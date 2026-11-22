@@ -224,25 +224,24 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
     assert_eq!(ro_res["results"].as_array().expect("ro results").len(), 1);
     assert_eq!(ro_res["results"][0]["path"], json!("notes/kyoto-plan.md"));
 
-    // Create a fresh named version without certifying its search index, then query
-    // through the read-only attached handle: it must report indexBuilding without writing.
     let branch = call(
         &transport,
         &handle,
         120,
         "versions.createNamed",
-        json!({ "workspaceId": workspace_id, "name": "uncertified-ro-check" }),
+        json!({
+            "workspaceId": workspace_id,
+            "name": "uncertified-ro-check",
+            "fromVersionId": "main",
+        }),
     )
     .await;
-    let branch_id = branch["version"]["versionId"]
-        .as_str()
-        .expect("branch id")
-        .to_string();
+    let branch_id = branch["id"].as_str().expect("branch id").to_string();
     call(
         &transport,
         &handle,
         121,
-        "versions.switch",
+        "versions.setActive",
         json!({ "workspaceId": workspace_id, "versionId": branch_id }),
     )
     .await;
@@ -270,6 +269,22 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
         "read-only attached handle must never certify or write engine_search_index_state"
     );
 
+    let mut cancelled_ctx = RequestContext::unbounded();
+    cancelled_ctx.cancel.cancel();
+    let cancelled_err = call_with_busy_retry(
+        &transport,
+        cancelled_ctx,
+        request(
+            123,
+            "retrieval.query",
+            Some(handle.clone()),
+            json!({ "query": "kyoto", "surfaces": ["chat"] }),
+        ),
+    )
+    .await
+    .expect_err("cancelled chat query must fail with Cancelled");
+    assert_eq!(cancelled_err.code, ErrorCode::Cancelled);
+
     // Invalid params are rejected with InvalidParams.
     for bad in [
         json!({ "query": "   " }),
@@ -279,6 +294,7 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
         json!({ "query": "kyoto", "pathPrefix": "../escape" }),
         json!({ "query": "kyoto", "pathPrefix": "shared-with-me/Team" }),
         json!({ "query": "kyoto", "collectionPath": "Shared-With-Me/Team/Tasks" }),
+        json!({ "query": "kyoto", "surfaces": ["page", "page"] }),
         json!({ "query": "kyoto", "surfaces": ["page", "record", "collection", "chat", "page"] }),
         json!({ "query": "kyoto", "unknownField": true }),
     ] {

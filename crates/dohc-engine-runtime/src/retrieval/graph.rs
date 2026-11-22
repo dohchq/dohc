@@ -1,12 +1,12 @@
 use super::text::{
-    MAX_NEIGHBOR_SNIPPET_CHARS, MAX_TITLE_CHARS, ParsedQuery, extract_best_snippet,
-    extract_markdown_heading, fallback_title_from_path, strip_markdown_frontmatter, truncate_chars,
+    MAX_NEIGHBOR_SNIPPET_CHARS, MAX_TITLE_CHARS, ParsedQuery, collapse_whitespace,
+    extract_best_snippet, strip_markdown_frontmatter, truncate_chars,
 };
 use super::{
     LiveFileHead, RetrievalEdgeDirection, RetrievalEdgeKind, RetrievalHit, RetrievalKind,
     RetrievalNeighbor, RetrievalNeighborVia, RetrievalRelatedEdge, SCHEMA_TEXT_CAP_BYTES,
     load_file_body_capped, redact_text_for_policy, resolve_live_file_head,
-    resolve_live_file_head_by_path,
+    resolve_live_file_head_by_path, resolve_live_file_title,
 };
 use crate::links::PARSER_GENERATION;
 use crate::links::path_keys;
@@ -191,6 +191,7 @@ pub(crate) fn expand_graph_neighborhood(
                             collect_parent_collection(
                                 conn,
                                 policy,
+                                resolver,
                                 workspace_id,
                                 version_id,
                                 collection_path,
@@ -377,40 +378,21 @@ fn hydrate_file_node(
         return Ok(existing.clone());
     }
 
-    let link_title: Option<String> = match head.blob_sha256.as_deref() {
-        Some(source_hash) => conn
-            .prepare_cached(
-                "SELECT s.title FROM link_sources s \
-                 WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
-                   AND s.status = 'indexed' AND s.source_hash = ?4 \
-                   AND NOT EXISTS(SELECT 1 FROM link_pending p \
-                                  WHERE p.workspace_id = s.workspace_id \
-                                    AND p.version_id = s.version_id \
-                                    AND p.object_id = s.object_id)",
-            )?
-            .query_row(
-                params![workspace_id, version_id, head.object_id, source_hash],
-                |row| row.get(0),
-            )
-            .optional()?,
-        None => None,
-    };
-
     let raw_body =
         load_file_body_capped(conn, head.blob_sha256.as_deref(), NEIGHBOR_BODY_CAP_BYTES)?;
     let searchable_body = raw_body
         .as_deref()
         .map(|text| extract_search_text(&head.path, text));
 
-    let title = link_title
-        .filter(|t| !t.trim().is_empty())
-        .map(|t| truncate_chars(t.trim(), MAX_TITLE_CHARS))
-        .or_else(|| {
-            searchable_body
-                .as_deref()
-                .and_then(extract_markdown_heading)
-        })
-        .unwrap_or_else(|| fallback_title_from_path(&head.path));
+    let title = resolve_live_file_title(
+        conn,
+        policy,
+        Some(resolver),
+        workspace_id,
+        version_id,
+        head,
+        searchable_body.as_deref(),
+    )?;
 
     let snippet_source = match (kind, searchable_body.as_deref()) {
         (RetrievalKind::Record, Some(body)) => strip_markdown_frontmatter(body),
@@ -813,9 +795,11 @@ fn collect_record_relations(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_parent_collection(
     conn: &Connection,
     policy: &SearchPolicySnapshot,
+    resolver: &Resolver,
     workspace_id: &str,
     version_id: &str,
     collection_path: &str,
@@ -847,20 +831,19 @@ fn collect_parent_collection(
             load_file_body_capped(conn, head.blob_sha256.as_deref(), SCHEMA_TEXT_CAP_BYTES)?
                 .unwrap_or_default();
         let parsed = parse_collection_schema(&schema_yaml);
+        let fallback_title = collection_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(collection_path)
+            .to_owned();
         let title = parsed
             .schema
             .name
             .as_deref()
-            .map(str::trim)
+            .map(|name| redact_text_for_policy(name, Some(&head.path), policy, Some(resolver)))
+            .map(|name| collapse_whitespace(&name))
             .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                collection_path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(collection_path)
-                    .to_owned()
-            });
+            .unwrap_or(fallback_title);
         let node = GraphNode {
             id: id.clone(),
             kind: RetrievalKind::Collection,

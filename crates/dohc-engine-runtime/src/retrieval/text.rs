@@ -120,14 +120,28 @@ fn collapse_double_consonant(root: &str) -> String {
 pub fn tokenize_words(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
+    let mut compound = String::new();
+    let mut split_count = 0usize;
     let mut prev_lower = false;
+
+    let flush_run = |current: &mut String,
+                     compound: &mut String,
+                     split_count: &mut usize,
+                     tokens: &mut Vec<String>| {
+        if !current.is_empty() {
+            tokens.push(current.to_lowercase());
+            current.clear();
+        }
+        if *split_count > 0 && !compound.is_empty() {
+            tokens.push(compound.to_lowercase());
+        }
+        compound.clear();
+        *split_count = 0;
+    };
 
     for ch in text.chars() {
         if is_cjk_char(ch) {
-            if !current.is_empty() {
-                tokens.push(current.to_lowercase());
-                current.clear();
-            }
+            flush_run(&mut current, &mut compound, &mut split_count, &mut tokens);
             tokens.push(ch.to_string());
             prev_lower = false;
             continue;
@@ -136,20 +150,17 @@ pub fn tokenize_words(text: &str) -> Vec<String> {
             if ch.is_uppercase() && prev_lower && !current.is_empty() {
                 tokens.push(current.to_lowercase());
                 current.clear();
+                split_count += 1;
             }
             current.push(ch);
+            compound.push(ch);
             prev_lower = ch.is_lowercase();
         } else {
-            if !current.is_empty() {
-                tokens.push(current.to_lowercase());
-                current.clear();
-            }
+            flush_run(&mut current, &mut compound, &mut split_count, &mut tokens);
             prev_lower = false;
         }
     }
-    if !current.is_empty() {
-        tokens.push(current.to_lowercase());
-    }
+    flush_run(&mut current, &mut compound, &mut split_count, &mut tokens);
     tokens
 }
 
@@ -498,7 +509,7 @@ pub fn extract_best_snippet(text: &str, query: &ParsedQuery, max_chars: usize) -
     let mut best_line: Option<(usize, &str)> = None;
     let mut first_non_empty: Option<&str> = None;
 
-    for raw_line in text.lines().take(400) {
+    for raw_line in text.lines() {
         let trimmed = raw_line.trim();
         if trimmed.is_empty() {
             continue;
@@ -598,19 +609,43 @@ pub fn path_matches_prefix(path: &str, prefix: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-pub fn escape_like_prefix(prefix: &str) -> String {
-    let mut out = String::with_capacity(prefix.len() + 2);
-    for ch in prefix.chars() {
-        match ch {
-            '%' | '_' | '\\' => {
-                out.push('\\');
-                out.push(ch);
+const MAX_REF_SCAN_BYTES: usize = 2048;
+
+fn is_escaped(bytes: &[u8], idx: usize) -> bool {
+    !bytes[..idx]
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\\')
+        .count()
+        .is_multiple_of(2)
+}
+
+fn extract_markdown_link_dest(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let href = if let Some(inside) = trimmed.strip_prefix('<') {
+        inside.split('>').next().unwrap_or("")
+    } else {
+        let mut end = trimmed.len();
+        for (k, ch) in trimmed.char_indices() {
+            if ch.is_whitespace() && !is_escaped(trimmed.as_bytes(), k) {
+                end = k;
+                break;
             }
-            _ => out.push(ch),
+        }
+        &trimmed[..end]
+    };
+    let mut dest = String::with_capacity(href.len());
+    let mut chars = href.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                dest.push(next);
+            }
+        } else {
+            dest.push(ch);
         }
     }
-    out.push_str("/%");
-    out
+    dest
 }
 
 pub fn redact_file_references(
@@ -622,57 +657,119 @@ pub fn redact_file_references(
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
     let mut i = 0usize;
+    let mut line_end = 0usize;
+    let mut next_chat_close: Option<usize> = None;
+    let mut chat_scanned_to = 0usize;
+    let mut next_wiki_close: Option<usize> = None;
+    let mut wiki_scanned_to = 0usize;
+    let mut next_md_sep: Option<usize> = None;
+    let mut md_scanned_to = 0usize;
+
     while i < bytes.len() {
-        if i + 2 <= bytes.len()
-            && &bytes[i..i + 2] == b"@["
-            && let Some(rel_end) = input[i + 2..].find(']')
-        {
-            let target = &input[i + 2..i + 2 + rel_end];
-            if !target.contains('\n') && !target.trim().is_empty() {
-                if allow_chat_mention(target.trim()) {
-                    out.push_str(&input[i..i + 2 + rel_end + 1]);
-                }
-                i += 2 + rel_end + 1;
-                continue;
-            }
+        if i >= line_end {
+            line_end = input[i..]
+                .find(['\n', '\r'])
+                .map_or(bytes.len(), |rel| i + rel);
+            next_chat_close = None;
+            chat_scanned_to = i;
+            next_wiki_close = None;
+            wiki_scanned_to = i;
+            next_md_sep = None;
+            md_scanned_to = i;
         }
-        if i + 2 <= bytes.len()
-            && &bytes[i..i + 2] == b"[["
-            && let Some(rel_end) = input[i + 2..].find("]]")
-        {
-            let inner = &input[i + 2..i + 2 + rel_end];
-            if !inner.contains('\n') && !inner.trim().is_empty() {
-                let target = inner.split('|').next().unwrap_or(inner).trim();
-                if allow_wikilink(target) {
-                    out.push_str(&input[i..i + 2 + rel_end + 2]);
-                }
-                i += 2 + rel_end + 2;
-                continue;
+
+        if i + 2 <= line_end && &bytes[i..i + 2] == b"@[" {
+            let search_from = i + 2;
+            if next_chat_close.is_none_or(|pos| pos < search_from) && chat_scanned_to < line_end {
+                let start = search_from.max(chat_scanned_to);
+                next_chat_close = input[start..line_end].find(']').map(|rel| start + rel);
+                chat_scanned_to = next_chat_close.unwrap_or(line_end);
             }
-        }
-        if bytes[i] == b'['
-            && let Some(label_end) = input[i + 1..].find("](")
-        {
-            let label = &input[i + 1..i + 1 + label_end];
-            let url_start = i + 1 + label_end + 2;
-            if !label.contains('\n')
-                && !label.contains('[')
-                && let Some(url_end) = input[url_start..].find(')')
+            if let Some(close) = next_chat_close
+                && close >= search_from
+                && close - search_from <= MAX_REF_SCAN_BYTES
             {
-                let target = input[url_start..url_start + url_end].trim();
-                if !target.contains('\n') {
-                    let is_external = target.starts_with("http://")
-                        || target.starts_with("https://")
-                        || target.starts_with("mailto:")
-                        || target.starts_with('#');
-                    if is_external || allow_markdown_link(target) {
-                        out.push_str(&input[i..url_start + url_end + 1]);
+                let target = &input[search_from..close];
+                if !target.contains('[') && !target.trim().is_empty() {
+                    if allow_chat_mention(target.trim()) {
+                        out.push_str(&input[i..close + 1]);
                     }
-                    i = url_start + url_end + 1;
+                    i = close + 1;
                     continue;
                 }
             }
         }
+
+        if i + 2 <= line_end && &bytes[i..i + 2] == b"[[" {
+            let search_from = i + 2;
+            if next_wiki_close.is_none_or(|pos| pos < search_from) && wiki_scanned_to < line_end {
+                let start = search_from.max(wiki_scanned_to);
+                next_wiki_close = input[start..line_end].find("]]").map(|rel| start + rel);
+                wiki_scanned_to = next_wiki_close.unwrap_or(line_end);
+            }
+            if let Some(close) = next_wiki_close
+                && close >= search_from
+                && close - search_from <= MAX_REF_SCAN_BYTES
+            {
+                let inner = &input[search_from..close];
+                if !inner.contains('[') && !inner.contains(']') && !inner.trim().is_empty() {
+                    let target = inner.split('|').next().unwrap_or(inner).trim();
+                    if allow_wikilink(target) {
+                        out.push_str(&input[i..close + 2]);
+                    }
+                    i = close + 2;
+                    continue;
+                }
+            }
+        }
+
+        if bytes[i] == b'[' && i + 1 < line_end {
+            let search_from = i + 1;
+            if next_md_sep.is_none_or(|pos| pos < search_from) && md_scanned_to < line_end {
+                let start = search_from.max(md_scanned_to);
+                next_md_sep = input[start..line_end].find("](").map(|rel| start + rel);
+                md_scanned_to = next_md_sep.unwrap_or(line_end);
+            }
+            if let Some(sep) = next_md_sep
+                && sep >= search_from
+                && sep - search_from <= MAX_REF_SCAN_BYTES
+            {
+                let label = &input[search_from..sep];
+                if !label.contains('[') {
+                    let url_start = sep + 2;
+                    let mut j = url_start;
+                    let mut depth = 0usize;
+                    let mut angle = false;
+                    while j < line_end && j - url_start <= MAX_REF_SCAN_BYTES {
+                        if !is_escaped(bytes, j) {
+                            match bytes[j] {
+                                b'<' if depth == 0 => angle = true,
+                                b'>' if angle => angle = false,
+                                b'(' if !angle => depth += 1,
+                                b')' if !angle && depth == 0 => break,
+                                b')' if !angle => depth -= 1,
+                                _ => {}
+                            }
+                        }
+                        j += 1;
+                    }
+                    if j < line_end && bytes[j] == b')' && input.is_char_boundary(j) {
+                        let raw_target = &input[url_start..j];
+                        let dest = extract_markdown_link_dest(raw_target);
+                        let is_external = dest.starts_with("http://")
+                            || dest.starts_with("https://")
+                            || dest.starts_with("mailto:")
+                            || dest.starts_with('#');
+                        if is_external || allow_markdown_link(&dest) {
+                            out.push_str(&input[i..j + 1]);
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
         let ch = input[i..].chars().next().unwrap();
         out.push(ch);
         i += ch.len_utf8();

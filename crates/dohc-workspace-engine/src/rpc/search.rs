@@ -354,13 +354,20 @@ impl EngineService {
                 "invalid-parameters",
             ));
         }
-        if let Some(surfaces) = &params.surfaces
-            && (surfaces.is_empty() || surfaces.len() > 4)
-        {
-            return Err(WireError::new(
-                ErrorCode::InvalidParams,
-                "invalid-parameters",
-            ));
+        if let Some(surfaces) = &params.surfaces {
+            if surfaces.is_empty() || surfaces.len() > 4 {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "invalid-parameters",
+                ));
+            }
+            let mut seen = std::collections::HashSet::with_capacity(surfaces.len());
+            if !surfaces.iter().all(|surface| seen.insert(*surface)) {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "invalid-parameters",
+                ));
+            }
         }
         let open = self.open(handle.as_ref())?;
         let allow_index_build = open.mode == crate::rpc::workspace::WorkspaceOpenMode::Full;
@@ -384,19 +391,23 @@ impl EngineService {
                 cancellation.token(),
             )
             .await
-            .map_err(|err| match err {
-                dohc_engine_runtime::RuntimeError::Cancelled => {
-                    cancellation.interruption("retrieval.query")
+            .map_err(|err| {
+                if matches!(err, dohc_engine_runtime::RuntimeError::Cancelled)
+                    || cancellation.token().is_cancelled()
+                {
+                    return cancellation.interruption("retrieval.query");
                 }
-                dohc_engine_runtime::RuntimeError::Storage(
-                    dohc_engine_storage::StorageError::InvalidInput { reason },
-                ) if reason == RECEIVED_SHARE_RETRIEVAL_REFUSAL => {
-                    WireError::new(ErrorCode::Forbidden, reason)
+                match err {
+                    dohc_engine_runtime::RuntimeError::Storage(
+                        dohc_engine_storage::StorageError::InvalidInput { reason },
+                    ) if reason == RECEIVED_SHARE_RETRIEVAL_REFUSAL => {
+                        WireError::new(ErrorCode::Forbidden, reason)
+                    }
+                    dohc_engine_runtime::RuntimeError::Storage(
+                        dohc_engine_storage::StorageError::InvalidInput { reason },
+                    ) => WireError::new(ErrorCode::InvalidParams, reason),
+                    other => map_runtime(other),
                 }
-                dohc_engine_runtime::RuntimeError::Storage(
-                    dohc_engine_storage::StorageError::InvalidInput { reason },
-                ) => WireError::new(ErrorCode::InvalidParams, reason),
-                other => map_runtime(other),
             })?;
         serde_json::to_value(response)
             .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))

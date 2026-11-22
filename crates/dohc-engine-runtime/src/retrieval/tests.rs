@@ -4,8 +4,8 @@ use super::*;
 use crate::links::PARSER_GENERATION;
 use crate::search::{ensure_search_index_for_version, search_workspace_page};
 use dohc_engine_domain::{
-    ChatActorKind, ChatChannelKind, ChatThreadLane, LinkedChatStore, StartChannelThread,
-    VersionedTextStore, WriteBinary, WriteText,
+    ChatActorKind, ChatChannelKind, ChatThreadLane, CreateFileThread, LinkedChatStore, SendMessage,
+    StartChannelThread, VersionedTextStore, WriteBinary, WriteText,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -1502,4 +1502,548 @@ fn council_r1_regressions_scope_live_blob_revisions_datasets_and_share_cursors()
         })
         .expect_err("durable share store must be refused");
     assert!(share_err.to_string().contains("received shares"));
+}
+
+#[test]
+fn council_r2_and_codex_regressions() {
+    let (scratch, mut store) = setup_store();
+    let root = scratch.path();
+    let token = CancellationToken::new();
+
+    fs::create_dir_all(root.join(".dohc")).expect("mkdir .dohc");
+    fs::write(
+        root.join(".dohc/visibility.toml"),
+        "[[rule]]\npath = \"private/**\"\nvisibility = \"hidden\"\n",
+    )
+    .expect("write visibility policy");
+
+    // 1. Hidden wikilinks inside headings, <angle> markdown links with titles,
+    //    fragmented chat mentions, and bare wikilinks in chat must all be redacted.
+    write_text(
+        &mut store,
+        "obj-secret",
+        "private/secret-diary.md",
+        "# Secret Diary\n\nHidden vault notes.\n",
+        10,
+    );
+    write_text(
+        &mut store,
+        "obj-heading-leak",
+        "notes/heading-leak.md",
+        "# Aurora [[private/secret-diary]]\n\nSee [doc](<private/secret-diary.md> \"Secret Title\") and [[notes/hub]].\n",
+        11,
+    );
+    write_text(
+        &mut store,
+        "obj-hub",
+        "notes/hub.md",
+        "# Aurora Hub\n\nLinks to [[notes/heading-leak]].\n",
+        12,
+    );
+
+    // 2. CamelCase pages and identifiers.
+    write_text(
+        &mut store,
+        "obj-camel-1",
+        "docs/ProjectPlan.md",
+        "# ProjectPlan\n\nRoadmap for iPhone rollout.\n",
+        13,
+    );
+
+    // 3. Stale relation title in link_sources with pending reindex + pending record_id IS NULL row.
+    write_text(
+        &mut store,
+        "obj-col-schema",
+        "People/collection.yaml",
+        "version: 1\nname: People\ndescription: Directory\nfields:\n  - name: role\n    type: text\n",
+        14,
+    );
+    write_text(
+        &mut store,
+        "obj-tasks-schema",
+        "Tasks/collection.yaml",
+        "version: 1\nname: Tasks\ndescription: Work items\nfields:\n  - name: owner\n    type: relation\n    collection: People\n    many: false\n",
+        15,
+    );
+    write_text(
+        &mut store,
+        "obj-person",
+        "People/alice.md",
+        "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrole: Lead\n---\n# Old Removed Title\n\nProfile body.\n",
+        16,
+    );
+    write_text(
+        &mut store,
+        "obj-pending-person",
+        "People/pending.md",
+        "# Pending Person\n\nAwaiting adoption.\n",
+        17,
+    );
+    write_text(
+        &mut store,
+        "obj-task",
+        "Tasks/ship.md",
+        "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nowner: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n# Ship Release\n\nRelies on owner relation.\n",
+        18,
+    );
+    store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "INSERT INTO collections(workspace_id,version_id,collection_path,schema_path,schema_status,degradation_reasons_json) \
+                 VALUES (?1,?2,'People','People/collection.yaml','valid','[]'), \
+                        (?1,?2,'Tasks','Tasks/collection.yaml','valid','[]')",
+                params![WS, VER],
+            )
+            .map_err(StorageError::corrupt_public)?;
+            tx.execute(
+                "INSERT INTO collection_records(workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state,index_initialized) \
+                 VALUES (?1,?2,'rec_aaaaaaaaaaaaaaaaaaaaaaaaaa','People','People/alice.md','obj-person','adopted',1), \
+                        (?1,?2,NULL,'People','People/pending.md','obj-pending-person','pending',0), \
+                        (?1,?2,'rec_bbbbbbbbbbbbbbbbbbbbbbbbbb','Tasks','Tasks/ship.md','obj-task','adopted',1)",
+                params![WS, VER],
+            )
+            .map_err(StorageError::corrupt_public)?;
+            tx.execute(
+                "INSERT INTO collection_record_fields(workspace_id,version_id,record_id,field_name,value_json,validation_status) \
+                 VALUES (?1,?2,'rec_bbbbbbbbbbbbbbbbbbbbbbbbbb','owner','\"rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\"','valid')",
+                params![WS, VER],
+            )
+            .map_err(StorageError::corrupt_public)?;
+            tx.execute(
+                "INSERT INTO collection_relation_edges(workspace_id,version_id,source_record_id,field_name,target_record_id,target_collection_path,many) \
+                 VALUES (?1,?2,'rec_bbbbbbbbbbbbbbbbbbbbbbbbbb','owner','rec_aaaaaaaaaaaaaaaaaaaaaaaaaa','People',0)",
+                params![WS, VER],
+            )
+            .map_err(StorageError::corrupt_public)?;
+            Ok(())
+        })
+        .expect("seed relation collections");
+
+    // 4. Case-sensitive prefix isolation: 170 lowercase target/ files must not displace Target/in-scope.md.
+    for i in 0..170 {
+        write_text(
+            &mut store,
+            &format!("obj-lower-{i:03}"),
+            &format!("target/noise-{i:03}.md"),
+            "# Amber Amber Amber\n\nAmber amber amber amber amber.\n",
+            30 + i,
+        );
+    }
+    write_text(
+        &mut store,
+        "obj-upper-target",
+        "Target/in-scope.md",
+        "# Upper Target Note\n\nMentions amber once.\n",
+        250,
+    );
+
+    // 5. Chat pre-limit pathPrefix, redaction of fragmented mentions & bare wikilinks, and >8 KiB chat body.
+    let mut chat = LinkedChatStore::new(&mut store);
+    chat.create_channel(
+        WS,
+        "ch-noise",
+        "Noise",
+        ChatChannelKind::Channel,
+        300,
+        &NoFaults,
+    )
+    .expect("noise channel");
+    for i in 0..170 {
+        chat.start_channel_thread(
+            &StartChannelThread {
+                automation: None,
+                workspace_id: WS.into(),
+                channel_id: "ch-noise".into(),
+                thread_id: format!("thr-noise-{i:03}"),
+                message_id: format!("msg-noise-{i:03}"),
+                title: Some(format!("Lantern chatter {i}")),
+                lane: ChatThreadLane::Posts,
+                own_thread: false,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Noise".into(),
+                author_owner_display_name: None,
+                author_user_id: Some("u-noise".into()),
+                origin: None,
+                body: "lantern lantern lantern lantern".into(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                author_agent_id: None,
+                author_reported: None,
+                work: None,
+                wake_agent_ids: Vec::new(),
+                now_ms: 301 + i,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("noise thread");
+    }
+    chat.create_thread(
+        &CreateFileThread {
+            workspace_id: WS.into(),
+            thread_id: "thr-target-file".into(),
+            title: "Upper Target Chat".into(),
+            linked_object_id: "obj-upper-target".into(),
+            linked_path_hint: Some("Target/in-scope.md".into()),
+            now_ms: 500,
+            request_id: "req-file-thread".into(),
+        },
+        &NoFaults,
+    )
+    .expect("file thread");
+    chat.send_message(
+        &SendMessage {
+            workspace_id: WS.into(),
+            thread_id: "thr-target-file".into(),
+            message_id: "msg-target-1".into(),
+            author_kind: ChatActorKind::Human,
+            author_display_name: "Alice".into(),
+            author_owner_display_name: None,
+            author_user_id: Some("u-alice".into()),
+            parent_message_id: None,
+            origin: None,
+            body: "Mentions lantern once in file chat.".into(),
+            needs_decision: false,
+            options: Vec::new(),
+            attachments: Vec::new(),
+            automation: None,
+            author_agent_id: None,
+            author_reported: None,
+            work: None,
+            wake_agent_ids: Vec::new(),
+            now_ms: 501,
+            request_id: None,
+        },
+        &NoFaults,
+    )
+    .expect("file chat message");
+
+    let long_prefix = "padding ".repeat(1400);
+    assert!(long_prefix.len() > 10_000);
+    chat.start_channel_thread(
+        &StartChannelThread {
+            automation: None,
+            workspace_id: WS.into(),
+            channel_id: "ch-noise".into(),
+            thread_id: "thr-long-and-redact".into(),
+            message_id: "msg-long-1".into(),
+            title: Some("Aurora mentions".into()),
+            lane: ChatThreadLane::Posts,
+            own_thread: false,
+            author_kind: ChatActorKind::Human,
+            author_display_name: "Bob".into(),
+            author_owner_display_name: None,
+            author_user_id: Some("u-bob".into()),
+            origin: None,
+            body: format!(
+                "Check @[private/secret-diary.md#scope] @[.env#DATABASE_URL] [[secret-diary]]\n{long_prefix}\nDeep tail token ZIRCONIUM_TAIL_MATCH."
+            ),
+            needs_decision: false,
+            options: Vec::new(),
+            attachments: Vec::new(),
+            author_agent_id: None,
+            author_reported: None,
+            work: None,
+            wake_agent_ids: Vec::new(),
+            now_ms: 510,
+            request_id: None,
+        },
+        &NoFaults,
+    )
+    .expect("long chat thread");
+
+    drain_links_sync(&mut store);
+
+    // Update Alice's heading AFTER link indexing without draining link_pending, leaving stale link_sources.title.
+    write_text(
+        &mut store,
+        "obj-person",
+        "People/alice.md",
+        "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrole: Lead\n---\n# Alice Fresh Heading\n\nProfile body.\n",
+        600,
+    );
+    rebuild_search_index(&mut store, root);
+
+    // Check 1: hidden wikilink in heading + <angle> markdown link + chat fragment/bare mentions are all redacted.
+    let aurora = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &default_req("aurora"),
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("aurora query");
+    let aurora_json = serde_json::to_string(&aurora).expect("serialize aurora");
+    assert!(
+        !aurora_json.contains("secret-diary")
+            && !aurora_json.contains("Secret Title")
+            && !aurora_json.contains(".env")
+            && !aurora_json.contains("DATABASE_URL"),
+        "hidden reference leaked in titles, snippets, or graph: {aurora_json}"
+    );
+    let leak_hit = aurora
+        .results
+        .iter()
+        .find(|h| h.path.as_deref() == Some("notes/heading-leak.md"))
+        .expect("heading-leak hit");
+    assert_eq!(leak_hit.title, "Aurora");
+    assert!(
+        aurora
+            .results
+            .iter()
+            .any(|h| h.thread_id.as_deref() == Some("thr-long-and-redact")),
+        "expected Aurora mentions chat thread in results: {:?}",
+        aurora.results
+    );
+    let secret_query = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &default_req("secret-diary"),
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("secret-diary query");
+    assert!(
+        secret_query.results.is_empty(),
+        "hidden title/link reference must not be searchable: {:?}",
+        secret_query.results
+    );
+
+    // Check 2: adversarial 256 KiB bracket-heavy input finishes quickly in O(N).
+    let hostile = "[".repeat(256 * 1024);
+    let started = Instant::now();
+    let cleaned = redact_file_references(&hostile, |_| true, |_| true, |_| true);
+    assert_eq!(cleaned.len(), hostile.len());
+    assert!(
+        started.elapsed().as_millis() < 2000,
+        "redact_file_references took too long on hostile brackets: {:?}",
+        started.elapsed()
+    );
+
+    // Check 3: CamelCase queries ProjectPlan and iPhone match cleanly.
+    for q in ["ProjectPlan", "iPhone"] {
+        let camel = store
+            .read_with(|conn| {
+                retrieve_workspace_on_conn(
+                    conn,
+                    root,
+                    WS,
+                    VER,
+                    &default_req(q),
+                    None,
+                    false,
+                    &token,
+                )
+            })
+            .expect("camel query");
+        assert!(
+            camel
+                .results
+                .iter()
+                .any(|h| h.path.as_deref() == Some("docs/ProjectPlan.md")),
+            "expected camelCase query {q:?} to match docs/ProjectPlan.md, got {:?}",
+            camel.results
+        );
+    }
+
+    // Check 4: stale relation title refreshed from live blob + pending record_id IS NULL excluded from recordCount.
+    let task_res = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &default_req("Ship Alice Fresh Heading"),
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("fresh relation title query");
+    let ship_hit = task_res
+        .results
+        .iter()
+        .find(|h| h.path.as_deref() == Some("Tasks/ship.md"))
+        .expect("expected Tasks/ship.md to match fresh relation title");
+    assert!(
+        ship_hit
+            .matched_fields
+            .as_ref()
+            .is_some_and(|fs| fs.iter().any(|f| f.value == "Alice Fresh Heading")),
+        "expected fresh relation title in matched_fields: {:?}",
+        ship_hit.matched_fields
+    );
+    let stale_rel = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &default_req("Ship Old Removed Title"),
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("stale relation title query");
+    let stale_serialized = serde_json::to_string(&stale_rel).expect("serialize stale rel");
+    assert!(
+        !stale_serialized.contains("Old Removed Title"),
+        "stale relation title leaked: {stale_serialized}"
+    );
+    let people_coll = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &RetrievalRequest {
+                    surfaces: Some(vec![RetrievalKind::Collection]),
+                    ..default_req("People")
+                },
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("people collection query");
+    let people_hit = people_coll
+        .results
+        .iter()
+        .find(|h| h.collection_path.as_deref() == Some("People"))
+        .expect("people collection hit");
+    assert_eq!(
+        people_hit.record_count,
+        Some(1),
+        "pending record_id IS NULL row must not inflate recordCount"
+    );
+
+    // Check 5: case-sensitive pathPrefix Target does not get displaced by 170 target/ files.
+    let case_scoped = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &RetrievalRequest {
+                    path_prefix: Some("Target".into()),
+                    ..default_req("amber")
+                },
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("case-sensitive scoped query");
+    assert_eq!(case_scoped.results.len(), 1);
+    assert_eq!(
+        case_scoped.results[0].path.as_deref(),
+        Some("Target/in-scope.md")
+    );
+    assert!(case_scoped.complete);
+
+    // Check 6: chat pathPrefix is pushed into SQL before candidate limits.
+    let chat_scoped = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &RetrievalRequest {
+                    surfaces: Some(vec![RetrievalKind::Chat]),
+                    path_prefix: Some("Target".into()),
+                    ..default_req("lantern")
+                },
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("scoped chat query");
+    assert_eq!(chat_scoped.results.len(), 1);
+    assert_eq!(
+        chat_scoped.results[0].thread_id.as_deref(),
+        Some("thr-target-file")
+    );
+    assert!(chat_scoped.complete);
+
+    // Check 7: chat message match past character 8,192 is preserved and produces a snippet.
+    let long_chat = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &RetrievalRequest {
+                    surfaces: Some(vec![RetrievalKind::Chat]),
+                    ..default_req("ZIRCONIUM_TAIL_MATCH")
+                },
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("long chat query");
+    assert_eq!(long_chat.results.len(), 1);
+    assert_eq!(
+        long_chat.results[0].thread_id.as_deref(),
+        Some("thr-long-and-redact")
+    );
+    assert!(
+        long_chat.results[0]
+            .snippet
+            .contains("ZIRCONIUM_TAIL_MATCH"),
+        "expected tail match in snippet, got {:?}",
+        long_chat.results[0].snippet
+    );
+
+    // Check 8: SQLite OperationInterrupted on a chat-only query maps cleanly to RuntimeError::Cancelled.
+    let paths = store
+        .read_with(|conn| Resolver::paths_for_version(conn, WS, VER))
+        .expect("paths");
+    let resolver = Resolver::new(paths);
+    store
+        .hooks_with(|conn| conn.progress_handler(20, Some(|| true)))
+        .expect("install interrupt handler");
+    let interrupted = store.read_with(|conn| {
+        retrieve_workspace_on_conn(
+            conn,
+            root,
+            WS,
+            VER,
+            &RetrievalRequest {
+                surfaces: Some(vec![RetrievalKind::Chat]),
+                ..default_req("lantern")
+            },
+            Some(&resolver),
+            false,
+            &token,
+        )
+    });
+    store
+        .hooks_with(|conn| conn.progress_handler(0, None::<fn() -> bool>))
+        .expect("clear interrupt handler");
+    assert!(
+        matches!(interrupted, Err(RuntimeError::Cancelled)),
+        "expected SQLite interrupt during chat query to map to RuntimeError::Cancelled, got {interrupted:?}"
+    );
 }

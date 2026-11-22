@@ -35,8 +35,8 @@ use self::graph::expand_graph_neighborhood;
 use self::rank::{RRF_K, ScoreDocument, rrf_fuse, score_document_bm25f};
 use self::text::{
     MAX_SNIPPET_CHARS, MAX_TITLE_CHARS, ParsedQuery, collapse_whitespace, escape_like_pattern,
-    escape_like_prefix, extract_best_snippet, extract_markdown_heading, fallback_title_from_path,
-    fts_match_and, fts_match_or, normalize_filter_prefix, parse_query, path_matches_prefix,
+    extract_best_snippet, extract_markdown_heading, fallback_title_from_path, fts_match_and,
+    fts_match_or, normalize_filter_prefix, parse_query, path_matches_prefix,
     redact_file_references, render_field_value_json, strip_markdown_frontmatter, truncate_chars,
 };
 
@@ -52,6 +52,7 @@ const FTS_OR_CANDIDATE_CAP: usize = 160;
 const PATH_METADATA_CANDIDATE_CAP: usize = 120;
 const RECORD_FIELD_CANDIDATE_CAP: usize = 120;
 const COLLECTION_SCAN_CAP: usize = 500;
+const RECORD_COUNT_SCAN_CAP: usize = 10_000;
 const DATASET_SCAN_CAP: usize = 100;
 const DATASET_TEXT_CAP_BYTES: i64 = 256 * 1024;
 const DATASET_MAX_TABLES: usize = 64;
@@ -60,6 +61,8 @@ const DATASET_MAX_OPERATIONS: usize = 128;
 const DATASET_EMITTED_FIELDS_CAP: usize = 64;
 const CHAT_FTS_CANDIDATE_CAP: usize = 160;
 const CHAT_METADATA_CANDIDATE_CAP: usize = 60;
+const CHAT_BODY_CAP_BYTES: i64 = 72 * 1024;
+const CHAT_COMBINED_BODY_CAP_BYTES: usize = 128 * 1024;
 const SHORT_QUERY_FILE_SCAN_CAP: usize = 2000;
 const SHORT_QUERY_CHAT_SCAN_CAP: usize = 1000;
 const CANDIDATE_TEXT_CAP_BYTES: i64 = 256 * 1024;
@@ -344,7 +347,9 @@ pub(crate) fn load_file_body_status(
     };
     match blob_text::capped(conn, sha256, cap_bytes) {
         Ok((_, _, Some(text))) => Ok(BlobLoad::Text(text)),
-        Ok((byte_len, _, None)) if i64::try_from(byte_len).unwrap_or(i64::MAX) > cap_bytes => {
+        Ok((recorded_len, actual_len, None))
+            if recorded_len > cap_bytes || actual_len > cap_bytes =>
+        {
             Ok(BlobLoad::Oversized)
         }
         Ok((_, _, None)) => Ok(BlobLoad::Missing),
@@ -364,35 +369,46 @@ pub(crate) fn load_file_body_capped(
     }
 }
 
-struct SqliteInterruptGuard<'a> {
-    conn: &'a Connection,
+fn is_sqlite_interrupted(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(ffi_err, _)
+            if ffi_err.code == rusqlite::ErrorCode::OperationInterrupted
+    )
 }
 
-impl<'a> SqliteInterruptGuard<'a> {
-    fn install(conn: &'a Connection, token: &CancellationToken) -> Self {
-        let cancel = token.clone();
-        let _ = conn.progress_handler(1000, Some(move || cancel.is_cancelled()));
-        Self { conn }
+fn is_storage_interrupted(err: &StorageError) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
+    while let Some(current) = source {
+        if let Some(sql_err) = current.downcast_ref::<rusqlite::Error>()
+            && is_sqlite_interrupted(sql_err)
+        {
+            return true;
+        }
+        source = current.source();
     }
+    false
 }
 
-impl Drop for SqliteInterruptGuard<'_> {
-    fn drop(&mut self) {
-        let _ = self.conn.progress_handler(0, None::<fn() -> bool>);
-    }
-}
-
-fn map_search_or_cancelled(err: SearchError, token: &CancellationToken) -> RuntimeError {
-    if token.is_cancelled()
-        || matches!(
-            &err,
-            SearchError::Storage(rusqlite::Error::SqliteFailure(ffi_err, _))
-                if ffi_err.code == rusqlite::ErrorCode::OperationInterrupted
-        )
-    {
+fn map_runtime_or_cancelled(err: RuntimeError, token: &CancellationToken) -> RuntimeError {
+    if token.is_cancelled() {
         return RuntimeError::Cancelled;
     }
-    RuntimeError::from(err)
+    match &err {
+        RuntimeError::Cancelled => RuntimeError::Cancelled,
+        RuntimeError::Search(SearchError::Storage(sql_err)) if is_sqlite_interrupted(sql_err) => {
+            RuntimeError::Cancelled
+        }
+        RuntimeError::Search(SearchError::Store(storage_err))
+            if is_storage_interrupted(storage_err) =>
+        {
+            RuntimeError::Cancelled
+        }
+        RuntimeError::Storage(storage_err) if is_storage_interrupted(storage_err) => {
+            RuntimeError::Cancelled
+        }
+        _ => err,
+    }
 }
 
 fn is_received_share_store(conn: &Connection, workspace_id: &str) -> Result<bool, SearchError> {
@@ -422,6 +438,7 @@ pub(crate) fn redact_text_for_policy(
         return text.to_owned();
     }
     let policy_degraded = policy.is_degraded();
+    let src = source_path.unwrap_or("");
     redact_file_references(
         text,
         |target| {
@@ -432,7 +449,7 @@ pub(crate) fn redact_text_for_policy(
             if target_path.is_empty() {
                 return true;
             }
-            if let (Some(res), Some(src)) = (resolver, source_path)
+            if let Some(res) = resolver
                 && let Some(resolved) = res.resolve(src, target_path)
             {
                 return path_is_search_indexed(policy, resolved);
@@ -453,7 +470,7 @@ pub(crate) fn redact_text_for_policy(
             if target_path.is_empty() {
                 return true;
             }
-            if let (Some(res), Some(src)) = (resolver, source_path)
+            if let Some(res) = resolver
                 && let Some(resolved) = res.resolve_markdown(src, target_path)
             {
                 return path_is_search_indexed(policy, resolved);
@@ -465,10 +482,70 @@ pub(crate) fn redact_text_for_policy(
             if policy_degraded {
                 return false;
             }
-            let normalized = target.trim_start_matches('/');
+            let target_path = target.split('#').next().unwrap_or(target).trim();
+            if target_path.is_empty() {
+                return true;
+            }
+            if let Some(res) = resolver
+                && let Some(resolved) = res.resolve("", target_path)
+            {
+                return path_is_search_indexed(policy, resolved);
+            }
+            let normalized = target_path.trim_start_matches("./").trim_start_matches('/');
             path_is_search_indexed(policy, normalized)
         },
     )
+}
+
+pub(crate) fn resolve_live_file_title(
+    conn: &Connection,
+    policy: &SearchPolicySnapshot,
+    resolver: Option<&Resolver>,
+    workspace_id: &str,
+    version_id: &str,
+    head: &LiveFileHead,
+    preloaded_body: Option<&str>,
+) -> Result<String, SearchError> {
+    let link_title: Option<String> = match head.blob_sha256.as_deref() {
+        Some(source_hash) => conn
+            .prepare_cached(
+                "SELECT s.title FROM link_sources s \
+                 WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
+                   AND s.status = 'indexed' AND s.source_hash = ?4 \
+                   AND NOT EXISTS(SELECT 1 FROM link_pending p \
+                                  WHERE p.workspace_id = s.workspace_id \
+                                    AND p.version_id = s.version_id \
+                                    AND p.object_id = s.object_id)",
+            )?
+            .query_row(
+                params![workspace_id, version_id, head.object_id, source_hash],
+                |row| row.get(0),
+            )
+            .optional()?,
+        None => None,
+    };
+
+    let raw_title = if let Some(title) = link_title.filter(|t| !t.trim().is_empty()) {
+        title
+    } else if let Some(body) = preloaded_body {
+        extract_markdown_heading(body).unwrap_or_else(|| fallback_title_from_path(&head.path))
+    } else {
+        let fetched = load_file_body_capped(conn, head.blob_sha256.as_deref(), 16 * 1024)?;
+        fetched
+            .as_deref()
+            .map(|text| extract_search_text(&head.path, text))
+            .as_deref()
+            .and_then(extract_markdown_heading)
+            .unwrap_or_else(|| fallback_title_from_path(&head.path))
+    };
+
+    let redacted = redact_text_for_policy(&raw_title, Some(&head.path), policy, resolver);
+    let cleaned = collapse_whitespace(&redacted);
+    if cleaned.is_empty() {
+        Ok(fallback_title_from_path(&head.path))
+    } else {
+        Ok(truncate_chars(&cleaned, MAX_TITLE_CHARS))
+    }
 }
 
 struct SurfaceMask {
@@ -509,7 +586,6 @@ impl SurfaceMask {
 struct ScoredCandidate {
     hit: RetrievalHit,
     bm25f_score: f64,
-    fts_rank: Option<usize>,
 }
 
 struct CandidatePool {
@@ -531,31 +607,86 @@ impl CandidatePool {
         }
     }
 
-    fn record_file_fts_rank(&mut self, id: &str) -> usize {
-        let rank = self.file_fts_order.len();
+    fn record_file_fts_rank(&mut self, id: &str) {
         self.file_fts_order.push(id.to_owned());
-        rank
     }
 
-    fn record_chat_fts_rank(&mut self, id: &str) -> usize {
-        let rank = self.chat_fts_order.len();
+    fn record_chat_fts_rank(&mut self, id: &str) {
         self.chat_fts_order.push(id.to_owned());
-        rank
     }
 
-    fn insert_or_improve(&mut self, mut candidate: ScoredCandidate) {
+    fn insert_or_improve(&mut self, candidate: ScoredCandidate) {
         if let Some(existing) = self.items.get_mut(&candidate.hit.id) {
-            if existing.fts_rank.is_none() {
-                existing.fts_rank = candidate.fts_rank;
-            }
             if candidate.bm25f_score > existing.bm25f_score {
-                candidate.fts_rank = existing.fts_rank.or(candidate.fts_rank);
                 *existing = candidate;
             }
         } else {
             self.items.insert(candidate.hit.id.clone(), candidate);
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_retrieval_on_actor(
+    store: &mut dohc_engine_storage::EngineStore,
+    root_for_actor: &Path,
+    ws: &str,
+    link_cache: &std::sync::Arc<std::sync::Mutex<cache::Cache>>,
+    now_ms: i64,
+    allow_index_build: bool,
+    actor_token: &CancellationToken,
+) -> Result<(String, bool, Option<cache::Prepared>), RuntimeError> {
+    if actor_token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let received = store.read_with(|conn| is_received_share_store(conn, ws))?;
+    if received {
+        return Err(StorageError::InvalidInput {
+            reason: RECEIVED_SHARE_RETRIEVAL_REFUSAL,
+        }
+        .into());
+    }
+    let version_id = VersionedTextStore::new(store)
+        .get_active_version(ws)?
+        .version_id;
+    let policy = read_engine_search_policy(root_for_actor);
+    let is_passive = store.is_passive();
+    let is_read_only = store.pages_checked().is_none();
+
+    let certified =
+        store.read_with(|conn| is_search_index_certified(conn, &policy, ws, &version_id))?;
+
+    let mut index_building = false;
+    if !certified {
+        if allow_index_build && !is_passive && !is_read_only {
+            let cancel = actor_token.clone();
+            let _ = store.hooks_with(|conn| {
+                conn.progress_handler(1000, Some(move || cancel.is_cancelled()))
+            });
+            let rebuild_res = store.mutate_with_connection(|conn| {
+                ensure_search_index_for_version(
+                    conn,
+                    root_for_actor,
+                    ws,
+                    &version_id,
+                    now_ms,
+                    &NoFaults,
+                )
+            });
+            let _ = store.hooks_with(|conn| conn.progress_handler(0, None::<fn() -> bool>));
+            rebuild_res?;
+        } else {
+            index_building = true;
+        }
+    }
+
+    let prepared = if !policy.is_degraded() {
+        Some(store.read_with(|conn| cache::prepare(conn, link_cache, ws, &version_id))?)
+    } else {
+        None
+    };
+
+    Ok((version_id, index_building, prepared))
 }
 
 impl ActorHandle {
@@ -586,60 +717,16 @@ impl ActorHandle {
 
         let (version_id, search_index_building, prepared_resolver) = self
             .run(move |store, _| -> Result<_, RuntimeError> {
-                if actor_token.is_cancelled() {
-                    return Err(RuntimeError::Cancelled);
-                }
-                let received = store
-                    .read_with(|conn| is_received_share_store(conn, &ws))
-                    .map_err(|err| map_search_or_cancelled(err, &actor_token))?;
-                if received {
-                    return Err(StorageError::InvalidInput {
-                        reason: RECEIVED_SHARE_RETRIEVAL_REFUSAL,
-                    }
-                    .into());
-                }
-                let version_id = VersionedTextStore::new(store)
-                    .get_active_version(&ws)?
-                    .version_id;
-                let policy = read_engine_search_policy(&root_for_actor);
-                let is_passive = store.is_passive();
-                let is_read_only = store.pages_checked().is_none();
-
-                let certified = store
-                    .read_with(|conn| is_search_index_certified(conn, &policy, &ws, &version_id))
-                    .map_err(|err| map_search_or_cancelled(err, &actor_token))?;
-
-                let mut index_building = false;
-                if !certified {
-                    if allow_index_build && !is_passive && !is_read_only {
-                        store
-                            .mutate_with_connection(|conn| {
-                                let _guard = SqliteInterruptGuard::install(conn, &actor_token);
-                                ensure_search_index_for_version(
-                                    conn,
-                                    &root_for_actor,
-                                    &ws,
-                                    &version_id,
-                                    now_ms,
-                                    &NoFaults,
-                                )
-                            })
-                            .map_err(|err| map_search_or_cancelled(err, &actor_token))?;
-                    } else {
-                        index_building = true;
-                    }
-                }
-
-                let prepared =
-                    if !policy.is_degraded() {
-                        Some(store.read_with(|conn| {
-                            cache::prepare(conn, &link_cache, &ws, &version_id)
-                        })?)
-                    } else {
-                        None
-                    };
-
-                Ok((version_id, index_building, prepared))
+                prepare_retrieval_on_actor(
+                    store,
+                    &root_for_actor,
+                    &ws,
+                    &link_cache,
+                    now_ms,
+                    allow_index_build,
+                    &actor_token,
+                )
+                .map_err(|err| map_runtime_or_cancelled(err, &actor_token))
             })
             .await?;
 
@@ -648,26 +735,33 @@ impl ActorHandle {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
-            let store = HeldReader::open(held)?;
+            let mut store = HeldReader::open(held)?;
             let resolver = prepared_resolver.map(cache::Prepared::build);
-            store.read_with(|conn| -> Result<RetrievalResponse, RuntimeError> {
-                let _guard = SqliteInterruptGuard::install(conn, &token);
-                let snapshot = conn
-                    .unchecked_transaction()
-                    .map_err(StorageError::corrupt_public)?;
-                let response = retrieve_workspace_on_conn(
-                    conn,
-                    &root_dir,
-                    &workspace_id,
-                    &version_id,
-                    &request,
-                    resolver.as_deref(),
-                    search_index_building,
-                    &token,
-                )?;
-                snapshot.commit().map_err(StorageError::corrupt_public)?;
-                Ok(response)
-            })
+            let cancel = token.clone();
+            let _ = store.hooks_with(|conn| {
+                conn.progress_handler(1000, Some(move || cancel.is_cancelled()))
+            });
+            let read_result = store
+                .read_with(|conn| -> Result<RetrievalResponse, RuntimeError> {
+                    let snapshot = conn
+                        .unchecked_transaction()
+                        .map_err(StorageError::corrupt_public)?;
+                    let response = retrieve_workspace_on_conn(
+                        conn,
+                        &root_dir,
+                        &workspace_id,
+                        &version_id,
+                        &request,
+                        resolver.as_deref(),
+                        search_index_building,
+                        &token,
+                    )?;
+                    snapshot.commit().map_err(StorageError::corrupt_public)?;
+                    Ok(response)
+                })
+                .map_err(|err| map_runtime_or_cancelled(err, &token));
+            let _ = store.hooks_with(|conn| conn.progress_handler(0, None::<fn() -> bool>));
+            read_result
         })
         .await
         .map_err(|_| RuntimeError::Storage(StorageError::StateCorrupt { source: None }))?
@@ -685,10 +779,34 @@ pub(crate) fn retrieve_workspace_on_conn(
     search_index_building: bool,
     token: &CancellationToken,
 ) -> Result<RetrievalResponse, RuntimeError> {
+    retrieve_workspace_on_conn_inner(
+        conn,
+        root_dir,
+        workspace_id,
+        version_id,
+        request,
+        resolver,
+        search_index_building,
+        token,
+    )
+    .map_err(|err| map_runtime_or_cancelled(err, token))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retrieve_workspace_on_conn_inner(
+    conn: &Connection,
+    root_dir: &Path,
+    workspace_id: &str,
+    version_id: &str,
+    request: &RetrievalRequest,
+    resolver: Option<&Resolver>,
+    search_index_building: bool,
+    token: &CancellationToken,
+) -> Result<RetrievalResponse, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    if is_received_share_store(conn, workspace_id).map_err(|e| map_search_or_cancelled(e, token))? {
+    if is_received_share_store(conn, workspace_id)? {
         return Err(StorageError::InvalidInput {
             reason: RECEIVED_SHARE_RETRIEVAL_REFUSAL,
         }
@@ -719,8 +837,7 @@ pub(crate) fn retrieve_workspace_on_conn(
         match resolver {
             Some(existing) => Some(existing),
             None => {
-                let paths = Resolver::paths_for_version(conn, workspace_id, version_id)
-                    .map_err(|e| map_search_or_cancelled(e.into(), token))?;
+                let paths = Resolver::paths_for_version(conn, workspace_id, version_id)?;
                 owned_resolver = Resolver::new(paths);
                 Some(&owned_resolver)
             }
@@ -734,6 +851,7 @@ pub(crate) fn retrieve_workspace_on_conn(
             collect_document_collections(
                 conn,
                 &policy,
+                active_resolver,
                 workspace_id,
                 version_id,
                 &parsed_query,
@@ -851,8 +969,7 @@ pub(crate) fn retrieve_workspace_on_conn(
                 &parsed_query,
                 &mut results,
                 token,
-            )
-            .map_err(|e| map_search_or_cancelled(e, token))?;
+            )?;
             (outcome.neighbors, outcome.links_building)
         } else {
             (Vec::new(), false)
@@ -915,10 +1032,25 @@ fn enforce_response_byte_budget(response: &mut RetrievalResponse) {
     }
 }
 
+fn append_path_prefix_sql(
+    bind_values: &mut Vec<rusqlite::types::Value>,
+    column: &str,
+    prefix: &str,
+) -> String {
+    let eq_idx = bind_values.len() + 1;
+    let lo_idx = eq_idx + 1;
+    let hi_idx = eq_idx + 2;
+    bind_values.push(rusqlite::types::Value::Text(prefix.to_owned()));
+    bind_values.push(rusqlite::types::Value::Text(format!("{prefix}/")));
+    bind_values.push(rusqlite::types::Value::Text(format!("{prefix}0")));
+    format!("({column} = ?{eq_idx} OR ({column} >= ?{lo_idx} AND {column} < ?{hi_idx}))")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_document_collections(
     conn: &Connection,
     policy: &SearchPolicySnapshot,
+    resolver: Option<&Resolver>,
     workspace_id: &str,
     version_id: &str,
     query: &ParsedQuery,
@@ -938,14 +1070,9 @@ fn collect_document_collections(
         extra.push_str(&format!(" AND collection_path = ?{idx}"));
     }
     if let Some(prefix) = path_prefix {
-        let eq_idx = bind_values.len() + 1;
-        let like_idx = eq_idx + 1;
-        bind_values.push(rusqlite::types::Value::Text(prefix.to_owned()));
-        bind_values.push(rusqlite::types::Value::Text(escape_like_prefix(prefix)));
-        extra.push_str(&format!(
-            " AND (collection_path = ?{eq_idx} OR collection_path LIKE ?{like_idx} ESCAPE '\\' \
-                   OR schema_path = ?{eq_idx} OR schema_path LIKE ?{like_idx} ESCAPE '\\')"
-        ));
+        let coll_clause = append_path_prefix_sql(&mut bind_values, "collection_path", prefix);
+        let schema_clause = append_path_prefix_sql(&mut bind_values, "schema_path", prefix);
+        extra.push_str(&format!(" AND ({coll_clause} OR {schema_clause})"));
     }
     let limit_idx = bind_values.len() + 1;
     bind_values.push(rusqlite::types::Value::Integer(COLLECTION_SCAN_CAP as i64));
@@ -954,16 +1081,14 @@ fn collect_document_collections(
          WHERE workspace_id = ?1 AND version_id = ?2{extra} \
          ORDER BY collection_path LIMIT ?{limit_idx}"
     );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| map_search_or_cancelled(e.into(), token))?;
+    let mut stmt = conn.prepare(&sql).map_err(SearchError::from)?;
     let rows = stmt
         .query_map(rusqlite::params_from_iter(bind_values), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(|e| map_search_or_cancelled(e.into(), token))?
+        .map_err(SearchError::from)?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| map_search_or_cancelled(e.into(), token))?;
+        .map_err(SearchError::from)?;
 
     if rows.len() >= COLLECTION_SCAN_CAP {
         pool.scan_saturated = true;
@@ -989,26 +1114,34 @@ fn collect_document_collections(
         else {
             continue;
         };
-        let schema_yaml =
-            load_file_body_capped(conn, head.blob_sha256.as_deref(), SCHEMA_TEXT_CAP_BYTES)?
-                .unwrap_or_default();
+        let schema_yaml = match load_file_body_status(
+            conn,
+            head.blob_sha256.as_deref(),
+            SCHEMA_TEXT_CAP_BYTES,
+        )? {
+            BlobLoad::Text(text) => text,
+            BlobLoad::Oversized => {
+                pool.scan_saturated = true;
+                continue;
+            }
+            BlobLoad::Missing => String::new(),
+        };
         let parsed = parse_collection_schema(&schema_yaml);
         let schema = parsed.schema;
 
+        let fallback_title = collection_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&collection_path)
+            .to_owned();
         let title = schema
             .name
             .as_deref()
-            .filter(|name| !name.trim().is_empty())
-            .map(|name| truncate_chars(name.trim(), MAX_TITLE_CHARS))
-            .unwrap_or_else(|| {
-                truncate_chars(
-                    collection_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&collection_path),
-                    MAX_TITLE_CHARS,
-                )
-            });
+            .map(|name| redact_text_for_policy(name, Some(&schema_path), policy, resolver))
+            .map(|name| collapse_whitespace(&name))
+            .filter(|name| !name.is_empty())
+            .map(|name| truncate_chars(&name, MAX_TITLE_CHARS))
+            .unwrap_or_else(|| truncate_chars(&fallback_title, MAX_TITLE_CHARS));
 
         let field_names: Vec<String> = schema
             .fields
@@ -1029,7 +1162,9 @@ fn collect_document_collections(
                 _ => {}
             }
         }
-        let description = schema.description.unwrap_or_default();
+        let raw_description = schema.description.unwrap_or_default();
+        let description =
+            redact_text_for_policy(&raw_description, Some(&schema_path), policy, resolver);
         let doc = ScoreDocument {
             title: title.clone(),
             path: collection_path.clone(),
@@ -1041,13 +1176,17 @@ fn collect_document_collections(
             continue;
         }
 
-        let record_count = count_indexed_collection_records(
+        let (record_count, count_saturated) = count_indexed_collection_records(
             conn,
             policy,
             workspace_id,
             version_id,
             &collection_path,
+            token,
         )?;
+        if count_saturated {
+            pool.scan_saturated = true;
+        }
 
         let snippet = build_collection_snippet(&description, &field_names);
         let id = format!("collection:document:{collection_path}");
@@ -1063,7 +1202,7 @@ fn collect_document_collections(
                 dataset_path: None,
                 record_id: None,
                 fields: Some(field_names),
-                record_count: Some(record_count),
+                record_count,
                 matched_fields: None,
                 thread_id: None,
                 message_id: None,
@@ -1077,7 +1216,6 @@ fn collect_document_collections(
                 related: Vec::new(),
             },
             bm25f_score: scored.score,
-            fts_rank: None,
         });
     }
     Ok(())
@@ -1089,25 +1227,40 @@ fn count_indexed_collection_records(
     workspace_id: &str,
     version_id: &str,
     collection_path: &str,
-) -> Result<u64, SearchError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT r.object_id FROM collection_records r \
-         WHERE r.workspace_id = ?1 AND r.version_id = ?2 AND r.collection_path = ?3 \
-           AND r.record_id IS NOT NULL \
-         LIMIT 5000",
-    )?;
-    let object_ids = stmt
-        .query_map(params![workspace_id, version_id, collection_path], |row| {
-            row.get::<_, String>(0)
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    token: &CancellationToken,
+) -> Result<(Option<u64>, bool), RuntimeError> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT r.object_id FROM collection_records r \
+             WHERE r.workspace_id = ?1 AND r.version_id = ?2 AND r.collection_path = ?3 \
+               AND r.record_id IS NOT NULL \
+             LIMIT ?4",
+        )
+        .map_err(SearchError::from)?;
+    let mut rows = stmt
+        .query(params![
+            workspace_id,
+            version_id,
+            collection_path,
+            (RECORD_COUNT_SCAN_CAP + 1) as i64
+        ])
+        .map_err(SearchError::from)?;
+    let mut scanned = 0usize;
     let mut count = 0u64;
-    for object_id in object_ids {
+    while let Some(row) = rows.next().map_err(SearchError::from)? {
+        scanned += 1;
+        if scanned > RECORD_COUNT_SCAN_CAP {
+            return Ok((None, true));
+        }
+        if scanned.is_multiple_of(256) && token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        let object_id: String = row.get(0).map_err(SearchError::from)?;
         if resolve_live_file_head(conn, policy, workspace_id, version_id, &object_id)?.is_some() {
             count += 1;
         }
     }
-    Ok(count)
+    Ok((Some(count), false))
 }
 
 fn build_collection_snippet(description: &str, field_names: &[String]) -> String {
@@ -1153,13 +1306,8 @@ fn collect_transactional_datasets(
         extra.push_str(&format!(" AND (path = ?{eq_idx} OR path = ?{child_idx})"));
     }
     if let Some(prefix) = path_prefix {
-        let eq_idx = bind_values.len() + 1;
-        let like_idx = eq_idx + 1;
-        bind_values.push(rusqlite::types::Value::Text(prefix.to_owned()));
-        bind_values.push(rusqlite::types::Value::Text(escape_like_prefix(prefix)));
-        extra.push_str(&format!(
-            " AND (path = ?{eq_idx} OR path LIKE ?{like_idx} ESCAPE '\\')"
-        ));
+        let prefix_clause = append_path_prefix_sql(&mut bind_values, "path", prefix);
+        extra.push_str(&format!(" AND {prefix_clause}"));
     }
     let limit_idx = bind_values.len() + 1;
     bind_values.push(rusqlite::types::Value::Integer(DATASET_SCAN_CAP as i64));
@@ -1171,16 +1319,14 @@ fn collect_transactional_datasets(
            AND path NOT LIKE '%/revisions/%'{extra} \
          ORDER BY path LIMIT ?{limit_idx}"
     );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| map_search_or_cancelled(e.into(), token))?;
+    let mut stmt = conn.prepare(&sql).map_err(SearchError::from)?;
     let rows = stmt
         .query_map(rusqlite::params_from_iter(bind_values), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(|e| map_search_or_cancelled(e.into(), token))?
+        .map_err(SearchError::from)?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| map_search_or_cancelled(e.into(), token))?;
+        .map_err(SearchError::from)?;
 
     if rows.len() >= DATASET_SCAN_CAP {
         pool.scan_saturated = true;
@@ -1209,14 +1355,13 @@ fn collect_transactional_datasets(
         {
             continue;
         }
-        let Some(head) = resolve_live_file_head(conn, policy, workspace_id, version_id, &object_id)
-            .map_err(|e| map_search_or_cancelled(e, token))?
+        let Some(head) =
+            resolve_live_file_head(conn, policy, workspace_id, version_id, &object_id)?
         else {
             continue;
         };
         let raw_json =
-            match load_file_body_status(conn, head.blob_sha256.as_deref(), DATASET_TEXT_CAP_BYTES)
-                .map_err(|e| map_search_or_cancelled(e, token))?
+            match load_file_body_status(conn, head.blob_sha256.as_deref(), DATASET_TEXT_CAP_BYTES)?
             {
                 BlobLoad::Text(text) => text,
                 BlobLoad::Oversized => {
@@ -1321,7 +1466,6 @@ fn collect_transactional_datasets(
                 related: Vec::new(),
             },
             bm25f_score: scored.score,
-            fts_rank: None,
         });
     }
     Ok(())
@@ -1349,36 +1493,38 @@ fn collect_file_and_record_candidates(
         if query.fts_terms.len() >= 2
             && let Some(and_expr) = fts_match_and(&query.fts_terms)
         {
-            fts_rows.extend(
-                query_file_fts_ranked(
-                    conn,
-                    workspace_id,
-                    version_id,
-                    &and_expr,
-                    mask,
-                    path_prefix,
-                    collection_filter,
-                    FTS_AND_CANDIDATE_CAP,
-                )
-                .map_err(|e| map_search_or_cancelled(e, token))?,
-            );
+            let (rows, saturated) = query_file_fts_ranked(
+                conn,
+                workspace_id,
+                version_id,
+                &and_expr,
+                mask,
+                path_prefix,
+                collection_filter,
+                FTS_AND_CANDIDATE_CAP,
+            )?;
+            if saturated {
+                pool.scan_saturated = true;
+            }
+            fts_rows.extend(rows);
         }
         if fts_rows.len() < 40
             && let Some(or_expr) = fts_match_or(&query.fts_terms)
         {
-            fts_rows.extend(
-                query_file_fts_ranked(
-                    conn,
-                    workspace_id,
-                    version_id,
-                    &or_expr,
-                    mask,
-                    path_prefix,
-                    collection_filter,
-                    FTS_OR_CANDIDATE_CAP,
-                )
-                .map_err(|e| map_search_or_cancelled(e, token))?,
-            );
+            let (rows, saturated) = query_file_fts_ranked(
+                conn,
+                workspace_id,
+                version_id,
+                &or_expr,
+                mask,
+                path_prefix,
+                collection_filter,
+                FTS_OR_CANDIDATE_CAP,
+            )?;
+            if saturated {
+                pool.scan_saturated = true;
+            }
+            fts_rows.extend(rows);
         }
         for object_id in fts_rows {
             if seen_objects.insert(object_id.clone()) {
@@ -1395,8 +1541,7 @@ fn collect_file_and_record_candidates(
             path_prefix,
             collection_filter,
             SHORT_QUERY_FILE_SCAN_CAP,
-        )
-        .map_err(|e| map_search_or_cancelled(e, token))?;
+        )?;
         if saturated {
             pool.scan_saturated = true;
         }
@@ -1419,8 +1564,7 @@ fn collect_file_and_record_candidates(
         mask,
         path_prefix,
         collection_filter,
-    )
-    .map_err(|e| map_search_or_cancelled(e, token))?;
+    )?;
     if path_saturated {
         pool.scan_saturated = true;
     }
@@ -1438,8 +1582,7 @@ fn collect_file_and_record_candidates(
             query,
             path_prefix,
             collection_filter,
-        )
-        .map_err(|e| map_search_or_cancelled(e, token))?;
+        )?;
         if fields_saturated {
             pool.scan_saturated = true;
         }
@@ -1461,8 +1604,8 @@ fn collect_file_and_record_candidates(
             break;
         }
 
-        let Some(head) = resolve_live_file_head(conn, policy, workspace_id, version_id, &object_id)
-            .map_err(|e| map_search_or_cancelled(e, token))?
+        let Some(head) =
+            resolve_live_file_head(conn, policy, workspace_id, version_id, &object_id)?
         else {
             continue;
         };
@@ -1487,12 +1630,12 @@ fn collect_file_and_record_candidates(
                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                  LIMIT 1",
             )
-            .map_err(|e| map_search_or_cancelled(e.into(), token))?
+            .map_err(SearchError::from)?
             .query_row(params![workspace_id, version_id, head.object_id], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .optional()
-            .map_err(|e| map_search_or_cancelled(e.into(), token))?;
+            .map_err(SearchError::from)?;
 
         let (kind, collection_path, record_id) = match record_row {
             Some((Some(rid), coll)) => (RetrievalKind::Record, Some(coll), Some(rid)),
@@ -1514,9 +1657,7 @@ fn collect_file_and_record_candidates(
             conn,
             head.blob_sha256.as_deref(),
             CANDIDATE_TEXT_CAP_BYTES,
-        )
-        .map_err(|e| map_search_or_cancelled(e, token))?
-        {
+        )? {
             BlobLoad::Text(raw) => extract_search_text(&head.path, &raw).into_owned(),
             BlobLoad::Oversized => {
                 pool.scan_saturated = true;
@@ -1526,32 +1667,15 @@ fn collect_file_and_record_candidates(
         };
         pool.hydrated_bytes = pool.hydrated_bytes.saturating_add(body_text.len());
 
-        let link_title: Option<String> = match head.blob_sha256.as_deref() {
-            Some(source_hash) => conn
-                .prepare_cached(
-                    "SELECT s.title FROM link_sources s \
-                     WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
-                       AND s.status = 'indexed' AND s.source_hash = ?4 \
-                       AND NOT EXISTS(SELECT 1 FROM link_pending p \
-                                      WHERE p.workspace_id = s.workspace_id \
-                                        AND p.version_id = s.version_id \
-                                        AND p.object_id = s.object_id)",
-                )
-                .map_err(|e| map_search_or_cancelled(e.into(), token))?
-                .query_row(
-                    params![workspace_id, version_id, head.object_id, source_hash],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|e| map_search_or_cancelled(e.into(), token))?,
-            None => None,
-        };
-
-        let title = link_title
-            .filter(|t| !t.trim().is_empty())
-            .map(|t| truncate_chars(t.trim(), MAX_TITLE_CHARS))
-            .or_else(|| extract_markdown_heading(&body_text))
-            .unwrap_or_else(|| fallback_title_from_path(&head.path));
+        let title = resolve_live_file_title(
+            conn,
+            policy,
+            resolver,
+            workspace_id,
+            version_id,
+            &head,
+            Some(&body_text),
+        )?;
 
         let mut rendered_fields: Vec<RetrievalMatchedField> = Vec::new();
         let mut fields_text = String::new();
@@ -1559,12 +1683,13 @@ fn collect_file_and_record_candidates(
             rendered_fields = load_record_fields(
                 conn,
                 policy,
+                resolver,
                 workspace_id,
                 version_id,
+                &head.path,
                 rid,
                 &mut relation_title_cache,
-            )
-            .map_err(|e| map_search_or_cancelled(e, token))?;
+            )?;
             for field in &rendered_fields {
                 fields_text.push_str(&field.name);
                 fields_text.push(' ');
@@ -1595,11 +1720,9 @@ fn collect_file_and_record_candidates(
             Some(rid) => format!("record:{rid}"),
             None => format!("page:{}", head.object_id),
         };
-        let fts_rank = if from_fts {
-            Some(pool.record_file_fts_rank(&id))
-        } else {
-            None
-        };
+        if from_fts {
+            pool.record_file_fts_rank(&id);
+        }
 
         let matched_fields = if kind == RetrievalKind::Record {
             let selected = select_matched_fields(&rendered_fields, query);
@@ -1656,7 +1779,6 @@ fn collect_file_and_record_candidates(
                 related: Vec::new(),
             },
             bm25f_score: scored.score,
-            fts_rank,
         });
     }
     Ok(())
@@ -1674,13 +1796,9 @@ fn append_file_scope_sql(
           AND {alias_table}.path <> 'dataset.json' AND {alias_table}.path NOT LIKE '%/dataset.json'"
     );
     if let Some(prefix) = path_prefix {
-        let eq_idx = bind_values.len() + 1;
-        let like_idx = eq_idx + 1;
-        bind_values.push(rusqlite::types::Value::Text(prefix.to_owned()));
-        bind_values.push(rusqlite::types::Value::Text(escape_like_prefix(prefix)));
-        clause.push_str(&format!(
-            " AND ({alias_table}.path = ?{eq_idx} OR {alias_table}.path LIKE ?{like_idx} ESCAPE '\\')"
-        ));
+        let prefix_col = format!("{alias_table}.path");
+        let prefix_clause = append_path_prefix_sql(bind_values, &prefix_col, prefix);
+        clause.push_str(&format!(" AND {prefix_clause}"));
     }
     if let Some(filter) = collection_filter {
         let idx = bind_values.len() + 1;
@@ -1723,7 +1841,7 @@ fn query_file_fts_ranked(
     path_prefix: Option<&str>,
     collection_filter: Option<&str>,
     limit: usize,
-) -> Result<Vec<String>, SearchError> {
+) -> Result<(Vec<String>, bool), SearchError> {
     let mut bind_values: Vec<rusqlite::types::Value> = vec![
         rusqlite::types::Value::Text(workspace_id.to_owned()),
         rusqlite::types::Value::Text(version_id.to_owned()),
@@ -1734,13 +1852,15 @@ fn query_file_fts_ranked(
     let limit_idx = bind_values.len() + 1;
     bind_values.push(rusqlite::types::Value::Integer(limit as i64));
     let sql = format!(
-        "SELECT f.object_id \
-         FROM engine_search_files_fts f \
+        "SELECT engine_search_files_fts.object_id \
+         FROM engine_search_files_fts \
          JOIN path_aliases a \
-           ON a.workspace_id = f.workspace_id AND a.version_id = f.version_id \
-          AND a.object_id = f.object_id \
+           ON a.workspace_id = engine_search_files_fts.workspace_id \
+          AND a.version_id = engine_search_files_fts.version_id \
+          AND a.object_id = engine_search_files_fts.object_id \
          WHERE engine_search_files_fts MATCH ?3 \
-           AND f.workspace_id = ?1 AND f.version_id = ?2{scope_sql} \
+           AND engine_search_files_fts.workspace_id = ?1 \
+           AND engine_search_files_fts.version_id = ?2{scope_sql} \
          ORDER BY bm25(engine_search_files_fts) LIMIT ?{limit_idx}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -1749,7 +1869,8 @@ fn query_file_fts_ranked(
             row.get::<_, String>(0)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    let saturated = rows.len() >= limit;
+    Ok((rows, saturated))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1774,14 +1895,17 @@ fn query_file_fts_short_scan(
     bind_values.push(rusqlite::types::Value::Integer(CANDIDATE_TEXT_CAP_BYTES));
     bind_values.push(rusqlite::types::Value::Integer(scan_cap as i64));
     let sql = format!(
-        "SELECT f.object_id, \
-                CASE WHEN length(CAST(f.text AS BLOB)) <= ?{cap_idx} THEN f.text ELSE NULL END \
-         FROM engine_search_files_fts f \
+        "SELECT engine_search_files_fts.object_id, \
+                CASE WHEN length(CAST(engine_search_files_fts.text AS BLOB)) <= ?{cap_idx} \
+                     THEN engine_search_files_fts.text ELSE NULL END \
+         FROM engine_search_files_fts \
          JOIN path_aliases a \
-           ON a.workspace_id = f.workspace_id AND a.version_id = f.version_id \
-          AND a.object_id = f.object_id \
-         WHERE f.workspace_id = ?1 AND f.version_id = ?2{scope_sql} \
-         ORDER BY f.rowid LIMIT ?{limit_idx}"
+           ON a.workspace_id = engine_search_files_fts.workspace_id \
+          AND a.version_id = engine_search_files_fts.version_id \
+          AND a.object_id = engine_search_files_fts.object_id \
+         WHERE engine_search_files_fts.workspace_id = ?1 \
+           AND engine_search_files_fts.version_id = ?2{scope_sql} \
+         ORDER BY engine_search_files_fts.rowid LIMIT ?{limit_idx}"
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(rusqlite::params_from_iter(bind_values))?;
@@ -1924,13 +2048,8 @@ fn query_record_field_candidates(
         extra.push_str(&format!(" AND r.collection_path = ?{idx}"));
     }
     if let Some(prefix) = path_prefix {
-        let eq_idx = bind_values.len() + 1;
-        let like_idx = eq_idx + 1;
-        bind_values.push(rusqlite::types::Value::Text(prefix.to_owned()));
-        bind_values.push(rusqlite::types::Value::Text(escape_like_prefix(prefix)));
-        extra.push_str(&format!(
-            " AND (a.path = ?{eq_idx} OR a.path LIKE ?{like_idx} ESCAPE '\\')"
-        ));
+        let prefix_clause = append_path_prefix_sql(&mut bind_values, "a.path", prefix);
+        extra.push_str(&format!(" AND {prefix_clause}"));
     }
     let limit_idx = bind_values.len() + 1;
     bind_values.push(rusqlite::types::Value::Integer(
@@ -1961,11 +2080,14 @@ fn query_record_field_candidates(
     Ok((out, saturated))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_record_fields(
     conn: &Connection,
     policy: &SearchPolicySnapshot,
+    resolver: Option<&Resolver>,
     workspace_id: &str,
     version_id: &str,
+    source_path: &str,
     record_id: &str,
     relation_title_cache: &mut HashMap<String, String>,
 ) -> Result<Vec<RetrievalMatchedField>, SearchError> {
@@ -1993,19 +2115,15 @@ fn load_record_fields(
         else {
             continue;
         };
-        let title: Option<String> = conn
-            .prepare_cached(
-                "SELECT title FROM link_sources \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-                   AND status = 'indexed'",
-            )?
-            .query_row(params![workspace_id, version_id, head.object_id], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let resolved_title = title
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| fallback_title_from_path(&head.path));
+        let resolved_title = resolve_live_file_title(
+            conn,
+            policy,
+            resolver,
+            workspace_id,
+            version_id,
+            &head,
+            None,
+        )?;
         relation_title_cache.insert(target_record_id, resolved_title);
     }
 
@@ -2023,10 +2141,14 @@ fn load_record_fields(
     let mut out = Vec::new();
     for (name, value_json) in rows {
         if let Some(rendered) = render_field_value_json(&value_json, relation_title_cache) {
-            out.push(RetrievalMatchedField {
-                name,
-                value: rendered,
-            });
+            let redacted = redact_text_for_policy(&rendered, Some(source_path), policy, resolver);
+            let cleaned = collapse_whitespace(&redacted);
+            if !cleaned.is_empty() {
+                out.push(RetrievalMatchedField {
+                    name,
+                    value: cleaned,
+                });
+            }
         }
     }
     Ok(out)
@@ -2092,9 +2214,18 @@ fn collect_chat_candidates(
         if query.fts_terms.len() >= 2
             && let Some(and_expr) = fts_match_and(&query.fts_terms)
         {
-            for (tid, mid) in
-                query_chat_fts_ranked(conn, workspace_id, &and_expr, CHAT_FTS_CANDIDATE_CAP)?
-            {
+            let (rows, saturated) = query_chat_fts_ranked(
+                conn,
+                workspace_id,
+                version_id,
+                &and_expr,
+                path_prefix,
+                CHAT_FTS_CANDIDATE_CAP,
+            )?;
+            if saturated {
+                pool.scan_saturated = true;
+            }
+            for (tid, mid) in rows {
                 if seen_pairs.insert((tid.clone(), mid.clone())) {
                     raw_hits.push((tid, mid, true));
                 }
@@ -2103,17 +2234,32 @@ fn collect_chat_candidates(
         if raw_hits.len() < 40
             && let Some(or_expr) = fts_match_or(&query.fts_terms)
         {
-            for (tid, mid) in
-                query_chat_fts_ranked(conn, workspace_id, &or_expr, CHAT_FTS_CANDIDATE_CAP)?
-            {
+            let (rows, saturated) = query_chat_fts_ranked(
+                conn,
+                workspace_id,
+                version_id,
+                &or_expr,
+                path_prefix,
+                CHAT_FTS_CANDIDATE_CAP,
+            )?;
+            if saturated {
+                pool.scan_saturated = true;
+            }
+            for (tid, mid) in rows {
                 if seen_pairs.insert((tid.clone(), mid.clone())) {
                     raw_hits.push((tid, mid, true));
                 }
             }
         }
     } else {
-        let (rows, saturated) =
-            query_chat_fts_short_scan(conn, workspace_id, query, SHORT_QUERY_CHAT_SCAN_CAP)?;
+        let (rows, saturated) = query_chat_fts_short_scan(
+            conn,
+            workspace_id,
+            version_id,
+            query,
+            path_prefix,
+            SHORT_QUERY_CHAT_SCAN_CAP,
+        )?;
         if saturated {
             pool.scan_saturated = true;
         }
@@ -2124,7 +2270,12 @@ fn collect_chat_candidates(
         }
     }
 
-    for tid in query_chat_metadata_candidates(conn, workspace_id, query)? {
+    let (meta_tids, meta_saturated) =
+        query_chat_metadata_candidates(conn, workspace_id, version_id, query, path_prefix)?;
+    if meta_saturated {
+        pool.scan_saturated = true;
+    }
+    for tid in meta_tids {
         let header_id = crate::search::THREAD_HEADER_MESSAGE_ID.to_owned();
         if seen_pairs.insert((tid.clone(), header_id.clone())) {
             raw_hits.push((tid, header_id, false));
@@ -2137,6 +2288,10 @@ fn collect_chat_candidates(
     for (thread_id, message_id, from_fts) in raw_hits {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
+        }
+        if pool.hydrated_bytes >= TOTAL_HYDRATED_BYTES_BUDGET {
+            pool.scan_saturated = true;
+            break;
         }
         if thread_id.is_empty() {
             continue;
@@ -2160,23 +2315,31 @@ fn collect_chat_candidates(
         if message_id == crate::search::THREAD_HEADER_MESSAGE_ID {
             continue;
         }
-        let msg_row: Option<(String, String, i64)> = conn
+        let msg_row: Option<(String, Option<String>, i64)> = conn
             .prepare_cached(
-                "SELECT author_display_name, substr(body, 1, 8192), created_at_ms \
+                "SELECT author_display_name, \
+                        CASE WHEN length(CAST(body AS BLOB)) <= ?4 THEN body ELSE NULL END, \
+                        created_at_ms \
                  FROM chat_messages \
                  WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
             )
             .map_err(SearchError::from)?
-            .query_row(params![workspace_id, thread_id, message_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
+            .query_row(
+                params![workspace_id, thread_id, message_id, CHAT_BODY_CAP_BYTES],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
             .optional()
             .map_err(SearchError::from)?;
-        let Some((author, body, created_at_ms)) = msg_row else {
+        let Some((author, maybe_body, created_at_ms)) = msg_row else {
             continue;
         };
+        let Some(body) = maybe_body else {
+            pool.scan_saturated = true;
+            continue;
+        };
+        pool.hydrated_bytes = pool.hydrated_bytes.saturating_add(body.len());
 
-        if entry.combined_messages.len() < 16_384 {
+        if entry.combined_messages.len() < CHAT_COMBINED_BODY_CAP_BYTES {
             if !entry.combined_messages.is_empty() {
                 entry.combined_messages.push('\n');
             }
@@ -2311,11 +2474,9 @@ fn collect_chat_candidates(
         }
 
         let id = format!("chat:{}", hit.thread_id);
-        let fts_rank = if hit.from_fts {
-            Some(pool.record_chat_fts_rank(&id))
-        } else {
-            None
-        };
+        if hit.from_fts {
+            pool.record_chat_fts_rank(&id);
+        }
         let snippet = extract_best_snippet(&hit.best_body, query, MAX_SNIPPET_CHARS);
 
         pool.insert_or_improve(ScoredCandidate {
@@ -2344,7 +2505,6 @@ fn collect_chat_candidates(
                 related: Vec::new(),
             },
             bm25f_score: scored.score,
-            fts_rank,
         });
     }
     Ok(())
@@ -2353,43 +2513,114 @@ fn collect_chat_candidates(
 fn query_chat_fts_ranked(
     conn: &Connection,
     workspace_id: &str,
+    version_id: &str,
     match_expr: &str,
+    path_prefix: Option<&str>,
     limit: usize,
-) -> Result<Vec<(String, String)>, SearchError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT thread_id, message_id \
-         FROM engine_search_chat_messages_fts \
-         WHERE engine_search_chat_messages_fts MATCH ?2 AND workspace_id = ?1 \
-         ORDER BY bm25(engine_search_chat_messages_fts) LIMIT ?3",
-    )?;
-    let rows = stmt
-        .query_map(params![workspace_id, match_expr, limit as i64], |row| {
+) -> Result<(Vec<(String, String)>, bool), SearchError> {
+    let rows = if let Some(prefix) = path_prefix {
+        let mut bind_values: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(workspace_id.to_owned()),
+            rusqlite::types::Value::Text(match_expr.to_owned()),
+            rusqlite::types::Value::Text(version_id.to_owned()),
+        ];
+        let prefix_clause = append_path_prefix_sql(&mut bind_values, "a.path", prefix);
+        let limit_idx = bind_values.len() + 1;
+        bind_values.push(rusqlite::types::Value::Integer(limit as i64));
+        let sql = format!(
+            "SELECT engine_search_chat_messages_fts.thread_id, \
+                    engine_search_chat_messages_fts.message_id \
+             FROM engine_search_chat_messages_fts \
+             JOIN chat_threads t \
+               ON t.workspace_id = engine_search_chat_messages_fts.workspace_id \
+              AND t.thread_id = engine_search_chat_messages_fts.thread_id \
+             JOIN path_aliases a \
+               ON a.workspace_id = t.workspace_id AND a.version_id = ?3 \
+              AND a.object_id = t.linked_object_id \
+             WHERE engine_search_chat_messages_fts MATCH ?2 \
+               AND engine_search_chat_messages_fts.workspace_id = ?1 \
+               AND t.channel_id IS NULL \
+               AND {prefix_clause} \
+             ORDER BY bm25(engine_search_chat_messages_fts) LIMIT ?{limit_idx}"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        stmt.query_map(rusqlite::params_from_iter(bind_values), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        let mut stmt = conn.prepare_cached(
+            "SELECT thread_id, message_id \
+             FROM engine_search_chat_messages_fts \
+             WHERE engine_search_chat_messages_fts MATCH ?2 AND workspace_id = ?1 \
+             ORDER BY bm25(engine_search_chat_messages_fts) LIMIT ?3",
+        )?;
+        stmt.query_map(params![workspace_id, match_expr, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let saturated = rows.len() >= limit;
+    Ok((rows, saturated))
 }
 
 fn query_chat_fts_short_scan(
     conn: &Connection,
     workspace_id: &str,
+    version_id: &str,
     query: &ParsedQuery,
+    path_prefix: Option<&str>,
     scan_cap: usize,
 ) -> Result<(Vec<(String, String)>, bool), SearchError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT thread_id, message_id, substr(text, 1, 8192) \
-         FROM engine_search_chat_messages_fts \
-         WHERE workspace_id = ?1 \
-         ORDER BY rowid LIMIT ?2",
-    )?;
-    let mut rows = stmt.query(params![workspace_id, scan_cap as i64])?;
+    let mut bind_values: Vec<rusqlite::types::Value> =
+        vec![rusqlite::types::Value::Text(workspace_id.to_owned())];
+    let (join_sql, where_extra) = if let Some(prefix) = path_prefix {
+        let ver_idx = bind_values.len() + 1;
+        bind_values.push(rusqlite::types::Value::Text(version_id.to_owned()));
+        let prefix_clause = append_path_prefix_sql(&mut bind_values, "a.path", prefix);
+        (
+            format!(
+                " JOIN chat_threads t \
+                    ON t.workspace_id = engine_search_chat_messages_fts.workspace_id \
+                   AND t.thread_id = engine_search_chat_messages_fts.thread_id \
+                  JOIN path_aliases a \
+                    ON a.workspace_id = t.workspace_id AND a.version_id = ?{ver_idx} \
+                   AND a.object_id = t.linked_object_id"
+            ),
+            format!(" AND t.channel_id IS NULL AND {prefix_clause}"),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+    let cap_idx = bind_values.len() + 1;
+    let limit_idx = cap_idx + 1;
+    bind_values.push(rusqlite::types::Value::Integer(CHAT_BODY_CAP_BYTES));
+    bind_values.push(rusqlite::types::Value::Integer(scan_cap as i64));
+    let sql = format!(
+        "SELECT engine_search_chat_messages_fts.thread_id, \
+                engine_search_chat_messages_fts.message_id, \
+                CASE WHEN length(CAST(engine_search_chat_messages_fts.text AS BLOB)) <= ?{cap_idx} \
+                     THEN engine_search_chat_messages_fts.text ELSE NULL END \
+         FROM engine_search_chat_messages_fts{join_sql} \
+         WHERE engine_search_chat_messages_fts.workspace_id = ?1{where_extra} \
+         ORDER BY engine_search_chat_messages_fts.rowid LIMIT ?{limit_idx}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(bind_values))?;
     let mut inspected = 0usize;
     let mut out = Vec::new();
+    let mut bytes_seen = 0usize;
+    let mut saw_oversized = false;
     while let Some(row) = rows.next()? {
         inspected += 1;
         let thread_id: String = row.get(0)?;
         let message_id: String = row.get(1)?;
-        let text: String = row.get(2)?;
+        let maybe_text: Option<String> = row.get(2)?;
+        let Some(text) = maybe_text else {
+            saw_oversized = true;
+            continue;
+        };
+        bytes_seen = bytes_seen.saturating_add(text.len());
         let lowered = text.to_lowercase();
         if query.terms.iter().any(|term| lowered.contains(&term.raw)) {
             out.push((thread_id, message_id));
@@ -2397,15 +2628,20 @@ fn query_chat_fts_short_scan(
                 return Ok((out, true));
             }
         }
+        if bytes_seen >= TOTAL_HYDRATED_BYTES_BUDGET / 2 {
+            return Ok((out, true));
+        }
     }
-    Ok((out, inspected >= scan_cap))
+    Ok((out, saw_oversized || inspected >= scan_cap))
 }
 
 fn query_chat_metadata_candidates(
     conn: &Connection,
     workspace_id: &str,
+    version_id: &str,
     query: &ParsedQuery,
-) -> Result<Vec<String>, SearchError> {
+    path_prefix: Option<&str>,
+) -> Result<(Vec<String>, bool), SearchError> {
     let mut probe_terms: Vec<&str> = query
         .terms
         .iter()
@@ -2419,7 +2655,7 @@ fn query_chat_metadata_candidates(
         .take(6)
         .collect();
     if probe_terms.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     probe_terms.sort();
     probe_terms.dedup();
@@ -2434,6 +2670,21 @@ fn query_chat_metadata_candidates(
         ));
         bind_values.push(rusqlite::types::Value::Text(escape_like_pattern(term)));
     }
+    let (join_sql, where_extra) = if let Some(prefix) = path_prefix {
+        let ver_idx = bind_values.len() + 1;
+        bind_values.push(rusqlite::types::Value::Text(version_id.to_owned()));
+        let prefix_clause = append_path_prefix_sql(&mut bind_values, "a.path", prefix);
+        (
+            format!(
+                " JOIN path_aliases a \
+                    ON a.workspace_id = t.workspace_id AND a.version_id = ?{ver_idx} \
+                   AND a.object_id = t.linked_object_id"
+            ),
+            format!(" AND t.channel_id IS NULL AND {prefix_clause}"),
+        )
+    } else {
+        (String::new(), String::new())
+    };
     let limit_idx = bind_values.len() + 1;
     bind_values.push(rusqlite::types::Value::Integer(
         CHAT_METADATA_CANDIDATE_CAP as i64,
@@ -2442,8 +2693,8 @@ fn query_chat_metadata_candidates(
     let sql = format!(
         "SELECT t.thread_id FROM chat_threads t \
          LEFT JOIN chat_channels ch \
-           ON ch.workspace_id = t.workspace_id AND ch.channel_id = t.channel_id \
-         WHERE t.workspace_id = ?1 \
+           ON ch.workspace_id = t.workspace_id AND ch.channel_id = t.channel_id{join_sql} \
+         WHERE t.workspace_id = ?1{where_extra} \
            AND ({}) \
          ORDER BY t.updated_at_ms DESC LIMIT ?{limit_idx}",
         clauses.join(" OR ")
@@ -2454,5 +2705,6 @@ fn query_chat_metadata_candidates(
             row.get::<_, String>(0)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(out)
+    let saturated = out.len() >= CHAT_METADATA_CANDIDATE_CAP;
+    Ok((out, saturated))
 }
