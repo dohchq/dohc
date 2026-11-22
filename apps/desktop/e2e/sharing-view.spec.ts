@@ -125,7 +125,7 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     await page.getByRole("menuitem", { name: "End share…" }).click();
     const confirm = page.getByTestId("sharing-end-confirm");
     await expect(confirm).toContainText(
-      `End this share with 1 person? ${RECIPIENT_EMAIL} keeps a read-only copy`,
+      `End this share with 1 person? Updates stop for ${RECIPIENT_EMAIL}, and their copy stays read-only.`,
     );
     await confirm.getByTestId("sharing-end").click();
     await expect(confirm).toBeHidden();

@@ -153,7 +153,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     // The copied manifest names no computer for the Collections, so this computer neither opens nor creates a store until the person keeps them here.
     const collections = restored.getByRole("region", { name: "Collections", exact: true });
     await expect(collections.getByTestId("collections-refusal")).toHaveText(
-      "Which computer keeps these Collections?Use this computer",
+      "Choose which computer keeps these CollectionsUse this computer",
     );
     await expect(
       collections.getByRole("button", { name: "Collections actions", exact: true }),
