@@ -183,6 +183,11 @@ export function createLinkReadRoutes(
         if (requireFresh().credential.kind !== "member") throw notFound();
         return linkRefusal("link_too_many_files");
       };
+      // The page reads the files again after a level change, so this answer names who made it too.
+      const changed =
+        capability.credential.kind === "member"
+          ? await levelChangedBy(share.workspaceId, capability.credential.userId)
+          : {};
       if (replica) {
         const body = replica.inventory(
           { grantId: capability.grantId, generation: capability.generation },
@@ -192,7 +197,7 @@ export function createLinkReadRoutes(
         if (body.files.length > linkCurrentFileLimit) return tooManyFiles();
         return linkJsonResponse(
           capability,
-          { ...body, ...linkChannel(capability.grantId) },
+          { ...changed, ...body, ...linkChannel(capability.grantId) },
           request.signal,
         );
       }
@@ -267,6 +272,7 @@ export function createLinkReadRoutes(
         return linkJsonResponse(
           fresh,
           {
+            ...changed,
             ok: true,
             ...memberReach(fresh),
             effectiveSelector: presentation.selector,
