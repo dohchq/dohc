@@ -182,6 +182,7 @@ h1{margin:0;font-size:18px;font-weight:600;overflow-wrap:anywhere}
 .row{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line)}
 .row:last-child,.opt:last-child{border-bottom:0}
 .k{flex:1;min-width:140px;overflow-wrap:anywhere}
+.reach>.k{flex-basis:100%}
 dt{flex:none;width:64px;color:var(--muted)}
 dd{margin:0}
 .av{display:grid;place-items:center;flex:none;width:24px;height:24px;border-radius:7px;background:var(--panel);color:var(--muted);font-size:11.5px;font-weight:600}
@@ -764,8 +765,10 @@ function consentContent(view: ConsentView, chosen: ChosenAgent, host: string): s
           })
           .join("");
         return (
-          // A joined workspace's mark sits beside its name, as on the desktop.
-          `<div class="row"><span class="k"><bdi id="${id}">${escapeHtml(workspace.name ?? workspace.workspaceId)}</bdi>` +
+          // A joined workspace's mark sits beside its name, as on the desktop. The
+          // name sits above the levels in every row (`.reach`), since a row with
+          // Edit is wider and would wrap where the others do not.
+          `<div class="row reach"><span class="k"><bdi id="${id}">${escapeHtml(workspace.name ?? workspace.workspaceId)}</bdi>` +
           (mark ? `<span class="pill">${mark}</span>` : "") +
           "</span>" +
           `<span class="seg" role="radiogroup" aria-labelledby="${id}">${radios}</span></div>`
