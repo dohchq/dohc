@@ -239,131 +239,82 @@ describe("CSV view actions", () => {
     expect((screen.getByLabelText("Row 2 column 2") as HTMLInputElement).value).toBe("2");
   });
 
-  it("restores deleted columns by row identity after another row is deleted and retires Undo across Raw edits", async () => {
+  it("retires pending Undo notices on any subsequent structural edit or Raw mode switch", async () => {
     const user = userEvent.setup();
-    const notices: Array<{ message: string; onUndo?: () => void }> = [];
+    const file = csvFile("ws-1", "cities.csv", "name,city\nAda,Paris\nGrace,Tokyo\nLin,Oslo");
     render(
-      <CsvView
-        {...csvFile("ws-1", "cities.csv", "name,city\nAda,Paris\nGrace,Tokyo\nLin,Oslo")}
-        onNotice={(message, onUndo) => {
-          notices.push({ message, onUndo });
-        }}
-      />,
+      <Shell>
+        {(onError, onNotice) => <CsvView {...file} onError={onError} onNotice={onNotice} />}
+      </Shell>,
     );
 
-    // Delete "city" column, then delete Ada's row, then undo "city" followed by undoing Ada's row.
     await user.click(screen.getByLabelText("Delete column 2"));
-    const undoCity = notices.at(-1)?.onUndo;
-    await user.click(screen.getByLabelText("Delete row 1"));
-    const undoAda = notices.at(-1)?.onUndo;
-
-    act(() => undoCity?.());
-    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Grace");
-    expect((screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value).toBe("Tokyo");
-    expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Lin");
-    expect((screen.getByLabelText("Row 2 column 2") as HTMLInputElement).value).toBe("Oslo");
-
-    // Undoing Ada's row after undoing "city" also restores Ada's original city ("Paris").
-    act(() => undoAda?.());
-    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
-    expect((screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value).toBe("Paris");
-    expect((screen.getByLabelText("Row 2 column 2") as HTMLInputElement).value).toBe("Tokyo");
-
-    // Reverse undo order (delete city, delete Ada, undo Ada first, then undo city) restores identically.
-    await user.click(screen.getByLabelText("Delete column 2"));
-    const undoCity2 = notices.at(-1)?.onUndo;
-    await user.click(screen.getByLabelText("Delete row 1"));
-    const undoAda2 = notices.at(-1)?.onUndo;
-    act(() => undoAda2?.());
-    act(() => undoCity2?.());
-    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
-    expect((screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value).toBe("Paris");
-    expect((screen.getByLabelText("Row 2 column 2") as HTMLInputElement).value).toBe("Tokyo");
-    expect((screen.getByLabelText("Row 3 column 2") as HTMLInputElement).value).toBe("Oslo");
-
-    // Switching to Raw mode and editing retires pending table Undo callbacks so they never overwrite Source edits.
-    await user.click(screen.getByLabelText("Delete row 1"));
-    const staleUndo = notices.at(-1)?.onUndo;
-    await user.click(mode("Raw"));
-    const rawEditor = screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement;
-    await user.type(rawEditor, "\nSam,Rome");
-    act(() => staleUndo?.());
-    expect(rawEditor.value).toContain("Sam,Rome");
-  });
-
-  it("restores all rows when deleting the last column of a one-column CSV and undoing in either order", async () => {
-    const user = userEvent.setup();
-    const notices: Array<{ message: string; onUndo?: () => void }> = [];
-    render(
-      <CsvView
-        {...csvFile("ws-1", "single.csv", "name\nAda\nGrace")}
-        onNotice={(message, onUndo) => {
-          notices.push({ message, onUndo });
-        }}
-      />,
-    );
-
-    // Delete Ada's row, then delete the only column, then undo row first and column second.
-    await user.click(screen.getByLabelText("Delete row 1"));
-    const undoAda = notices.at(-1)?.onUndo;
-    await user.click(screen.getByLabelText("Delete column 1"));
-    const undoCol = notices.at(-1)?.onUndo;
-
-    act(() => undoAda?.());
-    act(() => undoCol?.());
-    expect((screen.getByLabelText("Header column 1") as HTMLInputElement).value).toBe("name");
-    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
-    expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Grace");
-
-    // Repeat with column Undo first and row Undo second.
-    await user.click(screen.getByLabelText("Delete row 1"));
-    const undoAda2 = notices.at(-1)?.onUndo;
-    await user.click(screen.getByLabelText("Delete column 1"));
-    const undoCol2 = notices.at(-1)?.onUndo;
-
-    act(() => undoCol2?.());
-    act(() => undoAda2?.());
-    expect((screen.getByLabelText("Header column 1") as HTMLInputElement).value).toBe("name");
-    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
-    expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Grace");
-
-    // Starting a new table from the empty state retires older Undo notices.
-    await user.click(screen.getByLabelText("Delete column 1"));
-    const staleColUndo = notices.at(-1)?.onUndo;
-    await user.click(screen.getByTestId("csv-empty-add-row"));
-    act(() => staleColUndo?.());
-    expect((screen.getByLabelText("Header column 1") as HTMLInputElement).value).toBe("column");
-    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("");
-  });
-
-  it("preserves original row order when multiple row deletions are undone out of order", async () => {
-    const user = userEvent.setup();
-    const notices: Array<{ message: string; onUndo?: () => void }> = [];
-    render(
-      <CsvView
-        {...csvFile("ws-1", "people.csv", "name\nAda\nGrace\nLin\nJo")}
-        onNotice={(message, onUndo) => {
-          notices.push({ message, onUndo });
-        }}
-      />,
-    );
+    expect(await screen.findByTestId("workspace-shell-notice")).toBeTruthy();
 
     await user.click(screen.getByLabelText("Delete row 1"));
-    const undoAda = notices.at(-1)?.onUndo;
-    // After deleting Ada, rows are Grace (1), Lin (2), Jo (3).
-    await user.click(screen.getByLabelText("Delete row 2"));
-    const undoLin = notices.at(-1)?.onUndo;
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    expect(within(toast).getByText("Deleted row 1.")).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const noticesDialog = screen.getByRole("dialog", { name: "Notices" });
+    expect(within(noticesDialog).queryByText('Deleted column "city".')).toBeNull();
+    expect(within(noticesDialog).getByText("Deleted row 1.")).toBeTruthy();
 
-    // Undo Ada first, then Lin — original order Ada, Grace, Lin, Jo must hold.
-    act(() => undoAda?.());
-    act(() => undoLin?.());
+    await user.click(within(noticesDialog).getByRole("button", { name: "Undo" }));
     expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
     expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Grace");
     expect((screen.getByLabelText("Row 3 column 1") as HTMLInputElement).value).toBe("Lin");
-    expect((screen.getByLabelText("Row 4 column 1") as HTMLInputElement).value).toBe("Jo");
+
+    await user.click(screen.getByLabelText("Delete row 1"));
+    expect(await screen.findByTestId("workspace-shell-notice")).toBeTruthy();
+    await user.click(screen.getByTestId("csv-add-row"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
+
+    await user.click(screen.getByLabelText("Delete row 1"));
+    expect(await screen.findByTestId("workspace-shell-notice")).toBeTruthy();
+    await user.click(screen.getByTestId("csv-add-column"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
+
+    await user.click(screen.getByLabelText("Delete row 1"));
+    expect(await screen.findByTestId("workspace-shell-notice")).toBeTruthy();
+    await user.click(mode("Raw"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
   });
 
-  it("preserves extra columns beyond the 500-row preview and keeps ragged short rows unpadded on delete and Undo", async () => {
+  it("restores all rows on Undo after deleting the only column and dismisses Undo when starting from empty", async () => {
+    const user = userEvent.setup();
+    const file = csvFile("ws-1", "single.csv", "name\nAda\nGrace");
+    render(
+      <Shell>
+        {(onError, onNotice) => <CsvView {...file} onError={onError} onNotice={onNotice} />}
+      </Shell>,
+    );
+
+    await user.click(screen.getByLabelText("Delete column 1"));
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    expect(screen.getByTestId("csv-empty-table")).toBeTruthy();
+
+    await user.click(within(toast).getByRole("button", { name: "Undo" }));
+    expect((screen.getByLabelText("Header column 1") as HTMLInputElement).value).toBe("name");
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
+    expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Grace");
+
+    await user.click(screen.getByLabelText("Delete column 1"));
+    expect(await screen.findByTestId("workspace-shell-notice")).toBeTruthy();
+    await user.click(screen.getByTestId("csv-empty-add-row"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
+
+    await user.click(screen.getByLabelText("Delete column 1"));
+    expect(await screen.findByTestId("workspace-shell-notice")).toBeTruthy();
+    await user.click(screen.getByTestId("csv-empty-add-column"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
+  });
+
+  it("preserves extra columns beyond the 500-row preview on delete and Undo", async () => {
     const user = userEvent.setup();
     const notices: Array<{ message: string; onUndo?: () => void }> = [];
     const lines = ["name"];
@@ -388,44 +339,50 @@ describe("CSV view actions", () => {
 
     act(() => notices.at(-1)?.onUndo?.());
     expect(file.localBuffer.getSnapshot().body).toBe(original);
+  });
 
-    // Ragged rows keep their exact lengths through delete and Undo.
-    cleanup();
+  it("keeps ragged short rows unpadded and round-trip safe across column and row edits", async () => {
+    const user = userEvent.setup();
+    const notices: Array<{ message: string; onUndo?: () => void }> = [];
     const raggedOriginal = "a,b,c\n1\n2,3,\n4,5,6";
     const ragged = csvFile("ws-1", "ragged.csv", raggedOriginal);
-    const raggedNotices: Array<{ message: string; onUndo?: () => void }> = [];
     render(
       <CsvView
         {...ragged}
         onNotice={(message, onUndo) => {
-          raggedNotices.push({ message, onUndo });
+          notices.push({ message, onUndo });
         }}
       />,
     );
 
     await user.click(screen.getByLabelText("Delete row 3"));
     expect(ragged.localBuffer.getSnapshot().body).toBe("a,b,c\n1\n2,3,");
-    act(() => raggedNotices.at(-1)?.onUndo?.());
+    act(() => notices.at(-1)?.onUndo?.());
     expect(ragged.localBuffer.getSnapshot().body).toBe(raggedOriginal);
 
-    // Deleting column 1 from a ragged CSV keeps a short trailing row intact across Raw round-trips and restores it on Undo.
-    cleanup();
+    await user.click(screen.getByLabelText("Delete column 2"));
+    const row1Col2 = screen.getByLabelText("Row 1 column 2") as HTMLInputElement;
+    await user.type(row1Col2, "z");
+    act(() => notices.at(-1)?.onUndo?.());
+    expect(ragged.localBuffer.getSnapshot().body).toBe("a,b,c\n1,,z\n2,3,\n4,5,6");
+  });
+
+  it("round-trips ragged rows emptied by a column delete and matches Raw across follow-up edits", async () => {
+    const user = userEvent.setup();
+    const notices: Array<{ message: string; onUndo?: () => void }> = [];
     const shortTail = csvFile("ws-1", "short-tail.csv", "a,b\n1,2\n3");
-    const shortTailNotices: Array<{ message: string; onUndo?: () => void }> = [];
     render(
       <CsvView
         {...shortTail}
         onNotice={(message, onUndo) => {
-          shortTailNotices.push({ message, onUndo });
+          notices.push({ message, onUndo });
         }}
       />,
     );
 
     await user.click(screen.getByLabelText("Delete column 1"));
     expect(shortTail.localBuffer.getSnapshot().body).toBe('b\n2\n""');
-    expect(screen.getByLabelText("Row 2 column 1")).toBeTruthy();
-
-    act(() => shortTailNotices.at(-1)?.onUndo?.());
+    act(() => notices.at(-1)?.onUndo?.());
     expect(shortTail.localBuffer.getSnapshot().body).toBe("a,b\n1,2\n3");
 
     await user.click(screen.getByLabelText("Delete column 1"));
@@ -434,68 +391,22 @@ describe("CSV view actions", () => {
     expect((screen.getByLabelText("Header column 1") as HTMLInputElement).value).toBe("b");
     expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("2");
     expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("");
+  });
 
-    // Deleting column 1 then row 2 from a\n1\n2,b keeps the blank header and row 1 intact, matching a Raw round-trip.
-    cleanup();
-    const sparseCol = csvFile("ws-1", "sparse-col.csv", "a\n1\n2,b");
-    const sparseNotices: Array<{ message: string; onUndo?: () => void }> = [];
-    render(
-      <CsvView
-        {...sparseCol}
-        onNotice={(message, onUndo) => {
-          sparseNotices.push({ message, onUndo });
-        }}
-      />,
-    );
+  it("matches Raw when deleting columns, adding columns, and deleting rows on sparse ragged tables", async () => {
+    const user = userEvent.setup();
+    const sparse = csvFile("ws-1", "sparse-col.csv", "a\n1\n2,b");
+    render(<CsvView {...sparse} />);
 
     await user.click(screen.getByLabelText("Delete column 1"));
-    const undoCol1 = sparseNotices.at(-1)?.onUndo;
-    expect(sparseCol.localBuffer.getSnapshot().body).toBe('""\n""\nb');
+    expect(sparse.localBuffer.getSnapshot().body).toBe('""\n""\nb');
 
+    await user.click(screen.getByTestId("csv-add-column"));
     await user.click(screen.getByLabelText("Delete row 2"));
-    const undoRow2 = sparseNotices.at(-1)?.onUndo;
-    expect(sparseCol.localBuffer.getSnapshot().body).toBe('""\n""');
+    await user.click(screen.getByLabelText("Delete column 2"));
+    expect(sparse.localBuffer.getSnapshot().body).toBe('""\n""');
     expect(screen.getByLabelText("Header column 1")).toBeTruthy();
     expect(screen.getByLabelText("Row 1 column 1")).toBeTruthy();
-
-    await user.click(screen.getByLabelText("Delete column 1"));
-    const undoCol2 = sparseNotices.at(-1)?.onUndo;
-    expect(sparseCol.localBuffer.getSnapshot().body).toBe("");
-    expect(screen.getByTestId("csv-empty-table")).toBeTruthy();
-
-    act(() => undoCol2?.());
-    expect(sparseCol.localBuffer.getSnapshot().body).toBe('""\n""');
-    act(() => undoRow2?.());
-    expect(sparseCol.localBuffer.getSnapshot().body).toBe('""\n""\nb');
-    act(() => undoCol1?.());
-    expect(sparseCol.localBuffer.getSnapshot().body).toBe("a\n1\n2,b");
-
-    // Deleting row 1 then column 1 from a\n1,2\n3 empties the table instead of surfacing an orphan column.
-    cleanup();
-    const orphanCol = csvFile("ws-1", "orphan-col.csv", "a\n1,2\n3");
-    const orphanNotices: Array<{ message: string; onUndo?: () => void }> = [];
-    render(
-      <CsvView
-        {...orphanCol}
-        onNotice={(message, onUndo) => {
-          orphanNotices.push({ message, onUndo });
-        }}
-      />,
-    );
-
-    await user.click(screen.getByLabelText("Delete row 1"));
-    const undoOrphanRow = orphanNotices.at(-1)?.onUndo;
-    expect(orphanCol.localBuffer.getSnapshot().body).toBe("a\n3");
-
-    await user.click(screen.getByLabelText("Delete column 1"));
-    const undoOrphanCol = orphanNotices.at(-1)?.onUndo;
-    expect(orphanCol.localBuffer.getSnapshot().body).toBe("");
-    expect(screen.getByTestId("csv-empty-table")).toBeTruthy();
-
-    act(() => undoOrphanRow?.());
-    expect(orphanCol.localBuffer.getSnapshot().body).toBe('""\n2\n""');
-    act(() => undoOrphanCol?.());
-    expect(orphanCol.localBuffer.getSnapshot().body).toBe("a\n1,2\n3");
   });
 
   it("handles delete and Undo quickly on a 10,000-row CSV with a 5,000-column tail row", async () => {
@@ -518,41 +429,6 @@ describe("CSV view actions", () => {
     await user.click(screen.getByLabelText("Delete row 1"));
     act(() => notices.at(-1)?.onUndo?.());
     expect(file.localBuffer.getSnapshot().body).toBe(original);
-  });
-
-  it("dismisses pending CSV Undo notices from the shell when starting a new table from empty or switching to Raw", async () => {
-    const user = userEvent.setup();
-    const file = csvFile("ws-1", "single-shell.csv", "name\nAda\nGrace");
-    render(
-      <Shell>
-        {(onError, onNotice) => <CsvView {...file} onError={onError} onNotice={onNotice} />}
-      </Shell>,
-    );
-
-    await user.click(screen.getByLabelText("Delete column 1"));
-    const toast = await screen.findByTestId("workspace-shell-notice");
-    expect(within(toast).getByText('Deleted column "name".')).toBeTruthy();
-    expect(within(toast).getByRole("button", { name: "Undo" })).toBeTruthy();
-    expect(screen.getByTestId("notice-center-toggle")).toBeTruthy();
-
-    // Adding a row to the empty table immediately removes the now-retired Undo notice.
-    await user.click(screen.getByTestId("csv-empty-add-row"));
-    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
-
-    // Adding a column to an empty table also removes the retired Undo notice.
-    await user.click(screen.getByLabelText("Delete column 1"));
-    expect(await screen.findByTestId("workspace-shell-notice")).toBeTruthy();
-    await user.click(screen.getByTestId("csv-empty-add-column"));
-    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
-
-    // Switching to Raw mode also dismisses pending Undo notices.
-    await user.click(screen.getByLabelText("Delete column 1"));
-    expect(await screen.findByTestId("workspace-shell-notice")).toBeTruthy();
-    await user.click(mode("Raw"));
-    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
   });
 
   it("does not append duplicate empty rows when pressing Enter on an empty last row", async () => {
