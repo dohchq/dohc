@@ -92,6 +92,8 @@ function LinkHolderMark() {
 /** A post or a chat message with its replies: how many, and how to open them. */
 interface Replies {
   count: number;
+  // The tab holds an unsent reply to this thread.
+  drafted: boolean;
   open(): void;
 }
 
@@ -142,11 +144,14 @@ function ChatMessage({
       ) : (
         <div className="markdown chat-body" dangerouslySetInnerHTML={{ __html: html }} />
       )}
-      {/* A person who can't post has nothing to reply with, so only a thread with replies opens. */}
-      {replies && (canReply || replies.count > 0) && (
+      {/* A person who can't post has nothing to reply with, so only a thread with replies opens,
+          or one holding the reply they wrote before they lost Comment, for them to copy. */}
+      {replies && (canReply || replies.count > 0 || replies.drafted) && (
         <button type="button" className="chat-replies" onClick={replies.open}>
           {replies.count === 0
-            ? "Reply"
+            ? canReply
+              ? "Reply"
+              : "Unsent reply"
             : replies.count === 1
               ? "1 reply"
               : `${replies.count} replies`}
@@ -170,6 +175,7 @@ function threadView(
   lane: Lane,
   open: OpenThread | null,
   onOpen: (thread: OpenThread, seq: number) => void,
+  drafted: (thread: OpenThread) => boolean,
 ) {
   if (open)
     return {
@@ -195,9 +201,11 @@ function threadView(
       const post = thread.find((message) => message.startsPost);
       if (!post) continue;
       shown.push(post);
+      const opens = { threadId, rootId: null };
       replies.set(post.relaySeq, {
         count: thread.length - 1,
-        open: () => onOpen({ threadId, rootId: null }, post.relaySeq),
+        drafted: drafted(opens),
+        open: () => onOpen(opens, post.relaySeq),
       });
     }
     shown.sort((left, right) => left.relaySeq - right.relaySeq);
@@ -210,10 +218,11 @@ function threadView(
   for (const message of messages) {
     if (message.lane !== "chat" || message.parentMessageId) continue;
     shown.push(message);
+    const opens = { threadId: message.threadId, rootId: message.messageId };
     replies.set(message.relaySeq, {
       count: counts.get(message.messageId) ?? 0,
-      open: () =>
-        onOpen({ threadId: message.threadId, rootId: message.messageId }, message.relaySeq),
+      drafted: drafted(opens),
+      open: () => onOpen(opens, message.relaySeq),
     });
   }
   return { shown, replies };
@@ -270,13 +279,15 @@ export function ChannelView({
   const [lane, setLane] = useState<Lane>(threads === "chat" ? "chat" : "posts"),
     [open, setOpen] = useState<OpenThread | null>(null);
   // Each composer keeps its own draft: the Group's lane, or the open thread.
+  const threadKey = (thread: OpenThread) =>
+    `${draftKey}\nthread\n${thread.threadId}\n${thread.rootId ?? ""}`;
   const composerKey =
     draftKey === undefined
       ? null
       : !threads
         ? draftKey
         : open
-          ? `${draftKey}\nthread\n${open.threadId}\n${open.rootId ?? ""}`
+          ? threadKey(open)
           : `${draftKey}\n${lane}`;
   const [messages, setMessages] = useState<NamedChatMessage[] | null>(null),
     [loadFailed, setLoadFailed] = useState(false);
@@ -515,12 +526,18 @@ export function ChannelView({
       : { lane };
   const view =
     threads && messages
-      ? threadView(messages, lane, open, (thread, seq) => {
-          setOpen(thread);
-          stick.current = true;
-          opener.current = seq;
-          focusNext.current = "back";
-        })
+      ? threadView(
+          messages,
+          lane,
+          open,
+          (thread, seq) => {
+            setOpen(thread);
+            stick.current = true;
+            opener.current = seq;
+            focusNext.current = "back";
+          },
+          (thread) => draftKey !== undefined && readDraft(threadKey(thread)) !== "",
+        )
       : null;
   const shown = view?.shown ?? messages;
   const showLane = (next: Lane) => {
