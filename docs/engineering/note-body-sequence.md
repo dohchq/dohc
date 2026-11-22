@@ -121,7 +121,12 @@ INLINE = letters, `escapedPunctuation`, `hardBreak`, `image`, `inlineAtom`, `mat
 - A boundary carries every attribute its kind has (`level` for a heading, `language` for a code block) from the moment it has that kind, defaults included, so a later change to one is an overwrite.
 - A writer skips a write that would store the value already there.
 - Text before the first boundary has no boundary to change. A writer that changes that line's kind or path, or splits it at offset 0, first inserts a boundary for it at the start of the sequence, in the same transaction.
-- A split's new line copies the line's kind and path. When the line sits directly in a list item, the new line starts a new item (fresh id, all its records), and the item's later blocks go with it.
+- A split's new line copies the line's kind and path, with these cases for a line that sits directly in a list item:
+  - the item's first block, split anywhere but offset 0: the new line starts a new item below (fresh id, all its records), and the item's later blocks go with it;
+  - the item's first block, not empty, split at offset 0: the new empty line is a new item above; the existing boundary, item and records stay with the text;
+  - a later block of the item, split at offset 0: the new empty line stays in the same item, above the block;
+  - a later block of the item, split elsewhere: the new line stays in the same item, below.
+- No writer inserts or deletes between the two units of a surrogate pair. A split or a delete asked for there is refused.
 - Typing: insert letters with the marks the editor gives them.
 - Never copy letters.
 - A boundary always carries `path`, `[]` for a line in no container, so a later change to it is an overwrite. No writer writes a path longer than 64: a change that would nest a line deeper is refused, since a reader would cut the path.
@@ -129,7 +134,7 @@ INLINE = letters, `escapedPunctuation`, `hardBreak`, `image`, `inlineAtom`, `mat
   - a container keeps its id through a change if any of its leaves survives the change in it;
   - a new container gets a fresh id. The transaction that writes the paths naming it also writes its type record and a record for EVERY attribute of every kind it can become where it stands, with the values it starts with and defaults for the rest. The kinds: `blockquote` and `callout`; `bulletList`, `orderedList` and `taskList`; `listItem` and `taskItem`; `tableCell` and `tableHeader`. (`recordsOfContainer` does this.) Every later change to a record is then an overwrite, also a tick on an item that became a to-do because someone else changed its list;
   - changing a container's type or attribute is one write to its record. Changing a list's kind writes the list's type and the type of each item whose stored type differs, and leaves ticks alone;
-  - when a change splits a container (a line lifted from its middle, an item outdented), the first part keeps the id and each later part gets a fresh id and a copy of every record;
+  - when a change splits a container (a line lifted from its middle, an item outdented), the first part keeps the id and each later part gets a fresh id and a copy of every record whose key is the old id or starts with the old id and a dot, whatever attribute it names;
   - no writer gives two containers one id. When someone's change leaves one id on two containers (2.2), a writer that changes a record of one of them (a setting, or a type, as a change of a list's kind does for its items) first gives that one a fresh id, a copy of all its records and its leaves' paths, in the same transaction, and writes the change into the copy.
 - No record is ever deleted.
 - No writer repairs what it reads. In particular no editor writes table repairs (`fixTables`) or trailing lines in a live note. How an uneven table is drawn is the editor's business and writes nothing.
