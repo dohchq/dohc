@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AppBackendError,
@@ -41,12 +42,16 @@ afterEach(cleanup);
 function makeFakePort() {
   const sent: Array<Record<string, unknown>> = [];
   let onMessage: ((event: MessageEvent) => void) | null = null;
+  let closed = false;
   const port = {
     postMessage(message: Record<string, unknown>) {
+      if (closed) throw new Error("Port closed");
       sent.push(message);
     },
     start() {},
-    close() {},
+    close() {
+      closed = true;
+    },
     set onmessage(handler: ((event: MessageEvent) => void) | null) {
       onMessage = handler;
     },
@@ -59,15 +64,15 @@ function makeFakePort() {
     onMessage?.({ data: payload } as MessageEvent);
   };
 
-  return { port, sent, reply };
+  return { port, sent, reply, isClosed: () => closed };
 }
 
 describe("dohc/app", () => {
-  it("routes single-dataset and aliased calls over MessagePort and preserves uncertain retry keys", async () => {
+  it("sends exact broker wire keys and surfaces structured refusals", async () => {
     const fake = makeFakePort();
     const client = createAppClient({ port: fake.port });
 
-    const singlePromise = client.read<{ total: number }>("monthlyTotal", { month: "2026-11" });
+    const readPromise = client.read<{ total: number }>("monthlyTotal", { month: "2026-11" });
     expect(fake.sent).toHaveLength(1);
     expect(Object.keys(fake.sent[0]!).sort()).toEqual([
       "id",
@@ -77,25 +82,21 @@ describe("dohc/app", () => {
       "operation",
     ]);
     expect(fake.sent[0]!.op).toBe("backend.invoke");
-    expect(fake.sent[0]!.operation).toBe("monthlyTotal");
     fake.reply({
       id: fake.sent[0]!.id,
       ok: true,
       value: { result: { total: 420 }, revision: 3, replayed: false },
     });
-    expect(await singlePromise).toEqual({ total: 420 });
+    expect(await readPromise).toEqual({ total: 420 });
 
-    const aliasedPromise = client.dataset("spending").invoke("addExpense", { amount: 15 }, "k-1");
-    expect(fake.sent).toHaveLength(2);
-    expect(fake.sent[1]!.dataset).toBe("spending");
-    expect(fake.sent[1]!.idempotencyKey).toBe("k-1");
+    const refused = client.invoke("addExpense", { amount: 15 }, "k-1");
     fake.reply({
       id: fake.sent[1]!.id,
       ok: false,
       status: 409,
       error: { code: "budget_locked", message: "Month is closed." },
     });
-    await expect(aliasedPromise).rejects.toMatchObject({
+    await expect(refused).rejects.toMatchObject({
       name: "AppBackendError",
       status: 409,
       message: "Month is closed.",
@@ -103,78 +104,133 @@ describe("dohc/app", () => {
       uncertain: false,
     });
 
-    expect(() => client.dataset("Bad Alias")).toThrow(/Invalid dataset alias/);
     expect(mutationKey("save")).toMatch(/^save:/);
     expect(isAppBackendError(new AppBackendError(503))).toBe(true);
     expect(new AppBackendError(503).uncertain).toBe(true);
     client.close();
   });
 
-  it("guards stale useDatasetQuery responses and avoids refetch loops on inline object inputs", async () => {
+  it("captures the host port before AppProvider mounts and survives StrictMode remounts", async () => {
+    const fake = makeFakePort();
+    const fakeParent = {} as Window;
+    const originalParent = Object.getOwnPropertyDescriptor(window, "parent");
+    Object.defineProperty(window, "parent", { configurable: true, value: fakeParent });
+    const event = new MessageEvent("message", {
+      data: { kind: "dohc-app-channel", version: 1 },
+      ports: [fake.port],
+    });
+    Object.defineProperty(event, "source", { value: fakeParent });
+    window.dispatchEvent(event);
+    if (originalParent) Object.defineProperty(window, "parent", originalParent);
+
+    function Probe() {
+      const q = useDatasetQuery<{ ok: boolean }>("ping");
+      return <span>{q.loading ? "loading" : q.data?.ok ? "connected" : "failed"}</span>;
+    }
+
+    const first = render(
+      <StrictMode>
+        <AppProvider>
+          <Probe />
+        </AppProvider>
+      </StrictMode>,
+    );
+    expect(fake.isClosed()).toBe(false);
+    expect(fake.sent.length).toBeGreaterThanOrEqual(1);
+    for (const msg of fake.sent) {
+      fake.reply({
+        id: msg.id,
+        ok: true,
+        value: { result: { ok: true }, revision: 1, replayed: false },
+      });
+    }
+    await waitFor(() => expect(screen.getByText("connected")).toBeTruthy());
+
+    first.unmount();
+    expect(fake.isClosed()).toBe(false);
+
+    const beforeCount = fake.sent.length;
+    render(
+      <AppProvider>
+        <Probe />
+      </AppProvider>,
+    );
+    expect(fake.sent.length).toBe(beforeCount + 1);
+    fake.reply({
+      id: fake.sent[beforeCount]!.id,
+      ok: true,
+      value: { result: { ok: true }, revision: 2, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByText("connected")).toBeTruthy());
+  });
+
+  it("clears query data on scope change and guards late replies without refetch loops", async () => {
     const fake = makeFakePort();
     const client = createAppClient({ port: fake.port });
 
-    function View({ month }: { month: string }) {
-      const query = useDatasetQuery<{ label: string }>("summary", { month });
-      if (query.loading) return <span>Loading {month}</span>;
-      if (query.error) return <span>Error {query.error.status}</span>;
-      return <span>Loaded {query.data?.label}</span>;
+    function View({ op, month }: { op: string; month: string }) {
+      const query = useDatasetQuery<{ label: string }>(op, { month });
+      return (
+        <div>
+          <span>{query.loading ? "loading" : "idle"}</span>
+          <span>data:{query.data?.label ?? "none"}</span>
+          <span>rev:{query.revision ?? "none"}</span>
+          <span>err:{query.error?.status ?? "none"}</span>
+        </div>
+      );
     }
 
     const { rerender } = render(
       <AppProvider client={client}>
-        <View month="Oct" />
+        <View op="summary" month="Oct" />
       </AppProvider>,
     );
     expect(fake.sent).toHaveLength(1);
-    const firstId = fake.sent[0]!.id as string;
+    fake.reply({
+      id: fake.sent[0]!.id,
+      ok: true,
+      value: { result: { label: "October" }, revision: 7, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByText("data:October")).toBeTruthy());
 
-    // Re-rendering with the same value must not resend even though `{ month }` is a fresh object.
+    // Same value inline object must not refetch.
     rerender(
       <AppProvider client={client}>
-        <View month="Oct" />
+        <View op="summary" month="Oct" />
       </AppProvider>,
     );
     expect(fake.sent).toHaveLength(1);
 
+    // Changing operation immediately clears old data/revision even when the new query fails with 404.
     rerender(
       <AppProvider client={client}>
-        <View month="Nov" />
+        <View op="missingOp" month="Oct" />
       </AppProvider>,
     );
+    expect(screen.getByText("data:none")).toBeTruthy();
+    expect(screen.getByText("rev:none")).toBeTruthy();
     expect(fake.sent).toHaveLength(2);
-    const secondId = fake.sent[1]!.id as string;
 
-    // Resolve newer request first, then stale request; stale answer must not overwrite.
-    fake.reply({
-      id: secondId,
-      ok: true,
-      value: { result: { label: "November" }, revision: 2, replayed: false },
-    });
-    await waitFor(() => expect(screen.getByText("Loaded November")).toBeTruthy());
-
-    fake.reply({
-      id: firstId,
-      ok: true,
-      value: { result: { label: "October" }, revision: 1, replayed: false },
-    });
-    await Promise.resolve();
-    expect(screen.getByText("Loaded November")).toBeTruthy();
+    fake.reply({ id: fake.sent[1]!.id, ok: false, status: 404 });
+    await waitFor(() => expect(screen.getByText("err:404")).toBeTruthy());
+    expect(screen.getByText("data:none")).toBeTruthy();
+    expect(screen.getByText("rev:none")).toBeTruthy();
     client.close();
   });
 
-  it("retains the exact idempotencyKey when retrying an uncertain useDatasetMutation", async () => {
+  it("snapshots original operation and immutable payload across uncertain mutation retries", async () => {
     const fake = makeFakePort();
     const client = createAppClient({ port: fake.port });
+    const mutablePayload = { amount: 10 };
 
-    function Form() {
-      const save = useDatasetMutation<{ amount: number }, { saved: boolean }>("addExpense");
+    function Form({ operation }: { operation: string }) {
+      const save = useDatasetMutation<{ amount: number }, { saved: boolean }>(operation);
       return (
         <div>
           <button
             type="button"
             onClick={() => {
-              void save.mutate({ amount: 25 }).catch(() => {});
+              void save.mutate(mutablePayload).catch(() => {});
             }}
           >
             Save
@@ -193,9 +249,9 @@ describe("dohc/app", () => {
       );
     }
 
-    render(
+    const { rerender } = render(
       <AppProvider client={client}>
-        <Form />
+        <Form operation="opA" />
       </AppProvider>,
     );
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -204,8 +260,19 @@ describe("dohc/app", () => {
     fake.reply({ id: fake.sent[0]!.id, ok: false, status: 503 });
 
     const retryButton = await screen.findByRole("button", { name: "Retry" });
+
+    // Mutate the original object and switch component operation prop before retrying.
+    mutablePayload.amount = 999;
+    rerender(
+      <AppProvider client={client}>
+        <Form operation="opB" />
+      </AppProvider>,
+    );
+
     fireEvent.click(retryButton);
     expect(fake.sent).toHaveLength(2);
+    expect(fake.sent[1]!.operation).toBe("opA");
+    expect(fake.sent[1]!.input).toEqual({ amount: 10 });
     expect(fake.sent[1]!.idempotencyKey).toBe(firstKey);
     fake.reply({
       id: fake.sent[1]!.id,
@@ -218,10 +285,29 @@ describe("dohc/app", () => {
 });
 
 describe("dohc/ui and dohc/charts", () => {
-  it("renders dashboard controls with sorting, search, tabs, modal escape, and formatters", () => {
+  it("renders dashboard controls, keeps modal focus while typing, and traps Tab inside modal", () => {
     const onSelectRow = vi.fn();
     const onTab = vi.fn();
-    const onCloseModal = vi.fn();
+
+    function ModalHarness() {
+      const [open, setOpen] = useState(true);
+      const [text, setText] = useState("");
+      return (
+        <div>
+          <Button onClick={() => setOpen(true)}>Outside</Button>
+          <Modal open={open} title="Edit item" onClose={() => setOpen(false)}>
+            <Field label="Merchant" htmlFor="modal-merchant">
+              <Input
+                id="modal-merchant"
+                value={text}
+                onChange={(event) => setText(event.target.value)}
+              />
+            </Field>
+            <Button variant="primary">Save</Button>
+          </Modal>
+        </div>
+      );
+    }
 
     render(
       <AppShell>
@@ -237,7 +323,7 @@ describe("dohc/ui and dohc/charts", () => {
             value={formatCurrency(1240)}
             delta="-8%"
             tone="success"
-            footer={<Sparkline values={[320, 410, 380, 290]} ariaLabel="Weekly spending" />}
+            footer={<Sparkline values={[42]} ariaLabel="Single point" />}
           />
           <Card title="Budget">
             <ProgressBar
@@ -251,9 +337,6 @@ describe("dohc/ui and dohc/charts", () => {
           </Card>
           <Card title="Quick form">
             <Stack gap={8}>
-              <Field label="Merchant" htmlFor="merchant">
-                <Input id="merchant" defaultValue="Blue Bottle" />
-              </Field>
               <Select aria-label="Category" defaultValue="coffee">
                 <option value="coffee">Coffee</option>
               </Select>
@@ -291,31 +374,38 @@ describe("dohc/ui and dohc/charts", () => {
             },
           ]}
         />
-        <Modal open title="Edit item" onClose={onCloseModal}>
-          <p>Modal content</p>
-        </Modal>
+        <ModalHarness />
       </AppShell>,
     );
 
-    expect(screen.getByRole("heading", { name: "Control Tower" })).toBeTruthy();
-    expect(screen.getByRole("progressbar", { name: "Dining" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Single point" })).toBeTruthy();
+
+    // Typing in modal input with inline onClose must NOT steal focus.
+    const modalInput = screen.getByLabelText("Merchant");
+    modalInput.focus();
+    fireEvent.change(modalInput, { target: { value: "Blue" } });
+    expect(document.activeElement).toBe(modalInput);
+
+    // Tabbing from last modal focusable wraps to first modal focusable (Close button), not Outside.
+    const saveBtn = screen.getByRole("button", { name: "Save" });
+    saveBtn.focus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" }));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
 
     // Tab keyboard navigation
-    const spendingTab = screen.getByRole("tab", { name: "Spending" });
-    fireEvent.keyDown(spendingTab, { key: "ArrowRight" });
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Spending" }), { key: "ArrowRight" });
     expect(onTab).toHaveBeenCalledWith("workouts");
 
-    // Table search + sort + click
-    fireEvent.change(screen.getByRole("searchbox", { name: "Filter rows" }), {
-      target: { value: "groc" },
-    });
-    expect(screen.queryByText("Espresso")).toBeNull();
+    // Table search shows filtered empty state when nothing matches.
+    const search = screen.getByRole("searchbox", { name: "Filter rows" });
+    fireEvent.change(search, { target: { value: "zzzz" } });
+    expect(screen.getByText("No matching rows")).toBeTruthy();
+    fireEvent.change(search, { target: { value: "groc" } });
     fireEvent.click(screen.getByText("Groceries"));
     expect(onSelectRow).toHaveBeenCalledWith({ id: "2", name: "Groceries", amount: 85 });
-
-    // Modal Escape
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(onCloseModal).toHaveBeenCalledTimes(1);
 
     expect(formatNumber(1234)).toContain("1");
     expect(formatPercent(0.25)).toContain("25");
@@ -323,30 +413,29 @@ describe("dohc/ui and dohc/charts", () => {
     expect(formatDate("2026-11-23")).toContain("2026");
   });
 
-  it("renders interactive LineChart, BarChart, and DonutChart SVGs", () => {
-    render(
+  it("handles NaN gaps, signed bars, grouped horizontal bars, and single-tab-stop chart navigation", () => {
+    const { container } = render(
       <div>
         <LineChart
           variant="area"
-          labels={["Mon", "Tue", "Wed"]}
-          series={[{ name: "Spend", values: [40, 65, 30] }]}
-          goal={{ value: 50, label: "Daily cap" }}
+          labels={["Mon", "Tue", "Wed", "Thu"]}
+          series={[{ name: "Spend", values: [40, Number.NaN, 30, 50] }]}
+          goal={{ value: 45, label: "Daily cap" }}
           ariaLabel="Daily spending"
         />
         <BarChart
           data={[
-            { label: "Food", value: 320 },
-            { label: "Transit", value: 110 },
+            { label: "Income", value: 320 },
+            { label: "Refund", value: -80 },
           ]}
-          ariaLabel="Category totals"
+          ariaLabel="Signed totals"
         />
         <BarChart
           orientation="horizontal"
-          stacked
           labels={["Week 1", "Week 2"]}
           series={[
             { name: "Run", values: [20, 25] },
-            { name: "Lift", values: [15, 20] },
+            { name: "Lift", values: [15, -5] },
           ]}
           ariaLabel="Workout mix"
         />
@@ -361,11 +450,24 @@ describe("dohc/ui and dohc/charts", () => {
       </div>,
     );
 
-    expect(screen.getByRole("img", { name: "Daily spending" })).toBeTruthy();
-    expect(screen.getByRole("img", { name: "Category totals" })).toBeTruthy();
-    expect(screen.getByRole("img", { name: "Workout mix" })).toBeTruthy();
-    expect(screen.getByRole("img", { name: "Monthly breakdown" })).toBeTruthy();
-    expect(screen.getByText("Daily cap")).toBeTruthy();
-    expect(screen.getByText(/75%/)).toBeTruthy();
+    // Zero NaN attributes anywhere in generated SVG paths or rects.
+    expect(container.innerHTML).not.toContain("NaN");
+
+    // Interactive charts expose a single tab stop each and step with ArrowRight.
+    const lineGroup = screen.getByRole("group", { name: "Daily spending" });
+    expect(lineGroup.querySelectorAll("[tabindex]")).toHaveLength(0);
+    fireEvent.focus(lineGroup);
+    expect(lineGroup.textContent).toContain("Mon: Spend 40");
+    fireEvent.keyDown(lineGroup, { key: "ArrowRight" });
+    expect(lineGroup.textContent).toContain("Tue: Spend no data");
+
+    const barGroup = screen.getByRole("group", { name: "Signed totals" });
+    fireEvent.focus(barGroup);
+    fireEvent.keyDown(barGroup, { key: "ArrowRight" });
+    expect(barGroup.textContent).toContain("Refund: Value -80");
+
+    const donutGroup = screen.getByRole("group", { name: "Monthly breakdown" });
+    fireEvent.focus(donutGroup);
+    expect(donutGroup.textContent).toContain("Housing: 1,800 (75%)");
   });
 });

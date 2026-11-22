@@ -1,5 +1,5 @@
-import "./ui.css";
-import { useEffect, useRef, useState } from "react";
+import "./tokens.css";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 const SERIES_COLORS = [
   "var(--kit-chart-1)",
@@ -12,6 +12,9 @@ const SERIES_COLORS = [
 
 const colorAt = (index: number, explicit?: string) =>
   explicit ?? SERIES_COLORS[index % SERIES_COLORS.length]!;
+
+const finiteOrNull = (value: number | undefined): number | null =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
 
 function useContainerWidth(fallback = 560) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -35,9 +38,11 @@ function useContainerWidth(fallback = 560) {
 }
 
 function niceScale(minValue: number, maxValue: number, ticks = 4) {
-  const low = Math.min(0, minValue);
-  const high = maxValue <= low ? low + 1 : maxValue;
-  const span = high - low;
+  const finiteMin = Number.isFinite(minValue) ? minValue : 0;
+  const finiteMax = Number.isFinite(maxValue) ? maxValue : 1;
+  const low = Math.min(0, finiteMin);
+  const high = finiteMax <= low ? low + 1 : Math.max(0, finiteMax);
+  const span = high - low || 1;
   const rawStep = span / ticks;
   const magnitude = 10 ** Math.floor(Math.log10(rawStep));
   const residual = rawStep / magnitude;
@@ -49,6 +54,33 @@ function niceScale(minValue: number, maxValue: number, ticks = 4) {
     values.push(Number(current.toFixed(6)));
   }
   return { min, max, values };
+}
+
+function stepIndex(
+  event: KeyboardEvent<HTMLDivElement>,
+  count: number,
+  current: number | null,
+  setIndex: (index: number) => void,
+) {
+  if (count <= 0) return;
+  if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+    event.preventDefault();
+    setIndex(current === null ? 0 : (current + 1) % count);
+  } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+    event.preventDefault();
+    setIndex(current === null ? count - 1 : (current - 1 + count) % count);
+  } else if (event.key === "Home") {
+    event.preventDefault();
+    setIndex(0);
+  } else if (event.key === "End") {
+    event.preventDefault();
+    setIndex(count - 1);
+  }
+}
+
+function tooltipLeft(anchorX: number, containerWidth: number): number {
+  const estimated = Math.min(200, Math.max(120, containerWidth - 16));
+  return Math.max(8, Math.min(anchorX - estimated / 2, containerWidth - estimated - 8));
 }
 
 export interface ChartSeries {
@@ -91,16 +123,25 @@ export function LineChart({
   const series: readonly ChartSeries[] =
     rawSeries ?? (data ? [{ name: "Value", values: data.map((item) => item.value) }] : []);
 
-  if (labels.length === 0 || series.length === 0) {
+  const validGoal = goal && Number.isFinite(goal.value) ? goal : undefined;
+  const finiteValues = [
+    ...series.flatMap((entry) =>
+      labels
+        .map((_, index) => finiteOrNull(entry.values[index]))
+        .filter((v): v is number => v !== null),
+    ),
+    ...(validGoal ? [validGoal.value] : []),
+  ];
+
+  if (labels.length === 0 || series.length === 0 || finiteValues.length === 0) {
     return (
-      <div className="kit-empty" role="img" aria-label={ariaLabel}>
+      <div className="kit-chart-empty" role="img" aria-label={ariaLabel}>
         No chart data yet.
       </div>
     );
   }
 
-  const allValues = [...series.flatMap((entry) => entry.values), ...(goal ? [goal.value] : [])];
-  const scale = niceScale(Math.min(...allValues, 0), Math.max(...allValues, 0), 4);
+  const scale = niceScale(Math.min(...finiteValues, 0), Math.max(...finiteValues, 0), 4);
   const pad = { top: 14, right: 16, bottom: 28, left: 54 };
   const plotW = Math.max(120, width - pad.left - pad.right);
   const plotH = Math.max(80, height - pad.top - pad.bottom);
@@ -109,26 +150,53 @@ export function LineChart({
     labels.length === 1 ? pad.left + plotW / 2 : pad.left + (index / (labels.length - 1)) * plotW;
   const yOf = (value: number) =>
     pad.top + plotH - ((value - scale.min) / (scale.max - scale.min || 1)) * plotH;
-  const baselineY = yOf(Math.max(scale.min, 0));
+  const baselineY = yOf(Math.max(scale.min, Math.min(scale.max, 0)));
 
   const maxLabels = Math.max(2, Math.floor(plotW / 52));
   const labelStep = Math.max(1, Math.ceil(labels.length / maxLabels));
 
+  const readout =
+    activeIndex === null
+      ? ""
+      : `${labels[activeIndex]}: ${series
+          .map((entry) => {
+            const val = finiteOrNull(entry.values[activeIndex]);
+            return `${entry.name} ${val === null ? "no data" : formatValue(val)}`;
+          })
+          .join(", ")}`;
+
   return (
-    <div ref={ref} className="kit-chart">
+    <div
+      ref={ref}
+      className="kit-chart"
+      role="group"
+      aria-label={ariaLabel}
+      tabIndex={0}
+      onFocus={() => setActiveIndex((current) => current ?? 0)}
+      onBlur={() => setActiveIndex(null)}
+      onKeyDown={(event) => stepIndex(event, labels.length, activeIndex, setActiveIndex)}
+    >
+      <span className="kit-sr-only" aria-live="polite">
+        {readout}
+      </span>
       <svg
         width={width}
         height={height}
         viewBox={`0 0 ${width} ${height}`}
-        role="img"
-        aria-label={ariaLabel}
+        aria-hidden="true"
         onMouseLeave={() => setActiveIndex(null)}
       >
         {scale.values.map((tick) => {
           const y = yOf(tick);
           return (
             <g key={tick}>
-              <line x1={pad.left} y1={y} x2={pad.left + plotW} y2={y} className="kit-chart-grid" />
+              <line
+                x1={pad.left}
+                y1={y}
+                x2={pad.left + plotW}
+                y2={y}
+                className={tick === 0 ? "kit-chart-zero" : "kit-chart-grid"}
+              />
               <text x={pad.left - 8} y={y + 4} textAnchor="end" className="kit-chart-axis">
                 {formatValue(tick)}
               </text>
@@ -136,25 +204,25 @@ export function LineChart({
           );
         })}
 
-        {goal ? (
+        {validGoal ? (
           <g>
             <line
               x1={pad.left}
-              y1={yOf(goal.value)}
+              y1={yOf(validGoal.value)}
               x2={pad.left + plotW}
-              y2={yOf(goal.value)}
+              y2={yOf(validGoal.value)}
               stroke="var(--kit-warning)"
               strokeDasharray="4 4"
               strokeWidth={1.5}
             />
-            {goal.label ? (
+            {validGoal.label ? (
               <text
                 x={pad.left + plotW}
-                y={yOf(goal.value) - 5}
+                y={yOf(validGoal.value) - 5}
                 textAnchor="end"
                 className="kit-chart-axis"
               >
-                {goal.label}
+                {validGoal.label}
               </text>
             ) : null}
           </g>
@@ -162,29 +230,60 @@ export function LineChart({
 
         {series.map((entry, seriesIndex) => {
           const stroke = colorAt(seriesIndex, entry.color);
-          const points = entry.values.map((value, index) => `${xOf(index)},${yOf(value)}`);
-          const linePath = `M ${points.join(" L ")}`;
-          const areaPath = `${linePath} L ${xOf(entry.values.length - 1)},${baselineY} L ${xOf(0)},${baselineY} Z`;
+          const segments: Array<Array<{ index: number; value: number }>> = [];
+          let current: Array<{ index: number; value: number }> = [];
+          for (let index = 0; index < labels.length; index += 1) {
+            const val = finiteOrNull(entry.values[index]);
+            if (val === null) {
+              if (current.length > 0) {
+                segments.push(current);
+                current = [];
+              }
+            } else {
+              current.push({ index, value: val });
+            }
+          }
+          if (current.length > 0) segments.push(current);
+
           return (
-            <g key={entry.name}>
-              {variant === "area" ? <path d={areaPath} fill={stroke} fillOpacity={0.14} /> : null}
-              <path
-                d={linePath}
-                fill="none"
-                stroke={stroke}
-                strokeWidth={2}
-                strokeLinejoin="round"
-                strokeLinecap="round"
-              />
-              {entry.values.map((value, index) => (
-                <circle
-                  key={`${entry.name}-${index}`}
-                  cx={xOf(index)}
-                  cy={yOf(value)}
-                  r={activeIndex === index ? 4.5 : 2.5}
-                  fill={stroke}
-                />
-              ))}
+            <g key={`${seriesIndex}-${entry.name}`}>
+              {segments.map((segment, segIndex) => {
+                const coords = segment.map((pt) => `${xOf(pt.index)},${yOf(pt.value)}`);
+                const linePath = `M ${coords.join(" L ")}`;
+                const first = segment[0]!;
+                const last = segment[segment.length - 1]!;
+                const areaPath = `${linePath} L ${xOf(last.index)},${baselineY} L ${xOf(first.index)},${baselineY} Z`;
+                return (
+                  <g key={`${seriesIndex}-seg-${segIndex}`}>
+                    {variant === "area" && segment.length > 1 ? (
+                      <path d={areaPath} fill={stroke} fillOpacity={0.14} />
+                    ) : null}
+                    {segment.length > 1 ? (
+                      <path
+                        d={linePath}
+                        fill="none"
+                        stroke={stroke}
+                        strokeWidth={2}
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                      />
+                    ) : null}
+                  </g>
+                );
+              })}
+              {labels.map((_, index) => {
+                const value = finiteOrNull(entry.values[index]);
+                if (value === null) return null;
+                return (
+                  <circle
+                    key={`${seriesIndex}-pt-${index}`}
+                    cx={xOf(index)}
+                    cy={yOf(value)}
+                    r={activeIndex === index ? 4.5 : 2.5}
+                    fill={stroke}
+                  />
+                );
+              })}
             </g>
           );
         })}
@@ -217,14 +316,7 @@ export function LineChart({
                 width={Math.min(sliceW, plotW)}
                 height={plotH}
                 fill="transparent"
-                tabIndex={0}
-                className="kit-chart-focus"
-                aria-label={`${label}: ${series
-                  .map((entry) => `${entry.name} ${formatValue(entry.values[index] ?? 0)}`)
-                  .join(", ")}`}
                 onMouseEnter={() => setActiveIndex(index)}
-                onFocus={() => setActiveIndex(index)}
-                onBlur={() => setActiveIndex(null)}
               />
             </g>
           );
@@ -234,31 +326,31 @@ export function LineChart({
       {activeIndex !== null ? (
         <div
           className="kit-chart-tooltip"
-          style={{
-            left: Math.min(Math.max(8, xOf(activeIndex) - 50), Math.max(8, width - 160)),
-            top: 8,
-          }}
+          style={{ left: tooltipLeft(xOf(activeIndex), width), top: 8 }}
         >
           <strong>{labels[activeIndex]}</strong>
-          {series.map((entry, seriesIndex) => (
-            <div key={entry.name} className="kit-chart-legend-item">
-              <span
-                className="kit-chart-swatch"
-                style={{ background: colorAt(seriesIndex, entry.color) }}
-              />
-              <span>
-                {series.length > 1 ? `${entry.name}: ` : ""}
-                {formatValue(entry.values[activeIndex] ?? 0)}
-              </span>
-            </div>
-          ))}
+          {series.map((entry, seriesIndex) => {
+            const val = finiteOrNull(entry.values[activeIndex]);
+            return (
+              <div key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
+                <span
+                  className="kit-chart-swatch"
+                  style={{ background: colorAt(seriesIndex, entry.color) }}
+                />
+                <span>
+                  {series.length > 1 ? `${entry.name}: ` : ""}
+                  {val === null ? "—" : formatValue(val)}
+                </span>
+              </div>
+            );
+          })}
         </div>
       ) : null}
 
       {series.length > 1 ? (
         <div className="kit-chart-legend">
           {series.map((entry, seriesIndex) => (
-            <span key={entry.name} className="kit-chart-legend-item">
+            <span key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
               <span
                 className="kit-chart-swatch"
                 style={{ background: colorAt(seriesIndex, entry.color) }}
@@ -300,87 +392,200 @@ export function BarChart({
   const series: readonly ChartSeries[] =
     rawSeries ?? (data ? [{ name: "Value", values: data.map((item) => item.value) }] : []);
 
-  if (labels.length === 0 || series.length === 0) {
+  const cleanValues = series.map((entry) =>
+    labels.map((_, index) => finiteOrNull(entry.values[index]) ?? 0),
+  );
+  const hasAnyFinite = series.some((entry) =>
+    labels.some((_, index) => finiteOrNull(entry.values[index]) !== null),
+  );
+
+  if (labels.length === 0 || series.length === 0 || !hasAnyFinite) {
     return (
-      <div className="kit-empty" role="img" aria-label={ariaLabel}>
+      <div className="kit-chart-empty" role="img" aria-label={ariaLabel}>
         No chart data yet.
       </div>
     );
   }
 
-  const maxVal = stacked
-    ? Math.max(
-        0,
-        ...labels.map((_, index) =>
-          series.reduce((sum, entry) => sum + Math.max(0, entry.values[index] ?? 0), 0),
-        ),
-      )
-    : Math.max(0, ...series.flatMap((entry) => entry.values));
-  const scale = niceScale(0, maxVal, 4);
+  let domainMin = 0;
+  let domainMax = 0;
+  if (stacked) {
+    for (let index = 0; index < labels.length; index += 1) {
+      let pos = 0;
+      let neg = 0;
+      for (let s = 0; s < series.length; s += 1) {
+        const val = cleanValues[s]![index]!;
+        if (val >= 0) pos += val;
+        else neg += val;
+      }
+      if (pos > domainMax) domainMax = pos;
+      if (neg < domainMin) domainMin = neg;
+    }
+  } else {
+    for (const row of cleanValues) {
+      for (const val of row) {
+        if (val > domainMax) domainMax = val;
+        if (val < domainMin) domainMin = val;
+      }
+    }
+  }
+  const scale = niceScale(domainMin, domainMax, 4);
+
+  const readout =
+    activeIndex === null
+      ? ""
+      : `${labels[activeIndex]}: ${series
+          .map((entry, s) => `${entry.name} ${formatValue(cleanValues[s]![activeIndex]!)}`)
+          .join(", ")}`;
 
   if (orientation === "horizontal") {
-    const rowHeight = 32;
+    const barsPerRow = stacked ? 1 : series.length;
+    const barH = stacked ? 16 : Math.max(10, Math.min(14, Math.floor(28 / barsPerRow)));
+    const rowHeight = Math.max(32, barsPerRow * (barH + 3) + 12);
     const svgHeight = Math.max(height, labels.length * rowHeight + 28);
-    const pad = { top: 8, right: 56, bottom: 20, left: 108 };
+    const pad = { top: 8, right: 68, bottom: 20, left: 108 };
     const plotW = Math.max(100, width - pad.left - pad.right);
+    const xOf = (value: number) =>
+      pad.left + ((value - scale.min) / (scale.max - scale.min || 1)) * plotW;
+    const zeroX = xOf(0);
 
     return (
-      <div ref={ref} className="kit-chart">
+      <div
+        ref={ref}
+        className="kit-chart"
+        role="group"
+        aria-label={ariaLabel}
+        tabIndex={0}
+        onFocus={() => setActiveIndex((current) => current ?? 0)}
+        onBlur={() => setActiveIndex(null)}
+        onKeyDown={(event) => stepIndex(event, labels.length, activeIndex, setActiveIndex)}
+      >
+        <span className="kit-sr-only" aria-live="polite">
+          {readout}
+        </span>
         <svg
           width={width}
           height={svgHeight}
           viewBox={`0 0 ${width} ${svgHeight}`}
-          role="img"
-          aria-label={ariaLabel}
+          aria-hidden="true"
           onMouseLeave={() => setActiveIndex(null)}
         >
+          <line
+            x1={zeroX}
+            y1={pad.top}
+            x2={zeroX}
+            y2={svgHeight - pad.bottom}
+            className="kit-chart-zero"
+          />
           {labels.map((label, index) => {
-            const y = pad.top + index * rowHeight;
-            const total = series.reduce(
-              (sum, entry) => sum + Math.max(0, entry.values[index] ?? 0),
-              0,
-            );
-            let offset = pad.left;
+            const rowTop = pad.top + index * rowHeight;
+            let posCursor = 0;
+            let negCursor = 0;
+            const total = cleanValues.reduce((sum, row) => sum + row[index]!, 0);
+            const maxBarRight = stacked
+              ? xOf(cleanValues.reduce((sum, row) => sum + Math.max(0, row[index]!), 0))
+              : xOf(Math.max(0, ...cleanValues.map((row) => row[index]!)));
+            const labelX = Math.min(maxBarRight + 6, width - 4);
+            const labelAnchor = maxBarRight + 6 > width - 48 ? "end" : "start";
+
             return (
-              <g key={`${label}-${index}`}>
-                <text x={pad.left - 8} y={y + 18} textAnchor="end" className="kit-chart-axis">
+              <g key={`${label}-${index}`} onMouseEnter={() => setActiveIndex(index)}>
+                <text
+                  x={pad.left - 8}
+                  y={rowTop + rowHeight / 2 + 4}
+                  textAnchor="end"
+                  className="kit-chart-axis"
+                >
                   {label}
                 </text>
                 {series.map((entry, seriesIndex) => {
-                  const val = Math.max(0, entry.values[index] ?? 0);
-                  const w = (val / (scale.max || 1)) * plotW;
-                  const x = offset;
-                  offset += w;
+                  const val = cleanValues[seriesIndex]![index]!;
+                  const fill =
+                    series.length === 1 && data?.[index]?.color
+                      ? data[index]!.color
+                      : colorAt(seriesIndex, entry.color);
+                  let x0: number;
+                  let x1: number;
+                  let y: number;
+                  if (stacked) {
+                    y = rowTop + (rowHeight - barH) / 2;
+                    if (val >= 0) {
+                      x0 = xOf(posCursor);
+                      posCursor += val;
+                      x1 = xOf(posCursor);
+                    } else {
+                      x1 = xOf(negCursor);
+                      negCursor += val;
+                      x0 = xOf(negCursor);
+                    }
+                  } else {
+                    y = rowTop + 6 + seriesIndex * (barH + 3);
+                    x0 = val >= 0 ? zeroX : xOf(val);
+                    x1 = val >= 0 ? xOf(val) : zeroX;
+                  }
+                  const barW = Math.abs(x1 - x0);
                   return (
                     <rect
-                      key={`${entry.name}-${index}`}
-                      x={x}
-                      y={y + 6}
-                      width={Math.max(1, w)}
-                      height={16}
+                      key={`${seriesIndex}-${entry.name}-${index}`}
+                      x={Math.min(x0, x1)}
+                      y={y}
+                      width={Math.max(val === 0 ? 0 : 1, barW)}
+                      height={barH}
                       rx={3}
-                      fill={
-                        series.length === 1 && data?.[index]?.color
-                          ? data[index]!.color
-                          : colorAt(seriesIndex, entry.color)
-                      }
+                      fill={fill}
                       opacity={activeIndex === null || activeIndex === index ? 1 : 0.45}
-                      tabIndex={0}
-                      className="kit-chart-focus"
-                      aria-label={`${label} ${entry.name}: ${formatValue(val)}`}
-                      onMouseEnter={() => setActiveIndex(index)}
-                      onFocus={() => setActiveIndex(index)}
-                      onBlur={() => setActiveIndex(null)}
                     />
                   );
                 })}
-                <text x={offset + 6} y={y + 18} className="kit-chart-axis">
-                  {formatValue(total)}
-                </text>
+                {stacked || series.length === 1 ? (
+                  <text
+                    x={labelAnchor === "end" ? width - 4 : labelX}
+                    y={rowTop + rowHeight / 2 + 4}
+                    textAnchor={labelAnchor}
+                    className="kit-chart-axis"
+                  >
+                    {formatValue(total)}
+                  </text>
+                ) : null}
               </g>
             );
           })}
         </svg>
+
+        {activeIndex !== null ? (
+          <div
+            className="kit-chart-tooltip"
+            style={{ left: tooltipLeft(pad.left + plotW / 2, width), top: 8 }}
+          >
+            <strong>{labels[activeIndex]}</strong>
+            {series.map((entry, seriesIndex) => (
+              <div key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
+                <span
+                  className="kit-chart-swatch"
+                  style={{ background: colorAt(seriesIndex, entry.color) }}
+                />
+                <span>
+                  {series.length > 1 ? `${entry.name}: ` : ""}
+                  {formatValue(cleanValues[seriesIndex]![activeIndex]!)}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {series.length > 1 ? (
+          <div className="kit-chart-legend">
+            {series.map((entry, seriesIndex) => (
+              <span key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
+                <span
+                  className="kit-chart-swatch"
+                  style={{ background: colorAt(seriesIndex, entry.color) }}
+                />
+                <span>{entry.name}</span>
+              </span>
+            ))}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -391,22 +596,40 @@ export function BarChart({
   const groupW = plotW / labels.length;
   const yOf = (value: number) =>
     pad.top + plotH - ((value - scale.min) / (scale.max - scale.min || 1)) * plotH;
+  const zeroY = yOf(0);
 
   return (
-    <div ref={ref} className="kit-chart">
+    <div
+      ref={ref}
+      className="kit-chart"
+      role="group"
+      aria-label={ariaLabel}
+      tabIndex={0}
+      onFocus={() => setActiveIndex((current) => current ?? 0)}
+      onBlur={() => setActiveIndex(null)}
+      onKeyDown={(event) => stepIndex(event, labels.length, activeIndex, setActiveIndex)}
+    >
+      <span className="kit-sr-only" aria-live="polite">
+        {readout}
+      </span>
       <svg
         width={width}
         height={height}
         viewBox={`0 0 ${width} ${height}`}
-        role="img"
-        aria-label={ariaLabel}
+        aria-hidden="true"
         onMouseLeave={() => setActiveIndex(null)}
       >
         {scale.values.map((tick) => {
           const y = yOf(tick);
           return (
             <g key={tick}>
-              <line x1={pad.left} y1={y} x2={pad.left + plotW} y2={y} className="kit-chart-grid" />
+              <line
+                x1={pad.left}
+                y1={y}
+                x2={pad.left + plotW}
+                y2={y}
+                className={tick === 0 ? "kit-chart-zero" : "kit-chart-grid"}
+              />
               <text x={pad.left - 8} y={y + 4} textAnchor="end" className="kit-chart-axis">
                 {formatValue(tick)}
               </text>
@@ -418,29 +641,46 @@ export function BarChart({
           const groupX = pad.left + index * groupW;
           const innerPad = Math.min(10, groupW * 0.16);
           const usableW = Math.max(8, groupW - innerPad * 2);
-          let stackedHeight = 0;
+          let posCursor = 0;
+          let negCursor = 0;
 
           return (
-            <g key={`${label}-${index}`}>
+            <g key={`${label}-${index}`} onMouseEnter={() => setActiveIndex(index)}>
               {series.map((entry, seriesIndex) => {
-                const value = Math.max(0, entry.values[index] ?? 0);
-                const barH = (value / (scale.max || 1)) * plotH;
+                const value = cleanValues[seriesIndex]![index]!;
                 const barW = stacked
                   ? usableW
                   : usableW / series.length - (series.length > 1 ? 2 : 0);
                 const x = stacked
                   ? groupX + innerPad
                   : groupX + innerPad + seriesIndex * (usableW / series.length);
-                const y = stacked ? pad.top + plotH - stackedHeight - barH : pad.top + plotH - barH;
-                stackedHeight += barH;
-
+                let yTop: number;
+                let yBottom: number;
+                if (stacked) {
+                  if (value >= 0) {
+                    yBottom = yOf(posCursor);
+                    posCursor += value;
+                    yTop = yOf(posCursor);
+                  } else {
+                    yTop = yOf(negCursor);
+                    negCursor += value;
+                    yBottom = yOf(negCursor);
+                  }
+                } else if (value >= 0) {
+                  yTop = yOf(value);
+                  yBottom = zeroY;
+                } else {
+                  yTop = zeroY;
+                  yBottom = yOf(value);
+                }
+                const barH = Math.abs(yBottom - yTop);
                 return (
                   <rect
-                    key={`${entry.name}-${index}`}
+                    key={`${seriesIndex}-${entry.name}-${index}`}
                     x={x}
-                    y={y}
+                    y={Math.min(yTop, yBottom)}
                     width={Math.max(2, barW)}
-                    height={Math.max(1, barH)}
+                    height={Math.max(value === 0 ? 0 : 1, barH)}
                     rx={3}
                     fill={
                       series.length === 1 && data?.[index]?.color
@@ -448,12 +688,6 @@ export function BarChart({
                         : colorAt(seriesIndex, entry.color)
                     }
                     opacity={activeIndex === null || activeIndex === index ? 1 : 0.5}
-                    tabIndex={0}
-                    className="kit-chart-focus"
-                    aria-label={`${label} ${entry.name}: ${formatValue(value)}`}
-                    onMouseEnter={() => setActiveIndex(index)}
-                    onFocus={() => setActiveIndex(index)}
-                    onBlur={() => setActiveIndex(null)}
                   />
                 );
               })}
@@ -474,23 +708,20 @@ export function BarChart({
         <div
           className="kit-chart-tooltip"
           style={{
-            left: Math.min(
-              Math.max(8, pad.left + activeIndex * groupW + groupW / 2 - 50),
-              Math.max(8, width - 160),
-            ),
+            left: tooltipLeft(pad.left + activeIndex * groupW + groupW / 2, width),
             top: 8,
           }}
         >
           <strong>{labels[activeIndex]}</strong>
           {series.map((entry, seriesIndex) => (
-            <div key={entry.name} className="kit-chart-legend-item">
+            <div key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
               <span
                 className="kit-chart-swatch"
                 style={{ background: colorAt(seriesIndex, entry.color) }}
               />
               <span>
                 {series.length > 1 ? `${entry.name}: ` : ""}
-                {formatValue(entry.values[activeIndex] ?? 0)}
+                {formatValue(cleanValues[seriesIndex]![activeIndex]!)}
               </span>
             </div>
           ))}
@@ -500,7 +731,7 @@ export function BarChart({
       {series.length > 1 ? (
         <div className="kit-chart-legend">
           {series.map((entry, seriesIndex) => (
-            <span key={entry.name} className="kit-chart-legend-item">
+            <span key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
               <span
                 className="kit-chart-swatch"
                 style={{ background: colorAt(seriesIndex, entry.color) }}
@@ -532,12 +763,12 @@ export function DonutChart({
   ariaLabel = "Breakdown chart",
 }: DonutChartProps) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
-  const items = data.filter((item) => item.value > 0);
+  const items = data.filter((item) => Number.isFinite(item.value) && item.value > 0);
   const total = items.reduce((sum, item) => sum + item.value, 0);
 
   if (items.length === 0 || total <= 0) {
     return (
-      <div className="kit-empty" role="img" aria-label={ariaLabel}>
+      <div className="kit-chart-empty" role="img" aria-label={ariaLabel}>
         No chart data yet.
       </div>
     );
@@ -547,15 +778,28 @@ export function DonutChart({
   const circumference = 2 * Math.PI * radius;
   let consumed = 0;
   const focused = activeIndex !== null ? items[activeIndex] : null;
+  const readout = focused
+    ? `${focused.label}: ${formatValue(focused.value)} (${Math.round((focused.value / total) * 100)}%)`
+    : "";
 
   return (
-    <div className="kit-donut-layout">
+    <div
+      className="kit-chart kit-donut-layout"
+      role="group"
+      aria-label={ariaLabel}
+      tabIndex={0}
+      onFocus={() => setActiveIndex((current) => current ?? 0)}
+      onBlur={() => setActiveIndex(null)}
+      onKeyDown={(event) => stepIndex(event, items.length, activeIndex, setActiveIndex)}
+    >
+      <span className="kit-sr-only" aria-live="polite">
+        {readout}
+      </span>
       <svg
         width={size}
         height={size}
         viewBox={`0 0 ${size} ${size}`}
-        role="img"
-        aria-label={ariaLabel}
+        aria-hidden="true"
         style={{ width: size, height: size, flexShrink: 0 }}
         onMouseLeave={() => setActiveIndex(null)}
       >
@@ -584,12 +828,7 @@ export function DonutChart({
               strokeDasharray={`${Math.max(0, length - 1.5)} ${circumference}`}
               strokeDashoffset={offset}
               transform={`rotate(-90 ${size / 2} ${size / 2})`}
-              tabIndex={0}
-              className="kit-chart-focus"
-              aria-label={`${item.label}: ${formatValue(item.value)} (${Math.round(share * 100)}%)`}
               onMouseEnter={() => setActiveIndex(index)}
-              onFocus={() => setActiveIndex(index)}
-              onBlur={() => setActiveIndex(null)}
             />
           );
         })}
@@ -656,11 +895,9 @@ export function Sparkline({
   area = true,
   ariaLabel = "Sparkline",
 }: SparklineProps) {
-  if (values.length < 2) return null;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const span = max - min || 1;
-  const pad = 2;
+  const finite = values.filter((value) => Number.isFinite(value));
+  if (finite.length === 0) return null;
+
   const stroke =
     tone === "accent"
       ? "var(--kit-chart-1)"
@@ -670,8 +907,28 @@ export function Sparkline({
           ? "var(--kit-warning)"
           : "var(--kit-danger)";
 
-  const coords = values.map((value, index) => {
-    const x = pad + (index / (values.length - 1)) * (width - pad * 2);
+  if (finite.length === 1) {
+    return (
+      <svg
+        width={width}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label={ariaLabel}
+        style={{ display: "block", width, height }}
+      >
+        <circle cx={width / 2} cy={height / 2} r={3} fill={stroke} />
+      </svg>
+    );
+  }
+
+  const min = Math.min(...finite);
+  const max = Math.max(...finite);
+  const span = max - min || 1;
+  const pad = 2;
+
+  const coords = finite.map((value, index) => {
+    const x = pad + (index / (finite.length - 1)) * (width - pad * 2);
     const y = pad + (1 - (value - min) / span) * (height - pad * 2);
     return `${x},${y}`;
   });

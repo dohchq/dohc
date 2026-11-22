@@ -340,6 +340,10 @@ export async function stageAppCompiler(options = {}) {
       for (const [name, asset] of builtins.files) {
         await writeFile(join(staging, "builtins", name), asset.bytes);
       }
+      const stagedBuiltinsPin = JSON.stringify({
+        digest: builtins.digest,
+        files: Object.fromEntries([...builtins.files].map(([name, asset]) => [name, asset.sha256])),
+      });
       for (const [source, output] of [
         ["closedAppCompilerProcess.ts", "adapter.mjs"],
         ["closedAppCompilerWorker.ts", "worker.mjs"],
@@ -352,6 +356,7 @@ export async function stageAppCompiler(options = {}) {
           target: "node24",
           format: "esm",
           external: ["esbuild"],
+          define: { __DOHC_STAGED_BUILTINS__: stagedBuiltinsPin },
           logLevel: "silent",
         });
       }

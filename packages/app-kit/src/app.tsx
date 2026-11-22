@@ -3,7 +3,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -81,7 +80,7 @@ export function isAppBackendError(error: unknown): error is AppBackendError {
   return error instanceof AppBackendError;
 }
 
-export interface DatasetClient {
+export interface AppClient {
   invoke<T = unknown>(
     operation: string,
     input?: unknown,
@@ -91,10 +90,6 @@ export interface DatasetClient {
   upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply>;
   file(fileId: string, operation: string, input?: unknown): Promise<FileReply>;
   attempt(operation: string, request: AttemptRequest): Promise<AttemptResult>;
-}
-
-export interface AppClient extends DatasetClient {
-  dataset(alias: string): DatasetClient;
   close(): void;
 }
 
@@ -106,7 +101,6 @@ export interface AppClientOptions {
 }
 
 const VALID_STATUSES: readonly number[] = [400, 404, 409, 413, 429, 503];
-const ALIAS_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 const DEFAULT_INVOKE_TIMEOUT_MS = 30_000;
 const DEFAULT_TRANSFER_TIMEOUT_MS = 90_000;
 const DEFAULT_MAX_IN_FLIGHT = 3;
@@ -196,6 +190,32 @@ export function mutationKey(kind: string): string {
   return `${kind}:${crypto.randomUUID()}`;
 }
 
+// Capture the host's one-shot channel port at module load so late or remounted providers never miss it.
+let capturedHostPort: MessagePort | null = null;
+const hostPortWaiters = new Set<(port: MessagePort) => void>();
+
+function installHostChannelCapture() {
+  if (typeof window === "undefined") return;
+  const onMessage = (event: MessageEvent) => {
+    if (capturedHostPort || event.source !== window.parent || event.source === window) return;
+    if (
+      !isRecord(event.data) ||
+      event.data.kind !== "dohc-app-channel" ||
+      event.data.version !== 1 ||
+      event.ports.length !== 1
+    ) {
+      return;
+    }
+    capturedHostPort = event.ports[0]!;
+    window.removeEventListener("message", onMessage);
+    for (const waiter of hostPortWaiters) waiter(capturedHostPort);
+    hostPortWaiters.clear();
+  };
+  window.addEventListener("message", onMessage);
+}
+
+installHostChannelCapture();
+
 type Pending = {
   message: Record<string, unknown>;
   timeoutMs: number;
@@ -246,6 +266,7 @@ export function createAppClient(options: AppClientOptions = {}): AppClient {
   };
 
   const bindPort = (nextPort: MessagePort) => {
+    if (closed || port) return;
     port = nextPort;
     port.onmessage = ({ data }: MessageEvent) => {
       if (!isRecord(data) || typeof data.id !== "string") return;
@@ -269,24 +290,12 @@ export function createAppClient(options: AppClientOptions = {}): AppClient {
     pump();
   };
 
-  const receiveChannel = (event: MessageEvent) => {
-    if (closed || port || event.source !== window.parent || event.source === window) return;
-    if (
-      !isRecord(event.data) ||
-      event.data.kind !== "dohc-app-channel" ||
-      event.data.version !== 1 ||
-      event.ports.length !== 1
-    ) {
-      return;
-    }
-    window.removeEventListener("message", receiveChannel);
-    bindPort(event.ports[0]!);
-  };
-
   if (options.port) {
     bindPort(options.port);
-  } else if (typeof window !== "undefined") {
-    window.addEventListener("message", receiveChannel);
+  } else if (capturedHostPort) {
+    bindPort(capturedHostPort);
+  } else {
+    hostPortWaiters.add(bindPort);
   }
 
   const send = (
@@ -317,71 +326,53 @@ export function createAppClient(options: AppClientOptions = {}): AppClient {
       pump();
     });
 
-  const makeDatasetClient = (alias?: string): DatasetClient => {
-    const scope = alias ? { dataset: alias } : {};
-    return {
-      invoke<T = unknown>(
-        operation: string,
-        input: unknown = {},
-        idempotencyKey = `read:${crypto.randomUUID()}`,
-      ): Promise<InvokeReply<T>> {
-        return send(
-          { op: "backend.invoke", ...scope, operation, idempotencyKey, input },
-          invokeTimeoutMs,
-          (value) =>
-            isRecord(value) &&
-            "result" in value &&
-            typeof value.revision === "number" &&
-            typeof value.replayed === "boolean",
-        ) as Promise<InvokeReply<T>>;
-      },
-      async read<T = unknown>(operation: string, input: unknown = {}): Promise<T> {
-        const reply = await this.invoke<T>(operation, input, `read:${crypto.randomUUID()}`);
-        return reply.result;
-      },
-      async upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply> {
-        const payload = await normalizeUpload(file);
-        return send(
-          { op: "backend.upload", ...scope, idempotencyKey, ...payload },
-          transferTimeoutMs,
-          (value) =>
-            isRecord(value) && isFileMeta(value.file) && typeof value.replayed === "boolean",
-        ) as Promise<UploadReply>;
-      },
-      file(fileId: string, operation: string, input: unknown = {}): Promise<FileReply> {
-        return send(
-          { op: "backend.file", ...scope, fileId, operation, input },
-          transferTimeoutMs,
-          (value) =>
-            isRecord(value) && isFileMeta(value.file) && typeof value.bytesBase64 === "string",
-        ) as Promise<FileReply>;
-      },
-      attempt(operation: string, request: AttemptRequest): Promise<AttemptResult> {
-        return send(
-          { op: "backend.attempt", ...scope, operation, request },
-          invokeTimeoutMs,
-          isAttemptResult,
-        ) as Promise<AttemptResult>;
-      },
-    };
-  };
-
-  const root = makeDatasetClient();
-
   return {
-    ...root,
-    dataset(alias: string): DatasetClient {
-      if (!ALIAS_PATTERN.test(alias)) {
-        throw new Error(`Invalid dataset alias: ${alias}`);
-      }
-      return makeDatasetClient(alias);
+    invoke<T = unknown>(
+      operation: string,
+      input: unknown = {},
+      idempotencyKey = `read:${crypto.randomUUID()}`,
+    ): Promise<InvokeReply<T>> {
+      return send(
+        { op: "backend.invoke", operation, idempotencyKey, input },
+        invokeTimeoutMs,
+        (value) =>
+          isRecord(value) &&
+          "result" in value &&
+          typeof value.revision === "number" &&
+          typeof value.replayed === "boolean",
+      ) as Promise<InvokeReply<T>>;
+    },
+    async read<T = unknown>(operation: string, input: unknown = {}): Promise<T> {
+      const reply = await this.invoke<T>(operation, input, `read:${crypto.randomUUID()}`);
+      return reply.result;
+    },
+    async upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply> {
+      const payload = await normalizeUpload(file);
+      return send(
+        { op: "backend.upload", idempotencyKey, ...payload },
+        transferTimeoutMs,
+        (value) => isRecord(value) && isFileMeta(value.file) && typeof value.replayed === "boolean",
+      ) as Promise<UploadReply>;
+    },
+    file(fileId: string, operation: string, input: unknown = {}): Promise<FileReply> {
+      return send(
+        { op: "backend.file", fileId, operation, input },
+        transferTimeoutMs,
+        (value) =>
+          isRecord(value) && isFileMeta(value.file) && typeof value.bytesBase64 === "string",
+      ) as Promise<FileReply>;
+    },
+    attempt(operation: string, request: AttemptRequest): Promise<AttemptResult> {
+      return send(
+        { op: "backend.attempt", operation, request },
+        invokeTimeoutMs,
+        isAttemptResult,
+      ) as Promise<AttemptResult>;
     },
     close() {
       if (closed) return;
       closed = true;
-      if (typeof window !== "undefined") {
-        window.removeEventListener("message", receiveChannel);
-      }
+      hostPortWaiters.delete(bindPort);
       port?.close();
       for (const item of [...sent.values(), ...waiting]) {
         fail(item, 503);
@@ -392,6 +383,28 @@ export function createAppClient(options: AppClientOptions = {}): AppClient {
   };
 }
 
+let sharedHostClient: AppClient | null = null;
+let sharedPageHideWired = false;
+
+function getSharedAppClient(): AppClient {
+  if (!sharedHostClient) {
+    sharedHostClient = createAppClient();
+    if (!sharedPageHideWired && typeof window !== "undefined") {
+      sharedPageHideWired = true;
+      window.addEventListener(
+        "pagehide",
+        () => {
+          sharedHostClient?.close();
+          sharedHostClient = null;
+          sharedPageHideWired = false;
+        },
+        { once: true },
+      );
+    }
+  }
+  return sharedHostClient;
+}
+
 const AppClientContext = createContext<AppClient | null>(null);
 
 export interface AppProviderProps {
@@ -400,23 +413,7 @@ export interface AppProviderProps {
 }
 
 export function AppProvider({ client, children }: AppProviderProps) {
-  const owned = useMemo(() => (client ? null : createAppClient()), [client]);
-  const active = client ?? owned!;
-
-  useEffect(() => {
-    if (!owned) return;
-    const onPageHide = () => owned.close();
-    if (typeof window !== "undefined") {
-      window.addEventListener("pagehide", onPageHide, { once: true });
-    }
-    return () => {
-      if (typeof window !== "undefined") {
-        window.removeEventListener("pagehide", onPageHide);
-      }
-      owned.close();
-    };
-  }, [owned]);
-
+  const active = client ?? getSharedAppClient();
   return <AppClientContext.Provider value={active}>{children}</AppClientContext.Provider>;
 }
 
@@ -429,7 +426,6 @@ export function useApp(): AppClient {
 }
 
 export interface DatasetQueryOptions {
-  readonly dataset?: string;
   readonly enabled?: boolean;
 }
 
@@ -441,20 +437,42 @@ export interface DatasetQueryState<T> {
   reload(): void;
 }
 
+type ScopedQueryResult<T> = {
+  readonly scope: string;
+  readonly data: T | undefined;
+  readonly revision: number | null;
+  readonly loading: boolean;
+  readonly error: AppBackendError | null;
+};
+
+let nextClientId = 1;
+const clientIds = new WeakMap<AppClient, number>();
+function clientIdOf(client: AppClient): number {
+  let id = clientIds.get(client);
+  if (id === undefined) {
+    id = nextClientId++;
+    clientIds.set(client, id);
+  }
+  return id;
+}
+
 export function useDatasetQuery<T = unknown>(
   operation: string,
   input?: unknown,
   options?: DatasetQueryOptions,
 ): DatasetQueryState<T> {
   const client = useApp();
-  const dataset = options?.dataset;
   const enabled = options?.enabled ?? true;
   const serializedInput = JSON.stringify(input ?? {});
+  const scope = `${clientIdOf(client)}:${operation}:${serializedInput}`;
 
-  const [data, setData] = useState<T | undefined>(undefined);
-  const [revision, setRevision] = useState<number | null>(null);
-  const [loading, setLoading] = useState<boolean>(enabled);
-  const [error, setError] = useState<AppBackendError | null>(null);
+  const [state, setState] = useState<ScopedQueryResult<T>>(() => ({
+    scope,
+    data: undefined,
+    revision: null,
+    loading: enabled,
+    error: null,
+  }));
   const [version, setVersion] = useState(0);
   const generation = useRef(0);
 
@@ -464,38 +482,52 @@ export function useDatasetQuery<T = unknown>(
 
   useEffect(() => {
     if (!enabled) {
-      setLoading(false);
+      setState({ scope, data: undefined, revision: null, loading: false, error: null });
       return;
     }
     let alive = true;
     const token = ++generation.current;
     const parsedInput: unknown = JSON.parse(serializedInput);
-    const target = dataset ? client.dataset(dataset) : client;
-    setLoading(true);
-    setError(null);
-    target.invoke<T>(operation, parsedInput).then(
+    setState((current) =>
+      current.scope === scope
+        ? { ...current, loading: true, error: null }
+        : { scope, data: undefined, revision: null, loading: true, error: null },
+    );
+    client.invoke<T>(operation, parsedInput).then(
       (reply) => {
         if (!alive || token !== generation.current) return;
-        setData(reply.result);
-        setRevision(reply.revision);
-        setLoading(false);
+        setState({
+          scope,
+          data: reply.result,
+          revision: reply.revision,
+          loading: false,
+          error: null,
+        });
       },
       (caught: unknown) => {
         if (!alive || token !== generation.current) return;
-        setError(caught instanceof AppBackendError ? caught : new AppBackendError(503));
-        setLoading(false);
+        setState({
+          scope,
+          data: undefined,
+          revision: null,
+          loading: false,
+          error: caught instanceof AppBackendError ? caught : new AppBackendError(503),
+        });
       },
     );
     return () => {
       alive = false;
     };
-  }, [client, dataset, enabled, operation, serializedInput, version]);
+  }, [client, enabled, operation, scope, serializedInput, version]);
 
-  return { data, revision, loading, error, reload };
-}
-
-export interface DatasetMutationOptions {
-  readonly dataset?: string;
+  const matched = state.scope === scope;
+  return {
+    data: matched ? state.data : undefined,
+    revision: matched ? state.revision : null,
+    loading: matched ? state.loading : enabled,
+    error: matched ? state.error : null,
+    reload,
+  };
 }
 
 export interface DatasetMutationState<TInput, TResult> {
@@ -507,15 +539,22 @@ export interface DatasetMutationState<TInput, TResult> {
   readonly error: AppBackendError | null;
 }
 
+type RetainedSubmission = {
+  readonly id: number;
+  readonly client: AppClient;
+  readonly operation: string;
+  readonly key: string;
+  readonly payloadJson: string;
+};
+
 export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   operation: string,
-  options?: DatasetMutationOptions,
 ): DatasetMutationState<TInput, TResult> {
   const client = useApp();
-  const dataset = options?.dataset;
-  const [pending, setPending] = useState(false);
+  const [inFlightCount, setInFlightCount] = useState(0);
   const [error, setError] = useState<AppBackendError | null>(null);
-  const [retained, setRetained] = useState<{ input: TInput; key: string } | null>(null);
+  const [retained, setRetained] = useState<RetainedSubmission | null>(null);
+  const nextAttemptId = useRef(1);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -525,41 +564,59 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
     };
   }, []);
 
-  const run = useCallback(
-    async (input: TInput, key: string): Promise<InvokeReply<TResult>> => {
-      setPending(true);
+  const execute = useCallback(
+    async (submission: RetainedSubmission): Promise<InvokeReply<TResult>> => {
+      setInFlightCount((count) => count + 1);
       setError(null);
-      const target = dataset ? client.dataset(dataset) : client;
+      const payload: unknown = JSON.parse(submission.payloadJson);
       try {
-        const reply = await target.invoke<TResult>(operation, input, key);
+        const reply = await submission.client.invoke<TResult>(
+          submission.operation,
+          payload,
+          submission.key,
+        );
         if (mounted.current) {
-          setRetained(null);
-          setPending(false);
+          setRetained((current) => (current?.id === submission.id ? null : current));
         }
         return reply;
       } catch (caught) {
         const backendError = caught instanceof AppBackendError ? caught : new AppBackendError(503);
         if (mounted.current) {
           setError(backendError);
-          setRetained(backendError.uncertain ? { input, key } : null);
-          setPending(false);
+          if (backendError.uncertain) {
+            setRetained(submission);
+          } else {
+            setRetained((current) => (current?.id === submission.id ? null : current));
+          }
         }
         throw backendError;
+      } finally {
+        if (mounted.current) {
+          setInFlightCount((count) => Math.max(0, count - 1));
+        }
       }
     },
-    [client, dataset, operation],
+    [],
   );
 
   const mutate = useCallback(
-    (input: TInput, idempotencyKey?: string) =>
-      run(input, idempotencyKey ?? mutationKey(operation)),
-    [operation, run],
+    (input: TInput, idempotencyKey?: string) => {
+      const submission: RetainedSubmission = {
+        id: nextAttemptId.current++,
+        client,
+        operation,
+        key: idempotencyKey ?? mutationKey(operation),
+        payloadJson: JSON.stringify(input ?? {}),
+      };
+      return execute(submission);
+    },
+    [client, execute, operation],
   );
 
   const retry = useCallback(async () => {
     if (!retained) return null;
-    return run(retained.input, retained.key);
-  }, [retained, run]);
+    return execute(retained);
+  }, [execute, retained]);
 
   const discardPending = useCallback(() => {
     setRetained(null);
@@ -570,7 +627,7 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
     mutate,
     retry,
     discardPending,
-    pending,
+    pending: inFlightCount > 0,
     uncertain: retained !== null,
     error,
   };

@@ -1,15 +1,23 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type * as Esbuild from "esbuild";
+
+declare const __DOHC_STAGED_BUILTINS__:
+  | {
+      readonly digest: string;
+      readonly files: Readonly<Record<string, string>>;
+    }
+  | undefined;
 
 export const BUILTIN_NAMESPACE = "dohc-builtin";
 
 export const BUILTIN_FILES = [
   "dohc-app.mjs",
   "dohc-charts.mjs",
+  "dohc-tokens.css",
   "dohc-ui.css",
   "dohc-ui.mjs",
   "react-dom-client.mjs",
@@ -32,6 +40,7 @@ export const BUILTIN_SPECIFIERS: ReadonlyMap<string, BuiltinFileName> = new Map(
 
 const BUILTIN_INTERNAL_SPECIFIERS: ReadonlyMap<string, BuiltinFileName> = new Map([
   ...BUILTIN_SPECIFIERS,
+  ["./dohc-tokens.css", "dohc-tokens.css"],
   ["./dohc-ui.css", "dohc-ui.css"],
 ]);
 
@@ -102,10 +111,14 @@ function esmExternalBridge(externals: readonly string[]): Esbuild.Plugin {
   };
 }
 
-function rewriteUiCssPlugin(): Esbuild.Plugin {
+function rewriteKitCssPlugin(): Esbuild.Plugin {
   return {
-    name: "dohc-rewrite-ui-css",
+    name: "dohc-rewrite-kit-css",
     setup(build) {
+      build.onResolve({ filter: /^\.\/tokens\.css$/ }, () => ({
+        path: "./dohc-tokens.css",
+        external: true,
+      }));
       build.onResolve({ filter: /^\.\/ui\.css$/ }, () => ({
         path: "./dohc-ui.css",
         external: true,
@@ -159,7 +172,26 @@ async function bundleKitEntry(
     legalComments: "none",
     logLevel: "silent",
     external: [...externals],
-    plugins: rewriteCss ? [rewriteUiCssPlugin()] : [],
+    plugins: rewriteCss ? [rewriteKitCssPlugin()] : [],
+  });
+  return result.outputFiles[0]!.contents;
+}
+
+async function bundleKitCss(
+  esbuild: typeof Esbuild,
+  absWorkingDir: string,
+  entryPoint: string,
+): Promise<Uint8Array> {
+  const result = await esbuild.build({
+    absWorkingDir,
+    entryPoints: [entryPoint],
+    bundle: true,
+    minify: true,
+    write: false,
+    platform: "browser",
+    target: "es2022",
+    legalComments: "none",
+    logLevel: "silent",
   });
   return result.outputFiles[0]!.contents;
 }
@@ -217,6 +249,7 @@ export async function buildClosedAppBuiltins(
     reactDomClientBytes,
     dohcAppBytes,
     dohcUiBytes,
+    dohcTokensCssBytes,
     dohcUiCssBytes,
     dohcChartsBytes,
   ] = await Promise.all([
@@ -262,19 +295,8 @@ export async function buildClosedAppBuiltins(
       ["react", "react/jsx-runtime", "react-dom"],
       true,
     ),
-    esbuild
-      .build({
-        absWorkingDir: repoRoot,
-        entryPoints: [join(kitSrcDir, "ui.css")],
-        bundle: true,
-        minify: true,
-        write: false,
-        platform: "browser",
-        target: "es2022",
-        legalComments: "none",
-        logLevel: "silent",
-      })
-      .then((built) => built.outputFiles[0]!.contents),
+    bundleKitCss(esbuild, repoRoot, join(kitSrcDir, "tokens.css")),
+    bundleKitCss(esbuild, repoRoot, join(kitSrcDir, "ui.css")),
     bundleKitEntry(
       esbuild,
       repoRoot,
@@ -291,6 +313,7 @@ export async function buildClosedAppBuiltins(
     ["react-dom-client.mjs", reactDomClientBytes],
     ["dohc-app.mjs", dohcAppBytes],
     ["dohc-ui.mjs", dohcUiBytes],
+    ["dohc-tokens.css", dohcTokensCssBytes],
     ["dohc-ui.css", dohcUiCssBytes],
     ["dohc-charts.mjs", dohcChartsBytes],
   ]);
@@ -303,20 +326,33 @@ export async function loadClosedAppBuiltins(
   esbuild?: typeof Esbuild,
 ): Promise<ClosedAppBuiltins> {
   const selfPath = fileURLToPath(moduleUrl);
-  const selfName = basename(selfPath);
-  if (selfName === "worker.mjs" || selfName === "adapter.mjs") {
+  if (typeof __DOHC_STAGED_BUILTINS__ !== "undefined") {
+    const expected = __DOHC_STAGED_BUILTINS__;
     const builtinsDir = join(dirname(selfPath), "builtins");
     const entries = await Promise.all(
       BUILTIN_FILES.map(async (name) => [name, await readFile(join(builtinsDir, name))] as const),
     );
-    return finalizeBuiltins(entries);
+    const loaded = finalizeBuiltins(entries);
+    if (loaded.digest !== expected.digest) {
+      throw new Error("Built-in app kit integrity check failed.");
+    }
+    for (const name of BUILTIN_FILES) {
+      if (loaded.files.get(name)?.sha256 !== expected.files[name]) {
+        throw new Error("Built-in app kit integrity check failed.");
+      }
+    }
+    return loaded;
   }
   if (!cachedDevBuiltins) {
     const desktopRoot = resolve(dirname(selfPath), "../..");
-    cachedDevBuiltins = (async () => {
+    const pending = (async () => {
       const bundler = esbuild ?? (await import("esbuild"));
       return buildClosedAppBuiltins(bundler, desktopRoot);
     })();
+    cachedDevBuiltins = pending.catch((error) => {
+      if (cachedDevBuiltins === pending) cachedDevBuiltins = undefined;
+      throw error;
+    });
   }
   return cachedDevBuiltins;
 }

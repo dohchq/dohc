@@ -1,3 +1,4 @@
+import "./tokens.css";
 import "./ui.css";
 import {
   useEffect,
@@ -393,6 +394,7 @@ export interface FieldProps {
 }
 
 export function Field({ label, htmlFor, hint, error, children }: FieldProps) {
+  const messageId = useId();
   return (
     <div className="kit-field">
       <label className="kit-field-label" htmlFor={htmlFor}>
@@ -400,11 +402,13 @@ export function Field({ label, htmlFor, hint, error, children }: FieldProps) {
       </label>
       {children}
       {error ? (
-        <span className="kit-field-error" role="alert">
+        <span id={messageId} className="kit-field-error" role="alert">
           {error}
         </span>
       ) : hint ? (
-        <span className="kit-field-hint">{hint}</span>
+        <span id={messageId} className="kit-field-hint">
+          {hint}
+        </span>
       ) : null}
     </div>
   );
@@ -437,6 +441,9 @@ export function Checkbox({ label, className, id, ...props }: CheckboxProps) {
   );
 }
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export interface ModalProps {
   readonly open: boolean;
   readonly title: string;
@@ -447,6 +454,8 @@ export interface ModalProps {
 
 export function Modal({ open, title, onClose, footer, children }: ModalProps) {
   const titleId = useId();
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   const previousFocus = useRef<HTMLElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
 
@@ -454,23 +463,61 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
     if (!open) return;
     previousFocus.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    dialogRef.current?.focus();
+    const dialog = dialogRef.current;
+    dialog?.focus();
+
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) return;
+      const focusables = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
+        (element) => element.tabIndex >= 0,
+      );
+      if (focusables.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusables[0]!;
+      const last = focusables[focusables.length - 1]!;
+      const active = document.activeElement;
+      if (event.shiftKey) {
+        if (active === first || active === dialog || !dialog.contains(active)) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !dialog.contains(active)) {
+        event.preventDefault();
+        first.focus();
+      }
     };
+
+    const onFocusIn = (event: FocusEvent) => {
+      if (!dialog) return;
+      if (event.target instanceof Node && !dialog.contains(event.target)) {
+        const focusables = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+        (focusables[0] ?? dialog).focus();
+      }
+    };
+
     window.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("focusin", onFocusIn);
       previousFocus.current?.focus();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
   return (
     <div
       className="kit-modal-backdrop"
       onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget) onCloseRef.current();
       }}
     >
       <div
@@ -485,7 +532,7 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
           <h2 id={titleId} className="kit-modal-title">
             {title}
           </h2>
-          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close">
+          <Button variant="ghost" size="sm" onClick={() => onCloseRef.current()} aria-label="Close">
             Close
           </Button>
         </div>
@@ -532,8 +579,8 @@ export function DataTable<T>({
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<{ key: string; direction: "asc" | "desc" } | null>(null);
 
+  const trimmed = query.trim().toLowerCase();
   const visible = useMemo(() => {
-    const trimmed = query.trim().toLowerCase();
     const filtered = !trimmed
       ? [...rows]
       : rows.filter((row) => {
@@ -566,7 +613,7 @@ export function DataTable<T>({
           : String(av).localeCompare(String(bv), undefined, { numeric: true });
       return sort.direction === "asc" ? cmp : -cmp;
     });
-  }, [columns, query, rows, searchText, sort]);
+  }, [columns, rows, searchText, sort, trimmed]);
 
   const toggleSort = (key: string) => {
     setSort((current) => {
@@ -597,7 +644,10 @@ export function DataTable<T>({
           <Skeleton height={32} />
         </Stack>
       ) : visible.length === 0 ? (
-        <EmptyState title={emptyTitle} description={emptyDescription} />
+        <EmptyState
+          title={trimmed && rows.length > 0 ? "No matching rows" : emptyTitle}
+          description={trimmed && rows.length > 0 ? "Try a different filter." : emptyDescription}
+        />
       ) : (
         <div className="kit-table-wrap">
           <table className="kit-table">

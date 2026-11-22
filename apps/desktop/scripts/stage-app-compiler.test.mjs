@@ -283,6 +283,25 @@ createRoot(document.getElementById("root")!).render(<AppShell><StatCard label="S
             "index.html links missing.js, which is not in the app. Add the file or fix the link.",
         },
       );
+      const uiBuiltinPath = join(destination, "builtins/dohc-ui.mjs");
+      const originalUiBuiltin = await readFile(uiBuiltinPath);
+      await writeFile(uiBuiltinPath, "export const tampered = true;");
+      try {
+        await assert.rejects(
+          compile(
+            {
+              ...request,
+              inputs: [file("main.ts", Buffer.from("document.body.textContent = 'tampered';"))],
+            },
+            pageBounds,
+          ),
+          /Built-in app kit integrity check failed/,
+        );
+        await assert.rejects(requireAppCompiler(destination), /asset changed/);
+      } finally {
+        await writeFile(uiBuiltinPath, originalUiBuiltin);
+      }
+      await requireAppCompiler(destination);
       await rm(
         join(destination, process.platform === "win32" ? "compiler-owner.exe" : "compiler-owner"),
       );
@@ -302,8 +321,6 @@ createRoot(document.getElementById("root")!).render(<AppShell><StatCard label="S
         else process.env[key] = value;
       }
     }
-    await writeFile(join(destination, "builtins/dohc-ui.mjs"), "changed");
-    await assert.rejects(requireAppCompiler(destination), /asset changed/);
     await writeFile(join(destination, "worker.mjs"), "changed");
     await assert.rejects(requireAppCompiler(destination), /asset changed/);
   },

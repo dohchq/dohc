@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
 import { createAppDocument, type AppPage } from "@dohc/app-browser/document";
 import { compileClosedApp } from "./closedAppCompiler";
 
@@ -113,7 +114,7 @@ describe("closed app compiler", () => {
     }
   });
 
-  it("emits no bundle.css when dohc/ui and dohc/charts are not imported and refuses built-in packageMap overrides", async () => {
+  it("emits no bundle.css for dohc/app alone, keeps dohc/charts free of page resets, and refuses reserved overrides", async () => {
     const plain = await compileClosedApp({
       entryPath: "main.tsx",
       bounds: { maxInputFiles: 8, maxInputBytes: 1_000_000, maxOutputBytes: 2_000_000 },
@@ -126,6 +127,26 @@ describe("closed app compiler", () => {
     });
     expect(plain.files.map((output) => output.path)).toEqual(["bundle.js"]);
 
+    const chartsOnly = await compileClosedApp({
+      entryPath: "main.tsx",
+      bounds: { maxInputFiles: 8, maxInputBytes: 1_000_000, maxOutputBytes: 2_000_000 },
+      inputs: [
+        file("main.tsx", "import { Sparkline } from 'dohc/charts'; globalThis.spark = Sparkline;"),
+      ],
+    });
+    expect(chartsOnly.files.map((output) => output.path)).toEqual(["bundle.css", "bundle.js"]);
+    const chartsCss = new TextDecoder().decode(chartsOnly.files[0]!.bytes);
+    expect(chartsCss).toContain("--kit-chart-1");
+    expect(chartsCss).not.toContain("html,body{margin:0");
+
+    await expect(
+      compileClosedApp({
+        entryPath: "main.ts",
+        inputs: [file("main.ts", "import 'react-dom/server';")],
+        bounds,
+      }),
+    ).rejects.toThrow(/reserved by dohc's built-in kit/);
+
     for (const reserved of ["react", "react-dom/client", "scheduler", "dohc/ui", "dohc/app"]) {
       await expect(
         compileClosedApp({
@@ -135,6 +156,87 @@ describe("closed app compiler", () => {
           bounds,
         }),
       ).rejects.toThrow(/cannot override built-in package/);
+    }
+  });
+
+  it("connects a compiled dohc/app bundle through the real attachAppCollectionBroker", async () => {
+    const built = await compileClosedApp({
+      entryPath: "main.tsx",
+      bounds: { maxInputFiles: 8, maxInputBytes: 1_000_000, maxOutputBytes: 4_000_000 },
+      inputs: [
+        file(
+          "main.tsx",
+          `import { createRoot } from "react-dom/client";
+import { AppProvider, useDatasetQuery } from "dohc/app";
+function View() {
+  const q = useDatasetQuery<{ total: number }>("monthlyTotal", { month: "2026-11" });
+  return <p id="out">{q.loading ? "loading" : q.error ? "err:" + q.error.status : "total:" + q.data?.total}</p>;
+}
+const root = createRoot(document.getElementById("root")!);
+root.render(<AppProvider><View /></AppProvider>);
+globalThis.unmountBrokerTest = () => root.unmount();`,
+        ),
+      ],
+    });
+
+    const received: unknown[] = [];
+    const { JSDOM } = createRequire(import.meta.url)("jsdom") as {
+      JSDOM: new (
+        html: string,
+        options: { runScripts: "outside-only" },
+      ) => {
+        window: Window & typeof globalThis & { unmountBrokerTest?: () => void };
+      };
+    };
+    const dom = new JSDOM('<div id="root"></div>', { runScripts: "outside-only" });
+    const controller = new AbortController();
+    const fakeParent = {} as Window;
+    const listeners = new Map<string, Set<() => void>>();
+    const fakeFrame = {
+      addEventListener(type: string, cb: () => void) {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type)!.add(cb);
+      },
+      contentWindow: {
+        postMessage(data: unknown, _origin: string, transfer?: MessagePort[]) {
+          const event = new dom.window.MessageEvent("message", {
+            data,
+            ports: transfer ?? [],
+          });
+          Object.defineProperty(event, "source", { value: fakeParent });
+          dom.window.dispatchEvent(event);
+        },
+      },
+    } as unknown as HTMLIFrameElement;
+
+    Object.defineProperty(dom.window, "parent", { configurable: true, value: fakeParent });
+    attachAppCollectionBroker(
+      fakeFrame,
+      async (body) => {
+        received.push(body);
+        return new Response(
+          JSON.stringify({ result: { total: 420 }, revision: 2, replayed: false }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+      controller.signal,
+    );
+
+    try {
+      dom.window.eval(
+        new TextDecoder().decode(built.files.find((output) => output.path === "bundle.js")!.bytes),
+      );
+      for (const cb of listeners.get("load") ?? []) cb();
+      await vi.waitFor(() =>
+        expect(dom.window.document.getElementById("out")?.textContent).toBe("total:420"),
+      );
+      expect(received).toHaveLength(1);
+      expect((received[0] as Record<string, unknown>).op).toBe("backend.invoke");
+      expect((received[0] as Record<string, unknown>).operation).toBe("monthlyTotal");
+    } finally {
+      dom.window.unmountBrokerTest?.();
+      controller.abort();
+      dom.window.close();
     }
   });
 
