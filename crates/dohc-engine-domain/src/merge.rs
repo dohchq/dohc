@@ -19,6 +19,7 @@ use dohc_engine_storage::text;
 use dohc_engine_storage::{FaultInjector, Preimage, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub const MAX_MERGE_LINES: usize = 2_000;
 
@@ -180,8 +181,14 @@ pub struct VersionFileChangePage {
     pub next_after_path: Option<String>,
 }
 
-/// LCS-aligned line hunks with conservative overlap detection and the exact
-/// 2,000-line quadratic-work guard.
+/// Three-way line merge. Each side lines up with the base by a longest common
+/// subsequence, and the remote side keeps the copies of repeated lines the
+/// local side kept, so both sides' changes to a run of repeated lines land on
+/// the same copy. Changes that touch merge once when both sides made the same
+/// change and conflict otherwise. A merge conflicts instead when, between two
+/// lines that appear once in every text, it would leave a line with fewer
+/// copies than both sides kept or more than either side has. Texts over
+/// [`MAX_MERGE_LINES`] lines conflict before the quadratic alignment.
 pub fn merge_markdown(base: &str, local: &str, remote: &str) -> MarkdownMergeResult {
     if local == remote {
         return MarkdownMergeResult::Merged(local.to_owned());
@@ -203,41 +210,24 @@ pub fn merge_markdown(base: &str, local: &str, remote: &str) -> MarkdownMergeRes
         return MarkdownMergeResult::Conflict;
     }
 
-    let local_hunks = diff_hunks(&base_lines, &local_lines);
-    let remote_hunks = diff_hunks(&base_lines, &remote_lines);
-    for local_hunk in &local_hunks {
-        for remote_hunk in &remote_hunks {
-            let both_insert_at_same_offset = local_hunk.base_start == local_hunk.base_end
-                && remote_hunk.base_start == remote_hunk.base_end
-                && local_hunk.base_start == remote_hunk.base_start;
-            let same_start_with_insertion = local_hunk.base_start == remote_hunk.base_start
-                && ((local_hunk.base_start == local_hunk.base_end)
-                    != (remote_hunk.base_start == remote_hunk.base_end));
-            let overlapping = local_hunk.base_start < remote_hunk.base_end
-                && remote_hunk.base_start < local_hunk.base_end;
-            if both_insert_at_same_offset || same_start_with_insertion || overlapping {
-                return MarkdownMergeResult::Conflict;
-            }
-        }
+    let local_pairs = align(&base_lines, &local_lines, &vec![false; base_lines.len()]);
+    let mut kept_by_local = vec![false; base_lines.len()];
+    for &(base_index, _) in &local_pairs {
+        kept_by_local[base_index] = true;
     }
-
-    let mut all = Vec::with_capacity(local_hunks.len() + remote_hunks.len());
-    all.extend(local_hunks);
-    all.extend(remote_hunks);
-    all.sort_by_key(|hunk| hunk.base_start);
-    let mut output = Vec::new();
-    let mut cursor = 0;
-    for hunk in all {
-        output.extend(
-            base_lines[cursor..hunk.base_start]
-                .iter()
-                .map(|line| (*line).to_owned()),
-        );
-        output.extend(hunk.replacement);
-        cursor = hunk.base_end;
+    let remote_pairs = align(&base_lines, &remote_lines, &kept_by_local);
+    let Some(merged) = combine(
+        &base_lines,
+        hunks(&base_lines, &local_lines, &local_pairs),
+        hunks(&base_lines, &remote_lines, &remote_pairs),
+    ) else {
+        return MarkdownMergeResult::Conflict;
+    };
+    let merged = merged.join("\n");
+    if !keeps_copies([base, local, remote, &merged]) {
+        return MarkdownMergeResult::Conflict;
     }
-    output.extend(base_lines[cursor..].iter().map(|line| (*line).to_owned()));
-    MarkdownMergeResult::Merged(output.join("\n"))
+    MarkdownMergeResult::Merged(merged)
 }
 
 /// Content equality for two comparison sides. A binary side compares by its
@@ -1421,73 +1411,190 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
     }
 }
 
-#[derive(Debug)]
-struct Hunk {
+struct Hunk<'a> {
     base_start: usize,
     base_end: usize,
-    replacement: Vec<String>,
+    replacement: &'a [&'a str],
 }
 
-fn diff_hunks(base: &[&str], side: &[&str]) -> Vec<Hunk> {
-    let n = base.len();
-    let m = side.len();
-    let mut lcs = vec![vec![0_usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            lcs[i][j] = if base[i] == side[j] {
-                lcs[i + 1][j + 1] + 1
+const MATCH_SCORE: u32 = 1 << 16;
+
+/// The matched `(base, side)` line pairs of a longest common subsequence.
+/// Among those, it keeps the most base lines marked in `prefer`, then breaks
+/// ties by dropping base lines first.
+fn align(base: &[&str], side: &[&str], prefer: &[bool]) -> Vec<(usize, usize)> {
+    let (rows, columns) = (base.len(), side.len());
+    let width = columns + 1;
+    let mut score = vec![0_u32; (rows + 1) * width];
+    let matched = |score: &[u32], row: usize, column: usize| {
+        score[(row + 1) * width + column + 1] + MATCH_SCORE + u32::from(prefer[row])
+    };
+    for row in (0..rows).rev() {
+        for column in (0..columns).rev() {
+            let skipped = score[(row + 1) * width + column].max(score[row * width + column + 1]);
+            score[row * width + column] = if base[row] == side[column] {
+                skipped.max(matched(&score, row, column))
             } else {
-                lcs[i + 1][j].max(lcs[i][j + 1])
+                skipped
             };
         }
     }
 
-    let mut hunks = Vec::new();
-    let mut i = 0;
-    let mut j = 0;
-    let mut pending_start = None;
-    let mut pending_replacement = Vec::new();
-    while i < n && j < m {
-        if base[i] == side[j] {
-            flush_hunk(&mut hunks, &mut pending_start, &mut pending_replacement, i);
-            i += 1;
-            j += 1;
-        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
-            pending_start.get_or_insert(i);
-            i += 1;
+    let mut pairs = Vec::new();
+    let (mut row, mut column) = (0, 0);
+    while row < rows && column < columns {
+        if base[row] == side[column] && score[row * width + column] == matched(&score, row, column)
+        {
+            pairs.push((row, column));
+            row += 1;
+            column += 1;
+        } else if score[(row + 1) * width + column] >= score[row * width + column + 1] {
+            row += 1;
         } else {
-            pending_start.get_or_insert(i);
-            pending_replacement.push(side[j].to_owned());
-            j += 1;
+            column += 1;
         }
     }
-    if i < n || j < m {
-        let start = *pending_start.get_or_insert(i);
-        pending_replacement.extend(side[j..].iter().map(|line| (*line).to_owned()));
-        hunks.push(Hunk {
-            base_start: start,
-            base_end: n,
-            replacement: pending_replacement,
-        });
-    } else {
-        flush_hunk(&mut hunks, &mut pending_start, &mut pending_replacement, i);
+    pairs
+}
+
+/// The stretches of `base` that `side` replaced, between the matched `pairs`.
+fn hunks<'a>(base: &[&str], side: &'a [&'a str], pairs: &[(usize, usize)]) -> Vec<Hunk<'a>> {
+    let mut hunks = Vec::new();
+    let (mut base_start, mut side_start) = (0, 0);
+    for &(base_end, side_end) in pairs.iter().chain([&(base.len(), side.len())]) {
+        if base_end > base_start || side_end > side_start {
+            hunks.push(Hunk {
+                base_start,
+                base_end,
+                replacement: &side[side_start..side_end],
+            });
+        }
+        base_start = base_end + 1;
+        side_start = side_end + 1;
     }
     hunks
 }
 
-fn flush_hunk(
-    hunks: &mut Vec<Hunk>,
-    pending_start: &mut Option<usize>,
-    pending_replacement: &mut Vec<String>,
-    base_end: usize,
-) {
-    if let Some(base_start) = pending_start.take() {
-        hunks.push(Hunk {
-            base_start,
-            base_end,
-            replacement: std::mem::take(pending_replacement),
-        });
+/// Whether two hunks from different sides change the same place: they
+/// overlap, insert at the same line, or one inserts where the other starts.
+fn touches(left: &Hunk<'_>, right: &Hunk<'_>) -> bool {
+    let left_inserts = left.base_start == left.base_end;
+    let right_inserts = right.base_start == right.base_end;
+    (left.base_start == right.base_start && (left_inserts || right_inserts))
+        || (left.base_start < right.base_end && right.base_start < left.base_end)
+}
+
+/// Apply both sides' hunks to `base`. Hunks that touch merge once when both
+/// sides turn that stretch into the same lines; otherwise the merge conflicts.
+fn combine<'a>(
+    base: &[&'a str],
+    local: Vec<Hunk<'a>>,
+    remote: Vec<Hunk<'a>>,
+) -> Option<Vec<&'a str>> {
+    let mut all: Vec<(bool, Hunk<'a>)> = local
+        .into_iter()
+        .map(|hunk| (false, hunk))
+        .chain(remote.into_iter().map(|hunk| (true, hunk)))
+        .collect();
+    all.sort_by_key(|(_, hunk)| (hunk.base_start, hunk.base_end));
+    let mut output = Vec::new();
+    let mut cursor = 0;
+    let mut rest = all.into_iter().peekable();
+    while let Some(first) = rest.next() {
+        let mut group = vec![first];
+        while let Some(next) = rest.next_if(|(next_side, next)| {
+            group
+                .iter()
+                .any(|(side, hunk)| side != next_side && touches(hunk, next))
+        }) {
+            group.push(next);
+        }
+        let start = group.iter().map(|(_, hunk)| hunk.base_start).min()?;
+        let end = group.iter().map(|(_, hunk)| hunk.base_end).max()?;
+        let version = |remote: bool| {
+            let mut lines = Vec::new();
+            let mut at = start;
+            for (_, hunk) in group.iter().filter(|(side, _)| *side == remote) {
+                lines.extend_from_slice(&base[at..hunk.base_start]);
+                lines.extend_from_slice(hunk.replacement);
+                at = hunk.base_end;
+            }
+            lines.extend_from_slice(&base[at..end]);
+            lines
+        };
+        let local_changed = group.iter().any(|(side, _)| !side);
+        let remote_changed = group.iter().any(|(side, _)| *side);
+        let lines = version(!local_changed);
+        if local_changed && remote_changed && lines != version(true) {
+            return None;
+        }
+        output.extend_from_slice(&base[cursor..start]);
+        output.extend(lines);
+        cursor = end;
     }
+    output.extend_from_slice(&base[cursor..]);
+    Some(output)
+}
+
+/// Whether, in each stretch between lines that appear once in every one of
+/// `[base, local, remote, merged]` and in the same order, no line has fewer
+/// copies in the merge than both sides kept or more than either side has. A
+/// line that appears once in the base and both sides must appear once in the
+/// merge.
+fn keeps_copies(texts: [&str; 4]) -> bool {
+    let texts = texts.map(|text| {
+        if text.is_empty() {
+            Vec::new()
+        } else {
+            text.split('\n').collect::<Vec<_>>()
+        }
+    });
+    let mut counts: HashMap<&str, [usize; 4]> = HashMap::new();
+    for (index, text) in texts.iter().enumerate() {
+        for line in text {
+            counts.entry(line).or_default()[index] += 1;
+        }
+    }
+    if counts
+        .values()
+        .any(|count| matches!(count, [1, 1, 1, merged] if *merged != 1))
+    {
+        return false;
+    }
+    let mut positions: HashMap<&str, [usize; 4]> = HashMap::new();
+    for (index, text) in texts.iter().enumerate() {
+        for (position, line) in text.iter().enumerate() {
+            if matches!(counts[line], [1, 1, 1, 1]) {
+                positions.entry(line).or_default()[index] = position;
+            }
+        }
+    }
+    let mut starts = [0; 4];
+    for line in &texts[0] {
+        let Some(&at) = positions.get(line) else {
+            continue;
+        };
+        if (1..4).any(|index| at[index] < starts[index]) {
+            continue;
+        }
+        if !stretch_keeps_copies(&texts, starts, at) {
+            return false;
+        }
+        starts = at.map(|position| position + 1);
+    }
+    stretch_keeps_copies(&texts, starts, texts.each_ref().map(Vec::len))
+}
+
+fn stretch_keeps_copies(texts: &[Vec<&str>; 4], starts: [usize; 4], ends: [usize; 4]) -> bool {
+    let mut counts: HashMap<&str, [usize; 3]> = HashMap::new();
+    for side in 1..4 {
+        for line in &texts[side][starts[side]..ends[side]] {
+            counts.entry(line).or_default()[side - 1] += 1;
+        }
+    }
+    counts
+        .values()
+        .all(|&[local, remote, merged]| local.min(remote) <= merged && merged <= local.max(remote))
 }
 
 #[cfg(test)]

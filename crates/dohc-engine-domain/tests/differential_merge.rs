@@ -1,28 +1,40 @@
 use dohc_engine_domain::{MarkdownMergeResult, merge_markdown};
 
-fn outcome(base: &str, local: &str, remote: &str) -> String {
-    match merge_markdown(base, local, remote) {
-        MarkdownMergeResult::Merged(content) => format!("merged:{content}"),
-        MarkdownMergeResult::Conflict => "conflict".to_owned(),
-    }
-}
+/// The same cases and outcomes as the test loopback engine's merge test in
+/// `packages/workspace-engine-client`, so the two merges stay in step.
+const CASES: [(&str, &str, &str, Option<&str>); 9] = [
+    ("base", "same", "same", Some("same")),
+    ("base", "base", "remote", Some("remote")),
+    ("a\nb\nc", "A\nb\nc", "a\nb\nC", Some("A\nb\nC")),
+    ("a\nb", "local\nb", "remote\nb", None),
+    ("a\nb", "replacement\nb", "inserted\na\nb", None),
+    ("a\nb", "a\nb\nlocal", "a\nb\nremote", None),
+    ("x\nx\na\nb", "x\na\nb", "x\na\nB", Some("x\na\nB")),
+    (
+        "\n\n\n---\n---",
+        "\n\n---",
+        "\n\n\n\n---",
+        Some("\n\n\n---"),
+    ),
+    (
+        "One.\n\nTwo.\n\nThree.",
+        "One.\n\nLocal.\n\nTwo.\n\nThree.",
+        "One.\n\nTwo.\n\nRemote.\n\nThree.",
+        Some("One.\n\nLocal.\n\nTwo.\n\nRemote.\n\nThree."),
+    ),
+];
 
 #[test]
-fn merge_markdown_matches_ts_derived_golden() {
-    let actual = [
-        outcome("base", "same", "same"),
-        outcome("base", "base", "remote"),
-        outcome("a\nb\nc", "A\nb\nc", "a\nb\nC"),
-        outcome("a\nb", "local\nb", "remote\nb"),
-        outcome("a\nb", "replacement\nb", "inserted\na\nb"),
-    ]
-    .join("\n");
-    let golden = "merged:same\n\
-                  merged:remote\n\
-                  merged:A\n\
-                  b\n\
-                  C\n\
-                  conflict\n\
-                  conflict";
-    assert_eq!(actual, golden);
+fn merge_markdown_matches_the_shared_cases() {
+    for (base, local, remote, expected) in CASES {
+        let expected = match expected {
+            Some(text) => MarkdownMergeResult::Merged(text.to_owned()),
+            None => MarkdownMergeResult::Conflict,
+        };
+        assert_eq!(
+            merge_markdown(base, local, remote),
+            expected,
+            "{base:?} {local:?} {remote:?}"
+        );
+    }
 }
