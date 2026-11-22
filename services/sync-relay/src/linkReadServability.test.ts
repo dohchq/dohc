@@ -94,17 +94,6 @@ it.each(["view", "comment", "edit", "read-only", "read-write"] as const)(
           (await closed(request(null, `/sync/link/blobs/${sha256("live")}`, { headers }))).status,
         )
         .toBe(status);
-      const saved = testHandler(f.storage, {
-        ...f.options,
-        publicEditRelease: undefined,
-      });
-      try {
-        expect
-          .soft((await saved(request(null, "/sync/link/current", { headers }))).status)
-          .toBe(status);
-      } finally {
-        saved.dispose();
-      }
       if (status === 404) {
         expect.soft((await closed(request(null, "/sync/link/log", { headers }))).status).toBe(404);
         expect

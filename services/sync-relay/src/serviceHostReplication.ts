@@ -1,7 +1,7 @@
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createServiceHostFeed } from "./serviceHostFeed";
-import type { SyncRelayLogRow, SyncRelayStorage } from "./storage";
+import type { SyncRelayStorage } from "./storage";
 import { errorResponse, notFound } from "./errors";
 import type { LogAuthorNameLookup } from "./relayLogInputs";
 import type { DiscussionActivityHub } from "./discussionActivity";
@@ -24,16 +24,6 @@ export function createServiceHostReplication(options: {
     method: string;
     pathname: string;
   }): string | null;
-  revalidate?: (input: {
-    workspaceId: string;
-    bearer: string;
-    method: string;
-    pathname: string;
-  }) => string | null;
-  onLogRead?: (
-    input: { workspaceId: string; bearer: string },
-    rows: readonly SyncRelayLogRow[],
-  ) => void;
   // Only the service host principal enables this route.
   hostedFeed?: boolean;
   // The owner's account name for the history of the hosted feed's edits.
@@ -45,12 +35,6 @@ export function createServiceHostReplication(options: {
     Date.now,
     { wakeLog: (workspaceId) => options.activity.wakeLog(workspaceId), wait: async () => {} },
     { watched: () => false },
-    undefined,
-    (request, workspaceId, rows) =>
-      options.onLogRead?.(
-        { workspaceId, bearer: (request.headers.get("authorization") ?? "").slice(7) },
-        rows,
-      ),
   );
   const blobs = createWorkspaceBlobRoutes(options.storage, Date.now);
   const feed = options.hostedFeed
@@ -75,7 +59,7 @@ export function createServiceHostReplication(options: {
       if (!ownerUserId) throw notFound();
       const guard = () => {
         request.signal.throwIfAborted();
-        if ((options.revalidate ?? options.authorize)(credential) !== ownerUserId) throw notFound();
+        if (options.authorize(credential) !== ownerUserId) throw notFound();
       };
       const actor = { userId: ownerUserId };
       if (parts[3] === "hosted") {
