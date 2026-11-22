@@ -436,7 +436,7 @@ describe("CollectionPage", () => {
     const onNotice = vi.fn();
     vi.stubGlobal("dohcDesktop", api);
     render(pageWithHost(undefined, undefined, { onNotice }));
-    await screen.findByText("Saved on this computer. Waiting to send");
+    await screen.findByText("Saved on this computer, waiting to send");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() =>
       expect(api.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: "ws-1" }),
@@ -463,7 +463,7 @@ describe("CollectionPage", () => {
         { ...record("rec-1", "Socks"), creationDelivery: "pending", creationCanDiscard: false },
       ]),
     );
-    await screen.findByText("Saved on this computer. Waiting to send");
+    await screen.findByText("Saved on this computer, waiting to send");
     expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
   });
 
@@ -886,9 +886,9 @@ describe("CollectionPage", () => {
     renderPage(bridge);
 
     expect(
-      await screen.findByText("dohc could not read this collection's records. temporary failure"),
+      await screen.findByText("dohc could not read this Collection's records. temporary failure"),
     ).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(await screen.findByText("Plan")).toBeDefined();
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
@@ -1241,7 +1241,7 @@ describe("collection authoring", () => {
     // button; the confirming click runs the rewrite.
     fireEvent.click(await screen.findByLabelText("Delete view My board"));
     const confirmButton = screen.getByLabelText("Delete view My board");
-    expect(confirmButton.textContent).toBe("Confirm delete");
+    expect(confirmButton.textContent).toBe("Delete view");
     expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
     fireEvent.click(confirmButton);
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
@@ -1362,7 +1362,7 @@ describe("collection authoring", () => {
     fireEvent.click(screen.getByRole("button", { name: "View actions" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete view" }));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(lastWrittenSchema(bridge).schema.views.map((view) => view.name)).toEqual(["All"]);
     await waitFor(() => expect(onActiveViewChange).toHaveBeenLastCalledWith(null));
@@ -1401,7 +1401,7 @@ describe("collection authoring", () => {
           fireEvent.click(screen.getByRole("button", { name: "Rename" }));
         } else {
           fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
-          fireEvent.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+          fireEvent.click(screen.getByRole("menuitem", { name: "Delete view" }));
         }
       }
       await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
@@ -1454,7 +1454,7 @@ describe("collection authoring", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
     fireEvent.click(screen.getByRole("button", { name: "Create view" }));
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "This collection changed while you were editing. Try again.",
+      "This Collection changed while you were editing. Try again.",
     );
     expect(screen.getByRole("dialog", { name: "Add a view" })).toBeTruthy();
     expect(onError).not.toHaveBeenCalled();
@@ -1462,10 +1462,10 @@ describe("collection authoring", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "View actions" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete view" }));
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     expect(onError.mock.calls[0]![0]).toBe(
-      "This collection changed while you were editing. Try again.",
+      "This Collection changed while you were editing. Try again.",
     );
     expect(onError.mock.calls[0]![2]).toBeTypeOf("function");
   });
@@ -1936,7 +1936,7 @@ describe("record click-through", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Plum" }));
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     const [message, , retry] = onError.mock.calls[0]!;
-    expect(message).toMatch(/^dohc could not update this collection\./);
+    expect(message).toMatch(/^dohc could not update this Collection\./);
     retry!();
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(lastWrittenSchema(bridge).schema.fields[1]).toMatchObject({ colors: { Todo: "plum" } });
@@ -2279,9 +2279,7 @@ describe("Button fields", () => {
     expect(
       within(dialog).queryByRole("button", { name: "Choose what it does: Mark paid" }),
     ).toBeNull();
-    fireEvent.click(
-      await within(dialog).findByRole("button", { name: "Choose what it does: Archive" }),
-    );
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Choose action: Archive" }));
     await waitFor(() => expect(screen.queryByTestId("collection-fields-dialog")).toBeNull());
     const panel = await screen.findByTestId("collection-automations-panel");
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
@@ -2496,7 +2494,7 @@ describe("table pickers", () => {
       await screen.findByText("Plan");
 
       fireEvent.click(fieldCell(1));
-      fireEvent.click(screen.getByRole("button", { name: "Doing options" }));
+      fireEvent.click(screen.getByRole("button", { name: "Options for Doing" }));
       fireEvent.click(
         within(screen.getByRole("radiogroup", { name: "Color for Doing" })).getByRole("radio", {
           name: "Plum",
@@ -2528,11 +2526,11 @@ describe("table pickers", () => {
     await screen.findByText("Plan");
 
     fireEvent.click(fieldCell(1));
-    fireEvent.click(screen.getByRole("button", { name: "Todo options" }));
+    fireEvent.click(screen.getByRole("button", { name: "Options for Todo" }));
     fireEvent.click(screen.getByRole("radio", { name: "Plum" }));
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     const [message, , retry] = onError.mock.calls[0]!;
-    expect(message).toMatch(/^dohc could not update this collection\./);
+    expect(message).toMatch(/^dohc could not update this Collection\./);
     retry!();
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(lastWrittenSchema(bridge).schema.fields[1]).toMatchObject({ colors: { Todo: "plum" } });
@@ -2959,7 +2957,7 @@ describe("a new record in the table", () => {
     const kept = screen.getByTestId("collection-write-failure");
     expect(kept.textContent).toContain("New record in tasks");
     expect(
-      within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved collection value").value,
+      within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved Collection value").value,
     ).toContain('"title": "Milk"');
     expect(within(kept).getByTestId<HTMLButtonElement>("collection-write-retry").disabled).toBe(
       true,
@@ -3032,9 +3030,7 @@ describe("a new record in the table", () => {
     expect(onNotice).not.toHaveBeenCalled();
     act(() => onNewRecord.mock.calls[1]![1]!({ path: "tasks/Zebra.md", recordId: "rec-zebra" }));
     await waitFor(() =>
-      expect(onNotice).toHaveBeenCalledWith(
-        "Created 2 records. They are not among the records on screen.",
-      ),
+      expect(onNotice).toHaveBeenCalledWith("Created 2 records. They are not shown in this view."),
     );
     expect(onNotice).toHaveBeenCalledOnce();
     expect(bridge.queryCollectionRecords.mock.calls.length).toBeGreaterThan(queries);
@@ -3069,9 +3065,7 @@ describe("a new record in the table", () => {
     docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
     page.rerender(pageWithHost(onNewRecord, undefined, { onNotice }));
     await waitFor(() =>
-      expect(onNotice).toHaveBeenCalledWith(
-        "Created a record. It is not among the records on screen.",
-      ),
+      expect(onNotice).toHaveBeenCalledWith("Created 1 record. It is not shown in this view."),
     );
     expect(onNotice).toHaveBeenCalledOnce();
   });
@@ -3097,9 +3091,7 @@ describe("a new record in the table", () => {
     typeNext("Zebra");
     act(() => onNewRecord.mock.calls[1]![1]!({ path: "tasks/Zebra.md", recordId: "rec-zebra" }));
     await waitFor(() =>
-      expect(onNotice).toHaveBeenCalledWith(
-        "Created a record. It is not among the records on screen.",
-      ),
+      expect(onNotice).toHaveBeenCalledWith("Created 1 record. It is not shown in this view."),
     );
     expect(onNotice).toHaveBeenCalledOnce();
   });

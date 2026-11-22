@@ -35,19 +35,19 @@ afterEach(() => {
 describe("History hidden by its rules", () => {
   it("names what dohc can't read and what to do", () => {
     expect(historyHiddenWords([".dohc/visibility.toml"])).toBe(
-      "dohc can't read .dohc/visibility.toml, so History is hidden. Fix the file, then try again.",
+      "dohc cannot read .dohc/visibility.toml, so History is hidden. Fix the file.",
     );
     expect(historyHiddenWords([".dohc/files.toml", ".dohc/visibility.toml"])).toBe(
-      "dohc can't read .dohc/files.toml and .dohc/visibility.toml, so History is hidden. Fix the files, then try again.",
+      "dohc cannot read .dohc/files.toml and .dohc/visibility.toml, so History is hidden. Fix the files.",
     );
     expect(historyHiddenWords([".dohc"])).toBe(
-      "dohc can't read this workspace's .dohc folder, so History is hidden. Fix the folder, then try again.",
+      "dohc cannot read this workspace's .dohc folder, so History is hidden. Fix the folder.",
     );
     expect(restoreRulesUnreadableWords([".dohc/visibility.toml"])).toBe(
-      "dohc could not restore this file because it can't read .dohc/visibility.toml. Fix the file, then try again.",
+      "dohc could not restore this file because it cannot read .dohc/visibility.toml. Fix the file.",
     );
     expect(restoreRulesUnreadableWords([".dohc"])).toBe(
-      "dohc could not restore this file because it can't read this workspace's .dohc folder. Fix the folder, then try again.",
+      "dohc could not restore this file because it cannot read this workspace's .dohc folder. Fix the folder.",
     );
   });
 
@@ -66,14 +66,14 @@ describe("History hidden by its rules", () => {
     );
     const state = screen.getByTestId("history-policy-hidden");
     expect(state.textContent).toContain(
-      "dohc can't read .dohc/visibility.toml, so History is hidden.",
+      "dohc cannot read .dohc/visibility.toml, so History is hidden.",
     );
     expect(state.textContent).not.toContain("TOML parse error");
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(onRetry).toHaveBeenCalledOnce();
     await user.click(screen.getByRole("button", { name: "Copy details" }));
     expect(writeText).toHaveBeenCalledWith(
-      `Error: dohc can't read .dohc/visibility.toml, so History is hidden. Fix the file, then try again.\nCause: ${PARSER}`,
+      `Error: dohc cannot read .dohc/visibility.toml, so History is hidden. Fix the file.\nCause: ${PARSER}`,
     );
   });
 });
@@ -483,7 +483,7 @@ describe("a History diff the rules hide", () => {
     expect(restore).toHaveBeenLastCalledWith({ workspaceId: "ws-1", momentId: "restore-1" });
     expect(page.onReopenRestore).not.toHaveBeenCalled();
     expect(screen.getByTestId("engine-diff-restore-status").textContent).toBe(
-      "Undid the restore. This was recorded in history.",
+      "Undid the restore. This was recorded in History.",
     );
   });
 });

@@ -110,7 +110,7 @@ describe("Schedules run on", () => {
     await userEvent.click(within(waiting).getByRole("button", { name: "Take over now" }));
     expect(takeOverScheduleHost).not.toHaveBeenCalled();
     expect(within(waiting).getByRole("alert").textContent).toBe(
-      "If Ice's laptop is still on, a run can repeat.",
+      "If Ice's laptop is still on, a scheduled run could repeat.",
     );
     await userEvent.click(within(waiting).getByRole("button", { name: "Cancel" }));
     expect(within(waiting).queryByRole("alert")).toBeNull();
@@ -166,7 +166,7 @@ describe("Schedules run on", () => {
     await userEvent.click(within(elsewhere).getByRole("button", { name: "Take over now" }));
     expect(takeOverScheduleHost).not.toHaveBeenCalled();
     expect(within(elsewhere).getByRole("alert").textContent).toBe(
-      "If Ice's laptop is still on, a run can repeat.",
+      "If Ice's laptop is still on, a scheduled run could repeat.",
     );
     await userEvent.click(within(elsewhere).getByRole("button", { name: "Take over now" }));
     expect(takeOverScheduleHost).toHaveBeenCalledWith({ workspaceId: "ws", generation: 0 });
@@ -188,7 +188,7 @@ describe("Schedules run on", () => {
     expect(elsewhere.textContent).toContain(message);
     await userEvent.click(within(elsewhere).getByRole("button", { name: "Take over now" }));
     expect(within(elsewhere).getByRole("alert").textContent).toBe(
-      "If another computer is still on, a run can repeat.",
+      "If another computer is still on, a scheduled run could repeat.",
     );
   });
 
@@ -205,7 +205,7 @@ describe("Schedules run on", () => {
     const elsewhere = await screen.findByTestId("schedule-host-elsewhere");
     expect(elsewhere.textContent).toContain("Ice's desktop");
     expect(elsewhere.textContent).toContain(
-      "Same name as this computer. It may be an earlier installation of dohc here.",
+      "Same name as this computer. It could be an earlier dohc installation here.",
     );
     expect(within(elsewhere).getByRole("button", { name: "Take over now" })).toBeTruthy();
   });
@@ -344,7 +344,7 @@ describe("Schedules run on", () => {
     expect(waiting.textContent).toContain("Waiting for this server to hand over.");
     await userEvent.click(within(waiting).getByRole("button", { name: "Take over now" }));
     expect(within(waiting).getByRole("alert").textContent).toBe(
-      "If this server has not stopped, a run can repeat.",
+      "If this server has not stopped yet, a scheduled run could repeat.",
     );
   });
 

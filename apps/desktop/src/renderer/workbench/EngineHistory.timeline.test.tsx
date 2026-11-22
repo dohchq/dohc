@@ -158,7 +158,7 @@ describe("History timeline rows", () => {
     expect(calls.open).toHaveBeenCalledWith("m-1", "notes/plan.md");
     expect(rows[1]!.textContent).toContain("Created version Draft");
     expect(rows[1]!.querySelector("button")).toBeNull();
-    const collection = screen.getByRole("button", { name: "Open Collection history for Budget" });
+    const collection = screen.getByRole("button", { name: "Open Collection History for Budget" });
     expect(collection.textContent).toContain("Automation Stamp the date");
     fireEvent.click(collection);
     expect(calls.openHistory).toHaveBeenCalledOnce();
@@ -211,7 +211,7 @@ describe("History timeline rows", () => {
     await user.tab();
     await user.tab();
     expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "Open Collection history for Budget" }),
+      screen.getByRole("button", { name: "Open Collection History for Budget" }),
     );
     await user.keyboard("{Enter}");
     expect(calls.openHistory).toHaveBeenCalledOnce();
@@ -236,7 +236,7 @@ describe("History timeline rows", () => {
     ).toBe("addRow");
     // The title already names the Collection, so the line does not again.
     expect(unlabelled!.querySelector('[data-testid="history-collection-name"]')).toBeNull();
-    const button = screen.getByRole("button", { name: "Open Collection history for Budget" });
+    const button = screen.getByRole("button", { name: "Open Collection History for Budget" });
     const description = document.getElementById(button.getAttribute("aria-describedby")!);
     expect(description?.hidden).toBe(true);
     expect(description?.textContent).toBe(
@@ -344,7 +344,7 @@ describe("History timeline rows", () => {
     expect(guests.querySelector("time")).toBeNull();
     expect(guests.textContent).not.toContain("Date unknown");
     expect(guests.firstElementChild!.className.split(" ")).toContain("h-7");
-    expect(screen.queryByRole("button", { name: "Open Collection history for Guests" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Collection History for Guests" })).toBeNull();
   });
 
   it("keeps older dated days above the Date unknown group as earlier pages load", () => {
@@ -682,7 +682,7 @@ describe("History timeline sources", () => {
   it("shows a Collection that did not load as a warning row", () => {
     view({ entries: [file("m-1")], unavailableSources: [{ datasetId: GUESTS }] });
     const words = screen.getByTestId("history-sources-unavailable-words");
-    expect(words.textContent).toBe("dohc could not load Guests");
+    expect(words.textContent).toBe("dohc could not load Guests.");
     expect(words.className).not.toContain("truncate");
     const row = words.parentElement!;
     expect(row.className.split(" ")).toContain("text-ink");

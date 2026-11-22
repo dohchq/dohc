@@ -200,7 +200,7 @@ function checkFailure(error: unknown, macReleaseFeed: boolean): UpdateEvent {
 // error carries its response headers on the lines after the first.
 function causeOf(error: unknown): string {
   const line = (error instanceof Error ? error.message : String(error)).split("\n")[0]!.trim();
-  return (line || "The updater gave no reason.").slice(0, 500);
+  return (line || "dohc could not complete the update. Try again later.").slice(0, 500);
 }
 
 function boundedPercent(percent: number): number {

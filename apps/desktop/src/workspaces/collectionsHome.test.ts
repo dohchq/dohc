@@ -193,7 +193,7 @@ it("waits for the server only to open a Collection this computer has no copy of,
   computer.server("silent", { limitMs: 2000 });
   const started = performance.now();
   await expect(computer.open()).rejects.toThrow(
-    `This Collection needs ${relay.host}, which dohc can't reach.`,
+    `dohc could not reach ${relay.host} for this Collection. Check your connection, then try again.`,
   );
   // One limit, not one for each request in turn. The rest leaves room for a
   // loaded test run.
@@ -456,7 +456,7 @@ it("waits for the server at most once for a first open whose history stops comin
     path.endsWith("/replica/page") ? unanswered(15_000, signal) : go(),
   );
   await expect(within(1500, computer.read())).rejects.toThrow(
-    `This Collection needs ${relay.host}, which dohc can't reach.`,
+    `dohc could not reach ${relay.host} for this Collection. Check your connection, then try again.`,
   );
 }, 60_000);
 
@@ -504,7 +504,7 @@ it("waits for the server at most once for the whole first open, however many req
   });
   const started = performance.now();
   await expect(computer.open()).rejects.toThrow(
-    `This Collection needs ${relay.host}, which dohc can't reach.`,
+    `dohc could not reach ${relay.host} for this Collection. Check your connection, then try again.`,
   );
   expect(performance.now() - started).toBeLessThan(1250);
 }, 60_000);
@@ -545,7 +545,7 @@ it("gives up on a change the server does not answer at the limit, after one requ
   computer.server("silent", { limitMs: 400 });
   const started = performance.now();
   await expect(computer.write(id(7), { id: 1, name: "Late" })).rejects.toThrow(
-    `This Collection needs ${relay.host}, which dohc can't reach.`,
+    `dohc could not reach ${relay.host} for this Collection. Check your connection, then try again.`,
   );
   expect(performance.now() - started).toBeLessThan(700);
 }, 60_000);

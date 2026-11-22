@@ -81,7 +81,7 @@ describe("the notice after adding a share", () => {
   it("offers Open to edit for an Edit share this workspace already has", () => {
     const notice = addedShareNotice(mounted("edit", true), vi.fn());
 
-    expect(notice.message).toBe("Trip plan.md is already in shared-with-me.");
+    expect(notice.message).toBe("The share Trip plan.md is already in shared-with-me.");
     expect(notice.action?.label).toBe("Open to edit");
   });
 });

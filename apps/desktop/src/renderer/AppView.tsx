@@ -31,7 +31,8 @@ export const APP_OPEN_FAILED = "dohc could not open this app.";
 export const APP_CRASHED = "This app stopped working.";
 export const APP_LIMIT = "Close another app before opening this one.";
 export const APP_SESSION_ENDED = "This app lost its connection to dohc.";
-export const APP_DOWNLOAD_BLOCKED = "Apps in dohc can't save files. Download it from your browser.";
+export const APP_DOWNLOAD_BLOCKED =
+  "Apps in dohc cannot save files. Download it from your browser.";
 const BROWSER_OPEN_FAILED = "dohc could not open this app in your browser.";
 // A load the app replaced before it finished, such as a second click.
 const LOAD_ABORTED = -3;
@@ -281,7 +282,7 @@ export function useAppView(options: {
       } else if (event.kind === "download-blocked") {
         notices?.report({
           identity: downloadId,
-          title: `dohc didn't download ${event.filename}`,
+          title: `dohc did not download ${event.filename}`,
           message: APP_DOWNLOAD_BLOCKED,
           retry: null,
           action: {
@@ -468,7 +469,7 @@ export function AppViewBody(props: { view: AppView; onReview: () => void }) {
         <AppWindow size={24} aria-hidden className="text-subtle" />
         <p className="m-0 max-w-sm text-sm text-muted">
           {state.ended
-            ? "This app's approval ended. Review it to open it again."
+            ? "This app's approval ended. Review it to open again."
             : "Review this app to open it here."}
         </p>
         <PrimaryButton onClick={props.onReview}>Review and open app</PrimaryButton>

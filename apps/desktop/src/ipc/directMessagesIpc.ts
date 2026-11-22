@@ -343,7 +343,7 @@ export function registerDirectMessagesIpcHandlers<
         operation.assertCurrent();
         if (shareViewIsPresent(workspace.shareView)) {
           throw new Error(
-            "Shared views are read-only — add this conversation to a workspace you own.",
+            "Shared views are read-only. Add this conversation to a workspace you own.",
           );
         }
 

@@ -80,7 +80,7 @@ export function HistoryUpdating(props: { testId: string; className?: string }) {
       <span aria-hidden className={MARK_BOX}>
         <span className="size-2 animate-pulse rounded-full bg-accent" />
       </span>
-      Adding recent changes to History
+      Adding recent changes to History…
     </p>
   );
 }
@@ -515,7 +515,7 @@ function missingSourcesShort(
 ): string | null {
   const names = unavailable.flatMap((source) => nameOf(source.datasetId) ?? []);
   return unavailable.length
-    ? `dohc could not load ${collectionListPhrase(names, unavailable.length)}`
+    ? `dohc could not load ${collectionListPhrase(names, unavailable.length)}.`
     : null;
 }
 
@@ -1284,8 +1284,8 @@ function CollectionChangeRow(props: {
         type="button"
         data-testid="history-collection-open"
         aria-describedby={descriptionId}
-        aria-label={`Open Collection history for ${name}`}
-        title={`Open Collection history for ${name}`}
+        aria-label={`Open Collection History for ${name}`}
+        title={`Open Collection History for ${name}`}
         onClick={props.openHistory}
         className={`${frame} text-muted hover:bg-hover`}
       >

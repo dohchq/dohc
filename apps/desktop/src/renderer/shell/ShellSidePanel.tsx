@@ -107,13 +107,13 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
         {view ? (
           view.render(props)
         ) : wb.activeView === SHARING_VIEW_ID ? (
-          <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing..." />}>
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing…" />}>
             <LazySharingView {...sharing} />
           </Suspense>
         ) : selectedAppRoot !== null ? (
           // The same sealed preview an app's tab runs: a sandboxed frame
           // on a dohc loopback server, with no dohc bridge.
-          <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading app…" />}>
             <LazySitePreviewPage
               key={selectedAppRoot}
               variant="panel"

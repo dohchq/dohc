@@ -702,7 +702,7 @@ export function BoardView({
     (cardIndex.size === 0 && !groupFooter && groupField?.type !== "select")
   ) {
     return (
-      <div className="px-5 py-6 text-[13px] text-muted">No records in this collection yet.</div>
+      <div className="px-5 py-6 text-[13px] text-muted">No records in this Collection yet.</div>
     );
   }
 

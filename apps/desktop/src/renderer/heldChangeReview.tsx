@@ -129,7 +129,7 @@ export function HeldChangeCard(props: {
         ) : null}
         {unavailable === "unsupported" ? (
           <p data-testid="held-change-unavailable" className="m-0 text-[13px] text-muted">
-            dohc can't preview this change.
+            dohc cannot preview this change.
           </p>
         ) : null}
         {props.read.kind === "ready" && change === null ? (

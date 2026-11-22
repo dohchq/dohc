@@ -208,8 +208,8 @@ function blockControl(doc: ProseMirrorNode, pos: number, refs: BlockControlRefs)
       const plus = document.createElement("button");
       plus.type = "button";
       plus.className = "dohc-block-gutter-btn dohc-block-plus";
-      plus.title = "insert block";
-      plus.setAttribute("aria-label", "insert block");
+      plus.title = "Insert block";
+      plus.setAttribute("aria-label", "Insert block");
       plus.appendChild(makeGutterSvg(PLUS_ICON_PATH));
       plus.addEventListener("mousedown", stopEditorMouseEvent);
       plus.addEventListener("click", (event) => {
@@ -222,8 +222,8 @@ function blockControl(doc: ProseMirrorNode, pos: number, refs: BlockControlRefs)
       const handle = document.createElement("button");
       handle.type = "button";
       handle.className = "dohc-block-gutter-btn dohc-block-handle";
-      handle.title = "drag to move · click for actions";
-      handle.setAttribute("aria-label", "block actions");
+      handle.title = "Drag to move · click for actions";
+      handle.setAttribute("aria-label", "Block actions");
       handle.setAttribute("aria-haspopup", "menu");
       handle.setAttribute("aria-expanded", "false");
       handle.setAttribute("draggable", "true");
@@ -542,7 +542,7 @@ export const TURN_INTO_ENTRIES: BlockMenuEntry[] = [
 
 const ACTION_ENTRIES: BlockMenuEntry[] = [
   { kind: "action", id: "duplicate", label: "Duplicate", icon: Copy },
-  { kind: "action", id: "copy-markdown", label: "Copy as markdown", icon: ClipboardCopy },
+  { kind: "action", id: "copy-markdown", label: "Copy as Markdown", icon: ClipboardCopy },
   { kind: "action", id: "delete", label: "Delete", icon: X },
 ];
 
@@ -853,7 +853,7 @@ export function BlockMenu({
       // focus outline, so the frame draws none of its own.
       className={`dohc-block-menu ${MENU_FRAME} ${MENU_ENTER} outline-none`}
       role="menu"
-      aria-label="block actions"
+      aria-label="Block actions"
       aria-activedescendant={rowId(active)}
       tabIndex={-1}
       data-placement={state.placement}
@@ -1040,7 +1040,7 @@ export function TurnIntoMenu({
           // draws the focus outline, so the frame draws none of its own.
           className={`dohc-turn-into-menu ${MENU_FRAME} ${MENU_ENTER} outline-none`}
           role="listbox"
-          aria-label="turn into"
+          aria-label="Turn into"
           aria-activedescendant={optionId(selected)}
           tabIndex={-1}
           data-placement={dropdown.placement}

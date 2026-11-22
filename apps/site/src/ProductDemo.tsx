@@ -751,7 +751,7 @@ export function ProductDemo() {
             value={sourceText}
             readOnly
             spellCheck={false}
-            aria-label="Read-only markdown source"
+            aria-label="Read-only Markdown source"
           />
         ) : null}
         <div

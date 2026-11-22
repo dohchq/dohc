@@ -215,9 +215,7 @@ export function TransactionalCollectionViews(props: Props) {
           acknowledged.fieldId !== field.fieldId ||
           JSON.stringify(acknowledged.value) !== JSON.stringify(value)
         )
-          throw Error(
-            "This Collection's read action does not support boards. Update its rules, then try again.",
-          );
+          throw Error("This Collection's read action does not support boards. Update its rules.");
         const page = parsePage(
           result,
           fields.map((field) => field.fieldId),
@@ -226,10 +224,10 @@ export function TransactionalCollectionViews(props: Props) {
           const id = JSON.stringify(row.id);
           if (JSON.stringify(row.values[field.fieldId] ?? null) !== JSON.stringify(value))
             throw Error(
-              "This Collection's read action did not filter the board. Update its rules, then try again.",
+              "This Collection's read action did not filter the board. Update its rules.",
             );
           if (ids.has(id))
-            throw Error("Records changed while loading this board. Refresh to try again.");
+            throw Error("Records changed while loading this board. Refresh to reload.");
           ids.add(id);
         }
         columns.push({ value, page });
@@ -427,7 +425,8 @@ export function TransactionalCollectionViews(props: Props) {
           {groupHistory.length > 0 || loaded.moreGroups ? (
             <footer className="flex items-center gap-2 px-5 pb-2 text-[12px] text-muted">
               <span className="mr-auto">
-                {groups.length} groups · Card counts are for this page
+                {groups.length} {groups.length === 1 ? "group" : "groups"} · Card counts are for
+                this page
                 {loaded.moreGroups ? " · More groups" : ""}
               </span>
               <IconButton

@@ -120,16 +120,16 @@ export function RelationPicker({
       />
       {error !== null ? (
         <span className="px-2 py-1 text-[12px] text-danger">
-          dohc could not read the related collection's records. {error}
+          dohc could not read the related Collection's records. {error}
         </span>
       ) : records === null ? (
         <span className="dohc-reveal-if-slow px-2 py-1 text-[12px] text-subtle">
-          Loading records...
+          Loading records…
         </span>
       ) : shown.length === 0 ? (
         <span className="px-2 py-1 text-[12px] text-muted">
           {search.trim() === ""
-            ? "No records in the related collection yet."
+            ? "No records in the related Collection yet."
             : `No records match "${search.trim()}".`}
         </span>
       ) : field.many ? (

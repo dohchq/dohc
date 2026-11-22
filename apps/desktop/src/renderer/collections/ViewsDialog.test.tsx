@@ -54,7 +54,7 @@ it("keeps keyboard focus on the delete control while it arms, then deletes", asy
   // or a keyboard user is dropped at the top of the dialog.
   const confirm = screen.getByRole("button", { name: "Delete view Board" });
   expect(confirm).not.toBe(arm);
-  expect(confirm.textContent).toBe("Confirm delete");
+  expect(confirm.textContent).toBe("Delete view");
   expect(document.activeElement).toBe(confirm);
 
   fireEvent.click(confirm);

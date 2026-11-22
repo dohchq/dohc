@@ -124,7 +124,7 @@ function buildCalloutHeader(
   const chevron = document.createElement("button");
   chevron.type = "button";
   chevron.className = "dohc-callout-fold";
-  chevron.setAttribute("aria-label", folded ? "expand callout" : "collapse callout");
+  chevron.setAttribute("aria-label", folded ? "Expand callout" : "Collapse callout");
   chevron.setAttribute("aria-expanded", folded ? "false" : "true");
   chevron.disabled = view.editable === false;
   chevron.appendChild(makeCalloutSvg('<path d="m9 18 6-6-6-6"/>', "dohc-callout-chevron"));
@@ -149,7 +149,7 @@ function buildCalloutHeader(
   const typeTrigger = document.createElement("button");
   typeTrigger.type = "button";
   typeTrigger.className = "dohc-callout-type-trigger";
-  typeTrigger.setAttribute("aria-label", "change callout type");
+  typeTrigger.setAttribute("aria-label", "Change callout type");
   typeTrigger.setAttribute("aria-haspopup", "listbox");
   typeTrigger.setAttribute("aria-expanded", "false");
   typeTrigger.disabled = view.editable === false;
@@ -169,7 +169,7 @@ function buildCalloutHeader(
   const typeMenu = document.createElement("div");
   typeMenu.className = "dohc-callout-type-menu";
   typeMenu.setAttribute("role", "listbox");
-  typeMenu.setAttribute("aria-label", "callout type");
+  typeMenu.setAttribute("aria-label", "Callout type");
   typeMenu.hidden = true;
 
   const setTypeMenuOpen = (open: boolean) => {

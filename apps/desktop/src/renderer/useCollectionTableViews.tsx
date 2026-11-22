@@ -191,7 +191,7 @@ export function useCollectionTableViews(props: {
       localStorage.setItem(selectionKey, view?.viewId ?? "");
     } catch (error) {
       setActive(null);
-      onError("Could not open this saved view.", error);
+      onError("dohc could not open this saved view.", error);
     }
   }
   async function refresh() {
@@ -212,7 +212,7 @@ export function useCollectionTableViews(props: {
       select(view);
     } catch (error) {
       if (request === current.current && !controller.current.signal.aborted)
-        onError("Could not read saved views.", error, () => {
+        onError("dohc could not read saved views.", error, () => {
           void refresh();
         });
     } finally {
@@ -240,7 +240,7 @@ export function useCollectionTableViews(props: {
       void refresh();
       return NOT_READ;
     }
-    if (saving.current) return "dohc is saving another change to these views. Try again.";
+    if (saving.current) return "dohc is already saving a change to these views.";
     saving.current = true;
     setBusy(true);
     const request = current.current,
@@ -260,7 +260,7 @@ export function useCollectionTableViews(props: {
     } catch (error) {
       if (request !== current.current || controller.current.signal.aborted) return null;
       if (report)
-        onError("Could not save Collection views.", error, () => {
+        onError("dohc could not save Collection views.", error, () => {
           void refresh();
         });
       // The file may have changed, so the next change starts from what it holds now.
@@ -408,7 +408,7 @@ export function useCollectionTableViews(props: {
             </header>
             {views.length === 0 && (
               <p className="m-0 text-sm text-muted">
-                No saved views yet. Create a view for the records you need.
+                No saved views yet. Create a view to filter or sort records.
               </p>
             )}
             {views.map((view) => {

@@ -181,13 +181,13 @@ function mergeNotice(
         ? {
             identity,
             title,
-            message: `Some of ${source.name}'s changes are in Main. ${AFTER_STORE_FIX}`,
+            message: `Some changes from ${source.name} are in Main. ${AFTER_STORE_FIX}`,
             cause: answer.error,
           }
         : {
             identity,
             title,
-            message: `Some of ${source.name}'s changes are in Main, and History shows which.`,
+            message: `Some changes from ${source.name} are in Main, and History shows which.`,
             cause: answer.error,
             retry,
             offersHistory: true,
@@ -560,7 +560,7 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
                 another name.
               </>
             ) : (
-              "dohc can't use that name. Choose another name."
+              "dohc cannot use that name. Choose another name."
             ),
           );
           return;
@@ -816,7 +816,7 @@ export function VersionMenu(props: {
             type="button"
             data-testid="version-menu-button"
             aria-label={`Version: ${activeName}${onMain ? "" : " (not Main)"}`}
-            title={`You're working in the ${activeName} version`}
+            title={`Working in ${activeName}`}
             disabled={busy !== null || props.disabled}
             className="titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[13px] text-muted hover:bg-hover hover:text-ink focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
           >
@@ -1186,7 +1186,7 @@ function MergeFailure(props: { wordsId: string; error: unknown; sourceName: stri
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const words = isMergeStoppedPartway(props.error)
-    ? `dohc could not finish the merge. Some of ${props.sourceName}'s changes are in Main, and History shows which.`
+    ? `dohc could not finish the merge. Some changes from ${props.sourceName} are in Main, and History shows which.`
     : ipcErrorMessage(props.error, `dohc could not merge ${props.sourceName} into Main.`);
   const { cause } = readError(props.error);
   const details = errorDetails([
@@ -1387,7 +1387,7 @@ function conflictSideLabels(
       incomingName: "your other machine",
       keepCurrent: "Keep this machine's copy",
       keepIncoming: "Keep your other machine's copy",
-      currentMissing: "This machine doesn't have this file.",
+      currentMissing: "This machine does not have this file.",
       incomingMissing: "Your other machine removed this file.",
     };
   }
@@ -1398,8 +1398,8 @@ function conflictSideLabels(
     incomingName: sourceName,
     keepCurrent: "Keep Main's copy",
     keepIncoming: `Keep ${sourceName}'s copy`,
-    currentMissing: "Main doesn't have this file.",
-    incomingMissing: `${sourceName} removed this file.`,
+    currentMissing: "Main does not have this file.",
+    incomingMissing: `Removed in ${sourceName}.`,
   };
 }
 
@@ -1677,7 +1677,7 @@ function ConflictResolver(props: {
               onClick={() => startCombine(combineSeed.text)}
               className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[12px] text-subtle hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
             >
-              Combine by hand instead…
+              Combine by hand…
             </button>
           ) : !isBinary ? (
             <div className="mt-2 flex flex-col gap-1.5">
@@ -1707,9 +1707,9 @@ function ConflictResolver(props: {
                   role="alert"
                   className="mb-0 text-[12px] leading-4 text-danger"
                 >
-                  That change would make the combined copy {refusedBytes.toLocaleString("en-US")}{" "}
-                  bytes. Combining by hand works up to{" "}
-                  {CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")} bytes. Add less text.
+                  That change makes the combined copy {refusedBytes.toLocaleString("en-US")} bytes,
+                  which exceeds the {CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")}-byte
+                  limit for combining by hand. Add less text.
                 </p>
               ) : null}
               <div className="flex justify-end gap-2">
@@ -1950,7 +1950,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
       onError: (error) => {
         setState({
           status: "error",
-          message: ipcErrorMessage(error, "Could not compare with Main."),
+          message: ipcErrorMessage(error, "dohc could not compare with Main."),
         });
       },
     },
@@ -1982,7 +1982,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
       })
       .catch((error) => {
         if (windowGeneration.current !== generation) return;
-        setLoadMoreError(ipcErrorMessage(error, "Couldn't load more changed files."));
+        setLoadMoreError(ipcErrorMessage(error, "dohc could not load more changed files."));
       })
       .finally(() => {
         // Only this generation's pending flag: the effect already cleared it
@@ -2089,7 +2089,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
                     <Lock size={14} aria-hidden className="text-subtle" />
                     <span className="text-sm text-muted">Protected file changed</span>
                     <span className="text-xs text-subtle">
-                      This file follows the version, but its contents are never shown in
+                      This file belongs to this version, but its contents are never shown in
                       comparisons.
                     </span>
                   </div>
@@ -2101,8 +2101,8 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
                     <FileArchive size={14} aria-hidden className="text-subtle" />
                     <span className="text-sm text-muted">Binary file changed</span>
                     <span className="text-xs text-subtle">
-                      This file follows the version byte-for-byte, but contents are not shown in
-                      text diffs.
+                      This file is versioned byte-for-byte, and its contents are not shown in text
+                      diffs.
                     </span>
                   </div>
                 ) : (

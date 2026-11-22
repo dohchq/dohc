@@ -456,7 +456,7 @@ describe("BoardView", () => {
         groupBy="owner"
       />,
     );
-    expect(screen.getByText("No records in this collection yet.")).toBeDefined();
+    expect(screen.getByText("No records in this Collection yet.")).toBeDefined();
   });
 
   it("keeps a select field's empty columns so the first record has a place", () => {

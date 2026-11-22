@@ -298,7 +298,7 @@ it("says the renamed file is unchanged when the restore finishes after a move", 
   await screen.findByText("File moved before restoring");
   expect(
     screen.getByText(
-      "The file moved before the restore finished, so the renamed file is unchanged. Share again when you want to give access.",
+      "The file moved before the restore finished, so the renamed file is unchanged. Share again to give access.",
     ),
   ).toBeTruthy();
   expect(screen.queryByText("File restored")).toBeNull();
@@ -386,7 +386,7 @@ it("closes with the unfinished restore it knows of", async () => {
   render(<OwnerRestoreDialog {...f.props} />);
   await openStop();
   fireEvent.click(screen.getByRole("button", { name: "Stop access" }));
-  await screen.findByText("dohc could not prepare the restore. Retry in a moment.");
+  await screen.findByText("dohc could not prepare the restore.");
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(f.close).toHaveBeenCalledWith(
     expect.objectContaining({ operationId: "restore", phase: "fenced" }),
@@ -407,16 +407,16 @@ it("says when preparation keeps failing, and when the workspace is full", async 
   render(<OwnerRestoreDialog {...f.props} />);
   await openStop();
   fireEvent.click(screen.getByRole("button", { name: "Stop access" }));
-  await screen.findByText("dohc could not prepare the restore. Retry in a moment.");
+  await screen.findByText("dohc could not prepare the restore.");
   expect(screen.getByRole("button", { name: "Decline restore" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await screen.findByText(
-    "dohc could not prepare the restore again. Live editing of this file stays stopped until it finishes. Retry later.",
+    "dohc could not prepare the restore again. Live editing of this file stays stopped until it finishes.",
   );
   cause = "quota";
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await screen.findByText(
-    "This workspace has reached its limit on the server. Free some space, then retry the restore.",
+    "This workspace has reached its limit on the server. Free some space, then try again.",
   );
 });
 it("names a full workspace when admission refuses the confirmed restore", async () => {
@@ -436,7 +436,7 @@ it("names a full workspace when admission refuses the confirmed restore", async 
   await screen.findByRole("button", { name: "Restore file" });
   fireEvent.click(screen.getByRole("button", { name: "Restore file" }));
   await screen.findByText(
-    "This workspace has reached its limit on the server. Free some space, then retry the restore.",
+    "This workspace has reached its limit on the server. Free some space, then try again.",
   );
   expect(f.restored).not.toHaveBeenCalled();
 });
@@ -540,7 +540,7 @@ it("shows a refused decline and where the restore stands", async () => {
     "The restore is already being applied, so it can no longer be declined. Retry to finish it.",
   );
   expect(screen.queryByRole("button", { name: "Decline restore" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await screen.findByText("File restored");
   expect(f.call.mock.calls.filter(([input]) => input.action === "decline")).toHaveLength(1);
 });
@@ -567,7 +567,7 @@ it.each(["pending", "review"] as const)(
     await openStop();
     fireEvent.click(screen.getByRole("button", { name: "Stop access" }));
     await (step === "pending"
-      ? screen.findByText("dohc could not prepare the restore. Retry in a moment.")
+      ? screen.findByText("dohc could not prepare the restore.")
       : screen.findByRole("button", { name: "Restore file" }));
     fireEvent.click(screen.getByRole("button", { name: "Decline restore" }));
     await screen.findByText("Restore declined");
@@ -606,13 +606,13 @@ it("repeats a pending Decline on Retry", async () => {
   await screen.findByText(DECLINING);
   expect(screen.queryByRole("button", { name: "Decline restore" })).toBeNull();
   const before = f.call.mock.calls.length;
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await screen.findByText("Restore declined");
   expect(f.call.mock.calls.slice(before).map(([input]) => input.action)).toEqual(["decline"]);
   expect(f.error).not.toHaveBeenCalled();
 });
 const DECLINING =
-  "Declining has not finished. Live editing of this file stays stopped until it does. Retry to finish declining.";
+  "Declining has not finished. Live editing of this file stays stopped until it does.";
 
 it("finishes a pending Decline from the reopened dialog", async () => {
   const f = fixture(),
@@ -642,9 +642,9 @@ it("finishes a pending Decline from the reopened dialog", async () => {
   const before = f.call.mock.calls.length;
   render(<OwnerRestoreDialog {...f.props} operationId="restore" />);
   await screen.findByText(
-    "The restore has not finished. Live editing of this file stays stopped until it does. Retry to continue it.",
+    "The restore has not finished. Live editing of this file stays stopped until it does.",
   );
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await screen.findByText("Restore declined");
   expect(f.call.mock.calls.slice(before).map(([input]) => input.action)).toEqual([
     "status",
@@ -679,7 +679,7 @@ it("reports a refused Decline through the shell without a retry", async () => {
   );
   expect(f.error).not.toHaveBeenCalled();
   expect(f.changed).toHaveBeenCalledTimes(1);
-  expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Decline restore" })).toBeNull();
 });
 it("marks the agent the owner's change declared beside the authenticated owner", async () => {
@@ -693,7 +693,7 @@ it("marks the agent the owner's change declared beside the authenticated owner",
   const row = badges[0]!.closest("li")!;
   expect(row.textContent).toContain("Owner");
   expect(row.textContent).toContain("trip-agent-hosted");
-  expect(badges[0]!.getAttribute("aria-label")).toBe("agent");
+  expect(badges[0]!.getAttribute("aria-label")).toBe("Agent");
   expect(row.textContent?.split("Change details")[0]).not.toContain("local-person");
 });
 it("marks a connected agent's change with the plug, and a guest's agent as the guest's", async () => {
@@ -753,11 +753,11 @@ it("marks a connected agent's change with the plug, and a guest's agent as the g
   const badges = screen.getAllByTestId("owner-restore-change-agent-badge");
   const shownName = (badge: HTMLElement) => badge.parentElement!.nextElementSibling!.textContent;
   const connected = badges.filter(
-    (badge) => badge.getAttribute("aria-label") === "connected agent",
+    (badge) => badge.getAttribute("aria-label") === "Connected agent",
   );
   const plugged = connected.find((badge) => shownName(badge) === "Claude")!;
   const unnamed = connected.find((badge) => badge !== plugged)!;
-  const run = badges.find((badge) => badge.getAttribute("aria-label") === "agent")!;
+  const run = badges.find((badge) => badge.getAttribute("aria-label") === "Agent")!;
   fireEvent.focus(plugged);
   expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain(
     "Claude (as reported)",
@@ -857,10 +857,10 @@ it("returns a missing proposal to review without reporting completion", async ()
   fireEvent.click(screen.getByRole("button", { name: "Stop access" }));
   await screen.findByRole("button", { name: "Restore file" });
   fireEvent.click(screen.getByRole("button", { name: "Restore file" }));
-  await screen.findByText("The restore needs a new review. Retry to review it again.");
+  await screen.findByText("The restore needs a new review.");
   expect(screen.queryByText("File restored")).toBeNull();
   expect(f.restored).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await screen.findByRole("button", { name: "Restore file" });
   expect(f.call.mock.calls.filter(([i]) => i.action === "confirm")).toHaveLength(1);
 });
@@ -926,7 +926,7 @@ it("recovers a lost admitted confirmation reply using fresh status", async () =>
   expect(f.restored).not.toHaveBeenCalled();
   expect(f.release).toHaveBeenCalledTimes(1);
   const beforeRetry = f.call.mock.calls.length;
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await screen.findByText("File restored");
   expect(f.call.mock.calls.slice(beforeRetry).map(([input]) => input.action)).toEqual([
     "status",
@@ -980,14 +980,14 @@ it.each([false, true])(
     });
     render(<OwnerRestoreDialog {...f.props} />);
     await screen.findByText(
-      "The restore has not finished. Live editing of this file stays stopped until it does. Retry to continue it.",
+      "The restore has not finished. Live editing of this file stays stopped until it does.",
     );
     expect(screen.getByRole("button", { name: "Decline restore" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     if (failFirst) {
       await screen.findByText("Review unavailable.");
       expect(f.call.mock.calls.some(([input]) => input.action === "confirm")).toBe(false);
-      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     }
     await screen.findByRole("button", { name: "Restore file" });
     // The main action goes last, so Shift+Tab into the dialog reaches it first.
@@ -1026,13 +1026,13 @@ it.each(["relay-admitted", "native-applied", "settled", "resumed"])(
       return original(input);
     });
     const mounted = render(<OwnerRestoreDialog {...f.props} />);
-    await screen.findByRole("button", { name: "Retry" });
+    await screen.findByRole("button", { name: "Try again" });
     mounted.unmount();
     f.call.mockClear();
     render(<OwnerRestoreDialog {...f.props} />);
-    await screen.findByRole("button", { name: "Retry" });
+    await screen.findByRole("button", { name: "Try again" });
     expect(f.props.onBeforeRestore).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await screen.findByText("File restored");
     expect(f.call.mock.calls.map(([input]) => input.action)).toEqual([
       "options",

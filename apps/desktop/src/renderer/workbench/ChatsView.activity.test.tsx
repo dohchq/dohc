@@ -485,7 +485,7 @@ describe("ChatsView live activity refresh", () => {
     await waitFor(() => expect(shareReads).toBe(2));
     act(() => emitWorkspaceActivity());
     await waitFor(() =>
-      expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared"),
+      expect(screen.getByTestId("chats-channel-shared").textContent).toContain("No longer shared"),
     );
 
     await act(async () => {
@@ -494,7 +494,7 @@ describe("ChatsView live activity refresh", () => {
     });
 
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
-    expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared");
+    expect(screen.getByTestId("chats-channel-shared").textContent).toContain("No longer shared");
   });
 
   // The badge drain must not be held by a request that may never return. The
@@ -537,7 +537,7 @@ describe("ChatsView live activity refresh", () => {
     await waitFor(() => expect(screen.getAllByTestId("chats-channel")).toHaveLength(2));
     await waitFor(() =>
       expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
-        "Shared by owner@example.com — read-only",
+        "Shared by owner@example.com · Read-only",
       ),
     );
 
@@ -612,7 +612,7 @@ describe("ChatsView live activity refresh", () => {
 
     act(() => emitWorkspaceActivity());
     await waitFor(() =>
-      expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared"),
+      expect(screen.getByTestId("chats-channel-shared").textContent).toContain("No longer shared"),
     );
 
     await act(async () => {
@@ -620,7 +620,7 @@ describe("ChatsView live activity refresh", () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared");
+    expect(screen.getByTestId("chats-channel-shared").textContent).toContain("No longer shared");
     await user.click(screen.getAllByTestId("chats-channel")[0]);
     expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
@@ -675,7 +675,7 @@ describe("ChatsView live activity refresh", () => {
       "Shared by owner@example.com",
     );
     expect(screen.getByTestId("chats-channel-shared").textContent).not.toContain(
-      "no longer shared",
+      "No longer shared",
     );
 
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({
@@ -684,7 +684,7 @@ describe("ChatsView live activity refresh", () => {
     act(() => emitWorkspaceActivity());
 
     await waitFor(() =>
-      expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared"),
+      expect(screen.getByTestId("chats-channel-shared").textContent).toContain("No longer shared"),
     );
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });

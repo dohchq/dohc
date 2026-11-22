@@ -221,7 +221,7 @@ export function LinkedChatsPanel(props: {
         return;
       } catch (error) {
         if (!current()) return;
-        fail(ipcErrorMessage(error, "Could not load Chats for this file."), error);
+        fail(ipcErrorMessage(error, "dohc could not load Chats for this file."), error);
         return;
       }
     }
@@ -285,7 +285,7 @@ export function LinkedChatsPanel(props: {
         setScrollTarget({ token, focusMessageId });
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not load this chat."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not load this chat."), error);
       } finally {
         if (token === liveToken.current) setMessagesLoading(false);
       }
@@ -403,12 +403,12 @@ export function LinkedChatsPanel(props: {
         } catch (error) {
           if (token !== liveToken.current) return;
           setComposer(trimmed);
-          props.onError(ipcErrorMessage(error, "Could not post that comment."), error);
+          props.onError(ipcErrorMessage(error, "dohc could not post that comment."), error);
         }
         void openThread(thread);
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not comment on this file."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not comment on this file."), error);
       } finally {
         setSending(false);
       }
@@ -455,7 +455,7 @@ export function LinkedChatsPanel(props: {
       listRef.current?.scrollToEnd();
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not send that message."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not send that message."), error);
     } finally {
       // Reset unconditionally: switching threads/files bumps liveToken
       // without resetting `sending`, so a token-gated reset could leave this
@@ -643,7 +643,7 @@ export function LinkedChatsPanel(props: {
           }
         >
           {threads === null || threads.status === "updating" ? (
-            <SkeletonRows rows={2} className="px-2 py-1" label="Loading comments..." />
+            <SkeletonRows rows={2} className="px-2 py-1" label="Loading comments…" />
           ) : threads.status === "unavailable" ? (
             <RetryRow testId="linked-chats-failed" onRetry={() => void refreshThreads()} />
           ) : (

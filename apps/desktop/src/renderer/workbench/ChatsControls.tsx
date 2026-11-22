@@ -26,7 +26,7 @@ export function AgentPresenceHint(props: {
 }) {
   if (props.activity === null) return null;
   const working = props.activity === "working";
-  const text = working ? (props.program ? `Running ${props.program}` : "working") : null;
+  const text = working ? (props.program ? `Running ${props.program}` : "Working") : null;
   return (
     <span
       data-testid={props.testId}
@@ -84,7 +84,7 @@ function overLimitSentences(failure: {
 }): string[] {
   return failure.lanes.map(({ lane, rows }) =>
     lane === "granted"
-      ? `You have ${rows} shares of your groups; the limit is ${failure.limit}.`
+      ? `You have ${rows} shares of your Groups; the limit is ${failure.limit}.`
       : `You have ${rows} shares from other people; the limit is ${failure.limit}.`,
   );
 }
@@ -187,10 +187,10 @@ export function joinedChannelLabel(joined: JoinedSharedChannelRow, ownerRemoved 
   const from = joined.granterEmail ?? "someone else";
   const suffix = joined.ended
     ? ownerRemoved
-      ? " — the owner removed your access"
-      : " — no longer shared"
+      ? " · The owner removed your access"
+      : " · No longer shared"
     : joined.access === "read-only"
-      ? " — read-only"
+      ? " · Read-only"
       : "";
   return `Shared by ${from}${suffix}`;
 }

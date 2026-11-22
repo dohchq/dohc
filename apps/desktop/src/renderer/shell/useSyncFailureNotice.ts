@@ -21,7 +21,7 @@ export function syncFailureNotice(failure: SyncFailure): { title?: string; messa
   if (unreadPermissions) {
     return {
       title: "dohc could not sync this workspace",
-      message: `dohc could not read the permissions of ${unreadPermissions}, so it left the file as it was.\nIn its Properties › Security › Advanced, give your account Read permissions, then choose Try again.`,
+      message: `dohc could not read the permissions of ${unreadPermissions}, so it left the file as it was.\nIn Properties › Security › Advanced, give your account Read permissions.`,
     };
   }
   if (failure.detail.startsWith(COPY_FAILURE)) {

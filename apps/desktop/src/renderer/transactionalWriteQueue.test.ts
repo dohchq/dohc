@@ -916,7 +916,8 @@ describe("the rules of a table open at two revisions", () => {
     b.queue.enqueue(edit(row(1, 2), name, "Alicia"), b.page);
     expect(b.page.statuses.get("1", "name")).toMatchObject({
       state: "refused",
-      reason: "dohc didn't save this change. This Collection is read-only until it is back online.",
+      reason:
+        "dohc did not save this change. This Collection is read-only until it is back online.",
     });
     a.page.sync(old);
     b.queue.enqueue(edit(row(2, 4), name, "Bea"), b.page);

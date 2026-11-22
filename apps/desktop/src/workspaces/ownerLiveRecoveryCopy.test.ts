@@ -462,7 +462,7 @@ const body = (doc: Y.Doc) => doc.getXmlFragment("body");
 const paragraph = (doc: Y.Doc) => (body(doc).get(1) as Y.XmlElement).get(0) as Y.XmlText;
 const task = (doc: Y.Doc) => (body(doc).get(3) as Y.XmlElement).get(0) as Y.XmlElement;
 const LISTED =
-  "***\n\n## Kept edits that aren’t in this copy\n\nThese edits were kept on the computer that made them. A change saved at the same moment removed or replaced the place they were made, so the note above doesn’t have them.\n\n";
+  "***\n\n## Kept edits that aren't in this copy\n\nThese edits were kept on the computer that made them. A change saved at the same moment removed or replaced the place they were made, so the note above doesn't have them.\n\n";
 
 type Edit = (doc: Y.Doc) => void;
 
@@ -479,21 +479,21 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
     (doc: Y.Doc) => doc.getMap("frontmatter").set("status", "mine"),
     (doc: Y.Doc) => doc.getMap("frontmatter").set("status", "theirs"),
     "---\nstatus: theirs\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
-    "Set status to “mine”. The note has “theirs”.\n",
+    'Set status to "mine". The note has "theirs".\n',
   ],
   [
     "a whole number too large for a float, in a field someone else set at the same moment",
     (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740993n),
     (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740995n),
     "---\ncount: 9007199254740995\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
-    "Set count to “9007199254740993”. The note has “9007199254740995”.\n",
+    'Set count to "9007199254740993". The note has "9007199254740995".\n',
   ],
   [
     "a to-do someone else set at the same moment",
     (doc: Y.Doc) => task(doc).setAttribute("checked", true as never),
     (doc: Y.Doc) => task(doc).setAttribute("checked", false as never),
     "# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
-    "Ticked “tick me”. The note has it unticked.\n",
+    'Ticked "tick me". The note has it unticked.\n',
   ],
   [
     "the words a later kept edit left, of text typed into a paragraph someone else deleted",
@@ -531,7 +531,7 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
     },
     (doc: Y.Doc) => body(doc).delete(3, 1),
     "# Plan\n\nStart here.\n\nKeep this.\n",
-    "1 more kept edit, such as an image, can’t be shown as text.\n",
+    "1 more kept edit, such as an image, can't be shown as text.\n",
   ],
 ])("lists %s at the end of the readable copy", async (_case, mine, theirs, note, listed) => {
   const { root, writes } = await workspace();

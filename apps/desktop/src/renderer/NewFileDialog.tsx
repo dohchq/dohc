@@ -77,8 +77,8 @@ export function NewFileDialog(props: {
             New file
           </h2>
           <p id="new-file-help" className="m-0 text-xs text-muted">
-            Name it like a path — any folders you name are created for you. No extension means
-            markdown (.md).
+            Include folders in the path to create them. Files without an extension default to
+            Markdown, .md.
           </p>
         </div>
         <input

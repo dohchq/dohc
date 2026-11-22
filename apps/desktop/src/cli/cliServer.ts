@@ -4507,7 +4507,7 @@ async function dispatchWorkspace(
     case "post": {
       const channel = resolveChannel(request.args.group, channels);
       if (channel.engine.kind === "dm") {
-        throw new CliCommandError("DMs are streams — use 'dohc chat reply <thread>'");
+        throw new CliCommandError("DMs are streams. Use 'dohc chat reply <thread>'.");
       }
       // An agent DM is one conversation; the engine puts the message there.
       if (channel.engine.kind === "agent" && request.args.title) {
@@ -5239,7 +5239,7 @@ export async function handleCliRequestLine(
       cliTransportResponseSchema.parse({
         protocolVersion: CLI_PROTOCOL_VERSION,
         ok: false,
-        error: "dohc: CLI/app version mismatch — restart the app",
+        error: "dohc: CLI/app version mismatch. Restart the app.",
       }),
     )}\n`;
   }

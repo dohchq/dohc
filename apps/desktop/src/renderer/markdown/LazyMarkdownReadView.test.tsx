@@ -82,7 +82,7 @@ describe("LazyMarkdownReadView", () => {
       />,
     );
 
-    expect(screen.getByTestId("markdown-read-loading").textContent).toBe("Loading document...");
+    expect(screen.getByTestId("markdown-read-loading").textContent).toBe("Loading document…");
     expect(onRendered).not.toHaveBeenCalled();
 
     const recoveredModule = await import("./IncrementalMarkdownDocument");

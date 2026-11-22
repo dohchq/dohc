@@ -20,7 +20,7 @@ const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "num
 
 // Two computers can share a name, so dohc does not decide which this is.
 export const SAME_NAME =
-  "Same name as this computer. It may be an earlier installation of dohc here.";
+  "Same name as this computer. It could be an earlier dohc installation here.";
 
 type TakeOverFrom = Pick<ScheduleHostComputer, "kind" | "label" | "thisComputer">;
 type Loaded =
@@ -107,8 +107,8 @@ export function ScheduleHostRow(props: {
       <div className="flex flex-col gap-2">
         <p id={warningId} role="alert" className="m-0 text-[12px] text-ink">
           {from.kind === "server"
-            ? "If this server has not stopped, a run can repeat."
-            : `If ${computerInSentence(from)} is still on, a run can repeat.`}
+            ? "If this server has not stopped yet, a scheduled run could repeat."
+            : `If ${computerInSentence(from)} is still on, a scheduled run could repeat.`}
         </p>
         <div className="flex gap-2">
           <PrimaryButton

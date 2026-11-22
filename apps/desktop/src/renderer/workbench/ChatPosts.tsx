@@ -250,13 +250,13 @@ function AttachmentChip(props: {
   const changeLabel = useCollectionChangeLabel(props.workspaceId, pathHint);
   // A shared view can hold an attachment whose path it may not read: the
   // chip names it only as an attachment and opens nothing.
-  if (!pathHint) return <Ref path="" title="attachment" testId="chats-attachment-chip" />;
+  if (!pathHint) return <Ref path="" title="Attachment" testId="chats-attachment-chip" />;
   // An attachment is named by what it shows: the file and its heading, or
   // the Collection a change file changes, with the Collection's glyph. The
   // tooltip keeps the path.
   const label =
     changeLabel ??
-    `${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${headingText ? `#${headingText}` : ""}`;
+    `${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "Attachment"}${headingText ? `#${headingText}` : ""}`;
   return (
     <Ref
       path={pathHint}
@@ -419,7 +419,7 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
         <span className="grid gap-1">
           <span className="text-[12px] text-muted">Exit code</span>
           <span data-testid="chats-run-exit-code" className="text-[12px] tabular-nums text-ink">
-            {props.run.exitCode ?? "—"}
+            {props.run.exitCode ?? "-"}
           </span>
         </span>
       </span>
@@ -488,7 +488,7 @@ export function BookmarkAction(props: {
             aria-label={props.active ? "Remove chat bookmark" : "Bookmark chat as live file"}
             title={
               props.active
-                ? "Remove bookmark (the Markdown file moves to Archived)"
+                ? "Remove bookmark. The Markdown file moves to Archived."
                 : "Bookmark as a live Markdown file"
             }
             disabled={props.busy}
@@ -593,7 +593,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     setMessageNode,
   } = props;
   if (messagesLoading) {
-    return <SkeletonRows label="Loading..." className="pt-4" />;
+    return <SkeletonRows label="Loading…" className="pt-4" />;
   }
   const openingMessage = messages[0] ?? null;
   if (openingMessage === null) {
@@ -704,7 +704,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             }}
             className="mb-1 w-fit rounded px-1 text-left text-[12px] text-subtle hover:text-ink"
           >
-            ↳ replying to {chatAuthorLabel(parent)}
+            ↳ Replying to {chatAuthorLabel(parent)}
           </button>
         ) : null}
         <AgentColorScope
@@ -936,7 +936,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           }`}
         >
           <p data-testid="chats-thread-eyebrow" className="sr-only">
-            {`${channelLabel} · thread`}
+            {`${channelLabel} · Thread`}
           </p>
           <AgentColorAvatar>
             <ChatAvatar

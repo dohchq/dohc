@@ -373,7 +373,7 @@ it("leaves a queued change unsent, and not failed, while another workspace's uns
   });
   window.mount(WORKSPACE);
   expect((await screen.findByTestId("workspace-open-failed")).textContent).toContain(
-    "A collection change in another workspace has not saved. Retry or discard it to continue.",
+    "A Collection change in another workspace has not saved. Try again or discard it to continue.",
   );
   expect(asked()).toHaveLength(1);
   expect(queue().size).toBe(1);

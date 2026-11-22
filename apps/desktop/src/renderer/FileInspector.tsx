@@ -263,7 +263,7 @@ function TruncatedNotice(props: {
             onClick={() => openExternally(props)}
             className="text-subtle hover:text-ink"
           >
-            Open the full file externally
+            Open full file externally
           </button>
         )}
       </OpenExternallyControl>
@@ -783,7 +783,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
                     : engine.permanentFailureWhileEditing
                       ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
                       : engine.readOnlyWhileEditing
-                        ? "This document became read-only before your edit saved. Copy your edits to keep them."
+                        ? "This file became read-only before your edits saved. Copy your edits to keep them."
                         : undefined
       }
       replacedDraftIds={engine.replacedDraftIds}
@@ -827,7 +827,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
           icon={Layers}
           title={
             <>
-              This version doesn&apos;t have this file.{" "}
+              This version does not have this file.{" "}
               {pendingDraft ? (
                 <span data-testid="file-not-in-version-discarded">
                   dohc discarded your unsaved edit.{" "}
@@ -1127,7 +1127,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
-          <EmptyState data-testid="view-pdf" title="dohc can't preview PDF files.">
+          <EmptyState data-testid="view-pdf" title="dohc cannot preview PDF files.">
             <OpenExternallyButton
               workspaceId={props.workspaceId}
               path={props.path}
@@ -1169,7 +1169,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
-          <EmptyState data-testid="view-binary" title="dohc can't preview this type of file.">
+          <EmptyState data-testid="view-binary" title="dohc cannot preview this type of file.">
             <OpenExternallyButton
               workspaceId={props.workspaceId}
               path={props.path}

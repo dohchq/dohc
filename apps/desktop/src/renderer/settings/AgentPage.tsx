@@ -227,7 +227,7 @@ export function checkStatus(props: {
   return props.checking ? (
     <span className="inline-flex items-center gap-1 text-muted">
       <LoaderCircle size={12} aria-hidden className="animate-spin" />
-      Checking
+      Checking…
     </span>
   ) : props.check?.status === "replied" ? (
     <span className="inline-flex items-center gap-1 text-success">
@@ -237,7 +237,7 @@ export function checkStatus(props: {
   ) : props.check?.status === "failed" ? (
     <span className="inline-flex items-center gap-1 text-danger">
       <CircleAlert size={12} aria-hidden />
-      Didn't reply.
+      Did not reply
     </span>
   ) : (
     <span className="text-muted">Not checked</span>
@@ -641,8 +641,8 @@ function ThreadAgentBoxes(props: {
                   title={`${
                     mode === null
                       ? ""
-                      : `dohc can read and message your threads that run with ${mode}, or less. `
-                  }The sign-in lasts 30 days. After that, allow dohc again here.`}
+                      : `dohc can read and message threads running with ${mode} or lower access. `
+                  }This sign-in lasts 30 days. Allow dohc again here when it expires.`}
                 >
                   {`Allowed ${mode === null ? "" : `with ${mode} `}until ${t3CodeAllowedUntil(state.signedInUntilMs!)}`}
                 </span>

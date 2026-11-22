@@ -147,8 +147,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
     }
     if (required && !hasDefault)
       throw new Error("A new required field needs a default for existing records.");
-    if (unique && hasDefault)
-      throw new Error("A new unique field cannot give every record the same default.");
+    if (unique && hasDefault) throw new Error("A unique field cannot have a default value.");
     return DatasetSchemaChange.parse({ kind, tableId: props.tableId, field });
   }
   function prepare(button?: string) {
@@ -350,8 +349,8 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
               Required
             </label>
             <p className="m-0 text-[12px] text-muted">
-              Review existing values before applying this change. Fix conflicting records first.
-              Other conversions need a source change.
+              Review existing values and fix conflicting records before applying. Other type changes
+              must be edited in source.
             </p>
           </>
         )}
@@ -448,8 +447,8 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
               </label>
             )}
             <p className="m-0 text-[12px] text-muted">
-              New fields do not expand shared access. Custom rules stay unchanged; edit their source
-              to use a new field.
+              New fields do not change shared access. Edit custom rules in source to use a new
+              field.
             </p>
           </>
         )}
@@ -463,11 +462,11 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
                 props.buttonStates?.get(field.name)?.kind === "no-automation" ? (
                   <SecondaryButton
                     type="button"
-                    aria-label={`Choose what it does: ${field.name}`}
+                    aria-label={`Choose action: ${field.name}`}
                     disabled={pending}
                     onClick={() => props.onChooseButton?.(field.name)}
                   >
-                    Choose what it does
+                    Choose action
                   </SecondaryButton>
                 ) : null}
               </div>

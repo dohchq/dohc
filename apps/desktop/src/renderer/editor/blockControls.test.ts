@@ -173,7 +173,7 @@ describe("blockControls menu keyboard deletion", () => {
       }),
     );
 
-    fireEvent.keyDown(screen.getByRole("menu", { name: "block actions" }), {
+    fireEvent.keyDown(screen.getByRole("menu", { name: "Block actions" }), {
       key,
     });
     expect(onSelect).toHaveBeenCalledWith(
@@ -185,7 +185,7 @@ describe("blockControls menu keyboard deletion", () => {
 describe("BlockMenu on the Menu part's recipe and rule", () => {
   function openMenu(onSelect = vi.fn(), onClose = vi.fn()) {
     const handle = document.createElement("button");
-    handle.setAttribute("aria-label", "block actions");
+    handle.setAttribute("aria-label", "Block actions");
     document.body.append(handle);
     const outside = document.createElement("button");
     document.body.append(outside);
@@ -205,7 +205,7 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
         onClose,
       }),
     );
-    const menu = screen.getByRole("menu", { name: "block actions" });
+    const menu = screen.getByRole("menu", { name: "Block actions" });
     const rows = screen.getAllByRole("menuitem");
     return { handle, outside, menu, rows, onSelect, onClose };
   }
@@ -1068,7 +1068,7 @@ describe("TurnIntoMenu dropdown rendering", () => {
     );
 
     fireEvent.click(screen.getByTitle("Turn into"));
-    const listbox = screen.getByRole("listbox", { name: "turn into" });
+    const listbox = screen.getByRole("listbox", { name: "Turn into" });
     // jsdom rects are all-zero -> plenty of room below at the default
     // viewport, so the dropdown gets its full height, uncapped by the bar.
     expect(listbox.getAttribute("data-placement")).toBe("below");
@@ -1086,7 +1086,7 @@ describe("TurnIntoMenu dropdown rendering", () => {
     );
 
     fireEvent.click(screen.getByTitle("Turn into"));
-    const listbox = screen.getByRole("listbox", { name: "turn into" });
+    const listbox = screen.getByRole("listbox", { name: "Turn into" });
     fireEvent.click(within(listbox).getByText("Heading 1"));
 
     expect(screen.queryByRole("listbox")).toBeNull();
@@ -1106,7 +1106,7 @@ describe("TurnIntoMenu dropdown rendering", () => {
     editor.view.setProps({ handleScrollToSelection: () => true });
 
     fireEvent.click(screen.getByTitle("Turn into"));
-    const listbox = screen.getByRole("listbox", { name: "turn into" });
+    const listbox = screen.getByRole("listbox", { name: "Turn into" });
     expect(editor.view.hasFocus()).toBe(false);
     fireEvent.keyDown(listbox, { key: "Escape" });
     expect(screen.queryByRole("listbox")).toBeNull();
@@ -1127,7 +1127,7 @@ describe("TurnIntoMenu on the Menu part's recipe", () => {
         }),
       );
       fireEvent.click(screen.getByTitle("Turn into"));
-      const listbox = screen.getByRole("listbox", { name: "turn into" });
+      const listbox = screen.getByRole("listbox", { name: "Turn into" });
       const options = within(listbox).getAllByRole("option");
       const text = options[0]!;
       expect(document.activeElement).toBe(listbox);

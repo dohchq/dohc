@@ -1002,7 +1002,7 @@ if (waitlist) {
       return "Too many signups from this network. Try again in a few minutes.";
     const result = await response.json().catch(() => null);
     if (response.status === 200 && result?.success === true) return null;
-    return "Couldn't join the waitlist. Check the email address and try again.";
+    return "Could not join the waitlist. Check the email address and try again.";
   };
 
   waitlist.addEventListener("submit", async (event) => {
@@ -1028,7 +1028,7 @@ if (waitlist) {
       if (!message && focused) status.focus();
     } catch {
       waitlist.dataset.state = "error";
-      status.textContent = "Couldn't reach the waitlist. Check your connection and try again.";
+      status.textContent = "Could not reach the waitlist. Check your connection and try again.";
     } finally {
       pending = false;
       submit.removeAttribute("aria-disabled");
@@ -1066,12 +1066,12 @@ if (readers) {
     chat: {
       name: "#launch",
       view: `<div class="reader-msg">${WHO("S")}<span><b>Sam</b> sandbox is on track for the 19th, so the 24th is fine by me.</span></div><div class="reader-msg">${WHO("M")}<span><b>Maya</b> <span class="chat-mention">@My Agent</span> can you add the three gates as tasks?</span></div><div class="reader-msg">${AGENT_WHO}<span><b>My Agent</b> done. three tasks in tasks/, due the 21st.</span></div>`,
-      foot: "Your agent can read the chat as a file, and it replies with dohc's chat tools.",
+      foot: "Your agent reads the chat as a file and replies through dohc's chat tools.",
     },
     app: {
       name: "Split",
       view: '<div class="reader-app"><div class="reader-app-row"><span>Maya</span><span>owes ¥2,140</span></div><div class="reader-app-row"><span>Sam</span><span class="is-clear">settled</span></div><div class="reader-app-row"><span>you</span><span class="is-clear">paid</span></div></div>',
-      foot: "The app's code lives in the folder. It reads only the data you allow.",
+      foot: "The app's source lives in the folder. It reads only the data you grant.",
     },
     history: {
       name: "History",

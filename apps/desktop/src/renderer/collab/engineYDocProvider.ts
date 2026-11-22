@@ -156,9 +156,7 @@ export class EngineYDocUpdateTooLargeError extends Error {
     readonly limitBytes: number = ENGINE_YDOC_UPDATE_MAX_BYTES,
   ) {
     super(
-      "dohc could not save this edit. ENGINE_YDOC_UPDATE_MAX_BYTES is " +
-        `${limitBytes} bytes; the update is ${observedBytes} bytes. ` +
-        "Copy the set-aside edit below.",
+      `dohc could not save this edit. The update is ${observedBytes} bytes, over the ${limitBytes}-byte limit. Copy the set-aside edit below.`,
     );
     this.name = "EngineYDocUpdateTooLargeError";
   }
@@ -166,7 +164,7 @@ export class EngineYDocUpdateTooLargeError extends Error {
 
 export class EngineYDocDeliveryRefusedError extends Error {
   constructor(readonly reason: string) {
-    super(`The engine refused the Y.Doc operation: ${reason}.`);
+    super(`dohc could not apply this edit: ${reason}.`);
     this.name = "EngineYDocDeliveryRefusedError";
   }
 }
@@ -177,7 +175,7 @@ export class EngineYDocPendingLimitError extends Error {
     readonly observedRecords: number,
   ) {
     super(
-      "dohc could not save this edit while earlier edits await delivery. " +
+      "dohc could not save this edit while earlier edits are still saving. " +
         "Copy the set-aside edit below.",
     );
     this.name = "EngineYDocPendingLimitError";

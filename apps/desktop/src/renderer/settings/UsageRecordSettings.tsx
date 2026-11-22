@@ -33,8 +33,8 @@ const SWITCH_LABEL = "Keep a usage record";
 // open needs the person to fix it.
 const unreadableHint = (code: string) =>
   code === INVALID_USAGE_RECORD
-    ? "This version of dohc does not recognize its contents. Start a new record, and dohc keeps this file in the same folder."
-    : "Fix the file or its permissions at the path below, then try again.";
+    ? "This version of dohc does not recognize this file. Starting a new record keeps the old file in the same folder."
+    : "Fix the file or its permissions at the path below.";
 
 function total(row: UsageRecordRow): number {
   return DOORS.reduce((sum, { door }) => sum + row.doors[door].count, 0);
@@ -302,7 +302,7 @@ export function UsageRecordCard(props: {
             data-testid="usage-record-empty"
             title={
               view.enabled
-                ? "Nothing counted yet. dohc adds a count when you finish an action it counts, such as creating a version."
+                ? "Nothing counted yet. Counts appear here as you finish actions in dohc, such as creating a version."
                 : "No counts saved. Turn the record on to count what you do in dohc."
             }
           />
@@ -415,7 +415,7 @@ export function UsageRecordClearConfirm(props: {
         </ConfirmEscape>
       }
     >
-      <p>This deletes every saved count on this computer. dohc cannot restore them.</p>
+      <p>This deletes every saved count on this computer. This cannot be undone.</p>
     </Dialog>
   );
 }

@@ -44,7 +44,7 @@ const ENDED_SHARE: Workspace = {
   shareView: { ...EDIT_SHARE.shareView!, ended: true },
 };
 const ENDED_SENTENCE =
-  "This share was ended by granter@dohc.test. Your copy stays readable but won't update anymore.";
+  "This share was ended by granter@dohc.test. Your copy stays readable but will not update anymore.";
 
 function collectionBridge() {
   const bridge = makeShareBridge(
@@ -1186,7 +1186,7 @@ describe("ended Edit Collection shares", () => {
       await waitFor(() => expect(screen.queryByTestId("collection-new-record")).toBeNull());
       const drafts = screen.getByTestId("collection-record-drafts");
       expect(drafts.textContent).toContain(
-        "This draft cannot be sent with the current share access.",
+        "Your share access does not allow sending this draft. It is saved on this computer.",
       );
       expect(within(drafts).queryByRole("button", { name: "Try again" })).toBeNull();
       fireEvent.click(screen.getByTestId("notice-center-toggle"));

@@ -19,7 +19,7 @@ import type { AgentSetupSummary } from "./ChatsView";
 const STATES: Record<AgentOfferState, { words: string | null; hideFolder?: string }> = {
   runs: { words: "Runs when you send", hideFolder: "@max-[15rem]:hidden" },
   working: { words: "Runs after the current run", hideFolder: "@max-[17rem]:hidden" },
-  paused: { words: "Replies paused · runs after Resume", hideFolder: "@max-[21rem]:hidden" },
+  paused: { words: "Replies paused · Runs after Resume", hideFolder: "@max-[21rem]:hidden" },
   unknown: { words: null },
 };
 

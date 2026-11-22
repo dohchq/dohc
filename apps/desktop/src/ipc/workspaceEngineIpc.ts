@@ -147,7 +147,7 @@ export function createWorkspaceEngineIpc<
   ): Promise<Result | null>;
   requireEngineCapture(
     workspaceId: string,
-    feature: "Engine history",
+    feature: "History",
   ): Promise<{
     capture: Pick<
       WorkspaceEngineCapture,
@@ -618,7 +618,7 @@ export function createWorkspaceEngineIpc<
     ): Promise<Result> {
       const { entry, shared, assertCurrent, presentations } = historyIdentity(operation);
       if (!shared) {
-        const { capture } = await requireEngineCapture(entry.workspaceId, "Engine history");
+        const { capture } = await requireEngineCapture(entry.workspaceId, "History");
         assertCurrent();
         return read(capture, entry.rootPath, await presentations(), assertCurrent);
       }
@@ -668,7 +668,7 @@ export function createWorkspaceEngineIpc<
                 }),
                 workspace.workspaceId,
               )
-            : (await requireEngineCapture(workspace.workspaceId, "Engine history")).capture;
+            : (await requireEngineCapture(workspace.workspaceId, "History")).capture;
           assertCurrent();
           const presentations = await identity.presentations();
           let resolved: Awaited<ReturnType<typeof dependencies.historyCollections>> | undefined;
@@ -726,7 +726,7 @@ export function createWorkspaceEngineIpc<
           assertCurrent();
           if (policy.errors.length) throw new Error("History can't read this folder's settings.");
           const admitted = historyPathAdmission(policy);
-          const { capture } = await requireEngineCapture(input.workspaceId, "Engine history");
+          const { capture } = await requireEngineCapture(input.workspaceId, "History");
           assertCurrent();
           const { versions } = await capture.listVersions();
           assertCurrent();
@@ -864,7 +864,7 @@ export function createWorkspaceEngineIpc<
       workspaceHandler(async (event, payload) => {
         const input = RestoreEngineMomentFilePayload.parse(payload);
         const person = await localPerson();
-        const { capture } = await requireEngineCapture(input.workspaceId, "Engine history");
+        const { capture } = await requireEngineCapture(input.workspaceId, "History");
         const result = await capture.restoreFileToBeforeMoment(input.momentId, person);
         notifyRenderer({ workspaceId: input.workspaceId });
         return RestoreEngineMomentFileResult.parse(result);
@@ -945,7 +945,7 @@ export function createWorkspaceEngineIpc<
               assertWritableWorkspace(operation.workspace);
               const { capture } = await requireEngineCapture(
                 operation.workspace.workspaceId,
-                "Engine history",
+                "History",
               );
               return { kept: await capture.keepOutsideChange(input.path) };
             },
@@ -962,7 +962,7 @@ export function createWorkspaceEngineIpc<
               assertWritableWorkspace(operation.workspace);
               const { capture } = await requireEngineCapture(
                 operation.workspace.workspaceId,
-                "Engine history",
+                "History",
               );
               const retry = capture.retryHistoryCapture();
               // Observe rejection while the workspace operation is still completing.

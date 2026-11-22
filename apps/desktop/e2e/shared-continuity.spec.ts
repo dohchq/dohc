@@ -1455,7 +1455,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         const notice = page.getByTestId("orphaned-draft-notice");
         await expect(notice).toHaveCount(1);
         await expect(notice).toContainText(
-          "This document became read-only. Copy your edits to keep them.",
+          "This file became read-only before your edits saved. Copy your edits to keep them.",
         );
         await expect
           .poll(

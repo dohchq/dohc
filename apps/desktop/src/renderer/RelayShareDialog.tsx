@@ -599,6 +599,7 @@ function ShareSetup(props: {
             ) : (
               <span className="font-medium">{serverName(server)}</span>
             )}
+            .
           </p>
           <p className="m-0 text-muted">Others may have access.</p>
         </SetupBand>

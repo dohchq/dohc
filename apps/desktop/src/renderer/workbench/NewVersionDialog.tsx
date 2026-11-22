@@ -28,7 +28,7 @@ const megabytes = (bytes: number) => `${bytes / (1024 * 1024)} MB`;
 
 // What a version leaves alone. The sizes are the engine's capture caps:
 // larger files stay as they are on disk.
-export const SAME_IN_EVERY_VERSION = `Chats are the same in every version. Files over ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)} (text over ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)}) aren't copied, so changing one here changes it in Main too.`;
+export const SAME_IN_EVERY_VERSION = `Chats are the same in every version. Files over ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)}, or text over ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)}, are not copied, so changing one here changes it in Main too.`;
 
 type CardProps = {
   // The version you're in, which the new one starts from.
@@ -149,13 +149,15 @@ export function NewVersionCard(
           {props.saveFirst ? (
             <Fact icon={PenLine}>dohc saves your changes in {startName} first.</Fact>
           ) : null}
-          <Fact icon={ArrowLeftRight}>dohc switches you to it. Your edits go there.</Fact>
+          <Fact icon={ArrowLeftRight}>
+            dohc switches to the new version, and your edits go there.
+          </Fact>
           <Fact icon={Lock}>
-            {startName} stays as it is{fromMain ? " until you merge" : ""}.
+            Changes leave {startName} untouched{fromMain ? " until you merge" : ""}.
           </Fact>
           {fromMain ? null : (
             <Fact icon={CircleAlert} tone="warning" testId="version-new-no-merge">
-              It can't merge into Main, because it starts from {startName}.
+              It cannot merge into Main because it starts from {startName}.
             </Fact>
           )}
           <Fact icon={Info} testId="version-new-same">

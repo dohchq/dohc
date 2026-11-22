@@ -510,7 +510,7 @@ const renameRepro = {
 } as const;
 const reproErrorText = (error: unknown) =>
   error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-const ownedRenameRefusal = `dohc can't move "${renameRepro.oldPath}" while it has live editing on
+const ownedRenameRefusal = `dohc cannot move "${renameRepro.oldPath}" while it has live editing on
 In Live documents, stop live editing for this page, then move it again.`;
 
 async function runRenameRepro(
@@ -1630,7 +1630,7 @@ type DeleteReproCase =
   | "file-manager-capture-stop";
 const ownedDeleteRefusal = (
   action: "delete" | "restore",
-) => `LivePageOwnedError: dohc can't ${action} "${renameRepro.oldPath}" while it has live editing on
+) => `LivePageOwnedError: dohc cannot ${action} "${renameRepro.oldPath}" while it has live editing on
 In Live documents, stop live editing for this page, then ${action} it again.`;
 
 async function runDeleteRepro(

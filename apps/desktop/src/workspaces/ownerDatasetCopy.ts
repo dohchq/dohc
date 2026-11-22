@@ -222,7 +222,9 @@ export async function createOwnerDatasetCopy(
   // The server that holds this Collection, which it needs to change.
   const host = new URL(options.origin).host;
   const unreachable = () =>
-    new CollectionServerUnreachableError(`This Collection needs ${host}, which dohc can't reach.`);
+    new CollectionServerUnreachableError(
+      `dohc could not reach ${host} for this Collection. Check your connection, then try again.`,
+    );
   const refused = () =>
     signedOut ? signedOutChange() : notUpdated() ? copyNotUpdated() : offline(host);
   const markerPath = join(options.directory, "archived.json");

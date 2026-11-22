@@ -302,7 +302,9 @@ export async function dismissOrphanedDraft(
           current.draft.recovery?.objectId !== recovery.objectId ||
           current.draft.recovery.updateBase64 !== recovery.updateBase64
         ) {
-          throw new Error("This draft changed while dohc dismissed it. Review it and try again.");
+          throw new Error(
+            "This draft changed while dohc was dismissing it. Review it and try again.",
+          );
         }
         return current;
       };

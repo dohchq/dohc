@@ -429,7 +429,7 @@ describe("engine markdown source view", () => {
     const notices = screen.getAllByTestId("orphaned-draft-notice");
     expect(notices.map((notice) => notice.querySelector("span")?.textContent)).toEqual([
       "This document reopened before your last edit saved. Copy your edits to keep them.",
-      "This document became read-only. Copy your edits to keep them.",
+      "This file became read-only before your edits saved. Copy your edits to keep them.",
     ]);
     await user.click(within(notices[1]!).getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>

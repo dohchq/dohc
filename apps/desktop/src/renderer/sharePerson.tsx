@@ -273,22 +273,22 @@ function reportAccessChangeFailure(change: {
 export const invitationEmailNoticeIdentity = (grantId: string) =>
   `share-invitation-email:${grantId}`;
 
-const SENDING_INVITATION = "Sending the email…";
+const SENDING_INVITATION = "Sending email…";
 
 function invitationResendWords(answer: ResendRelayShareInvitationResult): string {
   switch (answer.invitationEmail) {
     case "sent":
-      return "Email invite sent.";
+      return "Email invitation sent.";
     case "unavailable":
-      return "This server sends no email.";
+      return "This server does not send email.";
     case "limit": {
       const { sent, limit, windowHours } = answer.invitationEmailLimit;
-      return `No email sent: ${sent} of ${limit} invitation emails used in the last ${windowHours} hours.`;
+      return `No email sent: ${sent} of ${limit} invitation emails used in the last ${windowHours} ${windowHours === 1 ? "hour" : "hours"}.`;
     }
     case "recent":
-      return "Tried a moment ago. Try again in a minute.";
+      return "Sent recently. Wait a minute before trying again.";
     case "failed":
-      return "The email could not be sent.";
+      return "dohc could not send the email.";
   }
 }
 

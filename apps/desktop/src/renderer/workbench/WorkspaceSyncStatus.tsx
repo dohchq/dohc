@@ -9,7 +9,7 @@ const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
   conflict: "Conflict",
   "sync-failed": "Sync failed",
   "not-connected": "Connect server to sync",
-  "account-unconfirmed": "Couldn't confirm account",
+  "account-unconfirmed": "Could not confirm account",
   "sign-in-expired": "Sign in again to sync",
   // The update the title bar names replaces it.
   "update-required": "Sync stopped",
@@ -19,7 +19,7 @@ const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
 // enough.
 const SYNC_DESCRIPTION: Partial<Record<SyncStatusResult["state"], string>> = {
   "not-connected": "Not syncing. Connect your server to sync this workspace.",
-  "account-unconfirmed": "Not syncing. dohc couldn't confirm this workspace's account.",
+  "account-unconfirmed": "Not syncing. dohc could not confirm this workspace's account.",
   "sign-in-expired": "Not syncing. Your sign-in expired.",
 };
 
@@ -105,8 +105,8 @@ function liveDeliveryLabel(
     reason === "live-history-over-budget" ||
     reason === "live-start-failing"
   )
-    return "Live editing can't start";
-  if (reason === "conflict-parent-withheld") return "Live editing can't resume";
+    return "Live editing cannot start";
+  if (reason === "conflict-parent-withheld") return "Live editing cannot resume";
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 
@@ -149,7 +149,7 @@ function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: numbe
   if (failedSaves === 0 || syncStatus?.updateRequired) return null;
   if (syncStatus?.state === "conflict") return null;
   if (syncStatus?.state === "sync-failed" && !syncWaitsOnBusyServer(syncStatus)) return null;
-  return `Couldn't save ${failedSaves} ${failedSaves === 1 ? "file" : "files"}`;
+  return `Could not save ${failedSaves} ${failedSaves === 1 ? "file" : "files"}`;
 }
 
 // The workspace's save and sync state. An editor's own edits in flight show
@@ -186,7 +186,7 @@ export function WorkspaceSyncStatus({
           : null;
   const label = stateLabel
     ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
-    : "Checking status";
+    : "Checking status…";
   const saveFailed = saveFailedLabel(syncStatus, failedSaves);
   const shownLabel =
     saveFailed ??

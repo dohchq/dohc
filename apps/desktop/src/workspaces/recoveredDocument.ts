@@ -215,7 +215,7 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
 const shown = (value: unknown) =>
   value === undefined || value === null
     ? null
-    : `“${typeof value === "string" || typeof value === "bigint" ? value : json(value)}”`;
+    : `"${typeof value === "string" || typeof value === "bigint" ? value : json(value)}"`;
 
 function quoteOf(text: string): string {
   const line = text.replace(/\s+/gu, " ").trim();
@@ -257,7 +257,7 @@ function entry(edit: Exclude<NotInNote, { kind: "other" }>): JSONContent[] {
               : `Set ${edit.name} to ${shown(edit.value) ?? "nothing"} on a ${edit.nodeName} that was deleted.`,
           ),
         ];
-      const block = edit.block === "" ? `a ${edit.nodeName}` : `“${quoteOf(edit.block)}”`;
+      const block = edit.block === "" ? `a ${edit.nodeName}` : `"${quoteOf(edit.block)}"`;
       if (task)
         return [
           paragraph(
@@ -282,10 +282,10 @@ function notInNoteSection(edits: readonly NotInNote[]): string {
     {
       type: "heading",
       attrs: { level: 2 },
-      content: [{ type: "text", text: "Kept edits that aren’t in this copy" }],
+      content: [{ type: "text", text: "Kept edits that aren't in this copy" }],
     },
     paragraph(
-      "These edits were kept on the computer that made them. A change saved at the same moment removed or replaced the place they were made, so the note above doesn’t have them.",
+      "These edits were kept on the computer that made them. A change saved at the same moment removed or replaced the place they were made, so the note above doesn't have them.",
     ),
     ...edits.flatMap((edit) => (edit.kind === "other" ? [] : entry(edit))),
     ...(others === 0
@@ -293,8 +293,8 @@ function notInNoteSection(edits: readonly NotInNote[]): string {
       : [
           paragraph(
             others === 1
-              ? "1 more kept edit, such as an image, can’t be shown as text."
-              : `${others} more kept edits, such as images, can’t be shown as text.`,
+              ? "1 more kept edit, such as an image, can't be shown as text."
+              : `${others} more kept edits, such as images, can't be shown as text.`,
           ),
         ]),
   ];

@@ -312,7 +312,7 @@ export function registerSharedViewsIpcHandlers<
       throw error;
     });
     if (existingEntries.length > 0) {
-      throw new Error("Choose an empty folder — the shared files will be placed inside it.");
+      throw new Error("Choose an empty folder. The shared files will be placed inside it.");
     }
     if (confirmNewWorkspaceFolder && !(await confirmNewWorkspaceFolder(rootPath, context?.event))) {
       throw cloudSyncFolderCancelledError();

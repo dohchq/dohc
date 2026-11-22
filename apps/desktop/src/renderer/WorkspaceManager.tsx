@@ -463,7 +463,7 @@ export function WorkspaceManager(props: {
           <RouteButton
             icon={FolderOpen}
             label="Open folder"
-            detail="Use a folder of files you already have."
+            detail="Open a folder you already have."
             onClick={() => void openExisting()}
           />
           <RouteButton
@@ -476,7 +476,7 @@ export function WorkspaceManager(props: {
           <RouteButton
             icon={Laptop}
             label="Join a synced workspace"
-            detail="Bring over a workspace you sync through your server."
+            detail="Open a workspace synced to your server."
             testId="first-run-join-synced"
             onClick={() => setJoining(true)}
           />

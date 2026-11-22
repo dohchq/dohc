@@ -165,7 +165,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     id: "bulleted-list",
     section: "Lists",
     label: "Bulleted list",
-    hint: "Start a simple list",
+    hint: "Start a bulleted list",
     icon: List,
     aliases: ["bullet", "bulleted", "list", "ul"],
   },
@@ -181,7 +181,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     id: "task-list",
     section: "Lists",
     label: "Todo list",
-    hint: "Track checkable work",
+    hint: "Track tasks with checkboxes",
     icon: ListTodo,
     aliases: ["todo", "task", "checklist", "checkbox"],
   },
@@ -189,7 +189,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     id: "quote",
     section: "Blocks",
     label: "Quote",
-    hint: "Call out a thought",
+    hint: "Insert a block quote",
     icon: Quote,
     aliases: ["blockquote", "quote"],
   },
@@ -205,7 +205,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     id: "toggle",
     section: "Blocks",
     label: "Toggle",
-    hint: "Collapsible callout",
+    hint: "Collapsible section",
     icon: ChevronRight,
     aliases: ["toggle", "fold", "collapse", "details", "accordion"],
   },
@@ -221,7 +221,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     id: "table",
     section: "Blocks",
     label: "Table",
-    hint: "Insert a simple grid",
+    hint: "Insert rows and columns",
     icon: Table,
     aliases: ["table", "grid", "rows", "columns"],
   },
@@ -253,7 +253,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     id: "image",
     section: "Media & links",
     label: "Image",
-    hint: "Upload a picture",
+    hint: "Insert an image",
     icon: Image,
     aliases: ["image", "img", "picture", "photo", "upload"],
   },
@@ -798,7 +798,7 @@ export function SlashCommandMenu({
         ...menuEnterFrom(state.placement),
       }}
       role="listbox"
-      aria-label="slash commands"
+      aria-label="Slash commands"
       onMouseDown={(event) => event.preventDefault()}
     >
       {items.length ? (
@@ -822,7 +822,7 @@ export function SlashCommandMenu({
           items.map((item, index) => renderOption(item, index))
         )
       ) : (
-        <div className={MENU_EMPTY}>No commands</div>
+        <div className={MENU_EMPTY}>No matching commands.</div>
       )}
     </div>
   );

@@ -31,7 +31,7 @@ function whyNoEmail(
 ): string {
   const limit = result.invitationEmailLimit;
   if (result.invitationEmail === "limit" && limit)
-    return `No email sent: ${limit.sent} of ${limit.limit} invitation emails used in the last ${limit.windowHours} hours.`;
+    return `No email sent: ${limit.sent} of ${limit.limit} invitation emails used in the last ${limit.windowHours} ${limit.windowHours === 1 ? "hour" : "hours"}.`;
   if (result.invitationEmail === "failed") return "dohc could not send the email.";
   return "Copy the invitation and send it to them.";
 }
@@ -210,7 +210,7 @@ export function EmailShareForm(props: {
           {invited ? (
             invited.result.invitationEmail === "sent" ? (
               <>
-                Email invite sent to{" "}
+                Email invitation sent to{" "}
                 <span className="break-words text-ink">{invited.result.recipientEmail}</span>.
               </>
             ) : (

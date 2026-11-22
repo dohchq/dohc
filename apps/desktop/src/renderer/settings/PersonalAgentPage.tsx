@@ -65,7 +65,7 @@ const REACH_SHOWN = {
 // What each level lets the agent do, in the sign-in screen's words.
 const REACH_MEANINGS =
   "View reads files and chats. Comment also posts in chats and Comments. " +
-  "Edit also changes Collections, but no other files.";
+  "Edit also changes Collections, not other files.";
 
 /** One personal agent and the server account that holds it. */
 export type PersonalEntry = {
@@ -184,7 +184,7 @@ export function PersonalReachSheet(props: {
       props.account,
       agent,
       { kind: "reach", reach },
-      "dohc could not save the reach.",
+      "dohc could not save this agent's reach.",
     );
     if (!open.current) {
       if (!result.ok) props.onLateFailure(result.error);

@@ -252,7 +252,7 @@ it("keeps a label-only review short and does not demand a destructive-change con
   await screen.findByText("People · Full name");
   expect(screen.queryByRole("checkbox", { name: /reviewed this change/ })).toBeNull();
   expect(screen.queryByText("Show migration SQL")).toBeNull();
-  expect(screen.getByText(/Existing shared apps keep working/)).toBeTruthy();
+  expect(screen.getByText(/Shared apps and access stay unchanged/)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Approve change" }));
   await waitFor(() => expect(props.onApprove).toHaveBeenCalledOnce());
 });
@@ -292,7 +292,7 @@ it("adds an action as a button, and after approval opens what runs it; a button 
       ["Archive", { kind: "no-automation", reason: "No automation uses this button." }],
     ]),
   });
-  fireEvent.click(screen.getByRole("button", { name: "Choose what it does: Archive" }));
+  fireEvent.click(screen.getByRole("button", { name: "Choose action: Archive" }));
   expect(onChooseButton).toHaveBeenCalledWith("Archive");
   fireEvent.click(screen.getByRole("button", { name: "Add as button: Welcome" }));
   await waitFor(() =>

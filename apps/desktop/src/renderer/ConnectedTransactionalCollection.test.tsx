@@ -535,7 +535,7 @@ it("reports an unknown action result in the open dialog without a toast or Notic
   fireEvent.click(await screen.findByRole("button", { name: "Draw winner" }));
   fireEvent.click(screen.getByRole("button", { name: "Run action" }));
   await screen.findByText("Action not confirmed");
-  expect(screen.getByText(/may have changed records/)).toBeTruthy();
+  expect(screen.getByText(/see if anything changed/)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   expect(onError).not.toHaveBeenCalled();
 });
@@ -827,7 +827,7 @@ it("opens wrapped history through the real dialog and reverses the saved edit", 
   fireEvent.click(await history.findByText("edit", { exact: true }));
   expect(history.getByText('"Original name"')).toBeTruthy();
   fireEvent.click(history.getByRole("button", { name: "Undo edit" }));
-  await history.findByText("No saved operations on this page. Refresh to check for changes.");
+  await history.findByText("No saved actions on this page. Refresh to check for changes.");
   expect(backend.dataset).toHaveBeenCalledWith({
     action: "invoke",
     workspaceId: "workspace-a",
@@ -1270,7 +1270,7 @@ describe("a quiet read beside one the page started", () => {
     const row = "collection-open:data/dataset.json";
     await waitFor(() =>
       expect(onError).toHaveBeenCalledWith(
-        "Could not open this Collection.",
+        "dohc could not open this Collection.",
         expect.anything(),
         expect.any(Function),
         row,
@@ -1492,7 +1492,7 @@ it("loads owner pending responses and requires confirmation before clearing a sa
   fireEvent.click(
     within(screen.getByRole("alertdialog")).getByRole("button", { name: "Clear retry" }),
   );
-  await screen.findByText("No pending responses. Refresh to check for changes.");
+  await screen.findByText("No pending responses.");
   expect(backend.dataset).toHaveBeenCalledWith({
     action: "pendingAttempts",
     workspaceId: "workspace-a",
@@ -1645,7 +1645,7 @@ it("cancels an unconfirmed response only after owner acknowledgement and reports
   fireEvent.click(
     within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel response" }),
   );
-  await screen.findByText("No pending responses. Refresh to check for changes.");
+  await screen.findByText("No pending responses.");
   expect(backend.dataset).toHaveBeenCalledWith({
     action: "cancelAttempt",
     workspaceId: "workspace-a",
@@ -1739,7 +1739,7 @@ it.each([
       onOpenScheduleSettings={vi.fn()}
     />,
   );
-  await screen.findByText("Fundraiser is archived");
+  await screen.findByText("The Collection Fundraiser is archived");
   expect(screen.queryByRole("button", { name: "Delete permanently…" })).toBeNull();
 });
 it("does not report permanent deletion in a different workspace", async () => {
@@ -1952,7 +1952,7 @@ describe("a dataset table's ⚡ panel", () => {
     fireEvent.click(customize);
     const dialog = await screen.findByRole("dialog", { name: "Customize Registrations" });
     expect(within(dialog).getByText("Fundraiser/automations.yaml")).toBeTruthy();
-    expect(within(dialog).getByText("Made with the first automation.")).toBeTruthy();
+    expect(within(dialog).getByText("Created with your first automation")).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Open automations.yaml" })).toBeNull();
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -2054,7 +2054,7 @@ describe("a dataset table's ⚡ panel", () => {
     });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose action: Confirm" }));
     const panel = await screen.findByTestId("collection-automations-panel");
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
       "Confirm",
@@ -2105,7 +2105,7 @@ describe("a dataset table's ⚡ panel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open a record" }));
     expect(handoff.opened).toBe(1);
     fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose action: Confirm" }));
     const panel = await screen.findByTestId("collection-automations-panel");
     fireEvent.change(within(panel).getByRole("textbox", { name: "Name" }), {
       target: { value: "Confirm twice" },
@@ -2424,7 +2424,7 @@ describe("a dataset table's ⚡ panel", () => {
     });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose action: Confirm" }));
     const panel = await screen.findByTestId("collection-automations-panel");
     const name = within(panel).getByRole("textbox", { name: "Name" });
     await waitFor(() => expect(document.activeElement).toBe(name));
@@ -2482,7 +2482,7 @@ describe("a dataset table's ⚡ panel", () => {
     });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose action: Confirm" }));
     const panel = await screen.findByTestId("collection-automations-panel");
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
       "Confirm",
@@ -2763,7 +2763,7 @@ describe("a read that waited for this Collection's move", () => {
     const row = "collection-open:data/dataset.json";
     await waitFor(() =>
       expect(onError).toHaveBeenCalledWith(
-        "Could not open this Collection.",
+        "dohc could not open this Collection.",
         named,
         expect.any(Function),
         row,

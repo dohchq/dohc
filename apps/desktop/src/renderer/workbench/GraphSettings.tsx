@@ -255,8 +255,8 @@ export function GraphSettings(props: {
             <div key={group.id} className="flex h-8 items-center gap-2 px-2 pl-6">
               <button
                 type="button"
-                aria-label={`Group colour, ${hue}. Change colour`}
-                title="Change colour"
+                aria-label={`Group color, ${hue}. Change color`}
+                title="Change color"
                 onClick={() => setGroup(group.id, { hue: (group.hue + 1) % GROUP_HUES.length })}
                 className={`grid size-6 shrink-0 place-items-center rounded-md hover:bg-hover ${HUE_TEXT[hue]}`}
               >

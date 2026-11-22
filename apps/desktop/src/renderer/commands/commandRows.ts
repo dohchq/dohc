@@ -131,7 +131,7 @@ export const COMMAND_ROWS = {
     keywords: ["add", "upload", "copy"],
   },
   "export-workspace": {
-    label: "Export workspace as zip",
+    label: "Export workspace as ZIP",
     availability: "always",
     group: "Files",
     icon: "download",
@@ -173,7 +173,7 @@ export const COMMAND_ROWS = {
     keywords: ["split", "pane", "side by side", "columns"],
   },
   "toggle-markdown-source": {
-    label: "Toggle markdown source view",
+    label: "Toggle Markdown source",
     availability: "activeMarkdown",
     group: "Editor & layout",
     icon: "code",
@@ -250,14 +250,14 @@ export const COMMAND_ROWS = {
     keywords: ["prefs", "preferences", "options", "config"],
   },
   "settings-appearance": {
-    label: "Settings: Open Appearance",
+    label: "Settings: Appearance",
     availability: "always",
     group: "Settings & app",
     icon: "palette",
     keywords: ["prefs", "preferences", "theme", "dark", "light", "font", "accent", "sidebar"],
   },
   "settings-agents": {
-    label: "Settings: Open Agents (MCP)",
+    label: "Settings: Agents",
     availability: "always",
     group: "Settings & app",
     icon: "sparkles",
@@ -292,7 +292,7 @@ export const COMMAND_ROWS = {
     keywords: ["changelog", "release notes", "updates"],
   },
   "toggle-theme": {
-    label: "Toggle light/dark theme",
+    label: "Toggle light or dark theme",
     availability: "always",
     group: "Settings & app",
     icon: "sun-moon",

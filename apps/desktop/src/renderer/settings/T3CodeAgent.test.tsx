@@ -195,7 +195,7 @@ it("offers no Add when this computer cannot encrypt dohc's sign-in to T3 Code", 
   renderList();
   await chooseT3Code();
   expect((await sheet().findByTestId("t3-code-cannot-keep")).textContent).toBe(
-    "This computer cannot encrypt dohc's sign-in to T3 Code, so dohc cannot connect to T3 Code.",
+    "This computer cannot encrypt the sign-in, so dohc cannot connect to T3 Code.",
   );
   expect(screen.queryByTestId("agent-add-confirm")).toBeNull();
   expect(screen.queryByTestId("t3-code-allow-start")).toBeNull();
@@ -211,14 +211,14 @@ it("asks T3 Code to allow dohc, and Cancel or closing the sheet ends the wait", 
   const allow = within(await sheet().findByTestId("t3-code-allow"));
   expect(allow.getByText(/Sharing & access, then Authorized clients/)).toBeTruthy();
   expect(allow.getByText(/Copy code only/)).toBeTruthy();
-  expect(allow.getByText(/A thread with full access needs Full access\./)).toBeTruthy();
+  expect(allow.getByText(/A thread with Full access needs Full access\./)).toBeTruthy();
   // T3 Code's page takes the mode, so dohc offers no choice of one.
   expect(allow.queryByRole("radio")).toBeNull();
   expect(screen.queryByTestId("agent-add-confirm")).toBeNull();
 
   await userEvent.click(allow.getByRole("button", { name: "Allow dohc in T3 Code" }));
   expect(bridgeMock.allowDohcInT3Code).toHaveBeenLastCalledWith({ access: null });
-  expect(allow.getByRole("status").textContent).toBe("Waiting for T3 Code");
+  expect(allow.getByRole("status").textContent).toBe("Waiting for T3 Code…");
   await userEvent.click(allow.getByRole("button", { name: "Cancel waiting for T3 Code" }));
   expect(bridgeMock.cancelAllowDohcInT3Code).toHaveBeenCalledOnce();
   await act(async () => first.reject(new Error("The wait was cancelled.")));
@@ -661,7 +661,7 @@ it("changes the thread in main, saves nothing itself, and names the new thread o
   expect(screen.getByRole("dialog", { name: "Change Chief of Staff's thread" })).toBeTruthy();
   expect(
     box.getByText(
-      "From now on, dohc forwards to the thread you choose, and the old thread keeps the messages it has.",
+      "dohc will forward new messages to the thread you choose. The old thread keeps its existing messages.",
     ),
   ).toBeTruthy();
   // Focus starts on the first field, and nothing is picked yet.
@@ -837,7 +837,7 @@ it("allows dohc in dohc with the mode the person picks, and the threads follow",
   expect(allow.getByText("dohc creates its own sign-in in T3 Code.")).toBeTruthy();
   expect(
     allow.getByRole("radiogroup", {
-      name: "Pick the mode of the thread you want to connect, or more.",
+      name: "Choose a mode at or above the thread you want to connect.",
     }),
   ).toBeTruthy();
   // T3 Code's own names and words, from the mode that asks most to the one that never asks.
@@ -921,7 +921,7 @@ it("keeps the pick when dohc could not sign itself in, and offers T3 Code's page
   await userEvent.click(onPage()!);
   expect(bridgeMock.allowDohcInT3Code).toHaveBeenLastCalledWith({ access: null });
   expect(within(allow.getByTestId("t3-code-allow-steps")).getByText(/Copy code only/)).toBeTruthy();
-  expect(allow.getByRole("status").textContent).toBe("Waiting for T3 Code");
+  expect(allow.getByRole("status").textContent).toBe("Waiting for T3 Code…");
   expect(allow.queryByRole("alert")).toBeNull();
 
   // Cancel ends the wait, and an answer that comes after it does not allow dohc.
@@ -1271,7 +1271,7 @@ it("asks before a workspace's messages go to the thread, and says what the threa
     name: "Forward messages from Trip to Chief of Staff?",
   });
   const holds =
-    "From now on, dohc forwards messages from this workspace to Chief of Staff's thread, which also holds messages from 1 other workspace.";
+    "dohc will forward messages from this workspace to Chief of Staff's thread, which also holds messages from 1 other workspace.";
   const appears =
     "What the thread learns in one workspace can appear in what it posts in another, where other people can read it.";
   expect(askDialog().getByText(holds)).toBeTruthy();
@@ -1300,14 +1300,14 @@ it("counts the other workspaces in the ask, and says when the agent's forwarding
   const { rerender } = await openAsk(withChief({ workspaces: ["ws-2", "ws-3"] }));
   expect(
     askDialog().getByText(
-      "From now on, dohc forwards messages from this workspace to Chief of Staff's thread, which also holds messages from 2 other workspaces.",
+      "dohc will forward messages from this workspace to Chief of Staff's thread, which also holds messages from 2 other workspaces.",
     ),
   ).toBeTruthy();
   // An agent that forwards from no workspace has a thread that held some before.
   rerender(withChief({ workspaces: [], enabled: false }));
   expect(
     askDialog().getByText(
-      "Once Forward messages is on, dohc forwards messages from this workspace to Chief of Staff's thread, which keeps every message it already has, from any workspace.",
+      "Once Forward messages is on, dohc will forward messages from this workspace to Chief of Staff's thread, which keeps every message it already has from any workspace.",
     ),
   ).toBeTruthy();
 });
@@ -1625,7 +1625,7 @@ it("says in the Change thread dialog how many other workspaces get the new threa
   // A screen reader reads it with the dialog's first sentence.
   const dialog = screen.getByRole("dialog", { name: "Change Chief of Staff's thread" });
   expect(document.getElementById(dialog.getAttribute("aria-describedby")!)!.textContent).toMatch(
-    /messages it has\.The thread you choose gets messages from this workspace and 1 other workspace\.$/,
+    /existing messages\.The thread you choose gets messages from this workspace and 1 other workspace\.$/,
   );
   rerender(withChief({ workspaces: ["ws-3", "ws-1", "ws-2"] }));
   expect(others()!.textContent).toBe(

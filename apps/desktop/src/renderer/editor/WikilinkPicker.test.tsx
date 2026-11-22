@@ -201,7 +201,7 @@ describe("WikilinkPicker during IME composition", () => {
           onDismiss,
         }),
       );
-      const list = screen.getByRole("listbox", { name: "page links" });
+      const list = screen.getByRole("listbox", { name: "Page links" });
       const options = screen.getAllByRole("option");
       const doc = editor.getJSON();
       const selection = editor.state.selection.toJSON();
@@ -256,7 +256,7 @@ describe("WikilinkPicker on the Menu part's recipe", () => {
           onDismiss: vi.fn(),
         }),
       );
-      const list = screen.getByRole("listbox", { name: "page links" });
+      const list = screen.getByRole("listbox", { name: "Page links" });
       const options = screen.getAllByRole("option");
       expect(options).toHaveLength(12);
 
@@ -288,7 +288,7 @@ describe("WikilinkPicker on the Menu part's recipe", () => {
         onDismiss: vi.fn(),
       }),
     );
-    const list = screen.getByRole("listbox", { name: "page links" });
+    const list = screen.getByRole("listbox", { name: "Page links" });
     const second = screen.getAllByRole("option")[1]!;
     fireEvent.mouseMove(second, { movementX: 0, movementY: 0 });
     expect(list.getAttribute("aria-activedescendant")).not.toBe(second.id);

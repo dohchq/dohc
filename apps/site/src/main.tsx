@@ -25,7 +25,7 @@ if (host) {
   const mount = async () => {
     if (mounted) return;
     mounted = true;
-    if (status) status.textContent = "Loading your workspace…";
+    if (status) status.textContent = "Loading workspace…";
     if (retry) retry.hidden = true;
     try {
       const [

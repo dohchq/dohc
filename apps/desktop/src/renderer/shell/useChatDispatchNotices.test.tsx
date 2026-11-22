@@ -336,7 +336,7 @@ it("still takes back a resumed chat's newer pause after an older dismissal fails
   act(() => h.store.clear("a", "budget-paused", GROUP_CHAT.id));
   expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual([
     'Paused in "Nova".',
-    "dohc could not dismiss this notice. Open this workspace again to try again.",
+    "dohc could not dismiss this Notice. Reopen this workspace to try again.",
   ]);
 });
 

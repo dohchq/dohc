@@ -367,7 +367,8 @@ export function CommandPalette(props: {
         >
           {matches.length === 0 ? (
             <li className="px-3 py-2.5 text-xs text-subtle">
-              {props.emptyText?.(query) ?? "No matching commands"}
+              {props.emptyText?.(query) ??
+                (query ? `No commands match "${query}".` : "No matching commands.")}
             </li>
           ) : (
             matches.map((command, index) => {
@@ -467,19 +468,19 @@ export function CommandPalette(props: {
             <kbd className="rounded border border-line bg-bg px-1 font-sans text-[12px]">
               {shortcutText("palette-move", window.dohcDesktop?.platform)}
             </kbd>
-            navigate
+            Navigate
           </span>
           <span className="flex items-center gap-1">
             <kbd className="rounded border border-line bg-bg px-1 font-sans text-[12px]">
               {shortcutText("palette-accept", window.dohcDesktop?.platform)}
             </kbd>
-            {props.acceptLabel ?? "run"}
+            {props.acceptLabel ?? "Run"}
           </span>
           <span className="flex items-center gap-1">
             <kbd className="rounded border border-line bg-bg px-1 font-sans text-[12px]">
               {shortcutText("palette-dismiss", window.dohcDesktop?.platform)}
             </kbd>
-            dismiss
+            Close
           </span>
         </div>
       </div>

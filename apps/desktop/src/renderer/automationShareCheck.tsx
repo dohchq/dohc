@@ -42,7 +42,7 @@ export function automationShareWarning(
   const reach = [...new Set(stops.map((stop) => automationReachCopy(stop, true)))];
   const what = `${automations.size === 1 ? "the automation" : "the automations"} ${AND.format([...automations.values()])}`;
   const who = recipient ?? "anyone who opens this link";
-  return `This share stops ${what}, because ${who} cannot ${OR.format(reach)}.`;
+  return `This share stops ${what} because ${who} cannot ${OR.format(reach)}.`;
 }
 
 export function useAutomationShareCheck(workspaceId: string, target: RelayShareTarget) {

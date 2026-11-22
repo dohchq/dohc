@@ -13,9 +13,9 @@ export const SHARE_ACCESS_WORDS: Record<ShareAccess, string> = {
 };
 
 export const SHARE_ACCESS_DESCRIPTIONS: Record<ShareAccess, string> = {
-  view: "Can read, but not change.",
+  view: "Can read, not change.",
   comment: "Can read and comment.",
-  edit: "Can make changes and see History.",
+  edit: "Can edit and view History.",
 };
 
 const ACCESS_LEVEL =
@@ -155,4 +155,4 @@ export function ShareLinkRow(props: { children: ReactNode; linkUrlFor?: string; 
 }
 
 export const invitedByEmailWords = (signedIn: boolean | undefined) =>
-  signedIn === false ? "Invited, not signed in yet" : "Invited by email";
+  signedIn === false ? "Pending invite" : "Invited by email";

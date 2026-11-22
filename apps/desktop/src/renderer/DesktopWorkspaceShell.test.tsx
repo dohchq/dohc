@@ -297,7 +297,7 @@ describe("collection folders", () => {
     );
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
-        "Could not refresh workspace files.",
+        "dohc could not refresh workspace files.",
       ),
     );
     expect(document.querySelector("[data-new-record-status]")).toBeNull();
@@ -524,7 +524,7 @@ describe("collection folders", () => {
       expect(kept.textContent).toContain("New record in tasks");
       expect(kept.textContent).toContain("dohc did not create this record.");
       expect(
-        within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved collection value").value,
+        within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved Collection value").value,
       ).toContain('"title": "Milk"');
       expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(sending ? 1 : 0);
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();

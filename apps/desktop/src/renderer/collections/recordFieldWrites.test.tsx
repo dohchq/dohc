@@ -360,8 +360,8 @@ describe("retained failures", () => {
       expect(open.textContent).toBe("Open externally");
       expect(row.contains(open)).toBe(true);
       expect(screen.queryByTestId("lossy-note-open-externally")).toBeNull();
-      expect(screen.getByTestId("collection-write-retry").textContent).toBe("Retry");
-      expect(screen.getByLabelText("Unsaved collection value")).toBeTruthy();
+      expect(screen.getByTestId("collection-write-retry").textContent).toBe("Try again");
+      expect(screen.getByLabelText("Unsaved Collection value")).toBeTruthy();
       host.unmount();
     } finally {
       doc.destroy();
@@ -377,7 +377,7 @@ describe("retained failures", () => {
   });
 
   const LOSSY_RECORD =
-    "dohc did not save this change because it would rewrite parts of this record dohc can't show. Open the record to edit it externally.";
+    "dohc did not save this change because it would rewrite parts of this record dohc cannot show. Open the record to edit it externally.";
   const sessionsOpened = (enabled: boolean[], state: UseEngineDoc) => (input: unknown) => {
     enabled.push((input as { enabled: boolean }).enabled);
     return state;
@@ -400,7 +400,7 @@ describe("retained failures", () => {
     render(<CollectionFieldWriteHost />);
     enqueue();
     expect(collectionWriteFailures()[0]?.message).toBe(
-      "dohc did not save this change because it could not read this record to check it. Try again.",
+      "dohc did not save this change because it could not read this record to check it.",
     );
     expect(enabled).not.toContain(true);
   });
@@ -650,7 +650,7 @@ describe("retained failures", () => {
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     fireEvent.click(screen.getByTestId("collection-write-copy"));
     expect((await screen.findByTestId("collection-write-copy-refused")).textContent).toBe(
-      "Could not copy. Select the value above to copy it.",
+      "dohc could not copy the value. Select it above to copy it.",
     );
     // The button's own "Could not copy" lasts COPY_FEEDBACK_MS; the line stays.
     await waitFor(
@@ -673,7 +673,7 @@ describe("retained failures", () => {
     const value = "  Keep this exact input.\nWith another line.  ";
     enqueue({ ...CHANGE, value });
     expect(collectionWriteFailures()[0]?.superseded).toBe(false);
-    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty("value", value);
+    expect(screen.getByLabelText("Unsaved Collection value")).toHaveProperty("value", value);
     const writeText = vi.fn(async () => undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     fireEvent.click(screen.getByTestId("collection-write-copy"));
@@ -696,7 +696,7 @@ describe("retained failures", () => {
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
     expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha"]);
     expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
-    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty(
+    expect(screen.getByLabelText("Unsaved Collection value")).toHaveProperty(
       "value",
       '[\n  "alpha"\n]',
     );
@@ -739,7 +739,7 @@ describe("retained failures", () => {
     screen.getByTestId("collection-write-failures");
     // The host's region comes first; the copy control has its own.
     expect(screen.getAllByRole("status")[0]!.textContent).toContain(
-      "1 unsaved collection change needs attention.",
+      "1 unsaved Collection change needs attention.",
     );
     screen.getByTestId("collection-write-retry");
     expect(screen.getByTestId("collection-write-discard").textContent).toBe(
@@ -796,7 +796,7 @@ describe("retained failures", () => {
       host.rerender(<CollectionFieldWriteHost />);
       await act(() => vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS));
       const message =
-        "Another program has Plan.md open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.";
+        "Another program has Plan.md open, so dohc cannot update it on disk. This change is saved and dohc retries until the file is free.";
       expect(collectionWriteFailures()).toEqual([]);
       expect(hasPendingCollectionFieldWrites()).toBe(false);
       expect(status.result.current.error).toBe(message);
@@ -974,7 +974,7 @@ describe("beginCollectionWriteOperation", () => {
     expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha"]);
     expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
     expect(screen.getByTestId("collection-write-copy")).toBeTruthy();
-    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty(
+    expect(screen.getByLabelText("Unsaved Collection value")).toHaveProperty(
       "value",
       '[\n  "alpha"\n]',
     );
@@ -1036,7 +1036,7 @@ describe("beginCollectionWriteOperation", () => {
     expect(nextVersion.getMap("frontmatter").has("status")).toBe(false);
     expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
     expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
-    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty("value", "done");
+    expect(screen.getByLabelText("Unsaved Collection value")).toHaveProperty("value", "done");
     const writeText = vi.fn(async () => undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     fireEvent.click(screen.getByTestId("collection-write-copy"));

@@ -109,13 +109,13 @@ function shareRefusalMessage(
   result: Extract<SitePackageInfo["shareManifest"], { ok: false }>,
 ): string {
   if (result.reason === "byte-budget") {
-    return `dohc scanned ${formatMiB(result.observedBytes)} for sharing. The configured limit is ${formatMiB(result.limitBytes)}. Reduce the app's referenced files and try again.`;
+    return `dohc scanned ${formatMiB(result.observedBytes)} for sharing, over the ${formatMiB(result.limitBytes)} limit. Reduce the app's referenced files and try again.`;
   }
   if (result.reason === "file-count") {
-    return `dohc found ${result.observedFiles} files for sharing. The configured limit is ${result.limitFiles} files. Remove referenced files and try again.`;
+    return `dohc found ${result.observedFiles} files for sharing, over the ${result.limitFiles}-file limit. Remove referenced files and try again.`;
   }
   if (result.reason === "path-too-long") {
-    return `dohc found a shared path ${result.observedChars} characters long: ${result.path}. The configured limit is ${result.limitChars} characters. Move the file to a shorter path and try again.`;
+    return `dohc found a shared path of ${result.observedChars} characters, over the ${result.limitChars}-character limit: ${result.path}. Move the file to a shorter path and try again.`;
   }
   if (result.reason === "unreadable") {
     return `dohc could not read ${result.path}. Check that the file is readable, then try again.`;
@@ -390,7 +390,12 @@ export function SitePreviewPage(props: {
           return null;
         }
         setPreview(null);
-        setActionError(ipcErrorMessage(error, `Could not start ${modeLabel(mode)} preview.`));
+        setActionError(
+          ipcErrorMessage(
+            error,
+            `dohc could not start the ${modeLabel(mode).toLowerCase()} preview.`,
+          ),
+        );
         return null;
       } finally {
         if (isCurrent() && !replaced) setRunningMode(null);
@@ -485,7 +490,7 @@ export function SitePreviewPage(props: {
       if (isCurrent()) props.onShareSite?.(target);
     } catch (error) {
       if (isCurrent()) {
-        setActionError(ipcErrorMessage(error, "Could not prepare this app for sharing."));
+        setActionError(ipcErrorMessage(error, "dohc could not prepare this app for sharing."));
       }
     }
   }, [
@@ -640,7 +645,7 @@ export function SitePreviewPage(props: {
       setIdleReason("stopped");
     } catch (error) {
       if (!isCurrent()) return;
-      setActionError(ipcErrorMessage(error, "Could not stop preview."));
+      setActionError(ipcErrorMessage(error, "dohc could not stop this preview."));
     }
   }
 
@@ -850,7 +855,7 @@ export function SitePreviewPage(props: {
                 { section: "Run preview as" },
                 ...modes.map((mode): MenuEntry => ({
                   id: mode,
-                  label: runningMode === mode ? "Starting" : modeLabel(mode),
+                  label: runningMode === mode ? "Starting…" : modeLabel(mode),
                   checked: preview?.mode === mode,
                   disabled: runningMode !== null,
                   testId: `site-preview-${mode}`,
@@ -931,7 +936,7 @@ export function SitePreviewPage(props: {
               data-testid="site-preview-error"
               className="border-b border-line bg-panel px-4 py-2 text-[12px] text-danger"
             >
-              This app tried to preview from an address dohc does not trust. Reload the preview.
+              dohc blocked a preview from an untrusted address. Reload the preview.
             </div>
           ) : null}
 

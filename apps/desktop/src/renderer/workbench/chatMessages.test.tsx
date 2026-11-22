@@ -443,7 +443,7 @@ describe("chat authorship display", () => {
     expect(author.querySelector(".text-agent")?.textContent).toBe("Claude Code");
     const badge = screen.getByTestId("test-chat-agent-badge");
     const mark = screen.getByTestId("test-chat-message-link-holder");
-    expect(badge.getAttribute("aria-label")).toBe("agent");
+    expect(badge.getAttribute("aria-label")).toBe("Agent");
     expect(mark.textContent).toBe("Link holder");
     expect(mark.title).toBe("Link holder");
     expect(badge.compareDocumentPosition(author) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -896,7 +896,7 @@ describe("message reactions (WS-MU-C2)", () => {
     expect(accessibleName).toContain("2");
     expect(accessibleName).toContain("Alice");
     expect(accessibleName).toContain("Bob");
-    expect(screen.getByRole("button", { name: "👍 2 — Alice, Bob" })).toBe(pill);
+    expect(screen.getByRole("button", { name: "👍 2, Alice, Bob" })).toBe(pill);
     expect(pill.getAttribute("data-mine")).toBe("false");
     expect(pill.getAttribute("aria-pressed")).toBe("false");
   });

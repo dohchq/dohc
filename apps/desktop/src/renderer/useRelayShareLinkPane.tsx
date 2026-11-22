@@ -200,7 +200,7 @@ function newLinkReach(target: RelayShareTarget): string {
   return `${reach} The sync relay can read this content.`;
 }
 
-const LINKS_BUSY = "Finish the change under way first.";
+const LINKS_BUSY = "Wait for the current change to finish.";
 const waits = (busy: boolean) => (busy ? { disabled: true, description: LINKS_BUSY } : {});
 
 function normalizedPathSet(paths: readonly string[]): string[] {
@@ -242,7 +242,7 @@ export function shareScope(workspaceId: string, target: RelayShareTarget): strin
 // The selection as the dialog names it, for notices about its shares.
 export function targetLabel(target: RelayShareTarget): string {
   return target.kind === "version"
-    ? `version “${target.versionName ?? target.versionId}”`
+    ? `version "${target.versionName ?? target.versionId}"`
     : (target.label ?? target.paths.join(", "));
 }
 
@@ -391,11 +391,11 @@ function applyDiscussionPrincipalOverrides(
 }
 
 function namedGrantName(grant: RelayShareLinkIndependentGrant): string {
-  return grant.recipientEmail ?? grant.recipientUserId ?? "Unknown recipient";
+  return grant.recipientEmail ?? grant.recipientUserId ?? "Unnamed person";
 }
 
 function dependentName(dependent: RelayShareLinkDependent): string {
-  return dependent.recipientEmail ?? dependent.recipientUserId ?? "Unknown recipient";
+  return dependent.recipientEmail ?? dependent.recipientUserId ?? "Unnamed person";
 }
 
 const isActive = (row: RelayShareLinkRow) => row.status === "active";
@@ -1463,7 +1463,7 @@ export function useRelayShareLinkPane(props: {
             return;
           }
           if (advertisedAccess && advertisedAccess.join() !== result.supportedLinkAccess.join())
-            throw new Error("dohc could not load consistent link permissions. Retry.");
+            throw new Error("dohc could not load consistent link access.");
           advertisedAccess = result.supportedLinkAccess;
           if (independentGrantCursor === undefined) {
             inventory.push(...result.links);
@@ -1769,7 +1769,7 @@ export function useRelayShareLinkPane(props: {
         );
         setConfirmation(null);
         setLifecycleError(
-          "Who has access through this link changed. Check the updated names and confirm again.",
+          "Access through this link changed. Check the updated names and confirm again.",
         );
         void refreshLinks(scopeGeneration);
         return;
@@ -1908,14 +1908,14 @@ export function useRelayShareLinkPane(props: {
                     ? "Turn off editing for this link? The same link keeps working, for viewing only."
                     : "Turn off comments for this link? The same link keeps working, for viewing only."
                   : row.access === "edit"
-                    ? "Turn off editing for this link? The same link keeps working. Holders can view and comment."
-                    : "Use Comment access for this link? The same link keeps working. Holders can view and comment."}
+                    ? "Turn off editing for this link? The same link keeps working. Anyone with the link can view and comment."
+                    : "Use Comment access for this link? The same link keeps working. Anyone with the link can view and comment."}
                 {narrowerDependents.length > 0 ? (
                   <>
                     {" "}
                     These people drop to {confirmation.access === "comment"
                       ? "Comment"
-                      : "view"}{" "}
+                      : "View"}{" "}
                     too: <DependentNames dependents={narrowerDependents} />.
                   </>
                 ) : null}
@@ -2198,7 +2198,7 @@ export function useRelayShareLinkPane(props: {
         <ShareLinkRow linkUrlFor={row.grantId}>
           {damaged ? (
             <p className="m-0 min-w-0 flex-1 text-[12px] leading-4 text-muted">
-              Unreadable link. dohc can't read what this link shares.
+              Unreadable link. dohc cannot read what this link shares.
             </p>
           ) : (
             <div className="-ml-2 flex shrink-0">
@@ -2299,9 +2299,9 @@ export function useRelayShareLinkPane(props: {
       >
         <p className="m-0 text-[13px] leading-relaxed text-ink">
           {pending.kind === "delete"
-            ? "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted."
+            ? "Delete this comment? This cannot be undone. Readers see that a comment was deleted."
             : pending.kind === "block"
-              ? `Block ${pending.name}? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
+              ? `Block ${pending.name}? They cannot comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
               : pending.kind === "promote"
                 ? `Make ${pending.name}'s access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.`
                 : `Remove ${pending.name}'s access? They lose access right away. Copies they already made stay with them.`}

@@ -389,7 +389,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
           <p className="m-0 text-[12px] text-muted">
             {props.generatedChange
               ? "Review the fields before applying this change."
-              : "Review the captured source before applying it. dohc will not edit the authored operations for you."}
+              : "Review the captured source before applying it. dohc does not edit custom actions."}
           </p>
         </div>
         {!preparation ? (
@@ -494,7 +494,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                           <div className="min-w-0">
                             <span className="text-[12px] text-muted">Before</span>
                             <p className="m-0 mt-1 whitespace-pre-wrap break-words text-muted">
-                              {change.before ?? "—"}
+                              {change.before ?? "None"}
                             </p>
                           </div>
                           <ArrowRight
@@ -506,7 +506,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                           <div className="min-w-0">
                             <span className="text-[12px] text-muted">After</span>
                             <p className="m-0 mt-1 whitespace-pre-wrap break-words text-ink">
-                              {change.after ?? "—"}
+                              {change.after ?? "None"}
                             </p>
                           </div>
                         </div>
@@ -598,9 +598,9 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
               }
             >
               {preservesAccess
-                ? "Only names or source locations changed. Existing shared apps keep working. Access stays unchanged."
-                : "Review changed values before approval. Changed rules require renewed app and collaborator approval."}{" "}
-              History can help reverse changes; later edits may need conflict resolution.
+                ? "Only names or file locations changed. Shared apps and access stay unchanged."
+                : "Review changed values before approving. Changed rules require renewed app and collaborator approval."}{" "}
+              You can reverse changes from History, though later edits can create conflicts.
             </p>
             {!namesOnly && (
               <label className="flex items-center gap-2 text-[12px] text-ink">

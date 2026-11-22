@@ -138,7 +138,7 @@ describe("CalendarView", () => {
 
   it("shows the empty state when the collection has no records", () => {
     render(<CalendarView schema={makeSchema()} records={[]} dateField="due" />);
-    expect(screen.getByText("No records in this collection yet.")).toBeDefined();
+    expect(screen.getByText("No records in this Collection yet.")).toBeDefined();
   });
 
   it("moves a month at a time with the arrows and back with Today", () => {

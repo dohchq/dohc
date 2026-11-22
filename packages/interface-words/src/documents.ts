@@ -11,7 +11,7 @@ export const documentWords = {
   opening: "Opening…",
   openingExplanation: "You can edit this document when it finishes opening.",
   tryAgain: "Try again",
-  couldntRead: "Couldn't read this file.",
+  couldntRead: "dohc could not read this file.",
   /** Phone: the page's view couldn't load (or its editor files couldn't be written), so nothing is on screen. */
   couldntOpen: "dohc could not open this file.",
   /** Phone: under "dohc could not open this file." when the editor files could not be written for lack of space. */
@@ -21,13 +21,13 @@ export const documentWords = {
   documentActions: "Document actions",
   copyAsMarkdown: "Copy as Markdown",
   copied: "Copied",
-  couldntCopy: "Couldn't copy",
+  couldntCopy: "Could not copy",
   /** The save mark. Calm states (saved, saving) draw nothing. */
   mark: {
     couldntSave: {
-      label: "Couldn't save",
+      label: "Could not save",
       explanation:
-        "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit.",
+        "Your edits are still here, but dohc cannot confirm the file on disk matches them. Keep this document open and try another edit.",
     },
     readOnlyShared: {
       label: "Read-only",

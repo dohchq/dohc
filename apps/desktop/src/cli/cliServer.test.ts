@@ -2793,7 +2793,7 @@ describe("CLI socket server", () => {
       {
         status: "refused",
         reason:
-          "Only the computer this run failed on can try it again. The notice names that computer.",
+          "Only the computer this run failed on can try it again. The Notice names that computer.",
         notice: {
           title: 'Automation "Stamp" failed',
           body: "The record is open elsewhere. It ran on Laptop.",
@@ -2907,7 +2907,7 @@ describe("CLI socket server", () => {
     ).resolves.toEqual({
       ok: false,
       reason:
-        "Only the computer this run failed on can try it again. The notice names that computer.",
+        "Only the computer this run failed on can try it again. The Notice names that computer.",
       notice: {
         title: 'Automation "Stamp" failed',
         body: "The record is open elsewhere. It ran on Laptop.",
@@ -3297,7 +3297,7 @@ describe("CLI socket server", () => {
     expect(read).not.toHaveBeenCalled();
     // The desktop's own check for a shared view's marker refuses too.
     context.syncFailure = () => {
-      throw new Error("This is a shared view — only the original workspace can be shared.");
+      throw new Error("This is a shared view. Only the original workspace can be shared.");
     };
     await expect(
       invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" }),

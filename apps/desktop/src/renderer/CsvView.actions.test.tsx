@@ -506,7 +506,7 @@ describe("CSV view actions", () => {
   });
 
   it.each([
-    ["read-only", { readOnly: true }, "This document is shared with you to read.", "Read-only"],
+    ["read-only", { readOnly: true }, "This file is shared with you to read.", "Read-only"],
     [
       "too large",
       { truncated: true },
@@ -538,7 +538,7 @@ describe("CSV view actions", () => {
       { kind: "error", reason: "disk full", issueId: null } as SaveState,
       "error",
       false,
-      "Couldn't save",
+      "Could not save",
     ],
   ])("draws a %s save state in the tab row", (_, saveState, dataState, quiet, label) => {
     render(
@@ -822,7 +822,7 @@ describe("text view actions", () => {
       {},
       "error",
       false,
-      "Couldn't save",
+      "Could not save",
     ],
     ["read-only", SAVED, { readOnly: true }, "saved", false, "Read-only"],
   ])(
@@ -856,7 +856,7 @@ describe("text view actions", () => {
     );
     const left = screen.getByTestId("left-row");
     const right = screen.getByTestId("right-row");
-    expect(within(left).getByTestId("view-text-save-state").textContent).toBe("Couldn't save");
+    expect(within(left).getByTestId("view-text-save-state").textContent).toBe("Could not save");
     expect(within(left).queryByTestId("csv-raw-toggle")).toBeNull();
     expect(within(right).getByTestId("csv-save-state").dataset.state).toBe("saved");
     expect(within(right).getByRole("radio", { name: "Raw" }).getAttribute("aria-checked")).toBe(

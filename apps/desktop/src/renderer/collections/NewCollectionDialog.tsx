@@ -193,12 +193,12 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
           try {
             parseDatasetDefinition(definition);
           } catch {
-            throw new Error("Check the collection path, field options, and default values.");
+            throw new Error("Check the Collection path, field options, and default values.");
           }
           plan = { definition };
         }
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : "Check the collection fields.");
+        setError(cause instanceof Error ? cause.message : "Check the Collection fields.");
         return;
       }
     }
@@ -215,9 +215,7 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
         });
         if (!alive.current) return;
         if (result.kind !== "approved" || result.revision.datasetId !== plan.definition.datasetId)
-          throw new Error(
-            "dohc created a different Collection than the one you asked for. Try again.",
-          );
+          throw new Error("dohc created a different Collection than requested.");
         const base = datasetBaseFolder(result.revision.definition);
         props.onCreated({
           kind: "transactional",
@@ -238,7 +236,7 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
       }
     } catch (cause) {
       if (alive.current)
-        props.onError("dohc could not create this collection.", cause, () => {
+        props.onError("dohc could not create this Collection.", cause, () => {
           if (alive.current) void create(retryPlan);
         });
     } finally {
@@ -259,7 +257,7 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
         className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-[960px] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-line bg-panel"
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-line px-5 py-3.5">
-          <h2 className="m-0 flex-1 text-sm font-semibold text-ink">New collection</h2>
+          <h2 className="m-0 flex-1 text-sm font-semibold text-ink">New Collection</h2>
           <IconButton aria-label="Close" title="Close" disabled={pending} onClick={props.onClose}>
             <X size={14} strokeWidth={1.9} aria-hidden />
           </IconButton>
@@ -495,7 +493,7 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
               disabled={pending}
               onClick={() => void create()}
             >
-              {pending ? "Creating…" : "Create collection"}
+              {pending ? "Creating…" : "Create Collection"}
             </PrimaryButton>
           </div>
         </div>

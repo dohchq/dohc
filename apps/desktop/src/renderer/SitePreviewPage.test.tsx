@@ -833,7 +833,7 @@ describe("SitePreviewPage", () => {
 
     expect(
       await screen.findByText(
-        "This app tried to preview from an address dohc does not trust. Reload the preview.",
+        "dohc blocked a preview from an untrusted address. Reload the preview.",
       ),
     ).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
@@ -860,7 +860,7 @@ describe("SitePreviewPage", () => {
 
     expect(
       await screen.findByText(
-        "This app tried to preview from an address dohc does not trust. Reload the preview.",
+        "dohc blocked a preview from an untrusted address. Reload the preview.",
       ),
     ).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
@@ -881,7 +881,7 @@ describe("SitePreviewPage", () => {
 
     expect(
       await screen.findByText(
-        "This app tried to preview from an address dohc does not trust. Reload the preview.",
+        "dohc blocked a preview from an untrusted address. Reload the preview.",
       ),
     ).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();

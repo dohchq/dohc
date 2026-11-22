@@ -246,7 +246,7 @@ describe("document save notices", () => {
   const rows = async (user: ReturnType<typeof userEvent.setup>, path = "notes/a.md") => {
     await user.click(screen.getByTestId("notice-center-toggle"));
     const found = within(screen.getByRole("dialog", { name: "Notices" })).queryAllByText(
-      `Couldn't save ${path}`,
+      `Could not save ${path}`,
     );
     await user.keyboard("{Escape}");
     return found;
@@ -259,8 +259,8 @@ describe("document save notices", () => {
 
     emit(failed());
     const toast = screen.getByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("Couldn't save notes/a.md");
-    expect(toast.textContent).toContain("The file is read-only. Make it writable, then try again.");
+    expect(toast.textContent).toContain("Could not save notes/a.md");
+    expect(toast.textContent).toContain("The file is read-only. Make it writable.");
     expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
     await user.click(within(toast).getByRole("button", { name: "Details" }));
     await user.click(within(toast).getByRole("button", { name: "Copy details" }));
@@ -293,7 +293,7 @@ describe("document save notices", () => {
     emit(failed("privacy-denied"));
     expect(result.current).toHaveLength(1);
     const [notice] = result.current;
-    expect(notice!.title).toBe("Couldn't save notes/a.md");
+    expect(notice!.title).toBe("Could not save notes/a.md");
     expect(notice!.message).toBe(PRIVACY_DENIED_WORDS);
     expect(notice!.details).toContainEqual(["Cause", "macOS blocked dohc from this folder."]);
     expect(notice!.retry).not.toBeNull();
@@ -316,7 +316,7 @@ describe("document save notices", () => {
     emit(failed("volume-shares-new-files"));
     expect(result.current).toHaveLength(1);
     const [notice] = result.current;
-    expect(notice!.title).toBe("Couldn't save notes/a.md");
+    expect(notice!.title).toBe("Could not save notes/a.md");
     expect(notice!.message).toBe(VOLUME_SHARES_NEW_FILES_WORDS);
     expect(notice!.details).toContainEqual([
       "Cause",
@@ -340,7 +340,7 @@ describe("document save notices", () => {
     emit(failed("document-too-dense"));
     expect(result.current).toHaveLength(1);
     const [notice] = result.current;
-    expect(notice!.title).toBe("Couldn't save notes/a.md");
+    expect(notice!.title).toBe("Could not save notes/a.md");
     expect(notice!.message).toBe(DOCUMENT_TOO_DENSE_WORDS);
     expect(notice!.details).toContainEqual(["Cause", "document-too-dense"]);
     expect(notice!.retry).toBeNull();
@@ -348,7 +348,7 @@ describe("document save notices", () => {
     act(() => notice!.action!.run());
     await waitFor(() => expect(result.current).toHaveLength(2));
     const notOpen = result.current.find((error) => error.identity !== notice!.identity)!;
-    expect(notOpen.message).toBe("dohc could not copy a.md as Markdown, because a.md is not open.");
+    expect(notOpen.message).toBe("dohc could not copy a.md as Markdown because it is not open.");
     notOpen.action!.run();
     expect(open).toHaveBeenCalledWith("notes/a.md");
     expect(result.current.find((error) => error.identity === notice!.identity)).toBeDefined();
@@ -366,9 +366,9 @@ describe("document save notices", () => {
       await editor.result.current.saveNow();
     });
     const toast = screen.getByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("Couldn't save .env");
+    expect(toast.textContent).toContain("Could not save .env");
     expect(toast.textContent).toContain(VOLUME_SHARES_NEW_FILES_WORDS);
-    expect(toast.textContent).not.toContain("dohc couldn't write the file.");
+    expect(toast.textContent).not.toContain("dohc could not write the file.");
     await closeEditor(editor, document);
   });
 
@@ -379,13 +379,13 @@ describe("document save notices", () => {
 
     emit(failed("deleted"));
     const toast = screen.getByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("Couldn't save notes/a.md");
+    expect(toast.textContent).toContain("Could not save notes/a.md");
     expect(toast.textContent).toContain("The file was moved or deleted outside dohc.");
     expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
     await user.click(within(toast).getByRole("button", { name: "Details" }));
     await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     expect(copied.mock.calls[0]![0]).toBe(
-      "Error: The file was moved or deleted outside dohc.\nTitle: Couldn't save notes/a.md\nFile: notes/a.md",
+      "Error: The file was moved or deleted outside dohc.\nTitle: Could not save notes/a.md\nFile: notes/a.md",
     );
 
     await user.click(within(toast).getByRole("button", { name: "Save it again" }));
@@ -440,7 +440,7 @@ describe("document save notices", () => {
     render(<Shell />);
     emit(failed(null));
     const toast = screen.getByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("dohc couldn't write the file.");
+    expect(toast.textContent).toContain("dohc could not write the file.");
     expect(toast.textContent).not.toContain("read-only");
   });
 
@@ -458,7 +458,7 @@ describe("document save notices", () => {
     });
     expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain(message);
-    expect(screen.queryByText("Couldn't save notes/a.md")).toBeNull();
+    expect(screen.queryByText("Could not save notes/a.md")).toBeNull();
   });
 
   it("quotes text someone else's change removed, copies all of it, and keeps a row for each removal", async () => {
@@ -472,7 +472,7 @@ describe("document save notices", () => {
     expect(toast.textContent).toContain("Someone else's change removed your text from notes/a.md");
     expect(toast.textContent).toContain('It read "First line word word');
     expect(toast.textContent).toContain("The file's owner keeps a copy in History.");
-    expect(toast.textContent).not.toContain("Couldn't save");
+    expect(toast.textContent).not.toContain("Could not save");
     await user.click(within(toast).getByRole("button", { name: "Copy text" }));
     expect(copied).toHaveBeenCalledWith(long);
 
@@ -515,7 +515,7 @@ describe("document save notices", () => {
     );
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
-        "Couldn't save notes/a.md",
+        "Could not save notes/a.md",
       ),
     );
     expect(await rows(user)).toHaveLength(1);
@@ -549,7 +549,7 @@ describe("document save notices", () => {
     render(<Shell />);
     emit({ ...failed(null), closing: true });
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
-      "Couldn't save notes/a.md",
+      "Could not save notes/a.md",
     );
     emit({
       state: { kind: "changed-on-disk", reason: "The file changed on disk.", issueId: null },
@@ -597,9 +597,9 @@ describe("document save notices", () => {
   it("names a live document's failed save in the title bar until a save clears it", () => {
     render(<Shell />);
     emit(failed());
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
     emit({ ...failed(), path: "notes/b.md" });
-    expect(titleBar().textContent).toBe("Couldn't save 2 files");
+    expect(titleBar().textContent).toBe("Could not save 2 files");
     emit({ state: { kind: "saved-here" } });
     emit({ path: "notes/b.md", state: { kind: "saved-here" } });
     expect(titleBar().textContent).toBe("Local · saved");
@@ -624,14 +624,14 @@ describe("document save notices", () => {
       {},
       { timeout: AUTOSAVE_DEBOUNCE_MS * 5 },
     );
-    expect(toast.textContent).toContain("Couldn't save data.csv");
-    expect(toast.textContent).toContain("dohc couldn't write the file.");
+    expect(toast.textContent).toContain("Could not save data.csv");
+    expect(toast.textContent).toContain("dohc could not write the file.");
     expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
     await user.click(within(toast).getByRole("button", { name: "Details" }));
     await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     expect(copied.mock.calls[0]![0]).toContain("File: data.csv");
     expect(copied.mock.calls[0]![0]).toContain(`Cause: ${READ_ONLY_ON_DISK}`);
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
     expect(await rows(user, "data.csv")).toHaveLength(1);
 
     await user.click(
@@ -647,10 +647,10 @@ describe("document save notices", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.getByTestId("view-csv").textContent).toContain("Couldn't save");
+    expect(screen.getByTestId("view-csv").textContent).toContain("Could not save");
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     expect(await rows(user, "data.csv")).toHaveLength(1);
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
 
     writeWorkspaceText.mockResolvedValue({ status: "written", contentHash: "saved-hash" });
     await user.click(screen.getByTestId("notice-center-toggle"));
@@ -666,7 +666,7 @@ describe("document save notices", () => {
       relativePath: "data.csv",
     });
     expect(writeWorkspaceText.mock.calls[2]![0].text).toContain("Grace Hopper");
-    expect(screen.queryByText("Couldn't save data.csv")).toBeNull();
+    expect(screen.queryByText("Could not save data.csv")).toBeNull();
   });
 
   it("files the text file's row again when Try again fails, and opens the file once its editor has closed", async () => {
@@ -752,7 +752,7 @@ describe("document save notices", () => {
     await act(async () => {
       await editor.result.current.saveNow();
     });
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
 
     act(() => editor.result.current.setDraft("second"));
     let saving: Promise<void> | undefined;
@@ -795,14 +795,14 @@ describe("document save notices", () => {
       }),
     );
     expect(screen.queryByTestId("connection-notices")).toBeNull();
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
 
     act(() => editor.result.current.setDraft("second"));
     await act(async () => {
       await editor.result.current.saveNow();
     });
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
-      "Couldn't save notes.txt",
+      "Could not save notes.txt",
     );
     expect(await rows(user, "notes.txt")).toHaveLength(1);
     await closeEditor(editor, document);
@@ -851,9 +851,9 @@ describe("document save notices", () => {
       await saving;
     });
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
-      "Couldn't save a.txt",
+      "Could not save a.txt",
     );
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
 
     await user.click(
       within(screen.getByTestId("workspace-shell-error")).getByRole("button", {
@@ -879,7 +879,7 @@ describe("document save notices", () => {
     await act(async () => {
       await editor.result.current.saveNow();
     });
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
     let saving: Promise<void> | undefined;
     act(() => {
       saving = editor.result.current.saveNow();
@@ -909,11 +909,11 @@ describe("document save notices", () => {
     });
     expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
     expect(await rows(user)).toHaveLength(1);
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
 
     emit({ state: { kind: "saved-here" } });
     expect(await rows(user)).toHaveLength(1);
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
     act(() => editor.result.current.setDraft("plain edit, saved"));
     await act(async () => {
       await editor.result.current.saveNow();
@@ -927,7 +927,7 @@ describe("document save notices", () => {
       await editor.result.current.saveNow();
     });
     expect(await rows(user)).toHaveLength(1);
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
     await closeEditor(editor, document);
   });
 
@@ -998,7 +998,7 @@ describe("document save notices", () => {
       reportDocumentReplacement("ws-1", "notes/a.md", false, { ...failure, setAsideFailed: false }),
     );
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
-      "dohc could not finish replacing this document.",
+      "dohc could not replace this page.",
     );
     act(() => reportDocumentReplacement("ws-1", "notes/a.md", false, null));
     expect(screen.queryByTestId("connection-notices")).toBeNull();
@@ -1025,7 +1025,7 @@ describe("document save notices", () => {
     );
     await waitFor(() => expect(writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(retryEngineYDocSave).toHaveBeenCalledWith({ workspaceId: "ws-1", path: "notes/a.md" });
-    expect(titleBar().textContent).toBe("Couldn't save 1 file");
+    expect(titleBar().textContent).toBe("Could not save 1 file");
     emit({ state: { kind: "saved-here" } });
     expect(titleBar().textContent).toBe("Local · saved");
     expect(screen.queryByTestId("connection-notices")).toBeNull();

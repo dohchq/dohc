@@ -306,7 +306,7 @@ describe("FileInspector Excalidraw view", () => {
 
     expect(await screen.findByTestId("view-drawing-truncated")).toBeTruthy();
     expect(screen.queryByTestId("mock-excalidraw-canvas")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Open the full file externally" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open full file externally" }));
     expect(bridge.openFileExternally).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       relativePath: "large.excalidraw",

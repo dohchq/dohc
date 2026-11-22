@@ -226,7 +226,7 @@ export function DesktopRoot() {
         if (request < committedRegistryRequest.current) return;
         const { words, cause: arrived } = readError(cause);
         setLoadError({
-          message: words ?? "dohc could not read the file that lists your workspaces.",
+          message: words ?? "dohc could not read your workspace list.",
           cause: arrived,
           next: registryReadFailureNext(refusalCode(cause)),
         });

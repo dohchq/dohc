@@ -553,7 +553,7 @@ const SHARE_EDITING_NOT_READY_ROW = "share-editing-not-ready";
 // What a refresh that set a shared view's collision record aside tells the
 // person, whether the refresh then completed or failed.
 function collisionRecordSetAsideMessage(): string {
-  return "dohc could not read this share's record of your files with the same path as a shared file. dohc keeps these files apart.";
+  return "dohc could not read its list of your files that share a path with a shared file. Your files stay separate.";
 }
 
 // The commands that still run under the opening cover.
@@ -1442,10 +1442,10 @@ function WorkspaceShell(props: {
           refusal.code === "edits-pending" && refusal.pending === "conflict-parent-withheld";
         reportShellFailure({
           identity,
-          ...(!withheld ? { title: `Live editing didn't stop for ${path}` } : {}),
+          ...(!withheld ? { title: `Live editing did not stop for ${path}` } : {}),
           message: withheld
-            ? `Live editing didn't stop for ${path}.`
-            : liveStopMessage(refusal).slice("Live editing didn't stop. ".length),
+            ? `Live editing did not stop for ${path}.`
+            : liveStopMessage(refusal).replace(/^Live editing (?:didn't|did not) stop\.\s*/u, ""),
           ...(refusal.sessionHost ? { details: [["Server", refusal.sessionHost]] } : {}),
           ...(withheld
             ? {
@@ -2145,7 +2145,7 @@ function WorkspaceShell(props: {
         });
         if (command === "unpin-app") await setAppPinned(appRoot, false);
       } catch (error) {
-        reportShellError("Could not open the workbench menu.", error);
+        reportShellError("dohc could not open the menu.", error);
       }
     },
     [reportShellError, setAppPinned, workspaceId],
@@ -2439,7 +2439,7 @@ function WorkspaceShell(props: {
     void Promise.resolve()
       .then(() => onManageWorkspaces?.())
       .catch((error: unknown) =>
-        reportShellError("Couldn't open the workspace manager.", error, manageWorkspaces),
+        reportShellError("dohc could not open the workspace manager.", error, manageWorkspaces),
       );
   }, [onManageWorkspaces, reportShellError]);
 
@@ -2501,7 +2501,7 @@ function WorkspaceShell(props: {
     : shareViewDamaged
       ? !shareView?.recipientUserId || needsReopenFor === shareView
         ? shareReopenMessage
-        : "dohc can't read what this share grants. Open the share again to restore it."
+        : "dohc cannot read what this share grants. Open the share again to restore it."
       : shareEditingNotReady
         ? SHARE_EDITING_NOT_READY_MESSAGE
         : shareHadEditRef.current
@@ -2588,7 +2588,7 @@ function WorkspaceShell(props: {
       void refreshDatasets().catch((error) => {
         if (!workspaceAdmission.superseded && !shareViewEndedRef.current)
           reportShellError(
-            "Could not read Collections.",
+            "dohc could not read Collections.",
             error,
             refresh,
             undefined,
@@ -2612,7 +2612,7 @@ function WorkspaceShell(props: {
     void refreshDatasets().catch((error) => {
       if (!workspaceAdmission.superseded)
         reportShellError(
-          "Could not read Collections.",
+          "dohc could not read Collections.",
           error,
           null,
           undefined,
@@ -2990,7 +2990,7 @@ function WorkspaceShell(props: {
         reportShellFailure({
           title: `Edits not written to ${row.path}`,
           message:
-            "When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.",
+            "When live editing stopped, dohc kept your unsent edits but could not finish writing them to your file. Save a recovery copy to get them back.",
           details,
           action: save,
           target,
@@ -3060,7 +3060,7 @@ function WorkspaceShell(props: {
             // A slow answer for a workspace this window left repaints nothing.
             if (workspaceIdRef.current !== workspaceId || workspaceAdmission.superseded) return;
             reportShellError(
-              `dohc could not try again to send your edits to ${row.path}.`,
+              `dohc could not retry sending your edits to ${row.path}.`,
               error,
               retry,
               undefined,
@@ -3076,7 +3076,7 @@ function WorkspaceShell(props: {
           tone: "warning",
           quiet: true,
           message:
-            "The server could not accept your edits. A recovery copy of them is saved, so the server may now release them.",
+            "The server could not accept your edits. A recovery copy is saved, so the server can now release them.",
           details,
           ...(row.earlier ? {} : { retry }),
           action: save,
@@ -3127,7 +3127,7 @@ function WorkspaceShell(props: {
       (await refreshShareViewRef.current(pressBurst ? "press-burst" : "background")) === "changed",
     followStatedLevel: () => refreshShareViewRef.current("manual"),
     onPersistentFailure: (error) =>
-      reportShellError("Couldn't refresh the shared view.", error, () => {
+      reportShellError("dohc could not refresh the shared view.", error, () => {
         if (!workspaceAdmission.superseded) void refreshShareViewRef.current();
       }),
     onVerified: (result) => {
@@ -3332,7 +3332,7 @@ function WorkspaceShell(props: {
       // own read, and the same one the caller runs on any activity.
       const askAgain = () => {
         void refreshHistory().catch((error) =>
-          reportShellError("Could not refresh history.", error),
+          reportShellError("dohc could not refresh History.", error),
         );
       };
       // Whether an open file changed, read apart from the page, which can
@@ -3365,7 +3365,9 @@ function WorkspaceShell(props: {
     supersedeHistoryPage(token);
     const statusRead = bridge().getSyncStatus({ workspaceId });
     const askAgain = () => {
-      void refreshHistory().catch((error) => reportShellError("Could not refresh history.", error));
+      void refreshHistory().catch((error) =>
+        reportShellError("dohc could not refresh History.", error),
+      );
     };
     syncStatusLane.settle(
       token,
@@ -3417,7 +3419,9 @@ function WorkspaceShell(props: {
   const captureAvailable = !shareView && captureDecided && !statusSaysNoRecorder(syncStatus);
   useEffect(() => {
     if (!workspaceIsReady) return;
-    void refreshHistory().catch((error) => reportShellError("Could not refresh history.", error));
+    void refreshHistory().catch((error) =>
+      reportShellError("dohc could not refresh History.", error),
+    );
   }, [refreshHistory, reportShellError, workspaceIsReady]);
   // Conflict review: opened from the notice center's conflict notice. Lists
   // every open conflict (two machines editing apart, or a merge left with
@@ -3489,16 +3493,18 @@ function WorkspaceShell(props: {
             // owes nothing.
             if (observeEngineVersion(versionToken, active)) {
               void refreshHistory().catch((error) =>
-                reportShellError("Could not refresh history.", error),
+                reportShellError("dohc could not refresh History.", error),
               );
             }
           })
           .catch(() => undefined);
       }
       void refreshFiles().catch((error) =>
-        reportShellError("Could not refresh workspace files.", error),
+        reportShellError("dohc could not refresh workspace files.", error),
       );
-      void refreshHistory().catch((error) => reportShellError("Could not refresh history.", error));
+      void refreshHistory().catch((error) =>
+        reportShellError("dohc could not refresh History.", error),
+      );
     },
     [
       !!shareView,
@@ -3557,7 +3563,7 @@ function WorkspaceShell(props: {
       // The contract refuses more dropped items, so say why before asking.
       if (droppedPaths && droppedPaths.length > DROP_IMPORT_LIMITS.items) {
         reportShellFailure({
-          message: `Could not import files. ${DROP_IMPORT_REFUSALS.items}`,
+          message: `dohc could not import files. ${DROP_IMPORT_REFUSALS.items}`,
           kind: "import-files",
         });
         return;
@@ -3570,7 +3576,7 @@ function WorkspaceShell(props: {
           ...(targetDir ? { targetDir } : {}),
         });
       } catch (error) {
-        reportShellError("Could not import files.", error, retry, "import-files");
+        reportShellError("dohc could not import files.", error, retry, "import-files");
         return;
       }
       const count = outcome.imported.length;
@@ -3582,7 +3588,7 @@ function WorkspaceShell(props: {
       if (outcome.stop && !outcome.interrupted) {
         reportShellFailure({
           message: fitImportMessage(
-            `Could not import files${skippedSuffix}. `,
+            `dohc could not import files${skippedSuffix}. `,
             importStopSentence(outcome.stop),
             "",
           ),
@@ -3627,7 +3633,7 @@ function WorkspaceShell(props: {
         try {
           await refreshFiles();
         } catch (error) {
-          reportShellError("The import stopped, and the Explorer could not refresh.", error);
+          reportShellError("The import stopped, and dohc could not refresh Explorer.", error);
         }
         return;
       }
@@ -3637,7 +3643,7 @@ function WorkspaceShell(props: {
       // again, so there is nothing to try again.
       const reportSkips = (title: string) =>
         reportImportSkips({ title, ...importSkipLines(skipped, outcome.skippedSources ?? []) });
-      const notImported = `${skipped} ${skipped === 1 ? "file wasn't" : "files weren't"} imported`;
+      const notImported = `${skipped} ${skipped === 1 ? "file was not" : "files were not"} imported`;
       if (count === 0 && folders.length === 0) {
         reportSkips(notImported);
         return;
@@ -3650,13 +3656,13 @@ function WorkspaceShell(props: {
         // The palette's dialog picks files, never folders.
         const landed = `Imported ${count} ${count === 1 ? "file" : "files"}${targetDir ? ` into ${targetDir}` : ""}.`;
         if (skipped > 0)
-          reportSkips(`${landed} ${skipped} ${skipped === 1 ? "wasn't" : "weren't"} imported.`);
+          reportSkips(`${landed} ${skipped} ${skipped === 1 ? "was not" : "were not"} imported.`);
         else showSuccessNotice(landed, undefined, "import-files");
       }
       try {
         await refreshFiles();
       } catch (error) {
-        reportShellError("Files imported, but the explorer could not refresh.", error);
+        reportShellError("Files imported, but dohc could not refresh Explorer.", error);
         return;
       }
       if (
@@ -3774,7 +3780,7 @@ function WorkspaceShell(props: {
         .catch((error) => {
           if (!isCurrentRequest()) return;
           reportShellError(
-            "dohc could not save this file. The file did not open in this editor group.",
+            "dohc could not save this file, so it did not open in this editor group.",
             error,
           );
         });
@@ -3831,7 +3837,7 @@ function WorkspaceShell(props: {
             if (workspaceIdRef.current !== id) return;
             const kept =
               saved.keptEdits === "copied"
-                ? " The server may now release your kept edits."
+                ? " The server can now release your kept edits."
                 : saved.keptEdits === "kept"
                   ? ` Your kept edits stay ${saved.storedOn === "server" ? "on the server" : "on this computer"}.`
                   : "";
@@ -3854,8 +3860,8 @@ function WorkspaceShell(props: {
               saved.notInNote === 0
                 ? ""
                 : saved.notInNote === 1
-                  ? " 1 edit didn't fit in the note and is listed at the end."
-                  : ` ${saved.notInNote} edits didn't fit in the note and are listed at the end.`;
+                  ? " 1 edit did not fit in the note and is listed at the end."
+                  : ` ${saved.notInNote} edits did not fit in the note and are listed at the end.`;
             showSuccessNotice(
               `Saved a recovery copy of ${path} in ${folder}.${listed}${kept}`,
               undefined,
@@ -3967,7 +3973,7 @@ function WorkspaceShell(props: {
             if (!copy.materialized) {
               reportShellError(
                 `dohc could not finish the copy of ${path}.`,
-                new Error(`${copy.path} is in History but not yet in this folder.`),
+                new Error(`The copy ${copy.path} is in History but not yet in this folder.`),
                 retry,
               );
               return;
@@ -4052,8 +4058,8 @@ function WorkspaceShell(props: {
             const version = versions.find(({ id }) => id === declined.versionId);
             reportShellFailure({
               message: version
-                ? `"${declined.path}" is in the version "${version.name}". Switch to that version to open it.`
-                : `"${declined.path}" is not in the version you have open.`,
+                ? `The file "${declined.path}" is in the version "${version.name}". Switch to that version to open it.`
+                : `The file "${declined.path}" is not in the open version.`,
               details: [
                 ["File", declined.path],
                 ["Version id", declined.versionId],
@@ -4064,7 +4070,7 @@ function WorkspaceShell(props: {
           .catch((error: unknown) => {
             if (!isCurrentRequest()) return;
             reportShellFailure({
-              message: "dohc could not open this document.",
+              message: "dohc could not open this file.",
               cause: error,
               retry: open,
             });
@@ -4548,7 +4554,7 @@ function WorkspaceShell(props: {
   const onMoreDataCollections = useCallback(() => {
     void loadMoreDatasets().catch((error) =>
       reportShellError(
-        "Could not read Collections.",
+        "dohc could not read Collections.",
         error,
         undefined,
         undefined,
@@ -4703,7 +4709,7 @@ function WorkspaceShell(props: {
         open: openChatsNavInTab,
         onUnavailable: (error) =>
           reportShellError(
-            "Could not open this conversation.",
+            "dohc could not open this conversation.",
             error,
             () => void openCanonicalDmInTab(locator),
           ),
@@ -4801,7 +4807,7 @@ function WorkspaceShell(props: {
         })
         .catch((error) => {
           if (!isCurrentRequest()) return;
-          reportShellError("Could not save the active draft before opening history.", error);
+          reportShellError("dohc could not save the active draft before opening History.", error);
         });
     },
     [
@@ -4816,9 +4822,11 @@ function WorkspaceShell(props: {
   const refreshAfterHistoryRestore = useCallback(() => {
     advanceCollectionWriteLineage(workspaceId);
     void refreshFiles().catch((error) =>
-      reportShellError("Could not refresh workspace files.", error),
+      reportShellError("dohc could not refresh workspace files.", error),
     );
-    void refreshHistory().catch((error) => reportShellError("Could not refresh history.", error));
+    void refreshHistory().catch((error) =>
+      reportShellError("dohc could not refresh History.", error),
+    );
   }, [refreshFiles, refreshHistory, reportShellError, workspaceId]);
   const openHistoryView = useCallback(() => {
     mutateWb((state) => ({
@@ -5200,7 +5208,7 @@ function WorkspaceShell(props: {
           pending.writing = null;
           if (workspaceSelection.current !== selection) return null;
           reportShellError(
-            "Could not create the page.",
+            "dohc could not create the page.",
             error,
             () => void writeNewPage(tabPath, open),
           );
@@ -5247,7 +5255,7 @@ function WorkspaceShell(props: {
       }, state),
     );
     keepBornDrafts.current();
-    if (written.includes(null)) throw new Error("Could not create the page.");
+    if (written.includes(null)) throw new Error("dohc could not create the page.");
   };
   useEffect(
     () =>
@@ -5311,7 +5319,7 @@ function WorkspaceShell(props: {
         void flushStableDrafts((groupId, tab) => requested.get(tab) === groupId)
           .then(commitClose)
           .catch((error) => {
-            reportShellError("Could not save the draft, so the tab stays open.", error);
+            reportShellError("dohc could not save the draft, so the tab stays open.", error);
           });
       };
       // A typed new page is written as it closes, and stays open if it
@@ -5737,7 +5745,7 @@ function WorkspaceShell(props: {
             const message = shareWriteRefusalRef.current;
             if (!shownInPage(message)) reportShellError(message, new Error(message), resume);
           } else if (!shownInPage(words))
-            reportShellError("Could not create a record.", error, resume);
+            reportShellError("dohc could not create a record.", error, resume);
           return;
         }
         if ("kind" in result) {
@@ -5767,7 +5775,7 @@ function WorkspaceShell(props: {
             try {
               await refreshFiles();
             } catch (error) {
-              if (!moved()) reportShellError("Could not refresh workspace files.", error);
+              if (!moved()) reportShellError("dohc could not refresh workspace files.", error);
             }
           if (!moved() && shareView)
             try {
@@ -5778,7 +5786,7 @@ function WorkspaceShell(props: {
           const restricted = !moved() && shareView && !shareViewWritableRef.current;
           const reason = restricted
             ? shareWriteRefusalRef.current
-            : (result.reason ?? "The sync relay did not accept this record.");
+            : (result.reason ?? "The server did not accept this record.");
           const shown = shownInPage(reason);
           if (moved()) return;
           if (!shown)
@@ -5800,7 +5808,7 @@ function WorkspaceShell(props: {
         try {
           await refreshFiles();
         } catch (error) {
-          if (!moved()) reportShellError("Could not refresh workspace files.", error);
+          if (!moved()) reportShellError("dohc could not refresh workspace files.", error);
         }
         if (moved()) return;
         if (options.open !== false) openFile(result.path);
@@ -5826,7 +5834,7 @@ function WorkspaceShell(props: {
       await refreshFiles();
       openFile(result.path);
     } catch (error) {
-      reportShellError("Could not create a drawing.", error);
+      reportShellError("dohc could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
   // Add an app here… opens the Explorer with its Apps section open and its
@@ -5860,7 +5868,7 @@ function WorkspaceShell(props: {
   }, [refreshShareMounts]);
   const onExplorerRefresh = useCallback(() => {
     void refreshFiles().catch((error) =>
-      reportShellError("Could not refresh workspace files.", error),
+      reportShellError("dohc could not refresh workspace files.", error),
     );
     return newestFilesRequest();
   }, [refreshFiles, newestFilesRequest, reportShellError]);
@@ -5910,7 +5918,7 @@ function WorkspaceShell(props: {
       commitAfterTabFlush(
         groupId,
         tab,
-        "Could not save the draft, so the tab stays in this group.",
+        "dohc could not save the draft, so the tab stays in this group.",
         commitMove,
       );
     },
@@ -5960,7 +5968,7 @@ function WorkspaceShell(props: {
       commitAfterTabFlush(
         groupId,
         tab,
-        "dohc could not save this file. The editor group was not created.",
+        "dohc could not save this file, so dohc did not create a new editor group.",
         commitSplit,
       );
     },
@@ -6047,7 +6055,7 @@ function WorkspaceShell(props: {
         });
         if (command) runWorkbenchMenuCommand(command, path, groupId);
       } catch (error) {
-        reportShellError("Could not open the workbench menu.", error);
+        reportShellError("dohc could not open the menu.", error);
       }
     },
     [reportShellError, runWorkbenchMenuCommand, workspaceId],
@@ -6107,7 +6115,7 @@ function WorkspaceShell(props: {
         // Unapplied input from other workspaces becomes retained failures.
         // Applied writes remain owned until the engine confirms their save.
         abandonPendingCollectionFieldWrites(
-          "dohc could not finish saving this change. Retry it, or discard the unsaved change.",
+          "dohc could not finish saving this change. Try again, or discard the unsaved change.",
           workspaceId,
         );
       }
@@ -6125,8 +6133,8 @@ function WorkspaceShell(props: {
             retainedFailures === 0
               ? "dohc has not confirmed this save yet. Keep dohc open until saving finishes."
               : retainedFailures === 1
-                ? "A collection change in another workspace has not saved. Retry or discard it to continue."
-                : "Collection changes in another workspace have not saved. Retry or discard them to continue.",
+                ? "A Collection change in another workspace has not saved. Try again or discard it to continue."
+                : "Collection changes in another workspace have not saved. Try again or discard them to continue.",
           blockedOnCollectionWrites: true,
         });
         return;
@@ -6175,7 +6183,7 @@ function WorkspaceShell(props: {
       };
       const reportInitialFilesFailure = (error: unknown) => {
         if (!cancelled) {
-          reportShellError("Could not refresh workspace files.", error, () => {
+          reportShellError("dohc could not refresh workspace files.", error, () => {
             void refreshInitialFiles().catch(reportInitialFilesFailure);
           });
         }
@@ -6254,11 +6262,12 @@ function WorkspaceShell(props: {
       if (mode !== "skip" || !hasCommittedListing()) {
         void refreshFiles(mode === "full" ? {} : { allowCached: true }).catch((error) => {
           if (!workspaceAdmission.superseded)
-            reportShellError("Could not refresh workspace files.", error);
+            reportShellError("dohc could not refresh workspace files.", error);
         });
       }
       void refreshHistory().catch((error) => {
-        if (!workspaceAdmission.superseded) reportShellError("Could not refresh history.", error);
+        if (!workspaceAdmission.superseded)
+          reportShellError("dohc could not refresh History.", error);
       });
       readCloudStatusAgainIfBusy();
       if (!shareView || shareViewReadsCollections) void refreshCollections();
@@ -6266,7 +6275,7 @@ function WorkspaceShell(props: {
         void refreshDatasets().catch((error) => {
           if (!workspaceAdmission.superseded)
             reportShellError(
-              "Could not read Collections.",
+              "dohc could not read Collections.",
               error,
               null,
               undefined,
@@ -6437,7 +6446,7 @@ function WorkspaceShell(props: {
       "export-workspace": () =>
         void bridge()
           .exportWorkspaceZip({ workspaceId })
-          .catch((error) => reportShellError("Could not export this workspace.", error)),
+          .catch((error) => reportShellError("dohc could not export this workspace.", error)),
       "toggle-sidebar": toggleSidePanel,
       "close-tab": closeActiveTab,
       "next-tab": () => showAdjacentTab(1),
@@ -6466,15 +6475,15 @@ function WorkspaceShell(props: {
       "zoom-in": () =>
         void bridge()
           .stepWindowZoom({ step: "in" })
-          .catch((error) => reportShellError("Could not change the window zoom.", error)),
+          .catch((error) => reportShellError("dohc could not change the window zoom.", error)),
       "zoom-out": () =>
         void bridge()
           .stepWindowZoom({ step: "out" })
-          .catch((error) => reportShellError("Could not change the window zoom.", error)),
+          .catch((error) => reportShellError("dohc could not change the window zoom.", error)),
       "zoom-reset": () =>
         void bridge()
           .stepWindowZoom({ step: "reset" })
-          .catch((error) => reportShellError("Could not change the window zoom.", error)),
+          .catch((error) => reportShellError("dohc could not change the window zoom.", error)),
       ...Object.fromEntries(
         pinnedApps.map(
           (app) =>
@@ -6585,7 +6594,9 @@ function WorkspaceShell(props: {
           event.preventDefault();
           void activeUndo
             .run()
-            .catch((error) => reportShellError("Could not undo the last history restore.", error));
+            .catch((error) =>
+              reportShellError("dohc could not undo the last History restore.", error),
+            );
         }
         return;
       }
@@ -6633,18 +6644,18 @@ function WorkspaceShell(props: {
   const shareBannerText = !shareView
     ? ""
     : shareViewEnded
-      ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
+      ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but will not update anymore.`
       : shareViewDamaged
         ? !shareView.recipientUserId || needsReopenFor === shareView
           ? "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays."
-          : "dohc can't read what this share grants. Open the share again to restore it."
+          : "dohc cannot read what this share grants. Open the share again to restore it."
         : shareViewWritable
           ? `Shared view from ${shareGranterName}. Pages save as you type. Other files need Send changes.`
           : shareViewHasIndependentChat
             ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
             : shareAccess === "comment"
               ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
-              : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`;
+              : `Shared view from ${shareGranterName}, read-only. Ask ${shareView.granterEmail ?? "the owner"} for changes.`;
   const [shareRefreshing, setShareRefreshing] = useState(false);
   const [shareExclusions, setShareExclusions] = useState<{
     workspaceId: string;
@@ -6793,8 +6804,8 @@ function WorkspaceShell(props: {
                 errorKind: outcome.errorKind,
               });
             reportShellError(
-              "Couldn't refresh the shared view.",
-              new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
+              "dohc could not refresh the shared view.",
+              new Error(`dohc could not refresh the shared view. ${outcome.errorMessage}`),
               retry,
             );
             return "stale";
@@ -6844,7 +6855,7 @@ function WorkspaceShell(props: {
             return "stale";
           }
           if (background) throw error;
-          reportShellError("Couldn't refresh the shared view.", error, retry);
+          reportShellError("dohc could not refresh the shared view.", error, retry);
           return "stale";
         } finally {
           // After the listing and after a FAILURE, deliberately. Refusals are
@@ -6964,7 +6975,7 @@ function WorkspaceShell(props: {
       if (!result.ok) {
         if (result.capturedLocalChanges > 0) await bestEffortRepaint();
         if (workspaceAdmission.superseded || token !== myShareChangeToken.current) return;
-        reportShellError("Couldn't send your changes.", new Error(result.errorMessage));
+        reportShellError("dohc could not send your changes.", new Error(result.errorMessage));
         return;
       }
       if (result.capturedLocalChanges > 0) await bestEffortRepaint();
@@ -6983,7 +6994,7 @@ function WorkspaceShell(props: {
     } catch (error) {
       if (workspaceAdmission.superseded) return;
       void checkShareAccess();
-      reportShellError("Couldn't send your changes.", error);
+      reportShellError("dohc could not send your changes.", error);
     } finally {
       if (!workspaceAdmission.superseded && owned === myShareChangeToken.current)
         setShareChangesSubmitting(false);
@@ -7024,7 +7035,7 @@ function WorkspaceShell(props: {
         setShareChangesSkipped(null);
         owned = await reloadMyShareChanges();
       } catch (error) {
-        reportShellError("Couldn't take your changes back.", error);
+        reportShellError("dohc could not take your changes back.", error);
       } finally {
         if (owned === myShareChangeToken.current) setShareChangesSubmitting(false);
       }
@@ -7270,7 +7281,7 @@ function WorkspaceShell(props: {
         loadingMore={engineHistoryLoadingMore}
         onLoadMore={() =>
           void loadMoreEngineHistory().catch((error) =>
-            reportShellError("Could not load earlier history.", error),
+            reportShellError("dohc could not load earlier History.", error),
           )
         }
         onOpenMoment={openMomentDiffTab}
@@ -7280,7 +7291,7 @@ function WorkspaceShell(props: {
         collections={historyCollections}
         onRetry={() =>
           void refreshHistory().catch((error) =>
-            reportShellError("Could not refresh history.", error),
+            reportShellError("dohc could not refresh History.", error),
           )
         }
         paused={historyPaused}
@@ -7292,7 +7303,7 @@ function WorkspaceShell(props: {
         onOpenFile={openHistoryRulesFile}
         onRetry={() =>
           void refreshHistory().catch((error) =>
-            reportShellError("Could not refresh history.", error),
+            reportShellError("dohc could not refresh History.", error),
           )
         }
       />
@@ -7315,12 +7326,12 @@ function WorkspaceShell(props: {
         data-testid="history-load-failed"
         className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center"
       >
-        <span className="text-xs text-danger">dohc could not load this workspace's history.</span>
+        <span className="text-xs text-danger">dohc could not load this workspace's History.</span>
         <button
           type="button"
           onClick={() =>
             void refreshHistory().catch((error) =>
-              reportShellError("Could not refresh history.", error),
+              reportShellError("dohc could not refresh History.", error),
             )
           }
           className="h-7 cursor-pointer rounded-md border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink"
@@ -7329,7 +7340,7 @@ function WorkspaceShell(props: {
         </button>
       </div>
     ) : (
-      <SkeletonRows layout="panel" label="Loading history..." />
+      <SkeletonRows layout="panel" label="Loading History…" />
     )
   ) : (
     // One line, per the empty-state recipe (copy.md): what is missing plus
@@ -7844,7 +7855,7 @@ function WorkspaceShell(props: {
       .revealWorkspaceFolder({ workspaceId: askedFor, recoveryCopies: true })
       .catch((error) => {
         if (workspaceIdRef.current !== askedFor) return;
-        reportShellError("Could not show the recovery folder.", error);
+        reportShellError("dohc could not show the recovery folder.", error);
       });
   }, [workspaceId, reportShellError]);
   const retryFileRecovery = useCallback(() => {
@@ -7976,7 +7987,7 @@ function WorkspaceShell(props: {
       kind: "outside-copy-read",
       title: "dohc could not list every kept copy",
       message:
-        "To find a copy that isn't listed, look beside its file for (kept copy) in the name.",
+        "To find a copy that is not listed, look beside its file for (kept copy) in the name.",
       details: [["Cause", error]],
       retry: () => void refreshKeptCopies(),
     });
@@ -8061,7 +8072,7 @@ function WorkspaceShell(props: {
           .catch((error) => {
             if (workspaceIdRef.current === askedFor)
               reportShellError(
-                "dohc couldn't dismiss this Notice. Try dismissing it again in Notices.",
+                "dohc could not dismiss this Notice. Try dismissing it again in Notices.",
                 error,
               );
           });
@@ -8271,7 +8282,7 @@ function WorkspaceShell(props: {
                                             .catch((error: unknown) => {
                                               setShareSkipped(shown);
                                               reportShellError(
-                                                "Couldn't dismiss that notice.",
+                                                "dohc could not dismiss that Notice.",
                                                 error,
                                               );
                                             });
@@ -8301,10 +8312,10 @@ function WorkspaceShell(props: {
                                     {myShareChange.state === "open"
                                       ? `Sent to ${shareGranterName} for review.`
                                       : myShareChange.state === "accepted"
-                                        ? `${shareGranterName} accepted your changes.`
+                                        ? `Accepted by ${shareGranterName}.`
                                         : // Declined owes a Next, and this one works right
                                           // here: the editor and the send control both stay.
-                                          `${shareGranterName} declined your changes. Your copy still has them. Edit again and send new changes.`}
+                                          `Declined by ${shareGranterName}. Your copy still has your changes. Edit again and send new changes.`}
                                   </span>
                                   {myShareChange.state === "open" ? (
                                     <>
@@ -8363,8 +8374,8 @@ function WorkspaceShell(props: {
                                       shareChangesSkipped.outsideShare === 0
                                         ? null
                                         : shareChangesSkipped.outsideShare === 1
-                                          ? "1 file wasn't sent — it's not part of this share."
-                                          : `${shareChangesSkipped.outsideShare} files weren't sent — they're not part of this share.`,
+                                          ? "1 file was not sent because it is outside this share."
+                                          : `${shareChangesSkipped.outsideShare} files were not sent because they are outside this share.`,
                                       shareChangesSkipped.morePending
                                         ? "More changes are waiting. Send again to send the rest."
                                         : null,
@@ -8716,7 +8727,7 @@ function WorkspaceShell(props: {
                                                       fallback={
                                                         <SkeletonRows
                                                           layout="panel"
-                                                          label="Loading graph..."
+                                                          label="Loading Graph…"
                                                         />
                                                       }
                                                     >
@@ -8760,7 +8771,7 @@ function WorkspaceShell(props: {
                                                         // so this window gets a load state, not a claim.
                                                         <SkeletonRows
                                                           layout="panel"
-                                                          label="Loading history..."
+                                                          label="Loading History…"
                                                         />
                                                       ) : (
                                                         // Main decided, and the answer was no recorder — or the
@@ -8840,7 +8851,7 @@ function WorkspaceShell(props: {
                                                         // so this window gets a load state, not a claim.
                                                         <SkeletonRows
                                                           layout="panel"
-                                                          label="Loading versions..."
+                                                          label="Loading versions…"
                                                         />
                                                       ) : (
                                                         // Main decided, and the answer was no recorder — or the
@@ -8879,7 +8890,7 @@ function WorkspaceShell(props: {
                                                     ) : !captureDecided ? (
                                                       <SkeletonRows
                                                         layout="panel"
-                                                        label="Loading versions..."
+                                                        label="Loading versions…"
                                                       />
                                                     ) : (
                                                       <div
@@ -8923,7 +8934,7 @@ function WorkspaceShell(props: {
                                                               <SkeletonRows
                                                                 inSlot
                                                                 layout="panel"
-                                                                label="Loading Chats..."
+                                                                label="Loading Chats…"
                                                               />
                                                             }
                                                           >
@@ -8974,7 +8985,7 @@ function WorkspaceShell(props: {
                                                         <SkeletonRows
                                                           inSlot
                                                           layout="panel"
-                                                          label="Loading Chats..."
+                                                          label="Loading Chats…"
                                                         />
                                                       ) : (
                                                         // Main decided, and the answer was no capture: the engine flag
@@ -9010,7 +9021,7 @@ function WorkspaceShell(props: {
                                                           <SkeletonRows
                                                             inSlot
                                                             layout="panel"
-                                                            label="Loading collection..."
+                                                            label="Loading Collection…"
                                                           />
                                                         }
                                                       >
@@ -9027,7 +9038,7 @@ function WorkspaceShell(props: {
                                                           onLifecycleChanged={() => {
                                                             void refreshDatasets().catch((error) =>
                                                               reportShellError(
-                                                                "Could not refresh Collections.",
+                                                                "dohc could not refresh Collections.",
                                                                 error,
                                                               ),
                                                             );
@@ -9071,7 +9082,7 @@ function WorkspaceShell(props: {
                                                           onFormCreated={(appRoot) => {
                                                             void refreshFiles().catch((error) =>
                                                               reportShellError(
-                                                                "Could not refresh workspace files.",
+                                                                "dohc could not refresh workspace files.",
                                                                 error,
                                                               ),
                                                             );
@@ -9089,7 +9100,7 @@ function WorkspaceShell(props: {
                                                           <SkeletonRows
                                                             inSlot
                                                             layout="panel"
-                                                            label="Loading collection..."
+                                                            label="Loading Collection…"
                                                           />
                                                         }
                                                       >
@@ -9205,7 +9216,7 @@ function WorkspaceShell(props: {
                                                     // (hand-edited or truncated state). Closeable, never a crash.
                                                     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
                                                       <span className="text-sm text-ink">
-                                                        dohc could not open this collection
+                                                        dohc could not open this Collection.
                                                       </span>
                                                       <button
                                                         type="button"
@@ -9366,7 +9377,7 @@ function WorkspaceShell(props: {
                                   >
                                     <Suspense
                                       fallback={
-                                        <SkeletonRows layout="panel" label="Loading app..." />
+                                        <SkeletonRows layout="panel" label="Loading app…" />
                                       }
                                     >
                                       <LazySitePreviewPage
@@ -9460,7 +9471,7 @@ function WorkspaceShell(props: {
                                   Workspace stopped
                                 </p>
                                 <h2 className="m-0 text-xl font-semibold leading-tight tracking-tight text-ink">
-                                  This version of dohc can't open this workspace
+                                  This version of dohc cannot open this workspace
                                 </h2>
                                 <div className="space-y-1">
                                   <p className="m-0 text-[13px] leading-relaxed text-muted">
@@ -9561,7 +9572,7 @@ function WorkspaceShell(props: {
                               <h2 className="m-0 max-w-md select-text cursor-text text-xl font-semibold leading-tight tracking-tight text-ink">
                                 {oldWindow.openElsewhere
                                   ? "This workspace is open in another window."
-                                  : "This window can't edit this workspace anymore."}
+                                  : "This window cannot edit this workspace anymore."}
                               </h2>
                               {oldWindow.openElsewhere ? (
                                 <PrimaryButton key="go" autoFocus onClick={goToWorkspaceWindow}>
@@ -9583,7 +9594,7 @@ function WorkspaceShell(props: {
                             >
                               <div className="max-w-md select-text cursor-text space-y-1.5">
                                 <p className="text-sm font-medium text-ink">
-                                  Couldn’t open this workspace
+                                  dohc could not open this workspace
                                 </p>
                                 <p className="text-xs text-balance text-muted">
                                   {workspaceOpenFailure.message}
@@ -9628,7 +9639,7 @@ function WorkspaceShell(props: {
                                   pinName
                                   getText={() =>
                                     errorDetails([
-                                      ["Error", "Couldn't open this workspace"],
+                                      ["Error", "dohc could not open this workspace"],
                                       ["Detail", workspaceOpenFailure.message],
                                       ["Cause", workspaceOpenFailure.cause],
                                       ...reportFacts(Date.now()),
@@ -9764,7 +9775,7 @@ function WorkspaceShell(props: {
                                       }
                                     >
                                       {engineRebuild.phase === "moving"
-                                        ? "Moving"
+                                        ? "Moving…"
                                         : "Move and rebuild"}
                                     </PrimaryButton>
                                   </>
@@ -9815,7 +9826,7 @@ function WorkspaceShell(props: {
                               );
                               openFile(path);
                               void refreshFiles().catch((error) =>
-                                reportShellError("Could not refresh workspace files.", error),
+                                reportShellError("dohc could not refresh workspace files.", error),
                               );
                             }}
                           />
@@ -9834,11 +9845,14 @@ function WorkspaceShell(props: {
                               showSuccessNotice("Restored the Collection. Sharing stays off.");
                               void refreshDatasets().catch((error) => {
                                 if (workspaceIdRef.current === workspaceId)
-                                  reportShellError("Could not refresh Collections.", error);
+                                  reportShellError("dohc could not refresh Collections.", error);
                               });
                               void refreshFiles().catch((error) => {
                                 if (workspaceIdRef.current === workspaceId)
-                                  reportShellError("Could not refresh workspace files.", error);
+                                  reportShellError(
+                                    "dohc could not refresh workspace files.",
+                                    error,
+                                  );
                               });
                             }}
                           />
@@ -9857,7 +9871,7 @@ function WorkspaceShell(props: {
                               if (ref.kind === "transactional") {
                                 void refreshDatasets().catch((error) =>
                                   reportShellError(
-                                    "Could not read Collections.",
+                                    "dohc could not read Collections.",
                                     error,
                                     null,
                                     undefined,
@@ -9865,7 +9879,10 @@ function WorkspaceShell(props: {
                                   ),
                                 );
                                 void refreshFiles().catch((error) =>
-                                  reportShellError("Could not refresh workspace files.", error),
+                                  reportShellError(
+                                    "dohc could not refresh workspace files.",
+                                    error,
+                                  ),
                                 );
                                 openVirtualTab(
                                   transactionalCollectionTabPath(ref.datasetPath, ref.tableId),
@@ -9884,7 +9901,7 @@ function WorkspaceShell(props: {
                               );
                               void refreshCollections();
                               void refreshFiles().catch((error) =>
-                                reportShellError("Could not refresh workspace files.", error),
+                                reportShellError("dohc could not refresh workspace files.", error),
                               );
                               openCollectionTab(path);
                             }}
@@ -10071,7 +10088,7 @@ function WorkspaceShell(props: {
                                 // The share dialog's own card and X, so the dialog lands in its place.
                                 <div className="relative">
                                   <SkeletonRows
-                                    label="Loading share dialog..."
+                                    label="Loading share dialog…"
                                     className="dohc-elevated w-105 rounded-xl border border-line bg-panel p-5"
                                   />
                                   <IconButton

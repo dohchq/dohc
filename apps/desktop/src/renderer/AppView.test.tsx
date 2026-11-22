@@ -319,7 +319,7 @@ describe("an owner app in its tab", () => {
     const [download] = notices.report.mock.calls.map(([notice]) => notice);
     emit({ viewId: viewIdOf(), kind: "approval-ended" });
     expect(notices.clear).toHaveBeenCalledWith(download.identity);
-    expect(screen.getByText("This app's approval ended. Review it to open it again.")).toBeTruthy();
+    expect(screen.getByText("This app's approval ended. Review it to open again.")).toBeTruthy();
     expect(screen.queryByTestId("app-view-webview")).toBeNull();
     expect((screen.getByTestId("app-view-reload") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTestId("app-view-open-browser") as HTMLButtonElement).disabled).toBe(true);
@@ -335,7 +335,7 @@ describe("an owner app in its tab", () => {
         within(screen.getByTestId("app-view-retry")).getByRole("button", { name: "Try again" }),
       );
     expect(
-      await screen.findByText("This app's approval ended. Review it to open it again."),
+      await screen.findByText("This app's approval ended. Review it to open again."),
     ).toBeTruthy();
   });
 

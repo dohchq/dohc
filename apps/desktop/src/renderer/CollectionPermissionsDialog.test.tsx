@@ -160,7 +160,7 @@ it("says in place that the access wasn't saved, keeps the choices and focus, fil
   save.focus();
   fireEvent.click(save);
   const line = await screen.findByText(
-    "Access wasn't saved. This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.",
+    "dohc could not save access. This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.",
   );
   expect(line.getAttribute("role")).toBe("status");
   expect(document.activeElement).toBe(save);

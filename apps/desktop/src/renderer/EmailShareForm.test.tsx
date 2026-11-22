@@ -55,10 +55,10 @@ it.each<RelayShareTarget>([
   render(<EmailShareForm workspaceId="ws-1" target={target} />);
   await user.click(screen.getByTestId("share-access"));
   expect((await screen.findByTestId("share-access-view")).textContent).toBe(
-    "Can viewCan read, but not change.",
+    "Can viewCan read, not change.",
   );
   expect(screen.getByTestId("share-access-edit").textContent).toBe(
-    "Can editCan make changes and see History.",
+    "Can editCan edit and view History.",
   );
 });
 
@@ -79,7 +79,7 @@ describe("automation steps a share would stop", () => {
     });
     expect(bridgeMock.createRelayShare).not.toHaveBeenCalled();
     expect(screen.getByTestId("share-automation-warning").textContent).toBe(
-      'This share stops the automation "Spend" in Trip, because ana@dohc.test cannot edit Budget.',
+      'This share stops the automation "Spend" in Trip because ana@dohc.test cannot edit Budget.',
     );
     expect(screen.getByTestId("share-create").textContent).toBe("Invite anyway");
 
@@ -184,10 +184,10 @@ describe("automation steps a share would stop", () => {
         "ana@dohc.test",
       ),
     ).toBe(
-      'This share stops the automations "Spend" in Projects/Trip and "Spend" in Home/Trip, because ana@dohc.test cannot edit Budget or view Archive.',
+      'This share stops the automations "Spend" in Projects/Trip and "Spend" in Home/Trip because ana@dohc.test cannot edit Budget or view Archive.',
     );
     expect(automationShareWarning([spend], null)).toBe(
-      'This share stops the automation "Spend" in Trip, because anyone who opens this link cannot edit Budget.',
+      'This share stops the automation "Spend" in Trip because anyone who opens this link cannot edit Budget.',
     );
     expect(automationShareWarning([], "ana@dohc.test")).toBeNull();
   });
@@ -227,7 +227,7 @@ describe("EmailShareForm", () => {
   });
 
   it.each([
-    [{ invitationEmail: "sent" }, "Email invite sent to friend@dohc.test."],
+    [{ invitationEmail: "sent" }, "Email invitation sent to friend@dohc.test."],
     [
       { invitationEmail: "unavailable" },
       "Invited friend@dohc.test. Copy the invitation and send it to them.",
@@ -407,8 +407,8 @@ describe("EmailShareForm", () => {
     ]);
     const [view, edit] = levels as [HTMLElement, HTMLElement];
     expect(view.getAttribute("aria-checked")).toBe("true");
-    expect(view.textContent).toBe("Can viewCan read, but not change.");
-    expect(edit.textContent).toBe("Can editCan make changes and see History.");
+    expect(view.textContent).toBe("Can viewCan read, not change.");
+    expect(edit.textContent).toBe("Can editCan edit and view History.");
     expect(screen.queryByTestId("share-access-pending")).toBeNull();
 
     await user.click(edit);

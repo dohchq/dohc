@@ -87,9 +87,9 @@ export function shareSkipNoticeLines(
   if (boundary.length > 0) {
     lines.push({
       kind: "boundary",
-      text: `dohc skipped ${updates(boundary.length)} outside what this share covers. Ask ${
+      text: `dohc skipped ${updates(boundary.length)} outside this share. Ask ${
         granterEmail ?? "the person who shared it"
-      }.`,
+      } to check what is shared.`,
       detail: boundary[0]?.detail,
     });
   }
@@ -110,7 +110,7 @@ export function shareSkipNoticeLines(
       kind: "malformed",
       // No instruction: the update was sent in a form dohc cannot read, and
       // there is nothing the reader or the granter can do about that.
-      text: `dohc couldn't apply ${updates(malformed.length)} this share sent.`,
+      text: `dohc could not apply ${updates(malformed.length)} this share sent.`,
       detail: malformed[0]?.detail,
     });
   }

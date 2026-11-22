@@ -137,7 +137,7 @@ export function DrawingView({
     if (truncated) {
       return {
         value: null,
-        error: "dohc cannot open a partial Excalidraw file.",
+        error: "dohc cannot open a partial drawing file.",
       };
     }
     try {
@@ -148,7 +148,7 @@ export function DrawingView({
     } catch (cause) {
       return {
         value: null,
-        error: cause instanceof Error ? cause.message : "The drawing is invalid.",
+        error: cause instanceof Error ? cause.message : "The drawing file is not valid.",
       };
     }
     // valueRevision advances only when the hook accepts a new disk snapshot.
@@ -314,7 +314,7 @@ export function DrawingView({
         >
           <span className="flex min-w-0 items-center gap-2">
             <TriangleAlert size={13} aria-hidden className="shrink-0" />
-            <span>This image was not added. Collaborative drawings cannot add images yet.</span>
+            <span>dohc did not add this image. Shared drawings cannot include images yet.</span>
           </span>
           <IconButton
             aria-label="Dismiss notice"
@@ -376,7 +376,7 @@ export function DrawingView({
           data-testid="view-drawing-error"
           icon={TriangleAlert}
           tone="danger"
-          title={`dohc could not open this drawing. ${document.error ?? "The drawing is invalid."}`}
+          title={`dohc could not open this drawing. ${document.error ?? "The drawing file is not valid."}`}
         >
           <OpenExternallyButton workspaceId={workspaceId} path={path} onError={onButtonError} />
         </EmptyState>

@@ -125,9 +125,7 @@ describe("a record's properties", () => {
     const input = within(openEditor("estimate")).getByRole<HTMLInputElement>("textbox");
     fireEvent.change(input, { target: { value: "many" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(within(editor("estimate")!).getByRole("alert").textContent).toBe(
-      "This value is not a number. Enter a number.",
-    );
+    expect(within(editor("estimate")!).getByRole("alert").textContent).toBe("Enter a number.");
     expect(changes).toEqual([]);
     fireEvent.click(value("title"));
     expect(editor("title")).toBeNull();

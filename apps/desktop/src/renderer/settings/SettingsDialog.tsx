@@ -622,7 +622,7 @@ export function SettingsDialog(props: {
     userResult?.warning,
     workspaceResult?.warning,
     workspaceResult?.refusal,
-    error ? `Settings error: ${error}` : null,
+    error || null,
   ].filter((message): message is string => Boolean(message));
 
   const saveAppearance = (patch: Partial<DesktopUserSettings["appearance"]>) =>
@@ -651,11 +651,11 @@ export function SettingsDialog(props: {
       if (props.workspaceOpenFailed) {
         return (
           <p className="text-sm text-muted">
-            Couldn’t open this workspace. Close Settings to try again.
+            dohc could not open this workspace. Close Settings to try again.
           </p>
         );
       }
-      return <SkeletonRows layout="panel" label="Loading settings..." />;
+      return <SkeletonRows layout="panel" label="Loading settings…" />;
     }
 
     switch (activeSection) {
@@ -890,7 +890,7 @@ export function SettingsDialog(props: {
                 <SettingRow
                   title="Live documents"
                   searchMatch={rowSearchMatch("Live documents", "editing", "live")}
-                  description="Documents this workspace is editing live. Stopping one keeps the file and its history."
+                  description="Documents this workspace is editing live. Stopping one keeps the file and its History."
                   testId="settings-row-live-documents"
                 >
                   <PrimaryButton
@@ -963,7 +963,7 @@ export function SettingsDialog(props: {
                   })
                 }
                 testId="settings-row-attachment-location"
-                description="Where dohc saves an image you paste, drop, or insert into a document."
+                description="Where dohc saves an image you paste, drop, or insert into a page."
                 top
                 aside={
                   <AttachmentLocationControl
@@ -981,7 +981,7 @@ export function SettingsDialog(props: {
                 description={
                   workspaceSettings.files.attachmentLocation === "same-folder" ? (
                     <span id="attachment-folder-unused">
-                      Not used when images go beside the document.
+                      Not used when images go beside the page.
                     </span>
                   ) : undefined
                 }
@@ -1131,7 +1131,7 @@ export function SettingsDialog(props: {
               <SettingRow
                 title="Reset user settings"
                 searchMatch={rowSearchMatch("Reset user settings", "defaults")}
-                description="Restore local user settings for this desktop install to defaults."
+                description="Restore user settings on this computer to defaults."
                 modified={isModified(userSettings, DEFAULT_USER_SETTINGS)}
                 testId="settings-row-reset-user"
               >
@@ -1142,7 +1142,7 @@ export function SettingsDialog(props: {
               <SettingRow
                 title="Reset workspace settings"
                 searchMatch={rowSearchMatch("Reset workspace settings", "defaults")}
-                description="Restore local settings for this workspace without touching workspace content."
+                description="Restore this workspace's settings to defaults. Your files stay untouched."
                 modified={isModified(workspaceSettings, DEFAULT_WORKSPACE_SETTINGS)}
                 testId="settings-row-reset-workspace"
               >
@@ -1230,7 +1230,7 @@ export function SettingsDialog(props: {
                     data-state={updateState?.status ?? "unknown"}
                     className={updateState?.failure ? "text-danger" : undefined}
                   >
-                    {updateState ? updateStatusLine(updateState) : "Update status unavailable."}
+                    {updateState ? updateStatusLine(updateState) : "Update status is unavailable."}
                   </span>
                 }
                 aside={

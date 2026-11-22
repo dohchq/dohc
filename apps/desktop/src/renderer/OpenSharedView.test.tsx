@@ -104,7 +104,7 @@ describe("OpenSharedView", () => {
 
     await user.click(screen.getByTestId("open-share-start"));
 
-    expect(screen.getByTestId("open-share-start").textContent).toBe("Adding the share…");
+    expect(screen.getByTestId("open-share-start").textContent).toBe("Adding share…");
     expectMissingInput(null);
     const back = screen.getByRole("button", { name: "Back" }) as HTMLButtonElement;
     expect(back.disabled).toBe(false);
@@ -252,7 +252,7 @@ describe("OpenSharedView", () => {
     await screen.findByText("/home/sam/dohc/shared");
     await user.click(screen.getByTestId("open-share-start"));
 
-    expect(screen.getByTestId("open-share-start").textContent).toBe("Opening the share…");
+    expect(screen.getByTestId("open-share-start").textContent).toBe("Opening share…");
     expectMissingInput(null);
     const back = screen.getByRole("button", { name: "Back" }) as HTMLButtonElement;
     expect(back.disabled).toBe(false);
@@ -334,7 +334,7 @@ describe("OpenSharedView", () => {
       (await screen.findByTestId("open-share-mode-separate")).getAttribute("aria-checked"),
     ).toBe("true");
     expect(screen.getByTestId("open-share-mode-help").textContent).toBe(
-      "Opens as its own workspace, where you can edit.",
+      "Opens as its own editable workspace.",
     );
   });
 
@@ -489,7 +489,7 @@ describe("OpenSharedView defaults for a pasted code", () => {
       expect(modeChecked("mount")).toBe("true");
       expect(modeHelp()).toBe("Adds a read-only copy to this workspace.");
       await user.click(screen.getByTestId("open-share-mode-separate"));
-      expect(modeHelp()).toBe("Opens as its own workspace, read-only.");
+      expect(modeHelp()).toBe("Opens as its own read-only workspace.");
     },
   );
 
@@ -497,11 +497,11 @@ describe("OpenSharedView defaults for a pasted code", () => {
     const user = userEvent.setup();
     await paste(received("edit"));
 
-    expect(modeHelp()).toBe("Opens as its own workspace, where you can edit.");
+    expect(modeHelp()).toBe("Opens as its own editable workspace.");
     await user.click(screen.getByTestId("open-share-mode-mount"));
     expect(modeHelp()).toBe("Adds a read-only copy to this workspace.");
     await user.click(screen.getByTestId("open-share-mode-separate"));
-    expect(modeHelp()).toBe("Opens as its own workspace, where you can edit.");
+    expect(modeHelp()).toBe("Opens as its own editable workspace.");
   });
 
   it("asks again for a code entered again after its lookup failed, and then defaults Edit to Open separately", async () => {
@@ -565,7 +565,7 @@ describe("OpenSharedView defaults for a pasted code", () => {
     });
 
     const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
-    await waitFor(() => expect(start.textContent).toBe("Checking the share…"));
+    await waitFor(() => expect(start.textContent).toBe("Checking share…"));
     expect(start.disabled).toBe(true);
     // Neither half looks chosen, so nobody confirms a default that may move.
     expect(modeChecked("mount")).toBe("false");
@@ -577,7 +577,7 @@ describe("OpenSharedView defaults for a pasted code", () => {
 
     await act(async () => lookup.resolve(received("edit")));
     await waitFor(() => expect(modeChecked("separate")).toBe("true"));
-    expect(modeHelp()).toBe("Opens as its own workspace, where you can edit.");
+    expect(modeHelp()).toBe("Opens as its own editable workspace.");
     await waitFor(() => expect(start.disabled).toBe(false));
     expect(start.textContent).toBe("Open share");
     expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledExactlyOnceWith({
@@ -594,7 +594,7 @@ describe("OpenSharedView defaults for a pasted code", () => {
       target: { value: CODE },
     });
     const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
-    await waitFor(() => expect(start.textContent).toBe("Checking the share…"));
+    await waitFor(() => expect(start.textContent).toBe("Checking share…"));
 
     await user.click(screen.getByTestId("open-share-mode-mount"));
     expect(start.disabled).toBe(false);
@@ -615,12 +615,12 @@ describe("OpenSharedView defaults for a pasted code", () => {
     const input = await screen.findByTestId("open-share-code");
     const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
     fireEvent.change(input, { target: { value: CODE } });
-    await waitFor(() => expect(start.textContent).toBe("Checking the share…"));
+    await waitFor(() => expect(start.textContent).toBe("Checking share…"));
     fireEvent.change(input, { target: { value: OTHER_CODE } });
     await waitFor(() => expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2));
 
     await act(async () => answers.get("share-1")!.resolve(received("edit", "share-1")));
-    expect(start.textContent).toBe("Checking the share…");
+    expect(start.textContent).toBe("Checking share…");
     expect(modeChecked("mount")).toBe("false");
     expect(modeChecked("separate")).toBe("false");
 

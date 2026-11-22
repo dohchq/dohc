@@ -198,7 +198,7 @@ export function AppsSettings(props: {
           >
             <span data-testid="apps-trust-state" className="text-[12px] text-muted">
               {props.trust.trusted === null
-                ? "Checking"
+                ? "Checking…"
                 : props.trust.trusted
                   ? "Trusted"
                   : "Restricted Mode"}
@@ -214,7 +214,7 @@ export function AppsSettings(props: {
         <h4 className="m-0 mb-2.5 text-sm font-semibold text-ink">Apps in this workspace</h4>
         <div ref={card}>
           {current.status === "loading" ? (
-            <SkeletonRows layout="panel" label="Loading apps..." />
+            <SkeletonRows layout="panel" label="Loading apps…" />
           ) : current.status === "failed" ? (
             <RetryRow testId="settings-apps-failed" onRetry={retry}>
               dohc could not list this workspace's apps.
@@ -284,11 +284,10 @@ function fallbackWords(
 ): string {
   if (!fallback) return "This app has nothing to preview yet.";
   const mode = modeLabel(fallback.mode);
-  if (fallback.source === "app") return `Default starts ${mode}, as its dohc.json sets.`;
-  if (fallback.source === "workspace") return `Default starts ${mode}, the workspace default.`;
-  if (fallback.source === "shared")
-    return `Default starts ${mode}, the only mode a shared app has.`;
-  return `Default starts ${mode}, which dohc picks for this app.`;
+  if (fallback.source === "app") return `Default uses ${mode}, set in dohc.json.`;
+  if (fallback.source === "workspace") return `Default uses ${mode}, from workspace settings.`;
+  if (fallback.source === "shared") return `Default uses ${mode}, the only mode for a shared app.`;
+  return `Default uses ${mode}, which dohc chooses for this app.`;
 }
 
 function AppPage(props: {

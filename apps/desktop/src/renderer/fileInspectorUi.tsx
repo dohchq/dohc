@@ -101,7 +101,7 @@ export function ViewActions(props: {
   return slot ? createPortal(content, slot) : null;
 }
 
-export const LOSSY_NOTE_TITLE = "This note has parts dohc can't show.";
+export const LOSSY_NOTE_TITLE = "This note has parts dohc cannot show.";
 
 export const OPENING_TITLE = "You can edit this document when it finishes opening.";
 
@@ -358,7 +358,7 @@ export function LossyNoteNoticeView(props: {
         {props.tooLarge
           ? SAVE_STATE["too-large"].title
           : props.held
-            ? "dohc held a change, because saving it would rewrite parts it can't show."
+            ? "dohc held a change because saving it would rewrite parts it cannot show."
             : LOSSY_NOTE_TITLE}
       </span>
       <span className="flex shrink-0 items-center gap-3">{props.children}</span>
@@ -415,7 +415,7 @@ export function LossyNoteNotice(props: {
       : history.keeps === "kept"
         ? "History keeps the original."
         : history.keeps === "untracked"
-          ? "History does not track this file, so dohc can't restore the original."
+          ? "History does not track this file, so dohc cannot restore the original."
           : "dohc could not confirm that History can restore the original.";
   return (
     <>
@@ -480,7 +480,7 @@ export function LossyNoteNotice(props: {
           }}
         >
           <p>
-            Saving rewrites the parts dohc can't show.
+            Saving rewrites the parts dohc cannot show.
             {historyLine ? ` ${historyLine}` : null}
           </p>
         </ConfirmDialog>

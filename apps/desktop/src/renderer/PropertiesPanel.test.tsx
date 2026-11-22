@@ -173,11 +173,11 @@ describe("PropertiesPanel", () => {
   });
 
   describe("pills", () => {
-    it("keeps Add a property as the +'s name and tooltip, and adds then removes a pill", async () => {
+    it("keeps Add property as the +'s name and tooltip, and adds then removes a pill", async () => {
       const user = userEvent.setup();
       render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody"} />);
-      const add = screen.getByRole("button", { name: "Add a property" });
-      expect(add.getAttribute("title")).toBe("Add a property");
+      const add = screen.getByRole("button", { name: "Add property" });
+      expect(add.getAttribute("title")).toBe("Add property");
       expect(add.textContent).toBe("");
 
       await user.click(add);

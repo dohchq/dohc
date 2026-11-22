@@ -96,7 +96,7 @@ export function AcceptDmDialog(props: {
             onClick={() => void accept()}
             className="rounded bg-accent px-3 py-1.5 text-xs text-bg disabled:opacity-50"
           >
-            {chosen ? `Add to ${chosen.label}` : "Choose a workspace"}
+            {busy ? "Adding…" : chosen ? `Add to ${chosen.label}` : "Choose a workspace"}
           </button>
         </div>
       </div>
@@ -164,7 +164,7 @@ export function LeaveDmDialog(props: {
             {`Leave your conversation with ${props.dm.peerLabel}?`}
           </h2>
           <p className="m-0 text-xs text-muted">
-            {`The conversation leaves ${props.workspaceLabel}. It appears again as a message request, so you can add it to a workspace later. Your messages are kept.`}
+            {`The conversation leaves ${props.workspaceLabel} and returns as a message request, so you can add it to a workspace later. Your messages are kept.`}
           </p>
         </div>
         <div className="flex justify-end gap-2">
@@ -185,7 +185,7 @@ export function LeaveDmDialog(props: {
             onClick={() => void confirm()}
             className="rounded bg-accent px-3 py-1.5 text-xs text-bg disabled:opacity-50"
           >
-            Leave conversation
+            {busy ? "Leaving…" : "Leave conversation"}
           </button>
         </div>
       </div>
@@ -216,7 +216,7 @@ export function DmRequestListItem(props: {
         <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[12px] font-medium text-ink">
-            {props.request.granterEmail ?? "A teammate"}
+            {props.request.granterEmail ?? "Someone"}
           </span>
           <span className="block text-[12px] text-muted">
             {pending ? "Wants to message you" : "Declined"}

@@ -96,7 +96,7 @@ export function CollectionCreationPreview({
         <div className="flex items-center gap-2 border-b border-line p-3 text-sm font-semibold text-ink">
           <Icon size={16} strokeWidth={1.9} aria-hidden="true" />
           <span className="truncate">
-            {name.trim().replace(/\/+$/, "").split("/").at(-1) || "New collection"}
+            {name.trim().replace(/\/+$/, "").split("/").at(-1) || "New Collection"}
           </span>
         </div>
         <div className="overflow-x-auto">
@@ -146,7 +146,7 @@ export function CollectionCreationPreview({
           <Table2 size={14} strokeWidth={1.9} aria-hidden="true" />
         )}
         <span>
-          {documents ? "Each record opens as a document" : "Connect records to forms and apps"}
+          {documents ? "Each record opens as a page" : "Connect records to forms and apps"}
         </span>
       </div>
     </section>
@@ -167,7 +167,9 @@ export function DatasetFormPreview({
     >
       <div className="mb-4 flex items-center justify-between text-[12px] text-muted">
         <span>Preview</span>
-        <span className="tabular-nums">{fields.length} fields</span>
+        <span className="tabular-nums">
+          {fields.length} {fields.length === 1 ? "field" : "fields"}
+        </span>
       </div>
       <div className="rounded-lg border border-line bg-bg p-5">
         <h3 className="m-0 mb-5 break-words text-lg font-semibold text-ink">

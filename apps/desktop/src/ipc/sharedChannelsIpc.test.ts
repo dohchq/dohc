@@ -467,7 +467,7 @@ describe("registered shared-channel handlers", () => {
         workspaceId: "workspace",
         shareId: "shown",
       }),
-    ).rejects.toThrow("Left the group, but its folder could not be removed. disk busy");
+    ).rejects.toThrow("Left the Group, but its folder could not be removed. disk busy");
     expect(h.workspace.sharedChannels?.find((row) => row.shareId === "shown")?.ended).toBe(true);
     h.unmount.mockResolvedValueOnce({ folderLeft: true });
     await expect(
@@ -475,7 +475,7 @@ describe("registered shared-channel handlers", () => {
         workspaceId: "workspace",
         shareId: "shown",
       }),
-    ).rejects.toThrow("Left the group. Its folder is still in shared-with-me/");
+    ).rejects.toThrow("Left the Group. Its folder is still in shared-with-me/");
   });
 
   it("does not cache an invitation kind returned after the account changes", async () => {

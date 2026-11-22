@@ -177,8 +177,8 @@ describe("About Access", () => {
     expect(rows.map((row) => row.textContent)).toEqual([
       "Anyone with the linkCan view",
       "Ssam@example.comCan edit",
-      "Kkim@example.comended",
-      "Llee@example.comended",
+      "Kkim@example.comEnded",
+      "Llee@example.comEnded",
     ]);
     expect(within(rows[0]!).getByText("Can view")).toBeTruthy();
     expect(within(rows[1]!).getByText("Can edit")).toBeTruthy();
@@ -196,7 +196,7 @@ describe("About Access", () => {
     const unknown = await screen.findByTestId("about-access-unknown");
     expect(unknown.dataset.reason).toBe("unexplained");
     expect(unknown.textContent).toContain(
-      "Access information is unavailable for this file. This does not mean that no one has access.",
+      "dohc could not check access for this file. Someone may still have access.",
     );
     expect(screen.getByTestId("about-access-freshness").textContent).toBe("Unknown");
     expect(screen.queryByTestId("about-access-empty")).toBeNull();

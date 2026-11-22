@@ -344,16 +344,16 @@ function unavailableWords(
   }
   if (entry.datasetAddressStatus === "unreadable") {
     return {
-      detail: "Can't read dataset.json",
+      detail: "Cannot read dataset.json",
       unavailable:
-        "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History.",
+        "dohc cannot read this Collection's dataset.json. Fix the file, or restore it from History.",
       fix,
     };
   }
   return {
     detail: "Not in this share",
     unavailable:
-      "This share doesn't include the Collection's dataset.json. Ask the owner to include it.",
+      "This share does not include the Collection's dataset.json. Ask the owner to include it.",
   };
 }
 

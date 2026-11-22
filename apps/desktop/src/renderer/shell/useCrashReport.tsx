@@ -9,7 +9,7 @@ const CRASH_REPORT_TITLES: Record<CrashReportSource, string> = {
   window: "A dohc window stopped unexpectedly",
   gpu: "dohc's graphics process stopped unexpectedly",
   utility: "A dohc background process stopped unexpectedly",
-  engine: "The workspace engine failed",
+  engine: "dohc's workspace engine stopped unexpectedly",
 };
 
 export interface CrashReportNotify {
@@ -97,7 +97,7 @@ export function useCrashReport(notify: CrashReportNotify): {
         () => reload(),
         (error: unknown) => {
           notifyRef.current.reportError(
-            "dohc could not save that you read the crash report.",
+            "dohc could not mark the crash report as read.",
             new Error(ipcErrorMessage(error)),
             () => markRead(),
           );

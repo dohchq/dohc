@@ -603,7 +603,7 @@ export function MessageReactions(props: {
             // The emoji glyph is aria-hidden, so without this the button announces
             // as just its count. Expose emoji + count + reactor names, e.g.
             // "👍 3 — Sam, Nova".
-            aria-label={`${group.emoji} ${group.records.length} — ${reactionerNames(group.records)}`}
+            aria-label={`${group.emoji} ${group.records.length}, ${reactionerNames(group.records)}`}
             title={`${reactionerNames(group.records)} reacted with ${group.emoji}`}
             onClick={() => toggle(group.emoji, group.mine)}
             className={`inline-flex h-6 items-center gap-1 rounded-full border px-1.5 text-[11px] leading-none transition-colors disabled:cursor-default aria-disabled:opacity-50 aria-disabled:cursor-default ${
@@ -1245,7 +1245,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       >
         <div className={`px-5 ${props.column ? STREAM_COLUMN : ""}`}>
           {props.loading ? (
-            <SkeletonRows label="Loading..." className="pt-1" />
+            <SkeletonRows label="Loading…" className="pt-1" />
           ) : (
             <p className="m-0 py-4 text-[13px] text-muted">{props.emptyLabel}</p>
           )}

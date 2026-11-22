@@ -292,7 +292,7 @@ export function CalendarView({
   );
 
   if (records.length === 0 && !onNavigate && !onNewRecord) {
-    return <div className="px-5 py-6 text-sm text-muted">No records in this collection yet.</div>;
+    return <div className="px-5 py-6 text-sm text-muted">No records in this Collection yet.</div>;
   }
 
   const stepPeriod = (delta: number) =>

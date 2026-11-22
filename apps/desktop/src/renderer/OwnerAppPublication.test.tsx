@@ -269,19 +269,19 @@ describe("owner app publication", () => {
         ).toBeTruthy();
       }
       fireEvent.click(
-        screen.getByRole("button", { name: `Revoke collection access ${published.publicationId}` }),
+        screen.getByRole("button", { name: `Revoke Collection access ${published.publicationId}` }),
       );
       expect(
         api.publishOwnerApp.mock.calls.some(([input]) => input.action === "revokeCollection"),
       ).toBe(false);
       expect(
         screen.getByText(
-          "Saved responses stay in your workspace. Copies already received cannot be removed.",
+          /Saved responses stay in your workspace, and copies already received cannot be removed\./,
         ),
       ).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Revoke access" }));
       await screen.findByText(
-        "App collection access revoked. Prepare the app again to review and restore access.",
+        "App Collection access revoked. Prepare the app again to review and restore access.",
       );
       expect(api.publishOwnerApp).toHaveBeenCalledWith({
         action: "revokeCollection",
@@ -292,10 +292,10 @@ describe("owner app publication", () => {
       expect(
         screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }),
       ).toBeTruthy();
-      await screen.findByText("No collection access");
+      await screen.findByText("No Collection access");
       expect(
         screen.queryByRole("button", {
-          name: `Revoke collection access ${published.publicationId}`,
+          name: `Revoke Collection access ${published.publicationId}`,
         }),
       ).toBeNull();
     },
@@ -333,7 +333,7 @@ describe("owner app publication", () => {
     const view = render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await open();
     fireEvent.click(
-      screen.getByRole("button", { name: `Revoke collection access ${published.publicationId}` }),
+      screen.getByRole("button", { name: `Revoke Collection access ${published.publicationId}` }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Revoke access" }));
     expect((screen.getByRole("button", { name: "Close" }) as HTMLButtonElement).disabled).toBe(
@@ -350,7 +350,7 @@ describe("owner app publication", () => {
     );
     expect(
       screen.queryByText(
-        "App collection access revoked. Prepare the app again to review and restore access.",
+        "App Collection access revoked. Prepare the app again to review and restore access.",
       ),
     ).toBeNull();
   });
@@ -486,7 +486,7 @@ describe("owner app publication", () => {
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await review();
     const scope = screen.getByTestId("app-publication-capability");
-    expect(scope.textContent).toContain("Create records only in trip/responses");
+    expect(scope.textContent).toContain("Creates records only in trip/responses");
     expect(scope.textContent).toContain("Fields it can create: name, place");
     expect(scope.textContent).toContain("Required fields: place");
     expect(scope.textContent).toContain("Fields shown in the app: place");
@@ -630,7 +630,7 @@ describe("owner app publication", () => {
       screen.getByText("1 removed. 0 already absent. 0 conflicts kept. 0 failed."),
     ).toBeTruthy();
     expect(
-      screen.getByText("0 removed. 0 already absent. 1 conflicts kept. 0 failed."),
+      screen.getByText("0 removed. 0 already absent. 1 conflict kept. 0 failed."),
     ).toBeTruthy();
   });
 
@@ -762,7 +762,7 @@ describe("owner app publication", () => {
         screen.getByRole("heading", { level: 2, name: "Trip planner" }),
       );
       expect(await stateText()).toBe(
-        "Approve it to run this version on this device.Later edits to its source wait for your approval.",
+        "Approve this app to run it on this device.Later source edits wait for your approval.",
       );
       await ready();
       expect(approveButton().textContent).toBe("Approve and open");
@@ -807,7 +807,7 @@ describe("owner app publication", () => {
       renderLocal();
       await openLocal();
       expect(await stateText()).toBe(
-        "Its source changed since you approved it.The app runs the approved version until you approve the changes.",
+        "The app's source changed since you approved it.The app runs the approved version until you approve the changes.",
       );
       await ready();
       expect(approveButton().textContent).toBe("Approve changes");
@@ -927,7 +927,7 @@ describe("owner app publication", () => {
       expect(alert.nextElementSibling?.tagName).toBe("FOOTER");
       expect(reportError).not.toHaveBeenCalled();
       expect(dialog()).toBeTruthy();
-      expect(await stateText()).toContain("Approve it to run this version on this device.");
+      expect(await stateText()).toContain("Approve this app to run it on this device.");
       await waitFor(() => expect(actions("prepareLocal")).toHaveLength(2));
       await ready();
       expect(actions("cancel")).toEqual([]);
@@ -1068,7 +1068,7 @@ describe("owner app publication", () => {
           ),
         ),
       );
-      expect(screen.queryByText("The server didn't return this app's links.")).toBeNull();
+      expect(screen.queryByText("The server did not return this app's links.")).toBeNull();
       expect(screen.getByRole("button", { name: "Publish on a link" })).toBeTruthy();
       expect(api.getSyncStatus).not.toHaveBeenCalled();
     });

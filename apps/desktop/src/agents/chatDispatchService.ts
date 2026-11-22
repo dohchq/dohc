@@ -196,8 +196,8 @@ function runFailureReason(
         .slice(`${RUNNER_START_FAILURE}: `.length)
         .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
         .trim();
-      const lead = "It couldn't start: ";
-      if (!detail) return "It couldn't start.";
+      const lead = "It could not start: ";
+      if (!detail) return "It could not start.";
       return lead + cutText(detail, NOTICE_BODY_MAX_CHARS - lead.length);
     }
   }
@@ -223,7 +223,7 @@ export const RUN_ID_LOG_TOKEN = "{runId}";
 export const RUN_LOG_SWEEP_MS = 24 * 60 * 60 * 1000;
 export const APP_QUIT_EXIT_CODE = 143;
 
-export const SELF_TEST_RESTRICTED_DETAIL = `${AGENTS_RESTRICTED_MESSAGE} Set Workspace trust to Trusted in Settings → Privacy. Then test again.`;
+export const SELF_TEST_RESTRICTED_DETAIL = `${AGENTS_RESTRICTED_MESSAGE} Set Workspace trust to Trusted in Settings › Privacy. Then test again.`;
 // For the log. The restrict that asked for the stop words what the person reads.
 export const RUNNER_OUTLIVED_STOP = "The agent runner did not exit after dohc stopped it.";
 
@@ -1075,7 +1075,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
         : undefined;
     const words = {
-      lead: `${noticeAgentName(agent?.name)} ${posted ? "stopped before finishing" : "didn't reply"}`,
+      lead: `${noticeAgentName(agent?.name)} ${posted ? "stopped before finishing" : "did not reply"}`,
       reason: runFailureReason(run, outcome, nodeAvailable),
     };
     // A run that couldn't start or needs Node.js has its own next step.
@@ -1414,8 +1414,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       // An agent you run reads its requests itself, so nothing is wrong to tell.
       if (agent && !agent.launch) continue;
       const message = !agent
-        ? "That agent isn't set up on this computer. Set it up in Settings → Agents."
-        : `${clip(agent.name)}'s chat runner is off. Turn it on in Settings → Agents.`;
+        ? "That agent is not set up on this computer. Set it up in Settings › Agents."
+        : `${clip(agent.name)} is off. Turn it on in Settings › Agents.`;
       try {
         options.onDispatchNotice?.(workspace, { reason: "no-runner", threadId, message });
       } catch (error) {
@@ -2081,7 +2081,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           : agent.launch
             ? `${agent.name} is off.`
             : `${agent.name} has no command to start it.`;
-        throw new Error(`${why} Check it in Settings → Agents, then try again.`);
+        throw new Error(`${why} Check it in Settings › Agents, then try again.`);
       }
       const requeued =
         (await options.requeueFailedTrigger?.({
@@ -2106,7 +2106,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (!workspace) return { ok: false, detail: "That workspace is not available." };
     if (shuttingDown) return { ok: false, detail: "dohc is quitting." };
     if (workspaceProcessReserved(workspace)) {
-      return { ok: false, detail: "A runner is already active in this workspace." };
+      return { ok: false, detail: "An agent is already active in this workspace." };
     }
     selfTestReservations.add(workspaceId);
     let reservationHeldByProcess = false;
@@ -2115,7 +2115,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const agent = (await options.readDispatchAgents()).find(
         (candidate) => candidate.id === agentId,
       );
-      if (!agent?.launch) return { ok: false, detail: "Configure a runner command first." };
+      if (!agent?.launch) return { ok: false, detail: "Add an agent command first." };
       const command = launchCommand(agent.launch);
       const assertMayStart = await agentStartCheck(workspace);
       if (!assertMayStart) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
@@ -2161,7 +2161,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             ok: false,
             detail: shuttingDown
               ? "dohc is quitting."
-              : "A runner became active before the self-test could start.",
+              : "An agent became active before the test could start.",
           };
         }
         assertMayStart();
@@ -2245,7 +2245,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           const reply = (runAgentId: string | null) =>
             complete(
               runAgentId === agent.id
-                ? { ok: true, detail: "Runner self-test passed. The runner replied through dohc." }
+                ? { ok: true, detail: "Test passed. The agent replied through dohc." }
                 : {
                     ok: false,
                     unconfirmed: true,
@@ -2260,7 +2260,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             }
             void complete({
               ok: false,
-              detail: "Runner self-test timed out after 120 seconds.",
+              detail: "Test timed out after 120 seconds.",
               logPath,
             });
           }, RUNNER_SELF_TEST_TIMEOUT_MS);
@@ -2282,14 +2282,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             reportError(error);
             void complete({
               ok: false,
-              detail: "Runner self-test failed to start.",
+              detail: "Test could not start.",
               logPath,
             });
           });
           child.onExit(() => {
             void complete({
               ok: false,
-              detail: "Runner exited before reporting self-test success.",
+              detail: "The agent exited before replying to the test.",
               logPath,
             });
           });
@@ -2308,7 +2308,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
         return {
           ok: false,
-          detail: `Runner self-test could not start.${
+          detail: `Test could not start.${
             error instanceof Error && error.message ? ` ${error.message}` : ""
           }`,
           logPath,

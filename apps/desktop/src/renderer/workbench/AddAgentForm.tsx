@@ -137,7 +137,7 @@ export function AddAgentForm(props: {
       return requests.isCurrent(token);
     } catch (cause) {
       if (requests.isCurrent(token))
-        props.onError(ipcErrorMessage(cause, "Could not save the agent."), cause);
+        props.onError(ipcErrorMessage(cause, "dohc could not save the agent."), cause);
       return false;
     } finally {
       if (requests.isCurrent(token)) setSaving(false);
@@ -160,10 +160,10 @@ export function AddAgentForm(props: {
       setCheck({ status: result.ok ? "ok" : "failed", detail: result.detail });
     } catch (cause) {
       if (!requests.isCurrent(token)) return;
-      props.onError(ipcErrorMessage(cause, "The check could not start."), cause);
+      props.onError(ipcErrorMessage(cause, "dohc could not start the check."), cause);
       setCheck({
         status: "failed",
-        detail: ipcErrorMessage(cause, "The check could not start."),
+        detail: ipcErrorMessage(cause, "dohc could not start the check."),
       });
     }
   }, [props.workspaceId, props.onError, requests, save, settings]);
@@ -304,7 +304,7 @@ export function AddAgentForm(props: {
               role={check.status === "failed" ? "alert" : "status"}
               className={`m-0 text-[12px] ${check.status === "ok" ? "text-success" : "text-danger"}`}
             >
-              {check.status === "ok" ? check.detail : "Check failed. See Notices."}
+              {check.status === "ok" ? check.detail : "Check failed. Open Notices for details."}
             </p>
           ) : null}
 

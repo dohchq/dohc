@@ -300,7 +300,7 @@ describe("VersionMenu", () => {
 
   it("opens the New version dialog from New version…, with focus in its name field", async () => {
     const same =
-      "Chats are the same in every version. Files over 5\u00a0MB (text over 10\u00a0MB) aren't copied, so changing one here changes it in Main too.";
+      "Chats are the same in every version. Files over 5\u00a0MB, or text over 10\u00a0MB, are not copied, so changing one here changes it in Main too.";
     bridgeMock.listWorkspaceVersions.mockResolvedValue({
       versions: [MAIN],
       activeVersionId: "main",
@@ -329,8 +329,8 @@ describe("VersionMenu", () => {
         (fact) => fact.textContent,
       ),
     ).toEqual([
-      "dohc switches you to it. Your edits go there.",
-      "Main stays as it is until you merge.",
+      "dohc switches to the new version, and your edits go there.",
+      "Changes leave Main untouched until you merge.",
       same,
     ]);
     expect(screen.queryByTestId("version-new-no-merge")).toBeNull();
@@ -362,9 +362,9 @@ describe("VersionMenu", () => {
     );
     expect(facts.slice(0, 4)).toEqual([
       "dohc saves your changes in Draft first.",
-      "dohc switches you to it. Your edits go there.",
-      "Draft stays as it is.",
-      "It can't merge into Main, because it starts from Draft.",
+      "dohc switches to the new version, and your edits go there.",
+      "Changes leave Draft untouched.",
+      "It cannot merge into Main because it starts from Draft.",
     ]);
   });
 
@@ -485,7 +485,7 @@ describe("VersionMenu", () => {
       "a name the engine refuses",
       "Ideas",
       "VersionedTextStoreError [invalid-version-name]: invalid-version-name",
-      "dohc can't use that name. Choose another name.",
+      "dohc cannot use that name. Choose another name.",
     ],
   ] as const)(
     "keeps %s in the dialog and says why under the field until the name changes",
@@ -649,7 +649,7 @@ describe("VersionMenu", () => {
     const dialog = screen.getByTestId("version-merge-dialog");
     await waitFor(() =>
       expect(within(dialog).getByTestId("version-merge-failure-words").textContent).toBe(
-        "dohc could not finish the merge. Some of Draft's changes are in Main, and History shows which.",
+        "dohc could not finish the merge. Some changes from Draft are in Main, and History shows which.",
       ),
     );
     await user.click(within(dialog).getByRole("button", { name: "Details" }));
@@ -722,7 +722,7 @@ describe("VersionMenu", () => {
       {
         title: "dohc could not finish merging Draft into Main",
         message:
-          "Some of Draft's changes are in Main. Fix the data store problem in Notices, then merge again.",
+          "Some changes from Draft are in Main. Fix the data store problem in Notices, then merge again.",
       },
     ],
   ])(
@@ -917,7 +917,7 @@ describe("VersionMenu", () => {
       expect(props.onMergeNotice).toHaveBeenCalledExactlyOnceWith({
         identity: "version-merge:ws-1:draft",
         title: "dohc could not finish merging Draft into Main",
-        message: "Some of Draft's changes are in Main, and History shows which.",
+        message: "Some changes from Draft are in Main, and History shows which.",
         cause: failure,
         retry: expect.any(Function),
         offersHistory: true,

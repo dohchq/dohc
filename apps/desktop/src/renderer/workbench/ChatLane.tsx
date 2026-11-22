@@ -351,7 +351,7 @@ export function ChatLane(props: {
       } catch (error) {
         if (!isCurrent()) return;
         setLoading(false);
-        onError(ipcErrorMessage(error, "Could not load the chat."), error);
+        onError(ipcErrorMessage(error, "dohc could not load this chat."), error);
       }
     },
     [agentDm, channelId, markRead, onError, reactions, workspaceId],
@@ -558,7 +558,7 @@ export function ChatLane(props: {
       void load(true);
     } catch (error) {
       if (current !== token.current) return;
-      onError(ipcErrorMessage(error, "Could not send that message."), error);
+      onError(ipcErrorMessage(error, "dohc could not send that message."), error);
     } finally {
       if (current === token.current) setSending(false);
     }
@@ -627,7 +627,7 @@ export function ChatLane(props: {
         return true;
       } catch (error) {
         if (current === token.current)
-          onError(ipcErrorMessage(error, "Could not send that reply."), error);
+          onError(ipcErrorMessage(error, "dohc could not send that reply."), error);
         return false;
       }
     },
@@ -696,7 +696,7 @@ export function ChatLane(props: {
       } catch (error) {
         // A choice that saved answers, so a refused one saved nothing.
         if (current === token.current)
-          onError(ipcErrorMessage(error, "Could not send that choice."), error);
+          onError(ipcErrorMessage(error, "dohc could not send that choice."), error);
       } finally {
         if (current === token.current) {
           setSending(false);
@@ -759,7 +759,7 @@ export function ChatLane(props: {
       }
       if (result.resolveFailure)
         onError(
-          ipcErrorMessage(result.resolveFailure, "dohc couldn't mark this message answered."),
+          ipcErrorMessage(result.resolveFailure, "dohc could not mark this message answered."),
           result.resolveFailure,
         );
       else if ("failure" in result)
@@ -782,7 +782,7 @@ export function ChatLane(props: {
       void load();
     } catch (error) {
       if (current === token.current)
-        onError(ipcErrorMessage(error, "Could not stop this agent run."), error);
+        onError(ipcErrorMessage(error, "dohc could not stop this agent run."), error);
     } finally {
       if (current === token.current) setStopping(false);
     }
@@ -1047,7 +1047,7 @@ export function ChatLane(props: {
       composer={(inset) =>
         props.locked ? (
           <ComposerNotice testId="chats-lane-readonly">
-            This group is read-only for you.
+            This Group is read-only for you.
           </ComposerNotice>
         ) : (
           <MentionComposer
@@ -1081,7 +1081,7 @@ export function ChatLane(props: {
       replyNotice={
         props.locked ? (
           <ComposerNotice testId="chats-lane-thread-readonly">
-            This group is read-only for you.
+            This Group is read-only for you.
           </ComposerNotice>
         ) : undefined
       }

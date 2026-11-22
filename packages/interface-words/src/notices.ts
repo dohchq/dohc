@@ -143,7 +143,7 @@ export const chatWords = {
   /** The damaged file's delete failed: it stays, still damaged, with Try again. */
   deleteDamagedFailed: "dohc could not delete the damaged file.",
   /** A record in the outbox that can't be read: nothing of its text, chat or workspace is known. */
-  unreadableMessage: "This message could not be read",
+  unreadableMessage: "dohc could not read this message.",
   copyMessage: "Copy message",
   discard: "Discard",
   discardTitle: "Discard this message?",

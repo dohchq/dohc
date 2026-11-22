@@ -124,7 +124,7 @@ describe("AppsSettings", () => {
     const page = screen.getByTestId("settings-app-page");
     expect(document.activeElement).toBe(screen.getByTestId("settings-app-back"));
     const startWith = within(page).getByTestId("settings-app-start-with");
-    expect(startWith.textContent).toContain("Default starts Dev, which dohc picks for this app.");
+    expect(startWith.textContent).toContain("Default uses Dev, which dohc chooses for this app.");
     const control = within(page).getByTestId("settings-app-mode-control");
     expect(
       within(control)
@@ -158,7 +158,7 @@ describe("AppsSettings", () => {
     ]);
     expect(details.textContent).toContain("apps/signup/package.json (pnpm)");
     expect(screen.getByTestId("settings-app-start-with").textContent).toContain(
-      "Default starts Build, as its dohc.json sets.",
+      "Default uses Build, set in dohc.json.",
     );
     expect(screen.getByTestId("settings-app-problems").textContent).toBe(
       "The build output is older than its source.apps/signup/dist",

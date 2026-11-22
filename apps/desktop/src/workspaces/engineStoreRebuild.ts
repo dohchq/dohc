@@ -68,7 +68,7 @@ export class EngineStoreRecoveryFailedError extends Error {
   constructor(cause: unknown) {
     const driftDetail = cause instanceof EngineStoreManifestDriftError ? ` ${cause.message}` : "";
     super(
-      `dohc could not finish rebuilding this workspace's data store.${driftDetail} Rebuild files remain at ${ENGINE_STORE_BACKUP_DIR}. Open this workspace again to retry.`,
+      `dohc could not finish rebuilding this workspace's data store.${driftDetail} Rebuild files remain at ${ENGINE_STORE_BACKUP_DIR}. Reopen this workspace to try again.`,
       { cause },
     );
     this.name = "EngineStoreRecoveryFailedError";

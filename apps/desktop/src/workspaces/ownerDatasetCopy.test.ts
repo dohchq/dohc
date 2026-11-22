@@ -191,7 +191,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
       copy = await createOwnerDatasetCopy(options);
       offline = true;
       await expect(copy.data(remote, source, signal).inspect!(id(1))).rejects.toThrow(
-        "This Collection needs relay, which dohc can't reach.",
+        "dohc could not reach relay for this Collection. Check your connection, then try again.",
       );
       await chmod(marker, 0o600);
       offline = false;
@@ -254,7 +254,9 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
       copy
         .data(remote, source, signal)
         .invoke({ ...read, operationId: id(5), input: { name: "Maybe" } }),
-    ).rejects.toThrow("This Collection needs relay, which dohc can't reach.");
+    ).rejects.toThrow(
+      "dohc could not reach relay for this Collection. Check your connection, then try again.",
+    );
     dropped = false;
     await invoke({
       ...pinned,
@@ -486,7 +488,7 @@ it.each(["delete", "status", "closing"])(
       await copy.close();
       copy = await createOwnerDatasetCopy(options);
       await expect(copy.data(remote, source, signal).invoke(read)).rejects.toThrow(
-        "This Collection needs relay, which dohc can't reach.",
+        "dohc could not reach relay for this Collection. Check your connection, then try again.",
       );
     } finally {
       await copy.close();

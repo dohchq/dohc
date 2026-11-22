@@ -317,14 +317,14 @@ it("refuses deleting an owned page, or a folder that holds one, before anything 
   await expect(capture.settleAndCloseLiveSessionsForPath("notes")).rejects.toMatchObject({
     name: "LiveFolderError",
     message: [
-      `dohc can't delete "notes" while a page in it has live editing on`,
+      `dohc cannot delete "notes" while a page in it has live editing on`,
       "In Live documents, stop live editing for every page in this folder, then delete the folder again.",
     ].join(String.fromCharCode(10)),
   });
   await expect(capture.settleAndCloseLiveSessionsForPath("notes/page.md")).rejects.toMatchObject({
     name: "LivePageOwnedError",
     message: [
-      `dohc can't delete "notes/page.md" while it has live editing on`,
+      `dohc cannot delete "notes/page.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then delete it again.",
     ].join(String.fromCharCode(10)),
   });
@@ -360,14 +360,14 @@ it("refuses a move that would replace an owned page or a folder that holds one, 
   expect(await replace("notes/target.md")).toMatchObject({
     name: "LivePageOwnedError",
     message: [
-      `dohc can't replace "notes/target.md" while it has live editing on`,
+      `dohc cannot replace "notes/target.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then try again.",
     ].join(String.fromCharCode(10)),
   });
   expect(await replace("box")).toMatchObject({
     name: "LiveFolderError",
     message: [
-      `dohc can't replace "box" while a page in it has live editing on`,
+      `dohc cannot replace "box" while a page in it has live editing on`,
       "In Live documents, stop live editing for every page in this folder, then try again.",
     ].join(String.fromCharCode(10)),
   });

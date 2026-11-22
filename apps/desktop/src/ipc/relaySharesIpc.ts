@@ -1320,7 +1320,7 @@ export function createRelaySharesIpcHandlers<
     // authoritative gate); this adds the honest product copy.
     if (input.paths?.some((path) => isSharedWithMePath(path))) {
       throw new Error(
-        "This came to you through a share — copy it into your own files to share it onward.",
+        "This came to you through a share. Copy it into your own files to share it onward.",
       );
     }
     return ownerRelayShareOperation(
@@ -1777,7 +1777,7 @@ export function createRelaySharesIpcHandlers<
     try {
       operation.assertCurrent();
       if (shareViewIsPresent(operation.workspace.shareView)) {
-        throw new Error("This is a shared view — only the original workspace can be shared.");
+        throw new Error("This is a shared view. Only the original workspace can be shared.");
       }
       const { credentials, credentialGeneration } = await remoteForWorkspace(operation.workspace);
       operation.assertCurrent();

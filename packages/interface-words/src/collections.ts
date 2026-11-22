@@ -7,7 +7,7 @@ export const collectionWords = {
   collectionsFailed: (workspace: string) => `dohc could not read the Collections in ${workspace}.`,
 
   // CollectionPage.tsx
-  collectionFailed: "dohc could not load this collection.",
+  collectionFailed: "dohc could not load this Collection.",
   // TransactionalCollectionPage.tsx
   recordsFailed: (table: string) => `dohc could not load ${table}.`,
   noRecords: "No records yet.",

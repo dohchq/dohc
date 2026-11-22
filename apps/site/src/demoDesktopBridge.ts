@@ -806,7 +806,7 @@ const demoBridge = {
     return { undo: { undoId: "demo-undo", expiresAtMs: Date.now() + 600_000 } };
   },
   async startDm() {
-    throw new Error("Direct messages are unavailable in the demo");
+    throw new Error("Direct messages are unavailable in the demo.");
   },
   // A browser saves an export as a download. A PDF opens the browser's print
   // dialog, where the person saves it as a PDF.

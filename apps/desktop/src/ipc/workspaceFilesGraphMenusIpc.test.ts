@@ -991,8 +991,8 @@ describe("registered native menu handlers", () => {
     const h = await harness();
     h.buildMenu.mockImplementation((template) => ({
       popup: (options) => {
-        const item = template.find((entry) => entry.label === "Close Tab");
-        if (!item?.click) throw new Error("missing Close Tab");
+        const item = template.find((entry) => entry.label === "Close tab");
+        if (!item?.click) throw new Error("missing Close tab");
         options?.callback?.();
         Reflect.apply(item.click, item, []);
       },
@@ -1002,7 +1002,7 @@ describe("registered native menu handlers", () => {
     ).resolves.toBe("close-tab");
     expect(h.buildMenu.mock.calls[0]![0]).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ label: "Close Editor Group", enabled: false }),
+        expect.objectContaining({ label: "Close editor group", enabled: false }),
       ]),
     );
   });
@@ -1024,7 +1024,7 @@ describe("registered native menu handlers", () => {
     await h.invoke(CHANNELS.showWorkbenchMenu, { workspaceId: "workspace", context: "status" });
     expect(h.buildMenu.mock.calls[0]![0]).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ label: "Restart to Update", enabled: true }),
+        expect.objectContaining({ label: "Restart to update", enabled: true }),
       ]),
     );
   });

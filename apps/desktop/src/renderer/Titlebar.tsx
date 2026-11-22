@@ -26,7 +26,7 @@ export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath" | "sh
     workspace.rootPath
       .replace(/[\\/]+$/, "")
       .split(/[\\/]/)
-      .pop() || "workspace"
+      .pop() || "Workspace"
   );
 }
 
@@ -416,7 +416,7 @@ export function Titlebar(props: {
               {props.primarySidebar ? (
                 <LayoutToggle
                   testId="titlebar-primary-sidebar"
-                  label="Toggle primary sidebar"
+                  label="Toggle sidebar"
                   pressed={props.primarySidebar.visible}
                   onClick={props.primarySidebar.onToggle}
                   Icon={PanelLeft}

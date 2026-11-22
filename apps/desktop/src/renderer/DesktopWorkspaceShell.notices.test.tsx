@@ -166,7 +166,7 @@ describe("edits the server refused", () => {
     });
     expect(
       await screen.findByText(
-        "Saved a recovery copy of notes/plan.md in notes. 2 edits didn't fit in the note and are listed at the end. Your kept edits stay on this computer.",
+        "Saved a recovery copy of notes/plan.md in notes. 2 edits did not fit in the note and are listed at the end. Your kept edits stay on this computer.",
       ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open" })).toBeTruthy();
@@ -629,7 +629,7 @@ it("keeps a failed workspace inert and opens it when the user retries", async ()
 
   const recovery = await screen.findByTestId("workspace-open-failed");
   expect(recovery.getAttribute("role")).toBe("alert");
-  expect(recovery.textContent).toContain("Couldn’t open this workspace");
+  expect(recovery.textContent).toContain("dohc could not open this workspace");
   expect(recovery.textContent).toContain("Watcher failed");
   expect(recovery.textContent).toContain("Choose another workspace from the title bar");
   expect(within(recovery).queryByRole("button", { name: /dismiss/i })).toBeNull();
@@ -1047,7 +1047,7 @@ describe("owner live documents", () => {
       if (mode === "another") view.rerender(shell(OTHER_WORKSPACE));
       else view.unmount();
       await act(async () => stopping.reject(liveStopError({ code: "edits-pending" })));
-      expect(screen.queryByText(`Live editing didn't stop for ${LIVE_ROW.path}`)).toBeNull();
+      expect(screen.queryByText(`Live editing did not stop for ${LIVE_ROW.path}`)).toBeNull();
       expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(1);
     },
   );
@@ -1113,10 +1113,10 @@ describe("owner live documents", () => {
     expect(screen.queryByTestId("live-documents-dialog")).toBeNull();
     await act(async () => stopping.reject(liveStopError({ code: "edits-pending" })));
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(within(toast).getByText(`Live editing didn't stop for ${LIVE_ROW.path}`)).toBeTruthy();
+    expect(within(toast).getByText(`Live editing did not stop for ${LIVE_ROW.path}`)).toBeTruthy();
     expect(
       within(toast).getByText(
-        "The server hasn't finished applying edits to this document. Try again in a moment.",
+        "The server has not finished applying edits to this document. Try again in a moment.",
       ),
     ).toBeTruthy();
     expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
@@ -1421,7 +1421,7 @@ describe("Undo on an Explorer notice", () => {
   }
 
   it("never shows workspace A's live-page refusal in workspace B", async () => {
-    const title = `dohc can't rename "a.md" while it has live editing on`;
+    const title = `dohc cannot rename "a.md" while it has live editing on`;
     const refused = deferred<never>();
     const bridge = Object.assign(undoBridge(), {
       moveWorkspacePath: vi.fn().mockReturnValueOnce(refused.promise),
@@ -1434,7 +1434,7 @@ describe("Undo on an Explorer notice", () => {
     view.rerender(shell(bridge, OTHER_WORKSPACE));
     await act(async () =>
       refused.reject(
-        new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: dohc can't move "a.md" while it has live editing on
+        new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: dohc cannot move "a.md" while it has live editing on
 In Live documents, stop live editing for this page, then move it again.`),
       ),
     );
@@ -1444,10 +1444,10 @@ In Live documents, stop live editing for this page, then move it again.`),
 });
 
 describe("a refused rename of a page this computer owns live", () => {
-  const TITLE = `dohc can't rename "a.md" while it has live editing on`;
+  const TITLE = `dohc cannot rename "a.md" while it has live editing on`;
   const BODY = "In Live documents, stop live editing for this page, then rename it again.";
   const refusal =
-    new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: dohc can't move "a.md" while it has live editing on
+    new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: dohc cannot move "a.md" while it has live editing on
 In Live documents, stop live editing for this page, then move it again.`);
   const treePaths = async () =>
     (await screen.findAllByTestId("tree-row")).map((row) => row.dataset.path);
@@ -1631,7 +1631,7 @@ it.each([
     const row = within(await screen.findByTestId("settings-row-sync-workspace"));
     expect(row.queryByRole("switch")).toBeNull();
     expect(row.getByTestId("cloud-workspace-sign-in-expired").textContent).toBe(
-      "This workspace isn't syncing until you sign in again.",
+      "This workspace is not syncing until you sign in again.",
     );
     expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual([
       "Sign in again",

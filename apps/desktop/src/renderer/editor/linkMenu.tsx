@@ -460,7 +460,7 @@ export function LinkMenu({
         ) : null}
       </div>
       {invalid ? (
-        <div className="dohc-link-menu__error">Enter a valid http(s) or mailto link.</div>
+        <div className="dohc-link-menu__error">Enter a valid web or email link.</div>
       ) : null}
     </div>
   );

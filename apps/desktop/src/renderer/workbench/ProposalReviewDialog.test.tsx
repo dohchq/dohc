@@ -214,7 +214,7 @@ describe("ProposalReviewDialog", () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(changes({ proposedByEmail: null }));
     renderDialog();
     expect((await screen.findByRole("dialog")).textContent).toContain(
-      "Changes from another dohc user",
+      "Changes from another person",
     );
   });
 

@@ -1163,9 +1163,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             <span>
               {collab.synced
                 ? collab.peerCount === 0
-                  ? "Live · just you"
+                  ? "Live · only you"
                   : `${collab.peerCount + 1} editing`
-                : "Syncing"}
+                : "Syncing…"}
             </span>
           </div>
         ) : null}
@@ -1272,7 +1272,7 @@ const MarkdownEditorCollabLoader = forwardRef<MarkdownEditorHandle, MarkdownEdit
           className="dohc-tiptap-editor h-full"
           data-collab-state={props.collab?.status ?? "connecting"}
         >
-          <SkeletonRows layout="document" label="Loading editor..." className="pt-1.5" />
+          <SkeletonRows layout="document" label="Loading editor…" className="pt-1.5" />
         </div>
       );
     }

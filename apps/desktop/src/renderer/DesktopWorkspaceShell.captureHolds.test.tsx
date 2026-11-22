@@ -27,7 +27,7 @@ const held = {
   retryRequested: false,
 };
 const message =
-  "dohc did not record the outside edit to \"notes/held.md\". dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.";
+  "dohc did not record the outside edit to \"notes/held.md\". dohc cannot read this file's Markdown. Common causes are nested lists in a synced workspace or deeply nested quotes. Your outside edit is still in the file on disk. Copy it first, then restore the file's earlier contents. If dohc still cannot read the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.";
 
 function fixture() {
   const bridge = makeBridge(Promise.resolve(null));
@@ -129,7 +129,7 @@ it.each([{ staleFiles: [] }, { staleFiles: [held] }])(
       />,
     );
     await screen.findByText(
-      "dohc did not record the outside edit to \"other.md\". dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
+      "dohc did not record the outside edit to \"other.md\". dohc cannot read this file's Markdown. Common causes are nested lists in a synced workspace or deeply nested quotes. Your outside edit is still in the file on disk. Copy it first, then restore the file's earlier contents. If dohc still cannot read the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
     );
     const current = await f.bridge.getSyncStatus();
     await act(async () => stale.resolve({ ...current, heldFiles: staleFiles }));

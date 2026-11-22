@@ -189,7 +189,7 @@ export function useWorkspaceSearch(
               active.updatingStartedAtMs ??= now;
               const remainingMs = active.updatingStartedAtMs + UPDATING_RETRY_DEADLINE_MS - now;
               if (remainingMs <= 0) {
-                fail(new Error("Workspace is still updating."));
+                fail(new Error("dohc could not search because the workspace is still updating."));
                 return;
               }
               const delay = Math.min(

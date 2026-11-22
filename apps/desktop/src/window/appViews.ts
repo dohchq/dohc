@@ -524,7 +524,7 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
         }
         operation.assertCurrent();
         const url = appViewLaunchUrl(launch.url);
-        if (!url) throw Error("The app address is not on this device. Open the app again.");
+        if (!url) throw Error("The app address is not on this computer. Open the app again.");
         entry.publicationId = publicationId;
         // An ended approval removes the page. Any other ending keeps it on screen until the tab reloads or closes.
         const ended = () => {

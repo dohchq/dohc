@@ -353,7 +353,7 @@ async function harness(
       },
     ),
   };
-  const requireEngineCapture = vi.fn(async (_id: string, _feature: "Engine history") => ({
+  const requireEngineCapture = vi.fn(async (_id: string, _feature: "History") => ({
     capture,
   }));
   const getStatus = vi.fn<(_id: string) => SyncStatusResult>(() => refused);
@@ -1573,7 +1573,7 @@ describe("workspace engine IPC registrations", () => {
   it("reads the sender's history and omits absent paging fields", async () => {
     const h = await harness();
     await h.invoke(CHANNELS.listEngineMoments);
-    expect(h.requireEngineCapture).toHaveBeenCalledWith("workspace", "Engine history");
+    expect(h.requireEngineCapture).toHaveBeenCalledWith("workspace", "History");
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({});
     await h.invoke(CHANNELS.listEngineMoments, {
       workspaceId: "workspace",
@@ -1838,7 +1838,7 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness({ listHistoryPage, getMoment } as unknown as SharedHistoryStore);
     h.readPolicy.mockRejectedValue(new Error("Receiver policy must not gate imported history."));
     h.requireEngineCapture.mockRejectedValue(
-      new Error("dohc could not start Engine history for this workspace."),
+      new Error("dohc could not start History for this workspace."),
     );
     await expect(
       h.invoke(CHANNELS.listEngineMoments, {
@@ -1874,7 +1874,7 @@ describe("workspace engine IPC registrations", () => {
     // Restore still needs a capture, which a shared view never has.
     await expect(
       h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "shared" }),
-    ).rejects.toThrow("Engine history");
+    ).rejects.toThrow("History");
     expect(h.requireEngineCapture).toHaveBeenCalledOnce();
     expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
     await h.renderers.open(

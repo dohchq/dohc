@@ -249,7 +249,7 @@ describe("ChatsView archive and row menus", () => {
     });
 
     const row = await screen.findByTestId("chats-my-agent");
-    expect(within(row).getByTestId("chats-my-agent-state").textContent).toBe("off");
+    expect(within(row).getByTestId("chats-my-agent-state").textContent).toBe("Off");
     fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
     expect(menuLabels()).toContain("Turn on");
     await user.click(screen.getByTestId("chat-row-menu-agent-power"));

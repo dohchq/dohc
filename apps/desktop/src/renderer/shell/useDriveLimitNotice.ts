@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from "react";
 
 export const DRIVE_LIMIT_MESSAGE =
-  "This drive can't protect a file that another program changes at the same moment dohc saves it. Keep the workspace on your computer's own drive to avoid that.";
+  "This drive cannot protect a file if another program changes it while dohc saves it. Keep this workspace on your computer's main drive to avoid data loss.";
 
 // What this session already showed, per workspace. Module state, because the
 // shell remounts on every workspace switch: the toast shows once per session,

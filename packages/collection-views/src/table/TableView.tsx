@@ -1759,7 +1759,7 @@ export function TableView({
             className="py-4 pr-2 text-sm text-muted"
             style={{ paddingLeft: (openColumn ? OPEN_COLUMN_WIDTH : 0) + 8 }}
           >
-            {emptyText ?? "No records in this collection yet."}
+            {emptyText ?? "No records in this Collection yet."}
           </div>
         ) : null}
         {records.length > 0 || hasDraft ? (

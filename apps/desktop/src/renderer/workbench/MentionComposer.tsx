@@ -1115,8 +1115,8 @@ export function MentionComposer(props: {
             {props.fileCandidates?.length ? (
               <button
                 type="button"
-                aria-label="Attach a file"
-                title="Attach a file"
+                aria-label="Attach file"
+                title="Attach file"
                 tabIndex={-1}
                 disabled={locked}
                 onMouseDown={(event) => {

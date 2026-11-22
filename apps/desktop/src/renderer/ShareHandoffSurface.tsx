@@ -15,14 +15,13 @@ import { inputCount } from "./ui/inputCount";
 
 const REFUSED_COPY =
   "dohc could not open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
-const NETWORK_COPY =
-  "dohc could not reach the server. Check your connection, then choose Try again.";
-const BUSY_COPY = "The server is busy right now. Wait a moment, then choose Try again.";
+const NETWORK_COPY = "dohc could not reach the server. Check your connection.";
+const BUSY_COPY = "The server is busy. Wait a few seconds.";
 const MISSING_COPY =
   "dohc could not find this share in your account. The person who shared it may have ended it.";
 // A Group invitation or message request waits in Chats.
-const CHATS_COPY = "Find it in Chats, in a workspace of your own.";
-const NO_OWN_WORKSPACE_COPY = `${CHATS_COPY} Create one from Manage workspaces first.`;
+const CHATS_COPY = "Open Chats in one of your own workspaces to find it.";
+const NO_OWN_WORKSPACE_COPY = `${CHATS_COPY} Create a workspace from Manage workspaces first.`;
 // Why Chats has not shown the invitation. With chats off there is nothing to
 // read again, so `copy` stands alone, without Try again.
 export type HandoffChatsOutcome =
@@ -32,7 +31,7 @@ export type HandoffChatsOutcome =
 // not answer in time.
 const CHATS_OUTCOME_COPY = {
   absent:
-    "This invitation isn't in this account's list in Chats. The person who shared it may have ended it.",
+    "This invitation is not in Chats for this account. The person who shared it may have ended it.",
   failed: "dohc could not read Chats to find this invitation. Check your connection.",
   late: "dohc could not open this invitation in Chats yet.",
 } as const;
@@ -178,12 +177,13 @@ export function ShareHandoffSurface(
     return (
       <HandoffCard title="Open a share">
         <div className="flex flex-col gap-1 text-xs leading-relaxed text-muted">
-          <p className="m-0">You're signed in as {acceptanceStatus.email}.</p>
-          <p className="m-0">
-            If you open this share, the person who shared it will see that email.
-          </p>
+          <p className="m-0">Signed in as {acceptanceStatus.email}.</p>
+          <p className="m-0">Opening this share shows that email to the person who shared it.</p>
         </div>
         <div className="flex items-center justify-end gap-2">
+          <SecondaryButton type="button" onClick={props.onBack}>
+            Cancel
+          </SecondaryButton>
           <PrimaryButton
             type="button"
             onClick={() =>
@@ -192,11 +192,8 @@ export function ShareHandoffSurface(
                 .catch(() => undefined)
             }
           >
-            Agree and open
+            Open share
           </PrimaryButton>
-          <SecondaryButton type="button" onClick={props.onBack}>
-            Cancel
-          </SecondaryButton>
         </div>
       </HandoffCard>
     );
@@ -210,8 +207,8 @@ export function ShareHandoffSurface(
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
         <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
-          This share link belongs to a different server ({props.status.linkRelayUrl}) than the one
-          you're signed in to. Sign in to that server, then choose Open in dohc again.
+          This share link belongs to {props.status.linkRelayUrl}, not the server you are signed in
+          to. Sign in to that server, then choose Open in dohc again.
         </p>
       </HandoffCard>
     );

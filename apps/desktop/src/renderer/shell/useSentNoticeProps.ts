@@ -34,9 +34,9 @@ import { sentNoticeRef, type SentNotices } from "./useSentNotices";
 import { chatOnScreen } from "../workbench/chatsOnScreen";
 
 export const NOT_HERE_NOTE =
-  "This workspace isn't on this computer. Join it from Manage workspaces, then choose Open again.";
+  "This workspace is not on this computer. Join it from Manage workspaces, then open this Notice again.";
 export const NO_OWN_WORKSPACE_NOTE =
-  "This opens in Chats, in a workspace of your own. Create one from Manage workspaces, then choose Open again.";
+  "This opens in Chats inside one of your own workspaces. Create a workspace from Manage workspaces, then open this Notice again.";
 // The lookup failures below go to the shell's errors with their cause and Try again.
 export const SHARE_LOOKUP_FAILED_NOTE = "dohc could not open this share.";
 
@@ -281,7 +281,7 @@ export function useSentNoticeProps(input: {
   const relist = sentNotices?.relist;
   useEffect(() => {
     if (!listFailure || !relist) return;
-    reportShellError("dohc could not read notices sent to you.", listFailure.error, relist);
+    reportShellError("dohc could not read Notices sent to you.", listFailure.error, relist);
   }, [listFailure, relist, reportShellError]);
 
   const account = sentNotices?.account ?? null;
@@ -306,7 +306,7 @@ export function useSentNoticeProps(input: {
       const refs = notices.map(sentNoticeRef);
       const attempt = () => {
         sentNotices.read(refs).catch((error: unknown) => {
-          reportShellError("dohc could not mark notices read.", error, attempt);
+          reportShellError("dohc could not mark Notices as read.", error, attempt);
         });
       };
       attempt();
@@ -522,7 +522,7 @@ export function useSentNoticeProps(input: {
       if (!sentNotices) return;
       const attempt = () => {
         sentNotices.dismiss(sentNoticeRef(notice)).catch((error: unknown) => {
-          reportShellError("dohc could not dismiss this notice.", error, attempt);
+          reportShellError("dohc could not dismiss this Notice.", error, attempt);
         });
       };
       attempt();

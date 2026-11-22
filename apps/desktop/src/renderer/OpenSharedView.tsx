@@ -99,8 +99,8 @@ export function shareLevel(share: RelayShareReceivedRow | null): ShareAccess | n
 
 function openingWords(mode: "mount" | "separate", level: ShareAccess | null): string {
   if (mode === "mount") return "Adds a read-only copy to this workspace.";
-  if (level === "edit") return "Opens as its own workspace, where you can edit.";
-  return level === null ? "Opens as its own workspace." : "Opens as its own workspace, read-only.";
+  if (level === "edit") return "Opens as its own editable workspace.";
+  return level === null ? "Opens as its own workspace." : "Opens as its own read-only workspace.";
 }
 
 function displayPath(path: string): string {
@@ -324,7 +324,7 @@ export function OpenSharedView(
       }
       if (!actionRequests.isCurrent(actionRequest)) return;
       if (isCloudSyncFolderCancelled(cause)) return;
-      setError(ipcErrorMessage(cause, "Couldn't open the share."));
+      setError(ipcErrorMessage(cause, "dohc could not open this share."));
     } finally {
       if (actionRequests.isCurrent(actionRequest)) setOpening(false);
     }
@@ -415,7 +415,7 @@ export function OpenSharedView(
       )}
       {props.mountInto ? (
         <div className="flex flex-col gap-1.5">
-          <SectionLabel>Open it</SectionLabel>
+          <SectionLabel>How to open</SectionLabel>
           <div
             className="grid grid-cols-2 gap-1 rounded-lg border border-line bg-panel-2 p-0.5"
             role="radiogroup"
@@ -447,7 +447,7 @@ export function OpenSharedView(
       ) : null}
 
       <div className="flex flex-col gap-1.5">
-        <SectionLabel>{mounting ? "Goes under" : "Folder"}</SectionLabel>
+        <SectionLabel>{mounting ? "Destination" : "Folder"}</SectionLabel>
         {mounting ? (
           // Plain text, not a chip: there is nothing to change here.
           <p className="m-0 flex h-9 items-center gap-2 px-0.5 text-[13px]">
@@ -475,11 +475,11 @@ export function OpenSharedView(
           {/* The busy label is the disabled button's reason, as it is while
               opening, and it names no mode before the grant decides one. */}
           {checkingAccess
-            ? "Checking the share…"
+            ? "Checking share…"
             : opening
               ? mounting
-                ? "Adding the share…"
-                : "Opening the share…"
+                ? "Adding share…"
+                : "Opening share…"
               : mounting
                 ? "Add share"
                 : "Open share"}
@@ -499,7 +499,7 @@ export function OpenSharedView(
           className="flex flex-col gap-2 rounded-md border border-line bg-bg p-3"
         >
           <p id="open-share-sign-in-description" className="sr-only">
-            Shares are addressed to your account on the server. Connect that server to open this
+            Shares are addressed to your account on the server. Connect to that server to open this
             share.
           </p>
           <CloudLogin

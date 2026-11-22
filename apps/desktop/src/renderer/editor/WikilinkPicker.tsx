@@ -222,12 +222,12 @@ export function WikilinkPicker({ state, files, view, insertMode = "text", onDism
         ...menuEnterFrom(position.placement),
       }}
       role="listbox"
-      aria-label="page links"
+      aria-label="Page links"
       aria-activedescendant={matches.length > 0 ? optionId(activeIdx) : undefined}
       onMouseDown={(e) => e.preventDefault()}
     >
       {matches.length === 0 ? (
-        <div className={MENU_EMPTY}>No files match "{state.query}"</div>
+        <div className={MENU_EMPTY}>No files match "{state.query}".</div>
       ) : (
         <div>
           {matches.map((f, i) => (

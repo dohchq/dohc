@@ -35,7 +35,7 @@ describe("workspaceName", () => {
   it("uses the final path segment and ignores trailing separators", () => {
     expect(workspaceName({ ...workspace, rootPath: "/home/sam/dohc/" })).toBe("dohc");
     expect(workspaceName({ ...workspace, rootPath: "C:\\Users\\ice\\dohc\\" })).toBe("dohc");
-    expect(workspaceName({ ...workspace, rootPath: "/" })).toBe("workspace");
+    expect(workspaceName({ ...workspace, rootPath: "/" })).toBe("Workspace");
   });
 
   // A shared view's folder is named after its share ID.
@@ -140,7 +140,7 @@ describe("Titlebar", () => {
       />,
     );
 
-    const primary = screen.getByRole("button", { name: "Toggle primary sidebar" });
+    const primary = screen.getByRole("button", { name: "Toggle sidebar" });
     const about = screen.getByRole("button", { name: "Toggle About" });
     expect(primary.getAttribute("aria-pressed")).toBe("true");
     expect(about.getAttribute("aria-pressed")).toBe("false");
