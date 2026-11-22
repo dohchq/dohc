@@ -8,7 +8,9 @@
 //!
 //! This is a chosen trade: a store that is already damaged when it opens is
 //! read and written until the check ends, where an open that checks first
-//! never touches it. In that time a write can make the damage worse, and a
+//! never touches it. A migration that was pending commits in that time too,
+//! so a damaged store can be migrated before it is refused, and a migration
+//! is not undone. In that time a write can make the damage worse, and a
 //! damaged row that still reads as valid can reach a workspace file, a live
 //! note's saved text, or the relay. Blob content is checked against its hash
 //! on those paths. Backups and recovery check for themselves.

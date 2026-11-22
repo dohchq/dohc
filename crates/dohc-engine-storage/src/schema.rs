@@ -389,8 +389,9 @@ pub(crate) fn open_engine_db_for_actor(
 }
 
 /// An actor's open of an owner or passive store that leaves the pages of an
-/// existing store unchecked, for a check that runs while the store serves. A
-/// store whose pages failed such a check is checked here, before it serves.
+/// existing store unchecked, for a check that runs while the store serves. Its
+/// pending migrations commit without that check too. A store whose pages
+/// failed such a check is checked here, before it serves or migrates.
 pub(crate) fn open_engine_db_serving_first(
     path: &Path,
     now_ms: i64,
@@ -450,6 +451,7 @@ fn open_engine_db_configured(
     if checked_first {
         integrity_check(&conn)?;
     }
+    let pages_unchecked = pages_later && disposition != Disposition::Fresh && !marked;
 
     if disposition == Disposition::ExistingV2 {
         if store_is_passive(&conn)? != passive {
@@ -484,6 +486,7 @@ fn open_engine_db_configured(
     if disposition == Disposition::Fresh {
         ctx.initial_root_token = root_token.map(str::to_owned);
     }
+    ctx.pages_checked_after_open = pages_unchecked;
     let no_faults = NoFaults;
     // Migrations must not originate operations or queue work for passive stores.
     // Fresh passive stores migrate as owner before the role switch below. They
@@ -512,7 +515,6 @@ fn open_engine_db_configured(
     validate_v2(&conn)?;
     // A fresh store has no pages to wait for. A marked store was checked
     // above, and is checked again only if a migration has written since.
-    let pages_unchecked = pages_later && disposition != Disposition::Fresh && !marked;
     if !pages_unchecked {
         if !checked_first || newly_applied > 0 {
             integrity_check(&conn)?;
