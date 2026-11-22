@@ -128,8 +128,6 @@
     "apps/desktop/src/renderer/shell/oldWindowState.ts | readOldWindowState",
     "apps/desktop/src/renderer/shell/shareCopyEdit.ts | getRelayReceivedShare",
     "apps/desktop/src/renderer/shell/usageRecordStops.ts | readUsageRecord",
-    "apps/desktop/src/renderer/shell/useAgentSetup.ts | getAgentRunStatus",
-    "apps/desktop/src/renderer/shell/useAgentSetup.ts | getAgentRunStatus #2",
     "apps/desktop/src/renderer/shell/useAutomationHolds.ts | listAutomationHolds",
     "apps/desktop/src/renderer/shell/useAutomationHolds.ts | listServerAutomationHolds",
     "apps/desktop/src/renderer/shell/useCaptureRecoveryNotices.ts | getCaptureRecoveryStatus",
