@@ -8306,22 +8306,26 @@ fn replay_share_write<T: RelayTransport>(
         path,
     );
     let request_id = format!("share-view:{key}");
-    let already_applied = store
+    let moved_from_id = format!("share-view-moved-from:{key}");
+    let (already_applied, moved_from) = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
-                [&request_id],
-                |row| row.get(0),
+                "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1), \
+                        (SELECT payload_hash FROM engine_requests WHERE request_id=?2)",
+                [&request_id, &moved_from_id],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .map_err(SyncError::corrupt)
         })
         .map_err(local)?;
     if already_applied {
-        if let Some(before) = rename_from {
+        // The path the move actually left, which need not be the op's own old
+        // path. The first pull reported it, and a lost page must not lose it.
+        if let Some(before) = moved_from {
             changed.insert(
-                before.to_owned(),
+                before.clone(),
                 ShareViewChangedPath {
-                    path: before.to_owned(),
+                    path: before,
                     operation: "delete",
                     content_kind,
                 },
@@ -8410,6 +8414,30 @@ fn replay_share_write<T: RelayTransport>(
             )
         })?)
     };
+    // An op can name an object this copy holds at a path the op does not:
+    // a rename made while the path was hidden from this member arrives as a
+    // write at the new path, and a later rename then starts from that path.
+    // Move the object from where this copy holds it, so the old name goes
+    // instead of the op being refused as bound elsewhere. An occupied target
+    // goes to the received head, as any contested path does: the native
+    // rename refuses it, and the fallback retires the occupant. The request
+    // key above stays the op's own, so a retry still dedupes.
+    let held_at = match object_id.filter(|id| received_object_token(id)) {
+        Some(token) => store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT path FROM path_aliases \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path<>?4",
+                    params![workspace_id, version_id, token, path],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)
+            })
+            .map_err(local)?,
+        None => None,
+    };
+    let rename_from = held_at.as_deref().or(rename_from);
     if let Some(before) = rename_from {
         let input = dohc_engine_domain::RenameTextFile {
             workspace_id: workspace_id.to_owned(),
@@ -8426,7 +8454,10 @@ fn replay_share_write<T: RelayTransport>(
         };
         let result =
             VersionedTextStore::new(store).rename_text_file_with(&input, faults, |tx, result| {
+                // Same bytes under another kind is another head: the fallback
+                // writes it as the received kind.
                 if result.before.blob_sha256 != sha256
+                    || result.moment.after_content_kind != content_kind
                     || object_id
                         .filter(|id| received_object_token(id))
                         .is_some_and(|id| {
@@ -8438,6 +8469,7 @@ fn replay_share_write<T: RelayTransport>(
                         reason: "received rename does not match its object and content",
                     });
                 }
+                record_move_source(tx, &moved_from_id, before, envelope.recorded_at_ms)?;
                 dohc_engine_storage::count_remote_change_in_tx(tx, workspace_id)?;
                 Ok(())
             });
@@ -8530,6 +8562,12 @@ fn replay_share_write<T: RelayTransport>(
                     let result = dohc_engine_domain::write_binary_in_tx(tx, &input)?;
                     if let Some(delete) = &rename_delete {
                         delete_received_rename_source_in_tx(tx, delete)?;
+                        record_move_source(
+                            tx,
+                            &moved_from_id,
+                            &delete.path,
+                            envelope.recorded_at_ms,
+                        )?;
                     }
                     Ok(result)
                 },
@@ -8580,6 +8618,12 @@ fn replay_share_write<T: RelayTransport>(
                     let result = dohc_engine_domain::write_text_in_tx(tx, &input)?;
                     if let Some(delete) = &rename_delete {
                         delete_received_rename_source_in_tx(tx, delete)?;
+                        record_move_source(
+                            tx,
+                            &moved_from_id,
+                            &delete.path,
+                            envelope.recorded_at_ms,
+                        )?;
                     }
                     Ok(result)
                 },
@@ -8622,6 +8666,25 @@ fn delete_received_rename_source_in_tx(
         Ok(_) | Err(DomainError::FileNotFound) => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+// The path a committed move left, for a deduped retry to report. It can differ
+// from the op's own old path, so neither the op nor the moved store can say.
+// Kept beside the move's request record, with the path as its payload.
+fn record_move_source(
+    tx: &Transaction<'_>,
+    moved_from_id: &str,
+    before: &str,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) \
+         VALUES(?1,?2,0,?3,'share-view-moved-from') \
+         ON CONFLICT(request_id) DO UPDATE SET payload_hash=excluded.payload_hash",
+        params![moved_from_id, before, now_ms],
+    )
+    .map_err(|err| DomainError::Storage(StorageError::persist_public(err)))?;
+    Ok(())
 }
 
 pub(crate) fn received_object_token(id: &str) -> bool {
