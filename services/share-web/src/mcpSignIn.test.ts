@@ -186,6 +186,7 @@ it("challenges an MCP request without a token, and publishes both metadata docum
     authorization_endpoint: `${ORIGIN}/oauth/authorize`,
     token_endpoint: `${ORIGIN}/oauth/token`,
     registration_endpoint: `${ORIGIN}/oauth/register`,
+    authorization_response_iss_parameter_supported: true,
     code_challenge_methods_supported: ["S256"],
     grant_types_supported: ["authorization_code", "refresh_token"],
     response_types_supported: ["code"],
@@ -252,8 +253,21 @@ it("serves the consent page with its own headers and a cookie for this request o
   expect(form.html).toContain('<span class="tile agent">P</span>');
   expect(form.html).not.toContain("<script>");
   expect(form.html).toContain('<div class="row"><dt>Access</dt><dd class="k">Can view</dd></div>');
+  expect(form.html).toContain(
+    "<bdi>Planner &#60;script&#62;</bdi> runs outside dohc. dohc limits what it reaches here, not what it does elsewhere.",
+  );
   expect(form.html).toContain('<span class="to">Returns to an app on this computer</span>');
   expect(form.html).not.toContain(s.secret);
+
+  const unnamedClient = await registeredClient(s.send);
+  const unnamed = await consentForm(
+    await s.send(
+      `${authorizePath({ clientId: unnamedClient, resource: resourceOf(s.secret), challenge: pkce().challenge })}&scope=mcp:tools`,
+    ),
+  );
+  expect(unnamed.html).toContain(
+    "This agent runs outside dohc. dohc limits what it reaches here, not what it does elsewhere.",
+  );
 });
 
 it("accepts a choice only from the browser and origin that opened the page, and clears its cookie", async () => {
@@ -287,9 +301,28 @@ it("accepts a choice only from the browser and origin that opened the page, and 
   expect(location.origin + location.pathname).toBe(LOOPBACK_REDIRECT);
   expect(location.searchParams.get("code")).toMatch(AGENT_TOKEN);
   expect(location.searchParams.get("state")).toBe("one");
+  expect(location.searchParams.get("iss")).toBe(ORIGIN);
   expect(allowed.headers.get("set-cookie")).toBe(
     `${name}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict`,
   );
+
+  const cancelForm = await consentForm(
+    await s.send(
+      authorizePath({
+        clientId,
+        resource: resourceOf(s.secret),
+        challenge: pkce().challenge,
+        state: "two",
+      }),
+    ),
+  );
+  const cancelled = await decide(s.send, ORIGIN, cancelForm, "cancel");
+  expect(cancelled.status).toBe(303);
+  const cancelLocation = new URL(cancelled.headers.get("location")!);
+  expect(cancelLocation.origin + cancelLocation.pathname).toBe(LOOPBACK_REDIRECT);
+  expect(cancelLocation.searchParams.get("error")).toBe("access_denied");
+  expect(cancelLocation.searchParams.get("state")).toBe("two");
+  expect(cancelLocation.searchParams.get("iss")).toBe(ORIGIN);
 
   const again = await decide(s.send, ORIGIN, form, "allow");
   await expectErrorPage(again.clone(), 400);

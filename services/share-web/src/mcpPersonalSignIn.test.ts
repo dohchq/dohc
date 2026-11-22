@@ -286,17 +286,52 @@ async function stack(options: { account?: boolean; live?: boolean } = {}) {
   };
 }
 
-it("starts the address's workspace at Edit and every other at None, and offers None, View, Comment and Edit", async () => {
+it("starts the address's workspace at View and every other at None, and offers None, View, Comment and Edit", async () => {
   const s = await stack();
   const { page, html } = await s.open(new CookieJar(), FUNDRAISER);
   expect(page.status).toBe(200);
   expect(reachOf(html)).toEqual({
     [TRIP]: { offered: ["none", "view", "comment", "edit"], selected: "none" },
-    [FUNDRAISER]: { offered: ["none", "view", "comment", "edit"], selected: "edit" },
+    [FUNDRAISER]: { offered: ["none", "view", "comment", "edit"], selected: "view" },
   });
+  expect(html).toContain("Edit also changes Collections, but no other files.");
   expect(html).not.toContain(GARDEN);
   // With no agent signed in yet, there is no one to choose.
   expect(html).not.toContain("Who it is");
+});
+
+it("describes open pages in Edit reach when live hosting is enabled, and includes iss on personal cancel", async () => {
+  const liveStack = await stack({ live: true });
+  const jar = new CookieJar();
+  const { as, html } = await liveStack.open(jar, TRIP);
+  expect(html).toContain(
+    "Edit also changes Collections and pages open in dohc, but no other files.",
+  );
+  expect(selected(html)).toEqual({ [TRIP]: "view", [FUNDRAISER]: "none" });
+
+  const cancelled = await liveStack.choose(as, html, { decision: "cancel" });
+  expect(cancelled.status).toBe(303);
+  const cancelLocation = new URL(cancelled.headers.get("location") ?? "");
+  expect(cancelLocation.origin + cancelLocation.pathname).toBe(LOOPBACK_REDIRECT);
+  expect(cancelLocation.searchParams.get("error")).toBe("access_denied");
+  expect(cancelLocation.searchParams.get("state")).toBe("consent");
+  expect(cancelLocation.searchParams.get("iss")).toBe(ORIGIN);
+});
+
+it("accepts an optional scope parameter on personal authorize requests", async () => {
+  const s = await stack();
+  const jar = new CookieJar();
+  const { as, clientId } = await s.open(jar, TRIP);
+  const scoped = await as(
+    `${authorizePath({
+      clientId,
+      resource: personalResource(ORIGIN, TRIP),
+      challenge: pkce().challenge,
+      state: "with-scope",
+    })}&scope=openid%20mcp:tools`,
+  );
+  expect(scoped.status).toBe(200);
+  expect(selected(await scoped.text())).toEqual({ [TRIP]: "view", [FUNDRAISER]: "none" });
 });
 
 it("asks a browser that signed in before the password last changed to sign in again before it allows", async () => {
@@ -343,7 +378,7 @@ it("signs an agent in again from its current reach", async () => {
     `name="as" value="${agentId}" class="opt" aria-pressed="false"><span class="tick" aria-hidden="true"></span>` +
       `<span class="av agent hue-olive" aria-hidden="true">H</span><span class="k"><bdi>Helper</bdi> <span class="sub">@${handleForName("Helper")}`,
   );
-  expect(selected(opened.html)).toEqual({ [TRIP]: "none", [FUNDRAISER]: "edit" });
+  expect(selected(opened.html)).toEqual({ [TRIP]: "none", [FUNDRAISER]: "view" });
 
   const chosen = await s.choose(opened.as, opened.html, { as: agentId, decision: "choose" });
   expect(chosen.status).toBe(200);
@@ -362,11 +397,13 @@ it("signs an agent in again from its current reach", async () => {
     decision: "allow",
   });
   expect(allowed.status).toBe(303);
+  const allowedLocation = new URL(allowed.headers.get("location") ?? "");
+  expect(allowedLocation.searchParams.get("iss")).toBe(ORIGIN);
   const resource = personalResource(ORIGIN, FUNDRAISER);
   const tokens = await tokenRequest(s.send, {
     grant_type: "authorization_code",
     client_id: opened.clientId,
-    code: new URL(allowed.headers.get("location") ?? "").searchParams.get("code") ?? "",
+    code: allowedLocation.searchParams.get("code") ?? "",
     code_verifier: opened.verifier,
     redirect_uri: LOOPBACK_REDIRECT,
     resource,
