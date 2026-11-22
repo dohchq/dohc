@@ -459,10 +459,23 @@ describe("selection and keys", () => {
     press("ArrowUp");
     expect(grid.scrollTop).toBe(0);
     press("ArrowLeft");
-    expect(grid.scrollLeft).toBe(96);
+    // Column 1 starts at 36 + 260 = 296, which would be hidden under frozen column 0 at scrollLeft = 96.
+    expect(grid.scrollLeft).toBe(0);
     press("ArrowLeft");
     expect(grid.scrollLeft).toBe(0);
     expect(selection()).toEqual([0, 0]);
+  });
+
+  it("keeps frozen column 0 editors anchored at scrollLeft + gutter when horizontally scrolled", () => {
+    const { grid, cell, editorInput } = setup({ onOpenRecord: vi.fn() });
+    Object.defineProperty(grid, "clientWidth", { configurable: true, value: 400 });
+    grid.scrollLeft = 180;
+
+    fireEvent.click(cell(0, 0));
+    const editor = editorInput()?.closest("fieldset") as HTMLElement | null;
+    expect(editor).not.toBeNull();
+    // OPEN_COLUMN_WIDTH (36) + scrollLeft (180) = 216px, directly over the pinned first column.
+    expect(editor!.style.left).toBe("216px");
   });
 
   it("starts an edit with Enter, cancels it with Escape, and keeps the cell selected", () => {

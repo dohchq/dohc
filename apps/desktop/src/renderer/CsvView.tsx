@@ -715,9 +715,21 @@ export function CsvView({
   const deleteRow = useCallback(
     (rowIndex: number) => {
       const previous = rowsRef.current;
+      const removed = previous[rowIndex];
+      if (!removed) return;
+      const savedRow = [...removed];
       const next = previous.filter((_, index) => index !== rowIndex);
       setRows(next);
-      onNotice?.(`Deleted row ${rowIndex}.`, () => setRows(previous));
+      onNotice?.(`Deleted row ${rowIndex}.`, () => {
+        const current = rowsRef.current;
+        const insertAt = Math.min(rowIndex, current.length);
+        const width = Math.max(savedRow.length, columnCountFor(current));
+        const restored = [...savedRow];
+        while (restored.length < width) restored.push("");
+        const updated = [...current];
+        updated.splice(insertAt, 0, restored);
+        setRows(updated);
+      });
     },
     [onNotice, setRows],
   );
@@ -726,6 +738,7 @@ export function CsvView({
     (cellIndex: number) => {
       const previous = rowsRef.current;
       const headerName = previous[0]?.[cellIndex]?.trim();
+      const savedValues = previous.map((row) => row[cellIndex] ?? "");
       const next = previous.map((row) => row.filter((_, index) => index !== cellIndex));
       if (next.every((row) => row.length === 0)) {
         setRows([]);
@@ -734,7 +747,21 @@ export function CsvView({
       }
       onNotice?.(
         headerName ? `Deleted column "${headerName}".` : `Deleted column ${cellIndex + 1}.`,
-        () => setRows(previous),
+        () => {
+          const current = rowsRef.current;
+          if (current.length === 0) {
+            setRows(savedValues.map((value) => [value]));
+            return;
+          }
+          const insertAt = Math.min(cellIndex, columnCountFor(current));
+          const updated = current.map((row, rIndex) => {
+            const cells = [...row];
+            while (cells.length < insertAt) cells.push("");
+            cells.splice(insertAt, 0, savedValues[rIndex] ?? "");
+            return cells;
+          });
+          setRows(updated);
+        },
       );
     },
     [onNotice, setRows],
@@ -871,11 +898,13 @@ export function CsvTable(props: {
         focusCell(nextRow, cellIndex);
         return;
       }
-      if (addIfLast && !locked && dataRowCount < MAX_CSV_PREVIEW_ROWS) {
+      const currentRow = rows[rowIndex];
+      const hasContent = currentRow?.some((cell) => cell.trim() !== "") ?? false;
+      if (addIfLast && hasContent && !locked && dataRowCount < MAX_CSV_PREVIEW_ROWS) {
         addRowAndFocus(cellIndex);
       }
     },
-    [addRowAndFocus, dataRowCount, focusCell, locked, previewRows.length],
+    [addRowAndFocus, dataRowCount, focusCell, locked, previewRows.length, rows],
   );
   const header = rows[0];
   if (!header) {

@@ -209,7 +209,7 @@ function codeBlockToolbar(
       labelEl.className = "dohc-code-language-label";
       labelEl.setAttribute("aria-hidden", "true");
 
-      const chevron = toolbarIcon(CHEVRON_DOWN_MARKUP, 11, "dohc-code-language-chevron");
+      const chevron = toolbarIcon(CHEVRON_DOWN_MARKUP, 12, "dohc-code-language-chevron");
 
       const select = document.createElement("select");
       select.className = "dohc-code-language-select";

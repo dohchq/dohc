@@ -163,7 +163,9 @@ export function NewWorkspaceCard(props: { onWorkspaceReady: (workspace: Workspac
             two sheets always show. */}
         <label
           className={`relative z-3 -mb-px flex h-8 w-fit min-w-36 max-w-[60%] cursor-text items-center gap-2 rounded-t-lg border border-b-panel bg-panel pl-4 pr-3.5 transition-colors ${
-            nameError ? "border-danger" : "border-line focus-within:border-ink"
+            nameError
+              ? "border-t-danger border-x-danger"
+              : "border-t-line border-x-line focus-within:border-t-ink focus-within:border-x-ink"
           }`}
         >
           <input

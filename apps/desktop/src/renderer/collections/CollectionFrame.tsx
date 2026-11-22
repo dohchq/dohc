@@ -158,7 +158,7 @@ export interface CollectionFrameProps extends Omit<HTMLAttributes<HTMLElement>, 
   search?: {
     value: string;
     onChange: (value: string) => void;
-    onSubmit: () => void;
+    onSubmit: (value?: string) => void;
     disabled?: boolean;
   };
   actions?: readonly CollectionFrameAction[];
@@ -349,7 +349,7 @@ function SearchBox({ search }: { search: NonNullable<CollectionFrameProps["searc
       onSubmit={(event) => {
         event.preventDefault();
         cancel();
-        search.onSubmit();
+        search.onSubmit(search.value);
       }}
     >
       <input
@@ -360,11 +360,12 @@ function SearchBox({ search }: { search: NonNullable<CollectionFrameProps["searc
         disabled={search.disabled}
         value={search.value}
         onChange={(event) => {
-          search.onChange(event.target.value);
+          const nextValue = event.target.value;
+          search.onChange(nextValue);
           cancel();
           timer.current = window.setTimeout(() => {
             timer.current = null;
-            submitRef.current();
+            submitRef.current(nextValue);
           }, 200);
         }}
         className={`${inputClass.replace("w-full", "h-8 w-44").replace("px-2.5", hasValue ? "pl-8 pr-7" : "pl-8 pr-2")}`}
@@ -386,7 +387,7 @@ function SearchBox({ search }: { search: NonNullable<CollectionFrameProps["searc
           onClick={() => {
             cancel();
             search.onChange("");
-            search.onSubmit();
+            search.onSubmit("");
           }}
           className="absolute right-1"
         >
@@ -739,8 +740,16 @@ function ViewTabs(props: {
             );
           })}
         </div>
-        <div data-strip-fade="left" aria-hidden="true" />
-        <div data-strip-fade="right" aria-hidden="true" />
+        <div
+          data-strip-fade="left"
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-linear-to-r from-bg to-transparent"
+        />
+        <div
+          data-strip-fade="right"
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-0 right-0 z-10 w-6 bg-linear-to-l from-bg to-transparent"
+        />
       </div>
       {views ? (
         <IconButton

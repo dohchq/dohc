@@ -197,7 +197,7 @@ function CodeBlock(props: ExtraProps) {
         data-chat-control
         className="flex h-7 items-center justify-between border-b border-line bg-panel px-3"
       >
-        <span className="truncate font-mono text-[11px] text-subtle">{language}</span>
+        <span className="truncate text-[12px] text-muted">{language}</span>
         <CopyButton iconOnly label="Copy code" getText={() => code} />
       </div>
       <pre className="m-0 overflow-x-auto whitespace-pre px-3 py-2.5 font-mono text-[12.5px] leading-5 text-ink">

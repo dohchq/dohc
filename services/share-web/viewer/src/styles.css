@@ -130,6 +130,7 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .markdown img, .preview-image { display: block; max-width: 100%; height: auto; margin: 24px auto; }
 .markdown a, .download-card a { color: var(--viewer-link); text-underline-offset: 3px; }
 .excalidraw-view { width: 100%; height: min(720px, calc(100vh - 190px)); min-height: 420px; overflow: hidden; border: 1px solid var(--viewer-line); border-radius: 10px; background: var(--viewer-drawing); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .state { display: grid; min-height: 100vh; place-items: center; color: var(--viewer-muted); }
 .muted { color: var(--viewer-subtle); }
 .download-card { max-width: 520px; margin: 80px auto; border: 1px solid var(--viewer-line); border-radius: 12px; padding: 24px; background: var(--viewer-surface); }
@@ -142,7 +143,7 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .comment-row { min-width: 0; border-bottom: 1px solid var(--viewer-line); padding-bottom: 16px; }
 .comment-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0 0 6px; }
 .comment-author { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0; font-size: 13px; font-weight: 600; }
-.comment-time { margin-left: auto; color: var(--viewer-subtle); font-size: 11px; font-weight: 400; white-space: nowrap; }
+.comment-time { margin-left: auto; color: var(--viewer-subtle); font-size: 12px; font-weight: 400; white-space: nowrap; }
 .unverified { color: var(--viewer-subtle); font-family: ui-monospace, monospace; font-size: 10px; font-weight: 400; text-transform: uppercase; letter-spacing: .06em; }
 .comment-body { overflow-wrap: anywhere; margin: 0; white-space: pre-wrap; font-size: 13px; line-height: 1.55; }
 .comment-deleted { color: var(--viewer-subtle); font-size: 13px; font-style: italic; line-height: 1.55; }

@@ -307,6 +307,8 @@ export function CommandPalette(props: {
             spellCheck={false}
             ref={inputRef}
             type="text"
+            role="combobox"
+            aria-expanded={true}
             aria-label={props.ariaLabel ?? "Command"}
             aria-controls={listId}
             aria-activedescendant={matches.length > 0 ? optionId(selected) : undefined}
@@ -326,6 +328,10 @@ export function CommandPalette(props: {
               } else if (event.key === "ArrowUp") {
                 event.preventDefault();
                 moveSelection(-1);
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                props.onClose();
               } else if (event.key === "Enter") {
                 // Its keypress would press whatever the command focused.
                 event.preventDefault();
@@ -454,19 +460,19 @@ export function CommandPalette(props: {
         </ul>
         <div className="flex items-center gap-3 border-t border-line px-3.5 py-2 text-[12px] text-subtle">
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-sans text-[11px]">
+            <kbd className="rounded border border-line bg-bg px-1 font-sans text-[12px]">
               {shortcutText("palette-move", window.dohcDesktop?.platform)}
             </kbd>
             navigate
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-sans text-[11px]">
+            <kbd className="rounded border border-line bg-bg px-1 font-sans text-[12px]">
               {shortcutText("palette-accept", window.dohcDesktop?.platform)}
             </kbd>
             {props.acceptLabel ?? "run"}
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-sans text-[11px]">
+            <kbd className="rounded border border-line bg-bg px-1 font-sans text-[12px]">
               {shortcutText("palette-dismiss", window.dohcDesktop?.platform)}
             </kbd>
             dismiss

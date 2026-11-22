@@ -24,7 +24,13 @@ import {
   type Schema,
 } from "@tiptap/pm/model";
 import { liftListItem, sinkListItem, splitListItem, wrapInList } from "@tiptap/pm/schema-list";
-import { EditorState, TextSelection, type Command, type Transaction } from "@tiptap/pm/state";
+import {
+  EditorState,
+  Selection,
+  TextSelection,
+  type Command,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { findWrapping } from "@tiptap/pm/transform";
 import { EditorView } from "@tiptap/pm/view";
 import {
@@ -164,18 +170,34 @@ function toggleListCommand(
       if (currentList.type === listType) {
         return liftListItem(currentItemType)(state, dispatch, view);
       }
-      if (!dispatch) return liftListItem(currentItemType)(state);
-      let nextState = state;
+      let liftTr: Transaction | null = null;
       const lifted = liftListItem(currentItemType)(
         state,
         (tr) => {
-          nextState = state.apply(tr);
-          dispatch(tr);
+          liftTr = tr;
         },
         view,
       );
-      if (!lifted) return false;
-      return wrapInList(listType)(nextState, dispatch, view);
+      if (!lifted || !liftTr) return false;
+      const afterLift = state.apply(liftTr);
+      let wrapTr: Transaction | null = null;
+      const wrapped = wrapInList(listType)(
+        afterLift,
+        (tr) => {
+          wrapTr = tr;
+        },
+        view,
+      );
+      if (!wrapped || !wrapTr) return false;
+      if (!dispatch) return true;
+      const combined = state.tr;
+      for (const step of (liftTr as Transaction).steps) combined.step(step);
+      for (const step of (wrapTr as Transaction).steps) combined.step(step);
+      combined.setSelection(
+        Selection.fromJSON(combined.doc, (wrapTr as Transaction).selection.toJSON()),
+      );
+      dispatch(combined.scrollIntoView());
+      return true;
     }
     return wrapInList(listType)(state, dispatch, view);
   };
@@ -409,10 +431,12 @@ function buildMarkdownInputRules(schema: Schema, canEdit: () => boolean) {
 
   if (horizontalRule && paragraph) {
     rules.push(
-      new InputRule(/^(?:---|___|\*\*\*)\s$/, (state, _match, start) => {
+      new InputRule(/^(?:---|___|\*\*\*)\s$/, (state, _match, start, end) => {
         if (!canEdit()) return null;
         const $start = state.doc.resolve(start);
-        if ($start.parent.type !== paragraph || $start.parentOffset !== 0) return null;
+        if ($start.parent.type !== paragraph || $start.parentOffset !== 0 || end !== $start.end()) {
+          return null;
+        }
         const from = $start.before();
         const to = $start.after();
         const tr = state.tr.replaceWith(from, to, [horizontalRule.create(), paragraph.create()]);
@@ -470,7 +494,7 @@ export function mountLiveBodyEditor(
   const tabCommands: Command[] = [];
   const shiftTabCommands: Command[] = [];
   if (schema.nodes.taskItem) {
-    enterCommands.push(splitListItem(schema.nodes.taskItem));
+    enterCommands.push(splitListItem(schema.nodes.taskItem, { checked: false }));
     tabCommands.push(sinkListItem(schema.nodes.taskItem));
     shiftTabCommands.push(liftListItem(schema.nodes.taskItem));
   }

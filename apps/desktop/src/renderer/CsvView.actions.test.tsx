@@ -190,6 +190,61 @@ describe("CSV view actions", () => {
     expect(screen.queryByTestId("csv-add-column")).toBeNull();
   });
 
+  it("restores a deleted row or column via Undo without clobbering edits made afterward", async () => {
+    const user = userEvent.setup();
+    const notices: Array<{ message: string; onUndo?: () => void }> = [];
+    render(
+      <CsvView
+        {...csvFile("ws-1", "data.csv", "name,count\nAda,1\nGrace,2")}
+        onNotice={(message, onUndo) => notices.push({ message, onUndo })}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Delete row 1"));
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Grace");
+    expect(notices.at(-1)?.message).toBe("Deleted row 1.");
+
+    // Edit the surviving row before undoing the deletion.
+    const surviving = screen.getByLabelText("Row 1 column 1") as HTMLInputElement;
+    await user.clear(surviving);
+    await user.type(surviving, "Grace Hopper");
+
+    act(() => notices.at(-1)?.onUndo?.());
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
+    expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe(
+      "Grace Hopper",
+    );
+
+    // Same check for column deletion + subsequent edit + Undo.
+    await user.click(screen.getByLabelText("Delete column 2"));
+    expect(screen.queryByLabelText("Header column 2")).toBeNull();
+    expect(notices.at(-1)?.message).toBe('Deleted column "count".');
+    const row1Name = screen.getByLabelText("Row 1 column 1") as HTMLInputElement;
+    await user.clear(row1Name);
+    await user.type(row1Name, "Ada Lovelace");
+
+    act(() => notices.at(-1)?.onUndo?.());
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe(
+      "Ada Lovelace",
+    );
+    expect((screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value).toBe("1");
+    expect((screen.getByLabelText("Row 2 column 2") as HTMLInputElement).value).toBe("2");
+  });
+
+  it("does not append duplicate empty rows when pressing Enter on an empty last row", async () => {
+    const user = userEvent.setup();
+    render(<CsvView {...csvFile("ws-1", "data.csv", "name,count\nAda,1")} />);
+
+    const row1 = screen.getByLabelText("Row 1 column 1");
+    await user.click(row1);
+    await user.keyboard("{Enter}");
+    expect(screen.getByLabelText("Row 2 column 1")).toBeTruthy();
+
+    // Row 2 is blank; pressing Enter again should not append a Row 3.
+    await user.keyboard("{Enter}");
+    expect(screen.queryByLabelText("Row 3 column 1")).toBeNull();
+  });
+
   it.each([
     ["read-only", { readOnly: true }, "This document is shared with you to read.", "Read-only"],
     [

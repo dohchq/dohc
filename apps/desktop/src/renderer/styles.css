@@ -484,7 +484,7 @@ body {
 :root:not([data-platform="darwin"]) ::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--dohc-ink) 13%, transparent);
+  background: color-mix(in srgb, var(--dohc-ink) 15%, transparent);
   background-clip: padding-box;
 }
 

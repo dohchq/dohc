@@ -46,4 +46,70 @@ describe("ImageView", () => {
     expect(screen.getByText("dohc could not load this image.")).toBeTruthy();
     expect(screen.queryByTestId("image-zoom-toggle")).toBeNull();
   });
+
+  it("scopes plain zoom keys to the focused viewport without hijacking Ctrl/Cmd app zoom", () => {
+    render(<ImageView url="blob:test-image" path="assets/icon.png" />);
+    const img = screen.getByRole("img", { name: "icon.png" });
+    Object.defineProperty(img, "naturalWidth", { configurable: true, value: 100 });
+    Object.defineProperty(img, "naturalHeight", { configurable: true, value: 100 });
+    img.getBoundingClientRect = () => ({
+      width: 100,
+      height: 100,
+      top: 0,
+      left: 0,
+      right: 100,
+      bottom: 100,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+    fireEvent.load(img);
+
+    const toggle = screen.getByTestId("image-zoom-toggle");
+    const viewport = screen.getByTestId("image-backdrop-frame").parentElement!;
+    expect(viewport.className).not.toContain("items-center");
+    expect(screen.getByTestId("image-backdrop-frame").className).toContain("m-auto");
+
+    // Ctrl+= must not be intercepted by ImageView so Electron app zoom remains intact.
+    fireEvent.keyDown(window, { key: "=", ctrlKey: true });
+    fireEvent.keyDown(viewport, { key: "=", ctrlKey: true });
+    expect(toggle.textContent).toBe("Fit");
+
+    // Plain + / - / 0 on the focused image viewport steps zoom cleanly.
+    fireEvent.keyDown(viewport, { key: "+" });
+    expect(toggle.textContent).toBe("150%");
+    fireEvent.keyDown(viewport, { key: "-" });
+    expect(toggle.textContent).toBe("100%");
+    fireEvent.keyDown(viewport, { key: "0" });
+    expect(toggle.textContent).toBe("Fit");
+  });
+
+  it("steps from actual fitted scale on large images instead of jumping up on Zoom Out", () => {
+    render(<ImageView url="blob:huge" path="assets/huge.png" />);
+    const img = screen.getByRole("img", { name: "huge.png" });
+    Object.defineProperty(img, "naturalWidth", { configurable: true, value: 2000 });
+    Object.defineProperty(img, "naturalHeight", { configurable: true, value: 1000 });
+    // Simulated fitted width is 400px => 20% actual scale (below the 25% minimum zoom preset).
+    img.getBoundingClientRect = () => ({
+      width: 400,
+      height: 200,
+      top: 0,
+      left: 0,
+      right: 400,
+      bottom: 200,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+    fireEvent.load(img);
+
+    const zoomOut = screen.getByTestId("image-zoom-out") as HTMLButtonElement;
+    const zoomIn = screen.getByTestId("image-zoom-in") as HTMLButtonElement;
+    const toggle = screen.getByTestId("image-zoom-toggle");
+    expect(zoomOut.disabled).toBe(true);
+    expect(zoomIn.disabled).toBe(false);
+
+    fireEvent.click(zoomIn);
+    expect(toggle.textContent).toBe("25%");
+  });
 });

@@ -330,6 +330,35 @@ describe("MarkdownContent link navigation", () => {
     expect(allowed).toBe(false);
     expect(scrollIntoView).toHaveBeenCalledOnce();
   });
+
+  it("assigns unique IDs to duplicate and Unicode headings and exposes task status to screen readers", async () => {
+    await act(() => {
+      root?.render(
+        createElement(MarkdownContent, {
+          markdown: [
+            "## Plan",
+            "## Plan",
+            "## Plan 2",
+            "## 计划",
+            "",
+            "- [x] Shipped",
+            "- [ ] Pending",
+          ].join("\n"),
+        }),
+      );
+    });
+    const headingIds = [...container.querySelectorAll("h2")].map((h) => h.id);
+    expect(new Set(headingIds).size).toBe(headingIds.length);
+    expect(headingIds[0]).toBe("h-plan");
+    expect(headingIds[1]).toBe("h-plan-2");
+    expect(headingIds[2]).not.toBe("h-plan-2");
+    expect(headingIds[3]).toBe("h-计划");
+
+    const srLabels = [...container.querySelectorAll("li.task-item .sr-only")].map((el) =>
+      el.textContent?.trim(),
+    );
+    expect(srLabels).toEqual(["Completed task:", "Incomplete task:"]);
+  });
 });
 
 describe("MarkdownContent image retries", () => {

@@ -22,6 +22,12 @@ export type NamedDocumentSession = ReturnType<
   ReturnType<typeof createNamedLiveBrowserTransport>["select"]
 >;
 const OPENING = ["authorizing", "connecting", "syncing"];
+const IS_MAC =
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent);
+const MOD_KEY = IS_MAC ? "⌘" : "Ctrl+";
+const MOD_ALT_KEY = IS_MAC ? "⌘⌥" : "Ctrl+Alt+";
+const MOD_SHIFT_KEY = IS_MAC ? "⌘⇧" : "Ctrl+Shift+";
 // Trying again can't change these, so the page offers no Try again.
 const FINAL = ["access-removed", "link-full"];
 /** Editing stopped with a change the page will not send again by itself. */
@@ -306,7 +312,7 @@ export function NamedDocumentEditor({
             type="button"
             className="toolbar-button"
             aria-label="Bold"
-            title="Bold (Ctrl+B)"
+            title={`Bold (${MOD_KEY}B)`}
             aria-pressed={toolbar.bold}
             onMouseDown={keepSelection}
             onClick={() => editorRef.current?.toggleMark("bold")}
@@ -317,7 +323,7 @@ export function NamedDocumentEditor({
             type="button"
             className="toolbar-button"
             aria-label="Italic"
-            title="Italic (Ctrl+I)"
+            title={`Italic (${MOD_KEY}I)`}
             aria-pressed={toolbar.italic}
             onMouseDown={keepSelection}
             onClick={() => editorRef.current?.toggleMark("italic")}
@@ -328,7 +334,7 @@ export function NamedDocumentEditor({
             type="button"
             className="toolbar-button"
             aria-label="Strikethrough"
-            title="Strikethrough (Ctrl+Shift+X)"
+            title={`Strikethrough (${MOD_SHIFT_KEY}X)`}
             aria-pressed={toolbar.strike}
             onMouseDown={keepSelection}
             onClick={() => editorRef.current?.toggleMark("strike")}
@@ -339,7 +345,7 @@ export function NamedDocumentEditor({
             type="button"
             className="toolbar-button"
             aria-label="Inline code"
-            title="Inline code (Ctrl+E)"
+            title={`Inline code (${MOD_KEY}E)`}
             aria-pressed={toolbar.code}
             onMouseDown={keepSelection}
             onClick={() => editorRef.current?.toggleMark("code")}
@@ -351,7 +357,7 @@ export function NamedDocumentEditor({
             type="button"
             className="toolbar-button"
             aria-label="Heading 1"
-            title="Heading 1 (Ctrl+Alt+1)"
+            title={`Heading 1 (${MOD_ALT_KEY}1)`}
             aria-pressed={toolbar.heading === 1}
             onMouseDown={keepSelection}
             onClick={() => editorRef.current?.setHeading(1)}
@@ -362,7 +368,7 @@ export function NamedDocumentEditor({
             type="button"
             className="toolbar-button"
             aria-label="Heading 2"
-            title="Heading 2 (Ctrl+Alt+2)"
+            title={`Heading 2 (${MOD_ALT_KEY}2)`}
             aria-pressed={toolbar.heading === 2}
             onMouseDown={keepSelection}
             onClick={() => editorRef.current?.setHeading(2)}
@@ -373,7 +379,7 @@ export function NamedDocumentEditor({
             type="button"
             className="toolbar-button"
             aria-label="Heading 3"
-            title="Heading 3 (Ctrl+Alt+3)"
+            title={`Heading 3 (${MOD_ALT_KEY}3)`}
             aria-pressed={toolbar.heading === 3}
             onMouseDown={keepSelection}
             onClick={() => editorRef.current?.setHeading(3)}
@@ -441,7 +447,7 @@ export function NamedDocumentEditor({
             type="button"
             className="toolbar-button"
             aria-label="Undo"
-            title="Undo (Ctrl+Z)"
+            title={`Undo (${MOD_KEY}Z)`}
             disabled={!toolbar.canUndo}
             onMouseDown={keepSelection}
             onClick={() => editorRef.current?.undo()}
@@ -452,7 +458,7 @@ export function NamedDocumentEditor({
             type="button"
             className="toolbar-button"
             aria-label="Redo"
-            title="Redo (Ctrl+Shift+Z)"
+            title={`Redo (${MOD_SHIFT_KEY}Z)`}
             disabled={!toolbar.canRedo}
             onMouseDown={keepSelection}
             onClick={() => editorRef.current?.redo()}

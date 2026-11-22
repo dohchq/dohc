@@ -10,12 +10,14 @@ import * as yTiptap from "@tiptap/y-tiptap";
 import * as Y from "yjs";
 import {
   CLOSED_SLASH_COMMAND_STATE,
+  dismissSlashCommand,
   filterSlashCommands,
   makeSlashCommandPlugin,
   SlashCommandMenu,
   type SlashCommandId,
   type SlashCommandState,
 } from "./slashCommands";
+import { insertBlockAfter } from "./blockControls";
 
 // Same Range stubs the other picker tests use — the plugin calls
 // view.coordsAtPos, which reaches into DOM Range measurement under jsdom.
@@ -433,6 +435,10 @@ describe("SlashCommandMenu on the Menu part's recipe", () => {
     expect(screen.getByText("Lists")).toBeTruthy();
     expect(screen.getByText("Blocks")).toBeTruthy();
     expect(screen.getByText("Media & links")).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Basic blocks" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Lists" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Blocks" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Media & links" })).toBeTruthy();
 
     rerender(
       createElement(SlashCommandMenu, {
@@ -486,6 +492,48 @@ describe("filterSlashCommands tiered scoring & code suppression", () => {
     editor.commands.setContent("<p><code>/he</code></p>");
     editor.commands.setTextSelection(4);
     expect(stateRef.current.open).toBe(false);
+    editor.destroy();
+  });
+
+  it("removes a gutter-inserted '/' and empty paragraph on Escape or dismiss, while keeping manually typed '/'", () => {
+    const { editor, stateRef, press } = makeSlashEditor();
+    editor.commands.setContent("<p>Hello</p>");
+
+    // Clicking gutter '+' inserts a new paragraph with '/' and opens the menu.
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    expect(editor.state.doc.childCount).toBe(2);
+
+    // Pressing Escape cancels cleanly with zero leftover '/' or blank paragraph.
+    press("Escape");
+    expect(stateRef.current.open).toBe(false);
+    expect(editor.state.doc.childCount).toBe(1);
+    expect(editor.state.doc.textContent).toBe("Hello");
+
+    // Same for outside-click dismiss via dismissSlashCommand.
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    dismissSlashCommand(editor.view);
+    expect(stateRef.current.open).toBe(false);
+    expect(editor.state.doc.childCount).toBe(1);
+    expect(editor.state.doc.textContent).toBe("Hello");
+
+    // Reusing an existing empty paragraph removes only the '/' and preserves the empty paragraph.
+    editor.commands.setContent("<p></p>");
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    press("Escape");
+    expect(stateRef.current.open).toBe(false);
+    expect(editor.state.doc.childCount).toBe(1);
+    expect(editor.state.doc.textContent).toBe("");
+
+    // Manually typed '/' is kept as text when Escape dismisses the menu.
+    editor.commands.insertContent("/");
+    expect(stateRef.current.open).toBe(true);
+    press("Escape");
+    expect(stateRef.current.open).toBe(false);
+    expect(editor.state.doc.textContent).toBe("/");
+
     editor.destroy();
   });
 });

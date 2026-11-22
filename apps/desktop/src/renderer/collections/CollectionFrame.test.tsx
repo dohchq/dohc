@@ -760,6 +760,22 @@ describe("the toolbar", () => {
     expect(onSubmit).toHaveBeenCalledOnce();
     await user.click(screen.getByRole("button", { name: "Search" }));
     expect(onSubmit).toHaveBeenCalledTimes(2);
+    expect(onSubmit).toHaveBeenLastCalledWith("camera");
+
+    await user.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(box.value).toBe("");
+    expect(onSubmit).toHaveBeenCalledTimes(3);
+    expect(onSubmit).toHaveBeenLastCalledWith("");
+  });
+
+  it("styles view-tab overflow fades with visible edge gradients", () => {
+    const { container } = render(<Frame />);
+    const leftFade = container.querySelector<HTMLElement>('[data-strip-fade="left"]');
+    const rightFade = container.querySelector<HTMLElement>('[data-strip-fade="right"]');
+    expect(leftFade?.className).toContain("bg-linear-to-r");
+    expect(leftFade?.className).toContain("from-bg");
+    expect(rightFade?.className).toContain("bg-linear-to-l");
+    expect(rightFade?.className).toContain("from-bg");
   });
 
   it("shows no search for a page that has none, and holds one that is disabled", () => {

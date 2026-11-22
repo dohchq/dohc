@@ -293,6 +293,15 @@ describe("mountLiveBodyEditor", () => {
 
       taskCtx.dispatchKey("Enter");
       expect(taskCtx.textbox.querySelectorAll('li[data-type="taskItem"]')).toHaveLength(3);
+
+      // Pressing Enter at the end of a checked task creates an unchecked next task.
+      const checkedItems = taskCtx.textbox.querySelectorAll('li[data-type="taskItem"]');
+      const firstText = checkedItems[0]!.querySelector("p")!.firstChild!;
+      taskCtx.setCaretAt(firstText, 4);
+      taskCtx.dispatchKey("Enter");
+      const afterSplit = taskCtx.textbox.querySelectorAll('li[data-type="taskItem"]');
+      expect(afterSplit[0]?.getAttribute("data-checked")).toBe("true");
+      expect(afterSplit[1]?.getAttribute("data-checked")).toBe("false");
     } finally {
       taskCtx.cleanup();
     }
@@ -400,6 +409,18 @@ describe("mountLiveBodyEditor", () => {
       await vi.waitFor(() => expect(hrSpace.textbox.querySelector("hr")).not.toBeNull());
     } finally {
       hrSpace.cleanup();
+    }
+
+    // Typing "--- " before existing text must never replace the paragraph and drop that text.
+    const hrBeforeText = setup("Keep this text");
+    try {
+      const textNode = hrBeforeText.textbox.querySelector("p")!.firstChild!;
+      hrBeforeText.setCaretAt(textNode, 0);
+      await hrBeforeText.typeTrigger("---", " ");
+      expect(hrBeforeText.textbox.querySelector("hr")).toBeNull();
+      expect(yDocToMarkdown(hrBeforeText.doc)).toContain("Keep this text");
+    } finally {
+      hrBeforeText.cleanup();
     }
   });
 

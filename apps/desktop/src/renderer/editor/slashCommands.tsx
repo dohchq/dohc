@@ -1,6 +1,7 @@
 import { isCodeBlock, isCodeMark, isEditableEditor } from "./pmHelpers";
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   type Dispatch,
@@ -42,7 +43,14 @@ import {
   revealMenuRow,
 } from "../ui/Menu";
 import type { Editor } from "@tiptap/core";
-import { NodeSelection, Plugin, PluginKey, type EditorState } from "@tiptap/pm/state";
+import {
+  NodeSelection,
+  Plugin,
+  PluginKey,
+  Selection,
+  type EditorState,
+  type Transaction,
+} from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import type { ProsemirrorBinding } from "@tiptap/y-tiptap";
 import { compareRelativePositions, type RelativePosition, type XmlFragment } from "yjs";
@@ -251,10 +259,57 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
 ];
 
-const slashCommandKey = new PluginKey<DismissedSlash | null>("dohc-slash-command");
+export type GutterSlashOrigin = {
+  from: number;
+  insertedParagraph: boolean;
+};
+
+type SlashPluginState = {
+  dismissed: DismissedSlash | null;
+  gutter: GutterSlashOrigin | null;
+};
+
+type SlashPluginMeta = { type: "dismiss" } | { type: "gutter"; origin: GutterSlashOrigin };
+
+const EMPTY_SLASH_PLUGIN_STATE: SlashPluginState = { dismissed: null, gutter: null };
+
+const slashCommandKey = new PluginKey<SlashPluginState>("dohc-slash-command");
+
+export function markGutterSlash(tr: Transaction, origin: GutterSlashOrigin): Transaction {
+  return tr.setMeta(slashCommandKey, { type: "gutter", origin } satisfies SlashPluginMeta);
+}
 
 export function dismissSlashCommand(view: EditorView): void {
-  view.dispatch(view.state.tr.setMeta(slashCommandKey, true).setMeta("addToHistory", false));
+  const { state } = view;
+  const pluginState = slashCommandKey.getState(state);
+  const trigger = findSlashTrigger(state);
+  const gutter = pluginState?.gutter;
+  if (gutter && trigger && trigger.from === gutter.from && trigger.query === "") {
+    const tr = state.tr;
+    const $from = state.doc.resolve(trigger.from);
+    if (
+      gutter.insertedParagraph &&
+      $from.parent.type.name === "paragraph" &&
+      $from.parent.textContent === "/" &&
+      state.doc.childCount > 1
+    ) {
+      const before = $from.before();
+      tr.delete(before, $from.after());
+      tr.setSelection(
+        Selection.near(tr.doc.resolve(Math.min(Math.max(0, before), tr.doc.content.size)), -1),
+      );
+    } else {
+      tr.delete(trigger.from, trigger.from + 1);
+    }
+    tr.setMeta(slashCommandKey, { type: "dismiss" } satisfies SlashPluginMeta);
+    view.dispatch(tr);
+    return;
+  }
+  view.dispatch(
+    state.tr
+      .setMeta(slashCommandKey, { type: "dismiss" } satisfies SlashPluginMeta)
+      .setMeta("addToHistory", false),
+  );
 }
 
 function slashCommandScore(command: SlashCommandItem, normalized: string): number {
@@ -329,7 +384,7 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
   }
 
   const trigger = findSlashTrigger(view.state);
-  if (!trigger || slashCommandKey.getState(view.state)?.from === trigger.from) {
+  if (!trigger || slashCommandKey.getState(view.state)?.dismissed?.from === trigger.from) {
     return CLOSED_SLASH_COMMAND_STATE;
   }
 
@@ -394,22 +449,44 @@ export function makeSlashCommandPlugin({
     publish(next);
   };
 
-  return new Plugin<DismissedSlash | null>({
+  return new Plugin<SlashPluginState>({
     key: slashCommandKey,
     // The menu stays closed while the caret is in the dismissed trigger.
     // Leaving it and coming back, or a new "/", opens the menu.
     state: {
-      init: () => null,
-      apply(tr, dismissed, oldState, state) {
-        const dismissing = tr.getMeta(slashCommandKey) === true;
-        if (!dismissed && !dismissing) return null;
+      init: () => EMPTY_SLASH_PLUGIN_STATE,
+      apply(tr, prev, oldState, state) {
+        const meta = tr.getMeta(slashCommandKey) as SlashPluginMeta | undefined;
         const trigger = findSlashTrigger(state);
-        if (!trigger) return null;
+
+        let gutter: GutterSlashOrigin | null = null;
+        if (meta?.type === "gutter") {
+          gutter = meta.origin;
+        } else if (meta?.type !== "dismiss" && prev.gutter && trigger && trigger.query === "") {
+          const mappedGutter = tr.mapping.mapResult(prev.gutter.from);
+          if (!mappedGutter.deleted && mappedGutter.pos === trigger.from) {
+            gutter = {
+              from: trigger.from,
+              insertedParagraph: prev.gutter.insertedParagraph,
+            };
+          }
+        }
+
+        const dismissing = meta?.type === "dismiss";
+        if (!prev.dismissed && !dismissing) {
+          return gutter ? { dismissed: null, gutter } : EMPTY_SLASH_PLUGIN_STATE;
+        }
+        if (!trigger) return EMPTY_SLASH_PLUGIN_STATE;
         // Read from the old state: this state's later plugins aren't built yet.
         const sync: YSyncState | undefined = yTiptap?.ySyncPluginKey.getState(oldState);
         const anchor = (from: number) =>
           yTiptap && sync ? anchorSlash(yTiptap, sync, from) : null;
-        if (dismissing || !dismissed) return { from: trigger.from, anchor: anchor(trigger.from) };
+        if (dismissing || !prev.dismissed) {
+          return {
+            dismissed: { from: trigger.from, anchor: anchor(trigger.from) },
+            gutter: null,
+          };
+        }
 
         // Y.js applies a remote edit, or an undo, by replacing the whole
         // document, which maps every position away. Its anchor still finds the
@@ -417,12 +494,16 @@ export function makeSlashCommandPlugin({
         const change: { isChangeOrigin?: boolean } | undefined = yTiptap
           ? tr.getMeta(yTiptap.ySyncPluginKey)
           : undefined;
-        const mapped = tr.mapping.mapResult(dismissed.from);
+        const mapped = tr.mapping.mapResult(prev.dismissed.from);
         const same = change?.isChangeOrigin
-          ? dismissed.anchor !== null &&
-            compareRelativePositions(dismissed.anchor, anchor(trigger.from))
+          ? prev.dismissed.anchor !== null &&
+            compareRelativePositions(prev.dismissed.anchor, anchor(trigger.from))
           : !mapped.deleted && mapped.pos === trigger.from;
-        return same ? { from: trigger.from, anchor: dismissed.anchor } : null;
+        return same
+          ? { dismissed: { from: trigger.from, anchor: prev.dismissed.anchor }, gutter }
+          : gutter
+            ? { dismissed: null, gutter }
+            : EMPTY_SLASH_PLUGIN_STATE;
       },
     },
     view(view) {
@@ -470,7 +551,7 @@ export function makeSlashCommandPlugin({
 
         if (event.key === "Escape") {
           event.preventDefault();
-          view.dispatch(view.state.tr.setMeta(slashCommandKey, true));
+          dismissSlashCommand(view);
           view.focus();
           return true;
         }
@@ -479,6 +560,26 @@ export function makeSlashCommandPlugin({
       },
     },
   });
+}
+
+function groupSlashCommands(items: SlashCommandItem[]): Array<{
+  section: SlashCommandSection;
+  entries: Array<{ item: SlashCommandItem; index: number }>;
+}> {
+  const groups: Array<{
+    section: SlashCommandSection;
+    entries: Array<{ item: SlashCommandItem; index: number }>;
+  }> = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    const last = groups[groups.length - 1];
+    if (last && last.section === item.section) {
+      last.entries.push({ item, index });
+    } else {
+      groups.push({ section: item.section, entries: [{ item, index }] });
+    }
+  }
+  return groups;
 }
 
 // The slash menu, drawn from the Menu part's recipe. The editor keeps focus
@@ -496,6 +597,7 @@ export function SlashCommandMenu({
   onHover: (index: number) => void;
   onDismiss?: () => void;
 }) {
+  const menuId = useId();
   const listRef = useRef<HTMLDivElement | null>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const selected = state.open ? state.selected : -1;
@@ -569,14 +671,18 @@ export function SlashCommandMenu({
     >
       {items.length ? (
         showSections ? (
-          items.map((item, index) => {
-            const showHeader = index === 0 || items[index - 1]!.section !== item.section;
+          groupSlashCommands(items).map((group, groupIndex) => {
+            const headingId = `${menuId}-section-${groupIndex}`;
             return (
-              <div key={item.id} className="contents">
-                {showHeader ? (
-                  <div className={`${MENU_SECTION}${index > 0 ? " mt-1" : ""}`}>{item.section}</div>
-                ) : null}
-                {renderOption(item, index)}
+              <div key={group.section} role="group" aria-labelledby={headingId}>
+                <div
+                  id={headingId}
+                  role="presentation"
+                  className={`${MENU_SECTION}${groupIndex > 0 ? " mt-1" : ""}`}
+                >
+                  {group.section}
+                </div>
+                {group.entries.map(({ item, index }) => renderOption(item, index))}
               </div>
             );
           })

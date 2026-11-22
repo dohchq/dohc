@@ -1631,4 +1631,40 @@ describe("SettingsDialog", () => {
       patch: { files: { attachmentLocation: "global-folder" } },
     });
   });
+
+  it("normalizes the Default accent swatch back to null so theme switching stays adaptive", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog
+        workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const accentRow = await screen.findByTestId("settings-row-accent");
+    await user.click(within(accentRow).getByRole("button", { name: "Blue" }));
+    await waitFor(() =>
+      expect(bridge.setUserSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            appearance: expect.objectContaining({ accentColor: expect.stringMatching(/^#/) }),
+          }),
+        }),
+      ),
+    );
+
+    await user.click(within(accentRow).getByRole("button", { name: "Default" }));
+    await waitFor(() =>
+      expect(bridge.setUserSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            appearance: expect.objectContaining({ accentColor: null }),
+          }),
+        }),
+      ),
+    );
+  });
 });

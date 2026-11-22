@@ -19,62 +19,68 @@ const CHECKER_STYLE = {
   backgroundSize: "16px 16px",
 };
 
-function stepZoom(current: Zoom, direction: 1 | -1): number {
-  const base = current === "fit" ? 1 : current;
+function stepZoom(current: number, direction: 1 | -1): number | null {
   if (direction > 0) {
-    return ZOOM_STEPS.find((step) => step > base + 0.001) ?? ZOOM_STEPS.at(-1)!;
+    return ZOOM_STEPS.find((step) => step > current + 0.001) ?? null;
   }
   for (let index = ZOOM_STEPS.length - 1; index >= 0; index -= 1) {
-    if (ZOOM_STEPS[index]! < base - 0.001) return ZOOM_STEPS[index]!;
+    if (ZOOM_STEPS[index]! < current - 0.001) return ZOOM_STEPS[index]!;
   }
-  return ZOOM_STEPS[0]!;
+  return null;
 }
 
 export function ImageView({ url, path }: { url: string; path: string }) {
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
+  const [fitScale, setFitScale] = useState<number | null>(null);
   const [failed, setFailed] = useState(false);
   const [backdrop, setBackdrop] = useState<Backdrop>("checker");
   const [zoom, setZoom] = useState<Zoom>("fit");
-  const rootRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const name = path.split("/").pop() ?? path;
 
   useEffect(() => {
     setDims(null);
+    setFitScale(null);
     setFailed(false);
     setZoom("fit");
   }, [url]);
 
-  const zoomIn = useCallback(() => setZoom((current) => stepZoom(current, 1)), []);
-  const zoomOut = useCallback(() => setZoom((current) => stepZoom(current, -1)), []);
-  const toggleFit = useCallback(() => setZoom((current) => (current === "fit" ? 1 : "fit")), []);
+  const measureFit = useCallback(() => {
+    if (!dims || dims.w <= 0) return;
+    const width = imgRef.current?.getBoundingClientRect().width ?? 0;
+    setFitScale(width > 0 ? width / dims.w : null);
+  }, [dims]);
 
   useEffect(() => {
-    if (failed) return;
-    function onKeyDown(event: KeyboardEvent) {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-      const target = event.target;
-      if (
-        target instanceof Element &&
-        target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')
-      ) {
-        return;
-      }
-      const root = rootRef.current;
-      if (!root || root.offsetParent === null) return;
-      if (event.key === "=" || event.key === "+") {
-        event.preventDefault();
-        zoomIn();
-      } else if (event.key === "-") {
-        event.preventDefault();
-        zoomOut();
-      } else if (event.key === "0") {
-        event.preventDefault();
-        setZoom("fit");
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [failed, zoomIn, zoomOut]);
+    if (zoom !== "fit" || !dims) return;
+    measureFit();
+    const viewport = viewportRef.current;
+    if (!viewport || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measureFit);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [zoom, dims, measureFit]);
+
+  const effectiveScale = zoom === "fit" ? (fitScale ?? 1) : zoom;
+  const nextZoomIn = stepZoom(effectiveScale, 1);
+  const nextZoomOut = stepZoom(effectiveScale, -1);
+
+  const zoomIn = useCallback(() => {
+    setZoom((current) => {
+      const base = current === "fit" ? (fitScale ?? 1) : current;
+      return stepZoom(base, 1) ?? current;
+    });
+  }, [fitScale]);
+
+  const zoomOut = useCallback(() => {
+    setZoom((current) => {
+      const base = current === "fit" ? (fitScale ?? 1) : current;
+      return stepZoom(base, -1) ?? current;
+    });
+  }, [fitScale]);
+
+  const toggleFit = useCallback(() => setZoom((current) => (current === "fit" ? 1 : "fit")), []);
 
   const frameClass =
     backdrop === "paper" ? "bg-bg dark:bg-ink" : backdrop === "dark" ? "bg-ink dark:bg-bg" : "";
@@ -88,9 +94,33 @@ export function ImageView({ url, path }: { url: string; path: string }) {
   const zoomLabel = zoom === "fit" ? "Fit" : `${Math.round(zoom * 100)}%`;
 
   return (
-    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="view-image">
+    <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="view-image">
       <div
-        className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-6"
+        ref={viewportRef}
+        tabIndex={0}
+        aria-label={`Image preview: ${name}`}
+        className="flex min-h-0 flex-1 overflow-auto p-6 outline-none"
+        onKeyDown={(event) => {
+          if (failed || event.ctrlKey || event.metaKey || event.altKey) return;
+          if (
+            event.target instanceof Element &&
+            event.target.closest(
+              'button, input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+            )
+          ) {
+            return;
+          }
+          if (event.key === "=" || event.key === "+") {
+            event.preventDefault();
+            zoomIn();
+          } else if (event.key === "-") {
+            event.preventDefault();
+            zoomOut();
+          } else if (event.key === "0") {
+            event.preventDefault();
+            setZoom("fit");
+          }
+        }}
         onWheel={(event) => {
           if (failed || !(event.ctrlKey || event.metaKey)) return;
           event.preventDefault();
@@ -105,11 +135,12 @@ export function ImageView({ url, path }: { url: string; path: string }) {
             data-testid="image-backdrop-frame"
             data-backdrop={backdrop}
             style={backdrop === "checker" ? CHECKER_STYLE : undefined}
-            className={`flex min-h-12 min-w-12 items-center justify-center rounded border border-line p-2 ${
+            className={`m-auto flex min-h-12 min-w-12 items-center justify-center rounded border border-line p-2 ${
               zoom === "fit" ? "max-h-full max-w-full" : ""
             } ${frameClass}`}
           >
             <img
+              ref={imgRef}
               src={url}
               alt={name}
               onClick={toggleFit}
@@ -119,12 +150,13 @@ export function ImageView({ url, path }: { url: string; path: string }) {
                   : "max-w-none cursor-zoom-out"
               }`}
               style={imgStyle}
-              onLoad={(e) =>
-                setDims({
-                  w: e.currentTarget.naturalWidth,
-                  h: e.currentTarget.naturalHeight,
-                })
-              }
+              onLoad={(e) => {
+                const w = e.currentTarget.naturalWidth;
+                const h = e.currentTarget.naturalHeight;
+                setDims({ w, h });
+                const rendered = e.currentTarget.getBoundingClientRect().width;
+                setFitScale(w > 0 && rendered > 0 ? rendered / w : null);
+              }}
               onError={() => setFailed(true)}
             />
           </div>
@@ -141,8 +173,8 @@ export function ImageView({ url, path }: { url: string; path: string }) {
               <IconButton
                 data-testid="image-zoom-out"
                 aria-label="Zoom out"
-                title="Zoom out"
-                disabled={zoom !== "fit" && zoom <= ZOOM_STEPS[0]!}
+                title="Zoom out (-)"
+                disabled={nextZoomOut === null}
                 onClick={zoomOut}
               >
                 <Minus size={13} aria-hidden />
@@ -151,7 +183,7 @@ export function ImageView({ url, path }: { url: string; path: string }) {
                 type="button"
                 data-testid="image-zoom-toggle"
                 aria-label="Toggle fit and 100%"
-                title={zoom === "fit" ? "Show at 100%" : "Fit to view"}
+                title={zoom === "fit" ? "Show at 100%" : "Fit to view (0)"}
                 onClick={toggleFit}
                 className="h-6 min-w-11 rounded-md px-1.5 text-center text-[12px] tabular-nums text-muted transition-colors hover:bg-hover hover:text-ink active:bg-selected"
               >
@@ -160,8 +192,8 @@ export function ImageView({ url, path }: { url: string; path: string }) {
               <IconButton
                 data-testid="image-zoom-in"
                 aria-label="Zoom in"
-                title="Zoom in"
-                disabled={zoom !== "fit" && zoom >= ZOOM_STEPS.at(-1)!}
+                title="Zoom in (+)"
+                disabled={nextZoomIn === null}
                 onClick={zoomIn}
               >
                 <Plus size={13} aria-hidden />

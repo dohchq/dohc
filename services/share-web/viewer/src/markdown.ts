@@ -7,9 +7,10 @@ const SAFE_LINK = /^(?:https?:\/\/|mailto:|\/[^/]|#|\.\.?\/)/iu;
 const HTTP_LINK = /^https?:\/\//iu;
 const MAILTO_LINK = /^mailto:/iu;
 const NON_FILE_LINK = /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/iu;
-const HEADING_ID = /^h-[a-z0-9-]+$/u;
+const HEADING_ID = /^h-[\p{L}\p{N}-]+$/u;
 
 const ALLOWED_CLASS_TOKENS = new Set([
+  "sr-only",
   "task-list",
   "task-item",
   "task-item-checked",
@@ -144,7 +145,7 @@ DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
 export function headingSlug(text: string): string {
   const cleaned = text
     .toLowerCase()
-    .replace(/[^a-z0-9\s-]/gu, "")
+    .replace(/[^\p{L}\p{N}\s-]/gu, "")
     .trim()
     .replace(/[\s-]+/gu, "-")
     .replace(/^-+|-+$/gu, "");
@@ -204,7 +205,7 @@ export function renderSafeMarkdown(
   resolveImage: (href: string) => string | null = (href) => (BLOB_IMAGE.test(href) ? href : null),
   resolveLink: (href: string) => string | null = () => null,
 ): string {
-  const usedSlugs = new Map<string, number>();
+  const usedIds = new Set<string>();
 
   const parser = new Marked({
     async: false,
@@ -347,9 +348,13 @@ export function renderSafeMarkdown(
       heading({ tokens, depth }) {
         const inlineHtml = this.parser.parseInline(tokens);
         const base = headingSlug(stripTags(inlineHtml));
-        const count = usedSlugs.get(base) ?? 0;
-        usedSlugs.set(base, count + 1);
-        const id = count === 0 ? `h-${base}` : `h-${base}-${count + 1}`;
+        let suffix = 1;
+        let id = `h-${base}`;
+        while (usedIds.has(id)) {
+          suffix += 1;
+          id = `h-${base}-${suffix}`;
+        }
+        usedIds.add(id);
         return `<h${depth} id="${id}">${inlineHtml}</h${depth}>\n`;
       },
       checkbox() {
@@ -369,7 +374,8 @@ export function renderSafeMarkdown(
         const body = this.parser.parse(innerTokens);
         const itemClass = item.checked ? "task-item task-item-checked" : "task-item";
         const checkClass = item.checked ? "task-check task-check-checked" : "task-check";
-        return `<li class="${itemClass}"><span class="${checkClass}"></span><div class="task-body">${body}</div></li>\n`;
+        const statusLabel = item.checked ? "Completed task: " : "Incomplete task: ";
+        return `<li class="${itemClass}"><span class="${checkClass}"></span><span class="sr-only">${statusLabel}</span><div class="task-body">${body}</div></li>\n`;
       },
       table(token: Tokens.Table) {
         const headCells = token.header

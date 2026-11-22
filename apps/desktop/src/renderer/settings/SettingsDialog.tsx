@@ -733,7 +733,14 @@ export function SettingsDialog(props: {
                 <ColorControl
                   label="Accent color"
                   value={userSettings.appearance.accentColor ?? palette[colorScheme].accent}
-                  onChange={(accentColor) => void saveAppearance({ accentColor })}
+                  onChange={(accentColor) =>
+                    void saveAppearance({
+                      accentColor:
+                        accentColor.toLowerCase() === palette[colorScheme].accent.toLowerCase()
+                          ? null
+                          : accentColor,
+                    })
+                  }
                 />
               </SettingRow>
               <SettingRow

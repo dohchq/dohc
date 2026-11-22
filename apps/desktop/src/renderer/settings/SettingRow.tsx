@@ -573,7 +573,7 @@ export function ColorControl(props: {
           defaultValue={props.value}
           className="h-6 w-8 cursor-pointer rounded-md border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] bg-bg p-0.5"
         />
-        <span className="font-mono text-[11px] text-muted">{props.value}</span>
+        <span className="font-mono text-[12px] text-muted">{props.value}</span>
       </label>
     </div>
   );

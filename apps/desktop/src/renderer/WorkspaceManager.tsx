@@ -275,6 +275,14 @@ export function WorkspaceManager(props: {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       if (document.documentElement.dataset.menuOpen !== undefined) return;
+      if (
+        event.target instanceof Element &&
+        event.target.closest(
+          'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+        )
+      ) {
+        return;
+      }
       event.preventDefault();
       openCurrentRef.current();
     };

@@ -1160,11 +1160,19 @@ export function TableView({
     if (top < grid.scrollTop) grid.scrollTop = top;
     else if (bottom > grid.scrollTop + grid.clientHeight)
       grid.scrollTop = bottom - grid.clientHeight;
-    // The first field brings the Open gutter back with it.
-    const left = at.column === 0 ? 0 : gutter + columnLeft(at.column);
-    const right = gutter + columnLeft(at.column + 1);
-    if (left < grid.scrollLeft) grid.scrollLeft = left;
-    else if (right > grid.scrollLeft + grid.clientWidth) grid.scrollLeft = right - grid.clientWidth;
+    // Keep the selected cell clear of the frozen Open gutter and pinned first column.
+    const frozenWidth = gutter + (fields.length > 0 ? columnWidth(0) : 0);
+    if (at.column === 0) {
+      if (!editorRef.current && grid.scrollLeft > 0) grid.scrollLeft = 0;
+    } else {
+      const left = gutter + columnLeft(at.column);
+      const right = gutter + columnLeft(at.column + 1);
+      if (left < grid.scrollLeft + frozenWidth) {
+        grid.scrollLeft = Math.max(0, left - frozenWidth);
+      } else if (right > grid.scrollLeft + grid.clientWidth) {
+        grid.scrollLeft = Math.min(right - grid.clientWidth, Math.max(0, left - frozenWidth));
+      }
+    }
   });
 
   const select = (row: number, column: number) => {
@@ -1301,7 +1309,7 @@ export function TableView({
     if (!field) return;
     const grid = scrollRef.current;
     const width = popoverWidth(field);
-    let left = gutter + columnLeft(column);
+    let left = column === 0 && grid ? grid.scrollLeft + gutter : gutter + columnLeft(column);
     // A picker is wider than most cells. Near the right edge it moves left to stay in view.
     if (width !== null && grid) {
       const room =
@@ -1776,7 +1784,7 @@ export function TableView({
                       {onOpenRecord ? (
                         <div
                           role="gridcell"
-                          className="sticky left-0 z-10 flex shrink-0 items-center justify-center border-b border-line bg-bg before:pointer-events-none before:absolute before:inset-0 group-hover:before:bg-hover group-aria-[current=true]:before:bg-selected"
+                          className="sticky left-0 z-[5] flex shrink-0 items-center justify-center border-b border-line bg-bg before:pointer-events-none before:absolute before:inset-0 group-hover:before:bg-hover group-aria-[current=true]:before:bg-selected"
                           style={{ width: OPEN_COLUMN_WIDTH }}
                         >
                           <button
@@ -1805,7 +1813,7 @@ export function TableView({
                             aria-describedby={isSelected && note ? noteId : undefined}
                             className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
                               isPinned
-                                ? "sticky z-10 bg-bg font-medium before:pointer-events-none before:absolute before:inset-0 group-hover:before:bg-hover group-aria-[current=true]:before:bg-selected"
+                                ? "sticky z-[5] bg-bg font-medium before:pointer-events-none before:absolute before:inset-0 group-hover:before:bg-hover group-aria-[current=true]:before:bg-selected"
                                 : ""
                             } ${isSelected ? "ring-2 ring-inset ring-accent" : ""}`}
                             style={
@@ -1844,7 +1852,7 @@ export function TableView({
                 {openColumn ? (
                   <div
                     role="gridcell"
-                    className="sticky left-0 z-10 flex shrink-0 items-center justify-center border-b border-line bg-bg"
+                    className="sticky left-0 z-[5] flex shrink-0 items-center justify-center border-b border-line bg-bg"
                     style={{ width: OPEN_COLUMN_WIDTH }}
                   >
                     {newRowLead}
@@ -1865,7 +1873,7 @@ export function TableView({
                       }
                       aria-describedby={isSelected && invalid ? noteId : undefined}
                       className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
-                        isPinned ? "sticky z-10 bg-bg font-medium" : ""
+                        isPinned ? "sticky z-[5] bg-bg font-medium" : ""
                       } ${isSelected ? "ring-2 ring-inset ring-accent" : ""}`}
                       style={
                         isPinned
@@ -1982,7 +1990,10 @@ export function TableView({
                 className="dohc-popover absolute z-20 flex max-w-80 items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal text-danger"
                 style={{
                   top: (at.row + 1) * ROW_HEIGHT,
-                  left: gutter + columnLeft(at.column),
+                  left:
+                    at.column === 0
+                      ? (scrollRef.current?.scrollLeft ?? 0) + gutter
+                      : gutter + columnLeft(at.column),
                   minWidth: columnWidth(at.column),
                 }}
               >
@@ -2103,7 +2114,10 @@ export function TableView({
                 className="dohc-popover absolute z-20 flex max-w-80 flex-col items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal"
                 style={{
                   top: (at.row + 1) * ROW_HEIGHT,
-                  left: gutter + columnLeft(at.column),
+                  left:
+                    at.column === 0
+                      ? (scrollRef.current?.scrollLeft ?? 0) + gutter
+                      : gutter + columnLeft(at.column),
                   minWidth: columnWidth(at.column),
                 }}
                 onKeyDown={(event) => {

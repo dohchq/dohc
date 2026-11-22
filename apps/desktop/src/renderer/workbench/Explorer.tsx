@@ -2564,7 +2564,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
               <ChevronRight
-                size={11}
+                size={12}
                 aria-hidden
                 className={`shrink-0 dark:text-muted transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
               />
@@ -2774,13 +2774,24 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
               >
                 <ChevronRight
-                  size={11}
+                  size={12}
                   aria-hidden
                   className={`shrink-0 dark:text-muted transition-transform ${filesExpanded ? "rotate-90" : ""}`}
                 />
                 <span className="min-w-0 truncate">Files</span>
               </button>
               <div className="flex shrink-0 items-center gap-0.5">
+                <span className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                  <SectionActionButton label="Refresh explorer" onClick={props.onRefresh}>
+                    <RefreshCw size={13} aria-hidden />
+                  </SectionActionButton>
+                  <SectionActionButton
+                    label="Collapse folders in explorer"
+                    onClick={props.onCollapseFolders}
+                  >
+                    <ChevronsUp size={13} aria-hidden />
+                  </SectionActionButton>
+                </span>
                 <SectionActionButton
                   label="New file"
                   onClick={() => props.onNewPage(creationParentPath())}
@@ -2793,17 +2804,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 >
                   <FolderPlus size={13} aria-hidden />
                 </SectionActionButton>
-                <span className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-                  <SectionActionButton label="Refresh explorer" onClick={props.onRefresh}>
-                    <RefreshCw size={13} aria-hidden />
-                  </SectionActionButton>
-                  <SectionActionButton
-                    label="Collapse folders in explorer"
-                    onClick={props.onCollapseFolders}
-                  >
-                    <ChevronsUp size={13} aria-hidden />
-                  </SectionActionButton>
-                </span>
               </div>
             </header>
 
