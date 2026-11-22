@@ -37,7 +37,7 @@ import { ipcErrorMessage } from "../ipcError";
 import { Overlay } from "../Overlay";
 import { relativeTime } from "../relativeTime";
 import { formatChatTime } from "../time";
-import { ConfirmDialog } from "../ui/ConfirmDialog";
+import { ConfirmDialog, FOCUS_RING } from "../ui/ConfirmDialog";
 import { Pill, PrimaryButton, SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
 import { Menu, MENU_SEPARATOR, type MenuEntry } from "../ui/Menu";
@@ -389,7 +389,8 @@ export function PersonalAgentPage(props: {
   // to it if it failed, else to the next Remove, else Change, else Agents, so it never drops to the page.
   const page = useRef<HTMLElement>(null);
   const focusedRemove = useRef<string | null>(null);
-  // A Remove pressed from the keyboard hands on a visible focus ring.
+  // A Remove pressed from the keyboard hands on a visible focus ring. Enter clears dohc's keyboard
+  // mark, so Remove and Change draw Chromium's :focus-visible themselves, as a dialog's buttons do.
   const keyed = useRef(false);
   useEffect(() => {
     const id = focusedRemove.current;
@@ -542,6 +543,7 @@ export function PersonalAgentPage(props: {
               <SecondaryButton
                 data-testid="personal-agent-reach"
                 size="row"
+                className={FOCUS_RING}
                 aria-label={`Change what ${agent.name} can reach`}
                 onClick={() => setReaching(true)}
               >
@@ -598,6 +600,7 @@ export function PersonalAgentPage(props: {
                       </span>
                       <SecondaryButton
                         size="row"
+                        className={FOCUS_RING}
                         data-testid="personal-agent-reach-remove"
                         data-workspace-id={workspace.workspaceId}
                         aria-label={`Remove ${name} from what ${agent.name} can reach`}
