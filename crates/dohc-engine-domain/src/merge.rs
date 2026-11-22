@@ -180,8 +180,8 @@ pub struct VersionFileChangePage {
     pub next_after_path: Option<String>,
 }
 
-/// Port of `mergeMarkdown.ts`: LCS-aligned line hunks with conservative
-/// overlap detection and the exact 2,000-line quadratic-work guard.
+/// LCS-aligned line hunks with conservative overlap detection and the exact
+/// 2,000-line quadratic-work guard.
 pub fn merge_markdown(base: &str, local: &str, remote: &str) -> MarkdownMergeResult {
     if local == remote {
         return MarkdownMergeResult::Merged(local.to_owned());
