@@ -184,6 +184,13 @@ describe("ChatMarkdown", () => {
     expect(writeText).toHaveBeenCalledWith("const a = 1;\nconst b = `two`;");
   });
 
+  it("highlights a token-dense JSON array directly from the tokenizer tree without losing characters", async () => {
+    const denseJson = `[${Array.from({ length: 9998 }, (_, i) => String(i % 10)).join(",")}]`;
+    const view = renderBody(`\`\`\`json\n${denseJson}\n\`\`\``);
+    await waitFor(() => expect(view.container.querySelector("pre code .hljs-number")).toBeTruthy());
+    expect(view.container.querySelector("pre code")?.textContent).toBe(denseJson);
+  });
+
   describe("whole-message copy", () => {
     const select = (start: Node, end: Node) => {
       const range = document.createRange();

@@ -243,7 +243,7 @@ export function CollectionFrame({
           ) : null}
         </div>
         <div className="flex grow flex-wrap items-center justify-end gap-1 border-b border-line py-1 pl-2 pr-3">
-          {search ? <SearchBox search={search} /> : null}
+          {search ? <SearchBox search={search} contextKey={activeTabId} /> : null}
           {actions?.map((action) => (
             <SecondaryButton
               key={action.id}
@@ -330,17 +330,36 @@ export function CollectionFrame({
   );
 }
 
-function SearchBox({ search }: { search: NonNullable<CollectionFrameProps["search"]> }) {
+function SearchBox({
+  search,
+  contextKey,
+}: {
+  search: NonNullable<CollectionFrameProps["search"]>;
+  contextKey: string;
+}) {
   const timer = useRef<number | null>(null);
+  const pendingValue = useRef<string | null>(null);
   const submitRef = useRef(search.onSubmit);
   submitRef.current = search.onSubmit;
   const cancel = () => {
+    pendingValue.current = null;
     if (timer.current !== null) {
       window.clearTimeout(timer.current);
       timer.current = null;
     }
   };
   useEffect(() => cancel, []);
+  useEffect(() => {
+    cancel();
+  }, [contextKey]);
+  useEffect(() => {
+    if (
+      search.disabled ||
+      (pendingValue.current !== null && search.value !== pendingValue.current)
+    ) {
+      cancel();
+    }
+  }, [search.disabled, search.value]);
   const hasValue = search.value.length > 0;
   return (
     <form
@@ -363,8 +382,10 @@ function SearchBox({ search }: { search: NonNullable<CollectionFrameProps["searc
           const nextValue = event.target.value;
           search.onChange(nextValue);
           cancel();
+          pendingValue.current = nextValue;
           timer.current = window.setTimeout(() => {
             timer.current = null;
+            pendingValue.current = null;
             submitRef.current(nextValue);
           }, 200);
         }}

@@ -768,6 +768,52 @@ describe("the toolbar", () => {
     expect(onSubmit).toHaveBeenLastCalledWith("");
   });
 
+  it("cancels a pending debounced search when switching tabs or resetting the search value externally", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const onSubmit = vi.fn();
+      function SwitchingSearch() {
+        const [active, setActive] = useState("all");
+        const [value, setValue] = useState("");
+        return (
+          <>
+            <button type="button" onClick={() => setValue("saved")}>
+              External reset
+            </button>
+            <CollectionFrame
+              name="Launch tracker"
+              tabs={TABS}
+              activeTabId={active}
+              onSelectTab={(id) => {
+                setActive(id);
+                setValue("");
+              }}
+              menuLabel="Collection actions"
+              menu={MENU}
+              search={{ value, onChange: setValue, onSubmit }}
+            >
+              <p>Records</p>
+            </CollectionFrame>
+          </>
+        );
+      }
+      render(<SwitchingSearch />);
+      const box = screen.getByLabelText<HTMLInputElement>("Search collection");
+
+      fireEvent.change(box, { target: { value: "old query" } });
+      fireEvent.click(tab("By status"));
+      vi.advanceTimersByTime(300);
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      fireEvent.change(box, { target: { value: "stale" } });
+      fireEvent.click(screen.getByRole("button", { name: "External reset" }));
+      vi.advanceTimersByTime(300);
+      expect(onSubmit).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("styles view-tab overflow fades with visible edge gradients", () => {
     const { container } = render(<Frame />);
     const leftFade = container.querySelector<HTMLElement>('[data-strip-fade="left"]');

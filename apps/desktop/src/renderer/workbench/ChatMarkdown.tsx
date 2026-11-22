@@ -17,7 +17,7 @@ import { toJsxRuntime, type Components, type ExtraProps } from "hast-util-to-jsx
 import { scanChatLinks, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatAttachmentRecord } from "../../ipc/bridgeContract";
 import { activateReadOnlyLinkHref } from "../linkActivation";
-import { highlightSpans } from "../editor/codeHighlight";
+import { highlightCodeTree, type HighlightHastNode } from "../editor/codeHighlight";
 import { normalizeLanguage } from "../editor/pmHelpers";
 import { stripMarkdown } from "../markdown/stripMarkdown";
 import { CopyButton } from "../ui/CopyButton";
@@ -150,40 +150,35 @@ function codeBlockLanguage(node: HastNode | undefined): string {
   return "";
 }
 
+function highlightClassName(node: HighlightHastNode): string | null {
+  const className = node.properties?.className;
+  if (!Array.isArray(className) || className.length === 0) return null;
+  const names = className.filter((name): name is string => typeof name === "string");
+  return names.length > 0 ? names.join(" ") : null;
+}
+
+function renderHighlightNodes(nodes: readonly HighlightHastNode[], prefix: string): ReactNode[] {
+  return nodes.map((node, index) => {
+    if (node.type === "text") return node.value ?? "";
+    const key = `${prefix}-${index}`;
+    const children = renderHighlightNodes(node.children ?? [], key);
+    const className = highlightClassName(node);
+    return className ? (
+      <span key={key} className={className}>
+        {children}
+      </span>
+    ) : (
+      <Fragment key={key}>{children}</Fragment>
+    );
+  });
+}
+
 function renderHighlightedCode(code: string, language: string): ReactNode {
   if (!language || code.length === 0 || code.length > MAX_CHAT_HIGHLIGHT_CHARS) return code;
   const normalized = normalizeLanguage(language);
   const grammar = CODE_HIGHLIGHT_ALIASES[normalized] ?? normalized;
-  const spans = highlightSpans(grammar, code);
-  if (spans.length === 0) return code;
-  const points = new Set<number>([0, code.length]);
-  for (const span of spans) {
-    if (span.end > span.start) {
-      points.add(Math.max(0, Math.min(code.length, span.start)));
-      points.add(Math.max(0, Math.min(code.length, span.end)));
-    }
-  }
-  const sorted = [...points].sort((a, b) => a - b);
-  const pieces: ReactNode[] = [];
-  for (let index = 0; index < sorted.length - 1; index += 1) {
-    const start = sorted[index]!;
-    const end = sorted[index + 1]!;
-    if (end <= start) continue;
-    const slice = code.slice(start, end);
-    const active: string[] = [];
-    for (const span of spans) {
-      if (span.start <= start && span.end >= end) active.push(span.className);
-    }
-    if (active.length === 0) pieces.push(slice);
-    else {
-      pieces.push(
-        <span key={start} className={active.join(" ")}>
-          {slice}
-        </span>,
-      );
-    }
-  }
-  return pieces;
+  const nodes = highlightCodeTree(grammar, code);
+  return nodes.length > 0 ? renderHighlightNodes(nodes, "hl") : code;
 }
 
 function CodeBlock(props: ExtraProps) {

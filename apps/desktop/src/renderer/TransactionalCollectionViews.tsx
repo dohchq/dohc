@@ -1,5 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BoardView, CalendarView, type CollectionCellChange } from "@dohc/collection-views";
+import {
+  BoardView,
+  CalendarView,
+  type CalendarViewMode,
+  type CollectionCellChange,
+} from "@dohc/collection-views";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { CollectionRecordGroup } from "@dohc/workspace-contracts";
 import type { CollectionTableView } from "./collectionTableViews";
@@ -67,6 +72,7 @@ const beginning = (): Position => ({ after: null, history: [] });
 /** A board requests each visible group; a calendar requests its visible date range. Neither reuses a table page. */
 export function TransactionalCollectionViews(props: Props) {
   const [month, setMonth] = useState(() => new Date());
+  const [calendarMode, setCalendarMode] = useState<CalendarViewMode>("month");
   const [offset, setOffset] = useState(0),
     [groupAfter, setGroupAfter] = useState<GroupCursor | null>(null);
   const [groupHistory, setGroupHistory] = useState<Array<GroupCursor | null>>([]);
@@ -462,6 +468,8 @@ export function TransactionalCollectionViews(props: Props) {
               dateField={props.view.dateField!}
               visibleFields={visibleFields}
               date={month}
+              viewMode={calendarMode}
+              onViewModeChange={setCalendarMode}
               nearbyDates={loaded.nearby}
               onNavigate={(date) => {
                 if (!disabled) {

@@ -30,6 +30,8 @@ import "./calendar.css";
 /** The engine's date field value format (workspace-contracts validation). */
 const DATE_VALUE_FORMAT = "yyyy-MM-dd";
 
+export type CalendarViewMode = "month" | "week";
+
 export interface CalendarViewProps {
   schema: CollectionSchema;
   records: CollectionRecord[];
@@ -63,6 +65,9 @@ export interface CalendarViewProps {
   /** A querying host controls the visible month and loads its full date range. */
   date?: Date;
   onNavigate?: (date: Date) => void;
+  /** Optional host-controlled calendar layout mode so reloads preserve Week selection. */
+  viewMode?: CalendarViewMode;
+  onViewModeChange?: (mode: CalendarViewMode) => void;
   /**
    * For a host that reads only the visible month: the dates of the nearest
    * records before and after it. An empty month offers to go to the closer one.
@@ -150,6 +155,8 @@ export function CalendarView({
   defaultDate,
   date,
   onNavigate,
+  viewMode,
+  onViewModeChange,
   nearbyDates,
 }: CalendarViewProps) {
   // The day's number, and before it the control that adds a record on that day. One component for the
@@ -182,7 +189,15 @@ export function CalendarView({
     }),
     [offersNew],
   );
-  const [view, setView] = useState<"month" | "week">("month");
+  const [ownView, setOwnView] = useState<CalendarViewMode>("month");
+  const view = viewMode ?? ownView;
+  const setView = useCallback(
+    (next: CalendarViewMode) => {
+      if (viewMode === undefined) setOwnView(next);
+      onViewModeChange?.(next);
+    },
+    [viewMode, onViewModeChange],
+  );
   const [undatedOpen, setUndatedOpen] = useState(false);
   const undatedRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
