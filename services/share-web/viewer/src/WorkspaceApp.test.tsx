@@ -2419,6 +2419,41 @@ it("follows the Groups again once the Groups read again after their follow came 
   expect(text()).not.toContain("membership");
 });
 
+it("follows the Groups again from All Groups, with no Group open, after their follow came back 404", async () => {
+  server({ level: "comment" });
+  await render();
+  await opened();
+  await act(async () =>
+    following("chat")[0]!.answer({
+      shareId: "share",
+      nextCursor: 22,
+      hasMore: false,
+      messages: [],
+    }),
+  );
+  await settle(() => following("chat").length === 1);
+  await click("All Groups");
+  await settle(() => groupPanel().querySelector("h2")?.textContent === "Groups");
+  await act(async () => following("chat")[0]!.answer({ ok: false, error: "not found" }, 404));
+  // The new follow starts where the last one stopped, so the list still counts new messages.
+  await settle(() => following("chat").length === 1);
+  expect(following("chat")[0]!.url.searchParams.get("since")).toBe("22");
+  await act(async () =>
+    following("chat")[0]!.answer({
+      shareId: "share",
+      nextCursor: 24,
+      hasMore: false,
+      messages: [{ ...chat(23, "Bring snacks too"), channelWireId: "wire-food" }],
+    }),
+  );
+  await settle(
+    () =>
+      buttons().find((node) => node.textContent?.startsWith("food"))?.textContent ===
+      "food1 unread",
+  );
+  expect(text()).not.toContain("membership");
+});
+
 it("reads the Groups once when the relay refuses them while the workspace still opens", async () => {
   const fetch = server({ level: "comment", groupsGone: true });
   await render();
