@@ -41,6 +41,8 @@ export interface MemberReach {
   keyedSignature(key: string | Uint8Array): string;
   levelAt(path: string): ShareAccess | null;
   folderLevel(folder: string): ShareAccess | null;
+  /** Whether a current Main file is at or below this path. */
+  pathExists(path: string): boolean;
   pathVisibleBeforeMoment(objectId: string, momentId: string, path: string): boolean;
   objectVisible(objectId: string): boolean;
   objectPath(objectId: string): string | null;
@@ -158,6 +160,13 @@ export function memberReach(
         .digest("hex"),
     levelAt,
     folderLevel: atFolder,
+    pathExists: (path) =>
+      db
+        .prepare(`SELECT 1 FROM sync_relay_current_files
+        WHERE workspace_id = ? AND version_id = 'main' AND path = ?
+        UNION ALL SELECT 1 FROM sync_relay_current_files
+        WHERE workspace_id = ? AND version_id = 'main' AND path >= ? AND path < ? LIMIT 1`)
+        .get(workspaceId, path, workspaceId, `${path}/`, `${path}0`) !== undefined,
     pathVisibleBeforeMoment: (objectId, momentId, path) => {
       const moment = db
         .prepare(`SELECT relay_seq FROM sync_relay_object_moments
