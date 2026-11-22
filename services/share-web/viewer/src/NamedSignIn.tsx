@@ -1,4 +1,5 @@
 import type { FormEvent, ReactNode } from "react";
+import { Icon } from "./icons";
 import { AccountSetupRequiredError } from "./namedRecipient";
 
 const SIGN_IN_FAILED = "dohc could not sign you in. Check your email and password, then try again.";
@@ -102,6 +103,12 @@ export function SignInForm(props: {
           disabled={props.busy}
         />
       </label>
+      {props.error ? (
+        <p id="join-sign-in-error" className="join-error" role="alert">
+          <Icon name="alert" size={12} />
+          <span>{props.error}</span>
+        </p>
+      ) : null}
       <button
         className="handoff-button primary join-primary"
         disabled={props.busy}
@@ -109,11 +116,6 @@ export function SignInForm(props: {
       >
         {props.busy ? "Signing in…" : "Sign in"}
       </button>
-      {props.error ? (
-        <p id="join-sign-in-error" className="join-error" role="alert">
-          {props.error}
-        </p>
-      ) : null}
       <a className="join-forgot" href="/account/forgot-password">
         Forgot your password?
       </a>
