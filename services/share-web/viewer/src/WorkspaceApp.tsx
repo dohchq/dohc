@@ -69,7 +69,8 @@ type View =
   | { status: "other-account"; name: string }
   | { status: "refused" | "ended" | "too-large" | "load-failed" | "version-mismatch" };
 // What the grant's own read and the account's session say after a refusal of the files.
-type Confirmed = "open" | "ended" | "signed-out" | "failed" | { other: string };
+// An open grant answers with its reach, which says whether the level changed.
+type Confirmed = { open: ViewMeta } | "ended" | "signed-out" | "failed" | { other: string };
 type Tab = "files" | "page" | "comments" | "chats";
 type Side = "comments" | "chats";
 const TABS: { id: Tab; label: string; panel: string }[] = [
@@ -504,8 +505,7 @@ function useMemberFiles(
     // A refused grant may only mean that the account signed out, or that another account signed in.
     const confirm = async (): Promise<Confirmed> => {
       try {
-        await loadMeta(session, signal);
-        return "open";
+        return { open: await loadMeta(session, signal) };
       } catch (error) {
         if (!refusedStatus(error)) return "failed";
       }
@@ -519,7 +519,8 @@ function useMemberFiles(
     };
     // Shows what a confirmed refusal says, and returns false when the files may still open.
     const refused = (confirmed: Confirmed, status: "refused" | "ended") => {
-      if (confirmed === "open" || confirmed === "failed") return false;
+      if (confirmed === "failed" || (typeof confirmed === "object" && "open" in confirmed))
+        return false;
       if (confirmed === "signed-out") signedOut.current();
       else if (confirmed === "ended") setView({ status });
       else setView({ status: "other-account", name: confirmed.other });
@@ -613,16 +614,17 @@ function useMemberFiles(
             reload = true;
             continue;
           }
+          let granted: ViewMeta | undefined;
           if (reading && refusedStatus(error)) {
             const confirmed = await confirm();
             if (signal.aborted || refused(confirmed, "ended")) return;
+            if (typeof confirmed === "object" && "open" in confirmed) granted = confirmed.open;
           }
           // A refused held read may mean the level changed. The grant says, when it answers.
-          if (reading && !stale)
-            stale = await loadMeta(session, stepSignal).then(
-              (meta) => meta.reach !== files.meta.reach,
-              () => false,
-            );
+          if (reading && !stale) {
+            granted ??= await loadMeta(session, stepSignal).catch(() => undefined);
+            stale = granted !== undefined && granted.reach !== files.meta.reach;
+          }
           if (signal.aborted) return;
           // Old levels would offer controls the relay now refuses.
           if (stale) {
