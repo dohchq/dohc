@@ -3689,18 +3689,23 @@ fn received_rename_falls_back_after_unsubmitted_edit() {
     received_rename_mismatch_replays_as_write_delete("edited");
 }
 
-/// The relay can serve a write that names an object this copy holds at another
-/// path, with no rename between them: a file renamed while its folder was
-/// hidden from the member arrives at its new path once the folder opens. The
-/// replay moves the object there, as a rename followed by that write would.
+/// The relay can serve an op that names an object this copy holds at a path
+/// the op does not: a file renamed while its folder was hidden from the member
+/// arrives as a write at its new path once the folder opens, and a later
+/// rename starts from that new path. The replay moves the object from where
+/// this copy holds it, as a rename followed by that write would, and the old
+/// path goes.
 #[test]
-fn received_write_of_a_held_object_at_a_new_path_moves_it() {
+fn received_op_of_a_held_object_at_another_path_moves_it() {
     for (case, binary) in [
         ("same", false),
         ("changed", false),
         ("edited", false),
+        ("renamed", false),
+        ("arrived-then-renamed", false),
         ("same", true),
         ("changed", true),
+        ("renamed", true),
     ] {
         let (_scratch, _path, mut engine) = open_store();
         let token = format!("share-object:v1:{}", "d".repeat(64));
@@ -3721,6 +3726,23 @@ fn received_write_of_a_held_object_at_a_new_path_moves_it() {
             op.payload["objectId"] = json!(token);
             op
         };
+        let rename = |seq, before: &str, after| {
+            let mut op = write(seq, after, &sha);
+            op.payload["operation"] = json!("rename");
+            op.payload["payloadBeforePath"] = json!(before);
+            op
+        };
+        // What this pull serves, where the object ends up, and how many ops apply.
+        let (ops, target, applied) = match case {
+            "renamed" => (vec![rename(1, "HR/b.md", "HR/c.md")], "HR/c.md", 1),
+            "arrived-then-renamed" => (
+                vec![write(1, "HR/b.md", &sha), rename(2, "HR/b.md", "HR/c.md")],
+                "HR/c.md",
+                2,
+            ),
+            _ => (vec![write(1, "HR/b.md", &arrived_sha)], "HR/b.md", 1),
+        };
+        let next = i64::try_from(ops.len()).unwrap() + 1;
         let page = |cursor, ops, next_cursor| {
             (
                 cursor,
@@ -3739,8 +3761,8 @@ fn received_write_of_a_held_object_at_a_new_path_moves_it() {
                 [],
                 [
                     page(0, vec![write(0, "HR/a.md", &sha)], 1),
-                    page(1, vec![write(1, "HR/b.md", &arrived_sha)], 2),
-                    page(2, vec![], 2),
+                    page(1, ops, next),
+                    page(next, vec![], next),
                 ],
             )
             .with_view_blobs([(sha.clone(), body), (arrived_sha.clone(), arrived)]),
@@ -3778,32 +3800,38 @@ fn received_write_of_a_held_object_at_a_new_path_moves_it() {
             .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
             .unwrap_or_else(|error| panic!("{label}: {error:?}"));
         assert_eq!(pull.skipped, 0, "{label}");
-        assert_eq!(pull.applied, 1, "{label}");
+        assert_eq!(pull.applied, applied, "{label}");
         let mut changed: Vec<(&str, &str)> = pull
             .changed_paths
             .iter()
             .map(|change| (change.path.as_str(), change.operation))
             .collect();
         changed.sort_unstable();
-        assert_eq!(
-            changed,
-            [("HR/a.md", "delete"), ("HR/b.md", "write")],
-            "{label}"
-        );
+        let expected: &[(&str, &str)] = match case {
+            "renamed" => &[("HR/a.md", "delete"), ("HR/c.md", "write")],
+            "arrived-then-renamed" => &[
+                ("HR/a.md", "delete"),
+                ("HR/b.md", "delete"),
+                ("HR/c.md", "write"),
+            ],
+            _ => &[("HR/a.md", "delete"), ("HR/b.md", "write")],
+        };
+        assert_eq!(changed, expected, "{label}");
         engine
             .read_with(|conn| {
                 let head: (String, String) = conn.query_row(
                     "SELECT a.object_id,CASE s.content_kind WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END
                      FROM path_aliases a JOIN snapshots s USING(workspace_id,version_id,object_id)
-                     WHERE a.workspace_id='ws' AND a.version_id='main' AND a.path='HR/b.md'",
-                    [],
+                     WHERE a.workspace_id='ws' AND a.version_id='main' AND a.path=?1",
+                    [target],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
                 assert_eq!(head, (token.clone(), arrived_sha.clone()), "{label}");
+                // The old names are gone, so none can be sent back as a new file.
                 assert_eq!(
                     conn.query_row(
-                        "SELECT COUNT(*) FROM path_aliases WHERE workspace_id='ws' AND path='HR/a.md'",
-                        [],
+                        "SELECT COUNT(*) FROM path_aliases WHERE workspace_id='ws' AND path<>?1",
+                        [target],
                         |row| row.get::<_, i64>(0),
                     )?,
                     0,
