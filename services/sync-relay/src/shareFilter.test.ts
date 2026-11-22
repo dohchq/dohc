@@ -45,6 +45,7 @@ function memberAt(level: ShareAccess): WorkspaceShareSelector {
     }),
     levelAt: () => level,
     folderLevel: () => level,
+    pathExists: () => true,
     hasLevel: (wanted) => wanted === level,
     groupLevel: () => level,
     hasGroupLevel: (wanted) => wanted === level,
@@ -474,6 +475,43 @@ describe("share op filter", () => {
         .allowed,
     ).toBe(false);
   });
+
+  it.each([false, true])(
+    "serves a rename's old path and payload at Edit only when visible before the rename: %s",
+    (visibleBefore) => {
+      const selector = memberAt("edit");
+      selector.reach.pathVisibleBeforeMoment = () => visibleBefore;
+      const beforeSha = "b".repeat(64);
+      const afterSha = "a".repeat(64);
+      const decision = filterOpForShare(
+        selector,
+        "moment.append",
+        momentPayload({
+          operation: "rename",
+          payloadBeforePath: "HR/layoff-plan.md",
+          beforePath: "HR/layoff-plan.md",
+          payloadBeforeBlobSha256: beforeSha,
+        }),
+      );
+      expect(decision).toMatchObject({ allowed: true, blobSha256s: [afterSha] });
+      if (!decision.allowed) return;
+      expect(decision.payload).toMatchObject({
+        operation: visibleBefore ? "rename" : "write",
+        path: "docs/a.md",
+        payloadAfterPath: "docs/a.md",
+        payloadAfterBlobSha256: afterSha,
+        payloadBeforeBlobSha256: visibleBefore ? beforeSha : null,
+      });
+      if (visibleBefore) {
+        expect(decision.payload).toHaveProperty("payloadBeforePath", "HR/layoff-plan.md");
+        expect(decision).not.toHaveProperty("reachMove");
+      } else {
+        expect(JSON.stringify(decision)).not.toContain("HR/");
+        expect(JSON.stringify(decision)).not.toContain(beforeSha);
+        expect(decision.reachMove).toBe("arrival");
+      }
+    },
+  );
 
   it("denies a moment when any referenced path is outside the selector (boundary-crossing rename)", () => {
     const rename = momentPayload({
