@@ -1,8 +1,16 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderBare,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useState, type ComponentProps } from "react";
+import { useState, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import type {
   CloudStatusResult,
   ListRelayShareLinksResult,
@@ -14,6 +22,13 @@ import type {
 } from "../ipc/ownerAppPublicationContract";
 import { deferred } from "../testing/deferred";
 import { OwnerAppPublication as Control } from "./OwnerAppPublication";
+import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
+
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="ws-trip">{children}</WorkspaceSessionProvider>;
+}
+
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: Session });
 
 const prepared: Extract<OwnerAppPublicationResult, { kind: "prepared" }> = {
   kind: "prepared",
@@ -422,6 +437,36 @@ describe("owner app publication", () => {
       approvalId: prepared.approvalId,
       candidateDigest: prepared.candidateDigest,
     });
+  });
+
+  it("finds a Collection again from its newest Try again, and not from an older one", async () => {
+    const reportError =
+      vi.fn<(fallback: string, error: unknown, retry: (() => void) | null) => void>();
+    const failed = deferred<unknown>();
+    const found = deferred<unknown>();
+    api.dataset.mockReturnValueOnce(failed.promise).mockReturnValueOnce(found.promise);
+    api.publishOwnerApp.mockImplementation((request) =>
+      request.action === "prepare"
+        ? Promise.resolve({ ...prepared, capabilities: [datasetCapability] })
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
+    await review();
+    const scope = screen.getByTestId("app-publication-capability");
+    expect(scope.textContent).toContain("Finding Collection…");
+    await act(async () => failed.reject(new Error("engine stopped")));
+    expect(scope.textContent).toContain("Collection path unavailable");
+    expect(reportError).toHaveBeenCalledOnce();
+    expect(reportError.mock.calls[0]![0]).toBe("dohc could not find this Collection.");
+    const tryAgain = reportError.mock.calls[0]![2]!;
+    act(tryAgain);
+    expect(scope.textContent).toContain("Finding Collection…");
+    await waitFor(() => expect(api.dataset).toHaveBeenCalledTimes(2));
+    act(tryAgain);
+    await act(async () => found.resolve(await datasetAnswer()));
+    expect(scope.textContent).toContain("data/dataset.json");
+    expect(api.dataset).toHaveBeenCalledTimes(2);
+    expect(reportError).toHaveBeenCalledOnce();
   });
 
   it("shows the fixed collection capability before approving the unchanged digest", async () => {

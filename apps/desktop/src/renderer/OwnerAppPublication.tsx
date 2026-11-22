@@ -33,6 +33,8 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { syncNamesServer } from "./workbench/WorkspaceSyncStatus";
+import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "./workspace/workspaceSession";
 import { accessReasonForLane, serverName, type AccessContext } from "./workbench/accessReason";
 
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
@@ -60,6 +62,11 @@ function OperationNames({ operations }: { operations: AppDatasetCapability["oper
   );
 }
 
+type DatasetAddress = {
+  path: string | null;
+  status: "missing" | "ambiguous" | "unreadable" | "failed" | "available";
+};
+
 function DatasetApproval({
   capability,
   workspaceId,
@@ -69,19 +76,10 @@ function DatasetApproval({
   workspaceId: string;
   reportError: ReportError;
 }) {
-  const [address, setAddress] = useState<{
-    workspaceId: string;
-    datasetId: string;
-    path: string | null;
-    status: "missing" | "ambiguous" | "unreadable" | "failed" | "available";
-  } | null>(null);
-  const [reload, setReload] = useState(0);
-  const report = useRef(reportError);
-  report.current = reportError;
-  useEffect(() => {
-    let current = true;
-    setAddress(null);
-    void (async () => {
+  const { datasetId } = capability;
+  const { value, error, retry } = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([workspaceId, datasetId]),
+    load: async (signal): Promise<DatasetAddress> => {
       let after: string | undefined;
       const seen = new Set<string>();
       do {
@@ -91,40 +89,36 @@ function DatasetApproval({
           after,
           includeArchived: true,
         });
-        if (!current) return;
+        signal.throwIfAborted();
         if (page.kind === "collections-refused") throw collectionsRefusalError(page.refusal);
         if (page.kind !== "list") throw Error("dohc could not find this Collection.");
-        const dataset = page.datasets.find((value) => value.datasetId === capability.datasetId);
-        if (dataset) {
-          setAddress({
-            workspaceId,
-            datasetId: capability.datasetId,
+        const dataset = page.datasets.find((value) => value.datasetId === datasetId);
+        if (dataset)
+          return {
             path: dataset.datasetPath,
             status: dataset.datasetAddressStatus ?? (dataset.datasetPath ? "available" : "missing"),
-          });
-          return;
-        }
+          };
         after = page.nextCursor ?? undefined;
         if (after && seen.has(after)) throw Error("The Collection list changed. Try again.");
         if (after) seen.add(after);
       } while (after);
-      if (!current) return;
-      setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "missing" });
-    })().catch((error) => {
-      if (!current) return;
-      setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "failed" });
-      report.current("dohc could not find this Collection.", error, () => {
-        if (current) setReload((value) => value + 1);
-      });
+      return { path: null, status: "missing" };
+    },
+  });
+  const report = useRef(reportError);
+  report.current = reportError;
+  const newestError = useRef<unknown>(null);
+  useEffect(() => {
+    newestError.current = error;
+    if (error === null) return;
+    report.current("dohc could not find this Collection.", error, () => {
+      if (newestError.current !== error) return;
+      newestError.current = null;
+      void retry();
     });
-    return () => {
-      current = false;
-    };
-  }, [workspaceId, capability.datasetId, reload]);
-  const found =
-    address?.workspaceId === workspaceId && address.datasetId === capability.datasetId
-      ? address
-      : null;
+  }, [error, retry]);
+  const found: DatasetAddress | null =
+    error !== null ? { path: null, status: "failed" } : (value ?? null);
   return (
     <div data-testid="app-publication-capability" className="space-y-2">
       <p className="m-0 font-medium">{capability.name}</p>
