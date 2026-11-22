@@ -187,8 +187,7 @@ function ResponsePanel({
               <ul className="my-2 list-none p-0 text-[12px] text-muted">
                 {rows.map((row) => (
                   <li key={row.acceptanceId} className="break-all">
-                    <span className="font-mono">{row.path}</span> ·{" "}
-                    {new Date(row.acceptedAtMs).toLocaleString()}
+                    <span>{row.path}</span> · {new Date(row.acceptedAtMs).toLocaleString()}
                   </li>
                 ))}
               </ul>

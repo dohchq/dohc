@@ -326,7 +326,7 @@ export function CollectionChangeReviewCard(props: {
 
 function Kbd(props: { children: string }) {
   return (
-    <kbd className="rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle">
+    <kbd className="rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle">
       {props.children}
     </kbd>
   );
@@ -373,12 +373,12 @@ function ReviewRow(props: {
             {words.danger ? (
               <CircleAlert size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
             ) : null}
-            <span className={words.file ? "font-mono text-[11px]" : undefined}>{words.effect}</span>
+            <span className={words.file ? "text-[11px]" : undefined}>{words.effect}</span>
           </span>
         ) : null}
         {source ? (
           <span className="col-start-2 flex flex-wrap items-center gap-1.5 text-[11px] text-subtle">
-            <span className="font-mono">{source.path}</span>
+            <span>{source.path}</span>
             {source.author ? (
               <>
                 <span aria-hidden>·</span>

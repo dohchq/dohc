@@ -285,7 +285,7 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
               placeholder="Collection name"
               value={name}
               disabled={pending}
-              className={`${inputClass} font-mono`}
+              className={`${inputClass}`}
               onChange={(event) => setName(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !isComposingKey(event)) void create();

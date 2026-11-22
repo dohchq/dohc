@@ -1195,7 +1195,7 @@ export function SettingsDialog(props: {
                   updateState?.currentVersion ? (
                     <span
                       data-testid="desktop-updates-version"
-                      className="font-mono text-[12px] tabular-nums text-subtle"
+                      className="text-[12px] tabular-nums text-subtle"
                     >
                       <span className="sr-only">Version </span>
                       {updateState.currentVersion}

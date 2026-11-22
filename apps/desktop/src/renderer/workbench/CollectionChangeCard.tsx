@@ -681,9 +681,7 @@ function ChangeRow(props: {
             {words.danger && !props.note ? (
               <CircleAlert size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
             ) : null}
-            <span className={words.file && !props.note ? "font-mono text-[11px]" : undefined}>
-              {effect}
-            </span>
+            <span className={words.file && !props.note ? "text-[11px]" : undefined}>{effect}</span>
           </div>
         ) : null}
       </div>

@@ -122,7 +122,7 @@ function DatasetApproval({
   return (
     <div data-testid="app-publication-capability" className="space-y-2">
       <p className="m-0 font-medium">{capability.name}</p>
-      <p className="m-0 break-all font-mono text-[12px]">
+      <p className="m-0 break-all text-[12px]">
         {!found
           ? "Finding Collection…"
           : (found.path ??
@@ -206,27 +206,22 @@ function CollectionApproval({ capability }: { capability: AppCollectionCapabilit
   return (
     <div data-testid="app-publication-capability" className="space-y-2">
       <p className="m-0">
-        Create records only in{" "}
-        <span className="break-all font-mono">{capability.collectionPath}</span>.
+        Create records only in <span className="break-all">{capability.collectionPath}</span>.
       </p>
       <dl className="m-0 space-y-1 text-[12px]">
         <div>
           <dt className="inline font-medium text-ink">Fields it can create: </dt>
-          <dd className="m-0 inline break-words font-mono">
-            {capability.allowedFields.join(", ")}
-          </dd>
+          <dd className="m-0 inline break-words">{capability.allowedFields.join(", ")}</dd>
         </div>
         <div>
           <dt className="inline font-medium text-ink">Required fields: </dt>
-          <dd className="m-0 inline break-words font-mono">
+          <dd className="m-0 inline break-words">
             {capability.requiredFields.join(", ") || "None"}
           </dd>
         </div>
         <div>
           <dt className="inline font-medium text-ink">Fields shown in the app: </dt>
-          <dd className="m-0 inline break-words font-mono">
-            {capability.readFields.join(", ") || "None"}
-          </dd>
+          <dd className="m-0 inline break-words">{capability.readFields.join(", ") || "None"}</dd>
         </div>
       </dl>
       <p className="m-0 text-[12px]">
@@ -1646,7 +1641,7 @@ function PublicationDialog(
                 <h3 className="m-0 text-[13px] font-medium text-ink">Files included</h3>
                 <ul
                   data-testid="app-publication-source-paths"
-                  className="mb-0 mt-2 max-h-40 list-none overflow-y-auto rounded-md border border-line bg-bg p-2 font-mono text-[12px] text-muted"
+                  className="mb-0 mt-2 max-h-40 list-none overflow-y-auto rounded-md border border-line bg-bg p-2 text-[12px] text-muted"
                 >
                   {prepared.sourcePaths.map((path) => (
                     <li key={path} className="break-all">
@@ -1873,7 +1868,7 @@ function PublicationDialog(
                                 <summary className="cursor-pointer">
                                   Approved collection access
                                 </summary>
-                                <p className="mb-0 break-all font-mono">
+                                <p className="mb-0 break-all">
                                   {publication.collectionCapability.collectionPath}
                                 </p>
                                 <p className="mb-0 break-words">

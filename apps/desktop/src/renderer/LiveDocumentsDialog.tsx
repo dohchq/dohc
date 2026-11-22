@@ -905,7 +905,7 @@ export function LiveDocumentsDialog({
               >
                 <span
                   title={row.path}
-                  className="min-w-0 basis-full truncate font-mono text-[12px] text-ink sm:flex-1 sm:basis-0"
+                  className="min-w-0 basis-full truncate text-[12px] text-ink sm:flex-1 sm:basis-0"
                 >
                   {row.path}
                 </span>
@@ -1229,11 +1229,7 @@ export function LiveDocumentsDialog({
                     <p className="m-0 text-[12px] text-ink">{REFUSAL_SENTENCE}</p>
                     <p className="mb-1 mt-1 text-[12px] text-muted">{refusalReason(row)}</p>
                     {row.paths.slice(0, REFUSAL_PATHS_SHOWN).map((path) => (
-                      <p
-                        key={path}
-                        title={path}
-                        className="m-0 truncate font-mono text-[12px] text-muted"
-                      >
+                      <p key={path} title={path} className="m-0 truncate text-[12px] text-muted">
                         {path}
                       </p>
                     ))}

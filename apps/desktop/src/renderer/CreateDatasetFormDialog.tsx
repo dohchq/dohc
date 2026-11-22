@@ -540,7 +540,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                 {source ? (
                   <details open>
                     <summary className="text-[12px] text-ink">Approved action source</summary>
-                    <p className="break-all font-mono text-[11px] text-muted">
+                    <p className="break-all text-[11px] text-muted">
                       {source.path}
                       <br />
                       {source.sha256}
@@ -561,7 +561,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                   className="mr-1.5 inline-block"
                 />
                 Source folder{" "}
-                <span className="ml-2 break-all font-mono text-[11px] text-muted">{appRoot}</span>
+                <span className="ml-2 break-all text-[11px] text-muted">{appRoot}</span>
               </summary>
               <div className="mt-2">
                 <p className="mb-2 mt-0">The app source stays in this workspace folder.</p>
@@ -571,7 +571,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                     aria-label="App folder"
                     value={appRoot}
                     disabled={pending}
-                    className={`${inputClass} mt-1 font-mono`}
+                    className={`${inputClass} mt-1`}
                     onChange={(event) => setAppRoot(event.target.value)}
                   />
                 </label>

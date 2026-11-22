@@ -408,7 +408,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                     aria-label="Collection definition"
                     value={datasetPath}
                     disabled={busy}
-                    className={`${inputClass} mt-1 font-mono`}
+                    className={`${inputClass} mt-1`}
                     onChange={(event) => setDatasetPath(event.target.value)}
                   />
                 </label>
@@ -418,7 +418,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                     aria-label="Migration file"
                     value={migrationPath}
                     disabled={busy}
-                    className={`${inputClass} mt-1 font-mono`}
+                    className={`${inputClass} mt-1`}
                     onChange={(event) => setMigrationPath(event.target.value)}
                   />
                 </label>
@@ -448,14 +448,14 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
               <div className="flex items-center gap-3 border-b border-line pb-3 text-[12px] text-muted">
                 <span>
                   Current revision{" "}
-                  <strong className="ml-1 font-mono text-ink">
+                  <strong className="ml-1 tabular-nums text-ink">
                     {preparation.previousRevision.revision}
                   </strong>
                 </span>
                 <ArrowRight size={14} strokeWidth={1.9} aria-hidden />
                 <span>
                   New revision{" "}
-                  <strong className="ml-1 font-mono text-ink">
+                  <strong className="ml-1 tabular-nums text-ink">
                     {preparation.revision.revision}
                   </strong>
                 </span>

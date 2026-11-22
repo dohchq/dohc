@@ -250,9 +250,7 @@ export function AppsSettings(props: {
                         </span>
                         <AppMarks app={app} />
                       </span>
-                      <span className="block truncate font-mono text-[11px] text-subtle">
-                        {app.root}
-                      </span>
+                      <span className="block truncate text-[11px] text-subtle">{app.root}</span>
                     </span>
                     <span
                       data-testid="settings-app-mode"
@@ -350,7 +348,7 @@ function AppPage(props: {
             <span className="min-w-0 truncate">{app.title}</span>
             <AppMarks app={app} />
           </h3>
-          <p className="m-0 mt-0.5 truncate font-mono text-[12px] text-muted">{app.root}</p>
+          <p className="m-0 mt-0.5 truncate text-[12px] text-muted">{app.root}</p>
         </div>
         {props.onOpen ? (
           <SecondaryButton
@@ -440,7 +438,7 @@ function AppPage(props: {
                 <span className="min-w-0 text-ink">
                   {diagnostic.message || APP_CHECK_FALLBACK_MESSAGE}
                   {diagnostic.path ? (
-                    <span className="ml-1.5 font-mono text-subtle">{diagnostic.path}</span>
+                    <span className="ml-1.5 text-subtle">{diagnostic.path}</span>
                   ) : null}
                 </span>
               </li>

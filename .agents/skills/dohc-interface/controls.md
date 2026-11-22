@@ -45,7 +45,7 @@ Danger marks something that failed or is broken. Warning marks something partly 
 | Brand moments | `font-serif`, rarely |
 | Code and Markdown source | `font-mono` |
 
-Use 10, 11, 12, or 13px for small text, never a fraction. The heaviest weight is `font-semibold`. `font-mono` ships at 400 and 500 only, so set it no heavier than `font-medium`. Paths, counts, times, and shortcuts use the interface font, so give `<kbd>` `font-sans`. Never uppercase a label. Draw a path with `PathLine` from `ui/PathLine.tsx`. Cut a long name in the middle so its extension shows.
+Use 10, 11, 12, or 13px for small text, never a fraction. The heaviest weight is `font-semibold`. `font-mono` ships at 400 and 500 only, so set it no heavier than `font-medium`. Paths, addresses, names, counts, times, and shortcuts use the interface font. `<kbd>` and `<code>` are monospace by default, so give them `font-sans` when they hold one of these. Give counts and times that line up or change in place `tabular-nums`. Keep `font-mono` for what a person reads character by character: code, commands, IDs, hashes, and sign-in codes. Never uppercase a label. Draw a path with `PathLine` from `ui/PathLine.tsx`. Cut a long name in the middle so its extension shows.
 
 ## Radius and elevation
 

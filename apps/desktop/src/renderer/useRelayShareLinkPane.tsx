@@ -2040,8 +2040,12 @@ export function useRelayShareLinkPane(props: {
 
   function renderLinkUrl(url: string) {
     return (
-      <div className="flex h-8 min-w-0 items-center rounded-lg border border-line bg-bg px-3 font-mono text-[12px] text-muted">
-        <code data-testid="share-link-url" title={url} className="min-w-0 select-text truncate">
+      <div className="flex h-8 min-w-0 items-center rounded-lg border border-line bg-bg px-3 text-[12px] text-muted">
+        <code
+          data-testid="share-link-url"
+          title={url}
+          className="min-w-0 select-text truncate font-sans"
+        >
           {url}
         </code>
       </div>

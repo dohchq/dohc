@@ -46,7 +46,7 @@ export function CollectionCreationPreview({
     >
       <div className="mb-4 flex items-center justify-between text-[12px] text-muted">
         <span>Preview</span>
-        <span className="font-mono">0 records</span>
+        <span className="tabular-nums">0 records</span>
       </div>
       <div className="overflow-hidden rounded-lg border border-line bg-bg">
         <div className="flex items-center gap-2 border-b border-line p-3 text-sm font-semibold text-ink">
@@ -116,7 +116,7 @@ export function DatasetFormPreview({
     >
       <div className="mb-4 flex items-center justify-between text-[12px] text-muted">
         <span>Preview</span>
-        <span className="font-mono">{fields.length} fields</span>
+        <span className="tabular-nums">{fields.length} fields</span>
       </div>
       <div className="rounded-lg border border-line bg-bg p-5">
         <h3 className="m-0 mb-5 break-words text-lg font-semibold text-ink">
