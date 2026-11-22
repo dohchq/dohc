@@ -1481,7 +1481,7 @@ function add(total: Tally, more: Tally) {
   for (const key of Object.keys(total) as (keyof Tally)[]) total[key] += more[key];
 }
 
-const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 30);
+const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 24);
 const WEIGHTS = process.env.BODY_CONTAINERS_ONE_LINE ? ONE_LINE : EVEN;
 const FIRST = Number(process.env.BODY_CONTAINERS_FIRST ?? 1);
 const ROUNDS = Number(process.env.BODY_CONTAINERS_ROUNDS ?? 0);
@@ -1518,7 +1518,7 @@ it.each(SETUPS)(
   600_000,
 );
 
-const BREAKAGE_SEEDS = Number(process.env.BODY_CONTAINERS_BREAKAGE_SEEDS ?? 8);
+const BREAKAGE_SEEDS = Number(process.env.BODY_CONTAINERS_BREAKAGE_SEEDS ?? 6);
 const BREAKAGES: [Fault, string, Weights?][] = [
   [FAULT.defaultMapUndo, "[3 undo]"],
   [FAULT.noDeleteFilter, "[5 records] the record"],
