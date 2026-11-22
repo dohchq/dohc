@@ -112,7 +112,9 @@ function DatasetApproval({
     newestError.current = error;
     if (error === null) return;
     report.current("dohc could not find this Collection.", error, () => {
-      if (newestError.current === error) void retry();
+      if (newestError.current !== error) return;
+      newestError.current = null;
+      void retry();
     });
   }, [error, retry]);
   const found: DatasetAddress | null =
