@@ -3944,7 +3944,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             />
           </div>
         </Specimen>
-        <Specimen label="Collections at the sidebar's default width: who made a change cuts before the Collection's name">
+        <Specimen label="Collections in a narrow sidebar: who made a change cuts before the Collection's name">
           <div
             data-testid={`states-history-collections-narrow-${theme}`}
             className="flex h-[260px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel"

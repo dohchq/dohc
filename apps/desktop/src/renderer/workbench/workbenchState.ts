@@ -489,7 +489,7 @@ type EditorTransitionActivation = "target" | "preserve";
 
 export const SIDEBAR_MIN_WIDTH = 160;
 export const SIDEBAR_MAX_WIDTH = 2400;
-export const SIDEBAR_DEFAULT_WIDTH = 240;
+export const SIDEBAR_DEFAULT_WIDTH = 320;
 export const ABOUT_MIN_WIDTH = 240;
 export const ABOUT_MAX_WIDTH = 2400;
 export const ABOUT_DEFAULT_WIDTH = 320;
