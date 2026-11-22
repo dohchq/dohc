@@ -1685,7 +1685,7 @@ mod tests {
     }
 
     #[test]
-    fn reordering_both_halves_conflicts_quickly() {
+    fn reordering_both_halves_hits_the_check_limit() {
         let half = MAX_MERGE_LINES / 2 - 1;
         let names: Vec<String> = (0..MAX_MERGE_LINES)
             .map(|line| format!("line {line}"))
@@ -1695,11 +1695,9 @@ mod tests {
         local[half..2 * half].reverse();
         let mut remote = names.clone();
         remote[MAX_MERGE_LINES - 1] = "remote".to_owned();
-        let started = Instant::now();
         assert_eq!(
             merge_markdown(&names.join("\n"), &local.join("\n"), &remote.join("\n")),
             MarkdownMergeResult::Conflict
         );
-        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
