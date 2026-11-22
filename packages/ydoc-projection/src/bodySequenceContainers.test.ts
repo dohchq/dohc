@@ -79,7 +79,7 @@ function person(baseline: Uint8Array, clientID: number) {
   const history = new Y.UndoManager([text, records], {
     trackedOrigins: new Set([LOCAL]),
     ignoreRemoteMapChanges: true,
-    deleteFilter: (item) => item.parent !== records,
+    deleteFilter: (item) => item.parent !== records || (item.parentSub ?? "").includes("."),
   });
   const changes = () => text.toDelta() as Change[];
   return {
@@ -424,5 +424,59 @@ it("reads one callout as two when a line is lifted out of it while another is ad
   });
   expect(settle(lifter, adder)).toMatchObject({
     content: [callout("a"), paragraph("b"), callout("c")],
+  });
+});
+
+it("undoes a tick on an item that became a to-do through its list, and nothing before it", () => {
+  const baseline = note({ L: "bulletList", a: "listItem" }, { path: ["L", "a"], text: "a" });
+  const changer = person(baseline, 10);
+  const adder = person(baseline, 20);
+  changer.change(() => {
+    changer.records.set("L", "taskList");
+    changer.records.set("a", "taskItem");
+    changer.records.set("a.checked", false);
+  });
+  adder.change(() => {
+    adder.records.set("b", "listItem");
+    adder.text.insertEmbed(adder.text.length, boundary(["L", "b"]), {});
+    adder.text.insert(adder.text.length, "b", {});
+  });
+  settle(changer, adder);
+  adder.history.stopCapturing();
+  adder.change(() => adder.text.insert(adder.text.length, "!", {}));
+  adder.history.stopCapturing();
+  adder.change(() => adder.records.set("b.checked", true));
+  expect(settle(changer, adder)).toMatchObject({
+    content: [
+      { type: "taskList", content: [todo(false, paragraph("a")), todo(true, paragraph("b!"))] },
+    ],
+  });
+  adder.history.undo();
+  expect(settle(changer, adder)).toMatchObject({
+    content: [
+      { type: "taskList", content: [todo(false, paragraph("a")), todo(false, paragraph("b!"))] },
+    ],
+  });
+});
+
+it("undoes a start number set after a list became numbered, and nothing before it", () => {
+  const baseline = note({ L: "bulletList", a: "listItem" }, { path: ["L", "a"], text: "item" });
+  const first = person(baseline, 10);
+  const second = person(baseline, 20);
+  first.change(() => first.records.set("L", "orderedList"));
+  first.history.stopCapturing();
+  first.change(() => first.text.insert(first.text.length, "!", {}));
+  first.history.stopCapturing();
+  first.change(() => first.records.set("L.start", 5));
+  expect(settle(first, second)).toMatchObject({
+    content: [{ type: "orderedList", attrs: { start: 5 }, content: [item("listItem", "item!")] }],
+  });
+  first.history.undo();
+  expect(settle(first, second)).toMatchObject({
+    content: [{ type: "orderedList", attrs: { start: 1 }, content: [item("listItem", "item!")] }],
+  });
+  first.history.undo();
+  expect(settle(first, second)).toMatchObject({
+    content: [{ type: "orderedList", content: [item("listItem", "item")] }],
   });
 });
