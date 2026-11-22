@@ -209,7 +209,11 @@ export function MemberChats({
       current.has(open) ? new Map([...current].filter(([wireId]) => wireId !== open)) : current,
     );
   }, [open, shown]);
-  const total = [...unread.values()].reduce((sum, count) => sum + count, 0);
+  // Only listed Groups count, so a Group a rule hides takes its count with it.
+  const total = (opened?.groups ?? []).reduce(
+    (sum, item) => sum + (unread.get(item.channelWireId) ?? 0),
+    0,
+  );
   useEffect(() => onUnread(total), [total, onUnread]);
   // Focus follows the person between the list and a Group.
   useEffect(() => {

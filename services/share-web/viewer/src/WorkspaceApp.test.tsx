@@ -664,6 +664,33 @@ it("posts in a Group at Comment, counts another Group's new messages, and opens 
   await settle(() => following("chat").length === 1);
 });
 
+it("stops counting a Group's new messages once a rule hides that Group", async () => {
+  const options: { level: Level; groupRules?: GroupRules } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await act(async () =>
+    following("chat")[0]!.answer({
+      shareId: "share",
+      nextCursor: 22,
+      hasMore: false,
+      messages: [{ ...chat(21, "Bring snacks too"), channelWireId: "wire-food" }],
+    }),
+  );
+  const chatsTab = () =>
+    [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((tab) =>
+      tab.textContent?.startsWith("Chats"),
+    )!;
+  await settle(() => chatsTab().textContent === "Chats1 unread");
+  await click("All Groups, 1 unread");
+  // The owner hid food. The relay refuses the files' held read, as for any rule change.
+  options.groupRules = { "wire-food": "none" };
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => !groupPanel().textContent?.includes("food"));
+  expect(groupPanel().textContent).toContain("plans");
+  expect(chatsTab().textContent).toBe("Chats");
+});
+
 const channelReads = (fetch: ReturnType<typeof server>) =>
   fetch.mock.calls.filter(
     ([input]) =>
