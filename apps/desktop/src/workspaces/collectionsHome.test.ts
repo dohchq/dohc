@@ -75,7 +75,7 @@ it("offline, lists and reads what this computer kept, and refuses a change at on
   // A refusal tells the window that nothing ran, so it shows the true value and keeps nothing to send later.
   const refused = expect.objectContaining({
     code: "operation_refused",
-    message: `dohc didn't save this change. This Collection is read-only until ${relay.host} is reachable.`,
+    message: `dohc did not save this change. This Collection is read-only until ${relay.host} is reachable.`,
     refusal: expect.objectContaining({ code: "offline" }),
   });
   await expect(computer.write(id(7), { id: 1, name: "Offline" })).rejects.toEqual(refused);
@@ -113,7 +113,7 @@ it("signed out, lists and reads what this computer kept, read-only, and refuses 
     expect.objectContaining({
       code: "operation_refused",
       message:
-        "dohc didn't save this change. This Collection is read-only until you connect your server.",
+        "dohc did not save this change. This Collection is read-only until you connect your server.",
       refusal: expect.objectContaining({ code: "offline" }),
     }),
   );

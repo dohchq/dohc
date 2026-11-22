@@ -244,7 +244,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     await expect(
       copy.data(remote, source, signal).invoke({ ...read, operationId: id(5) }),
     ).rejects.toThrow(
-      "dohc didn't save this change. This Collection is read-only until relay is reachable.",
+      "dohc did not save this change. This Collection is read-only until relay is reachable.",
     );
     expect(sent).toHaveBeenCalledOnce();
     offline = false;
@@ -591,7 +591,7 @@ it("says this computer can't update its copy, not that the server is out of reac
   } as unknown as OwnerDatasetData;
   const pinned = { ...scope, revision: 1, revisionSha256: revision.revisionSha256 };
   const refusal =
-    "dohc didn't save this change. This Collection is read-only until dohc can update its copy on this device.";
+    "dohc did not save this change. This Collection is read-only until dohc can update its copy on this device.";
   const signal = new AbortController().signal;
   try {
     await host.activate(actor, { workspaceId: "w", revision, schemaSql, operationSource });

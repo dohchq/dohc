@@ -51,21 +51,21 @@ const NEVER_SENT = new Set([
 const offline = (host: string) =>
   new AppBackendRuntimeError({
     code: "offline",
-    message: `dohc didn't save this change. This Collection is read-only until ${host} is reachable.`,
+    message: `dohc did not save this change. This Collection is read-only until ${host} is reachable.`,
   });
 /** A change made while this computer can't bring its copy up to date, refused the same way. */
 const copyNotUpdated = () =>
   new AppBackendRuntimeError({
     code: "offline",
     message:
-      "dohc didn't save this change. This Collection is read-only until dohc can update its copy on this device.",
+      "dohc did not save this change. This Collection is read-only until dohc can update its copy on this device.",
   });
 /** A change made with no one signed in, refused the same way. */
 const signedOutChange = () =>
   new AppBackendRuntimeError({
     code: "offline",
     message:
-      "dohc didn't save this change. This Collection is read-only until you connect your server.",
+      "dohc did not save this change. This Collection is read-only until you connect your server.",
   });
 /** A signed-out read of what this computer did not keep, refused as any read that needs a session. */
 const signInFirst = () => new Error("Sign in to your server first.");

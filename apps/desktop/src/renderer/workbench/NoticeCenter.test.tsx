@@ -396,7 +396,7 @@ describe("notice center", () => {
     {
       reason: "live-document-without-lineage" as const,
       title: "Live editing cannot start",
-      body: "The server cannot start live editing for a document until you open it once in dohc. Notes larger than 256 KB do not open as live documents. Make the note smaller or split it first. Open Live documents to see which document, then resume live editing.",
+      body: "The server cannot start live editing for a document until you open it once in dohc. Notes larger than 256 KB do not open as live documents. Open Live documents to see which document it is, make it smaller or split it if needed, open it in dohc, and then resume live editing.",
     },
     // A diverged server copy offers no Resume: only the server's operator can continue it.
     {

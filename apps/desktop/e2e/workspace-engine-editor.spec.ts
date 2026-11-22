@@ -101,7 +101,7 @@ async function restoreRestartTyping(
   if (open === "notice") {
     const toast = recoveryToast(page);
     await expect(toast).toContainText(
-      `The file "${path}" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.`,
+      `The file "${path}" changed outside dohc. Your text is saved in History. Open the recovery change and choose Restore.`,
       { timeout: 30_000 },
     );
     await toast.getByTestId("workspace-shell-error-action").click();

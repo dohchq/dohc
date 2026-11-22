@@ -541,7 +541,9 @@ export function MessageReactions(props: {
                 data-testid={`${props.testIdPrefix}-reaction-choice`}
                 data-emoji={emoji}
                 aria-label={emoji}
-                title={emojiNames.get(emoji) ?? emoji}
+                title={(emojiNames.get(emoji) ?? emoji)
+                  .replaceAll("\u2019", "'")
+                  .replaceAll("\u2018", "'")}
                 onClick={() => {
                   toggle(emoji, mine);
                   setPickerOpen(false);

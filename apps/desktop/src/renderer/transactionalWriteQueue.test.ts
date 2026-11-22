@@ -143,7 +143,7 @@ describe("the order changes go in", () => {
     queue.enqueue(edit(row(1, 2), name, "Alicia"));
     queue.enqueue(edit(row(2, 4), name, "Beatrice"));
     const words =
-      "dohc didn't save this change. This Collection is read-only until relay.test is reachable.";
+      "dohc did not save this change. This Collection is read-only until relay.test is reachable.";
     rules.calls[0]!.answer.reject(
       Object.assign(new Error(words), {
         code: "operation_refused",
@@ -170,7 +170,7 @@ describe("the order changes go in", () => {
     rules.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
     await vi.waitFor(() => expect(rules.calls).toHaveLength(2));
     const words =
-      "dohc didn't save this change. This Collection is read-only until relay.test is reachable.";
+      "dohc did not save this change. This Collection is read-only until relay.test is reachable.";
     rules.calls[1]!.answer.reject(
       Object.assign(new Error(words), {
         code: "operation_refused",
@@ -202,7 +202,7 @@ describe("the order changes go in", () => {
     await vi.waitFor(() => expect(state(page, 1, name)).toBe("unconfirmed"));
     queue.retry(lost);
     const words =
-      "dohc didn't save this change. This Collection is read-only until relay.test is reachable.";
+      "dohc did not save this change. This Collection is read-only until relay.test is reachable.";
     // The refused connection proves only that this try ran nothing: the first may have saved.
     rules.calls[1]!.answer.reject(
       Object.assign(new Error(words), {

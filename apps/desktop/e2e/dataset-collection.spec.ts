@@ -307,7 +307,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
       `The ${dirname(listed.datasets[0].datasetPath!)} folder and its files stay. Find them in Files.`,
     );
     await deletion
-      .getByRole("checkbox", { name: "I understand that dohc cannot undo this deletion." })
+      .getByRole("checkbox", { name: "I understand this deletion cannot be undone." })
       .check();
     await deletion.getByRole("button", { name: "Delete permanently", exact: true }).click();
     await expect(deletion).toBeHidden();

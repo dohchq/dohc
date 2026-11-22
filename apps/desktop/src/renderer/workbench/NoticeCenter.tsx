@@ -792,7 +792,7 @@ function liveDeliveryCopy(
   if (reason === "live-document-without-lineage") {
     return {
       title: "Live editing cannot start",
-      body: "The server cannot start live editing for a document until you open it once in dohc. Notes larger than 256 KB do not open as live documents. Make the note smaller or split it first. Open Live documents to see which document, then resume live editing.",
+      body: "The server cannot start live editing for a document until you open it once in dohc. Notes larger than 256 KB do not open as live documents. Open Live documents to see which document it is, make it smaller or split it if needed, open it in dohc, and then resume live editing.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };

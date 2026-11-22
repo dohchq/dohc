@@ -236,8 +236,8 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     const agents = dialog.getByRole("region", { name: "Agents" });
     await expect(agents.getByRole("listitem")).toHaveCount(2);
     await expect(agents).toContainText("Claude Code");
-    await expect(agents).toContainText("Name reported by the agent");
-    await expect(agents).toContainText("The agent reported no name");
+    await expect(agents).toContainText("Name reported by agent");
+    await expect(agents).toContainText("No name reported");
     const windowSize = await page.evaluate(() => ({
       width: window.innerWidth,
       height: window.innerHeight,

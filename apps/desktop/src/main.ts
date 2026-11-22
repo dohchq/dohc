@@ -5469,7 +5469,7 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
       return "This Notice was already handled, so Run now will not start it.";
     }
     if (!(await automations.runNow(intent.automationId, intent.notice.noticeId))) {
-      return "dohc could not start the automation. Try again.";
+      return "dohc could not start the automation. It will try again when you reopen or focus dohc.";
     }
     // The claim is in the engine now; it runs from there.
     await runNowIntents.remove(intent.notice);

@@ -135,7 +135,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     }, archivePath);
     await (await collectionCommand(collection, "Export recovery")).click();
     const exportDialog = page.getByRole("dialog", { name: "Export Recovery proof?", exact: true });
-    await expect(exportDialog).toContainText("private records");
+    await expect(exportDialog).toContainText("private record");
     await exportDialog.getByRole("button", { name: "Save recovery file", exact: true }).click();
     await expect(exportDialog).toBeHidden();
     expect((await readFile(archivePath)).byteLength).toBeGreaterThan(4096);
@@ -186,7 +186,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     ).toBeDisabled();
     await recovery
       .getByRole("checkbox", {
-        name: "I stopped the old host and will not restart it for this Collection.",
+        name: "I stopped the previous host and will not restart it for this Collection.",
       })
       .check();
     await recovery.getByRole("button", { name: "Restore Collection", exact: true }).click();

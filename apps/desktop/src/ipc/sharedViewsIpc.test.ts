@@ -746,7 +746,7 @@ describe("registered received-view handlers", () => {
   it.each([
     [new ShareUnavailableError(), "No share matches"],
     [new RelayUnauthorizedError(), "session expired"],
-    [new ShareSelectorInvalidError("share"), "server didn't say"],
+    [new ShareSelectorInvalidError("share"), "server did not say"],
   ])("maps preflight errors without creating local state", async (error, message) => {
     const h = await harness();
     h.fetchInfo.mockRejectedValue(error);

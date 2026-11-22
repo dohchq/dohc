@@ -400,7 +400,7 @@ confidentialTest.describe("View link lifecycle", () => {
         ).toBeVisible();
         await expect(dialog).toContainText("The link includes files added later.");
         await expect(dialog).toContainText("The sync relay can read this content.");
-        await expect(dialog).toContainText("Can read, but not change.");
+        await expect(dialog).toContainText("Can read, not change.");
         await page.keyboard.press("Escape");
 
         await dialog.getByRole("button", { name: "Create link", exact: true }).click();

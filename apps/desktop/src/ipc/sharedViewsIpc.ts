@@ -286,15 +286,15 @@ export function registerSharedViewsIpcHandlers<
     } catch (error) {
       if (error instanceof ShareUnavailableError) {
         throw new Error(
-          "No share matches that code for your account. Check the code and that you're signed in with the account it was shared with.",
+          "No share matches that code for your account. Check the code and that you are signed in with the account it was shared with.",
         );
       }
       if (error instanceof RelayUnauthorizedError) {
-        throw new Error("Your server session expired. Sign in again, then retry.");
+        throw new Error("Your server session expired. Sign in again, then try again.");
       }
       if (error instanceof ShareSelectorInvalidError) {
         throw new Error(
-          "This share can't be opened: the server didn't say what it shares. Try again later.",
+          "dohc cannot open this share because the server did not say what it shares. Try again later.",
         );
       }
       throw error;

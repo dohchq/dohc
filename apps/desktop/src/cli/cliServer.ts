@@ -5239,7 +5239,7 @@ export async function handleCliRequestLine(
       cliTransportResponseSchema.parse({
         protocolVersion: CLI_PROTOCOL_VERSION,
         ok: false,
-        error: "dohc: CLI/app version mismatch. Restart the app.",
+        error: "dohc: CLI/app version mismatch — restart the app",
       }),
     )}\n`;
   }
