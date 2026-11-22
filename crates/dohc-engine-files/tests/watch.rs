@@ -221,22 +221,28 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
 /// while the watch on the rest of the workspace keeps working. Taking that
 /// error for a lost watch attaches again, meets the same folder, and attaches
 /// again, rescanning each time. Once the folder can be read, changes inside it
-/// must be reported too.
+/// must be reported too, also when the permission changed on a folder above it.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreadable_folder_is_not_taken_for_a_lost_watch() {
+    watch_while_a_folder_is_locked("locked", 0o000, "locked").await;
+    watch_while_a_folder_is_locked("parent", 0o400, "parent/child").await;
+}
+
+#[cfg(target_os = "linux")]
+async fn watch_while_a_folder_is_locked(lock: &str, bits: u32, inner: &str) {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     let ws = Scratch::new();
-    ws.write("locked/note.md", b"a note");
-    let locked = ws.path().join("locked");
+    ws.write(&format!("{inner}/note.md"), b"a note");
+    let locked = ws.path().join(lock);
     let mode = |bits| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(bits));
-    mode(0o000).expect("lock the folder");
-    if std::fs::read_dir(&locked).is_ok() {
+    mode(bits).expect("lock the folder");
+    if std::fs::read_dir(ws.path().join(inner)).is_ok() {
         mode(0o755).expect("unlock the folder");
-        eprintln!("SKIP: this user can read a folder with mode 000");
+        eprintln!("SKIP: this user can read a folder with mode {bits:o}");
         return;
     }
     let dirty = Arc::new(AtomicU64::new(0));
@@ -270,12 +276,12 @@ async fn an_unreadable_folder_is_not_taken_for_a_lost_watch() {
     mode(0o755).expect("unlock the folder");
     tokio::time::sleep(dohc_engine_files::watch::WATCH_SETTLE * 3).await;
     let before = dirty.load(Ordering::Acquire);
-    ws.write("locked/later.md", b"later");
+    ws.write(&format!("{inner}/later.md"), b"later");
     let deadline = Instant::now() + Duration::from_secs(5);
     while dirty.load(Ordering::Acquire) == before {
         assert!(
             Instant::now() < deadline,
-            "a write inside the folder was not reported after it became readable"
+            "a write in {inner} was not reported after {lock} became readable"
         );
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
