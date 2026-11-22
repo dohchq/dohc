@@ -30,6 +30,7 @@ import { readError } from "../ipc/errorWords";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import {
   DAEMON_CAPTURE_HEALTH_POLL_MS,
+  LOCKED_ACCESS_RULE_POLL_MS,
   AuthoredTextChangedError,
   UnsupportedWorkspacePathError,
   assertGeneratedMarkdownPath,
@@ -2329,6 +2330,66 @@ describe("workspaceEngineCapture batch capture", () => {
       }
     },
   );
+
+  it("looks again each second while a program holds a rule file, then every five", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    await openedLocalState({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      attachmentId: WORKSPACE_ATTACHMENT_ID,
+    });
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    ).store;
+    let unreadable: "locked" | null = "locked";
+    const watcherStatus = vi.fn(async () => ({
+      running: true,
+      degraded: false,
+      terminal: false,
+      deferredWrites: [],
+      heldAccessRules: [{ ...REMOVED_TEAM, unreadable }],
+    }));
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return watcherStatus;
+        if (property === "listPendingCollectionAdoptions")
+          return async () => ({ adoptions: [], nextCursor: null });
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const engine = capture(root, {
+      store: daemonStore,
+      rustEngineSessions: sessions,
+      onError: () => {},
+    });
+    try {
+      engine.start();
+      await engine.flush();
+      expect(watcherStatus).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(LOCKED_ACCESS_RULE_POLL_MS);
+      await engine.flush();
+      expect(watcherStatus).toHaveBeenCalledTimes(2);
+      // The program let go: the rule reads again, and the poll goes back to its pace.
+      unreadable = null;
+      await vi.advanceTimersByTimeAsync(LOCKED_ACCESS_RULE_POLL_MS);
+      await engine.flush();
+      expect(watcherStatus).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS - 1);
+      expect(watcherStatus).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(1);
+      await engine.flush();
+      expect(watcherStatus).toHaveBeenCalledTimes(4);
+    } finally {
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
 
   it.each([true])(
     "coalesces blocked capture health polls and resumes after failure=%s",
