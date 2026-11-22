@@ -420,26 +420,22 @@
     { "name": "item-setext-lt-text", "source": "- <3\n  --",
       "canonical": "- \n  ## &lt;3\n",
       "exactSource": true,
-      "nativeRereadCanonical": "- \n  ## &amp;lt;3\n",
       "note": "marked keeps HTML-shaped lines out of a heading, and `<3` is not one.",
       "rustBase64": "AQjBkcj69In2DwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDBkcj69In2DwEDCGxpc3RJdGVtBwDBkcj69In2DwIDB2hlYWRpbmcoAMGRyPr0ifYPAwVsZXZlbAF9AgcAwZHI+vSJ9g8DBgQAwZHI+vSJ9g8FAjwzR8GRyPr0ifYPAwMJcGFyYWdyYXBoAA=="
     },
     { "name": "item-setext-lt-before-divider", "source": "- <3\n  --\n  -:",
       "canonical": "- \n  ## &lt;3\n\n  -:\n",
       "exactSource": true,
-      "nativeRereadCanonical": "- \n  ## &amp;lt;3\n\n  -:\n",
       "note": "The underline makes the heading, and the next line is a paragraph, not a table divider.",
       "rustBase64": "AQvih9en0prvBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDih9en0prvBQEDCGxpc3RJdGVtBwDih9en0prvBQIDCXBhcmFncmFwaAcA4ofXp9Ka7wUDBgQA4ofXp9Ka7wUEAi06R+KH16fSmu8FAwMHaGVhZGluZygA4ofXp9Ka7wUHBWxldmVsAX0CBwDih9en0prvBQcGBADih9en0prvBQkCPDNH4ofXp9Ka7wUHAwlwYXJhZ3JhcGgA"
     },
     { "name": "item-setext-open-tag-start", "source": "- <a\n  --",
       "canonical": "- \n  ## &lt;a\n",
-      "nativeRereadCanonical": "- \n  ## &amp;lt;a\n",
       "note": "marked reads no block HTML or tag in `<a`, so it is heading text. The strict proof treats `<a` as a tag, so only a settle with the file keeps these bytes.",
       "rustBase64": "AQjTrpCIirq9CgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDTrpCIirq9CgEDCGxpc3RJdGVtBwDTrpCIirq9CgIDB2hlYWRpbmcoANOukIiKur0KAwVsZXZlbAF9AgcA066QiIq6vQoDBgQA066QiIq6vQoFAjxhR9OukIiKur0KAwMJcGFyYWdyYXBoAA=="
     },
     { "name": "item-setext-close-tag-start", "source": "- </a\n  --",
       "canonical": "- \n  ## &lt;/a\n",
-      "nativeRereadCanonical": "- \n  ## &amp;lt;/a\n",
       "note": "marked reads no block HTML or tag in `</a`, so it is heading text. The strict proof treats `</a` as a tag, so only a settle with the file keeps these bytes.",
       "rustBase64": "AQiqipammLLlDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCqipammLLlDAEDCGxpc3RJdGVtBwCqipammLLlDAIDB2hlYWRpbmcoAKqKlqaYsuUMAwVsZXZlbAF9AgcAqoqWppiy5QwDBgQAqoqWppiy5QwFAzwvYUeqipammLLlDAMDCXBhcmFncmFwaAA="
     },

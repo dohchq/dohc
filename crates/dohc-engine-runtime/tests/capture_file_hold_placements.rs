@@ -355,15 +355,16 @@ async fn capture_file_hold_parks_pending_settlement_without_compensation() {
 }
 
 /// Seed a desktop-read note without its final newline: a nested list item
-/// with a link. The engine's reading cannot reproduce the desktop's here, so
-/// an outside frontmatter edit to it is held.
+/// holding `&amp;#42;`, which the engine keeps as written and the desktop
+/// reads as `&#42;`. The readings differ, so an outside frontmatter edit to it
+/// is held.
 fn seed_desktop_entity_row(scratch: &ScratchDir) -> (DocKey, String) {
     use base64::Engine;
     let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
         "../../../tools/rust-engine-program/nested1b-desktop-folds.json"
     ))
     .unwrap();
-    let initial = rows[2]["source"].as_str().unwrap().to_owned();
+    let initial = rows[7]["source"].as_str().unwrap().to_owned();
     let mut store = EngineStore::open(&engine_db_path(scratch).unwrap(), 1).unwrap();
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, "main", 1, &NoFaults)
@@ -375,7 +376,7 @@ fn seed_desktop_entity_row(scratch: &ScratchDir) -> (DocKey, String) {
     let key = DocKey::new(WS, "main", &head.object_id).unwrap();
     let doc = Ydoc::wire();
     let base = base64::engine::general_purpose::STANDARD
-        .decode(rows[2]["desktopBase64"].as_str().unwrap())
+        .decode(rows[7]["desktopBase64"].as_str().unwrap())
         .unwrap();
     doc.apply(&base).unwrap();
     // The desktop keeps the file as source because its writer adds the newline.
