@@ -1018,8 +1018,8 @@ describe("ChatsView direct messages", () => {
     expect(
       screen.getByRole("listbox", { name: "Members" }).getAttribute("aria-multiselectable"),
     ).toBeNull();
-    // To shows an example of what to type: the first member's first name, the row Enter would pick.
-    expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).placeholder).toBe("Ana");
+    // To holds no example, so it never reads as a name already typed.
+    expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).placeholder).toBe("");
 
     // A message without anyone picked asks who it is for.
     const composer = screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement;
@@ -1056,15 +1056,21 @@ describe("ChatsView direct messages", () => {
     );
     // With a pick, To shows no example beside it.
     expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).placeholder).toBe("");
+    // One person is picked, so the list closes, and Enter in To picks no hidden row.
+    expect(screen.queryByTestId("chats-dm-new-members")).toBeNull();
+    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-expanded")).toBe("false");
+    fireEvent.keyDown(screen.getByTestId("chats-dm-recipients"), { key: "ArrowDown" });
+    fireEvent.keyDown(screen.getByTestId("chats-dm-recipients"), { key: "Enter" });
+    expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
+      ["ana"],
+    );
     // Keyboard: type to filter, Enter picks.
     await user.type(screen.getByTestId("chats-dm-recipients"), "sam{Enter}");
     expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
       ["sam"],
     );
-    // The whole list is back, and the active row is the pick, not the row that was first in the filter.
-    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-activedescendant")).toMatch(
-      /-sam$/,
-    );
+    // The new pick closes the list again.
+    expect(screen.queryByTestId("chats-dm-new-members")).toBeNull();
     await waitFor(() =>
       expect(bridgeMock.directResolve).toHaveBeenLastCalledWith({
         viewerId: VIEWER,
@@ -1204,11 +1210,8 @@ describe("ChatsView direct messages", () => {
     expect(existing.textContent).toContain(
       "You already have a conversation with Sam Rivera. Sending adds your message to it.",
     );
-    // The line sits under the list, so the rows don't move when it appears.
-    expect(
-      screen.getByTestId("chats-dm-new-members").compareDocumentPosition(existing) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    // The pick closed the list.
+    expect(screen.queryByTestId("chats-dm-new-members")).toBeNull();
     expect(screen.queryByRole("button", { name: "Mention" })).toBeNull();
     await user.type(screen.getByTestId("chats-dm-new-composer"), "Lunch?");
     fireEvent.click(within(existing).getByTestId("chats-dm-new-open-existing"));

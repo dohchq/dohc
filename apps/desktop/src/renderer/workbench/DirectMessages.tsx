@@ -960,6 +960,8 @@ function NewMessageForAccount(props: NewMessageProps) {
       ? members.members.filter((member) => member.name.toLocaleLowerCase().includes(words))
       : members.members;
   }, [members, query]);
+  // With someone picked, the list closes until the person types another name or removes the pick.
+  const listShown = pick === null || query !== "";
   const activeIndex = Math.min(highlight, matches.length - 1);
   const active = activeIndex >= 0 ? matches[activeIndex]! : null;
   const choose = (memberId: string | null) => {
@@ -967,14 +969,8 @@ function NewMessageForAccount(props: NewMessageProps) {
     setPickError(false);
     setPicked(memberId);
     setQuery("");
-    // The cleared query lists everyone again: the active row is the pick, so the two never differ.
-    const all = members.status === "ready" ? members.members : [];
-    setHighlight(
-      Math.max(
-        0,
-        all.findIndex((member) => member.memberId === memberId),
-      ),
-    );
+    // A pick closes the list. The next list opens with its first row active.
+    setHighlight(0);
     inputRef.current?.focus();
   };
   // Focus stays in the To field, so the list scrolls to keep the active member in view.
@@ -989,6 +985,8 @@ function NewMessageForAccount(props: NewMessageProps) {
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     // Enter, the arrows and Backspace work an IME's candidates while it composes.
     if (isComposingKey(event)) return;
+    // A closed list takes no arrows or Enter. Backspace still removes the pick.
+    if (!listShown && event.key !== "Backspace") return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
       moveTo(Math.min(activeIndex + 1, matches.length - 1));
@@ -1201,6 +1199,9 @@ function NewMessageForAccount(props: NewMessageProps) {
         />
       </EmptyState>
     );
+  } else if (!listShown) {
+    // The composer stays at the bottom, where it was while the list showed.
+    content = <div className="min-h-0 flex-1" />;
   } else {
     content = (
       <ul
@@ -1301,18 +1302,14 @@ function NewMessageForAccount(props: NewMessageProps) {
                 id={`${listId}-input`}
                 data-testid="chats-dm-recipients"
                 role="combobox"
-                aria-expanded="true"
-                aria-controls={listId}
-                aria-activedescendant={active ? `${listId}-${active.memberId}` : undefined}
+                aria-expanded={listShown}
+                aria-controls={listShown ? listId : undefined}
+                aria-activedescendant={
+                  listShown && active ? `${listId}-${active.memberId}` : undefined
+                }
                 aria-invalid={pickError || undefined}
                 aria-describedby={pickError ? errorId : undefined}
                 autoFocus={pick === null}
-                // An example: the first member's first name, which Enter would pick.
-                placeholder={
-                  pick === null && members.status === "ready"
-                    ? members.members[0]?.name.split(" ")[0]
-                    : undefined
-                }
                 value={query}
                 onChange={(event) => {
                   goStraight.current = false;
