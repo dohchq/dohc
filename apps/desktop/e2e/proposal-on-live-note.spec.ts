@@ -282,8 +282,10 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       await resumeLive();
       await page.reload();
       await page.getByTestId("notice-center-toggle").click();
-      const notices = page.getByRole("dialog", { name: "Notices", exact: true });
-      await notices.getByRole("button", { name: "Review", exact: true }).click({ timeout: 60_000 });
+      await page
+        .getByTestId(`notice-share-changes-${first}`)
+        .getByRole("button", { name: "Review", exact: true })
+        .click({ timeout: 60_000 });
       const dialog = page.getByTestId("proposal-review-dialog");
       await expect(dialog).toBeVisible();
       await dialog.getByTestId("proposal-review-accept").click();
@@ -357,7 +359,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       await page.reload();
       await page.getByTestId("notice-center-toggle").click();
       await page
-        .getByRole("dialog", { name: "Notices", exact: true })
+        .getByTestId(`notice-share-changes-${budget}`)
         .getByRole("button", { name: "Review", exact: true })
         .click({ timeout: 60_000 });
       const dialog = page.getByTestId("proposal-review-dialog");
