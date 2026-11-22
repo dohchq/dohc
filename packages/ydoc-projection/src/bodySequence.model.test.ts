@@ -18,7 +18,7 @@ const idOf = (client: number, clock: number): Id => `${String(client)}:${String(
 
 type Token =
   | { kind: "char"; id: Id; text: string; marks: string }
-  | { kind: "boundary"; id: Id; attrs: string };
+  | { kind: "boundary" | "atom"; id: Id; attrs: string };
 
 function read(text: Y.Text): Token[] {
   const tokens: Token[] = [];
@@ -41,7 +41,7 @@ function read(text: Y.Text): Token[] {
     } else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
       const attrs = content.type.getAttributes() as Record<string, unknown>;
       tokens.push({
-        kind: "boundary",
+        kind: content.type.nodeName === BLOCK ? "boundary" : "atom",
         id: idOf(item.id.client, item.id.clock),
         attrs: JSON.stringify(Object.entries(attrs).sort(([a], [b]) => a.localeCompare(b))),
       });
@@ -53,9 +53,10 @@ function read(text: Y.Text): Token[] {
 function linesOf(tokens: Token[]): string[] {
   const lines: string[] = [];
   for (const token of tokens) {
+    const text = token.kind === "char" ? token.text : "";
     if (token.kind === "boundary") lines.push("");
-    else if (lines.length === 0) lines.push(token.text);
-    else lines[lines.length - 1] += token.text;
+    else if (lines.length === 0) lines.push(text);
+    else lines[lines.length - 1] += text;
   }
   return lines;
 }
@@ -66,12 +67,15 @@ type Effects = {
   insertedBoundaries: Id[];
   deletedBoundaries: Id[];
   marks: boolean;
+  known: Set<Id>;
 };
 
 class Oracle {
   readonly rootOf = new Map<Id, Id>();
   readonly typed = new Set<Id>();
   readonly everDeletedChars = new Set<Id>();
+  readonly insertedChars = new Set<Id>();
+  readonly deletedChars = new Set<Id>();
   readonly insertedBoundaries = new Set<Id>();
   readonly deletedBoundaries = new Set<Id>();
   readonly snapshots: Id[][] = [];
@@ -90,7 +94,13 @@ afterEach(() => {
   for (const doc of docs.splice(0)) doc.destroy();
 });
 
-function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = true) {
+function person(
+  baseline: Uint8Array,
+  clientID: number,
+  oracle: Oracle,
+  gc = true,
+  steps: "each change" | "grouped" = "each change",
+) {
   const doc = new Y.Doc({ gc });
   docs.push(doc);
   doc.clientID = clientID;
@@ -98,7 +108,8 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
   const text = doc.getText(FIELD);
   const manager = new Y.UndoManager(text, {
     trackedOrigins: new Set([LOCAL]),
-    captureTimeout: 0,
+    captureTimeout: 60_000,
+    ignoreRemoteMapChanges: true,
   });
   const sent: Uint8Array[] = [];
   doc.on("update", (update: Uint8Array, origin: unknown) => {
@@ -152,8 +163,31 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
     return null;
   };
 
-  const observe = (act: () => void, mayMark: () => boolean): Effects => {
+  const raw = () => {
+    const out: string[] = [];
+    for (let item = text._start; item !== null; item = item.right) {
+      const c = item.content;
+      const what =
+        c instanceof Y.ContentFormat
+          ? `F(${c.key}=${JSON.stringify(c.value)})`
+          : c instanceof Y.ContentString
+            ? JSON.stringify(c.str)
+            : c instanceof Y.ContentType
+              ? "[B]"
+              : "(gone)";
+      out.push(
+        `${item.deleted ? "~" : ""}${what}@${String(item.id.client)}:${String(item.id.clock)}`,
+      );
+    }
+    return out.join(" ");
+  };
+  const observe = (
+    act: () => void,
+    mayMark: () => boolean,
+    sawThen: () => (id: Id) => boolean = () => () => true,
+  ): Effects => {
     const before = tokens();
+    const rawBefore = process.env.BODY_SEQUENCE_DEBUG ? raw() : "";
     act();
     const after = tokens();
     const marks = mayMark();
@@ -163,14 +197,22 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
       insertedBoundaries: minus(visible("boundary", after), visible("boundary", before)),
       deletedBoundaries: minus(visible("boundary", before), visible("boundary", after)),
       marks,
+      known: visible("char", before),
     };
     if (!marks) {
       const was = marksOf(before);
+      const saw = sawThen();
       for (const [id, now] of marksOf(after))
-        if (was.has(id) && was.get(id) !== now)
-          throw new Error(`a change that is not a mark changed the marks of ${id}`);
+        if (was.has(id) && was.get(id) !== now && saw(id))
+          throw new Error(
+            `a change that is not a mark changed the marks of ${id}
+BEFORE ${rawBefore}
+AFTER  ${raw()}`,
+          );
     }
     for (const id of effects.deletedChars) oracle.everDeletedChars.add(oracle.root(id));
+    for (const id of effects.insertedChars) oracle.insertedChars.add(id);
+    for (const id of effects.deletedChars) oracle.deletedChars.add(id);
     for (const id of effects.insertedBoundaries) oracle.insertedBoundaries.add(id);
     for (const id of effects.deletedBoundaries) oracle.deletedBoundaries.add(id);
     oracle.snapshots.push(after.map((token) => token.id));
@@ -182,6 +224,7 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
     act: () => void,
     expected: { chars?: number; boundaries?: number; marks?: boolean },
   ): Effects => {
+    if (steps === "each change") manager.stopCapturing();
     const depth = manager.undoStack.length;
     const effects = observe(
       () => doc.transact(act, LOCAL),
@@ -198,8 +241,17 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
     if ((expected.chars ?? 0) <= 0 && effects.insertedChars.length > 0)
       throw new Error("a change that types no letters added letters");
     for (const id of effects.insertedChars) oracle.typed.add(id);
+    const top = undoMirror.at(-1);
     if (manager.undoStack.length > depth) undoMirror.push(effects);
-    redoMirror = [];
+    else if (top && manager.undoStack.length === depth) {
+      top.insertedChars.push(...effects.insertedChars);
+      top.deletedChars.push(...effects.deletedChars);
+      top.insertedBoundaries.push(...effects.insertedBoundaries);
+      top.deletedBoundaries.push(...effects.deletedBoundaries);
+      top.marks ||= effects.marks;
+      top.known = new Set([...top.known].filter((id) => effects.known.has(id)));
+    }
+    if (manager.redoStack.length === 0) redoMirror = [];
     return effects;
   };
 
@@ -231,6 +283,7 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
         popped = from.splice(stack().length, depth - stack().length);
       },
       () => popped.some((entry) => entry.marks),
+      () => (id) => popped.every((entry) => entry.known.has(id)),
     );
     learnCopies();
     const roots = (ids: Id[]) => ids.map((id) => oracle.root(id));
@@ -238,15 +291,30 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
     const mayAddChars = new Set(popped.flatMap((entry) => roots(entry.deletedChars)));
     const mayDeleteBoundaries = new Set(popped.flatMap((entry) => roots(entry.insertedBoundaries)));
     const mayAddBoundaries = new Set(popped.flatMap((entry) => roots(entry.deletedBoundaries)));
-    const once = (ids: Id[]) => new Set(roots(ids)).size === ids.length;
+    const noMoreThan = (ids: Id[], deleted: Id[]) => {
+      const left = new Map<Id, number>();
+      for (const id of roots(deleted)) left.set(id, (left.get(id) ?? 0) + 1);
+      return roots(ids).every((id) => {
+        left.set(id, (left.get(id) ?? 0) - 1);
+        return left.get(id)! >= 0;
+      });
+    };
+    const once = (ids: Id[], kind: "deletedChars" | "deletedBoundaries") =>
+      noMoreThan(
+        ids,
+        popped.flatMap((entry) => entry[kind]),
+      );
     const within = (ids: Id[], allowed: Set<Id>) => roots(ids).every((id) => allowed.has(id));
     if (!within(effects.deletedChars, mayDeleteChars))
       throw new Error(`${which} deleted letters that its change did not type`);
-    if (!within(effects.insertedChars, mayAddChars) || !once(effects.insertedChars))
+    if (!within(effects.insertedChars, mayAddChars) || !once(effects.insertedChars, "deletedChars"))
       throw new Error(`${which} added letters that its change did not delete`);
     if (!within(effects.deletedBoundaries, mayDeleteBoundaries))
       throw new Error(`${which} deleted a boundary that its change did not add`);
-    if (!within(effects.insertedBoundaries, mayAddBoundaries) || !once(effects.insertedBoundaries))
+    if (
+      !within(effects.insertedBoundaries, mayAddBoundaries) ||
+      !once(effects.insertedBoundaries, "deletedBoundaries")
+    )
       throw new Error(`${which} added a boundary that its change did not delete`);
     for (const copy of effects.insertedBoundaries) {
       const source = sourceOf(copy);
@@ -281,7 +349,7 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
       return local(() => text.insert(index, letters), { chars: letters.length });
     },
     deleteCharsAt(index: number, length: number) {
-      return local(() => text.delete(index, length), { chars: -length });
+      return local(() => text.delete(index, length), { chars: -length, marks: true });
     },
     splitAt(index: number, attrs: Record<string, unknown> = { type: "paragraph" }) {
       return local(() => text.insertEmbed(index, boundary(attrs), attrsAt(index)), {
@@ -294,7 +362,7 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
     },
     retypeAt(index: number, attrs: Record<string, unknown>) {
       const token = tokens()[index];
-      if (token?.kind !== "boundary") throw new Error("not a boundary");
+      if (!token || token.kind === "char") throw new Error("not an element");
       return local(() => {
         let at = 0;
         for (let item = text._start; item !== null; item = item.right) {
@@ -312,6 +380,7 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
     markAt(index: number, length: number, mark: string) {
       return local(() => text.format(index, length, { [mark]: true }), { marks: true });
     },
+    newStep: () => manager.stopCapturing(),
     undo: () => back("undo"),
     redo: () => back("redo"),
     canUndo: () => manager.undoStack.length > 0,
@@ -382,11 +451,26 @@ function deliver(people: Person[], arrive: Arrive, next: () => number) {
 
 function agreed(people: Person[]): Token[] {
   const first = people[0]!.tokens();
-  for (const each of people.slice(1)) expect(each.tokens()).toEqual(first);
+  for (const each of people) {
+    expect(each.tokens()).toEqual(first);
+    const reopened = new Y.Doc();
+    const text = reopened.getText(FIELD);
+    Y.applyUpdate(reopened, Y.encodeStateAsUpdate(each.doc));
+    const read_ = read(text);
+    reopened.destroy();
+    expect(read_).toEqual(first);
+  }
   return first;
 }
 
 function holds(oracle: Oracle, final: Token[]) {
+  const letters = new Set(final.filter((token) => token.kind === "char").map((token) => token.id));
+  for (const id of oracle.insertedChars)
+    if (!oracle.deletedChars.has(id) && !letters.has(id))
+      throw new Error("a letter no change deleted is gone");
+  for (const id of letters)
+    if (oracle.deletedChars.has(id) || !oracle.insertedChars.has(id))
+      throw new Error("a letter stands that no change left standing");
   const shown = final
     .filter((token) => token.kind === "char")
     .map((token) => oracle.root(token.id));
@@ -402,6 +486,9 @@ function holds(oracle: Oracle, final: Token[]) {
   const boundaries = new Set(
     final.filter((token) => token.kind === "boundary").map((token) => token.id),
   );
+  for (const id of boundaries)
+    if (!oracle.insertedBoundaries.has(id))
+      throw new Error("a boundary stands that no change added");
   for (const id of oracle.insertedBoundaries)
     if (!oracle.deletedBoundaries.has(id) && !boundaries.has(id))
       throw new Error("a boundary nobody deleted is gone");
@@ -419,17 +506,24 @@ function holds(oracle: Oracle, final: Token[]) {
   }
 }
 
-function team(count: number, baseline: Uint8Array, gc = true) {
+function team(
+  count: number,
+  baseline: Uint8Array,
+  gc = true,
+  steps: "each change" | "grouped" = "each change",
+) {
   const oracle = new Oracle();
   const base = new Y.Doc();
   Y.applyUpdate(base, baseline);
   for (const token of read(base.getText(FIELD))) {
-    if (token.kind === "char") oracle.typed.add(token.id);
-    else oracle.insertedBoundaries.add(token.id);
+    if (token.kind === "char") {
+      oracle.typed.add(token.id);
+      oracle.insertedChars.add(token.id);
+    } else if (token.kind === "boundary") oracle.insertedBoundaries.add(token.id);
   }
   base.destroy();
   const people = Array.from({ length: count }, (_, index) =>
-    person(baseline, 10 * (index + 1), oracle, gc),
+    person(baseline, 10 * (index + 1), oracle, gc, steps),
   );
   return { oracle, people };
 }
@@ -536,6 +630,56 @@ describe.each(setups)("%i people, changes arriving %s", (count, arrive) => {
     expect(linesOf(agreed(rest))).toEqual(["pp", "kk", "ll"]);
   });
 
+  it("agrees after a line's kind is changed, the line is joined away, and both are undone as one step", () => {
+    for (const gc of [true, false]) {
+      const { oracle, people } = team(count, note("one", "two"), gc, "grouped");
+      const [first] = people;
+      first!.retypeAt(4, { type: "heading", level: 2 });
+      first!.newStep();
+      first!.retypeAt(4, { type: "paragraph" });
+      first!.joinAt(4);
+      deliver(people, arrive, random(7));
+      expect(linesOf(agreed(people))).toEqual(["onetwo"]);
+      first!.undo();
+      deliver(people, arrive, random(7));
+      const restored = agreed(people);
+      holds(oracle, restored);
+      expect(restored.map((token) => (token.kind === "boundary" ? token.attrs : ""))).toContain(
+        '[["level",2],["type","heading"]]',
+      );
+      first!.retypeAt(4, { type: "codeBlock" });
+      deliver(people, arrive, random(7));
+      expect(
+        agreed(people)
+          .filter((token) => token.kind === "boundary")
+          .at(-1),
+      ).toMatchObject({
+        attrs: '[["level",2],["type","codeBlock"]]',
+      });
+    }
+  });
+
+  it("brings an inline item back whole when its delete is undone after someone changed it", () => {
+    const base = new Y.Doc();
+    base.clientID = 1;
+    const text = base.getText(FIELD);
+    text.insertEmbed(0, boundary({ type: "paragraph" }), {});
+    text.insert(1, "x", {});
+    const math = new Y.XmlElement("mathInline");
+    math.setAttribute("tex", "E=mc^2");
+    text.insertEmbed(2, math, {});
+    const { people } = team(count, Y.encodeStateAsUpdate(base));
+    base.destroy();
+    people[0]!.doc.transact(() => people[0]!.text.delete(2, 1), LOCAL);
+    people[1]!.retypeAt(2, { tex: "E=mc^2 + p^2c^2" });
+    deliver(people, arrive, random(7));
+    people[0]!.undo();
+    deliver(people, arrive, random(7));
+    expect(agreed(people).at(-1)).toEqual(
+      expect.objectContaining({ kind: "atom", attrs: '[["tex","E=mc^2"]]' }),
+    );
+  });
+
   it("keeps marks where they were through a split and a join", () => {
     const { oracle, people } = team(count, note("One one", "Two two two"));
     people[0]!.markAt(3, 10, "bold");
@@ -555,7 +699,12 @@ describe.each(setups)("%i people, changes arriving %s", (count, arrive) => {
 function randomRun(seed: number, count: number, arrive: Arrive, rounds: number, gc: boolean) {
   const next = random(seed);
   const pick = (below: number) => Math.floor(next() * below);
-  const { oracle, people } = team(count, note("abcd", "efgh", "ijkl"), gc);
+  const { oracle, people } = team(
+    count,
+    note("abcd", "efgh", "ijkl"),
+    gc,
+    process.env.BODY_SEQUENCE_STEPS === "each" ? "each change" : "grouped",
+  );
   const log: string[] = [];
   let letter = 0;
   try {
@@ -569,6 +718,10 @@ function randomRun(seed: number, count: number, arrive: Arrive, rounds: number, 
           const chars = tokens.flatMap((token, index) => (token.kind === "char" ? [index] : []));
           const roll = next();
           const say = (what: string) => log.push(`${String(who)}:${what}`);
+          if (next() < 0.4) {
+            say("step");
+            each.newStep();
+          }
           if (roll < 0.25) {
             const first = tokens[0]?.kind === "boundary" ? 1 : 0;
             const at = first + pick(tokens.length - first + 1);
@@ -636,12 +789,13 @@ const RANDOM_SETUPS: [number, Arrive, number][] = [
   [4, "after a reconnect", 3],
 ];
 const SEEDS = Number(process.env.BODY_SEQUENCE_SEEDS ?? 300);
+const FIRST = Number(process.env.BODY_SEQUENCE_FIRST ?? 1);
 
 it.each(RANDOM_SETUPS)(
   "random joins, splits, typing, marks and undo by %i people, arriving %s, %i rounds",
   (count, arrive, rounds) => {
     let implicit = 0;
-    for (let seed = 1; seed <= SEEDS; seed++)
+    for (let seed = FIRST; seed <= SEEDS; seed++)
       for (const gc of [true, false])
         implicit += randomRun(seed, count, arrive, rounds, gc).implicit;
     console.log(
