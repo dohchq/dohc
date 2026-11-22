@@ -1,0 +1,26 @@
+{
+ "seed": -136,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-empty-list-items",
+ "updates": [
+  "ARvz5vSeDgAHAQRib2R5AwtvcmRlcmVkTGlzdAcA8+b0ng4AAwhsaXN0SXRlbYfz5vSeDgEDCGxpc3RJdGVtBwDz5vSeDgIDCXBhcmFncmFwaAcA8+b0ng4DBgQA8+b0ng4EAWGH8+b0ng4CAwhsaXN0SXRlbYfz5vSeDgYDCGxpc3RJdGVtBwDz5vSeDgcDCXBhcmFncmFwaAcA8+b0ng4IBgQA8+b0ng4JAWIoAPPm9J4OAAVzdGFydAF9AYfz5vSeDgADCHRhc2tMaXN0BwDz5vSeDgwDCHRhc2tJdGVtBwDz5vSeDg0DCXBhcmFncmFwaAcA8+b0ng4OBgQA8+b0ng4PAWMoAPPm9J4ODQdjaGVja2VkAXmH8+b0ng4NAwh0YXNrSXRlbSgA8+b0ng4SB2NoZWNrZWQBeYfz5vSeDhIDCHRhc2tJdGVtKADz5vSeDhQHY2hlY2tlZAF4h/Pm9J4OFAMIdGFza0l0ZW0HAPPm9J4OFgMJcGFyYWdyYXBoBwDz5vSeDhcGBADz5vSeDhgBZCgA8+b0ng4WB2NoZWNrZWQBeQA=",
+  "AQHz5vSeDhsoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcQZW1wdHktbGlzdC1pdGVtcwA="
+ ],
+ "mergedUpdateB64": "ARzz5vSeDgAHAQRib2R5AwtvcmRlcmVkTGlzdAcA8+b0ng4AAwhsaXN0SXRlbYfz5vSeDgEDCGxpc3RJdGVtBwDz5vSeDgIDCXBhcmFncmFwaAcA8+b0ng4DBgQA8+b0ng4EAWGH8+b0ng4CAwhsaXN0SXRlbYfz5vSeDgYDCGxpc3RJdGVtBwDz5vSeDgcDCXBhcmFncmFwaAcA8+b0ng4IBgQA8+b0ng4JAWIoAPPm9J4OAAVzdGFydAF9AYfz5vSeDgADCHRhc2tMaXN0BwDz5vSeDgwDCHRhc2tJdGVtBwDz5vSeDg0DCXBhcmFncmFwaAcA8+b0ng4OBgQA8+b0ng4PAWMoAPPm9J4ODQdjaGVja2VkAXmH8+b0ng4NAwh0YXNrSXRlbSgA8+b0ng4SB2NoZWNrZWQBeYfz5vSeDhIDCHRhc2tJdGVtKADz5vSeDhQHY2hlY2tlZAF4h/Pm9J4OFAMIdGFza0l0ZW0HAPPm9J4OFgMJcGFyYWdyYXBoBwDz5vSeDhcGBADz5vSeDhgBZCgA8+b0ng4WB2NoZWNrZWQBeSgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxBlbXB0eS1saXN0LWl0ZW1zAA==",
+ "stateVectorB64": "AfPm9J4OHA==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "listItem",
+   "orderedList",
+   "paragraph",
+   "taskItem",
+   "taskList",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "1. a\n2. b\n\n- [ ] c\n- [ ] d\n"
+ }
+}
