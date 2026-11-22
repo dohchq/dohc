@@ -1324,7 +1324,6 @@
   "packages/workspace-core/src/fsEntryIdentity.test.ts": 0.05,
   "packages/workspace-core/src/hash.test.ts": 0.055,
   "packages/workspace-core/src/html.test.ts": 0.05,
-  "packages/workspace-core/src/mergeMarkdown.test.ts": 0.059,
   "packages/workspace-core/src/ownedFile.test.ts": 0.106,
   "packages/workspace-core/src/paths.test.ts": 0.162,
   "packages/workspace-core/src/records.test.ts": 0.05,
