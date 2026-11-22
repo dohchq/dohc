@@ -31,6 +31,7 @@ async function relayFetch(
   relay: SyncRelayConnection,
   path: string,
   init: RequestInit = {},
+  errors: Record<number, (response: Response) => Promise<Error>> = {},
 ): Promise<unknown> {
   const response = await relayRequest({
     relay,
@@ -39,10 +40,20 @@ async function relayFetch(
     // The relay answers one generic 404 for every lookup failure — a share
     // that ended, a proposal that never existed, and a workspace this account
     // does not own all read the same, so none of them can be told apart here.
-    errors: { 404: () => new ShareUnavailableError() },
+    errors: { 404: () => new ShareUnavailableError(), ...errors },
     label: "Proposal request",
   });
   return (await response.json()) as unknown;
+}
+
+async function liveFileRefusal(response: Response): Promise<Error> {
+  const body = (await response.json().catch(() => null)) as {
+    code?: unknown;
+    error?: unknown;
+  } | null;
+  return body?.code === "proposal-file-live" && typeof body.error === "string"
+    ? new Error(body.error)
+    : new Error(`Proposal request failed (${response.status})`);
 }
 
 function record(value: unknown, at: string): Record<string, unknown> {
@@ -309,6 +320,7 @@ export async function settleShareProposal(input: {
       input.proposalId,
     )}/${input.decision}`,
     { method: "POST" },
+    { 409: liveFileRefusal },
   );
   return parseSettlement(body, `${input.decision} response`, input.proposalId);
 }

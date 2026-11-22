@@ -794,6 +794,7 @@ export interface SyncRelayStorage {
     workspaceId: string,
     path: string,
   ): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  isHostedForLiveEditing(workspaceId: string, objectId: string): boolean;
   readServiceHostEnrollmentByObjectId(
     workspaceId: string,
     objectId: string,

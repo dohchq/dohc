@@ -25,6 +25,7 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   "host-moved": 409,
   "host-start-failed": 409,
   "host-not-loaded": 409,
+  "proposal-file-live": 409,
   dependents_changed: 409,
   discussion_limit_reached: 413,
   discussion_rate_limited: 429,
@@ -118,6 +119,8 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
     "Live editing didn't stop. The server couldn't load this document and may hold recent edits. Contact the server's operator, then try again.",
   "host-not-loaded":
     "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.",
+  "proposal-file-live":
+    "dohc could not accept these changes because a file in them is being edited live. Stop live editing for it in Live documents, then accept them.",
   dependents_changed: "active dependent grants changed",
   discussion_limit_reached: "discussion message limit reached",
   discussion_rate_limited: "discussion message rate limit reached",

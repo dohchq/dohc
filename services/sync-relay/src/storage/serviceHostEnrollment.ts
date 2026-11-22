@@ -577,6 +577,20 @@ export function isResumedHostSave(
     .get(workspaceId, save.objectId);
   return stored !== undefined && source?.path === save.path && source.digest === stored;
 }
+/** Whether the server hosts the document for live editing, or is still letting go of it after a Stop. */
+export function isHostedForLiveEditing(
+  storage: StorageContext,
+  workspaceId: string,
+  objectId: string,
+): boolean {
+  return (
+    storage.db
+      .prepare(
+        `SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND retired_at_ms IS NULL`,
+      )
+      .get(workspaceId, objectId) !== undefined
+  );
+}
 export function bindStoppedNoteClient(
   storage: StorageContext,
   input: { workspaceId: string; userId: string; payloadJson: string; authors: LiveAuthorSnapshot },

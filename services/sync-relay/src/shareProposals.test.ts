@@ -723,6 +723,76 @@ describe("accept, decline, and withdraw", () => {
   });
 });
 
+describe("a proposal on a note being edited live", () => {
+  it("stays open until live editing for the note has stopped, then is accepted", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    const head = await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    await uploadShareBlob(h, shareId, "recipient two");
+    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
+    const proposalId = (await json(submitted)).proposalId as string;
+    const hosting = hostForLiveEditing(storage, "object-in", "docs/in.md");
+
+    const refused = await settle(h, proposalId, "accept");
+    expect(refused.status).toBe(409);
+    expect(await json(refused)).toMatchObject({
+      code: "proposal-file-live",
+      error:
+        "dohc could not accept these changes because docs/in.md is being edited live. Stop live editing for it in Live documents, then accept them.",
+    });
+    expect(await granter.sharedMoments(shareId), "nothing reaches the owner's log").toEqual([]);
+    expect((await reviewRows(h)).map((row) => row.proposalId)).toEqual([proposalId]);
+
+    hosting.retireRequested();
+    expect(
+      (await settle(h, proposalId, "accept")).status,
+      "the server is still letting go of the note",
+    ).toBe(409);
+
+    hosting.retired();
+    expect((await settle(h, proposalId, "accept")).status).toBe(200);
+    expect((await granter.sharedMoments(shareId)).map((moment) => moment.objectId)).toEqual([
+      "object-in",
+    ]);
+  });
+
+  it("names how many files are being edited live", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    const one = await granter.write("object-in", "docs/in.md", "granter one");
+    const two = await granter.write("object-two", "docs/two.md", "granter two");
+    const three = await granter.write("object-three", "docs/three.md", "granter three");
+    const shareId = await createShare(h, "edit");
+    await uploadShareBlob(h, shareId, "recipient two");
+    const submitted = await submit(h, shareId, [
+      change({ basedOnBlobSha256: one.blobSha256 }),
+      change({
+        basedOnPath: "docs/two.md",
+        afterPath: "docs/two.md",
+        basedOnBlobSha256: two.blobSha256,
+      }),
+      change({
+        basedOnPath: "docs/three.md",
+        afterPath: "docs/three.md",
+        basedOnBlobSha256: three.blobSha256,
+      }),
+    ]);
+    expect(submitted.status, await submitted.clone().text()).toBe(200);
+    const proposalId = (await json(submitted)).proposalId as string;
+    hostForLiveEditing(storage, "object-in", "docs/in.md");
+    hostForLiveEditing(storage, "object-three", "docs/three.md");
+
+    expect((await json(await settle(h, proposalId, "accept"))).error).toBe(
+      "dohc could not accept these changes because docs/in.md and 1 more file are being edited live. Stop live editing for them in Live documents, then accept them.",
+    );
+  });
+});
+
 describe("what an open proposal survives", () => {
   it("keeps its content out of the unreferenced-blob sweep", async () => {
     // A proposed change is not in the log — that is the whole point of holding
@@ -868,6 +938,37 @@ describe("who may do what", () => {
 
 // There is no downgrade route yet, so the grant is narrowed directly. The
 // gates must read the current access rather than the request's starting value.
+// The rows the server keeps while it hosts a note for live editing: the note's live lineage and
+// the activation that hosts it. A Stop first asks the activation to retire, then retires it.
+function hostForLiveEditing(storage: SyncRelayStorage, objectId: string, path: string) {
+  const db = (
+    storage as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }
+  ).db;
+  const lineageClaimId = sha256(`lineage ${objectId}`);
+  const activationId = `activation-${objectId}`;
+  db.prepare(
+    `INSERT INTO sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id,current_path,baseline_moment_relay_seq,
+      baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes,lineage_state,admission_state,restore_fence_generation,registered_at_ms)
+      VALUES (?,'main',?,?,?,1,?,1,?,x'0000','current','open',7,0)`,
+  ).run(WORKSPACE, objectId, lineageClaimId, path, "b".repeat(64), lineageClaimId);
+  db.prepare(
+    `INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+      source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes) VALUES ('test',?,?,'main',?,?,'{}','{}',?,x'0000',?,'{}',1)`,
+  ).run(activationId, WORKSPACE, objectId, lineageClaimId, lineageClaimId, GRANTER);
+  return {
+    retireRequested() {
+      db.prepare(
+        `UPDATE sync_relay_service_activations SET retire_requested_at_ms=5000,retire_restore_generation=0,retire_accepted_cursor=0 WHERE activation_id=?`,
+      ).run(activationId);
+    },
+    retired() {
+      db.prepare(
+        `UPDATE sync_relay_service_activations SET retired_at_ms=6000,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?`,
+      ).run(activationId);
+    },
+  };
+}
+
 function narrowToComment(storage: SyncRelayStorage, shareId: string): void {
   (storage as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db
     .prepare(
