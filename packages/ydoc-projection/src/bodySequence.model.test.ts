@@ -111,7 +111,12 @@ function person(
     trackedOrigins: new Set([LOCAL]),
     captureTimeout: Number.MAX_SAFE_INTEGER,
     ignoreRemoteMapChanges: true,
-    deleteFilter: (item) => item.parentSub === null,
+    deleteFilter: (item) =>
+      !(
+        item.parent instanceof Y.XmlElement &&
+        item.parent.nodeName === BLOCK &&
+        item.parentSub !== null
+      ),
   });
   const sent: Uint8Array[] = [];
   doc.on("update", (update: Uint8Array, origin: unknown) => {

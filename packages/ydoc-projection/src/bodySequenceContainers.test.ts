@@ -71,7 +71,13 @@ function person(baseline: Uint8Array, clientID: number) {
   const history = new Y.UndoManager([text, records], {
     trackedOrigins: new Set([LOCAL]),
     ignoreRemoteMapChanges: true,
-    deleteFilter: (item) => item.parentSub === null,
+    deleteFilter: (item) =>
+      item.parent !== records &&
+      !(
+        item.parent instanceof Y.XmlElement &&
+        item.parent.nodeName === BLOCK_ELEMENT &&
+        item.parentSub !== null
+      ),
   });
   const changes = () => text.toDelta() as Change[];
   return {
