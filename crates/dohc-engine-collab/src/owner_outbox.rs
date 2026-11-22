@@ -2915,6 +2915,7 @@ pub(crate) fn entry_credit(
     agent_run_id: Option<String>,
     automation: Option<String>,
     person: Option<i64>,
+    person_id: &str,
 ) -> Result<EntryCredit, OwnerOutboxError> {
     let person = match person {
         None => false,
@@ -2951,7 +2952,7 @@ pub(crate) fn entry_credit(
         )
     } else if person {
         (
-            Some("local-person".into()),
+            Some(person_id.to_owned()),
             Some(dohc_engine_domain::ChangeAttribution {
                 actor_kind: dohc_engine_domain::ChangeActorKind::Human,
                 on_behalf_of: None,

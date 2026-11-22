@@ -835,6 +835,7 @@ it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
                 : client.ownerYDocRelease(
                     request,
                     binding as import("@dohc/live-session-contract").LiveObjectBinding,
+                    "local-person",
                     { acceptedCursor: acceptedCursor! },
                   );
             }),

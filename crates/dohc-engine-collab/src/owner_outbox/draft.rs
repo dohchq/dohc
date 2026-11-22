@@ -3621,9 +3621,15 @@ mod tests {
         .unwrap();
         assert!(matches!(
             store.write_with(&NoFaults, |tx| {
-                release::release_in_tx(tx, &observed.binding, Some(6), None, 22, |_, _, _, _, _| {
-                    Ok(())
-                })
+                release::release_in_tx(
+                    tx,
+                    &observed.binding,
+                    Some(6),
+                    None,
+                    "person",
+                    22,
+                    |_, _, _, _, _| Ok(()),
+                )
             }),
             Err(OwnerOutboxError::StopConflict)
         ));
@@ -4242,6 +4248,7 @@ mod tests {
                         &observed.binding,
                         Some(9),
                         None,
+                        "person",
                         22,
                         |_, _, _, _, _| Ok(()),
                     )

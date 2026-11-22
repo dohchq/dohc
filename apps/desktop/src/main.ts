@@ -7492,6 +7492,7 @@ const backgroundLiveStart = createBackgroundLiveStart({
 
 const desktopEngine = createDesktopEngine({
   resourcesBasePath,
+  localPersonId: localUserId,
   onWorkspaceOpened: (workspaceId) => {
     const workspace = findWorkspace(workspaceId);
     // A window's reads that came before this open, such as its settings, read again.

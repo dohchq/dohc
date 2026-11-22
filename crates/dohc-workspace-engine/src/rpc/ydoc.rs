@@ -750,6 +750,7 @@ impl EngineService {
             document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
             accepted_cursor: Option<i64>,
             kept_snapshot: Option<String>,
+            person_id: Option<String>,
         }
         if matches!(action, "pause" | "copyWritten") {
             let handle = handle.ok_or_else(workspace_unavailable)?;
@@ -758,6 +759,11 @@ impl EngineService {
         let params: Params = parse(params)?;
         // A release names its relay cut, a Try again only its kept edits.
         if (action == "release") != params.binding.is_some()
+            || (action == "release") != params.person_id.is_some()
+            || params
+                .person_id
+                .as_deref()
+                .is_some_and(|person| dohc_engine_collab::validate_actor_origin_id(person).is_err())
             || (action == "release")
                 != (params.accepted_cursor.is_some() || params.kept_snapshot.is_some())
             || params.kept_snapshot.as_deref().is_some_and(|digest| {
@@ -803,6 +809,7 @@ impl EngineService {
                 params.document,
                 params.accepted_cursor,
                 params.kept_snapshot,
+                params.person_id,
                 action.into(),
                 now_ms()?,
                 Arc::new(NoFaults),
