@@ -485,10 +485,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       enrollment: serviceHostEnrollmentStorage.ServiceHostEnrollment,
     ) => serviceHostEnrollmentStorage.LiveNoteStartFailure,
   ) {
-    const result = serviceHostEnrollmentStorage.failLapsedLiveNoteStarts(this, nowMs, cause);
-    for (const enrollment of result)
-      notifyDesktopReadiness(this, { workspaceId: enrollment.workspaceId, path: enrollment.path });
-    return result;
+    return serviceHostEnrollmentStorage.failLapsedLiveNoteStarts(this, nowMs, cause);
   }
   reclaimIdleLiveDocuments(nowMs: number) {
     const result = serviceHostEnrollmentStorage.reclaimIdleLiveDocuments(this, nowMs);

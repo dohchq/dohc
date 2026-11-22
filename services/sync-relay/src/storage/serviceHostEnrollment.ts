@@ -750,7 +750,7 @@ export function failLapsedLiveNoteStarts(
     .filter((enrollment) => covered(storage, enrollment));
   return lapsed.flatMap((enrollment) => {
     const { workspaceId, objectId } = enrollment;
-    return moveLiveNote(storage, {
+    return storage.moveLiveNote({
       workspaceId,
       objectId,
       generation: enrollment.note.generation,

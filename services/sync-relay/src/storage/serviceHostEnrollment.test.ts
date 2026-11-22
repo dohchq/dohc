@@ -1,4 +1,5 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { observeDesktopReadiness } from "../desktopReadinessChanges";
 import {
   fixture as ticketFixture,
   binding,
@@ -1417,6 +1418,54 @@ it("leaves a starting note whose Edit access ended to its release, which records
   expect(noteOf(f.storage).state).toBe("starting");
   f.release(binding.objectId);
   expect(noteOf(f.storage)).toMatchObject({ state: "off", reason: "access-ended", cause: null });
+});
+
+it("tells the waits of a note its start clock turned off, even when a later note's turn fails", async () => {
+  const f = await fixture();
+  f.enroll();
+  f.seed(scope.workspaceId, "b-object", "docs/b.md", "b-share");
+  f.enroll({ path: "docs/b.md", shareId: "b-share" });
+  const changed = vi.fn();
+  const stops = [binding.currentPath, "docs/b.md"].map((path) =>
+    observeDesktopReadiness(
+      f.storage,
+      { shareId: `wait:${path}`, workspaceId: scope.workspaceId, path },
+      changed,
+    ),
+  );
+  try {
+    let calls = 0;
+    expect(() =>
+      f.storage.failLapsedLiveNoteStarts(10 + LIVE_NOTE_START_MAX_MS, () => {
+        if (calls++ > 0) throw new Error("No cause.");
+        return "failing";
+      }),
+    ).toThrow("No cause.");
+    await Promise.resolve();
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {
+    for (const stop of stops) stop();
+  }
+});
+
+it.each([
+  ["retiring", "retire_requested_at_ms=5,retire_restore_generation=0,retire_accepted_cursor=1"],
+  [
+    "retired",
+    "retire_requested_at_ms=5,retire_restore_generation=0,retire_accepted_cursor=1,retired_at_ms=6,retired_boundary_json='{}',state_bytes=NULL",
+  ],
+])("fills a note whose completed activation is %s as starting, not live", async (_, retire) => {
+  const f = await fixture();
+  f.enroll();
+  retainServiceActivation(f.raw, key.namespace, true);
+  f.raw.exec(`UPDATE sync_relay_service_activations SET ${retire}`);
+  downgradeToV4(f);
+  const reopened = openSyncRelayStorage(f.path, f.config);
+  try {
+    expect(noteOf(reopened)).toMatchObject({ generation: 1, state: "starting" });
+  } finally {
+    reopened.close();
+  }
 });
 
 it("fails a start 10 minutes after the start the record holds, also across a relay restart", async () => {

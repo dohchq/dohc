@@ -949,6 +949,22 @@ it("turns a note with no live-editing history off as one without it, before its 
   );
 });
 
+it("turns a note whose history arrived after its host found none off as failing, not as one without it", async () => {
+  const f = await fixture();
+  await f.waitStarted(1);
+  await f.waitUpdate(["docs/a.md"]);
+  f.block(binding.objectId, "without-lineage");
+  vi.spyOn(f.storage, "mainLiveLineageExists").mockReturnValue(true);
+  f.clock.now = 10 + LIVE_NOTE_START_MAX_MS;
+  await vi.waitFor(
+    () => {
+      f.host.reconcile();
+      expect(f.enrollment()!.note).toMatchObject({ state: "off", cause: "failing" });
+    },
+    { timeout: 10_000 },
+  );
+});
+
 it("turns a note its host refuses off as refused, also when its start clock ran out in the same pass", async () => {
   const f = await fixture();
   await f.waitStarted(1);
