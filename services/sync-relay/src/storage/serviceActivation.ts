@@ -74,6 +74,8 @@ export class ServiceActivationDamaged extends Error {
 }
 /** Validation refused the captured history. The message is the validator's, so the owner sees only that it was refused. */
 export class ServiceActivationRefused extends Error {}
+/** Validation refused the captured baseline itself, which every capture of the same state repeats. */
+export class ServiceActivationBaselineRefused extends ServiceActivationRefused {}
 /** A capture past the relay's configured byte budget. */
 export class ServiceActivationCaptureOverBudget extends Error {
   constructor() {
@@ -901,7 +903,7 @@ export class ServiceActivationStore {
       });
     const foldPage: OrdinaryFoldValidator = async (work, signal) => {
       const result = await input.validate(work, signal);
-      if (result.kind === "accepted")
+      if (result.kind === "accepted" || result.kind === "baseline-refused")
         throw new Error("Ordinary fold validation answered for an activation.");
       return result;
     };
@@ -951,6 +953,8 @@ export class ServiceActivationStore {
       throw new ServiceActivationHistoryOverBudget(validation.message);
     if (validation.kind === "folded")
       throw new Error("Ordinary activation validation answered for a fold.");
+    if (validation.kind === "baseline-refused")
+      throw new ServiceActivationBaselineRefused(validation.message);
     if (validation.kind !== "accepted") throw new ServiceActivationRefused(validation.message);
     const base = validation.baseline;
     return this.storage.tx(() => {

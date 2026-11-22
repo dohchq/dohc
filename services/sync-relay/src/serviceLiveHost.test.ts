@@ -28,7 +28,10 @@ import type { StorageContext } from "./storage/context.js";
 import { readServiceActivationRetirement } from "./storage/serviceActivationRetirement.js";
 import { type ServiceHostRetirementPreparation } from "./storage/serviceHostEnrollment.js";
 import { preparedStop } from "./liveTickets.test-helper.js";
-import { ServiceActivationStore } from "./storage/serviceActivation.js";
+import {
+  ServiceActivationBaselineRefused,
+  ServiceActivationStore,
+} from "./storage/serviceActivation.js";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery.js";
 import { initialAcceptedHistoryDigest } from "./liveAcceptedHistory.js";
 import { nativeRestoreFence } from "./storage/liveRestoreOperation.js";
@@ -5969,13 +5972,18 @@ async function restartEmpty(o: Awaited<ReturnType<typeof emptyServiceHost>>) {
 it.each([
   ["refused", () => new ServiceActivationTooLarge()],
   [
+    "refused",
+    () =>
+      new ServiceActivationBaselineRefused("Native activation does not match the ordinary source."),
+  ],
+  [
     "history-over-budget",
     () =>
       new ServiceActivationHistoryOverBudget(
         "Ordinary activation history exceeds its configured entry budget.",
       ),
   ],
-] as const)("keeps a %s block through an idle unload", async (block, refusal) => {
+] as const)("keeps a %s block through an idle unload (case %#)", async (block, refusal) => {
   let driver: ServiceActivationDriver | undefined;
   const addTarget = ServiceActivationDriver.prototype.addTarget;
   vi.spyOn(ServiceActivationDriver.prototype, "addTarget").mockImplementation(function (

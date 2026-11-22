@@ -30,6 +30,7 @@ import {
   ServiceActivationBusy,
   ServiceActivationCaptureOverBudget,
   ServiceActivationHistoryOverBudget,
+  ServiceActivationBaselineRefused,
   ServiceActivationRefused,
   ServiceActivationStaleCut,
   ServiceActivationTooLarge,
@@ -1457,17 +1458,20 @@ export class ServiceActivationDriver {
             },
           });
         } catch (error) {
-          const tooLarge = error instanceof ServiceActivationTooLarge,
+          const lasting =
+              error instanceof ServiceActivationTooLarge ||
+              error instanceof ServiceActivationBaselineRefused,
             overBudget = error instanceof ServiceActivationHistoryOverBudget;
           if (
             !(error instanceof ServiceActivationStaleCut) &&
             !(error instanceof ServiceActivationBusy) &&
-            !tooLarge &&
+            !lasting &&
             !overBudget
           )
             throw error;
-          // The same capture would run its validation out of memory again, so it waits for its owner.
-          if (tooLarge) this.#blocked.set(key, { reason: "refused" });
+          // The same capture would run its validation out of memory again, or refuse its baseline again, so it waits for
+          // its owner.
+          if (lasting) this.#blocked.set(key, { reason: "refused" });
           await releaseStale();
           // A cut that keeps going stale would repeat the capture on every pass, and a history past the read budget refuses
           // until it changes, so each waits as a failure does, longer each time. Only time or the owner's Resume ends the wait.
