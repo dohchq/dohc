@@ -38,7 +38,7 @@ pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece
     for piece in &mut pieces {
         if let InlinePiece::Text(run) = piece {
             if !run.marks.iter().any(|mark| mark.kind == MarkKind::Code) {
-                run.text = decoded_references(&run.text);
+                run.text = replaced_references(&run.text, true);
             }
         }
     }
@@ -86,7 +86,7 @@ fn unsure_syntax(text: &str) -> bool {
 // text holding them reads back as written.
 const WRITTEN_REFERENCES: [(&str, char); 3] = [("&amp;", '&'), ("&lt;", '<'), ("&gt;", '>')];
 
-fn decoded_references(text: &str) -> String {
+fn replaced_references(text: &str, decode: bool) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find('&') {
@@ -97,7 +97,9 @@ fn decoded_references(text: &str) -> String {
             .find(|(reference, _)| rest.starts_with(reference))
         {
             Some((reference, character)) => {
-                out.push(*character);
+                if decode {
+                    out.push(*character);
+                }
                 rest = &rest[reference.len()..];
             }
             None => {
@@ -114,13 +116,7 @@ fn unsure_piece(piece: &InlinePiece) -> bool {
     match piece {
         InlinePiece::Text(run) => {
             (!run.marks.iter().any(|mark| mark.kind == MarkKind::Code)
-                && unsure_syntax(
-                    &WRITTEN_REFERENCES
-                        .iter()
-                        .fold(run.text.clone(), |text, (reference, _)| {
-                            text.replace(reference, "")
-                        }),
-                ))
+                && unsure_syntax(&replaced_references(&run.text, false)))
                 || run.marks.iter().any(|mark| {
                     mark.kind == MarkKind::Link
                         && ["href", "title"]

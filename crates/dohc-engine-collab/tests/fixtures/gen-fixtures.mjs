@@ -1360,7 +1360,7 @@ function makeReaderParity() {
     "[a](https://e.example)", "[b](u \"t\")", "[**c**](x.md)", "![alt](x.png)",
     "![p](https://e.example/p.png \"t\")", "[", "]", "](", "![", "`code`",
     "*em*", "**strong**", "~~del~~", "_u_", "__s__", "1.", "*a*b", "x_y_z",
-    "[`c`](u)", "[a `b` c](https://e.example)",
+    "[`c`](u)", "[a `b` c](https://e.example)", "&amp;", "&lt;", "&gt;",
   ];
   const curated = [
     "plain text", "*em* and **strong** and ***both***", "_em_ and __strong__",
@@ -1386,10 +1386,19 @@ function makeReaderParity() {
     "*a&amp;*b and **&lt;**x", "# Title &amp; *x*", "&lt;b&gt;hidden&lt;/b&gt; *x*", "x &amp *y*",
     "&gt; not a quote *x*",
   ];
+  const read = (markdown) => getDohcYDocBodyFragment(markdownToYDoc(markdown)).toArray().flatMap(reading);
+  const accepted = (markdown) => {
+    try {
+      read(markdown);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const texts = [
     ...curated,
     ...Array.from({ length: 1500 }, (_, index) =>
-      `${index % 5 === 0 ? "# " : ""}${phrase(INLINE, index % 10 === 0 ? 40 : 12)}`),
+      `${index % 5 === 0 ? "# " : ""}${phrase(INLINE, index % 10 === 0 ? 40 : 12)}`).filter(accepted),
   ];
   return {
     seed: -5,
@@ -1397,10 +1406,7 @@ function makeReaderParity() {
     kind: "readerParity",
     updates: [],
     expected: {
-      cases: texts.map((markdown) => ({
-        markdown,
-        reading: getDohcYDocBodyFragment(markdownToYDoc(markdown)).toArray().flatMap(reading),
-      })),
+      cases: texts.map((markdown) => ({ markdown, reading: read(markdown) })),
     },
   };
 }
