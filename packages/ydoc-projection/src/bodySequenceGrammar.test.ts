@@ -2,15 +2,14 @@ import { describe, expect, it } from "vitest";
 import { Fragment, type Node as ProseMirrorNode, type NodeType } from "@tiptap/pm/model";
 import { getDohcProseMirrorSchema, parseRichdocMarkdown } from "./import-export.js";
 import {
-  boundaryOfLeaf,
   flattenBody,
-  leafOfBoundary,
   leavesOfSequence,
   readBodyLeaves,
-  type SequencePiece,
+  writtenLeaves,
   type SequenceFrame,
   type SequenceInline,
   type SequenceLeaf,
+  type SequencePiece,
 } from "./bodySequenceGrammar.js";
 
 const schema = getDohcProseMirrorSchema();
@@ -43,27 +42,61 @@ const blocks = Object.values(schema.nodes).filter(
 );
 const containers = blocks.filter((type) => !type.isTextblock && !type.isLeaf);
 const leafBlocks = blocks.filter((type) => type.isTextblock || type.isLeaf);
-const inlineAtoms = Object.values(schema.nodes).filter(
+const inlineItems = Object.values(schema.nodes).filter(
   (type) => type.isInline && type.isLeaf && !type.isText,
 );
+const itemsOf = (leaves: readonly SequenceLeaf[]) =>
+  leaves
+    .flatMap((leaf) => leaf.inline)
+    .flatMap((piece) =>
+      "atom" in piece && inlineItems.some((type) => type.name === piece.atom) ? [piece.atom] : [],
+    );
+function itemsIn(doc: ProseMirrorNode) {
+  const items: string[] = [];
+  doc.descendants((node) => {
+    if (inlineItems.includes(node.type)) items.push(node.type.name);
+  });
+  return items;
+}
+
+const names = [...Object.keys(schema.nodes), "nonsense", ""];
+const marks = [...Object.keys(schema.marks), "nonsense"];
+const anyValue = (next: Next): unknown =>
+  pick(next, [
+    0,
+    2,
+    70,
+    -1,
+    1.5,
+    2n,
+    "x",
+    "",
+    true,
+    null,
+    [],
+    [1, "a"],
+    {},
+    { nested: { deep: [1] } },
+    new Uint8Array([1, 2]),
+  ]);
+const anyAttrs = (next: Next) => {
+  const attrs: Record<string, unknown> = {};
+  const keys = ["level", "checked", "start", "colspan", "colwidth", "fold", "src", "tex", "x"];
+  while (next() < 0.6) attrs[pick(next, keys)] = anyValue(next);
+  return attrs;
+};
+const anyMarks = (next: Next) => {
+  const on: Record<string, unknown> = {};
+  while (next() < 0.4)
+    on[pick(next, marks)] = pick(next, [true, false, {}, { href: 3 }, { href: "h" }, null, 3]);
+  return on;
+};
+const anyInlinePiece = (next: Next): SequenceInline =>
+  next() < 0.7
+    ? { text: pick(next, ["x", "word ", "\n", "", "😀"]), marks: anyMarks(next) }
+    : { atom: pick(next, names), attrs: anyAttrs(next) };
 
 describe("reading any sequence", () => {
-  const names = [...Object.keys(schema.nodes), "nonsense", ""];
-  const marks = [...Object.keys(schema.marks), "nonsense"];
-  const anyAttrs = (next: Next) =>
-    pick(next, [
-      {},
-      { level: 2 },
-      { level: "x", checked: true, colspan: 2, start: 5 },
-      { nonsense: 1 },
-      { calloutType: "warning", title: "T", fold: "+" },
-    ]);
-  const anyMarks = (next: Next) => {
-    const on: Record<string, unknown> = {};
-    while (next() < 0.4)
-      on[pick(next, marks)] = pick(next, [true, {}, { href: "https://example.com" }, null, 3]);
-    return on;
-  };
   const anyLeaf = (next: Next): SequenceLeaf => {
     const path: SequenceFrame[] = [];
     while (next() < 0.6 && path.length < 70)
@@ -73,12 +106,7 @@ describe("reading any sequence", () => {
         attrs: anyAttrs(next),
       });
     const inline: SequenceInline[] = [];
-    while (next() < 0.7)
-      inline.push(
-        next() < 0.7
-          ? { text: pick(next, ["x", "word ", "\n", "", "😀"]), marks: anyMarks(next) }
-          : { atom: pick(next, names), attrs: anyAttrs(next), marks: anyMarks(next) },
-      );
+    while (next() < 0.7) inline.push(anyInlinePiece(next));
     return {
       type: next() < 0.8 ? pick(next, leafBlocks).name : pick(next, names),
       attrs: anyAttrs(next),
@@ -86,65 +114,57 @@ describe("reading any sequence", () => {
       inline,
     };
   };
+  const reads = (seed: number, leaves: SequenceLeaf[], shown: unknown) => {
+    const doc = readBodyLeaves(schema, leaves);
+    try {
+      doc.check();
+    } catch (error) {
+      throw new Error(`seed ${String(seed)}: ${String(error)} ${JSON.stringify(shown)}`);
+    }
+    expect(lettersIn(doc), `seed ${String(seed)}`).toBe(lettersOf(leaves));
+    expect(itemsIn(doc), `seed ${String(seed)}`).toEqual(itemsOf(leaves));
+  };
 
-  it("gives a valid document that holds every letter once, in order", () => {
+  it("gives a valid document that holds every letter and inline item once, in order", () => {
     for (let seed = 1; seed <= SEEDS * 10; seed++) {
       const next = random(seed);
       const leaves = Array.from({ length: Math.floor(next() * 12) }, () => anyLeaf(next));
-      const doc = readBodyLeaves(schema, leaves);
-      try {
-        doc.check();
-      } catch (error) {
-        throw new Error(`seed ${String(seed)}: ${String(error)}\n${JSON.stringify(leaves)}`);
-      }
-      expect(lettersIn(doc), `seed ${String(seed)}`).toBe(lettersOf(leaves));
+      reads(seed, leaves, null);
     }
   });
 
-  it("gives a valid document for boundaries with any attributes", () => {
-    const anyValue = (next: Next): unknown =>
-      pick(next, [
-        0,
-        1,
-        2,
-        3,
-        70,
-        -1,
-        1.5,
-        "2",
-        null,
-        [],
-        {},
-        { t: pick(next, containers).name, id: pick(next, ["a", "b"]) },
-        { t: 3, id: "a" },
-        { t: pick(next, names) },
-        { checked: true, start: 4 },
-      ]);
-    const keys = ["type", "depth", "c0", "c1", "c2", "a.a", "a.b", "level", "x"];
+  it("gives a valid document for boundaries and container records with any values", () => {
+    const ids = ["a", "b", "c", "", "bad id", 3, null, ["a"]];
+    const boundaryKeys = ["type", "path", "level", "language", "tex", "x"];
     const leafNames = [...leafBlocks.map((type) => type.name), "nonsense"];
     for (let seed = 1; seed <= SEEDS * 10; seed++) {
       const next = random(seed);
+      const records = new Map<string, unknown>();
+      for (const id of ["a", "b", "c"]) {
+        if (next() < 0.8)
+          records.set(id, next() < 0.8 ? pick(next, containers).name : anyValue(next));
+        for (const key of ["checked", "start", "title", "fold", "colspan", "type"])
+          if (next() < 0.3) records.set(`${id}.${key}`, anyValue(next));
+      }
       const pieces: SequencePiece[] = [];
-      let letters = "";
       while (next() < 0.9) {
         if (next() < 0.5) {
-          const text = pick(next, ["x", "yz "]);
-          letters += text;
-          pieces.push({ text, marks: {} });
+          pieces.push(anyInlinePiece(next));
           continue;
         }
         const boundary: Record<string, unknown> = {};
-        while (next() < 0.8)
-          boundary[pick(next, keys)] = next() < 0.3 ? pick(next, leafNames) : anyValue(next);
+        while (next() < 0.8) {
+          const key = pick(next, boundaryKeys);
+          boundary[key] =
+            key === "path" && next() < 0.8
+              ? Array.from({ length: Math.floor(next() * 5) }, () => pick(next, ids))
+              : key === "type" && next() < 0.8
+                ? pick(next, leafNames)
+                : anyValue(next);
+        }
         pieces.push({ boundary });
       }
-      const doc = readBodyLeaves(schema, leavesOfSequence(pieces));
-      try {
-        doc.check();
-      } catch (error) {
-        throw new Error(`seed ${String(seed)}: ${String(error)} ${JSON.stringify(pieces)}`);
-      }
-      expect(lettersIn(doc), `seed ${String(seed)}`).toBe(letters);
+      reads(seed, leavesOfSequence(schema, pieces, records), pieces);
     }
   });
 
@@ -155,17 +175,47 @@ describe("reading any sequence", () => {
     });
   });
 
-  it("keeps the text that follows a block that holds no text", () => {
+  it("keeps what follows a block that holds no text as a paragraph after it", () => {
     const doc = readBodyLeaves(schema, [
-      { type: "horizontalRule", attrs: {}, path: [], inline: [{ text: "after", marks: {} }] },
+      {
+        type: "horizontalRule",
+        attrs: {},
+        path: [],
+        inline: [
+          { text: "after", marks: {} },
+          { atom: "hardBreak", attrs: {} },
+        ],
+      },
     ]);
     expect(doc.toJSON()).toEqual({
       type: "doc",
       content: [
         { type: "horizontalRule" },
-        { type: "paragraph", content: [{ type: "text", text: "after" }] },
+        { type: "paragraph", content: [{ type: "text", text: "after" }, { type: "hardBreak" }] },
       ],
     });
+  });
+
+  it("moves an inline item a code block cannot hold, and what follows it, to a paragraph", () => {
+    const doc = readBodyLeaves(schema, [
+      {
+        type: "codeBlock",
+        attrs: {},
+        path: [],
+        inline: [
+          { text: "See ", marks: { bold: {} } },
+          { atom: "wikilink", attrs: { target: "Design" } },
+          { text: "!", marks: {} },
+        ],
+      },
+    ]);
+    doc.check();
+    expect(doc.child(0).type.name).toBe("codeBlock");
+    expect(doc.child(0).textContent).toBe("See ");
+    expect(doc.child(0).firstChild!.marks).toHaveLength(0);
+    expect(doc.child(1).type.name).toBe("paragraph");
+    expect(doc.child(1).firstChild!.type.name).toBe("wikilink");
+    expect(doc.child(1).lastChild!.text).toBe("!");
   });
 
   it("starts a list item with a paragraph when its first block is not one", () => {
@@ -203,17 +253,61 @@ describe("reading any sequence", () => {
       ],
     });
   });
+
+  it("reads an attribute value its node cannot hold as the default, and a whole bigint as a number", () => {
+    const heading = (level: unknown) =>
+      readBodyLeaves(schema, [{ type: "heading", attrs: { level }, path: [], inline: [] }])
+        .firstChild!.attrs.level as unknown;
+    expect(heading(3)).toBe(3);
+    expect(heading(3n)).toBe(3);
+    expect(heading("x")).toBe(1);
+    expect(heading(9)).toBe(1);
+    expect(heading({ nested: true })).toBe(1);
+  });
+
+  it("turns a mark on only for an object, and reads code alone when code is on", () => {
+    const marksOn = (given: Record<string, unknown>) =>
+      readBodyLeaves(schema, [
+        { type: "paragraph", attrs: {}, path: [], inline: [{ text: "x", marks: given }] },
+      ]).firstChild!.firstChild!.marks.map((mark) => mark.type.name);
+    expect(marksOn({ bold: {} })).toEqual(["bold"]);
+    expect(marksOn({ bold: true, italic: false, strike: null, underline: 1 })).toEqual([]);
+    expect(marksOn({ bold: {}, code: {}, italic: {} })).toEqual(["code"]);
+    expect(marksOn({ "bold--abcdefgh": {} })).toEqual([]);
+  });
+
+  it("ends a path at an id used twice, an id with no record, or one past 64 deep", () => {
+    const records = new Map<string, unknown>([
+      ["q", "blockquote"],
+      ["l", "bulletList"],
+      ["i", "listItem"],
+    ]);
+    const depthOf = (path: unknown) => {
+      const [leaf] = leavesOfSequence(schema, [{ boundary: { path } }], records);
+      return leaf!.path.map((frame) => frame.id);
+    };
+    expect(depthOf(["q", "l", "i"])).toEqual(["q", "l", "i"]);
+    expect(depthOf(["q", "q", "l"])).toEqual(["q"]);
+    expect(depthOf(["q", "missing", "l"])).toEqual(["q"]);
+    expect(depthOf("q")).toEqual([]);
+    const deep = new Map<string, unknown>();
+    const ids = Array.from({ length: 70 }, (_, at) => `q${String(at)}`);
+    for (const id of ids) deep.set(id, "blockquote");
+    const [leaf] = leavesOfSequence(schema, [{ boundary: { path: ids } }], deep);
+    expect(leaf!.path).toHaveLength(64);
+  });
 });
 
 describe("writing a document and reading it back", () => {
-  const roundTrip = (doc: ProseMirrorNode) =>
-    readBodyLeaves(
-      schema,
-      flattenBody(doc, (_node, index) => String(index)).map((leaf) => ({
-        ...leafOfBoundary(boundaryOfLeaf(leaf)),
-        inline: leaf.inline,
-      })),
-    );
+  const roundTrip = (doc: ProseMirrorNode, idFor = (index: number) => `c${String(index)}`) => {
+    const leaves = flattenBody(doc, (_node, index) => idFor(index));
+    const written = writtenLeaves(leaves);
+    const pieces: SequencePiece[] = leaves.flatMap((leaf, at) => [
+      { boundary: written.boundaries[at]! },
+      ...leaf.inline,
+    ]);
+    return readBodyLeaves(schema, leavesOfSequence(schema, pieces, written.containers));
+  };
 
   const allowedIn = (parent: NodeType) => {
     const allowed = new Set<NodeType>();
@@ -228,14 +322,13 @@ describe("writing a document and reading it back", () => {
 
   function anyInline(next: Next, holder: NodeType): Fragment {
     const nodes: ProseMirrorNode[] = [];
-    const atoms = allowedIn(holder).filter((type) => inlineAtoms.includes(type));
+    const items = allowedIn(holder).filter((type) => inlineItems.includes(type));
     while (next() < 0.7) {
       const marked =
         holder.spec.marks === "" || next() < 0.6
           ? []
           : [pick(next, [schema.marks.bold!, schema.marks.italic!, schema.marks.strike!]).create()];
-      if (atoms.length > 0 && next() < 0.2)
-        nodes.push(pick(next, atoms).create(null, null, marked));
+      if (items.length > 0 && next() < 0.2) nodes.push(pick(next, items).create());
       else nodes.push(schema.text(pick(next, ["a", "bc ", "def"]), marked));
     }
     return Fragment.fromArray(nodes);
@@ -341,10 +434,7 @@ describe("writing a document and reading it back", () => {
       );
     const doc = schema.topNodeType.create(null, [quote("a"), quote("b")]);
     expect(roundTrip(doc).eq(doc)).toBe(true);
-    const merged = readBodyLeaves(
-      schema,
-      flattenBody(doc, () => "same"),
-    );
+    const merged = roundTrip(doc, () => "same");
     expect(merged.childCount).toBe(1);
     expect(merged.firstChild!.childCount).toBe(2);
   });

@@ -1,79 +1,125 @@
 import {
   Fragment,
   Mark,
+  type MarkType,
   type Node as ProseMirrorNode,
   type NodeType,
   type Schema,
 } from "@tiptap/pm/model";
 
 export const MAX_SEQUENCE_DEPTH = 64;
+export const BLOCK_ELEMENT = "block";
+export const CONTAINER_ID = /^[A-Za-z0-9_-]{1,32}$/;
 
 export type SequenceAttrs = Record<string, unknown>;
 export type SequenceFrame = { type: string; id: string; attrs: SequenceAttrs };
 export type SequenceInline =
   | { text: string; marks: SequenceAttrs }
-  | { atom: string; attrs: SequenceAttrs; marks: SequenceAttrs };
+  | { atom: string; attrs: SequenceAttrs };
 export type SequenceLeaf = {
   type: string;
   attrs: SequenceAttrs;
   path: SequenceFrame[];
   inline: SequenceInline[];
 };
-
 export type SequencePiece = { boundary: SequenceAttrs } | SequenceInline;
+
+/**
+ * The note's container records: `<id>` holds a container's node type and `<id>.<attribute>` one of
+ * its attributes.
+ */
+export type ContainerRecords = { get(key: string): unknown };
 
 const record = (value: unknown): SequenceAttrs | null =>
   typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as SequenceAttrs)
     : null;
 
-/** The leaf a boundary's attributes describe: its type, its own attributes and its path. */
-export function leafOfBoundary(attributes: SequenceAttrs): Omit<SequenceLeaf, "inline"> {
-  const depth = attributes.depth;
-  const frames =
-    typeof depth === "number" && Number.isInteger(depth) && depth > 0
-      ? Math.min(depth, MAX_SEQUENCE_DEPTH)
-      : 0;
-  const path: SequenceFrame[] = [];
-  for (let at = 0; at < frames; at++) {
-    const frame = record(attributes[`c${String(at)}`]);
-    if (!frame || typeof frame.t !== "string" || typeof frame.id !== "string") break;
-    path.push({ type: frame.t, id: frame.id, attrs: record(attributes[`a.${frame.id}`]) ?? {} });
-  }
-  return {
-    type: typeof attributes.type === "string" ? attributes.type : "paragraph",
-    attrs: attributes,
-    path,
-  };
-}
+const whole = (value: unknown): unknown =>
+  typeof value === "bigint" &&
+  value >= BigInt(Number.MIN_SAFE_INTEGER) &&
+  value <= BigInt(Number.MAX_SAFE_INTEGER)
+    ? Number(value)
+    : value;
 
-/** The attributes a writer gives the boundary of a leaf. */
-export function boundaryOfLeaf(leaf: Omit<SequenceLeaf, "inline">): SequenceAttrs {
-  const attributes: SequenceAttrs = { ...leaf.attrs, type: leaf.type };
-  if (leaf.path.length > 0) attributes.depth = leaf.path.length;
-  leaf.path.forEach((frame, at) => {
-    attributes[`c${String(at)}`] = { t: frame.type, id: frame.id };
-    attributes[`a.${frame.id}`] = frame.attrs;
-  });
-  return attributes;
-}
+const text = (value: unknown) => typeof value === "string";
+const textOrNone = (value: unknown) => value === null || typeof value === "string";
+const yesOrNo = (value: unknown) => typeof value === "boolean";
+const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value);
+const plain = (value: unknown) =>
+  value === null ||
+  typeof value === "string" ||
+  typeof value === "boolean" ||
+  (typeof value === "number" && Number.isFinite(value));
 
-/** The leaves a sequence holds. Text before the first boundary is a paragraph with no path. */
-export function leavesOfSequence(pieces: Iterable<SequencePiece>): SequenceLeaf[] {
-  const leaves: SequenceLeaf[] = [];
-  for (const piece of pieces) {
-    if ("boundary" in piece) leaves.push({ ...leafOfBoundary(piece.boundary), inline: [] });
-    else if (leaves.length === 0)
-      leaves.push({ type: "paragraph", attrs: {}, path: [], inline: [piece] });
-    else leaves.at(-1)!.inline.push(piece);
+const VALUE_RULES: Record<string, (value: unknown) => boolean> = {
+  "wikilink.target": text,
+  "inlineAtom.atomId": text,
+  "inlineAtom.params": text,
+  "inlineAtom.source": text,
+  "callout.calloutType": text,
+  "callout.title": text,
+  "mathInline.tex": text,
+  "mathBlock.tex": text,
+  "image.src": text,
+  "image.alt": text,
+  "escapedPunctuation.value": text,
+  "rawBlock.source": text,
+  "rawInline.source": text,
+  "bulletList.loose": yesOrNo,
+  "orderedList.loose": yesOrNo,
+  "taskList.loose": yesOrNo,
+  "taskItem.checked": yesOrNo,
+  "wikilink.label": textOrNone,
+  "image.title": textOrNone,
+  "codeBlock.language": textOrNone,
+  "orderedList.type": textOrNone,
+  "callout.fold": (value) => value === "" || value === "+" || value === "-",
+  "heading.level": (value) =>
+    typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 6,
+  "orderedList.start": finite,
+  "tableCell.colspan": finite,
+  "tableCell.rowspan": finite,
+  "tableHeader.colspan": finite,
+  "tableHeader.rowspan": finite,
+  "tableCell.colwidth": (value) =>
+    value === null ||
+    (Array.isArray(value) && value.every((width) => typeof width === "number" && width >= 0)),
+  "tableHeader.colwidth": (value) =>
+    value === null ||
+    (Array.isArray(value) && value.every((width) => typeof width === "number" && width >= 0)),
+  "tableCell.align": (value) =>
+    value === null || value === "left" || value === "right" || value === "center",
+  "tableHeader.align": (value) =>
+    value === null || value === "left" || value === "right" || value === "center",
+  "tableRow.height": (value) => value === null || (finite(value) && (value as number) > 0),
+  "link.href": textOrNone,
+  "link.target": textOrNone,
+  "link.rel": textOrNone,
+  "link.class": textOrNone,
+  "link.title": textOrNone,
+};
+
+/**
+ * The attributes of `raw` that `type` has and whose values it can hold. An attribute with a value
+ * it cannot hold reads as its default.
+ */
+function attrsFor(type: NodeType | MarkType, raw: unknown): SequenceAttrs {
+  const given = record(raw) ?? {};
+  const attrs: SequenceAttrs = {};
+  for (const key of Object.keys(type.spec.attrs ?? {})) {
+    const value = whole(given[key]);
+    if (value !== undefined && (VALUE_RULES[`${type.name}.${key}`] ?? plain)(value))
+      attrs[key] = value;
   }
-  return leaves;
+  return attrs;
 }
 
 type Shape = {
   children: Map<NodeType, Set<NodeType>>;
   leafBlock(type: NodeType | undefined): type is NodeType;
   container(type: NodeType | undefined): type is NodeType;
+  inlineItem(type: NodeType | undefined): type is NodeType;
   paragraph: NodeType;
 };
 
@@ -99,28 +145,90 @@ function shapeOf(schema: Schema): Shape {
     children,
     leafBlock: (type): type is NodeType => block(type) && (type.isTextblock || type.isLeaf),
     container: (type): type is NodeType => block(type) && !type.isTextblock && !type.isLeaf,
+    inlineItem: (type): type is NodeType =>
+      type !== undefined && type.isInline && type.isLeaf && !type.isText,
     paragraph: schema.nodes.paragraph!,
   };
   shapes.set(schema, shape);
   return shape;
 }
 
-function attrsFor(type: NodeType | Mark["type"], raw: unknown): SequenceAttrs {
-  const given = typeof raw === "object" && raw !== null ? (raw as SequenceAttrs) : {};
-  const attrs: SequenceAttrs = {};
-  for (const key of Object.keys(type.spec.attrs ?? {}))
-    if (given[key] !== undefined) attrs[key] = given[key];
-  return attrs;
+/** For each node type that holds nodes, the node types it may hold, both sorted by name. */
+export function allowedChildren(schema: Schema): Record<string, string[]> {
+  const table: Record<string, string[]> = {};
+  for (const [type, allowed] of shapeOf(schema).children)
+    if (allowed.size > 0) table[type.name] = [...allowed].map((child) => child.name).sort();
+  return Object.fromEntries(Object.entries(table).sort(([a], [b]) => a.localeCompare(b)));
 }
 
-function marksFor(schema: Schema, parent: NodeType, raw: SequenceAttrs): readonly Mark[] {
+function pathOf(schema: Schema, value: unknown, containers: ContainerRecords): SequenceFrame[] {
+  const path: SequenceFrame[] = [];
+  if (!Array.isArray(value)) return path;
+  const seen = new Set<string>();
+  for (const id of value.slice(0, MAX_SEQUENCE_DEPTH) as unknown[]) {
+    if (typeof id !== "string" || !CONTAINER_ID.test(id) || seen.has(id)) break;
+    const type = containers.get(id);
+    if (typeof type !== "string") break;
+    seen.add(id);
+    const attrs: SequenceAttrs = {};
+    for (const key of Object.keys(schema.nodes[type]?.spec.attrs ?? {})) {
+      const held = containers.get(`${id}.${key}`);
+      if (held !== undefined) attrs[key] = held;
+    }
+    path.push({ type, id, attrs });
+  }
+  return path;
+}
+
+/** The leaves a sequence holds. Content before the first boundary is a paragraph with no path. */
+export function leavesOfSequence(
+  schema: Schema,
+  pieces: Iterable<SequencePiece>,
+  containers: ContainerRecords,
+): SequenceLeaf[] {
+  const leaves: SequenceLeaf[] = [];
+  for (const piece of pieces) {
+    if ("boundary" in piece)
+      leaves.push({
+        type: typeof piece.boundary.type === "string" ? piece.boundary.type : "paragraph",
+        attrs: piece.boundary,
+        path: pathOf(schema, piece.boundary.path, containers),
+        inline: [],
+      });
+    else if (leaves.length === 0)
+      leaves.push({ type: "paragraph", attrs: {}, path: [], inline: [piece] });
+    else leaves.at(-1)!.inline.push(piece);
+  }
+  return leaves;
+}
+
+/** What a writer stores for some leaves: each boundary's attributes, and the container records. */
+export function writtenLeaves(leaves: readonly Omit<SequenceLeaf, "inline">[]): {
+  boundaries: SequenceAttrs[];
+  containers: Map<string, unknown>;
+} {
+  const containers = new Map<string, unknown>();
+  const boundaries = leaves.map((leaf) => {
+    for (const frame of leaf.path) {
+      containers.set(frame.id, frame.type);
+      for (const [key, value] of Object.entries(frame.attrs))
+        containers.set(`${frame.id}.${key}`, value);
+    }
+    const attributes: SequenceAttrs = { ...leaf.attrs, type: leaf.type };
+    if (leaf.path.length > 0) attributes.path = leaf.path.map((frame) => frame.id);
+    return attributes;
+  });
+  return { boundaries, containers };
+}
+
+/** A mark is on when its value is an object, which holds the mark's attributes. */
+function marksFor(schema: Schema, holder: NodeType, raw: SequenceAttrs): readonly Mark[] {
   let marks: readonly Mark[] = Mark.none;
   for (const [name, type] of Object.entries(schema.marks)) {
-    const value = raw[name];
-    if (value === undefined || value === null || value === false) continue;
-    marks = type.create(attrsFor(type, value)).addToSet(marks);
+    const value = record(raw[name]);
+    if (value) marks = type.create(attrsFor(type, value)).addToSet(marks);
   }
-  return parent.allowedMarks(marks);
+  return holder.allowedMarks(marks);
 }
 
 type Open = { frame: SequenceFrame; type: NodeType; children: ProseMirrorNode[] };
@@ -136,7 +244,7 @@ function closed(open: Open): ProseMirrorNode {
 
 /**
  * The document a sequence of leaves stands for. Every sequence reads as a valid document, and
- * every letter in it is in that document once.
+ * every letter and every inline item the schema knows is in that document once.
  */
 export function readBodyLeaves(schema: Schema, leaves: readonly SequenceLeaf[]): ProseMirrorNode {
   const shape = shapeOf(schema);
@@ -148,6 +256,19 @@ export function readBodyLeaves(schema: Schema, leaves: readonly SequenceLeaf[]):
       const node = closed(stack.pop()!);
       into().push(node);
     }
+  };
+  const inline = (piece: SequenceInline, holder: NodeType): ProseMirrorNode | "refused" | null => {
+    if ("text" in piece) {
+      if (piece.text === "") return null;
+      return holder.isTextblock
+        ? schema.text(piece.text, marksFor(schema, holder, piece.marks))
+        : "refused";
+    }
+    const type = schema.nodes[piece.atom];
+    if (!shape.inlineItem(type)) return null;
+    return shape.children.get(holder)!.has(type)
+      ? type.create(attrsFor(type, piece.attrs))
+      : "refused";
   };
 
   for (const leaf of leaves) {
@@ -178,43 +299,30 @@ export function readBodyLeaves(schema: Schema, leaves: readonly SequenceLeaf[]):
     closeTo(shared);
     for (const { frame, type } of path.slice(shared)) stack.push({ frame, type, children: [] });
 
-    const inlineFor = (holder: NodeType) => {
-      const allowed = shape.children.get(holder)!;
-      const nodes: ProseMirrorNode[] = [];
-      for (const piece of leaf.inline) {
-        if ("text" in piece) {
-          if (piece.text !== "")
-            nodes.push(schema.text(piece.text, marksFor(schema, holder, piece.marks)));
-          continue;
-        }
-        const type = schema.nodes[piece.atom];
-        if (!type || !type.isInline || !type.isLeaf || type.isText || !allowed.has(type)) continue;
-        nodes.push(
-          type.create(attrsFor(type, piece.attrs), null, marksFor(schema, holder, piece.marks)),
-        );
-      }
-      return Fragment.fromArray(nodes);
-    };
-
-    if (leafType.isTextblock) {
-      into().push(leafType.create(attrsFor(leafType, leaf.attrs), inlineFor(leafType)));
-      continue;
+    const own: ProseMirrorNode[] = [];
+    const after: ProseMirrorNode[] = [];
+    let spilled = false;
+    for (const piece of leaf.inline) {
+      const held = spilled ? "refused" : inline(piece, leafType);
+      if (held === "refused") {
+        spilled = true;
+        const moved = inline(piece, shape.paragraph);
+        if (moved && moved !== "refused") after.push(moved);
+      } else if (held) own.push(held);
     }
-    into().push(leafType.create(attrsFor(leafType, leaf.attrs)));
-    const after = inlineFor(shape.paragraph);
-    if (after.childCount > 0) into().push(shape.paragraph.create(null, after));
+    into().push(
+      leafType.create(attrsFor(leafType, leaf.attrs), leafType.isTextblock ? own : undefined),
+    );
+    if (after.length > 0) into().push(shape.paragraph.create(null, Fragment.fromArray(after)));
   }
   closeTo(0);
   if (top.length === 0) top.push(shape.paragraph.create());
   return schema.topNodeType.create(null, Fragment.fromArray(top));
 }
 
-const marksOf = (node: ProseMirrorNode): SequenceAttrs =>
-  Object.fromEntries(node.marks.map((mark) => [mark.type.name, { ...mark.attrs }]));
-
 /**
- * The leaves a document is written as. `idFor` names each container node; two neighbouring
- * containers of one type need different names to stay two.
+ * The leaves a document is written as. `idFor` names each container node, and no two containers
+ * in a note may share a name. Marks on inline items are not written.
  */
 export function flattenBody(
   doc: ProseMirrorNode,
@@ -227,13 +335,14 @@ export function flattenBody(
       if (child.isTextblock || child.isLeaf) {
         const inline: SequenceInline[] = [];
         child.forEach((piece) => {
-          if (piece.isText) inline.push({ text: piece.text ?? "", marks: marksOf(piece) });
-          else
+          if (piece.isText)
             inline.push({
-              atom: piece.type.name,
-              attrs: { ...piece.attrs },
-              marks: marksOf(piece),
+              text: piece.text ?? "",
+              marks: Object.fromEntries(
+                piece.marks.map((mark) => [mark.type.name, { ...mark.attrs }]),
+              ),
             });
+          else inline.push({ atom: piece.type.name, attrs: { ...piece.attrs } });
         });
         leaves.push({ type: child.type.name, attrs: { ...child.attrs }, path, inline });
         return;
