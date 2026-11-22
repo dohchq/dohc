@@ -1,0 +1,14 @@
+{
+  "cli": { "version": ">= 16.0.0", "appVersionSource": "remote" },
+  "build": {
+    "testflight": {
+      "distribution": "store",
+      "autoIncrement": true,
+      "node": "24.16.0",
+      "pnpm": "11.20.0",
+      "env": { "EXPO_PUBLIC_DOHC_PHONE_WRITES": "1" },
+      "ios": { "resourceClass": "medium" }
+    }
+  },
+  "submit": { "testflight": { "ios": {} } }
+}
