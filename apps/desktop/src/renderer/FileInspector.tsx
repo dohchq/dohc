@@ -277,7 +277,7 @@ type FileInspectorProps = {
   // A record's Button fields report through the shell's toasts and Notices,
   // and the shell opens the record's History.
   onButtonError?: ReportButtonError;
-  onButtonNotice?: (message: string, undo?: () => void) => void;
+  onButtonNotice?: (message: string, undo?: () => void) => (() => void) | void;
   // Closes every tab showing a file, as an Undo that removes it does first.
   onClosePath?: (path: string) => void;
   onOpenRecordHistory?: (record: RecordHistoryTarget) => void;

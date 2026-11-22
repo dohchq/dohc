@@ -50,7 +50,10 @@ function csvFile(workspaceId: string, path: string, body: string) {
 }
 
 function Shell(props: {
-  children: (onError: ReturnType<typeof useShellError>["reportButtonError"]) => ReactNode;
+  children: (
+    onError: ReturnType<typeof useShellError>["reportButtonError"],
+    onNotice: ReturnType<typeof useShellError>["showSuccessNotice"],
+  ) => ReactNode;
 }) {
   const shell = useShellError("ws-1");
   return (
@@ -63,13 +66,16 @@ function Shell(props: {
           atMs: error.atMs,
           canRetry: error.retry !== null,
           seen: error.seen,
+          tone: error.tone,
+          actionLabel: error.action?.label,
         }))}
         reportFailure={shell.reportShellFailure}
         onRetry={shell.retryShellError}
+        onAction={shell.runShellErrorAction}
         onHide={shell.hideShellError}
         onDismiss={shell.dismissShellError}
       />
-      {props.children(shell.reportButtonError)}
+      {props.children(shell.reportButtonError, shell.showSuccessNotice)}
     </>
   );
 }
@@ -196,7 +202,9 @@ describe("CSV view actions", () => {
     render(
       <CsvView
         {...csvFile("ws-1", "data.csv", "name,count\nAda,1\nGrace,2")}
-        onNotice={(message, onUndo) => notices.push({ message, onUndo })}
+        onNotice={(message, onUndo) => {
+          notices.push({ message, onUndo });
+        }}
       />,
     );
 
@@ -237,7 +245,9 @@ describe("CSV view actions", () => {
     render(
       <CsvView
         {...csvFile("ws-1", "cities.csv", "name,city\nAda,Paris\nGrace,Tokyo\nLin,Oslo")}
-        onNotice={(message, onUndo) => notices.push({ message, onUndo })}
+        onNotice={(message, onUndo) => {
+          notices.push({ message, onUndo });
+        }}
       />,
     );
 
@@ -287,7 +297,9 @@ describe("CSV view actions", () => {
     render(
       <CsvView
         {...csvFile("ws-1", "single.csv", "name\nAda\nGrace")}
-        onNotice={(message, onUndo) => notices.push({ message, onUndo })}
+        onNotice={(message, onUndo) => {
+          notices.push({ message, onUndo });
+        }}
       />,
     );
 
@@ -330,7 +342,9 @@ describe("CSV view actions", () => {
     render(
       <CsvView
         {...csvFile("ws-1", "people.csv", "name\nAda\nGrace\nLin\nJo")}
-        onNotice={(message, onUndo) => notices.push({ message, onUndo })}
+        onNotice={(message, onUndo) => {
+          notices.push({ message, onUndo });
+        }}
       />,
     );
 
@@ -347,6 +361,87 @@ describe("CSV view actions", () => {
     expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Grace");
     expect((screen.getByLabelText("Row 3 column 1") as HTMLInputElement).value).toBe("Lin");
     expect((screen.getByLabelText("Row 4 column 1") as HTMLInputElement).value).toBe("Jo");
+  });
+
+  it("preserves extra columns beyond the 500-row preview and keeps ragged short rows unpadded on delete and Undo", async () => {
+    const user = userEvent.setup();
+    const notices: Array<{ message: string; onUndo?: () => void }> = [];
+    const lines = ["name"];
+    for (let index = 1; index <= 500; index++) lines.push(`row${index}`);
+    lines.push("Grace,Tokyo");
+    const original = lines.join("\n");
+    const file = csvFile("ws-1", "wide-tail.csv", original);
+    render(
+      <CsvView
+        {...file}
+        onNotice={(message, onUndo) => {
+          notices.push({ message, onUndo });
+        }}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Delete row 1"));
+    const afterDelete = file.localBuffer.getSnapshot().body.split("\n");
+    expect(afterDelete[0]).toBe("name");
+    expect(afterDelete[1]).toBe("row2");
+    expect(afterDelete.at(-1)).toBe("Grace,Tokyo");
+
+    act(() => notices.at(-1)?.onUndo?.());
+    expect(file.localBuffer.getSnapshot().body).toBe(original);
+
+    // Ragged rows keep their exact lengths through delete and Undo.
+    cleanup();
+    const raggedOriginal = "a,b,c\n1\n2,3,\n4,5,6";
+    const ragged = csvFile("ws-1", "ragged.csv", raggedOriginal);
+    const raggedNotices: Array<{ message: string; onUndo?: () => void }> = [];
+    render(
+      <CsvView
+        {...ragged}
+        onNotice={(message, onUndo) => {
+          raggedNotices.push({ message, onUndo });
+        }}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Delete row 3"));
+    expect(ragged.localBuffer.getSnapshot().body).toBe("a,b,c\n1\n2,3,");
+    act(() => raggedNotices.at(-1)?.onUndo?.());
+    expect(ragged.localBuffer.getSnapshot().body).toBe(raggedOriginal);
+  });
+
+  it("dismisses pending CSV Undo notices from the shell when starting a new table from empty or switching to Raw", async () => {
+    const user = userEvent.setup();
+    const file = csvFile("ws-1", "single-shell.csv", "name\nAda\nGrace");
+    render(
+      <Shell>
+        {(onError, onNotice) => <CsvView {...file} onError={onError} onNotice={onNotice} />}
+      </Shell>,
+    );
+
+    await user.click(screen.getByLabelText("Delete column 1"));
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    expect(within(toast).getByText('Deleted column "name".')).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Undo" })).toBeTruthy();
+    expect(screen.getByTestId("notice-center-toggle")).toBeTruthy();
+
+    // Adding a row to the empty table immediately removes the now-retired Undo notice.
+    await user.click(screen.getByTestId("csv-empty-add-row"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
+
+    // Adding a column to an empty table also removes the retired Undo notice.
+    await user.click(screen.getByLabelText("Delete column 1"));
+    expect(await screen.findByTestId("workspace-shell-notice")).toBeTruthy();
+    await user.click(screen.getByTestId("csv-empty-add-column"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
+
+    // Switching to Raw mode also dismisses pending Undo notices.
+    await user.click(screen.getByLabelText("Delete column 1"));
+    expect(await screen.findByTestId("workspace-shell-notice")).toBeTruthy();
+    await user.click(mode("Raw"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.queryByTestId("notice-center-toggle")).toBeNull();
   });
 
   it("does not append duplicate empty rows when pressing Enter on an empty last row", async () => {

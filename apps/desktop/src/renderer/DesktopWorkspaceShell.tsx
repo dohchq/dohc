@@ -3290,7 +3290,7 @@ function WorkspaceShell(props: {
   const showSettingsNotice = useCallback(
     (message: string, undo?: () => void) => {
       if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
-      showSuccessNotice(message, undo);
+      return showSuccessNotice(message, undo);
     },
     [workspaceAdmission, workspaceId, showSuccessNotice],
   );
@@ -4478,9 +4478,8 @@ function WorkspaceShell(props: {
       onError: (message: string, error: unknown, retry: (() => void) | null, identity?: string) => {
         if (current()) reportButtonError(message, error, whileCurrent(retry) ?? null, identity);
       },
-      onNotice: (message: string, undo?: () => void) => {
-        if (current()) showSuccessNotice(message, whileCurrent(undo) ?? undefined);
-      },
+      onNotice: (message: string, undo?: () => void) =>
+        current() ? showSuccessNotice(message, whileCurrent(undo) ?? undefined) : undefined,
     };
   }, [workspaceId, reportButtonError, showSuccessNotice]);
   // The Explorer's notices and failures, held to their workspace rather than
