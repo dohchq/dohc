@@ -1633,6 +1633,45 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
     ).status,
   ).toBe(400);
 
+  const readWorkspaceUsage = () =>
+    Number(
+      f.storage.db
+        .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'")
+        .get()!.usage_bytes,
+    );
+  const readDatasetUsage = (datasetId: string) =>
+    Number(
+      f.storage.db
+        .prepare(
+          "SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id='w' AND dataset_id=?",
+        )
+        .get(datasetId)!.storage_bytes,
+    );
+  const workspaceUsageBeforeApprove = readWorkspaceUsage();
+  const dataset1UsageBeforeApprove = readDatasetUsage(id(1));
+  const dataset2UsageBeforeApprove = readDatasetUsage(id(101));
+
+  // Refuses approval when a bound Collection's journal is fenced (inactive), leaving zero bindings/rows.
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare("UPDATE dohc_dataset_journals SET active=0 WHERE workspace_id='w' AND dataset_id=?")
+      .run(id(101)),
+  );
+  expect((await f.http("w/local-apps", { localApp: multiCandidate })).status).toBe(409);
+  expect(
+    f.storage.db
+      .prepare("SELECT count(*) AS n FROM sync_relay_local_dataset_apps WHERE workspace_id='w'")
+      .get()!.n,
+  ).toBe(0);
+  expect(readWorkspaceUsage()).toBe(workspaceUsageBeforeApprove);
+  expect(readDatasetUsage(id(1))).toBe(dataset1UsageBeforeApprove);
+  expect(readDatasetUsage(id(101))).toBe(dataset2UsageBeforeApprove);
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare("UPDATE dohc_dataset_journals SET active=1 WHERE workspace_id='w' AND dataset_id=?")
+      .run(id(101)),
+  );
+
   // Local workspace approval via /sync/w/local-apps succeeds for the owner.
   const approvedRes = await f.http("w/local-apps", { localApp: multiCandidate });
   expect(approvedRes.status).toBe(200);
@@ -1641,6 +1680,23 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
     authorityRevision: number;
   };
   const backendBase = `w/app-publications/${approved.publicationId}/backend`;
+
+  // Re-approving an already-approved app while a bound Collection is fenced also fails with 409.
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare("UPDATE dohc_dataset_journals SET active=0 WHERE workspace_id='w' AND dataset_id=?")
+      .run(id(101)),
+  );
+  expect((await f.http("w/local-apps", { localApp: multiCandidate })).status).toBe(409);
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare("UPDATE dohc_dataset_journals SET active=1 WHERE workspace_id='w' AND dataset_id=?")
+      .run(id(101)),
+  );
+  // Idempotent approval while both Collections are active returns the same authorityRevision.
+  const idempotentRes = await f.http("w/local-apps", { localApp: multiCandidate });
+  expect(idempotentRes.status).toBe(200);
+  expect(await idempotentRes.json()).toEqual(approved);
 
   // Missing alias returns 400; unknown alias returns 404.
   expect(
@@ -1763,7 +1819,7 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
       .get("w", approved.publicationId)!.n,
   ).toBe(0);
 
-  // Re-approving increments authorityRevision, and permanently deleting Collection 2 cleans up Collection 1's binding.
+  // Re-approving increments authorityRevision, and per-Collection unbind cleans up every sibling binding.
   const reapprovedRes = await f.http("w/local-apps", { localApp: multiCandidate });
   expect(reapprovedRes.status).toBe(200);
   const reapproved = (await reapprovedRes.json()) as {
@@ -1771,6 +1827,39 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
     authorityRevision: number;
   };
   expect(reapproved.authorityRevision).toBe(approved.authorityRevision + 1);
+  expect(
+    (
+      await f.http(`w/datasets/${id(1)}/binding`, {
+        publicationId: reapproved.publicationId,
+        enabled: false,
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    f.storage.db
+      .prepare("SELECT count(*) AS n FROM dohc_dataset_bindings WHERE workspace_id=? AND app_id=?")
+      .get("w", reapproved.publicationId)!.n,
+  ).toBe(0);
+  expect(
+    f.storage.db
+      .prepare(
+        "SELECT candidate FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?",
+      )
+      .get(reapproved.publicationId)!.candidate,
+  ).toBe("");
+
+  // Re-approving once more and permanently deleting Collection 2 removes every binding, deletes the
+  // multi-Collection row, and refunds exact storage bytes with zero leak.
+  const dataset1UsageBeforeFinalApprove = readDatasetUsage(id(1));
+  const dataset2UsageBeforeFinalApprove = readDatasetUsage(id(101));
+  const workspaceUsageBeforeFinalApprove = readWorkspaceUsage();
+  const finalApprovedRes = await f.http("w/local-apps", { localApp: multiCandidate });
+  expect(finalApprovedRes.status).toBe(200);
+  const finalApproved = (await finalApprovedRes.json()) as {
+    publicationId: string;
+    authorityRevision: number;
+  };
+  expect(finalApproved.authorityRevision).toBe(reapproved.authorityRevision + 1);
   expect((await f.http(`w/datasets/${id(101)}/archive`, {})).status).toBe(200);
   const delPreview = (await (await f.http(`w/datasets/${id(101)}/delete-preview`)).json()) as {
     cursor: unknown;
@@ -1790,6 +1879,16 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
       .prepare(
         "SELECT 1 FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
       )
-      .get("w", id(1), reapproved.publicationId),
+      .get("w", id(1), finalApproved.publicationId),
   ).toBeUndefined();
+  expect(
+    f.storage.db
+      .prepare("SELECT 1 FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?")
+      .get(finalApproved.publicationId),
+  ).toBeUndefined();
+  expect(readDatasetUsage(id(1))).toBe(dataset1UsageBeforeFinalApprove);
+  const expectedLocalAppRowBytes = Buffer.byteLength(finalApproved.publicationId) + 256;
+  expect(readWorkspaceUsage()).toBe(
+    workspaceUsageBeforeFinalApprove - expectedLocalAppRowBytes - dataset2UsageBeforeFinalApprove,
+  );
 });

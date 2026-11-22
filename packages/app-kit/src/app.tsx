@@ -507,13 +507,22 @@ function clientIdOf(client: AppClient): number {
   return id;
 }
 
+function resolveTargetClient(client: AppClient, dataset: string | undefined): AppClient | null {
+  if (dataset === undefined) return client;
+  try {
+    return client.dataset(dataset);
+  } catch {
+    return null;
+  }
+}
+
 export function useDatasetQuery<T = unknown>(
   operation: string,
   input?: unknown,
   options?: DatasetQueryOptions,
 ): DatasetQueryState<T> {
   const client = useApp();
-  const target = options?.dataset === undefined ? client : client.dataset(options.dataset);
+  const target = resolveTargetClient(client, options?.dataset);
   const enabled = options?.enabled ?? true;
   let serializedInput: string | null = null;
   if (enabled) {
@@ -529,7 +538,8 @@ export function useDatasetQuery<T = unknown>(
     }
   }
   const invalidInput = enabled && serializedInput === null;
-  const scope = `${clientIdOf(target)}:${options?.dataset ?? ""}:${operation}:${
+  const invalidRequest = enabled && (target === null || invalidInput);
+  const scope = `${target ? clientIdOf(target) : "invalid"}:${options?.dataset ?? ""}:${operation}:${
     !enabled ? "disabled" : invalidInput ? "invalid" : `s:${serializedInput}`
   }`;
 
@@ -537,8 +547,8 @@ export function useDatasetQuery<T = unknown>(
     scope,
     data: undefined,
     revision: null,
-    loading: enabled && !invalidInput,
-    error: invalidInput ? new AppBackendError(400) : null,
+    loading: enabled && !invalidRequest,
+    error: invalidRequest ? new AppBackendError(400) : null,
   }));
   const [version, setVersion] = useState(0);
   const generation = useRef(0);
@@ -552,7 +562,7 @@ export function useDatasetQuery<T = unknown>(
       setState({ scope, data: undefined, revision: null, loading: false, error: null });
       return;
     }
-    if (serializedInput === null) {
+    if (!target || serializedInput === null) {
       setState((current) =>
         current.scope === scope && current.error?.status === 400 && !current.loading
           ? current
@@ -602,11 +612,12 @@ export function useDatasetQuery<T = unknown>(
   }, [enabled, operation, scope, serializedInput, target, version]);
 
   const matched = state.scope === scope;
+  const invalidRequestError = invalidRequest ? new AppBackendError(400) : null;
   return {
     data: matched ? state.data : undefined,
     revision: matched ? state.revision : null,
-    loading: matched ? state.loading : enabled && !invalidInput,
-    error: matched ? state.error : null,
+    loading: matched ? state.loading : enabled && !invalidRequest,
+    error: matched ? state.error : invalidRequestError,
     reload,
   };
 }
@@ -633,7 +644,7 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   options?: DatasetMutationOptions,
 ): DatasetMutationState<TInput, TResult> {
   const client = useApp();
-  const target = options?.dataset === undefined ? client : client.dataset(options.dataset);
+  const target = resolveTargetClient(client, options?.dataset);
   const [inFlightCount, setInFlightCount] = useState(0);
   const [error, setError] = useState<AppBackendError | null>(null);
   const [retained, setRetained] = useState<readonly RetainedSubmission[]>([]);
@@ -707,6 +718,11 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
 
   const mutate = useCallback(
     async (input: TInput, idempotencyKey?: string) => {
+      if (!target) {
+        const badAlias = new AppBackendError(400);
+        if (mounted.current) setError(badAlias);
+        throw badAlias;
+      }
       let payloadJson: string | undefined;
       try {
         payloadJson = input === undefined ? "{}" : JSON.stringify(input);

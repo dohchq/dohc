@@ -42,8 +42,6 @@ import {
 } from "@dohc/app-backend-runtime/supervisor";
 import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
 import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
-import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
-import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import { createLocalAppStore, type LocalAppStore } from "./localAppStore";
 import { createLocalApps } from "./localApps";
 import { createServerDatasetApps, type ServerCollectionsTransport } from "./serverDatasetApps";
@@ -671,37 +669,38 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         const affectedMultiIds: string[] = [];
         const multiRows = db
           .prepare(
-            "SELECT publication_id, candidate, storage_bytes FROM local_dataset_apps WHERE dataset_id=''",
+            `SELECT app.publication_id, app.storage_bytes
+             FROM local_dataset_apps app
+             JOIN dohc_dataset_bindings binding
+               ON binding.workspace_id = ? AND binding.dataset_id = ? AND binding.app_id = app.publication_id
+             WHERE app.dataset_id = ''`,
           )
-          .all() as Array<{ publication_id: string; candidate: string; storage_bytes: number }>;
+          .all(workspaceId, key.datasetId) as Array<{
+          publication_id: string;
+          storage_bytes: number;
+        }>;
         for (const row of multiRows) {
-          const parsed = parseAppPublicationCandidate(
-            JSON.parse(row.candidate),
-            APP_PUBLICATION_LIMITS,
-          );
-          const boundIds = parsed.capabilities
-            .filter((cap) => cap.kind === "dataset")
-            .map((cap) => cap.datasetId);
-          if (!boundIds.includes(key.datasetId)) continue;
           affectedMultiIds.push(row.publication_id);
-          for (const otherId of boundIds) {
-            if (otherId === key.datasetId) continue;
-            const existing = db
-              .prepare(
-                "SELECT binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
-              )
-              .get(workspaceId, otherId, row.publication_id);
-            if (existing) {
-              const previousBytes =
-                Buffer.byteLength(String(existing.binding_json)) +
-                Buffer.byteLength(row.publication_id) +
-                256;
-              db.prepare(
-                "DELETE FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
-              ).run(workspaceId, otherId, row.publication_id);
-              if (db.prepare("SELECT 1 FROM local_dataset_usage WHERE dataset_id=?").get(otherId)) {
-                charge(otherId, -previousBytes);
-              }
+          const siblingBindings = db
+            .prepare(
+              "SELECT dataset_id, binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND app_id=? AND dataset_id<>?",
+            )
+            .all(workspaceId, row.publication_id, key.datasetId) as Array<{
+            dataset_id: string;
+            binding_json: string;
+          }>;
+          for (const sibling of siblingBindings) {
+            const previousBytes =
+              Buffer.byteLength(sibling.binding_json) + Buffer.byteLength(row.publication_id) + 256;
+            db.prepare(
+              "DELETE FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+            ).run(workspaceId, sibling.dataset_id, row.publication_id);
+            if (
+              db
+                .prepare("SELECT 1 FROM local_dataset_usage WHERE dataset_id=?")
+                .get(sibling.dataset_id)
+            ) {
+              charge(sibling.dataset_id, -previousBytes);
             }
           }
           charge(null, -Number(row.storage_bytes));

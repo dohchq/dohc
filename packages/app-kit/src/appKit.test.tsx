@@ -1083,12 +1083,24 @@ describe("dohc/ui and dohc/charts", () => {
           "create",
           { dataset: "workouts" },
         );
+        const badQuery = useDatasetQuery("list", {}, { dataset: "Bad Alias" });
+        const badMutate = useDatasetMutation("create", { dataset: "Bad Alias" });
         return (
           <div>
             <p data-testid="q1">{q1.data ? `${q1.data.dataset}:${q1.data.op}` : "loading"}</p>
             <p data-testid="q2">{q2.data ? `${q2.data.dataset}:${q2.data.op}` : "loading"}</p>
+            <p data-testid="bad-q">{badQuery.error ? String(badQuery.error.status) : "ok"}</p>
+            <p data-testid="bad-m">{badMutate.error ? String(badMutate.error.status) : "ok"}</p>
             <button type="button" onClick={() => void addWorkout.mutate({ minutes: 30 })}>
               Add workout
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void badMutate.mutate({}).catch(() => {});
+              }}
+            >
+              Bad mutate
             </button>
           </div>
         );
@@ -1103,13 +1115,16 @@ describe("dohc/ui and dohc/charts", () => {
       await waitFor(() => {
         expect(screen.getByTestId("q1").textContent).toBe("expenses:list");
         expect(screen.getByTestId("q2").textContent).toBe("workouts:list");
+        expect(screen.getByTestId("bad-q").textContent).toBe("400");
       });
 
       fireEvent.click(screen.getByRole("button", { name: "Add workout" }));
+      fireEvent.click(screen.getByRole("button", { name: "Bad mutate" }));
       await waitFor(() => {
         expect(seen.some((msg) => msg.operation === "create" && msg.dataset === "workouts")).toBe(
           true,
         );
+        expect(screen.getByTestId("bad-m").textContent).toBe("400");
       });
     } finally {
       client.close();
