@@ -2185,24 +2185,6 @@ it("goes by the grant's first answer when a later read of it fails after a level
   await settle(() => text().includes("Leave at nine.") && badge() === "View only");
 });
 
-it("hides the old level's controls as soon as the grant reports a new level, before the files read again", async () => {
-  const options: { level: Level; openHeld?: boolean } = { level: "comment" };
-  server(options);
-  await render();
-  await opened();
-  await click("Comments");
-  await settle(() => commentBox() !== null);
-  // The owner lowered the members to View. The fresh file list is slow to arrive.
-  options.level = "view";
-  options.openHeld = true;
-  await act(async () =>
-    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
-  );
-  await settle(() => held.some((item) => item.path === "current" && !item.signal.aborted));
-  expect(container.querySelector('textarea[name="body"]')).toBeNull();
-  expect(text()).not.toContain("Can comment");
-});
-
 it("asks the grant when the file poll fails, and opens the new level it reports", async () => {
   const options: { level: Level } = { level: "comment" };
   server(options);

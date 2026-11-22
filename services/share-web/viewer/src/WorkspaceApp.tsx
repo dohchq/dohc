@@ -549,12 +549,6 @@ function useMemberFiles(
         reload = false,
         // The level or a rule changed, so the files shown carry levels the member no longer has.
         stale = false;
-      // Shows no files until the current ones load, so the page offers no control the relay now refuses.
-      const retire = () => {
-        if (stale) return;
-        stale = true;
-        setView({ status: "loading" });
-      };
       while (!signal.aborted) {
         const step = new AbortController(),
           stepSignal = AbortSignal.any([signal, step.signal]);
@@ -589,7 +583,7 @@ function useMemberFiles(
             };
             // A rule changed since the files were read, so the log's cursor may skip files that just became visible.
             // A file at a new path has no level yet. Either way the current files say.
-            if (meta.reach !== files.meta.reach) retire();
+            stale ||= meta.reach !== files.meta.reach;
             if (stale || next.files.some((file) => !files.levels.has(file.path))) {
               reload = true;
               continue;
@@ -628,7 +622,7 @@ function useMemberFiles(
           if (!stale) {
             granted ??= await loadMeta(session, stepSignal).catch(() => undefined);
             if (signal.aborted) return;
-            if (granted !== undefined && granted.reach !== files.meta.reach) retire();
+            stale = granted !== undefined && granted.reach !== files.meta.reach;
           }
           // A new epoch starts again from the current files. So do a refusal and a level change: a rule change
           // refuses a held read as a lost membership does, and only a refused read of the current files ends the membership.
