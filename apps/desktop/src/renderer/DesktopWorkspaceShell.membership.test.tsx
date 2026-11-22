@@ -560,6 +560,28 @@ describe("a joined workspace", () => {
     ).toBeTruthy();
   });
 
+  // The ended band says what the copy still allows, so the lowered level no longer applies.
+  it("takes back the lowered level's toast and row once the membership ends", async () => {
+    const bridge = makeShareBridge();
+    bridge.checkSharedViewAccess.mockResolvedValueOnce({
+      status: "current",
+      access: "view",
+      role: "member",
+      levelChanged: true,
+      levelChangedBy: "Ana",
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const { rerender } = render(shell(bridge, JOINED));
+    const toasts = () => screen.queryByTestId("notice-toasts")?.textContent ?? "";
+    await waitFor(() => expect(toasts()).toContain("Ana now lets members view only."));
+    rerender(shell(bridge, ENDED));
+    await waitFor(() => expect(toasts()).not.toContain("Ana now lets members view only."));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(
+      within(screen.getByTestId("notice-center")).queryByText("Ana now lets members view only."),
+    ).toBeNull();
+  });
+
   it("says nothing when the check finds the level it already had", async () => {
     const bridge = withGroup("comment", { status: "current", access: "comment", role: "member" });
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalled());
@@ -693,8 +715,12 @@ describe("a joined workspace", () => {
     render(shell(bridge, ENDED));
     const band = await screen.findByTestId("shared-view-banner");
     expect(band.dataset.ended).toBe("true");
+    // The title bar no longer claims the copy syncs.
+    expect(screen.getByTestId("sync-status").getAttribute("title")).toBe(
+      "Not syncing. This copy stays on this computer.",
+    );
     expect(band.textContent).toBe(
-      "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
+      "Your membership ended. This copy stays on this computer, and your direct messages stay open. Ask the owner to invite you again to keep working in it.",
     );
     await waitFor(() =>
       expect(screen.getAllByTestId("tree-row").some((row) => row.dataset.path === "plan.md")).toBe(

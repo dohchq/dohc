@@ -855,15 +855,22 @@ function MemberWorkspace({
         }
       >
         <p>Ask the owner to invite you again to keep working in it.</p>
+        {/* The one step a browser can take here: another account the owner invited. */}
+        <p className="join-aside">
+          Signed in as <span className="join-name">{account.name}</span> ·{" "}
+          <button className="join-link" type="button" disabled={signingOut} onClick={onSignOut}>
+            Sign out
+          </button>
+        </p>
+        {signOutError && <LaunchFailure role="alert" message={signOutError} />}
         {kept}
       </StatePage>
     );
   if (view.status === "other-account")
     return (
-      <StatePage icon="users" title="This browser is signed in as another account.">
+      <StatePage icon="users" title={`This browser is now signed in as ${view.name}.`}>
         <p>
-          It is now signed in as {view.name}. Sign in as {account.name} to keep working in{" "}
-          {lastName.current ?? "this workspace"}.
+          Sign in as {account.name} to keep working in {lastName.current ?? "this workspace"}.
         </p>
         <button
           className="handoff-button secondary"

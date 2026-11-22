@@ -160,6 +160,8 @@ export interface ShellError {
   // Answers false when it could not run, so the row stays.
   retry: (() => void | false) | null;
   retryBusy?: boolean;
+  // Try again runs where the row is, as an action that `stays` does, so Notices stays open on its outcome.
+  retryStays?: true;
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs; one that `reads` it
@@ -209,6 +211,8 @@ export type ReportShellFailure = (failure: {
   title?: string;
   message: string;
   cause?: unknown;
+  // Files the row with no toast, for a failure its own surface already shows.
+  quiet?: boolean;
   retry?: (() => void) | null;
   action?: ShellError["action"];
   target?: NoticeTarget;
@@ -678,6 +682,7 @@ export function useShellError(
       rows?: readonly string[];
       lead?: string;
       retry?: ShellError["retry"];
+      retryStays?: true;
       onDismiss?: () => void;
       action?: ShellError["action"];
       target?: NoticeTarget;
@@ -724,6 +729,7 @@ export function useShellError(
             isStoppedWorkspaceCall(failure.cause) || isStoppedWorkspaceCall(failure.message)
               ? null
               : (failure.retry ?? null),
+          ...(failure.retryStays ? { retryStays: true } : {}),
           ...(failure.command ? { command: failure.command } : {}),
           ...(failure.paths?.length ? { paths: failure.paths } : {}),
           ...(failure.rows?.length ? { rows: failure.rows } : {}),
@@ -1260,13 +1266,17 @@ export function useShellError(
     [clearKind, push],
   );
   const showWarningNotice = useCallback(
-    (message: string, options?: { change?: true; paths?: readonly string[] }) => {
+    (
+      message: string,
+      options?: { change?: true; paths?: readonly string[]; identity?: string },
+    ) => {
       push({
         message,
         retry: null,
         tone: "warning",
         ...(options?.paths ? { paths: options.paths } : {}),
         ...(options?.change ? { change: true } : {}),
+        ...(options?.identity ? { identity: options.identity } : {}),
       });
     },
     [push],
@@ -1299,8 +1309,8 @@ export function useShellError(
     };
     const arrived = copies.filter((copy) => !shownKeptCopies.current.has(copy.id));
     for (const copy of arrived) shownKeptCopies.current.add(copy.id);
-    // A copy the owner's Restore rule kept is the result they chose, and the
-    // Restore's own toast names it, so its row is quiet, read, and not a failure.
+    // A copy the owner's Restore rule kept is the result they chose: no toast
+    // and not a failure. Its row stays unread, since only it offers Save copy.
     const collided = arrived.filter((copy) => !copy.accessRule);
     const summarized = collided.length > 1;
     const fresh: ShellError[] = arrived.map((copy) =>
@@ -1310,7 +1320,7 @@ export function useShellError(
         action: { label: "Save copy", run: copy.save },
         keptCopyId: copy.id,
         seen: copy.accessRule || summarized,
-        ...(copy.accessRule ? { tone: "success" as const, read: true } : {}),
+        ...(copy.accessRule ? { tone: "success" as const } : {}),
       }),
     );
     if (summarized) {

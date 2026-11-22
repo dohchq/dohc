@@ -1802,8 +1802,8 @@ fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), Halt> {
         return Ok(());
     };
     let mut text = format!(
-        "# Saved files\n\nThis workspace's access changed on {}. dohc saved here what the \
-         server hadn't received from this copy, instead of deleting it.\n",
+        "# Saved files\n\nThis workspace's access changed on {}. dohc saved these files here \
+         instead of deleting them. Each row says why.\n",
         utc_time(manifest.closed_at_ms)
     );
     // A version saved in case the disk changed shows once the first wave

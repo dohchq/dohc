@@ -181,7 +181,8 @@ describe("useAccessRuleHoldNotices", () => {
   // not read, so there is no change to allow; Restore rule says why it
   // failed. The row leads with what the owner does, in the engine's words.
   it("says why the rule on disk cannot be read, what to do first, and offers no change to allow", async () => {
-    const until = "Until you choose, dohc doesn't record or share changes in team.";
+    // Restore rule is the one step, so the row names no choice between two.
+    const until = "Until you decide on this rule, dohc doesn't record or share changes in team.";
     // A locked rule names its file as spelled on disk, and its row reveals
     // the folder rather than opening a file dohc can't read.
     for (const [unreadable, rulePath, lead, target] of [
@@ -329,7 +330,7 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.openHistory).toHaveBeenCalledOnce();
   });
 
-  it("names one entry's new reach, and where Restore kept the rule from outside dohc", async () => {
+  it("names one entry's new reach, and leaves the kept rule to its own row", async () => {
     const h = harness([{ ...WIDENED, changes: [WIDENED.changes[0]!] }, REMOVED]);
     await waitFor(() => expect(h.errors().shellErrors).toHaveLength(2));
     const success = () => h.errors().shellErrors.filter((error) => error.tone === "success");
@@ -348,8 +349,7 @@ describe("useAccessRuleHoldNotices", () => {
     act(() => h.errors().runShellErrorAction(h.row("team/sub")!.id));
     await waitFor(() =>
       expect(success().at(-1)).toMatchObject({
-        message:
-          "Restored the access rule for team/sub. Members can view team/sub. dohc kept the rule from outside dohc in Notices, where Save copy puts it beside team/sub/access.yaml.",
+        message: "Restored the access rule for team/sub. Members can view team/sub.",
       }),
     );
     expect(success().at(-1)!.action).toBeUndefined();
@@ -379,7 +379,8 @@ describe("useAccessRuleHoldNotices", () => {
     );
   });
 
-  it("names every saved copy when Restore puts back a recorded rule", async () => {
+  // Each kept copy names itself on its own row, so the outcome names none.
+  it("says only what Restore put back when it kept several copies", async () => {
     const h = harness([
       { ...WIDENED, observedSha256: null, changes: [], unreadable: "several-files" },
     ]);
@@ -391,8 +392,7 @@ describe("useAccessRuleHoldNotices", () => {
     act(() => h.errors().runShellErrorAction(h.row("team")!.id));
     await waitFor(() =>
       expect(h.errors().shellErrors.find((error) => error.tone === "success")).toMatchObject({
-        message:
-          "Restored the access rule for team. dohc kept the files from outside dohc as copies in Notices. Save copy puts each beside its original: team/access.yaml, team/\uFF41ccess.yaml.",
+        message: "Restored the access rule for team.",
       }),
     );
   });
@@ -642,6 +642,8 @@ describe("useAccessRuleHoldNotices", () => {
       message:
         "dohc still doesn't record or share changes in team. Members keep their earlier access.",
       retry: expect.any(Function),
+      // Try again keeps Notices open, as Restore rule does.
+      retryStays: true,
     });
     expect(h.row("team")!.action?.busy).toBeUndefined();
   });
@@ -663,7 +665,8 @@ describe("useAccessRuleHoldNotices", () => {
         );
     await waitFor(() =>
       expect(failed()).toMatchObject({
-        message: "Another program has this file open. Close it there, then try again.",
+        // Beside Try again, the words end at what to do first.
+        message: "Another program has this file open. Close it there.",
         retry: expect.any(Function),
       }),
     );
