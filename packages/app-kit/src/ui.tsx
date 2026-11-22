@@ -712,6 +712,7 @@ export function DataTable<T>({
                   onKeyDown={
                     onRowClick
                       ? (event) => {
+                          if (event.target !== event.currentTarget) return;
                           if (event.key === "Enter" || event.key === " ") {
                             event.preventDefault();
                             onRowClick(row);

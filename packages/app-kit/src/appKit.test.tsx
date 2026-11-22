@@ -678,6 +678,37 @@ describe("dohc/ui and dohc/charts", () => {
       const spark = screen.getByRole("img", { name: "Gapped spark" });
       expect(spark.querySelectorAll('path[fill="none"]')).toHaveLength(2);
       expect(container.innerHTML).not.toContain("NaN");
+
+      // Sub-1e-6 data preserves distinct tick labels instead of collapsing to repeated zeros.
+      const { container: tinyContainer } = render(
+        <div>
+          <LineChart
+            labels={["A", "B"]}
+            series={[{ name: "Tiny", values: [0, 4e-7] }]}
+            formatValue={(v) => v.toExponential(1)}
+            ariaLabel="Tiny scale"
+          />
+          <DataTable
+            rows={[{ id: "1", name: "Item" }]}
+            rowKey={(r) => r.id}
+            onRowClick={() => {
+              throw new Error("Descendant key event should not trigger onRowClick");
+            }}
+            columns={[
+              {
+                key: "name",
+                header: "Item",
+                render: () => <input aria-label="Cell input" defaultValue="" />,
+              },
+            ]}
+          />
+        </div>,
+      );
+      expect(tinyContainer.textContent).toContain("1.0e-7");
+      expect(tinyContainer.textContent).toContain("4.0e-7");
+      const cellInput = screen.getByLabelText("Cell input");
+      fireEvent.keyDown(cellInput, { key: " " });
+      fireEvent.keyDown(cellInput, { key: "Enter" });
     } finally {
       globalThis.ResizeObserver = OriginalResizeObserver;
     }

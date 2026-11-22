@@ -53,7 +53,7 @@ function niceScale(minValue: number, maxValue: number, ticks = 4) {
   const max = Math.ceil(high / step) * step;
   const values: number[] = [];
   for (let current = min; current <= max + step * 0.001; current += step) {
-    values.push(Number(current.toFixed(6)));
+    values.push(Math.abs(current) < step * 1e-9 ? 0 : Number(current.toPrecision(12)));
   }
   return { min, max, values };
 }

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -214,14 +215,42 @@ function cjsNamedReexportModule(
   return lines.join("\n");
 }
 
+function resolveRuntimePackageDir(
+  desktopRoot: string,
+  repoRoot: string,
+  desktopRequire: NodeRequire,
+  pkg: "react" | "react-dom",
+  runtimeEntry: string,
+): string {
+  for (const candidate of [
+    join(desktopRoot, "node_modules", pkg),
+    join(repoRoot, "packages/app-kit/node_modules", pkg),
+  ]) {
+    if (existsSync(join(candidate, "cjs"))) return realpathSync(candidate);
+  }
+  return dirname(desktopRequire.resolve(runtimeEntry));
+}
+
 export async function buildClosedAppBuiltins(
   esbuild: typeof Esbuild,
   desktopRoot: string,
 ): Promise<ClosedAppBuiltins> {
   const repoRoot = resolve(desktopRoot, "../..");
   const desktopRequire = createRequire(join(desktopRoot, "package.json"));
-  const reactDir = dirname(desktopRequire.resolve("react/package.json"));
-  const reactDomDir = dirname(desktopRequire.resolve("react-dom/package.json"));
+  const reactDir = resolveRuntimePackageDir(
+    desktopRoot,
+    repoRoot,
+    desktopRequire,
+    "react",
+    "react/jsx-runtime",
+  );
+  const reactDomDir = resolveRuntimePackageDir(
+    desktopRoot,
+    repoRoot,
+    desktopRequire,
+    "react-dom",
+    "react-dom/client",
+  );
   const reactKeys = Object.keys(
     desktopRequire(join(reactDir, "cjs/react.production.js")) as Record<string, unknown>,
   );
