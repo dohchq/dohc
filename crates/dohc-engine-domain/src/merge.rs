@@ -200,9 +200,9 @@ pub fn merge_markdown(base: &str, local: &str, remote: &str) -> MarkdownMergeRes
         return MarkdownMergeResult::Merged(local.to_owned());
     }
 
-    let base_lines: Vec<&str> = base.split('\n').collect();
-    let local_lines: Vec<&str> = local.split('\n').collect();
-    let remote_lines: Vec<&str> = remote.split('\n').collect();
+    let base_lines = lines(base);
+    let local_lines = lines(local);
+    let remote_lines = lines(remote);
     if [base_lines.len(), local_lines.len(), remote_lines.len()]
         .into_iter()
         .any(|line_count| line_count > MAX_MERGE_LINES)
@@ -1536,19 +1536,22 @@ fn combine<'a>(
     Some(output)
 }
 
+/// The lines of `text`. An empty text has none.
+fn lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\n').collect()
+    }
+}
+
 /// Whether, in each stretch between lines that appear once in every one of
-/// `[base, local, remote, merged]` and in the same order, no line has fewer
-/// copies in the merge than both sides kept or more than either side has. A
-/// line that appears once in the base and both sides must appear once in the
-/// merge.
+/// `[base, local, remote, merged]`, no line has fewer copies in the merge than
+/// both sides kept or more than either side has. The stretches run between the
+/// longest chain of such lines that every text keeps in the same order. A line
+/// that appears once in the base and both sides must appear once in the merge.
 fn keeps_copies(texts: [&str; 4]) -> bool {
-    let texts = texts.map(|text| {
-        if text.is_empty() {
-            Vec::new()
-        } else {
-            text.split('\n').collect::<Vec<_>>()
-        }
-    });
+    let texts = texts.map(lines);
     let mut counts: HashMap<&str, [usize; 4]> = HashMap::new();
     for (index, text) in texts.iter().enumerate() {
         for line in text {
@@ -1569,14 +1572,30 @@ fn keeps_copies(texts: [&str; 4]) -> bool {
             }
         }
     }
-    let mut starts = [0; 4];
-    for line in &texts[0] {
-        let Some(&at) = positions.get(line) else {
-            continue;
-        };
-        if (1..4).any(|index| at[index] < starts[index]) {
-            continue;
+    let anchors: Vec<[usize; 4]> = texts[0]
+        .iter()
+        .filter_map(|line| positions.get(line).copied())
+        .collect();
+    let mut length = vec![1_usize; anchors.len()];
+    let mut previous = vec![None; anchors.len()];
+    for later in 0..anchors.len() {
+        for earlier in 0..later {
+            if length[earlier] + 1 > length[later]
+                && (1..4).all(|index| anchors[earlier][index] < anchors[later][index])
+            {
+                length[later] = length[earlier] + 1;
+                previous[later] = Some(earlier);
+            }
         }
+    }
+    let mut chain = Vec::new();
+    let mut next = (0..anchors.len()).max_by_key(|&index| length[index]);
+    while let Some(index) = next {
+        chain.push(anchors[index]);
+        next = previous[index];
+    }
+    let mut starts = [0; 4];
+    for at in chain.into_iter().rev() {
         if !stretch_keeps_copies(&texts, starts, at) {
             return false;
         }

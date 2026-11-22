@@ -957,7 +957,13 @@ function combineHunks(base: string[], local: LineHunk[], remote: LineHunk[]): st
     const localChanged = group.some((entry) => !entry.remote);
     const remoteChanged = group.some((entry) => entry.remote);
     const lines = version(!localChanged);
-    if (localChanged && remoteChanged && lines.join("\n") !== version(true).join("\n")) {
+    const remoteLines = version(true);
+    if (
+      localChanged &&
+      remoteChanged &&
+      (lines.length !== remoteLines.length ||
+        lines.some((line, index) => line !== remoteLines[index]))
+    ) {
       return undefined;
     }
     output.push(...base.slice(cursor, start), ...lines);
@@ -967,8 +973,12 @@ function combineHunks(base: string[], local: LineHunk[], remote: LineHunk[]): st
   return output;
 }
 
+function textLines(text: string): string[] {
+  return text === "" ? [] : text.split("\n");
+}
+
 function keepsCopies(texts: [string, string, string, string]): boolean {
-  const lines = texts.map((text) => (text === "" ? [] : text.split("\n")));
+  const lines = texts.map(textLines);
   const counts = new Map<string, number[]>();
   lines.forEach((text, index) => {
     for (const line of text) {
@@ -1003,10 +1013,34 @@ function keepsCopies(texts: [string, string, string, string]): boolean {
         Math.min(local!, remote!) <= merged! && merged! <= Math.max(local!, remote!),
     );
   };
-  let starts = [0, 0, 0, 0];
-  for (const line of lines[0]!) {
+  const anchors = lines[0]!.flatMap((line) => {
     const at = positions.get(line);
-    if (!at || [1, 2, 3].some((index) => at[index]! < starts[index]!)) continue;
+    return at ? [at] : [];
+  });
+  const length = anchors.map(() => 1);
+  const previous: (number | undefined)[] = anchors.map(() => undefined);
+  for (let later = 0; later < anchors.length; later += 1) {
+    for (let earlier = 0; earlier < later; earlier += 1) {
+      if (
+        length[earlier]! + 1 > length[later]! &&
+        [1, 2, 3].every((index) => anchors[earlier]![index]! < anchors[later]![index]!)
+      ) {
+        length[later] = length[earlier]! + 1;
+        previous[later] = earlier;
+      }
+    }
+  }
+  let next: number | undefined;
+  length.forEach((value, index) => {
+    if (next === undefined || value >= length[next]!) next = index;
+  });
+  const chain: number[][] = [];
+  while (next !== undefined) {
+    chain.unshift(anchors[next]!);
+    next = previous[next];
+  }
+  let starts = [0, 0, 0, 0];
+  for (const at of chain) {
     if (!stretchKeepsCopies(starts, at)) return false;
     starts = at.map((position) => position + 1);
   }
@@ -1021,9 +1055,9 @@ export function mergeMarkdown(base: string, local: string, remote: string): Mark
   if (local === base) return { status: "merged", text: remote };
   if (remote === base) return { status: "merged", text: local };
 
-  const baseLines = base.split("\n");
-  const localLines = local.split("\n");
-  const remoteLines = remote.split("\n");
+  const baseLines = textLines(base);
+  const localLines = textLines(local);
+  const remoteLines = textLines(remote);
   if (
     [baseLines.length, localLines.length, remoteLines.length].some(
       (count) => count > MAX_MERGE_LINES,

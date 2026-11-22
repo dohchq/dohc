@@ -17,10 +17,12 @@ fn count<'a>(lines: &[&'a str]) -> HashMap<&'a str, usize> {
     counts
 }
 
-/// The first line whose copies a clean merge lost or added: fewer in the
-/// merge than both sides kept, or more than either side has, inside a stretch
-/// between lines that appear once in the base, both sides and the merge, in
-/// the same order.
+/// The first line whose copies a clean merge lost or added. Anchors are lines
+/// that appear once in the base, both sides and the merge. Along the longest
+/// chain of anchors that every text keeps in the same order, between two
+/// neighbouring anchors and before the first or after the last, no line may
+/// have fewer copies in the merge than both sides have, or more than either
+/// side has.
 fn lost_or_added_copy(base: &str, local: &str, remote: &str, merged: &str) -> Option<String> {
     let texts = [base, local, remote, merged].map(lines);
     let counts = texts.each_ref().map(|text| count(text));
@@ -32,30 +34,51 @@ fn lost_or_added_copy(base: &str, local: &str, remote: &str, merged: &str) -> Op
     {
         return Some(format!("{line:?} should stay once"));
     }
-    let mut cuts = vec![[0_usize; 4]];
-    for line in &texts[0] {
-        if !once_in_three(line) {
-            continue;
-        }
-        let at: [usize; 4] = std::array::from_fn(|index| {
-            texts[index]
-                .iter()
-                .position(|candidate| candidate == line)
-                .unwrap()
-        });
-        let last = cuts.last().unwrap();
-        if (0..4).all(|index| at[index] >= last[index]) {
-            cuts.push(at.map(|position| position + 1));
-        }
-    }
-    let mut ends: Vec<[usize; 4]> = cuts[1..]
+    let anchors: Vec<[isize; 4]> = texts[0]
         .iter()
-        .map(|cut| cut.map(|position| position - 1))
+        .filter(|line| once_in_three(line))
+        .map(|line| {
+            std::array::from_fn(|index| {
+                texts[index]
+                    .iter()
+                    .position(|candidate| candidate == line)
+                    .unwrap() as isize
+            })
+        })
         .collect();
-    ends.push(texts.each_ref().map(Vec::len));
-    for (start, end) in cuts.iter().zip(&ends) {
-        let stretch: [HashMap<&str, usize>; 3] =
-            std::array::from_fn(|side| count(&texts[side + 1][start[side + 1]..end[side + 1]]));
+    let before =
+        |left: &[isize; 4], right: &[isize; 4]| (0..4).all(|index| left[index] < right[index]);
+    let mut chains: Vec<Vec<[isize; 4]>> = Vec::new();
+    for anchor in &anchors {
+        let mut chain = chains
+            .iter()
+            .filter(|chain| before(chain.last().unwrap(), anchor))
+            .fold(Vec::new(), |best, chain| {
+                if chain.len() > best.len() {
+                    chain.clone()
+                } else {
+                    best
+                }
+            });
+        chain.push(*anchor);
+        chains.push(chain);
+    }
+    let longest = chains.iter().fold(Vec::new(), |best, chain| {
+        if chain.len() >= best.len() {
+            chain.clone()
+        } else {
+            best
+        }
+    });
+    let mut bounds = vec![[-1_isize; 4]];
+    bounds.extend(longest);
+    bounds.push(texts.each_ref().map(|text| text.len() as isize));
+    for pair in bounds.windows(2) {
+        let [start, end] = [pair[0], pair[1]];
+        let stretch: [HashMap<&str, usize>; 3] = std::array::from_fn(|side| {
+            let text = &texts[side + 1];
+            count(&text[(start[side + 1] + 1) as usize..end[side + 1] as usize])
+        });
         for line in stretch.iter().flat_map(HashMap::keys) {
             let [local, remote, merged] =
                 std::array::from_fn(|side| stretch[side].get(line).copied().unwrap_or(0));
@@ -67,39 +90,6 @@ fn lost_or_added_copy(base: &str, local: &str, remote: &str, merged: &str) -> Op
         }
     }
     None
-}
-
-#[test]
-fn a_divider_both_sides_kept_survives_the_merge() {
-    let (base, local, remote) = ("\n\n\n---\n---", "\n\n---", "\n\n\n\n---");
-    let MarkdownMergeResult::Merged(merged) = merge_markdown(base, local, remote) else {
-        return;
-    };
-    assert_eq!(
-        lost_or_added_copy(base, local, remote, &merged),
-        None,
-        "{merged:?}"
-    );
-}
-
-#[test]
-fn the_same_change_on_both_sides_lands_once() {
-    assert_eq!(
-        merge_markdown("x\nx\na\nb", "x\na\nb", "x\na\nB"),
-        MarkdownMergeResult::Merged("x\na\nB".to_owned())
-    );
-}
-
-#[test]
-fn paragraphs_added_in_different_places_merge_cleanly() {
-    assert_eq!(
-        merge_markdown(
-            "One.\n\nTwo.\n\nThree.",
-            "One.\n\nLocal.\n\nTwo.\n\nThree.",
-            "One.\n\nTwo.\n\nRemote.\n\nThree.",
-        ),
-        MarkdownMergeResult::Merged("One.\n\nLocal.\n\nTwo.\n\nRemote.\n\nThree.".to_owned())
-    );
 }
 
 struct Random(u64);
@@ -219,3 +209,4 @@ fn random_merges_never_lose_or_add_a_copy() {
     );
     assert!(clean > cases.len() / 2, "only {clean} merged cleanly");
 }
+

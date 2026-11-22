@@ -17,6 +17,9 @@ const CASES: [string, string, string, string | undefined][] = [
     "One.\n\nTwo.\n\nRemote.\n\nThree.",
     "One.\n\nLocal.\n\nTwo.\n\nRemote.\n\nThree.",
   ],
+  ["\nB\nX\n---\n---", "\nB\n---\nX\n---", "B\nX\n\n---\nC", undefined],
+  ["\nA", "\n", "B\n", undefined],
+  ["", "A\n", "\nB", undefined],
 ];
 
 it.each(CASES)("merges %j, %j and %j like the engine", (base, local, remote, expected) => {
