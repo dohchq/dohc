@@ -8272,6 +8272,33 @@ fn replay_share_write<T: RelayTransport>(
             )
         })?)
     };
+    // A write can name an object this copy holds at another path, with no
+    // rename between them: a rename made while the path was hidden from this
+    // member arrives as a write at the new path. Replay it as that rename, so
+    // the object moves instead of being refused as bound elsewhere. Only into
+    // a free path; an occupied one keeps the plain write's handling. The
+    // request key above stays the write's, so a retry still dedupes.
+    let held_at = match (
+        rename_from,
+        object_id.filter(|id| received_object_token(id)),
+    ) {
+        (None, Some(token)) => store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT path FROM path_aliases \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path<>?4 \
+                       AND NOT EXISTS(SELECT 1 FROM path_aliases \
+                         WHERE workspace_id=?1 AND version_id=?2 AND path=?4)",
+                    params![workspace_id, version_id, token, path],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)
+            })
+            .map_err(local)?,
+        _ => None,
+    };
+    let rename_from = rename_from.or(held_at.as_deref());
     if let Some(before) = rename_from {
         let input = dohc_engine_domain::RenameTextFile {
             workspace_id: workspace_id.to_owned(),
