@@ -63,6 +63,8 @@ export function createDirectStore(api: Api) {
   // Conversations New message handed over to whose composer hasn't taken focus yet.
   const focusOn = new Set<string>();
   const unsent = new Map<string, { messageId: string; body: string }>();
+  // Why the last send failed, until a send works. A list read that fails the same way files no notice of its own.
+  let sendFailure: string | null = null;
 
   const set = (next: DirectListState) => {
     state = next;
@@ -140,6 +142,7 @@ export function createDirectStore(api: Api) {
         drafts.clear();
         focusOn.clear();
         unsent.clear();
+        sendFailure = null;
         set({ status: "loading" });
       }
       if (phase === "ready" && listeners.size > 0) void refresh();
@@ -239,7 +242,12 @@ export function createDirectStore(api: Api) {
     },
     sent(key: string, messageId: string): void {
       if (unsent.get(key)?.messageId === messageId) unsent.delete(key);
+      sendFailure = null;
     },
+    sendFailed(message: string): void {
+      sendFailure = message;
+    },
+    sendFailure: () => sendFailure,
   };
 }
 
