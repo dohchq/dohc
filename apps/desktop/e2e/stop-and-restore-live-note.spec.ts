@@ -32,15 +32,19 @@ test.skip(
 type Api = DohcDesktopBridge;
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 
+const hasWord = (file: string, word: string) => new RegExp(`${word}(?!\\d)`).test(file);
+
 function typeNumberedWordsUntilStopped(page: Page, prefix: string) {
   const words: string[] = [];
   let typing = true;
+  let failure: unknown;
   const done = (async () => {
     for (let index = 0; typing; index += 1) {
       const word = ` ${prefix}${index}`;
       try {
         await page.keyboard.type(word, { delay: 40 });
-      } catch {
+      } catch (error) {
+        failure = error;
         return;
       }
       words.push(word.trim());
@@ -48,6 +52,7 @@ function typeNumberedWordsUntilStopped(page: Page, prefix: string) {
   })();
   return {
     words,
+    failure: () => failure,
     async stop() {
       typing = false;
       await done;
@@ -159,7 +164,7 @@ test("@stop-and-restore-live Stop and restore ends one Edit link of a live note 
     const second = await shareLink("edit");
     await expect.poll(status, { timeout: 180_000, intervals: [1000] }).toBe("ready");
 
-    const openLinkEditor = async (url: string) => {
+    const openLinkEditor = async (url: string, edge: "Home" | "End" = "End") => {
       const linkPage = await shared!.browser.newPage();
       linkPage.on("pageerror", (error) => shared!.failures.push(error.message));
       await linkPage.goto(`${sharedDatasetViewerOrigin}/s${new URL(url).hash}`);
@@ -171,11 +176,11 @@ test("@stop-and-restore-live Stop and restore ends one Edit link of a live note 
       await expect(box).toHaveAttribute("contenteditable", "true", { timeout: 120_000 });
       await expect(box).toBeEditable({ timeout: 15_000 });
       await box.getByText(body, { exact: false }).click({ timeout: 15_000 });
-      await linkPage.keyboard.press("End");
+      await linkPage.keyboard.press(edge);
       return { linkPage, box };
     };
     const ended = await openLinkEditor(first.url);
-    const kept = await openLinkEditor(second.url);
+    const kept = await openLinkEditor(second.url, "Home");
     const endedTypist = typeNumberedWordsUntilStopped(ended.linkPage, "ended");
     const keptTypist = typeNumberedWordsUntilStopped(kept.linkPage, "kept");
     await expect
@@ -183,8 +188,8 @@ test("@stop-and-restore-live Stop and restore ends one Edit link of a live note 
         async () => {
           const file = await ownerFile();
           return (
-            endedTypist.words.some((word) => file.includes(word)) &&
-            keptTypist.words.some((word) => file.includes(word))
+            endedTypist.words.some((word) => hasWord(file, word)) &&
+            keptTypist.words.some((word) => hasWord(file, word))
           );
         },
         {
@@ -195,9 +200,11 @@ test("@stop-and-restore-live Stop and restore ends one Edit link of a live note 
       )
       .toBe(true);
     const before = await ownerFile();
-    const settled = [endedTypist.words, keptTypist.words].map((words) =>
-      words.find((word) => before.includes(word))!,
+    const settled = [...endedTypist.words, ...keptTypist.words].filter((word) =>
+      hasWord(before, word),
     );
+    expect(endedTypist.failure(), "the ended link's editor is still typing").toBeUndefined();
+    expect(keptTypist.failure(), "the kept link's editor is still typing").toBeUndefined();
 
     let outcome: Awaited<ReturnType<Api["stopAndRestore"]>> | undefined;
     await expect
@@ -222,6 +229,7 @@ test("@stop-and-restore-live Stop and restore ends one Edit link of a live note 
       .toBe("restored");
     await endedTypist.stop();
     await keptTypist.stop();
+    expect(keptTypist.failure(), "the kept link's editor typed through Stop").toBeUndefined();
     console.log(`[stop-and-restore-live] outcome: ${JSON.stringify(outcome)}`);
     expect(outcome).toMatchObject({ status: "restored", unfinished: null });
 
@@ -238,7 +246,9 @@ test("@stop-and-restore-live Stop and restore ends one Edit link of a live note 
     expect(linkStatus(second.grantId), "the other link stays").toBe("active");
     const after = await ownerFile();
     expect(after, "the owner's own words stay").toContain(body);
-    for (const word of settled) expect(after, "live typing already saved stays").toContain(word);
+    for (const word of settled) expect(hasWord(after, word), `saved ${word} stays`).toBe(true);
+    const refused = ` refused-${randomBytes(6).toString("hex")}`;
+    await ended.linkPage.keyboard.insertText(refused).catch(() => undefined);
 
     const paused = await status();
     console.log(`[stop-and-restore-live] the note after Stop and restore: ${paused}`);
@@ -262,13 +272,23 @@ test("@stop-and-restore-live Stop and restore ends one Edit link of a live note 
     const again = await openLinkEditor(second.url);
     const marker = ` after-${randomBytes(6).toString("hex")}`;
     await again.linkPage.keyboard.insertText(marker);
+    let final = "";
     await expect
-      .poll(async () => (await ownerFile()).includes(marker.trim()), {
-        message: "the other link's editor reaches the owner again",
-        timeout: 120_000,
-        intervals: [1000],
-      })
+      .poll(
+        async () => {
+          final = await ownerFile();
+          return final.includes(marker.trim());
+        },
+        {
+          message: "the other link's editor reaches the owner again",
+          timeout: 120_000,
+          intervals: [1000],
+        },
+      )
       .toBe(true);
+    expect(final, "the owner's own words stay").toContain(body);
+    for (const word of settled) expect(hasWord(final, word), `saved ${word} stays`).toBe(true);
+    expect(final, "the ended link can no longer write").not.toContain(refused.trim());
     expect(shared.failures).toEqual([]);
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } catch (error) {
