@@ -371,7 +371,7 @@ describe("reading any sequence", () => {
 describe("writing a document and reading it back", () => {
   const roundTrip = (doc: ProseMirrorNode, idFor = (index: number) => `c${String(index)}`) => {
     const leaves = flattenBody(doc, (_node, index) => idFor(index));
-    const written = writtenLeaves(leaves);
+    const written = writtenLeaves(schema, leaves);
     const pieces: SequencePiece[] = leaves.flatMap((leaf, at) => [
       { boundary: written.boundaries[at]! },
       ...leaf.inline,
@@ -494,6 +494,27 @@ describe("writing a document and reading it back", () => {
     for (const type of ["bulletList", "taskItem", "table", "callout", "codeBlock", "blockquote"])
       expect([...types]).toContain(type);
     expect(roundTrip(doc).toJSON()).toEqual(doc.toJSON());
+  });
+
+  it("gives a new container every record a kind it can become has, and every line a path", () => {
+    const item = schema.nodes.listItem!.create(null, schema.nodes.paragraph!.create());
+    const doc = schema.topNodeType.create(null, [
+      schema.nodes.paragraph!.create(),
+      schema.nodes.bulletList!.create(null, item),
+    ]);
+    const written = writtenLeaves(
+      schema,
+      flattenBody(doc, (_node, index) => ["L", "i"][index]!),
+    );
+    expect(written.boundaries.map((boundary) => boundary.path)).toEqual([[], ["L", "i"]]);
+    expect(Object.fromEntries(written.containers)).toEqual({
+      L: "bulletList",
+      "L.loose": null,
+      "L.start": 1,
+      "L.type": null,
+      i: "listItem",
+      "i.checked": false,
+    });
   });
 
   it("keeps two neighbouring quotes two, and makes them one when they share a name", () => {

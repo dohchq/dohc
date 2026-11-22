@@ -8,6 +8,8 @@ import {
 } from "@tiptap/pm/model";
 
 export const MAX_SEQUENCE_DEPTH = 64;
+export const BODY_SEQUENCE_FIELD = "sequence";
+export const BODY_CONTAINERS_FIELD = "containers";
 export const BLOCK_ELEMENT = "block";
 export const CONTAINER_ID = /^[A-Za-z0-9_-]{1,32}$/;
 
@@ -107,10 +109,6 @@ const VALUE_RULES: Record<string, (value: unknown) => boolean> = {
   "link.title": textOrNone,
 };
 
-/**
- * The attributes of `raw` that `type` has and whose values it can hold. An attribute with a value
- * it cannot hold reads as its default.
- */
 function attrsFor(type: NodeType | MarkType, raw: unknown): SequenceAttrs {
   const given = record(raw) ?? {};
   const attrs: SequenceAttrs = {};
@@ -220,26 +218,48 @@ export function leavesOfSequence(
   return leaves;
 }
 
+const KINDS_A_CONTAINER_CAN_BECOME = [
+  ["blockquote", "callout"],
+  ["bulletList", "orderedList", "taskList"],
+  ["listItem", "taskItem"],
+  ["tableCell", "tableHeader"],
+];
+
+/**
+ * The records a writer gives a new container: its type, and every attribute of every kind it can
+ * become where it stands, so that each later change to one is an overwrite.
+ */
+export function recordsOfContainer(schema: Schema, frame: SequenceFrame): Map<string, unknown> {
+  const records = new Map<string, unknown>([[frame.id, frame.type]]);
+  const kinds = KINDS_A_CONTAINER_CAN_BECOME.find((family) => family.includes(frame.type)) ?? [
+    frame.type,
+  ];
+  for (const kind of kinds)
+    for (const [key, spec] of Object.entries(schema.nodes[kind]?.spec.attrs ?? {}))
+      if (!records.has(`${frame.id}.${key}`))
+        records.set(`${frame.id}.${key}`, (spec as { default?: unknown }).default ?? null);
+  for (const [key, value] of Object.entries(frame.attrs)) records.set(`${frame.id}.${key}`, value);
+  return records;
+}
+
 /** What a writer stores for some leaves: each boundary's attributes, and the container records. */
-export function writtenLeaves(leaves: readonly Omit<SequenceLeaf, "inline">[]): {
+export function writtenLeaves(
+  schema: Schema,
+  leaves: readonly Omit<SequenceLeaf, "inline">[],
+): {
   boundaries: SequenceAttrs[];
   containers: Map<string, unknown>;
 } {
   const containers = new Map<string, unknown>();
   const boundaries = leaves.map((leaf) => {
-    for (const frame of leaf.path) {
-      containers.set(frame.id, frame.type);
-      for (const [key, value] of Object.entries(frame.attrs))
-        containers.set(`${frame.id}.${key}`, value);
-    }
-    const attributes: SequenceAttrs = { ...leaf.attrs, type: leaf.type };
-    if (leaf.path.length > 0) attributes.path = leaf.path.map((frame) => frame.id);
-    return attributes;
+    for (const frame of leaf.path)
+      if (!containers.has(frame.id))
+        for (const [key, value] of recordsOfContainer(schema, frame)) containers.set(key, value);
+    return { ...leaf.attrs, type: leaf.type, path: leaf.path.map((frame) => frame.id) };
   });
   return { boundaries, containers };
 }
 
-/** A mark is on when its value is an object, which holds the mark's attributes. */
 function marksFor(schema: Schema, holder: NodeType, raw: SequenceAttrs): readonly Mark[] {
   let marks: readonly Mark[] = Mark.none;
   for (const [name, type] of Object.entries(schema.marks)) {

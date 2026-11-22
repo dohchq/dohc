@@ -3,17 +3,19 @@ import * as Y from "yjs";
 import { getDohcProseMirrorSchema } from "./import-export.js";
 import {
   BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
   leavesOfSequence,
   readBodyLeaves,
+  recordsOfContainer,
   type SequencePiece,
 } from "./bodySequenceGrammar.js";
 
 const schema = getDohcProseMirrorSchema();
-const FIELD = "sequence";
-const CONTAINERS = "containers";
+const FIELD = BODY_SEQUENCE_FIELD;
+const CONTAINERS = BODY_CONTAINERS_FIELD;
 const REMOTE = Symbol("remote");
 const LOCAL = Symbol("local");
-const REMOTE_FREE = Symbol("the default, written outside the history");
 const docs: Y.Doc[] = [];
 afterEach(() => {
   for (const doc of docs.splice(0)) doc.destroy();
@@ -54,9 +56,13 @@ type Line = { path: string[]; text: string };
 function note(records: Record<string, unknown>, ...lines: Line[]) {
   const doc = new Y.Doc();
   doc.clientID = 1;
-  doc.getMap(CONTAINERS);
   const text = doc.getText(FIELD);
-  for (const [key, value] of Object.entries(records)) doc.getMap(CONTAINERS).set(key, value);
+  for (const [id, type] of Object.entries(records))
+    if (!id.includes("."))
+      for (const [key, value] of recordsOfContainer(schema, { id, type: String(type), attrs: {} }))
+        doc.getMap(CONTAINERS).set(key, value);
+  for (const [key, value] of Object.entries(records))
+    if (key.includes(".")) doc.getMap(CONTAINERS).set(key, value);
   for (const line of lines) {
     text.insertEmbed(text.length, boundary(line.path), {});
     text.insert(text.length, line.text, {});
@@ -90,9 +96,9 @@ function person(baseline: Uint8Array, clientID: number) {
     sent,
     history,
     change: (act: () => void) => doc.transact(act, LOCAL),
-    write(key: string, value: unknown, whenMissing: unknown) {
-      if (!records.has(key)) doc.transact(() => records.set(key, whenMissing), REMOTE_FREE);
-      doc.transact(() => records.set(key, value), LOCAL);
+    create(id: string, type: string, attrs: Record<string, unknown> = {}) {
+      for (const [key, value] of recordsOfContainer(schema, { id, type, attrs }))
+        records.set(key, value);
     },
     line: (index: number) =>
       changes()
@@ -146,7 +152,7 @@ const twoTodos = () =>
 
 function indentSecondUnderFirst(indenter: Person) {
   indenter.change(() => {
-    indenter.records.set("L2", "taskList");
+    indenter.create("L2", "taskList");
     indenter.line(1).setAttribute("path", ["L", "I1", "L2", "I2"] as unknown as string);
   });
 }
@@ -273,7 +279,7 @@ it("keeps a list one list when it becomes to-dos and someone adds an item in the
   const adder = person(twoBullets(), 20);
   toTodos(changer);
   adder.change(() => {
-    adder.records.set("c", "listItem");
+    adder.create("c", "listItem");
     const at = adder.indexOf(1);
     adder.text.insertEmbed(at, boundary(["L", "c"]), {});
     adder.text.insert(at + 1, "c", {});
@@ -348,7 +354,7 @@ it("leaves a line someone added to a quote in the quote when the quote is undone
   const wrapper = person(baseline, 10);
   const writer = person(baseline, 20);
   wrapper.change(() => {
-    wrapper.records.set("q", "blockquote");
+    wrapper.create("q", "blockquote");
     wrapper.line(0).setAttribute("path", ["q"] as unknown as string);
   });
   settle(wrapper, writer);
@@ -381,14 +387,13 @@ it("keeps a to-do someone added to a list when the change that made the list is 
   const splitter = person(baseline, 10);
   const adder = person(baseline, 20);
   splitter.change(() => {
-    splitter.records.set("L2", "taskList");
+    splitter.create("L2", "taskList");
     splitter.line(1).setAttribute("path", [] as unknown as string);
     splitter.line(2).setAttribute("path", ["L2", "I3"] as unknown as string);
   });
   settle(splitter, adder);
   adder.change(() => {
-    adder.records.set("I4", "taskItem");
-    adder.records.set("I4.checked", false);
+    adder.create("I4", "taskItem");
     adder.text.insertEmbed(adder.text.length, boundary(["L2", "I4"]), {});
     adder.text.insert(adder.text.length, "four", {});
   });
@@ -442,7 +447,7 @@ it("undoes a tick on an item that became a to-do through its list, and nothing b
     changer.records.set("a.checked", false);
   });
   adder.change(() => {
-    adder.records.set("b", "listItem");
+    adder.create("b", "listItem");
     adder.text.insertEmbed(adder.text.length, boundary(["L", "b"]), {});
     adder.text.insert(adder.text.length, "b", {});
   });
@@ -450,7 +455,7 @@ it("undoes a tick on an item that became a to-do through its list, and nothing b
   adder.history.stopCapturing();
   adder.change(() => adder.text.insert(adder.text.length, "!", {}));
   adder.history.stopCapturing();
-  adder.write("b.checked", true, false);
+  adder.change(() => adder.records.set("b.checked", true));
   expect(settle(changer, adder)).toMatchObject({
     content: [
       { type: "taskList", content: [todo(false, paragraph("a")), todo(true, paragraph("b!"))] },
@@ -472,7 +477,7 @@ it("undoes a start number set after a list became numbered, and nothing before i
   first.history.stopCapturing();
   first.change(() => first.text.insert(first.text.length, "!", {}));
   first.history.stopCapturing();
-  first.write("L.start", 5, 1);
+  first.change(() => first.records.set("L.start", 5));
   expect(settle(first, second)).toMatchObject({
     content: [{ type: "orderedList", attrs: { start: 5 }, content: [item("listItem", "item!")] }],
   });
@@ -491,10 +496,7 @@ it("keeps a callout's settings for a line someone added when the callout's makin
   const maker = person(baseline, 10);
   const adder = person(baseline, 20);
   maker.change(() => {
-    maker.records.set("c1", "callout");
-    maker.records.set("c1.calloutType", "warning");
-    maker.records.set("c1.title", "Danger");
-    maker.records.set("c1.fold", "-");
+    maker.create("c1", "callout", { calloutType: "warning", title: "Danger", fold: "-" });
     maker.line(0).setAttribute("path", ["c1"] as unknown as string);
   });
   settle(maker, adder);
@@ -523,12 +525,12 @@ it("puts a line back at the top level when its wrapping is undone after someone 
   first.change(() => first.text.insert(first.indexOf(0) + 5, "!", {}));
   first.history.stopCapturing();
   first.change(() => {
-    first.records.set("q", "blockquote");
+    first.create("q", "blockquote");
     first.line(1).setAttribute("path", ["q"] as unknown as string);
   });
   settle(first, second);
   second.change(() => {
-    second.records.set("q2", "blockquote");
+    second.create("q2", "blockquote");
     second.line(1).setAttribute("path", ["q2"] as unknown as string);
   });
   settle(first, second);
@@ -547,9 +549,9 @@ it("puts a start number back when its change is undone after someone changed it 
   first.history.stopCapturing();
   first.change(() => first.text.insert(first.text.length, "!", {}));
   first.history.stopCapturing();
-  first.write("L.start", 5, 1);
+  first.change(() => first.records.set("L.start", 5));
   settle(first, second);
-  second.write("L.start", 9, 1);
+  second.change(() => second.records.set("L.start", 9));
   settle(first, second);
   first.history.undo();
   expect(settle(first, second)).toMatchObject({

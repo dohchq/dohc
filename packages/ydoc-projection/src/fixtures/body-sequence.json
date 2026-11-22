@@ -1,0 +1,523 @@
+[
+  {
+    "name": "letters, marks, inline items and blocks that hold no blocks",
+    "update": "ASsBACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AgQBCHNlcXVlbmNlE2JlZm9yZSBhbnkgYm91bmRhcnmHARMDBWJsb2NrKAABFAR0eXBlAXcJcGFyYWdyYXBoKAABFARwYXRoAXUAhAEUBE9uZSCGARoEYm9sZAJ7fYQBGwRib2xkhgEfBGJvbGQEbnVsbIQBIAUgYW5kIIYBJQRsaW5rMHsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJ0aXRsZSI6IkV4YW1wbGUifYQBJgZhIGxpbmuGASwEbGluawRudWxshwEtAwh3aWtpbGluaygAAS4GdGFyZ2V0AXcEUGFnZSgAAS4FbGFiZWwBfocBLgMFYmxvY2soAAExBHR5cGUBdwdoZWFkaW5nKAABMQVsZXZlbAF9AigAATEEcGF0aAF1AIQBMQpUaXRsZSDwn5iAhwE8AwVibG9jaygAAT0EdHlwZQF3CWNvZGVCbG9jaygAAT0IbGFuZ3VhZ2UBdwJ0cygAAT0EcGF0aAF1AIYBPQRib2xkAnt9hAFBD2NvbnN0IHggPSAxOwp4O4YBUARib2xkBG51bGyHAVEDBWJsb2NrKAABUgR0eXBlAXcOaG9yaXpvbnRhbFJ1bGUoAAFSBHBhdGgBdQCHAVIDBWJsb2NrKAABVQR0eXBlAXcJbWF0aEJsb2NrKAABVQN0ZXgBdwN4XjIoAAFVBHBhdGgBdQCHAVUDBWJsb2NrKAABWQR0eXBlAXcJcGFyYWdyYXBoKAABWQRwYXRoAXUAhgFZBGNvZGUCe32GAVwGaXRhbGljAnt9hAFdCWNvZGUgd2luc4YBZgRjb2RlBG51bGyGAWcGaXRhbGljBG51bGwA",
+    "document": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "before any boundary"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "One "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "bold"
+                }
+              ],
+              "text": "bold"
+            },
+            {
+              "type": "text",
+              "text": " and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com",
+                    "target": "_blank",
+                    "rel": "noopener noreferrer nofollow",
+                    "class": null,
+                    "title": "Example"
+                  }
+                }
+              ],
+              "text": "a link"
+            },
+            {
+              "type": "wikilink",
+              "attrs": {
+                "target": "Page",
+                "label": null
+              }
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Title 😀"
+            }
+          ]
+        },
+        {
+          "type": "codeBlock",
+          "attrs": {
+            "language": "ts"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "const x = 1;\nx;"
+            }
+          ]
+        },
+        {
+          "type": "horizontalRule"
+        },
+        {
+          "type": "mathBlock",
+          "attrs": {
+            "tex": "x^2"
+          }
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "code"
+                }
+              ],
+              "text": "code wins"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "lists, a to-do, a callout and an uneven table",
+    "update": "AUcCACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AigBCmNvbnRhaW5lcnMBTAF3CmJ1bGxldExpc3QoAQpjb250YWluZXJzB0wubG9vc2UBfigBCmNvbnRhaW5lcnMHTC5zdGFydAF9ASgBCmNvbnRhaW5lcnMGTC50eXBlAX4oAQpjb250YWluZXJzAWEBdwhsaXN0SXRlbSgBCmNvbnRhaW5lcnMJYS5jaGVja2VkAXkoAQpjb250YWluZXJzAWIBdwhsaXN0SXRlbSgBCmNvbnRhaW5lcnMJYi5jaGVja2VkAXkoAQpjb250YWluZXJzAU4Bdwh0YXNrTGlzdCgBCmNvbnRhaW5lcnMHTi5sb29zZQF+KAEKY29udGFpbmVycwdOLnN0YXJ0AX0BKAEKY29udGFpbmVycwZOLnR5cGUBfigBCmNvbnRhaW5lcnMBdAF3CHRhc2tJdGVtKAEKY29udGFpbmVycwl0LmNoZWNrZWQBeCgBCmNvbnRhaW5lcnMBYwF3B2NhbGxvdXQoAQpjb250YWluZXJzDWMuY2FsbG91dFR5cGUBdwd3YXJuaW5nKAEKY29udGFpbmVycwdjLnRpdGxlAXcHQ2FyZWZ1bCgBCmNvbnRhaW5lcnMGYy5mb2xkAXcBLSgBCmNvbnRhaW5lcnMBVAF3BXRhYmxlKAEKY29udGFpbmVycwJyMQF3CHRhYmxlUm93KAEKY29udGFpbmVycwlyMS5oZWlnaHQBfigBCmNvbnRhaW5lcnMCaDEBdwt0YWJsZUhlYWRlcigBCmNvbnRhaW5lcnMKaDEuY29sc3BhbgF9ASgBCmNvbnRhaW5lcnMKaDEucm93c3BhbgF9ASgBCmNvbnRhaW5lcnMLaDEuY29sd2lkdGgBfigBCmNvbnRhaW5lcnMIaDEuYWxpZ24BfigBCmNvbnRhaW5lcnMCaDIBdwt0YWJsZUhlYWRlcigBCmNvbnRhaW5lcnMKaDIuY29sc3BhbgF9ASgBCmNvbnRhaW5lcnMKaDIucm93c3BhbgF9ASgBCmNvbnRhaW5lcnMLaDIuY29sd2lkdGgBfigBCmNvbnRhaW5lcnMIaDIuYWxpZ24BfigBCmNvbnRhaW5lcnMCcjIBdwh0YWJsZVJvdygBCmNvbnRhaW5lcnMJcjIuaGVpZ2h0AX0oKAEKY29udGFpbmVycwJkMQF3CXRhYmxlQ2VsbCgBCmNvbnRhaW5lcnMKZDEuY29sc3BhbgF9ASgBCmNvbnRhaW5lcnMKZDEucm93c3BhbgF9ASgBCmNvbnRhaW5lcnMLZDEuY29sd2lkdGgBdQF9uAEoAQpjb250YWluZXJzCGQxLmFsaWduAX4HAQhzZXF1ZW5jZQMFYmxvY2soAAInBHR5cGUBdwlwYXJhZ3JhcGgoAAInBHBhdGgBdQJ3AUx3AWGEAicFZmlyc3SHAi4DBWJsb2NrKAACLwR0eXBlAXcJcGFyYWdyYXBoKAACLwRwYXRoAXUCdwFMdwFhhAIvGXNlY29uZCBwYXJhZ3JhcGggb2YgZmlyc3SHAkoDBWJsb2NrKAACSwR0eXBlAXcJcGFyYWdyYXBoKAACSwRwYXRoAXUCdwFMdwFihAJLBnNlY29uZIcCUwMFYmxvY2soAAJUBHR5cGUBdwlwYXJhZ3JhcGgoAAJUBHBhdGgBdQR3AUx3AWJ3AU53AXSEAlQOYSB0aWNrZWQgdG8tZG+HAmQDBWJsb2NrKAACZQR0eXBlAXcJcGFyYWdyYXBoKAACZQRwYXRoAXUBdwFjhAJlEGluc2lkZSBhIGNhbGxvdXSHAncDBWJsb2NrKAACeAR0eXBlAXcJcGFyYWdyYXBoKAACeARwYXRoAXUDdwFUdwJyMXcCaDGEAngBYYcCewMFYmxvY2soAAJ8BHR5cGUBdwlwYXJhZ3JhcGgoAAJ8BHBhdGgBdQN3AVR3AnIxdwJoMoQCfAFihwJ/AwVibG9jaygAAoABBHR5cGUBdwlwYXJhZ3JhcGgoAAKAAQRwYXRoAXUDdwFUdwJyMncCZDGEAoABDW9uZSBjZWxsIG9ubHkA",
+    "document": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "bulletList",
+          "attrs": {
+            "loose": null
+          },
+          "content": [
+            {
+              "type": "listItem",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "first"
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "second paragraph of first"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "listItem",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "second"
+                    }
+                  ]
+                },
+                {
+                  "type": "taskList",
+                  "attrs": {
+                    "loose": null
+                  },
+                  "content": [
+                    {
+                      "type": "taskItem",
+                      "attrs": {
+                        "checked": true
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a ticked to-do"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "calloutType": "warning",
+            "title": "Careful",
+            "fold": "-"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "inside a callout"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "content": [
+            {
+              "type": "tableRow",
+              "attrs": {
+                "height": null
+              },
+              "content": [
+                {
+                  "type": "tableHeader",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "align": null
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tableHeader",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "align": null
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tableRow",
+              "attrs": {
+                "height": 40
+              },
+              "content": [
+                {
+                  "type": "tableCell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": [
+                      120
+                    ],
+                    "align": null
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "one cell only"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "values and paths a reader must repair",
+    "update": "AUgDACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AigBCmNvbnRhaW5lcnMBTAF3CHRhc2tMaXN0KAEKY29udGFpbmVycwdMLmxvb3NlAX4oAQpjb250YWluZXJzB0wuc3RhcnQBfQEoAQpjb250YWluZXJzBkwudHlwZQF+KAEKY29udGFpbmVycwFpAXcIbGlzdEl0ZW0oAQpjb250YWluZXJzCWkuY2hlY2tlZAF5qAMGAXcDeWVzKAEKY29udGFpbmVycwFxAXcKYmxvY2txdW90ZSgBCmNvbnRhaW5lcnMNcS5jYWxsb3V0VHlwZQF3BG5vdGUoAQpjb250YWluZXJzB3EudGl0bGUBdwAoAQpjb250YWluZXJzBnEuZm9sZAF3ACgBCmNvbnRhaW5lcnMBVAF3BXRhYmxlKAEKY29udGFpbmVycwFyAXcIdGFibGVSb3coAQpjb250YWluZXJzCHIuaGVpZ2h0AX4oAQpjb250YWluZXJzAWQBdwl0YWJsZUNlbGwoAQpjb250YWluZXJzCWQuY29sc3BhbgF9gKjWuQcoAQpjb250YWluZXJzCWQucm93c3BhbgF9ASgBCmNvbnRhaW5lcnMKZC5jb2x3aWR0aAF1AnoAAAAAAAAAZH0UKAEKY29udGFpbmVycwdkLmFsaWduAX4oAQpjb250YWluZXJzAW8BdwtvcmRlcmVkTGlzdCgBCmNvbnRhaW5lcnMHby5zdGFydAF8P8AAACgBCmNvbnRhaW5lcnMCb2kBdwhsaXN0SXRlbSgBCmNvbnRhaW5lcnMKb2kuY2hlY2tlZAF5BwEIc2VxdWVuY2UDBWJsb2NrKAADGAR0eXBlAXcHaGVhZGluZygAAxgFbGV2ZWwBdwF4KAADGARwYXRoAXUCdwFMdwFphAMYFGEgaGVhZGluZyBpbiBhbiBpdGVthwMvAwVibG9jaygAAzAEdHlwZQF3B2hlYWRpbmcoAAMwBWxldmVsAXoAAAAAAAAAAygAAzAEcGF0aAF1A3cBcXcBcXcBTIQDMBlhIHBhdGggdGhhdCByZXBlYXRzIGFuIGlkhwNMAwVibG9jaygAA00EdHlwZQF3CXBhcmFncmFwaCgAA00EcGF0aAF1AncBcXcHbWlzc2luZ4QDTRVhIHBhdGggd2l0aCBubyByZWNvcmSHA2QDBWJsb2NrKAADZQR0eXBlAXcIbm9uc2Vuc2UoAANlBHBhdGgBdwFxhANlK2FuIHVua25vd24gdHlwZSBhbmQgYSBwYXRoIHRoYXQgaXMgbm8gYXJyYXmHA5IBAwVibG9ja4QDkwEdYSBib3VuZGFyeSB3aXRoIG5vIGF0dHJpYnV0ZXOHA7ABAwVibG9jaygAA7EBBHR5cGUBdwlwYXJhZ3JhcGgoAAOxAQRwYXRoAXUDdwFUdwFydwFkhAOxAQZhIGNlbGyHA7kBAwVibG9jaygAA7oBBHR5cGUBdwlwYXJhZ3JhcGgoAAO6AQRwYXRoAXUCdwFvdwJvaYQDugEkYSBsaXN0IHRoYXQgc3RhcnRzIGF0IG9uZSBhbmQgYSBoYWxmhwPgAQMFYmxvY2soAAPhAQR0eXBlAXcJY29kZUJsb2NrKAAD4QEEcGF0aAF1AIQD4QEFY29kZSCHA+gBAwh3aWtpbGluaygAA+kBBnRhcmdldAF3B1NwaWxsZWSEA+kBDmFmdGVyIHRoZSBpdGVthwP4AQMIbm9uc2Vuc2WHA/kBAwVibG9jaygAA/oBBHR5cGUBdwlwYXJhZ3JhcGgoAAP6AQRwYXRoAXUAhAP6AQdtYXJrczoghgODAgRib2xkAnt9hAOEAgJvboYDhgIEYm9sZARudWxsxgOGAgOHAgRib2xkBHRydWXGA4gCA4cCDmJvbGQtLWFiY2RlZmdoAnt9xAOJAgOHAgNvZmbGA4wCA4cCBGJvbGQCe33GA40CA4cCDmJvbGQtLWFiY2RlZmdoBG51bGwBAwEGAQ==",
+    "document": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "taskList",
+          "attrs": {
+            "loose": null
+          },
+          "content": [
+            {
+              "type": "taskItem",
+              "attrs": {
+                "checked": false
+              },
+              "content": [
+                {
+                  "type": "paragraph"
+                },
+                {
+                  "type": "heading",
+                  "attrs": {
+                    "level": 1
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a heading in an item"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "content": [
+            {
+              "type": "heading",
+              "attrs": {
+                "level": 3
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a path that repeats an id"
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a path with no record"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "an unknown type and a path that is no array"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "a boundary with no attributes"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "content": [
+            {
+              "type": "tableRow",
+              "attrs": {
+                "height": null
+              },
+              "content": [
+                {
+                  "type": "tableCell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": [
+                      100,
+                      20
+                    ],
+                    "align": null
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a cell"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "orderedList",
+          "attrs": {
+            "start": 1,
+            "type": null,
+            "loose": null
+          },
+          "content": [
+            {
+              "type": "listItem",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a list that starts at one and a half"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "codeBlock",
+          "attrs": {
+            "language": null
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "code "
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "wikilink",
+              "attrs": {
+                "target": "Spilled",
+                "label": null
+              }
+            },
+            {
+              "type": "text",
+              "text": "after the item"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "marks: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "bold"
+                }
+              ],
+              "text": "on"
+            },
+            {
+              "type": "text",
+              "text": "off"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "both joined one line, one typed, one undid",
+    "update": "AwIGACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AsQEEQQSAVgEBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQLHBAoECwMFYmxvY2soAAUBBHR5cGUBdwlwYXJhZ3JhcGgoAAUBBHBhdGgBdQAOBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQIHAQhzZXF1ZW5jZQMFYmxvY2soAAQBBHR5cGUBdwlwYXJhZ3JhcGgoAAQBBHBhdGgBdQCEBAEHT25lIG9uZYcECgMFYmxvY2soAAQLBHR5cGUBdwlwYXJhZ3JhcGgoAAQLBHBhdGgBdQCEBAsEVHdvIIQEEQd0d28gdHdvhwQYAwVibG9jaygABBkEdHlwZQF3CXBhcmFncmFwaCgABBkEcGF0aAF1AIQEGQVUaHJlZQIFAQABBAIAAQsD",
+    "document": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "One one"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Two Xtwo two"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Three"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]
