@@ -16,6 +16,7 @@ import type {
   EngineYDocSaveStateEvent,
 } from "../ipc/bridgeContract";
 import { resetOrphanedDrafts } from "./orphanedDrafts";
+import { draftFilesForTests } from "./orphanedDraftFiles.testHarness";
 
 const canvas = vi.hoisted(() => ({
   props: null as null | Record<string, unknown>,
@@ -152,8 +153,11 @@ function bridgeFor(
   const saveStateListeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
   const lineageReplacementListeners = new Set<(event: EngineYDocLineageReplacementEvent) => void>();
   let sessionId: string | null = null;
+  const drafts = draftFilesForTests();
   return {
     platform: "linux" as const,
+    ...drafts.calls,
+    drafts,
     onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
       text,
@@ -562,9 +566,7 @@ describe("FileInspector Excalidraw view", () => {
     );
     await waitFor(() => expect(bridge.applyEngineYDocUpdate).toHaveBeenCalledOnce());
 
-    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
-    });
+    bridge.drafts.fail(new Error("No space left on device"));
     const winner = new Y.Doc();
     declareSceneRoots(winner);
     act(() => bridge.emitLineageReplacement(Y.encodeStateAsUpdate(winner)));
@@ -576,7 +578,7 @@ describe("FileInspector Excalidraw view", () => {
       "dohc could not finish replacing this document. Storage refused the earlier edits.",
     );
 
-    setItem.mockRestore();
+    bridge.drafts.fail(null);
     fireEvent.click(retry);
     await waitFor(() =>
       expect(bridge.acknowledgeEngineYDocLineageReplacement).toHaveBeenCalledOnce(),

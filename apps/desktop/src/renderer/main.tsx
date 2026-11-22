@@ -27,10 +27,14 @@ installGlobalErrorReporters();
 // Before the root renders: the set-aside recoveries the last app run
 // left behind go back into the store, so the first paint already carries their
 // notices and nothing has to re-render to find them.
-restoreOrphanedDrafts();
-
 const container = document.getElementById("root");
-if (container) {
+void restoreOrphanedDrafts()
+  .catch(() => undefined)
+  .then(() => {
+    if (container) render(container);
+  });
+
+function render(container: HTMLElement): void {
   // AppErrorBoundary: an uncaught render error must show the branded
   // recovery screen (reload button), never unmount to a blank window.
   // RecoveryCloseGuard sits above it: the crash screen's

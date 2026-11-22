@@ -6223,6 +6223,75 @@ export const LiveDraftRecoveryRecord = z
 export type LiveDraftRecoveryRecord = z.infer<typeof LiveDraftRecoveryRecord>;
 export const LiveDraftRecoveryChangedEvent = z.object({ workspaceId: WORKSPACE_ID }).strict();
 export type LiveDraftRecoveryChangedEvent = z.infer<typeof LiveDraftRecoveryChangedEvent>;
+const SET_ASIDE_DRAFT_KEY = z
+  .string()
+  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+export const SetAsideDraftFile = z.object({ key: SET_ASIDE_DRAFT_KEY, raw: z.string() }).strict();
+export type SetAsideDraftFile = z.infer<typeof SetAsideDraftFile>;
+export const SetAsideDraftFiles = z.array(SetAsideDraftFile);
+export const SetAsideDraftChange = z
+  .object({ key: SET_ASIDE_DRAFT_KEY, raw: z.string().nullable() })
+  .strict();
+export type SetAsideDraftChange = z.infer<typeof SetAsideDraftChange>;
+export const setAsideDraftOperations = {
+  listSetAsideDrafts: {
+    capabilityId: "document.aside.list",
+    scope: "device",
+    channel: "desktop:list-set-aside-drafts",
+    payload: z.object({}).strict(),
+    result: z.array(SetAsideDraftFile),
+    guard: "trusted-sender",
+  },
+  writeSetAsideDraft: {
+    capabilityId: "document.aside.write",
+    scope: "device",
+    channel: "desktop:write-set-aside-draft",
+    payload: z
+      .object({ key: SET_ASIDE_DRAFT_KEY, raw: z.string(), ifCurrent: z.string().nullable() })
+      .strict(),
+    result: z.boolean(),
+    guard: "trusted-sender",
+  },
+  removeSetAsideDraft: {
+    capabilityId: "document.aside.remove",
+    scope: "device",
+    channel: "desktop:remove-set-aside-draft",
+    payload: z.object({ key: SET_ASIDE_DRAFT_KEY, ifCurrent: z.string() }).strict(),
+    result: z.boolean(),
+    guard: "trusted-sender",
+  },
+  moveSetAsideDrafts: {
+    capabilityId: "document.aside.move",
+    scope: "device",
+    channel: "desktop:move-set-aside-drafts",
+    payload: z
+      .object({
+        workspaceId: WORKSPACE_ID,
+        changes: z.array(
+          z.union([
+            z
+              .object({
+                id: z.string(),
+                kind: z.enum(["file", "folder"]),
+                fromPath: PATH_STRING,
+                toPath: PATH_STRING,
+              })
+              .strict(),
+            z
+              .object({
+                id: z.string(),
+                kind: z.enum(["create-file", "create-folder", "delete-file", "delete-folder"]),
+                path: PATH_STRING,
+              })
+              .strict(),
+          ]),
+        ),
+      })
+      .strict(),
+    result: z.null(),
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
 export const DiscardLiveDraftRecoveryPayload = z
   .object({
     workspaceId: WORKSPACE_ID,
@@ -9323,6 +9392,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
     OperationBridge<typeof liveDraftRecoveryOperations>,
+    OperationBridge<typeof setAsideDraftOperations>,
     OperationBridge<typeof stopAndRestoreRecoveryOperations>,
     OperationBridge<typeof engineYDocSaveOperations>,
     OperationBridge<typeof appViewOperations> {
@@ -9569,6 +9639,7 @@ export interface DohcDesktopBridge
   // workspace, so listLiveDraftRecovery answers differently. A poke, not the
   // drafts. Returns an unsubscribe function.
   onLiveDraftRecoveryChanged(listener: (event: LiveDraftRecoveryChangedEvent) => void): () => void;
+  onSetAsideDraftChanged(listener: (change: SetAsideDraftChange) => void): () => void;
   // Which computer runs a workspace's schedules changed, as when a handover
   // finished in the background.
   onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;

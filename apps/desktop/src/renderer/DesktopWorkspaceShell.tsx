@@ -5541,7 +5541,7 @@ export function DesktopWorkspaceShell(props: {
       // Set-aside drafts key by path, so recovery follows the same projection
       // as tabs and pins — a rename must not strand the
       // notice on the old path while the tab remaps to the new one.
-      remapOrphanedDraftPaths(workspaceId, (path) => projectTreePath(path, changes));
+      remapOrphanedDraftPaths(workspaceId, changes);
       // Collection writes key their record and collection by path too. This
       // runs while the operation still holds the cell-edit pause, so a
       // retained write's retry targets the record where the move put it. A

@@ -1635,6 +1635,33 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
+  it("does not acknowledge until an async check right before it settles", async () => {
+    const mock = mockTransport(["Losing root."]);
+    mock.releaseReplacement();
+    const binding = await bindEngineYDoc(mock.transport, undefined, {
+      beforeReplacementAcknowledged: async () => {
+        await Promise.resolve();
+        throw new Error("storage refused");
+      },
+      onLineageReplacementFailure: vi.fn(),
+    });
+    const losingDoc = binding.doc!;
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+
+    await expect(
+      mock.replaceLineage({
+        update: Y.encodeStateAsUpdate(winner),
+        recoveredPaths: [],
+        artifactAssets: [],
+        lineageGeneration: 2,
+      }),
+    ).rejects.toThrow("storage refused");
+    expect(mock.acknowledgedGenerations).toEqual([]);
+    expect(binding.doc).toBe(losingDoc);
+    await binding.destroy();
+  });
+
   it("serializes consecutive lineage replacements", async () => {
     const mock = mockTransport(["Losing root."]);
     const binding = await bindEngineYDoc(mock.transport);

@@ -65,6 +65,7 @@ import {
   CollectionCopyChangedEvent,
   NoticesChangedEvent,
   LiveDraftRecoveryChangedEvent,
+  SetAsideDraftChange,
   SearchResultsEvent,
   FolderAppAnswer,
   ShareHandoffStatus,
@@ -91,6 +92,7 @@ import {
   UsageRecordStoppedEvent,
   noticeOperations,
   liveDraftRecoveryOperations,
+  setAsideDraftOperations,
   stopAndRestoreRecoveryOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
@@ -311,6 +313,7 @@ const bridge: DohcDesktopBridge = {
   stopAndRestore: (payload) => ipcRenderer.invoke(CHANNELS.stopAndRestore, payload),
   ...operationBridge(stopAndRestoreRecoveryOperations, invoke),
   ...operationBridge(liveDraftRecoveryOperations, invoke),
+  ...operationBridge(setAsideDraftOperations, invoke),
   undoStopAndRestore: (payload) => ipcRenderer.invoke(CHANNELS.undoStopAndRestore, payload),
   confirmCollectionAutomationStep: (payload) =>
     ipcRenderer.invoke(CHANNELS.confirmCollectionAutomationStep, payload),
@@ -578,6 +581,8 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.noticesChanged, NoticesChangedEvent, () => listener()),
   onLiveDraftRecoveryChanged: (listener) =>
     onEvent(CHANNELS.liveDraftRecoveryChanged, LiveDraftRecoveryChangedEvent, listener),
+  onSetAsideDraftChanged: (listener) =>
+    onEvent(CHANNELS.setAsideDraftChanged, SetAsideDraftChange, listener),
   onScheduleHostChanged: (listener) =>
     onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
   onChatDispatchNotices: (listener) =>

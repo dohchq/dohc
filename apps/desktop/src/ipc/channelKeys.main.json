@@ -222,6 +222,7 @@
   "searchResults",
   "sendChatMessage",
   "setAppPinned",
+  "setAsideDraftChanged",
   "setChatFollow",
   "setChatReaction",
   "setTitlebarTheme",
