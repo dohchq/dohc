@@ -6,7 +6,7 @@ import {
   Server,
   Undo2,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   ListCollectionAutomationRunsResult,
   UndoCollectionAutomationRunResult,
@@ -133,30 +133,51 @@ function valueText(value: unknown): string {
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
-function writeText(write: RunWrite): string {
+function writeText(write: RunWrite): ReactNode {
   if (write.kind === "notice") return `Notified ${write.name}`;
   if (write.kind === "message") return `Sent a message to ${write.name}`;
   if (write.kind === "dataset-action") return `Ran ${write.name}`;
-  const record = "path" in write ? recordName(write.path) : String(write.recordId);
+  const record =
+    "path" in write ? (
+      recordName(write.path)
+    ) : (
+      <span className="font-mono">{String(write.recordId)}</span>
+    );
   switch (write.kind) {
     case "field":
-      return `${record} · ${write.field}: ${valueText(write.before)} → ${valueText(write.after)}`;
+      return (
+        <>
+          {record}
+          {` · ${write.field}: ${valueText(write.before)} → ${valueText(write.after)}`}
+        </>
+      );
     case "dataset-edit":
-      return write.fields
-        .map(
-          (field) =>
-            `${record} · ${field.field}: ${valueText(field.before)} → ${valueText(field.after)}`,
-        )
-        .join("; ");
+      return write.fields.map((field, index) => (
+        <Fragment key={field.field}>
+          {index > 0 ? "; " : null}
+          {record}
+          {` · ${field.field}: ${valueText(field.before)} → ${valueText(field.after)}`}
+        </Fragment>
+      ));
     case "dataset-created":
     case "created":
-      return `Added ${record}`;
+      return <>Added {record}</>;
     case "dataset-kept":
     case "kept":
-      return `${record} · ${write.field}: kept ${valueText(write.current)}, which someone set after the run began`;
+      return (
+        <>
+          {record}
+          {` · ${write.field}: kept ${valueText(write.current)}, which someone set after the run began`}
+        </>
+      );
     case "dataset-skipped":
     case "skipped":
-      return `${record} · ${sentence(write.reason)}`;
+      return (
+        <>
+          {record}
+          {` · ${sentence(write.reason)}`}
+        </>
+      );
   }
 }
 
@@ -393,7 +414,7 @@ function RunRow(props: {
       {open ? (
         <ul className="m-0 mt-1.5 list-none space-y-0.5 pl-5">
           {run.writes.map((write, index) => (
-            <li key={index} className="break-words font-mono text-[11px] leading-snug text-muted">
+            <li key={index} className="break-words text-[11px] leading-snug text-muted">
               {writeText(write)}
               {write.unconfirmed && run.state !== "running" && run.state !== "pending"
                 ? " · May not be saved"
@@ -406,7 +427,7 @@ function RunRow(props: {
           {run.reversals?.map((write) => (
             <li
               key={JSON.stringify([write.recordId, write.field])}
-              className="break-words font-mono text-[11px] leading-snug text-muted"
+              className="break-words text-[11px] leading-snug text-muted"
             >
               Undo · {recordName(write.path)} · {write.field}
               {settlementText(write.state) ? ` · ${settlementText(write.state)}` : null}
