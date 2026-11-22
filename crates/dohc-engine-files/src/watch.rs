@@ -584,7 +584,8 @@ fn reads_only(event: &notify::Event) -> bool {
 /// would meet the same folder and report it again, without end. Reaching the
 /// limit on watches names a folder too, but the rest of the tree goes unwatched.
 /// The callback remembers each unreadable folder and attaches again once a
-/// change names it, because only a new watch reaches inside it.
+/// change names it or a folder above it, because only a new watch reaches
+/// inside it.
 fn watch_lost(root: &Path, error: &notify::Error) -> bool {
     matches!(error.kind, notify::ErrorKind::MaxFilesWatch)
         || error.paths.is_empty()
@@ -619,7 +620,10 @@ fn event_callback(
                 }
                 false
             }
-            Ok(event) => event.paths.iter().any(|path| unreadable.contains(path)),
+            Ok(event) => event
+                .paths
+                .iter()
+                .any(|path| unreadable.iter().any(|folder| folder.starts_with(path))),
         };
         if attach_again {
             unreadable.clear();
@@ -1108,13 +1112,13 @@ mod callback_tests {
     }
 
     #[test]
-    fn a_change_to_an_unreadable_folder_attaches_the_watch_again_once() {
+    fn a_change_above_an_unreadable_folder_attaches_the_watch_again_once() {
         let root = ScratchDir::new_named("watch-callback").unwrap();
         let mut callback = Callback::new(root.path(), 4);
         (callback.send)(Err(notify::Error::io(std::io::Error::from(
             std::io::ErrorKind::PermissionDenied,
         ))
-        .add_path(root.join("locked"))));
+        .add_path(root.join("parent").join("locked"))));
         let _ = callback.messages.try_recv();
         callback.expect_queued(
             notify::Event::new(EventKind::Modify(ModifyKind::Any))
@@ -1123,7 +1127,7 @@ mod callback_tests {
         let unlocked = notify::Event::new(EventKind::Modify(ModifyKind::Metadata(
             notify::event::MetadataKind::Permissions,
         )))
-        .add_path(root.join("locked"));
+        .add_path(root.join("parent"));
         (callback.send)(Ok(unlocked.clone()));
         assert!(callback.backend_error.swap(false, Ordering::AcqRel));
         assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
