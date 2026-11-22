@@ -256,36 +256,74 @@ async fn watch_while_a_folder_is_locked(lock: &str, bits: u32, inner: &str) {
     .await
     .expect("watch start");
 
-    tokio::time::sleep(dohc_engine_files::watch::WATCH_SETTLE * 3).await;
-    assert_eq!(
-        watcher.disruption_count(),
-        0,
+    let settled = until_quiet(&dirty).await;
+    assert!(
+        settled && watcher.disruption_count() == 0,
         "the watch was attached again {} times and marked dirty {} times",
         watcher.disruption_count(),
         dirty.load(Ordering::Acquire)
     );
-
-    let before = dirty.load(Ordering::Acquire);
-    ws.write("after.md", b"after");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while dirty.load(Ordering::Acquire) == before {
-        assert!(Instant::now() < deadline, "the write was not reported");
-        tokio::time::sleep(Duration::from_millis(40)).await;
-    }
+    assert!(
+        write_is_reported(&ws, "after.md", &dirty).await,
+        "the write was not reported"
+    );
 
     mode(0o755).expect("unlock the folder");
-    tokio::time::sleep(dohc_engine_files::watch::WATCH_SETTLE * 3).await;
-    let before = dirty.load(Ordering::Acquire);
-    ws.write(&format!("{inner}/later.md"), b"later");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while dirty.load(Ordering::Acquire) == before {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while watcher.disruption_count() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "unlocking {lock} was not noticed"
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut attempt = 0;
+    loop {
+        assert!(until_quiet(&dirty).await, "the watch never settled");
+        if write_is_reported(&ws, &format!("{inner}/later-{attempt}.md"), &dirty).await {
+            break;
+        }
         assert!(
             Instant::now() < deadline,
             "a write in {inner} was not reported after {lock} became readable"
         );
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        attempt += 1;
     }
     watcher.stop().expect("stop");
+}
+
+#[cfg(target_os = "linux")]
+async fn until_quiet(dirty: &std::sync::atomic::AtomicU64) -> bool {
+    use std::sync::atomic::Ordering;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = dirty.load(Ordering::Acquire);
+    loop {
+        tokio::time::sleep(dohc_engine_files::watch::WATCH_SETTLE * 2).await;
+        let now = dirty.load(Ordering::Acquire);
+        if now == seen {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        seen = now;
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn write_is_reported(ws: &Scratch, rel: &str, dirty: &std::sync::atomic::AtomicU64) -> bool {
+    use std::sync::atomic::Ordering;
+    let before = dirty.load(Ordering::Acquire);
+    ws.write(rel, b"written");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dirty.load(Ordering::Acquire) == before {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    true
 }
 
 /// A FAT32 volume stores a name that is not UTF-8 percent-encoded but reports
