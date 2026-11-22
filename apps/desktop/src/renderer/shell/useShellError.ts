@@ -1235,13 +1235,17 @@ export function useShellError(
     [clearKind, push],
   );
   const showWarningNotice = useCallback(
-    (message: string, options?: { change?: true; paths?: readonly string[] }) => {
+    (
+      message: string,
+      options?: { change?: true; paths?: readonly string[]; identity?: string },
+    ) => {
       push({
         message,
         retry: null,
         tone: "warning",
         ...(options?.paths ? { paths: options.paths } : {}),
         ...(options?.change ? { change: true } : {}),
+        ...(options?.identity ? { identity: options.identity } : {}),
       });
     },
     [push],

@@ -660,13 +660,15 @@ describe("Members page", () => {
 
   it("shows a failed list in place with Try again, and the cause in a notice", async () => {
     bridge.workspaceMembers.mockRejectedValueOnce(
-      new Error("dohc could not reach your server. Check your connection, then try again."),
+      new Error("dohc could not reach your server. Check your connection."),
     );
     const { props } = renderMembers();
     const failed = await screen.findByTestId("settings-members-failed");
-    expect(failed.textContent).toContain("dohc could not reach your server.");
+    // The line says what failed; the cause is the notice's.
+    expect(within(failed).getByText("dohc could not load Members.")).toBeTruthy();
+    expect(failed.textContent).not.toContain("reach");
     expect(props.onError).toHaveBeenCalledWith(
-      expect.stringContaining("could not reach"),
+      "dohc could not reach your server. Check your connection.",
       expect.any(Error),
       expect.any(Function),
       undefined,
@@ -675,6 +677,35 @@ describe("Members page", () => {
     await userEvent.click(within(failed).getByRole("button", { name: "Try again" }));
     expect(await screen.findByTestId("settings-members-page")).toBeTruthy();
     expect(props.onClearError).toHaveBeenCalledWith("settings-members:ws-1");
+  });
+
+  // One outage, one notice: the title bar's report covers it.
+  it("shows a failed list only in place while the title bar names the server", async () => {
+    bridge.workspaceMembers.mockRejectedValueOnce(
+      new Error("dohc could not reach your server. Check your connection."),
+    );
+    const { props } = renderMembers({ serverNamed: true });
+    const failed = await screen.findByTestId("settings-members-failed");
+    expect(failed.textContent).toContain("dohc could not load Members.");
+    expect(within(failed).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(props.onError).not.toHaveBeenCalled();
+  });
+
+  it("takes back a failed change once the title bar names the server, and files none while it does", async () => {
+    const { props, rerender } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    const away = () => new Error("dohc could not reach your server. Check your connection.");
+    bridge.workspaceMembers.mockRejectedValueOnce(away());
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    await vi.waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
+    expect(props.onClearError).not.toHaveBeenCalledWith("settings-members:ws-1:level");
+    rerender({ serverNamed: true });
+    expect(props.onClearError).toHaveBeenCalledWith("settings-members:ws-1:level");
+    bridge.workspaceMembers.mockRejectedValueOnce(away());
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    await vi.waitFor(() => expect(requests()).toHaveLength(3));
+    await act(async () => undefined);
+    expect(props.onError).toHaveBeenCalledTimes(1);
   });
 
   it("says in plain words when the server does not list this account, and offers Sync and sharing", async () => {
