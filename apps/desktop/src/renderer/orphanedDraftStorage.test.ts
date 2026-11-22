@@ -291,6 +291,17 @@ it("keeps the superseded file when the new copy cannot be written", async () => 
   expect(loadStoredDrafts(now).map((row) => row.text)).toEqual([draft.text]);
 });
 
+it("dismissing removes the superseded file after the new copy cannot be written", async () => {
+  disk.set(key, JSON.stringify({ ...draft, version: 1 }));
+  loadStoredDrafts(now);
+  disk.fail(new Error("No space left on device"));
+  expect(await replaceStoredDraft({ ...draft, text: "newer typing" })).toBe(false);
+  disk.fail(null);
+  forgetStoredDraft(draft.id);
+  await draftFileWritesSettled();
+  expect([...disk.files.keys()]).toEqual([]);
+});
+
 describe.each([{}, { version: 1 }])("supported format %j", (version) => {
   it("restores the draft without rewriting it", () => {
     const raw = JSON.stringify({ ...draft, ...version });

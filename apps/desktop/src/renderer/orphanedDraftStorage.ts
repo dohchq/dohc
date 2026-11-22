@@ -233,7 +233,14 @@ export async function replaceStoredDraft(draft: StoredOrphanedDraft): Promise<bo
     (pending.has(draft.id) || isStoredDraftCurrent(draft.id))
   )
     return write(draft, key, raw);
-  if (!(await storeDraft(draft))) return false;
+  const copy = crypto.randomUUID();
+  if (!(await write(draft, copy, null))) {
+    if (key !== undefined && keys.get(draft.id) === copy) {
+      keys.set(draft.id, key);
+      holdWhatTheFileHolds(draft.id);
+    }
+    return false;
+  }
   removeIfCurrent(key, raw);
   if (key) ownedKeys.delete(key);
   return true;
