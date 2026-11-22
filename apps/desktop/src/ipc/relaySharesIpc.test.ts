@@ -117,6 +117,7 @@ function harness() {
   const reconcileReceivedShares = vi.fn<(listing: unknown) => Promise<void>>(async () => undefined);
   let enrolled = true;
   const localStops = vi.fn<Dependencies["listOwnerLiveStops"]>(async () => []);
+  const noteBytes = vi.fn<Dependencies["noteBytes"]>(async () => null);
   const ownerLiveQuarantines = vi.fn<Dependencies["ownerLiveQuarantines"]>(() => []);
   const unwrittenOwnerLiveReleases = vi.fn<Dependencies["unwrittenOwnerLiveReleases"]>(
     async () => [],
@@ -191,6 +192,7 @@ function harness() {
     keepOutsideChange,
     withoutEditors,
     listOwnerLiveStops: localStops,
+    noteBytes,
     ownerLiveQuarantines,
     unwrittenOwnerLiveReleases,
     retryOwnerLiveQuarantine,
@@ -246,6 +248,7 @@ function harness() {
       enrolled = false;
     },
     localStops,
+    noteBytes,
     ownerLiveStop,
     pushRecorded,
     liveDocument,
@@ -592,6 +595,63 @@ describe("owner live document enrollment", () => {
       "/sync/workspace/live-host",
       "/sync/workspace/live-host?retired=1&after=older.md",
     ]);
+  });
+
+  it("says a note never started is too large to edit live, and its Resume asks the server for nothing", async () => {
+    const h = harness();
+    const notStarted = (path: string) => ({
+      path,
+      objectId: path,
+      status: "unavailable",
+      reason: "live-document-without-lineage",
+    });
+    h.request.mockImplementation(async (_credentials, path) =>
+      path.includes("retired=1")
+        ? { ok: true, documents: [], nextCursor: null }
+        : {
+            ok: true,
+            documents: [
+              notStarted("large.md"),
+              notStarted("small.md"),
+              { path: "grown.md", objectId: "grown", status: "ready" },
+            ],
+          },
+    );
+    h.noteBytes.mockImplementation(async (_workspace, path) =>
+      path === "small.md" ? 256 * 1024 : 256 * 1024 + 1,
+    );
+    await expect(
+      h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, { workspaceId }),
+    ).resolves.toEqual({
+      documents: [
+        {
+          path: "large.md",
+          objectId: "large.md",
+          status: "unavailable",
+          reason: "live-document-too-large",
+          canResume: false,
+        },
+        {
+          path: "small.md",
+          objectId: "small.md",
+          status: "unavailable",
+          reason: "live-document-without-lineage",
+          canResume: true,
+        },
+        { path: "grown.md", objectId: "grown", status: "ready", canResume: false },
+      ],
+      nextCursor: null,
+    });
+    h.request.mockClear();
+    await expect(
+      h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel, {
+        workspaceId,
+        path: "large.md",
+      }),
+    ).rejects.toThrow(
+      "dohc could not resume live editing for large.md because it is larger than 256 KB. Make it smaller or split it, then open it in dohc.",
+    );
+    expect(h.request.mock.calls.map((call) => call[2]?.method ?? "GET")).toEqual(["GET", "GET"]);
   });
 
   describe("edits the server refused", () => {

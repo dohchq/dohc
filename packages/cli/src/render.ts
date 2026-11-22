@@ -421,6 +421,7 @@ const LIVE_REASON_WORDS = {
   "session-host-refused": "stopped by the server",
   "session-host-diverged": "server copy doesn't match",
   "live-document-without-lineage": "not started",
+  "live-document-too-large": "too large",
   "live-edit-unadmitted": "server copy is missing an edit",
   "conflict-parent-withheld": "can't resume",
   "live-history-over-budget": "history too long",

@@ -991,6 +991,7 @@ async function runRenameRepro(
       },
       relayShareErrorCopy: unexpected,
       relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+      noteBytes: async () => null,
       listOwnerLiveStops: () =>
         source.sessions.run(source.workspace, async ({ workspace }) =>
           source
@@ -2115,6 +2116,7 @@ async function runDeleteRepro(
       },
       relayShareErrorCopy: unexpected,
       relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+      noteBytes: async () => null,
       listOwnerLiveStops: () =>
         opened.sessions.run(opened.workspace, async ({ workspace }) =>
           opened

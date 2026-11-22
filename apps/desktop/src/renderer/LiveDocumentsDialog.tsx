@@ -30,6 +30,7 @@ export type LiveDocumentRow = {
     | "session-host-refused"
     | "session-host-diverged"
     | "live-document-without-lineage"
+    | "live-document-too-large"
     | "live-edit-unadmitted"
     | "conflict-parent-withheld"
     | "live-history-over-budget"
@@ -249,6 +250,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "session-host-refused") return "Stopped by the server";
   if (row.reason === "session-host-diverged") return "Server copy doesn't match";
   if (row.reason === "live-document-without-lineage") return "Not started";
+  if (row.reason === "live-document-too-large") return "Too large";
   if (row.reason === "live-edit-unadmitted") return "Server copy is missing an edit";
   if (row.reason === "conflict-parent-withheld") return "Can't resume";
   if (row.reason === "live-history-over-budget") return "History too long";
@@ -1052,8 +1054,13 @@ export function LiveDocumentsDialog({
                 !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
                     Live editing can't start until you open this document once in dohc. After you
-                    open it, resume live editing. A note larger than 256 KB doesn't open as a
-                    document in dohc. Make it smaller or split it, then open it.
+                    open it, resume live editing.
+                  </p>
+                ) : null}
+                {row.reason === "live-document-too-large" ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    This note is larger than 256 KB, so it can't be edited live. Make it smaller or
+                    split it, then open it in dohc.
                   </p>
                 ) : null}
                 {/* A Resume retries the edit. One that would remove live work stays held. A deferred Stop's note already offers Resume. */}
