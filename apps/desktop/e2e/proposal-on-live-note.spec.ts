@@ -158,6 +158,9 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
         .toBe(true);
     const resumeLive = async () => {
       await call(page, "resumeOwnerLiveDocument", { workspaceId, path: PATH });
+      await live();
+    };
+    const live = async () => {
       await expect
         .poll(
           async () => {
@@ -201,7 +204,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       paths: [PATH],
       access: "edit",
     });
-    await expect.poll(status, { timeout: 180_000, intervals: [1000] }).toBe("ready");
+    await live();
 
     const recipient = await launchDesktopApp({ workspace: recipientTemp, env: stack.trustEnv });
     desktops.push(recipient);
