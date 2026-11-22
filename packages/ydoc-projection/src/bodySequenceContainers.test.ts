@@ -13,6 +13,7 @@ const FIELD = "sequence";
 const CONTAINERS = "containers";
 const REMOTE = Symbol("remote");
 const LOCAL = Symbol("local");
+const REMOTE_FREE = Symbol("the default, written outside the history");
 const docs: Y.Doc[] = [];
 afterEach(() => {
   for (const doc of docs.splice(0)) doc.destroy();
@@ -44,7 +45,7 @@ function shown(doc: Y.Doc) {
 function boundary(path: string[]) {
   const element = new Y.XmlElement(BLOCK_ELEMENT);
   element.setAttribute("type", "paragraph");
-  if (path.length > 0) element.setAttribute("path", path as unknown as string);
+  element.setAttribute("path", path as unknown as string);
   return element;
 }
 
@@ -79,7 +80,7 @@ function person(baseline: Uint8Array, clientID: number) {
   const history = new Y.UndoManager([text, records], {
     trackedOrigins: new Set([LOCAL]),
     ignoreRemoteMapChanges: true,
-    deleteFilter: (item) => item.parent !== records || (item.parentSub ?? "").includes("."),
+    deleteFilter: (item) => item.parent !== records,
   });
   const changes = () => text.toDelta() as Change[];
   return {
@@ -89,6 +90,10 @@ function person(baseline: Uint8Array, clientID: number) {
     sent,
     history,
     change: (act: () => void) => doc.transact(act, LOCAL),
+    write(key: string, value: unknown, whenMissing: unknown) {
+      if (!records.has(key)) doc.transact(() => records.set(key, whenMissing), REMOTE_FREE);
+      doc.transact(() => records.set(key, value), LOCAL);
+    },
     line: (index: number) =>
       changes()
         .map(({ insert }) => insert)
@@ -445,7 +450,7 @@ it("undoes a tick on an item that became a to-do through its list, and nothing b
   adder.history.stopCapturing();
   adder.change(() => adder.text.insert(adder.text.length, "!", {}));
   adder.history.stopCapturing();
-  adder.change(() => adder.records.set("b.checked", true));
+  adder.write("b.checked", true, false);
   expect(settle(changer, adder)).toMatchObject({
     content: [
       { type: "taskList", content: [todo(false, paragraph("a")), todo(true, paragraph("b!"))] },
@@ -467,7 +472,7 @@ it("undoes a start number set after a list became numbered, and nothing before i
   first.history.stopCapturing();
   first.change(() => first.text.insert(first.text.length, "!", {}));
   first.history.stopCapturing();
-  first.change(() => first.records.set("L.start", 5));
+  first.write("L.start", 5, 1);
   expect(settle(first, second)).toMatchObject({
     content: [{ type: "orderedList", attrs: { start: 5 }, content: [item("listItem", "item!")] }],
   });
@@ -478,5 +483,76 @@ it("undoes a start number set after a list became numbered, and nothing before i
   first.history.undo();
   expect(settle(first, second)).toMatchObject({
     content: [{ type: "orderedList", content: [item("listItem", "item")] }],
+  });
+});
+
+it("keeps a callout's settings for a line someone added when the callout's making is undone", () => {
+  const baseline = note({}, { path: [], text: "one" });
+  const maker = person(baseline, 10);
+  const adder = person(baseline, 20);
+  maker.change(() => {
+    maker.records.set("c1", "callout");
+    maker.records.set("c1.calloutType", "warning");
+    maker.records.set("c1.title", "Danger");
+    maker.records.set("c1.fold", "-");
+    maker.line(0).setAttribute("path", ["c1"] as unknown as string);
+  });
+  settle(maker, adder);
+  adder.change(() => {
+    adder.text.insertEmbed(adder.text.length, boundary(["c1"]), {});
+    adder.text.insert(adder.text.length, "two", {});
+  });
+  settle(maker, adder);
+  maker.history.undo();
+  expect(settle(maker, adder)).toMatchObject({
+    content: [
+      paragraph("one"),
+      {
+        type: "callout",
+        attrs: { calloutType: "warning", title: "Danger", fold: "-" },
+        content: [paragraph("two")],
+      },
+    ],
+  });
+});
+
+it("puts a line back at the top level when its wrapping is undone after someone wrapped it again", () => {
+  const baseline = note({}, { path: [], text: "keep" }, { path: [], text: "temp" });
+  const first = person(baseline, 10);
+  const second = person(baseline, 20);
+  first.change(() => first.text.insert(first.indexOf(0) + 5, "!", {}));
+  first.history.stopCapturing();
+  first.change(() => {
+    first.records.set("q", "blockquote");
+    first.line(1).setAttribute("path", ["q"] as unknown as string);
+  });
+  settle(first, second);
+  second.change(() => {
+    second.records.set("q2", "blockquote");
+    second.line(1).setAttribute("path", ["q2"] as unknown as string);
+  });
+  settle(first, second);
+  first.history.undo();
+  expect(settle(first, second)).toEqual({
+    type: "doc",
+    content: [paragraph("keep!"), paragraph("temp")],
+  });
+});
+
+it("puts a start number back when its change is undone after someone changed it again", () => {
+  const baseline = note({ L: "bulletList", a: "listItem" }, { path: ["L", "a"], text: "item" });
+  const first = person(baseline, 10);
+  const second = person(baseline, 20);
+  first.change(() => first.records.set("L", "orderedList"));
+  first.history.stopCapturing();
+  first.change(() => first.text.insert(first.text.length, "!", {}));
+  first.history.stopCapturing();
+  first.write("L.start", 5, 1);
+  settle(first, second);
+  second.write("L.start", 9, 1);
+  settle(first, second);
+  first.history.undo();
+  expect(settle(first, second)).toMatchObject({
+    content: [{ type: "orderedList", attrs: { start: 1 }, content: [item("listItem", "item!")] }],
   });
 });
