@@ -2067,7 +2067,9 @@ it("offers no message box to a Comment member in a Group set to View only", asyn
   await render();
   await opened();
   expect(groupComposer()).toBeNull();
-  expect(groupPanel().textContent).toContain("Only people who can comment post here.");
+  // The member can comment, so the Group's own rule is why, and the note says who posts.
+  expect(groupPanel().textContent).toContain("Only admins and the owner post in plans.");
+  expect(groupPanel().textContent).not.toContain("Only people who can comment post here.");
 });
 
 it("follows a Group's own level when its rule changes while it is open, and keeps the draft", async () => {
@@ -2430,7 +2432,7 @@ it("applies a rule change that lands while the first read of the Groups is still
   // The listing sent before the change arrives last.
   await act(async () => first.answer(first.body));
   await settle(
-    () => groupPanel().textContent?.includes("Only people who can comment post here.") === true,
+    () => groupPanel().textContent?.includes("Only admins and the owner post in plans.") === true,
   );
   expect(groupComposer()).toBeNull();
 });

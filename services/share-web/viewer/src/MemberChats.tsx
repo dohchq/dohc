@@ -7,6 +7,7 @@ import {
   openMemberGroups,
   type MemberGroups,
 } from "./memberWorkspace";
+import type { ShareAccess } from "./model";
 import type { NamedChatAccess } from "./namedChat";
 import "./namedChat.css";
 
@@ -124,6 +125,7 @@ export function MemberChats({
   shown,
   onEnded,
   onUnread,
+  memberLevel,
 }: {
   found: MemberListing;
   // Counts the reads of the Groups that arrived, so a follow that came back 404 starts again after one.
@@ -133,6 +135,8 @@ export function MemberChats({
   shown: boolean;
   onEnded(reason: Ended): void;
   onUnread(count: number): void;
+  // A Group listed at View only for a member who can comment is closed by its own rule, so its note names who posts.
+  memberLevel: ShareAccess;
 }) {
   const [open, setOpen] = useState<string | null>(null),
     [unread, setUnread] = useState<ReadonlyMap<string, number>>(new Map());
@@ -262,7 +266,11 @@ export function MemberChats({
             client={hub.client(group)}
             name={group.name}
             onEnded={followGone}
-            readOnlyNote={READ_ONLY}
+            readOnlyNote={
+              group.access === "read-only" && memberLevel !== "view"
+                ? `Only admins and the owner post in ${group.name ?? "this Group"}.`
+                : READ_ONLY
+            }
             empty={EMPTY}
             threads={group.type ?? "both"}
             draftKey={`${opened.userId}\n${opened.shareId}\ngroup\n${group.channelWireId}`}

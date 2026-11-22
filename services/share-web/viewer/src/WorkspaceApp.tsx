@@ -1166,6 +1166,7 @@ function MemberWorkspace({
               shown={showing === "chats"}
               onEnded={placeGone}
               onUnread={setUnread}
+              memberLevel={files.meta.access}
             />
           </div>
         </div>
