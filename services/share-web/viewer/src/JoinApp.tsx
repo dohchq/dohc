@@ -105,17 +105,17 @@ async function joinRequest(path: string, token: string, signal: AbortSignal): Pr
 const REFUSED: Record<Refusal, { icon: IconName; title: string; body: string }> = {
   link_off: {
     icon: "unlink",
-    title: "This invite link no longer works",
+    title: "This invite link no longer works.",
     body: "The owner or an admin turned it off or reset it. Ask them to turn it on, then choose Try again. Or ask for the current link.",
   },
   removed: {
     icon: "x",
-    title: "You were removed from this workspace",
+    title: "You were removed from this workspace.",
     body: "An owner or admin removed this account. Ask them to let you back in, then choose Try again.",
   },
   full: {
     icon: "users",
-    title: "This workspace is full",
+    title: "This workspace is full.",
     body: `It already has ${MAX_WORKSPACE_MEMBERS.toLocaleString("en-US")} people. Ask the owner or an admin to make room, then choose Try again.`,
   },
 };
@@ -260,7 +260,7 @@ export default function JoinApp(props: { token: string | null }) {
     // A broken link lands here, and so does a person who confirmed their email in another tab.
     case "no-link":
       return (
-        <Page pageRef={page} icon="unlink" title="Open your invite link again">
+        <Page pageRef={page} icon="unlink" title="Open your invite link again.">
           <p>
             To join, open the whole invite link you were sent. If it still doesn't work, ask for a
             new one.
@@ -289,7 +289,7 @@ export default function JoinApp(props: { token: string | null }) {
           icon="users"
           title={
             shown.alreadyMember
-              ? `You're already in ${shown.workspaceName}`
+              ? `You're already in ${shown.workspaceName}.`
               : `Join ${shown.workspaceName}`
           }
         >
@@ -318,7 +318,7 @@ export default function JoinApp(props: { token: string | null }) {
     }
     case "joined":
       return (
-        <Page pageRef={page} icon="check" title={`You joined ${stage.workspaceName}`}>
+        <Page pageRef={page} icon="check" title={`You joined ${stage.workspaceName}.`}>
           <OpenActions grantId={stage.grantId} workspaceName={stage.workspaceName} />
           {failure}
           {signedIn(stage.account)}
@@ -344,7 +344,7 @@ export default function JoinApp(props: { token: string | null }) {
     }
     case "unreachable":
       return (
-        <Page pageRef={page} icon="alert" failed title="dohc could not check this invite link">
+        <Page pageRef={page} icon="alert" failed title="dohc could not check this invite link.">
           <ErrorLine failure={error ?? { message: UNREACHABLE, retry: load }} busy={busy} />
           {signedIn(stage.account)}
         </Page>
