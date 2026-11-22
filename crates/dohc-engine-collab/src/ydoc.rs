@@ -1280,12 +1280,14 @@ impl Ydoc {
                 frontmatter_yaml.push_str(entry)?;
             }
         }
-        let children: Vec<MarkdownNode> = body
-            .children(&txn)
-            .map(|child| {
-                markdown_node(&txn, child, 0, &mut remaining_nodes, &mut source_text_bytes)
-            })
-            .collect::<ProjectionResult<_>>()?;
+        let mut children = Vec::new();
+        for child in body.children(&txn) {
+            let child =
+                markdown_node(&txn, child, 0, &mut remaining_nodes, &mut source_text_bytes)?;
+            if !empty_list_or_item(&child) {
+                children.push(child);
+            }
+        }
         let body_markdown = markdown_document(&children)?;
         if let Some(Out::Any(Any::String(source))) = meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
             let written = written_frontmatter_keys(&frontmatter, &meta, &txn);
@@ -6081,6 +6083,18 @@ struct RenderContext<'a> {
     table_cell: bool,
 }
 
+fn empty_list_or_item(node: &MarkdownNode) -> bool {
+    matches!(
+        node,
+        MarkdownNode::Element { tag, children, .. }
+            if children.is_empty()
+                && matches!(
+                    tag.as_str(),
+                    "bulletList" | "orderedList" | "taskList" | "listItem" | "taskItem"
+                )
+    )
+}
+
 fn markdown_node<T: ReadTxn>(
     txn: &T,
     node: XmlOut,
@@ -6153,7 +6167,9 @@ fn markdown_node<T: ReadTxn>(
                 let child =
                     markdown_node(txn, child, depth + 1, remaining_nodes, source_text_bytes)?;
                 // An empty text piece writes nothing; its line is still an empty line.
-                if !matches!(&child, MarkdownNode::Text(runs) if runs.is_empty()) {
+                if !matches!(&child, MarkdownNode::Text(runs) if runs.is_empty())
+                    && !empty_list_or_item(&child)
+                {
                     children.push(child);
                 }
             }
