@@ -59,7 +59,7 @@ export function useAccessSavedNotice(
       message:
         saved.count > 0
           ? `Your access changed. dohc moved ${items} into a recovery folder.`
-          : "Your access changed. dohc undid changes that weren't sent. The recovery folder lists them.",
+          : "Your access changed. dohc undid changes that weren't sent.",
       identity,
       // Nothing failed: dohc kept the member's work where they can find it.
       tone: "warning",

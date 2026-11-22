@@ -82,10 +82,13 @@ const reachWords = (reach: AccessRuleReach, level: MemberLevel) => {
 
 // A refusal dohc has words for, such as a rule file another program holds
 // or a moved workspace folder, says what to do, so its words replace the
-// row's own. `final` is one that trying again only repeats.
+// row's own. `final` is one that trying again only repeats. Beside Try
+// again, the words end at what to do first.
 const refusalWords = (error: unknown): { words: string; final: boolean } | null => {
   const read = readError(error);
-  return read.mapped && read.words ? { words: read.words, final: read.canRetry === false } : null;
+  if (!read.mapped || !read.words) return null;
+  const final = read.canRetry === false;
+  return { words: final ? read.words : read.words.replace(/, then try again\.$/u, "."), final };
 };
 
 /** Why a choice didn't run: the level read at the press differs from the one the row showed. */
@@ -177,11 +180,13 @@ export function accessRuleHoldWords(
     };
   }
   // dohc can't read the rule, so it can't say whether access widened.
+  // Restore rule is its one step, and once dohc reads the rule the row asks
+  // again, so it names no choice between two.
   if (hold.unreadable === "locked" || hold.unreadable === "on-disk") {
     const lead = ON_DISK[hold.unreadable](hold.folder, hold.rulePath);
     return {
       title: `dohc could not read ${ruleOfLower(hold.folder)}`,
-      message: `${lead} ${until}`,
+      message: `${lead} Until you decide on this rule, dohc doesn't record or share changes in ${place}.`,
       rows,
       openMembers,
       accept: null,
@@ -235,13 +240,8 @@ export function accessRuleDecidedWords(
         ? canDo(resolve(only.before, level), hold.folder)
         : undefined;
     const now = can ? ` ${whoOf(only!.who)} can ${can}.` : "";
-    const keptCopy =
-      kept.length > 1
-        ? ` dohc kept the files from outside dohc as copies in Notices. Save copy puts each beside its original: ${kept.join(", ")}.`
-        : kept[0]
-          ? ` dohc kept the rule from outside dohc in Notices, where Save copy puts it beside ${kept[0]}.`
-          : "";
-    return `Restored ${ruleOfLower(hold.folder)}.${now}${keptCopy}`;
+    // Each kept copy has its own unread row with Save copy.
+    return `Restored ${ruleOfLower(hold.folder)}.${now}`;
   }
   if (hold.reason === "removed")
     return `Removed ${ruleOfLower(hold.folder)}. ${changedReach(hold, level)}`;
@@ -553,6 +553,8 @@ export function useAccessRuleHoldNotices(
               `dohc still doesn't record or share changes in ${place}. Members keep their earlier access.`,
             cause: error,
             retry: refused?.final ? null : () => decideRef.current(asked, hold, decision),
+            // Try again runs the choice again on the waiting row, as its own button does.
+            retryStays: true,
           });
         },
       );

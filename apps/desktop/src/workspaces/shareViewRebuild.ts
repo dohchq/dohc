@@ -449,7 +449,8 @@ export function shareViewRebuildStop(notice: ShareViewRebuildNotice): ShareViewR
     case "ended":
       return {
         reason: "ended",
-        detail: "Your membership ended. What arrived stays in this folder.",
+        detail:
+          "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
       };
     case "failed": {
       if (notice.error instanceof LivePageUnkeptError)

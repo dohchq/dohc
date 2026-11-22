@@ -11,7 +11,13 @@ const nameField = () => screen.getByTestId("chats-new-channel-name") as HTMLInpu
 describe("NewGroupDialog", () => {
   it("starts in Name with Chat picked and Create off until there's a name", () => {
     render(<NewGroupDialog onCreate={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByRole("heading").textContent).toBe("New Group");
+    expect(screen.getByTestId("chats-new-channel-submit").textContent).toBe("Create Group");
     expect(document.activeElement).toBe(nameField());
+    // Optional follows the label; the field holds no placeholder.
+    const purpose = screen.getByLabelText("What it's for Optional");
+    expect(purpose).toBe(screen.getByTestId("chats-new-channel-purpose"));
+    expect(purpose.hasAttribute("placeholder")).toBe(false);
     expect(screen.getByRole("radio", { name: "Chat" }).getAttribute("aria-checked")).toBe("true");
     expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(
       true,
@@ -27,7 +33,7 @@ describe("NewGroupDialog", () => {
     render(<NewGroupDialog onCreate={onCreate} onClose={vi.fn()} />);
     fireEvent.keyDown(screen.getByTestId("chats-new-channel-purpose"), { key: "Enter" });
     expect(screen.getByTestId("chats-new-channel-name-error").textContent).toBe(
-      "Give the group a name.",
+      "Give the Group a name.",
     );
     expect(nameField().getAttribute("aria-invalid")).toBe("true");
     expect(document.activeElement).toBe(nameField());
@@ -92,10 +98,10 @@ describe("NewGroupDialog", () => {
         onClose={vi.fn()}
       />,
     );
-    const post = await screen.findByRole("radio", { name: "Can post" });
-    expect(post.getAttribute("aria-checked")).toBe("true");
+    const followed = await screen.findByRole("radio", { name: "Default" });
+    expect(followed.getAttribute("aria-checked")).toBe("true");
     expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
-      "Follows the member level, Comment.",
+      "Follows the member level, Comment, so members can post.",
     );
     fireEvent.change(nameField(), { target: { value: "Announcements" } });
     fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
@@ -118,7 +124,7 @@ describe("NewGroupDialog", () => {
     );
   });
 
-  it("follows the member level again when the pick comes back to it", async () => {
+  it("follows the member level again when the pick comes back to Default", async () => {
     const onCreate = vi.fn(async () => null);
     render(
       <NewGroupDialog
@@ -128,7 +134,7 @@ describe("NewGroupDialog", () => {
       />,
     );
     fireEvent.click(await screen.findByRole("radio", { name: "No access" }));
-    fireEvent.click(screen.getByRole("radio", { name: "View only" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Default" }));
     fireEvent.change(nameField(), { target: { value: "Announcements" } });
     fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
     await waitFor(() =>

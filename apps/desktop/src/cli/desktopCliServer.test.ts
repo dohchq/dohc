@@ -473,9 +473,10 @@ describe("desktop CLI workspace context", () => {
       "belongs to a membership that ended",
       {
         reason: "ended" as const,
-        detail: "Your membership ended. What arrived stays in this folder.",
+        detail:
+          "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
       },
-      "Your membership of this workspace ended. What arrived stays in its folder.",
+      "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
     ],
   ])("refuses a closed copy that %s before activity admission", async (_state, stopped, words) => {
     const f = fixture();

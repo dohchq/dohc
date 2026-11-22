@@ -165,6 +165,8 @@ export interface WorkspaceErrorNotice {
   actionBusy?: number;
   // Its steps run in place: Notices stays open while they work.
   actionStays?: boolean;
+  // Try again runs where the row is, as a step that stays does.
+  retryStays?: boolean;
   seen: boolean;
   read?: boolean;
   // The row has no Dismiss: it stays until its action runs.
@@ -1915,6 +1917,7 @@ export function NoticeCenter(props: {
                 disabled: error.retryBusy || error.retryBlocked !== undefined,
                 busy: error.retryBusy,
                 ...(error.retryBlocked ? { reason: error.retryBlocked } : {}),
+                ...(error.retryStays ? { stays: true } : {}),
               },
             ]
           : [];
