@@ -15,6 +15,18 @@ consumer's first error. The engine uses it to check actual run, attribute,
 and byte budgets before copying text. Existing Delta and snapshot APIs keep
 their upstream implementation.
 
+`src/types/text.rs` also changes `clean_format_gap`, which a local delete in a
+text runs to drop the formatting items that delete made redundant. Upstream
+scans past a live embedded shared type as if it held nothing, where Yjs's
+`cleanupFormattingGap` stops at any live countable item. A note body stored as
+one sequence (`docs/engineering/note-body-sequence.md`) holds each block's
+start as an embedded element. A local delete before one removed the
+formatting items on both sides of it, and a letter someone else typed plain
+after that element at the same moment came out marked. The scan now stops at
+any live countable item. It still stops at a deleted string or embed, where
+Yjs scans on, which leaves a redundant formatting item and changes no text.
+Tests live in `crates/yrs-interop/tests/body_sequence.rs`.
+
 Visitor regression tests live in `crates/yrs-interop/tests/text_diff_visitor.rs`;
 projection budget tests live in `crates/dohc-engine-collab/src/ydoc.rs`.
 Both run in the canonical workspace Rust gate. This dependency is excluded

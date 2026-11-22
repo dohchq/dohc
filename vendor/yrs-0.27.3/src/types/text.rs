@@ -1129,6 +1129,7 @@ fn clean_format_gap(
             ItemContent::Format(key, value) if !item.is_deleted() => {
                 update_current_attributes(end_attrs, key.as_ref(), value);
             }
+            _ if !item.is_deleted() && item.is_countable() => break,
             _ => {}
         }
         end = item.right.clone();
