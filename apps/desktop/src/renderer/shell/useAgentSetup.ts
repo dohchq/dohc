@@ -16,10 +16,12 @@ export function useAgentSetup(
   const run = useWorkspaceQuery(useWorkspaceSession(), {
     key: JSON.stringify([workspaceId, workspaceIsReady]),
     manual: !workspaceIsReady,
-    load: () => bridge().getAgentRunStatus({ workspaceId }),
+    load: () =>
+      bridge()
+        .getAgentRunStatus({ workspaceId })
+        .catch(() => null),
   });
-  const agentRunStatus = run.error === null ? run.value : undefined;
-  const { retry } = run;
+  const { value: agentRunStatus, retry } = run;
 
   const agentSetup = useMemo<AgentSetupSummary | null>(() => {
     if (!userSettings || !agentRunStatus) return null;

@@ -109,3 +109,31 @@ it("sums up the agent dohc starts when an agent you run comes first", async () =
     runnerEnabled: true,
   });
 });
+
+it("keeps a failed run read's empty setup while Settings closing reads again", async () => {
+  const reads: Array<{ done: (status: AgentRunStatusResult) => void; fail: () => void }> = [];
+  const getAgentRunStatus = vi.fn(
+    () =>
+      new Promise<AgentRunStatusResult>((done, fail) => {
+        reads.push({ done, fail: () => fail(new Error("unreadable")) });
+      }),
+  );
+  vi.stubGlobal("dohcDesktop", { getAgentRunStatus });
+  const settings: DesktopUserSettingsResult = { settings: DEFAULT_USER_SETTINGS, source: "stored" };
+  shown = "ws-1";
+  const { result, rerender } = renderHook(
+    ({ section }: { section: SettingsSectionId | null }) =>
+      useAgentSetup("ws-1", settings, section, true),
+    { initialProps: { section: null } as { section: SettingsSectionId | null }, wrapper },
+  );
+  await act(async () => reads[0]!.done(inactive));
+  expect(result.current.agentSetup).not.toBeNull();
+  rerender({ section: "agents" });
+  rerender({ section: null });
+  await act(async () => reads[1]!.fail());
+  expect(result.current.agentSetup).toBeNull();
+  rerender({ section: "agents" });
+  rerender({ section: null });
+  expect(reads).toHaveLength(3);
+  expect(result.current.agentSetup).toBeNull();
+});
