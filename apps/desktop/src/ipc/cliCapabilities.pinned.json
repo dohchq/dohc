@@ -301,6 +301,9 @@
     ],
     "outsideChanges": [
       "capture.outside.read"
+    ],
+    "workspaceSearch": [
+      "workspace.search"
     ]
   },
   "public": {
@@ -417,6 +420,7 @@
     "document held-change": "document.held.change",
     "dataset cancelInvoke": "dataset.operation.cancel",
     "document outside-changes": "capture.outside.read",
-    "document keep-outside-change": "capture.outside.keep"
+    "document keep-outside-change": "capture.outside.keep",
+    "workspace search": "workspace.search"
   }
 }

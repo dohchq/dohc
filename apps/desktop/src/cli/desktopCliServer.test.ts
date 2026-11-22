@@ -253,6 +253,17 @@ function fixture(
     reads: {
       chatFileMentions: vi.fn(async () => null),
       outsideChanges: vi.fn(async () => ({ outsideChanges: [] })),
+      workspaceSearch: vi.fn(async () => ({
+        versionId: "main",
+        results: [],
+        neighbors: [],
+        complete: true,
+        indexBuilding: false,
+        policyDegraded: false,
+        mountsCovered: true,
+        sharedChannelRowsUncovered: 0,
+        truncated: false,
+      })),
       chatLinks: vi.fn(async () => null),
       linksEdges: vi.fn(async () => ({
         versionId: "main",
@@ -2763,4 +2774,128 @@ it("lists and keeps a live note's outside change for the CLI and the MCP, only i
   const refused = await cli("document", "keep-outside-change", "notes.md");
   expect(refused.exitCode).not.toBe(0);
   expect(f.capture.keepOutsideChange).toHaveBeenCalledTimes(3);
+});
+
+it("runs workspace search for CLI and MCP in the original workspace and refuses received shares and mounts", async () => {
+  const f = fixture(await createTestScratch("workspace-search-cli-"));
+  const answer = {
+    versionId: "main",
+    results: [
+      {
+        id: "page:obj-1",
+        kind: "page" as const,
+        title: "Tokyo Trip",
+        path: "Projects/tokyo.md",
+        objectId: "obj-1",
+        snippet: "Booked Shinjuku hotel.",
+        matchedTerms: ["tokyo", "hotel"],
+        related: [
+          {
+            kind: "record" as const,
+            edge: "wikilink" as const,
+            direction: "out" as const,
+            title: "Shinjuku Hotel",
+            path: "Trips/shinjuku.md",
+            objectId: "obj-2",
+            collectionPath: "Trips",
+            recordId: "rec-1",
+          },
+        ],
+      },
+    ],
+    neighbors: [
+      {
+        id: "chat:th-1",
+        kind: "chat" as const,
+        title: "Hotel Budget",
+        threadId: "th-1",
+        via: [
+          {
+            fromId: "page:obj-1",
+            fromTitle: "Tokyo Trip",
+            edge: "chat-linked-file" as const,
+            direction: "in" as const,
+          },
+        ],
+      },
+    ],
+    complete: true,
+    indexBuilding: false,
+    policyDegraded: false,
+    mountsCovered: true,
+    sharedChannelRowsUncovered: 0,
+    truncated: false,
+  };
+  const searchRead = vi.fn(async () => answer);
+  f.dependencies.reads.workspaceSearch = searchRead;
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(
+      JSON.parse(
+        await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options()),
+      ),
+    );
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const cli = (cwd: string, ...argv: string[]) => executeCli({ argv, cwd, env: {}, request: send });
+  const tools = await import("@dohc/mcp/tools");
+
+  const jsonRun = await cli(
+    f.workspace.rootPath,
+    "workspace",
+    "search",
+    "tokyo hotel",
+    "--surface",
+    "page",
+    "--surface",
+    "record",
+    "--path-prefix",
+    "Projects",
+    "--limit",
+    "5",
+    "--no-neighbors",
+    "--json",
+  );
+  expect(jsonRun.exitCode).toBe(0);
+  expect(JSON.parse(jsonRun.stdout)).toMatchObject(answer);
+  expect(searchRead).toHaveBeenLastCalledWith(
+    expect.objectContaining({ workspaceId: f.workspace.workspaceId }),
+    {
+      query: "tokyo hotel",
+      surfaces: ["page", "record"],
+      pathPrefix: "Projects",
+      limit: 5,
+      includeNeighbors: false,
+    },
+  );
+
+  const textRun = await cli(f.workspace.rootPath, "workspace", "search", "tokyo hotel");
+  expect(textRun.exitCode).toBe(0);
+  expect(textRun.stdout).toContain("[page] Tokyo Trip — Projects/tokyo.md");
+  expect(textRun.stdout).toContain("related: → [record] Shinjuku Hotel (wikilink)");
+  expect(textRun.stdout).toContain("Connected:");
+  expect(textRun.stdout).toContain("[chat] Hotel Budget — th-1");
+
+  const mcpResult = await tools.requestDeclaredTool(
+    { root: f.workspace.rootPath, home: "state", request: send },
+    "dohc_search_workspace",
+    { query: "tokyo hotel", collectionPath: "Trips" },
+  );
+  expect(mcpResult).toEqual(answer);
+
+  // Mounted received folder under shared-with-me/ is refused before reaching the reader.
+  const mountDir = join(f.workspace.rootPath, "shared-with-me", "team-share");
+  await mkdir(mountDir, { recursive: true });
+  searchRead.mockClear();
+  const mountRefused = await cli(mountDir, "workspace", "search", "tokyo");
+  expect(mountRefused.exitCode).not.toBe(0);
+  expect(searchRead).not.toHaveBeenCalled();
+
+  // Standalone received share is refused before reaching the reader.
+  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+  const shareRefused = await cli(f.workspace.rootPath, "workspace", "search", "tokyo");
+  expect(shareRefused.exitCode).not.toBe(0);
+  expect(searchRead).not.toHaveBeenCalled();
 });

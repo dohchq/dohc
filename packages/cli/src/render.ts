@@ -752,7 +752,84 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderAutomationPress(
         result as Extract<CliResultByVerb["automationPress"], { ok: true }>,
       );
+    case "workspaceSearch":
+      return renderWorkspaceSearch(result as CliResultByVerb["workspaceSearch"]);
     default:
       return JSON.stringify(result, null, 2);
   }
+}
+
+function renderWorkspaceSearch(result: CliResultByVerb["workspaceSearch"]): string {
+  const lines: string[] = [];
+  if (result.results.length === 0) {
+    lines.push("No matching pages, Collections, records, or chats.");
+  } else {
+    for (const hit of result.results) {
+      const tag =
+        hit.kind === "collection" && hit.collectionKind === "transactional" ? "dataset" : hit.kind;
+      const location =
+        hit.path ??
+        hit.collectionPath ??
+        hit.datasetPath ??
+        (hit.channelName && hit.threadId
+          ? `#${hit.channelName} (${hit.threadId})`
+          : (hit.threadId ?? hit.id));
+      lines.push(`[${tag}] ${lineSafe(hit.title)} — ${lineSafe(location)}`);
+      if (hit.matchedFields && hit.matchedFields.length > 0) {
+        const fields = hit.matchedFields
+          .map((field) => `${lineSafe(field.name)}=${lineSafe(field.value)}`)
+          .join(" · ");
+        lines.push(`  fields: ${fields}`);
+      }
+      if (hit.snippet.trim().length > 0) {
+        lines.push(`  ${lineSafe(hit.snippet)}`);
+      }
+      if (hit.related.length > 0) {
+        const links = hit.related
+          .map((edge) => {
+            const arrow = edge.direction === "out" ? "→" : "←";
+            const label = edge.field ? `${edge.edge}:${edge.field}` : edge.edge;
+            return `${arrow} [${edge.kind}] ${lineSafe(edge.title)} (${label})`;
+          })
+          .join(", ");
+        lines.push(`  related: ${links}`);
+      }
+    }
+  }
+  if (result.neighbors.length > 0) {
+    lines.push("");
+    lines.push("Connected:");
+    for (const neighbor of result.neighbors) {
+      const location = neighbor.path ?? neighbor.collectionPath ?? neighbor.threadId ?? neighbor.id;
+      const via = neighbor.via
+        .map((step) => {
+          const label = step.field ? `${step.edge}:${step.field}` : step.edge;
+          return `${step.direction === "out" ? "from" : "to"} ${lineSafe(step.fromTitle)} (${label})`;
+        })
+        .join("; ");
+      lines.push(
+        `  [${neighbor.kind}] ${lineSafe(neighbor.title)} — ${lineSafe(location)} (via ${via})`,
+      );
+    }
+  }
+  const notices: string[] = [];
+  if (result.indexBuilding) notices.push("index is still building");
+  if (result.policyDegraded) {
+    notices.push("visibility policy could not be read; filtered files excluded");
+  }
+  if (!result.mountsCovered) {
+    notices.push("mounted shared folders under shared-with-me/ are not searched");
+  }
+  if (result.sharedChannelRowsUncovered > 0) {
+    notices.push(
+      `${counted(result.sharedChannelRowsUncovered, "shared channel", "shared channels")} could not be refreshed`,
+    );
+  }
+  if (result.truncated) notices.push("output truncated to byte budget");
+  if (!result.complete && notices.length === 0) notices.push("partial coverage");
+  if (notices.length > 0) {
+    lines.push("");
+    lines.push(`Note: ${notices.join("; ")}.`);
+  }
+  return lines.join("\n");
 }

@@ -171,6 +171,21 @@ Resolve wikilink or Markdown literals from one source document using the engine'
 
 Returns `{ versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
 
+### `dohc_search_workspace`
+
+Search across pages, Document Collections, typed records, transactional dataset pointers, and chats in one ranked call, with 1-hop linked context (wikilinks, Collection relations, chat mentions). Use this first to recall context in the owning workspace before listing files or grepping chat. Check complete, indexBuilding, policyDegraded, mountsCovered, sharedChannelRowsUncovered, and truncated for coverage.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `query`: `string`. Required.
+- `surfaces`: `("page" | "collection" | "record" | "chat")[]`
+- `pathPrefix`: `string`
+- `collectionPath`: `string`
+- `includeNeighbors`: `boolean`
+- `limit`: `integer`
+
+Returns `{ versionId, results: { kind, id, title, path?, objectId?, collectionKind?, collectionPath?, datasetPath?, recordId?, fields?, recordCount?, matchedFields?, threadId?, messageId?, author?, createdAtMs?, channelName?, channelWireId?, linkedFilePath?, snippet, matchedTerms, related }[], neighbors: { kind, id, title, path?, objectId?, collectionPath?, recordId?, threadId?, snippet?, via }[], complete, indexBuilding, policyDegraded, mountsCovered, sharedChannelRowsUncovered, truncated }`.
+
 ### `dohc_retry_chat_run`
 
 Run an agent's stopped request in a dohc Chat thread again, as Try again does under its message. dohc_read_chat reports a stopped run under dispatch.lastRun. Each request gets two attempts. Only the computer that ran it can run it again, and only for someone who may post in the thread.
@@ -2487,6 +2502,30 @@ dohc reads the account password from stdin, or asks for it when stdin is a termi
 - `--preview-token <token>`: Use previewToken from deletePreview. Required.
 
 With `--json`, prints `{ schemaVersion, ok: true, finished, email, server, disconnectError }`.
+
+### `dohc workspace`
+
+Search pages, Collections, records, and chats across this workspace.
+
+Requires the original workspace; received shares and mounted folders are refused. Paths in --path-prefix and --collection are relative to the workspace root.
+
+Works on the owning workspace only; standalone received shares and mounted shared folders are refused. `complete` is false when `indexBuilding` or `policyDegraded` is true, when `sharedChannelRowsUncovered` is non-zero, or when a short query exceeds its scan bound. `mountsCovered` is false when received folders are mounted under `shared-with-me/`. `truncated` is true when the response hit its 64 KiB wire cap.
+
+#### `dohc workspace search`
+
+```sh
+dohc workspace search <query> [options]
+```
+
+Search pages, Collections, records, and chats in one ranked call.
+
+- `--surface <surface>`: Limit direct hits to page, collection, record, or chat. Repeatable.
+- `--path-prefix <path>`: Limit direct hits to a workspace folder prefix.
+- `--collection <path>`: Limit direct hits to one Collection path.
+- `--limit <count>`: Maximum direct hits to return, from 1 to 50. Defaults to 15.
+- `--no-neighbors`: Omit 1-hop related edges and connected neighbors.
+
+With `--json`, prints `{ schemaVersion, versionId, results: { kind, id, title, path?, objectId?, collectionKind?, collectionPath?, datasetPath?, recordId?, fields?, recordCount?, matchedFields?, threadId?, messageId?, author?, createdAtMs?, channelName?, channelWireId?, linkedFilePath?, snippet, matchedTerms, related }[], neighbors: { kind, id, title, path?, objectId?, collectionPath?, recordId?, threadId?, snippet?, via }[], complete, indexBuilding, policyDegraded, mountsCovered, sharedChannelRowsUncovered, truncated }`.
 
 ## App channel
 

@@ -15,7 +15,7 @@ impl Cache {
         self.entries.clear();
     }
 }
-pub(super) struct Prepared {
+pub(crate) struct Prepared {
     cache: Arc<Mutex<Cache>>,
     key: Key,
     resolver: Option<Arc<Resolver>>,
@@ -23,7 +23,7 @@ pub(super) struct Prepared {
 }
 impl Prepared {
     // Map construction and eviction (including map destruction) stay off the actor.
-    pub(super) fn build(self) -> Arc<Resolver> {
+    pub(crate) fn build(self) -> Arc<Resolver> {
         if let Some(resolver) = self.resolver {
             return resolver;
         }
@@ -75,7 +75,7 @@ pub(crate) fn revision(
     Ok((revision, external))
 }
 // Never call inside write_with: rollback could reuse a revision with uncommitted aliases.
-pub(super) fn prepare(
+pub(crate) fn prepare(
     conn: &Connection,
     cache: &Arc<Mutex<Cache>>,
     ws: &str,

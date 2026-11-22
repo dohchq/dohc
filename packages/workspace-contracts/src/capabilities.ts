@@ -78,6 +78,15 @@ const LISTED_CAPABILITIES = {
   "links.edges": capability("Read a bounded page of file links.", { ipc: [], mcp: {} }),
   "links.in": capability("Read documents that link to a file.", { ipc: [], mcp: {} }),
   "links.resolve": capability("Resolve links from one document.", { ipc: [], mcp: {} }),
+  "workspace.search": capability(
+    "Search pages, Collections, records, and chats in the owning workspace.",
+    {
+      ipc: [],
+      mcp: {},
+      mcpReason:
+        "Only the owning workspace offers cross-surface workspace search in this release. Shared profiles omit this read; socket admission and engine owner checks remain the gates.",
+    },
+  ),
   "settings.user.read": capability("Read this computer's user settings.", {
     ipc: ["getUserSettings"],
   }),

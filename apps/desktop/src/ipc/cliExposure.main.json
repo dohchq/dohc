@@ -84,7 +84,8 @@
     "versionMerge",
     "versionResolve",
     "versionSwitch",
-    "watch"
+    "watch",
+    "workspaceSearch"
   ],
   "internalVerbs": [
     "chat",
@@ -173,7 +174,8 @@
     "versionMerge",
     "versionResolve",
     "versionSwitch",
-    "watch"
+    "watch",
+    "workspaceSearch"
   ],
   "publicGroups": [
     "links",
@@ -189,7 +191,8 @@
     "history",
     "version",
     "automation",
-    "account"
+    "account",
+    "workspace"
   ],
   "publicVerbs": [
     "links edges",
@@ -305,7 +308,8 @@
     "automation retry",
     "automation press",
     "account deletePreview",
-    "account delete"
+    "account delete",
+    "workspace search"
   ],
   "help": {
     "top": {
@@ -366,6 +370,10 @@
         {
           "group": "account",
           "block": "  account      Review and delete the server account the dohc app is connected\n               to.\n               deletePreview, delete\n"
+        },
+        {
+          "group": "workspace",
+          "block": "  workspace    Search pages, Collections, records, and chats across this\n               workspace.\n               search\n"
         }
       ],
       "suffix": "\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc <command> --help to see what each verb does.\n"
@@ -497,6 +505,8 @@
     "account": "Usage: dohc account <verb> [arguments] [options]\n\nReview and delete the server account the dohc app is connected to.\n\nVerbs:\n  deletePreview   List what deleting the connected server account removes.\n  delete          Delete the connected server account and the workspaces it owns\n                  on the server.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc account <verb> --help to see its arguments and options.\n",
     "account deletePreview": "Usage: dohc account deletePreview [options]\n\nList what deleting the connected server account removes.\n\nThe result holds the server and previewToken that delete needs. The token\nexpires after five minutes.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
     "account delete": "Usage: dohc account delete [options]\n\nDelete the connected server account and the workspaces it owns on the server.\n\ndohc reads the account password from stdin, or asks for it when stdin is a\nterminal. Never pass it as an argument.\nThis cannot be undone. Copies on this computer stay. People you shared with lose\naccess and keep their copies.\nIf you create an account again later, the server will not accept your old copies\nof the deleted workspaces. Its backups keep the data until they expire.\nWhen the server cannot finish at once, the account stays blocked and the server\nfinishes later. Either way, the dohc app disconnects from the server. If it\ncannot, delete exits 1 and says how to finish.\nIf the preview expired or changed, run deletePreview again.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --server <address>        Use server from deletePreview. Required.\n  --preview-token <token>   Use previewToken from deletePreview. Required.\n  --as-agent                Post and read chat as an agent.\n  --agent-id <id>           Work as this agent you run, by its id in Settings ›\n                            Agents. Implies --as-agent.\n  --workspace <id>          Work in this workspace, by its id, instead of the\n                            one this folder is in. Relative paths then start at\n                            the workspace's folder.\n  --json                    Print the result as JSON.\n  --help                    Show help. -h does the same.\n",
-    "dataset cancelInvoke": "Usage: dohc dataset cancelInvoke '<JSON>' [options]\n\nRequest cancellation of a running Collection action.\n\nFields: workspaceId, invocationId\nUse the invocationId sent with invoke. The action may already have changed\nrecords. Check records or History. Retry with the same input and idempotencyKey.\n\nRun dohc inside a workspace folder while the dohc app is open.\nEach verb takes one JSON object that names workspaceId. Find workspaceId in\n.dohc/manifest.json at the workspace root.\ndatasetPath is the caller-relative dataset.json path. List and describe return\nit alongside the internal datasetId.\nAfter moving the file, update commands and app manifests. An old path reports a\nbroken reference.\nThese verbs use the same Collection rules as dohc. They do not accept SQL or\ncaller identity.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n"
+    "dataset cancelInvoke": "Usage: dohc dataset cancelInvoke '<JSON>' [options]\n\nRequest cancellation of a running Collection action.\n\nFields: workspaceId, invocationId\nUse the invocationId sent with invoke. The action may already have changed\nrecords. Check records or History. Retry with the same input and idempotencyKey.\n\nRun dohc inside a workspace folder while the dohc app is open.\nEach verb takes one JSON object that names workspaceId. Find workspaceId in\n.dohc/manifest.json at the workspace root.\ndatasetPath is the caller-relative dataset.json path. List and describe return\nit alongside the internal datasetId.\nAfter moving the file, update commands and app manifests. An old path reports a\nbroken reference.\nThese verbs use the same Collection rules as dohc. They do not accept SQL or\ncaller identity.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n",
+    "workspace": "Usage: dohc workspace <verb> [arguments] [options]\n\nSearch pages, Collections, records, and chats across this workspace.\n\nVerbs:\n  search   Search pages, Collections, records, and chats in one ranked call.\n\nRun dohc inside a workspace folder while the dohc app is open.\nRequires the original workspace; received shares and mounted folders are\nrefused.\nPaths in --path-prefix and --collection are relative to the workspace root.\n\nOptions:\n  --as-agent         Post and read chat as an agent.\n  --agent-id <id>    Work as this agent you run, by its id in Settings › Agents.\n                     Implies --as-agent.\n  --workspace <id>   Work in this workspace, by its id, instead of the one this\n                     folder is in. Relative paths then start at the workspace's\n                     folder.\n  --json             Print the result as JSON.\n  --help             Show help. -h does the same.\n\nRun dohc workspace <verb> --help to see its arguments and options.\n",
+    "workspace search": "Usage: dohc workspace search <query> [options]\n\nSearch pages, Collections, records, and chats in one ranked call.\n\nRun dohc inside a workspace folder while the dohc app is open.\nRequires the original workspace; received shares and mounted folders are\nrefused.\nPaths in --path-prefix and --collection are relative to the workspace root.\n\nOptions:\n  --surface <surface>    Limit direct hits to page, collection, record, or chat.\n                         Repeatable.\n  --path-prefix <path>   Limit direct hits to a workspace folder prefix.\n  --collection <path>    Limit direct hits to one Collection path.\n  --limit <count>        Maximum direct hits to return, from 1 to 50. Defaults\n                         to 15.\n  --no-neighbors         Omit 1-hop related edges and connected neighbors.\n  --as-agent             Post and read chat as an agent.\n  --agent-id <id>        Work as this agent you run, by its id in Settings ›\n                         Agents. Implies --as-agent.\n  --workspace <id>       Work in this workspace, by its id, instead of the one\n                         this folder is in. Relative paths then start at the\n                         workspace's folder.\n  --json                 Print the result as JSON.\n  --help                 Show help. -h does the same.\n"
   }
 }

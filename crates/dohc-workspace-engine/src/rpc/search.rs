@@ -16,6 +16,9 @@ use dohc_engine_runtime::NoFaults;
 use dohc_engine_runtime::SearchPageDisposition;
 use dohc_engine_runtime::SearchResultKey;
 use dohc_engine_runtime::SearchSurface;
+use dohc_engine_runtime::retrieval::{
+    DEFAULT_RETRIEVAL_LIMIT, MAX_RETRIEVAL_LIMIT, RetrievalKind, RetrievalRequest,
+};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -90,6 +93,17 @@ struct SearchChatMessagesGranularParams {
 struct SearchEnsureIndexParams {
     workspace_id: String,
     version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RetrievalQueryParams {
+    query: String,
+    surfaces: Option<Vec<RetrievalKind>>,
+    path_prefix: Option<String>,
+    collection_path: Option<String>,
+    include_neighbors: Option<bool>,
+    limit: Option<usize>,
 }
 
 impl EngineService {
@@ -323,5 +337,57 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         Ok(json!({}))
+    }
+
+    pub(super) async fn retrieval_query(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RetrievalQueryParams = parse(params)?;
+        let limit = params.limit.unwrap_or(DEFAULT_RETRIEVAL_LIMIT);
+        if limit == 0 || limit > MAX_RETRIEVAL_LIMIT {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-parameters",
+            ));
+        }
+        if let Some(surfaces) = &params.surfaces
+            && surfaces.is_empty()
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-parameters",
+            ));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let request = RetrievalRequest {
+            query: params.query,
+            surfaces: params.surfaces,
+            path_prefix: params.path_prefix,
+            collection_path: params.collection_path,
+            include_neighbors: params.include_neighbors.unwrap_or(true),
+            limit,
+        };
+        let response = open
+            .actor
+            .retrieve_workspace(
+                open.root.clone(),
+                open.workspace_id.clone(),
+                request,
+                now_ms()?,
+                cancellation.token(),
+            )
+            .await
+            .map_err(|err| match err {
+                dohc_engine_runtime::RuntimeError::Storage(
+                    dohc_engine_storage::StorageError::InvalidInput { reason },
+                ) => WireError::new(ErrorCode::InvalidParams, reason),
+                other => map_runtime(other),
+            })?;
+        serde_json::to_value(response)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))
     }
 }
