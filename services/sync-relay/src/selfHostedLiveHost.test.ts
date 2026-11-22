@@ -949,6 +949,21 @@ it("turns a note with no live-editing history off as one without it, before its 
   );
 });
 
+it("turns a note its host refuses off as refused, also when its start clock ran out in the same pass", async () => {
+  const f = await fixture();
+  await f.waitStarted(1);
+  await f.waitUpdate(["docs/a.md"]);
+  f.block(binding.objectId, "refused");
+  f.clock.now = 10 + LIVE_NOTE_START_MAX_MS;
+  await vi.waitFor(
+    () => {
+      f.host.reconcile();
+      expect(f.enrollment()!.note).toMatchObject({ state: "off", cause: "refused" });
+    },
+    { timeout: 10_000 },
+  );
+});
+
 it("logs a replacement daemon once it starts", async () => {
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   try {

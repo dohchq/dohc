@@ -473,11 +473,13 @@ export async function startSelfHostedLiveHost(options: {
         signature = "";
         replacing = true;
       }
-      storage.failLapsedLiveNoteStarts(options.nowMs?.() ?? Date.now(), (row) =>
-        current?.blocked(row) === "without-lineage" || !storage.mainLiveLineageExists(row)
+      storage.failLapsedLiveNoteStarts(options.nowMs?.() ?? Date.now(), (row) => {
+        const block = current?.blocked(row);
+        if (block === "refused") return "refused";
+        return block === "without-lineage" || !storage.mainLiveLineageExists(row)
           ? "no-lineage"
-          : "failing",
-      );
+          : "failing";
+      });
       selected = selection();
       const { targets, departing } = selected,
         next = selectionSignature(selected);
@@ -515,7 +517,11 @@ export async function startSelfHostedLiveHost(options: {
           refused.delete(key);
           continue;
         }
-        if (block === "refused" && row.note.state === "starting")
+        if (
+          block === "refused" &&
+          row.note.state === "starting" &&
+          storage.serviceHostEnrollmentCovered(row)
+        )
           storage.moveLiveNote({
             workspaceId: row.workspaceId,
             objectId: row.objectId,

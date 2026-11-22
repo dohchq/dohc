@@ -746,7 +746,8 @@ export function failLapsedLiveNoteStarts(
       `SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=0 AND state='starting' AND since_ms<=? LIMIT ?`,
     )
     .all(now - LIVE_NOTE_START_MAX_MS, SERVICE_HOST_MAX_DOCUMENTS)
-    .map(row);
+    .map(row)
+    .filter((enrollment) => covered(storage, enrollment));
   return lapsed.flatMap((enrollment) => {
     const { workspaceId, objectId } = enrollment;
     return moveLiveNote(storage, {

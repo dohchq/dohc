@@ -1404,6 +1404,21 @@ it("starts a reclaimed note again on its next open, once", async () => {
   });
 });
 
+it("leaves a starting note whose Edit access ended to its release, which records why", async () => {
+  const f = await fixture();
+  f.enroll();
+  expect(
+    f.storage.revokeShareGrant({ shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20 })
+      .ok,
+  ).toBe(true);
+  expect(f.storage.failLapsedLiveNoteStarts(10 + LIVE_NOTE_START_MAX_MS, () => "failing")).toEqual(
+    [],
+  );
+  expect(noteOf(f.storage).state).toBe("starting");
+  f.release(binding.objectId);
+  expect(noteOf(f.storage)).toMatchObject({ state: "off", reason: "access-ended", cause: null });
+});
+
 it("fails a start 10 minutes after the start the record holds, also across a relay restart", async () => {
   const f = await fixture();
   f.enroll();
