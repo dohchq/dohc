@@ -6607,7 +6607,7 @@ export function DesktopWorkspaceShell(props: {
     ? ""
     : shareViewEnded
       ? membershipView
-        ? "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it."
+        ? "Your membership ended. This copy stays on this computer, and your direct messages stay open. Ask the owner to invite you again to keep working in it."
         : `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
       : shareViewDamaged
         ? !shareView.recipientUserId || needsReopenFor === shareView
