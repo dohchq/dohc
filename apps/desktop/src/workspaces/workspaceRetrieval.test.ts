@@ -125,4 +125,22 @@ describe("createWorkspaceRetrievalReader", () => {
       "Workspace engine is unavailable.",
     );
   });
+
+  it("refuses shared-with-me mount filters before touching the adapter", async () => {
+    const withAdapter = vi.fn();
+    const reader = createWorkspaceRetrievalReader({
+      withAdapter,
+      syncWorkspaceSharedChannels: async () => 0,
+    });
+    await expect(
+      reader.search(ownerWorkspace(), { query: "tokyo", pathPrefix: "shared-with-me/Team" }),
+    ).rejects.toThrow("shared-with-me/");
+    await expect(
+      reader.search(ownerWorkspace(), {
+        query: "tokyo",
+        collectionPath: "Shared-With-Me/Team/Trips",
+      }),
+    ).rejects.toThrow("shared-with-me/");
+    expect(withAdapter).not.toHaveBeenCalled();
+  });
 });

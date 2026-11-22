@@ -108,7 +108,7 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
         &handle,
         6,
         "data/expenses/dataset.json",
-        r#"{"formatVersion":1,"name":"Kyoto Expenses","description":"Hotel and rail pass ledger","fields":[{"name":"vendor","type":"text"},{"name":"yen","type":"number"}]}"#,
+        r#"{"formatVersion":1,"name":"Kyoto Expenses","tables":[{"name":"expenses","fields":[{"name":"vendor","type":"text"},{"name":"yen","type":"number"}]}]}"#,
     )
     .await;
     call(
@@ -199,7 +199,8 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
     assert!(!serialized.contains("KYOTO_API_KEY"));
     assert!(!serialized.contains(".env"));
 
-    // Read-only attached handle can query retrieval.query cleanly.
+    // Read-only attached handle can query retrieval.query cleanly, and must not
+    // rebuild an uncertified index on the owner's writer store.
     let read_only = open_with(
         &transport,
         &scratch,
@@ -223,12 +224,62 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
     assert_eq!(ro_res["results"].as_array().expect("ro results").len(), 1);
     assert_eq!(ro_res["results"][0]["path"], json!("notes/kyoto-plan.md"));
 
+    // Create a fresh named version without certifying its search index, then query
+    // through the read-only attached handle: it must report indexBuilding without writing.
+    let branch = call(
+        &transport,
+        &handle,
+        120,
+        "versions.createNamed",
+        json!({ "workspaceId": workspace_id, "name": "uncertified-ro-check" }),
+    )
+    .await;
+    let branch_id = branch["version"]["versionId"]
+        .as_str()
+        .expect("branch id")
+        .to_string();
+    call(
+        &transport,
+        &handle,
+        121,
+        "versions.switch",
+        json!({ "workspaceId": workspace_id, "versionId": branch_id }),
+    )
+    .await;
+    let ro_uncertified = call(
+        &transport,
+        &read_only,
+        122,
+        "retrieval.query",
+        json!({ "query": "kyoto", "surfaces": ["page"] }),
+    )
+    .await;
+    assert_eq!(ro_uncertified["indexBuilding"], json!(true));
+    assert_eq!(ro_uncertified["complete"], json!(false));
+    let db_path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
+    let conn = rusqlite::Connection::open(db_path).expect("open db");
+    let certified_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM engine_search_index_state WHERE workspace_id = ?1 AND version_id = ?2",
+            rusqlite::params![workspace_id, branch_id],
+            |row| row.get(0),
+        )
+        .expect("count index state");
+    assert_eq!(
+        certified_rows, 0,
+        "read-only attached handle must never certify or write engine_search_index_state"
+    );
+
     // Invalid params are rejected with InvalidParams.
     for bad in [
         json!({ "query": "   " }),
+        json!({ "query": "???" }),
         json!({ "query": "kyoto", "limit": 0 }),
         json!({ "query": "kyoto", "limit": 51 }),
         json!({ "query": "kyoto", "pathPrefix": "../escape" }),
+        json!({ "query": "kyoto", "pathPrefix": "shared-with-me/Team" }),
+        json!({ "query": "kyoto", "collectionPath": "Shared-With-Me/Team/Tasks" }),
+        json!({ "query": "kyoto", "surfaces": ["page", "record", "collection", "chat", "page"] }),
         json!({ "query": "kyoto", "unknownField": true }),
     ] {
         let err = call_with_busy_retry(
@@ -268,6 +319,41 @@ async fn retrieval_query_refuses_received_share_and_passive_handles() {
     .await
     .expect_err("received share must be refused");
     assert_eq!(share_err.code, ErrorCode::Forbidden);
+
+    // Even if a raw client reopens a store containing a durable share_view_cursors row
+    // without setting projectCollections: true, retrieval.query must refuse with Forbidden.
+    let durable_share_scratch = ScratchDir::new().expect("durable share scratch");
+    let durable_handle = open_with(
+        &transport,
+        &durable_share_scratch,
+        10,
+        "ws-durable-share",
+        json!({ "captureMode": "none" }),
+    )
+    .await;
+    {
+        let db_path = dohc_engine_testkit::engine_db_path(&durable_share_scratch).expect("db");
+        let conn = rusqlite::Connection::open(db_path).expect("open db");
+        conn.execute(
+            "INSERT INTO share_view_cursors (workspace_id, share_id, cursor) \
+             VALUES ('ws-durable-share', 'sh-1', 'cur-1')",
+            [],
+        )
+        .expect("seed share_view_cursors");
+    }
+    let durable_err = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            11,
+            "retrieval.query",
+            Some(durable_handle),
+            json!({ "query": "anything" }),
+        ),
+    )
+    .await
+    .expect_err("durable received-share store must be refused even without projectCollections");
+    assert_eq!(durable_err.code, ErrorCode::Forbidden);
 
     let passive_scratch = ScratchDir::new().expect("passive scratch");
     let passive_handle = open_with(

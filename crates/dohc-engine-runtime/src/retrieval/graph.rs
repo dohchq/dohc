@@ -4,14 +4,16 @@ use super::text::{
 };
 use super::{
     LiveFileHead, RetrievalEdgeDirection, RetrievalEdgeKind, RetrievalHit, RetrievalKind,
-    RetrievalNeighbor, RetrievalNeighborVia, RetrievalRelatedEdge, load_file_body_capped,
-    resolve_live_file_head, resolve_live_file_head_by_path,
+    RetrievalNeighbor, RetrievalNeighborVia, RetrievalRelatedEdge, SCHEMA_TEXT_CAP_BYTES,
+    load_file_body_capped, redact_text_for_policy, resolve_live_file_head,
+    resolve_live_file_head_by_path,
 };
 use crate::links::PARSER_GENERATION;
 use crate::links::path_keys;
 use crate::links::resolver::Resolver;
 use crate::search::SearchError;
-use crate::search::policy::{SearchPolicySnapshot, path_is_search_indexed};
+use crate::search::policy::SearchPolicySnapshot;
+use dohc_engine_domain::parse_collection_schema;
 use dohc_engine_files::search_text::extract_search_text;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
@@ -162,6 +164,8 @@ pub(crate) fn expand_graph_neighborhood(
                         )?;
                         collect_chats_for_file(
                             conn,
+                            policy,
+                            resolver,
                             workspace_id,
                             object_id,
                             query,
@@ -174,6 +178,7 @@ pub(crate) fn expand_graph_neighborhood(
                             collect_record_relations(
                                 conn,
                                 policy,
+                                resolver,
                                 workspace_id,
                                 version_id,
                                 record_id,
@@ -204,6 +209,7 @@ pub(crate) fn expand_graph_neighborhood(
                     collect_collection_records(
                         conn,
                         policy,
+                        resolver,
                         workspace_id,
                         version_id,
                         collection_path,
@@ -220,6 +226,7 @@ pub(crate) fn expand_graph_neighborhood(
                     collect_files_for_chat(
                         conn,
                         policy,
+                        resolver,
                         workspace_id,
                         version_id,
                         thread_id,
@@ -329,8 +336,11 @@ pub(crate) fn expand_graph_neighborhood(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hydrate_file_node(
     conn: &Connection,
+    policy: &SearchPolicySnapshot,
+    resolver: &Resolver,
     head: &LiveFileHead,
     workspace_id: &str,
     version_id: &str,
@@ -367,16 +377,24 @@ fn hydrate_file_node(
         return Ok(existing.clone());
     }
 
-    let link_title: Option<String> = conn
-        .prepare_cached(
-            "SELECT title FROM link_sources \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-             AND status = 'indexed'",
-        )?
-        .query_row(params![workspace_id, version_id, head.object_id], |row| {
-            row.get(0)
-        })
-        .optional()?;
+    let link_title: Option<String> = match head.blob_sha256.as_deref() {
+        Some(source_hash) => conn
+            .prepare_cached(
+                "SELECT s.title FROM link_sources s \
+                 WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
+                   AND s.status = 'indexed' AND s.source_hash = ?4 \
+                   AND NOT EXISTS(SELECT 1 FROM link_pending p \
+                                  WHERE p.workspace_id = s.workspace_id \
+                                    AND p.version_id = s.version_id \
+                                    AND p.object_id = s.object_id)",
+            )?
+            .query_row(
+                params![workspace_id, version_id, head.object_id, source_hash],
+                |row| row.get(0),
+            )
+            .optional()?,
+        None => None,
+    };
 
     let raw_body =
         load_file_body_capped(conn, head.blob_sha256.as_deref(), NEIGHBOR_BODY_CAP_BYTES)?;
@@ -399,7 +417,9 @@ fn hydrate_file_node(
         (_, Some(body)) => body,
         _ => "",
     };
-    let snippet = extract_best_snippet(snippet_source, query, MAX_NEIGHBOR_SNIPPET_CHARS);
+    let redacted_snippet =
+        redact_text_for_policy(snippet_source, Some(&head.path), policy, Some(resolver));
+    let snippet = extract_best_snippet(&redacted_snippet, query, MAX_NEIGHBOR_SNIPPET_CHARS);
 
     let node = GraphNode {
         id: id.clone(),
@@ -418,6 +438,8 @@ fn hydrate_file_node(
 
 fn hydrate_chat_node(
     conn: &Connection,
+    policy: &SearchPolicySnapshot,
+    resolver: &Resolver,
     workspace_id: &str,
     thread_id: &str,
     query: &ParsedQuery,
@@ -475,11 +497,15 @@ fn hydrate_chat_node(
         return Ok(None);
     }
 
+    let redacted_stored = redact_text_for_policy(&stored_title, None, policy, Some(resolver));
+    let redacted_body = first_body
+        .as_deref()
+        .map(|body| redact_text_for_policy(body, None, policy, Some(resolver)));
     let title = truncate_chars(
-        &crate::search::index::display_title_for(&stored_title, first_body.as_deref()),
+        &crate::search::index::display_title_for(&redacted_stored, redacted_body.as_deref()),
         MAX_TITLE_CHARS,
     );
-    let snippet = first_body
+    let snippet = redacted_body
         .as_deref()
         .map(|body| extract_best_snippet(body, query, MAX_NEIGHBOR_SNIPPET_CHARS))
         .unwrap_or_default();
@@ -566,7 +592,16 @@ fn collect_outgoing_links(
         else {
             continue;
         };
-        let node = hydrate_file_node(conn, &head, workspace_id, version_id, query, cache)?;
+        let node = hydrate_file_node(
+            conn,
+            policy,
+            resolver,
+            &head,
+            workspace_id,
+            version_id,
+            query,
+            cache,
+        )?;
         out.push(DiscoveredEdge {
             edge: if kind == "markdown" {
                 RetrievalEdgeKind::Markdown
@@ -650,7 +685,16 @@ fn collect_incoming_links(
         if resolved != Some(target_path) {
             continue;
         }
-        let node = hydrate_file_node(conn, &head, workspace_id, version_id, query, cache)?;
+        let node = hydrate_file_node(
+            conn,
+            policy,
+            resolver,
+            &head,
+            workspace_id,
+            version_id,
+            query,
+            cache,
+        )?;
         out.push(DiscoveredEdge {
             edge: if kind == "markdown" {
                 RetrievalEdgeKind::Markdown
@@ -669,6 +713,7 @@ fn collect_incoming_links(
 fn collect_record_relations(
     conn: &Connection,
     policy: &SearchPolicySnapshot,
+    resolver: &Resolver,
     workspace_id: &str,
     version_id: &str,
     record_id: &str,
@@ -703,7 +748,16 @@ fn collect_record_relations(
         else {
             continue;
         };
-        let node = hydrate_file_node(conn, &head, workspace_id, version_id, query, cache)?;
+        let node = hydrate_file_node(
+            conn,
+            policy,
+            resolver,
+            &head,
+            workspace_id,
+            version_id,
+            query,
+            cache,
+        )?;
         out.push(DiscoveredEdge {
             edge: RetrievalEdgeKind::Relation,
             direction: RetrievalEdgeDirection::Out,
@@ -739,7 +793,16 @@ fn collect_record_relations(
         else {
             continue;
         };
-        let node = hydrate_file_node(conn, &head, workspace_id, version_id, query, cache)?;
+        let node = hydrate_file_node(
+            conn,
+            policy,
+            resolver,
+            &head,
+            workspace_id,
+            version_id,
+            query,
+            cache,
+        )?;
         out.push(DiscoveredEdge {
             edge: RetrievalEdgeKind::Relation,
             direction: RetrievalEdgeDirection::In,
@@ -771,24 +834,39 @@ fn collect_parent_collection(
     let Some(schema_path) = schema_path else {
         return Ok(());
     };
-    if !path_is_search_indexed(policy, &schema_path) {
+    let Some(head) =
+        resolve_live_file_head_by_path(conn, policy, workspace_id, version_id, &schema_path)?
+    else {
         return Ok(());
-    }
+    };
     let id = format!("collection:document:{collection_path}");
     let node = if let Some(existing) = cache.get(&id) {
         existing.clone()
     } else {
-        let title = collection_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(collection_path)
-            .to_owned();
+        let schema_yaml =
+            load_file_body_capped(conn, head.blob_sha256.as_deref(), SCHEMA_TEXT_CAP_BYTES)?
+                .unwrap_or_default();
+        let parsed = parse_collection_schema(&schema_yaml);
+        let title = parsed
+            .schema
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                collection_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(collection_path)
+                    .to_owned()
+            });
         let node = GraphNode {
             id: id.clone(),
             kind: RetrievalKind::Collection,
             title: truncate_chars(&title, MAX_TITLE_CHARS),
-            path: Some(schema_path),
-            object_id: None,
+            path: Some(head.path),
+            object_id: Some(head.object_id),
             collection_path: Some(collection_path.to_owned()),
             record_id: None,
             thread_id: None,
@@ -810,6 +888,7 @@ fn collect_parent_collection(
 fn collect_collection_records(
     conn: &Connection,
     policy: &SearchPolicySnapshot,
+    resolver: &Resolver,
     workspace_id: &str,
     version_id: &str,
     collection_path: &str,
@@ -835,7 +914,16 @@ fn collect_collection_records(
         else {
             continue;
         };
-        let node = hydrate_file_node(conn, &head, workspace_id, version_id, query, cache)?;
+        let node = hydrate_file_node(
+            conn,
+            policy,
+            resolver,
+            &head,
+            workspace_id,
+            version_id,
+            query,
+            cache,
+        )?;
         out.push(DiscoveredEdge {
             edge: RetrievalEdgeKind::CollectionMember,
             direction: RetrievalEdgeDirection::In,
@@ -846,8 +934,11 @@ fn collect_collection_records(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_chats_for_file(
     conn: &Connection,
+    policy: &SearchPolicySnapshot,
+    resolver: &Resolver,
     workspace_id: &str,
     object_id: &str,
     query: &ParsedQuery,
@@ -867,7 +958,15 @@ fn collect_chats_for_file(
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     for thread_id in linked_threads {
-        if let Some(node) = hydrate_chat_node(conn, workspace_id, &thread_id, query, cache)? {
+        if let Some(node) = hydrate_chat_node(
+            conn,
+            policy,
+            resolver,
+            workspace_id,
+            &thread_id,
+            query,
+            cache,
+        )? {
             out.push(DiscoveredEdge {
                 edge: RetrievalEdgeKind::ChatLinkedFile,
                 direction: RetrievalEdgeDirection::In,
@@ -878,9 +977,12 @@ fn collect_chats_for_file(
     }
 
     let mut mention_stmt = conn.prepare_cached(
-        "SELECT DISTINCT thread_id FROM chat_attachments \
-         WHERE workspace_id = ?1 AND object_id = ?2 \
-         ORDER BY created_at_ms DESC, attachment_id DESC LIMIT ?3",
+        "SELECT DISTINCT ca.thread_id FROM chat_attachments ca \
+         JOIN chat_messages m \
+           ON m.workspace_id = ca.workspace_id AND m.thread_id = ca.thread_id \
+          AND m.message_id = ca.message_id \
+         WHERE ca.workspace_id = ?1 AND ca.object_id = ?2 \
+         ORDER BY ca.created_at_ms DESC, ca.attachment_id DESC LIMIT ?3",
     )?;
     let mentioned_threads = mention_stmt
         .query_map(
@@ -890,7 +992,15 @@ fn collect_chats_for_file(
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     for thread_id in mentioned_threads {
-        if let Some(node) = hydrate_chat_node(conn, workspace_id, &thread_id, query, cache)? {
+        if let Some(node) = hydrate_chat_node(
+            conn,
+            policy,
+            resolver,
+            workspace_id,
+            &thread_id,
+            query,
+            cache,
+        )? {
             out.push(DiscoveredEdge {
                 edge: RetrievalEdgeKind::ChatMention,
                 direction: RetrievalEdgeDirection::In,
@@ -906,6 +1016,7 @@ fn collect_chats_for_file(
 fn collect_files_for_chat(
     conn: &Connection,
     policy: &SearchPolicySnapshot,
+    resolver: &Resolver,
     workspace_id: &str,
     version_id: &str,
     thread_id: &str,
@@ -930,7 +1041,16 @@ fn collect_files_for_chat(
         && let Some(head) =
             resolve_live_file_head(conn, policy, workspace_id, version_id, &object_id)?
     {
-        let node = hydrate_file_node(conn, &head, workspace_id, version_id, query, cache)?;
+        let node = hydrate_file_node(
+            conn,
+            policy,
+            resolver,
+            &head,
+            workspace_id,
+            version_id,
+            query,
+            cache,
+        )?;
         out.push(DiscoveredEdge {
             edge: RetrievalEdgeKind::ChatLinkedFile,
             direction: RetrievalEdgeDirection::Out,
@@ -941,9 +1061,12 @@ fn collect_files_for_chat(
 
     let mut attachment_objects: Vec<String> = {
         let mut stmt = conn.prepare_cached(
-            "SELECT DISTINCT object_id FROM chat_attachments \
-             WHERE workspace_id = ?1 AND thread_id = ?2 AND object_id IS NOT NULL \
-             ORDER BY created_at_ms DESC, attachment_id DESC LIMIT ?3",
+            "SELECT DISTINCT ca.object_id FROM chat_attachments ca \
+             JOIN chat_messages m \
+               ON m.workspace_id = ca.workspace_id AND m.thread_id = ca.thread_id \
+              AND m.message_id = ca.message_id \
+             WHERE ca.workspace_id = ?1 AND ca.thread_id = ?2 AND ca.object_id IS NOT NULL \
+             ORDER BY ca.created_at_ms DESC, ca.attachment_id DESC LIMIT ?3",
         )?;
         stmt.query_map(
             params![workspace_id, thread_id, MAX_CHAT_LINKS_PER_SEED as i64],
@@ -982,7 +1105,16 @@ fn collect_files_for_chat(
         else {
             continue;
         };
-        let node = hydrate_file_node(conn, &head, workspace_id, version_id, query, cache)?;
+        let node = hydrate_file_node(
+            conn,
+            policy,
+            resolver,
+            &head,
+            workspace_id,
+            version_id,
+            query,
+            cache,
+        )?;
         out.push(DiscoveredEdge {
             edge: RetrievalEdgeKind::ChatMention,
             direction: RetrievalEdgeDirection::Out,

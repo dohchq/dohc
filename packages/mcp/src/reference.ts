@@ -647,6 +647,8 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_read_held_change: "A shared view holds no saves of its own, so it does not offer this tool.",
   dohc_list_outside_changes:
     "The owning workspace holds outside changes. Shared profiles do not offer this read.",
+  dohc_search_workspace:
+    "Workspace search runs only on the owning workspace. Shared profiles do not offer this read.",
 };
 
 async function mcpSection(): Promise<{ text: string; version: string }> {

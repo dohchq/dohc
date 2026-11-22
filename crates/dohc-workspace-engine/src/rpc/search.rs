@@ -17,7 +17,8 @@ use dohc_engine_runtime::SearchPageDisposition;
 use dohc_engine_runtime::SearchResultKey;
 use dohc_engine_runtime::SearchSurface;
 use dohc_engine_runtime::retrieval::{
-    DEFAULT_RETRIEVAL_LIMIT, MAX_RETRIEVAL_LIMIT, RetrievalKind, RetrievalRequest,
+    DEFAULT_RETRIEVAL_LIMIT, MAX_RETRIEVAL_LIMIT, RECEIVED_SHARE_RETRIEVAL_REFUSAL, RetrievalKind,
+    RetrievalRequest,
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -354,7 +355,7 @@ impl EngineService {
             ));
         }
         if let Some(surfaces) = &params.surfaces
-            && surfaces.is_empty()
+            && (surfaces.is_empty() || surfaces.len() > 4)
         {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
@@ -362,6 +363,7 @@ impl EngineService {
             ));
         }
         let open = self.open(handle.as_ref())?;
+        let allow_index_build = open.mode == crate::rpc::workspace::WorkspaceOpenMode::Full;
         let cancellation = OperationCancellation::new(ctx);
         let request = RetrievalRequest {
             query: params.query,
@@ -378,10 +380,19 @@ impl EngineService {
                 open.workspace_id.clone(),
                 request,
                 now_ms()?,
+                allow_index_build,
                 cancellation.token(),
             )
             .await
             .map_err(|err| match err {
+                dohc_engine_runtime::RuntimeError::Cancelled => {
+                    cancellation.interruption("retrieval.query")
+                }
+                dohc_engine_runtime::RuntimeError::Storage(
+                    dohc_engine_storage::StorageError::InvalidInput { reason },
+                ) if reason == RECEIVED_SHARE_RETRIEVAL_REFUSAL => {
+                    WireError::new(ErrorCode::Forbidden, reason)
+                }
                 dohc_engine_runtime::RuntimeError::Storage(
                     dohc_engine_storage::StorageError::InvalidInput { reason },
                 ) => WireError::new(ErrorCode::InvalidParams, reason),

@@ -740,6 +740,11 @@ fn security_policy_binary_excalidraw_and_degraded_fail_closed() {
         !all_paths.contains(&"private/secret-diary.md"),
         "hidden file leaked: {all_paths:?}"
     );
+    let serialized = serde_json::to_string(&res).expect("serialize");
+    assert!(
+        !serialized.contains("secret-diary"),
+        "hidden wikilink target leaked into snippet or result: {serialized}"
+    );
     assert!(!all_paths.contains(&".env"), ".env leaked: {all_paths:?}");
     assert!(
         !all_paths.contains(&"notes/was-text.md"),
@@ -1187,4 +1192,314 @@ fn benchmark_twenty_thousand_files_retrieval() {
             })
         );
     }
+}
+
+#[test]
+fn council_r1_regressions_scope_live_blob_revisions_datasets_and_share_cursors() {
+    let (scratch, mut store) = setup_store();
+    let root = scratch.path();
+    let token = CancellationToken::new();
+
+    // 1. Scoped search must not be displaced by 170 stronger outside matches.
+    for i in 0..170 {
+        write_text(
+            &mut store,
+            &format!("obj-noise-{i:03}"),
+            &format!("Other/noise-{i:03}.md"),
+            "# Quartz Quartz Quartz\n\nQuartz quartz quartz quartz quartz.\n",
+            10 + i,
+        );
+    }
+    write_text(
+        &mut store,
+        "obj-target",
+        "Target/in-scope.md",
+        "# In Scope Note\n\nMentions quartz once.\n",
+        200,
+    );
+
+    // 2. Root-level dataset revisions must not surface, while >64 KiB datasets with 40 tables do.
+    write_text(
+        &mut store,
+        "obj-root-rev",
+        "revisions/1-abc/dataset.json",
+        r#"{"formatVersion":1,"name":"Ghost Revision Dataset","tables":[{"name":"ghost","fields":[{"name":"title","type":"text"}]}]}"#,
+        201,
+    );
+    let mut big_tables = Vec::new();
+    for t in 0..40 {
+        let mut fields = Vec::new();
+        for f in 0..70 {
+            let fname = if t == 39 && f == 69 {
+                "deep_zanzibar_column".to_owned()
+            } else {
+                format!("col_{t}_{f}_padding_descriptor_field_name")
+            };
+            fields.push(json!({ "name": fname, "type": "text" }));
+        }
+        big_tables.push(json!({ "name": format!("tbl_{t}"), "fields": fields }));
+    }
+    let big_dataset_json = json!({
+        "formatVersion": 1,
+        "name": "Large Ledger",
+        "tables": big_tables,
+    })
+    .to_string();
+    assert!(
+        big_dataset_json.len() > 64 * 1024 && big_dataset_json.len() < 256 * 1024,
+        "expected descriptor between 64 KiB and 256 KiB, got {}",
+        big_dataset_json.len()
+    );
+    write_text(
+        &mut store,
+        "obj-big-ds",
+        "BigData/dataset.json",
+        &big_dataset_json,
+        202,
+    );
+
+    // 3. Stale FTS text (deleted Excalidraw text) must never leak when scoring reads the live blob.
+    write_text(
+        &mut store,
+        "obj-excal",
+        "boards/stale.excalidraw",
+        &json!({
+            "type": "excalidraw",
+            "version": 2,
+            "elements": [
+                { "type": "text", "text": "Current Live Canvas", "isDeleted": false }
+            ]
+        })
+        .to_string(),
+        203,
+    );
+
+    // 4. Symmetric city/cities stemming.
+    write_text(
+        &mut store,
+        "obj-cities",
+        "notes/cities.md",
+        "# European Cities\n\nTravel guide for major cities.\n",
+        204,
+    );
+
+    // 5. Deleted collection.yaml must not appear as a parent Collection graph node,
+    //    and pending (record_id IS NULL) rows must not inflate recordCount.
+    write_text(
+        &mut store,
+        "obj-orphan-rec",
+        "GhostColl/item.md",
+        "---\nstatus: open\n---\n# Orphan Record\n\nUnique phantom_schema_token body.\n",
+        205,
+    );
+    store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "INSERT INTO collections(workspace_id,version_id,collection_path,schema_path,schema_status,degradation_reasons_json) \
+                 VALUES (?1,?2,'GhostColl','GhostColl/collection.yaml','valid','[]')",
+                params![WS, VER],
+            )
+            .map_err(StorageError::corrupt_public)?;
+            tx.execute(
+                "INSERT INTO collection_records(workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state,index_initialized) \
+                 VALUES (?1,?2,'rec-ghost-1','GhostColl','GhostColl/item.md','obj-orphan-rec','adopted',1)",
+                params![WS, VER],
+            )
+            .map_err(StorageError::corrupt_public)?;
+            Ok(())
+        })
+        .expect("seed ghost collection");
+
+    rebuild_search_index(&mut store, root);
+
+    // Poison FTS row for boards/stale.excalidraw with stale deleted token (simulating frozen degraded FTS).
+    store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "UPDATE engine_search_files_fts SET text = 'STALE_FROZEN_DELETED_CANVAS' \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = 'obj-excal'",
+                params![WS, VER],
+            )
+            .map_err(StorageError::corrupt_public)?;
+            Ok(())
+        })
+        .expect("poison fts");
+
+    // Verify scoped search finds Target/in-scope.md despite 170 stronger outside matches.
+    let mut scoped_req = default_req("quartz");
+    scoped_req.path_prefix = Some("Target".into());
+    let scoped = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(conn, root, WS, VER, &scoped_req, None, false, &token)
+        })
+        .expect("scoped retrieval");
+    assert_eq!(scoped.results.len(), 1);
+    assert_eq!(
+        scoped.results[0].path.as_deref(),
+        Some("Target/in-scope.md")
+    );
+
+    // Verify root-level revisions/1-abc/dataset.json is excluded.
+    let ghost_rev = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &default_req("Ghost Revision Dataset"),
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("ghost revision query");
+    assert!(
+        !ghost_rev
+            .results
+            .iter()
+            .any(|h| h.dataset_path.as_deref() == Some("revisions/1-abc/dataset.json")),
+        "root dataset revision must never surface: {:?}",
+        ghost_rev.results
+    );
+
+    // Verify >64 KiB dataset descriptor + 40th table / 70th field is discoverable.
+    let big_ds = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &default_req("deep_zanzibar_column"),
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("large dataset query");
+    assert!(
+        big_ds
+            .results
+            .iter()
+            .any(|h| h.dataset_path.as_deref() == Some("BigData/dataset.json")),
+        "expected large dataset hit, got {:?}",
+        big_ds.results
+    );
+
+    // Verify stale FTS text NEVER leaks even when search_index_building is true.
+    let stale_res = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &default_req("STALE_FROZEN_DELETED_CANVAS"),
+                None,
+                true,
+                &token,
+            )
+        })
+        .expect("stale fts query");
+    assert!(
+        stale_res.results.is_empty(),
+        "stale FTS text leaked: {:?}",
+        stale_res.results
+    );
+
+    // Verify symmetric city <-> cities stemming.
+    let city_res = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &default_req("city"),
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("city query");
+    assert!(
+        city_res
+            .results
+            .iter()
+            .any(|h| h.path.as_deref() == Some("notes/cities.md")),
+        "expected 'city' to match 'cities', got {:?}",
+        city_res.results
+    );
+
+    // Verify deleted collection.yaml does not appear in related or neighbors.
+    let ghost_coll = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &default_req("phantom_schema_token"),
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect("ghost collection query");
+    assert_eq!(ghost_coll.results.len(), 1);
+    assert!(
+        !ghost_coll.results[0]
+            .related
+            .iter()
+            .any(|edge| edge.kind == RetrievalKind::Collection),
+        "deleted schema leaked into related: {:?}",
+        ghost_coll.results[0].related
+    );
+    assert!(
+        !ghost_coll
+            .neighbors
+            .iter()
+            .any(|n| n.kind == RetrievalKind::Collection),
+        "deleted schema leaked into neighbors: {:?}",
+        ghost_coll.neighbors
+    );
+
+    // Verify shared-with-me/ filter prefix is rejected.
+    let mut mount_req = default_req("quartz");
+    mount_req.path_prefix = Some("shared-with-me/Team".into());
+    let mount_err = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(conn, root, WS, VER, &mount_req, None, false, &token)
+        })
+        .expect_err("shared-with-me pathPrefix must be refused");
+    assert!(mount_err.to_string().contains("shared-with-me"));
+
+    // Verify durable share_view_cursors row refuses retrieval.
+    store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "INSERT INTO share_view_cursors(workspace_id, share_id, cursor) \
+                 VALUES (?1, 'sh-1', 'cur-1')",
+                params![WS],
+            )
+            .map_err(StorageError::corrupt_public)?;
+            Ok(())
+        })
+        .expect("seed share_view_cursors");
+    let share_err = store
+        .read_with(|conn| {
+            retrieve_workspace_on_conn(
+                conn,
+                root,
+                WS,
+                VER,
+                &default_req("quartz"),
+                None,
+                false,
+                &token,
+            )
+        })
+        .expect_err("durable share store must be refused");
+    assert!(share_err.to_string().contains("received shares"));
 }

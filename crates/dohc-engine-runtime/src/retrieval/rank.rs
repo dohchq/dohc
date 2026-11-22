@@ -168,7 +168,10 @@ fn field_term_tf(tokens: &[String], lowered: &str, term: &QueryTerm) -> (f64, bo
     for token in tokens {
         if token == &term.raw {
             exact += 1;
-        } else if allow_prefix && token.starts_with(&term.stem) {
+        } else if allow_prefix
+            && (token.starts_with(&term.stem)
+                || crate::retrieval::text::stem_term(token) == term.stem)
+        {
             prefix += 1;
         }
         if exact + prefix >= 16 {

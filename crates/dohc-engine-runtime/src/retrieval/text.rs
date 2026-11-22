@@ -60,9 +60,9 @@ pub fn stem_term(raw: &str) -> String {
     {
         return root.to_owned();
     }
-    if raw.len() >= 5
+    if raw.len() >= 4
         && let Some(root) = raw.strip_suffix('y')
-        && root.len() >= 4
+        && root.len() >= 3
         && !matches!(
             root.as_bytes().last(),
             Some(b'a' | b'e' | b'i' | b'o' | b'u')
@@ -576,9 +576,16 @@ pub fn normalize_filter_prefix(raw: Option<&str>) -> Result<Option<String>, &'st
     if trimmed.len() > 1024 || trimmed.contains(['\\', '\0']) {
         return Err("invalid path filter");
     }
-    for segment in trimmed.split('/') {
+    for (idx, segment) in trimmed.split('/').enumerate() {
         if segment.is_empty() || segment == "." || segment == ".." {
             return Err("invalid path filter");
+        }
+        if idx == 0
+            && segment
+                .trim_end_matches(['.', ' '])
+                .eq_ignore_ascii_case("shared-with-me")
+        {
+            return Err("mounted shared folders under shared-with-me/ are not searched");
         }
     }
     Ok(Some(trimmed.to_owned()))
@@ -589,4 +596,86 @@ pub fn path_matches_prefix(path: &str, prefix: &str) -> bool {
         || path
             .strip_prefix(prefix)
             .is_some_and(|rest| rest.starts_with('/'))
+}
+
+pub fn escape_like_prefix(prefix: &str) -> String {
+    let mut out = String::with_capacity(prefix.len() + 2);
+    for ch in prefix.chars() {
+        match ch {
+            '%' | '_' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push_str("/%");
+    out
+}
+
+pub fn redact_file_references(
+    input: &str,
+    mut allow_wikilink: impl FnMut(&str) -> bool,
+    mut allow_markdown_link: impl FnMut(&str) -> bool,
+    mut allow_chat_mention: impl FnMut(&str) -> bool,
+) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if i + 2 <= bytes.len()
+            && &bytes[i..i + 2] == b"@["
+            && let Some(rel_end) = input[i + 2..].find(']')
+        {
+            let target = &input[i + 2..i + 2 + rel_end];
+            if !target.contains('\n') && !target.trim().is_empty() {
+                if allow_chat_mention(target.trim()) {
+                    out.push_str(&input[i..i + 2 + rel_end + 1]);
+                }
+                i += 2 + rel_end + 1;
+                continue;
+            }
+        }
+        if i + 2 <= bytes.len()
+            && &bytes[i..i + 2] == b"[["
+            && let Some(rel_end) = input[i + 2..].find("]]")
+        {
+            let inner = &input[i + 2..i + 2 + rel_end];
+            if !inner.contains('\n') && !inner.trim().is_empty() {
+                let target = inner.split('|').next().unwrap_or(inner).trim();
+                if allow_wikilink(target) {
+                    out.push_str(&input[i..i + 2 + rel_end + 2]);
+                }
+                i += 2 + rel_end + 2;
+                continue;
+            }
+        }
+        if bytes[i] == b'['
+            && let Some(label_end) = input[i + 1..].find("](")
+        {
+            let label = &input[i + 1..i + 1 + label_end];
+            let url_start = i + 1 + label_end + 2;
+            if !label.contains('\n')
+                && !label.contains('[')
+                && let Some(url_end) = input[url_start..].find(')')
+            {
+                let target = input[url_start..url_start + url_end].trim();
+                if !target.contains('\n') {
+                    let is_external = target.starts_with("http://")
+                        || target.starts_with("https://")
+                        || target.starts_with("mailto:")
+                        || target.starts_with('#');
+                    if is_external || allow_markdown_link(target) {
+                        out.push_str(&input[i..url_start + url_end + 1]);
+                    }
+                    i = url_start + url_end + 1;
+                    continue;
+                }
+            }
+        }
+        let ch = input[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }

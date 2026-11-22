@@ -2,9 +2,16 @@ import {
   WorkspaceSearchInput,
   type WorkspaceSearchResult,
 } from "@dohc/workspace-contracts/retrieval";
+import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
+
+function isMountedShareFilter(raw: string | undefined): boolean {
+  if (!raw) return false;
+  const trimmed = raw.trim().replace(/^\/+|\/+$/gu, "");
+  return trimmed.length > 0 && isSharedWithMePath(trimmed);
+}
 
 export function createWorkspaceRetrievalReader(deps: {
   withAdapter: <T>(
@@ -22,6 +29,9 @@ export function createWorkspaceRetrievalReader(deps: {
         throw new Error("Only the original workspace supports workspace search.");
       }
       const parsed = WorkspaceSearchInput.parse(input);
+      if (isMountedShareFilter(parsed.pathPrefix) || isMountedShareFilter(parsed.collectionPath)) {
+        throw new Error("Mounted shared folders under shared-with-me/ are not searched.");
+      }
       const includesChat = parsed.surfaces === undefined || parsed.surfaces.includes("chat");
       const hasLiveSharedChannels =
         workspace.sharedChannels?.some((channel) => channel.ended !== true) ?? false;

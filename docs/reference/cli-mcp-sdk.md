@@ -175,7 +175,7 @@ Returns `{ versionId, results: ({ path, fragment } | { path, create, fragment } 
 
 Search across pages, Document Collections, typed records, transactional dataset pointers, and chats in one ranked call, with 1-hop linked context (wikilinks, Collection relations, chat mentions). Use this first to recall context in the owning workspace before listing files or grepping chat. Check complete, indexBuilding, policyDegraded, mountsCovered, sharedChannelRowsUncovered, and truncated for coverage.
 
-Changes the workspace, so a shared view does not offer it.
+Workspace search runs only on the owning workspace. Shared profiles do not offer this read.
 
 - `query`: `string`. Required.
 - `surfaces`: `("page" | "collection" | "record" | "chat")[]`
