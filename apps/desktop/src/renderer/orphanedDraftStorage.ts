@@ -289,10 +289,7 @@ export function remapStoredDraftPaths(
       dropped.add(id);
     } else if (held !== undefined) expected.set(id, moved.raw);
   }
-  if (
-    moving.length > 0 ||
-    [...files.values()].some((raw) => movedSetAsideDraft(raw, workspaceId, changes) !== null)
-  )
+  if (changes.some((change) => change.kind === "file" || change.kind === "folder"))
     void send(
       moving,
       async () => {

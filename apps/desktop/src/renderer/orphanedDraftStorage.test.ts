@@ -199,6 +199,16 @@ describe("after a replacement fails during a rename", () => {
   });
 });
 
+it("moves a draft another window is still writing when this window renames its file", async () => {
+  const release = disk.hold();
+  const raw = JSON.stringify({ ...draft, version: 1 });
+  void disk.calls.writeSetAsideDraft({ key, raw, ifCurrent: null });
+  remapStoredDraftPaths("ws", rename("a.md", ".env"));
+  release();
+  await draftFileWritesSettled();
+  expect(disk.files.size).toBe(0);
+});
+
 it("leaves a draft main could not move at risk, and dismissing still removes its file", async () => {
   expect(await storeDraft(draft)).toBe(true);
   disk.fail(new Error("No space left on device"));
