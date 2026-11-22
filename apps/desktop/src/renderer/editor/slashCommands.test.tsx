@@ -461,7 +461,7 @@ describe("SlashCommandMenu on the Menu part's recipe", () => {
         onDismiss,
       }),
     );
-    fireEvent.mouseDown(screen.getByRole("listbox", { name: "slash commands" }));
+    fireEvent.mouseDown(screen.getByRole("listbox", { name: "Slash commands" }));
     expect(onDismiss).not.toHaveBeenCalled();
     fireEvent.mouseDown(document.body);
     expect(onDismiss).toHaveBeenCalledTimes(1);

@@ -798,7 +798,7 @@ describe("the toolbar", () => {
         );
       }
       render(<SwitchingSearch />);
-      const box = screen.getByLabelText<HTMLInputElement>("Search collection");
+      const box = screen.getByLabelText<HTMLInputElement>("Search Collection");
 
       fireEvent.change(box, { target: { value: "old query" } });
       fireEvent.click(tab("By status"));

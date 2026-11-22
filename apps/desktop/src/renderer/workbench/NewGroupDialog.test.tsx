@@ -18,7 +18,7 @@ describe("NewGroupDialog", () => {
     expect(submit.disabled).toBe(false);
     fireEvent.click(submit);
     expect(screen.getByTestId("chats-new-channel-name-error").textContent).toBe(
-      "Give the group a name.",
+      "Give the Group a name.",
     );
     expect(nameField().getAttribute("aria-invalid")).toBe("true");
     expect(document.activeElement).toBe(nameField());

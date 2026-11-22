@@ -204,12 +204,12 @@ describe("PropertiesPanel", () => {
         </>,
       );
 
-      await user.click(screen.getByRole("button", { name: "Add a property" }));
+      await user.click(screen.getByRole("button", { name: "Add property" }));
       expect(screen.getAllByTestId("property-row")).toHaveLength(2);
       await user.click(screen.getByRole("button", { name: "outside" }));
       expect(screen.getAllByTestId("property-row")).toHaveLength(1);
 
-      await user.click(screen.getByRole("button", { name: "Add a property" }));
+      await user.click(screen.getByRole("button", { name: "Add property" }));
       const keyInput = screen.getByLabelText("Property 2 name");
       await user.type(keyInput, "status{Enter}");
       const valueInput = screen.getByLabelText("Property status value");
