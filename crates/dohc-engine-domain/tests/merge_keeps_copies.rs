@@ -18,11 +18,10 @@ fn count<'a>(lines: &[&'a str]) -> HashMap<&'a str, usize> {
 }
 
 /// The first line whose copies a clean merge lost or added. Anchors are lines
-/// that appear once in the base, both sides and the merge. Along the longest
-/// chain of anchors that every text keeps in the same order, between two
-/// neighbouring anchors and before the first or after the last, no line may
-/// have fewer copies in the merge than both sides have, or more than either
-/// side has.
+/// that appear once in the base, both sides and the merge. Between neighbouring
+/// anchors of every longest chain that all four texts keep in order, and before
+/// its first or after its last, no line may have fewer copies in the merge than
+/// both sides have, or more than either side has.
 fn lost_or_added_copy(base: &str, local: &str, remote: &str, merged: &str) -> Option<String> {
     let texts = [base, local, remote, merged].map(lines);
     let counts = texts.each_ref().map(|text| count(text));
@@ -46,35 +45,40 @@ fn lost_or_added_copy(base: &str, local: &str, remote: &str, merged: &str) -> Op
             })
         })
         .collect();
-    let before =
-        |left: &[isize; 4], right: &[isize; 4]| (0..4).all(|index| left[index] < right[index]);
-    let mut chains: Vec<Vec<[isize; 4]>> = Vec::new();
-    for anchor in &anchors {
-        let mut chain = chains
-            .iter()
-            .filter(|chain| before(chain.last().unwrap(), anchor))
-            .fold(Vec::new(), |best, chain| {
-                if chain.len() > best.len() {
-                    chain.clone()
-                } else {
-                    best
-                }
-            });
-        chain.push(*anchor);
-        chains.push(chain);
-    }
-    let longest = chains.iter().fold(Vec::new(), |best, chain| {
-        if chain.len() >= best.len() {
-            chain.clone()
-        } else {
-            best
-        }
-    });
     let mut bounds = vec![[-1_isize; 4]];
-    bounds.extend(longest);
+    bounds.extend(anchors);
     bounds.push(texts.each_ref().map(|text| text.len() as isize));
-    for pair in bounds.windows(2) {
-        let [start, end] = [pair[0], pair[1]];
+    let before = |earlier: usize, later: usize| {
+        (0..4).all(|index| bounds[earlier][index] < bounds[later][index])
+    };
+    let mut ending = vec![0_usize; bounds.len()];
+    for later in 1..bounds.len() {
+        ending[later] = (0..later)
+            .filter(|&earlier| before(earlier, later))
+            .map(|earlier| ending[earlier] + 1)
+            .max()
+            .unwrap();
+    }
+    let mut starting = vec![0_usize; bounds.len()];
+    for earlier in (0..bounds.len() - 1).rev() {
+        starting[earlier] = (earlier + 1..bounds.len())
+            .filter(|&later| before(earlier, later))
+            .map(|later| starting[later] + 1)
+            .max()
+            .unwrap();
+    }
+    let longest = starting[0];
+    let on_chain = |index: usize| ending[index] + starting[index] == longest;
+    for (earlier, later) in (0..bounds.len())
+        .flat_map(|earlier| (earlier + 1..bounds.len()).map(move |later| (earlier, later)))
+        .filter(|&(earlier, later)| {
+            on_chain(earlier)
+                && on_chain(later)
+                && ending[later] == ending[earlier] + 1
+                && before(earlier, later)
+        })
+    {
+        let [start, end] = [bounds[earlier], bounds[later]];
         let stretch: [HashMap<&str, usize>; 3] = std::array::from_fn(|side| {
             let text = &texts[side + 1];
             count(&text[(start[side + 1] + 1) as usize..end[side + 1] as usize])
@@ -166,6 +170,18 @@ fn paragraph_edits(
     side.join("\n")
 }
 
+/// The paragraphs of `base` with one of them moved to another place.
+fn move_paragraph(random: &mut Random, base: &[String]) -> String {
+    let mut paragraphs: Vec<&String> = base.iter().filter(|line| !line.is_empty()).collect();
+    let moved = paragraphs.remove(random.below(paragraphs.len()));
+    paragraphs.insert(random.below(paragraphs.len() + 1), moved);
+    paragraphs
+        .iter()
+        .map(|line| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 #[test]
 fn random_merges_never_lose_or_add_a_copy() {
     let mut random = Random(4396);
@@ -190,6 +206,17 @@ fn random_merges_never_lose_or_add_a_copy() {
         let remote = paragraph_edits(&mut random, &mut serial, &base, "r");
         cases.push((base.join("\n"), local, remote));
     }
+    for _ in 0..20_000 {
+        let mut base = Vec::new();
+        for _ in 0..3 + random.below(5) {
+            serial += 1;
+            base.extend([format!("p{serial}"), String::new()]);
+        }
+        base.pop();
+        let local = move_paragraph(&mut random, &base);
+        let remote = paragraph_edits(&mut random, &mut serial, &base, "r");
+        cases.push((base.join("\n"), local, remote));
+    }
 
     let mut clean = 0;
     let mut wrong = Vec::new();
@@ -209,4 +236,3 @@ fn random_merges_never_lose_or_add_a_copy() {
     );
     assert!(clean > cases.len() / 2, "only {clean} merged cleanly");
 }
-

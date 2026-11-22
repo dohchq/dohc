@@ -862,6 +862,7 @@ interface LineHunk {
 type MarkdownMergeResult = { status: "merged"; text: string } | { status: "conflict" };
 
 const MATCH_SCORE = 1 << 16;
+const CHECK_WORK = 4;
 
 function align(base: string[], side: string[], prefer: boolean[]): [number, number][] {
   const width = side.length + 1;
@@ -1017,37 +1018,51 @@ function keepsCopies(texts: [string, string, string, string]): boolean {
     const at = positions.get(line);
     return at ? [at] : [];
   });
-  const length = anchors.map(() => 1);
-  const previous: (number | undefined)[] = anchors.map(() => undefined);
+  const before = (earlier: number, later: number): boolean =>
+    [1, 2, 3].every((index) => anchors[earlier]![index]! < anchors[later]![index]!);
+  const ending = anchors.map(() => 1);
   for (let later = 0; later < anchors.length; later += 1) {
     for (let earlier = 0; earlier < later; earlier += 1) {
-      if (
-        length[earlier]! + 1 > length[later]! &&
-        [1, 2, 3].every((index) => anchors[earlier]![index]! < anchors[later]![index]!)
-      ) {
-        length[later] = length[earlier]! + 1;
-        previous[later] = earlier;
+      if (before(earlier, later)) ending[later] = Math.max(ending[later]!, ending[earlier]! + 1);
+    }
+  }
+  const starting = anchors.map(() => 1);
+  for (let earlier = anchors.length - 1; earlier >= 0; earlier -= 1) {
+    for (let later = earlier + 1; later < anchors.length; later += 1) {
+      if (before(earlier, later)) {
+        starting[earlier] = Math.max(starting[earlier]!, starting[later]! + 1);
       }
     }
   }
-  let next: number | undefined;
-  length.forEach((value, index) => {
-    if (next === undefined || value >= length[next]!) next = index;
-  });
-  const chain: number[][] = [];
-  while (next !== undefined) {
-    chain.unshift(anchors[next]!);
-    next = previous[next];
-  }
-  let starts = [0, 0, 0, 0];
-  for (const at of chain) {
-    if (!stretchKeepsCopies(starts, at)) return false;
-    starts = at.map((position) => position + 1);
-  }
-  return stretchKeepsCopies(
-    starts,
-    lines.map((text) => text.length),
+  const longest = Math.max(0, ...ending);
+  const onChain = anchors.flatMap((_, index) =>
+    ending[index]! + starting[index]! === longest + 1 ? [index] : [],
   );
+  const first = [0, 0, 0, 0];
+  const last = lines.map((text) => text.length);
+  const after = (index: number): number[] => anchors[index]!.map((position) => position + 1);
+  let budget = CHECK_WORK * (last[1]! + last[2]! + last[3]!);
+  const keeps = (starts: number[], ends: number[]): boolean => {
+    const work = [1, 2, 3].reduce((sum, side) => sum + ends[side]! - starts[side]!, 0);
+    if (work > budget) return false;
+    budget -= work;
+    return stretchKeepsCopies(starts, ends);
+  };
+  if (onChain.length === 0) return keeps(first, last);
+  for (const earlier of onChain) {
+    if (ending[earlier] === 1 && !keeps(first, anchors[earlier]!)) return false;
+    if (starting[earlier] === 1 && !keeps(after(earlier), last)) return false;
+    for (const later of onChain) {
+      if (
+        ending[later] === ending[earlier]! + 1 &&
+        before(earlier, later) &&
+        !keeps(after(earlier), anchors[later]!)
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 export function mergeMarkdown(base: string, local: string, remote: string): MarkdownMergeResult {

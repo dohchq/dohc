@@ -1418,6 +1418,7 @@ struct Hunk<'a> {
 }
 
 const MATCH_SCORE: u32 = 1 << 16;
+const CHECK_WORK: usize = 4;
 
 /// The matched `(base, side)` line pairs of a longest common subsequence.
 /// Among those, it keeps the most base lines marked in `prefer`, then breaks
@@ -1548,8 +1549,11 @@ fn lines(text: &str) -> Vec<&str> {
 /// Whether, in each stretch between lines that appear once in every one of
 /// `[base, local, remote, merged]`, no line has fewer copies in the merge than
 /// both sides kept or more than either side has. The stretches run between the
-/// longest chain of such lines that every text keeps in the same order. A line
-/// that appears once in the base and both sides must appear once in the merge.
+/// neighbouring lines of every longest chain of such lines that all four texts
+/// keep in the same order, so no choice between equally long chains can hide a
+/// lost copy. A line that appears once in the base and both sides must appear
+/// once in the merge. Reorderings that would take more than `CHECK_WORK` times
+/// the lines of the three results to check count as a conflict.
 fn keeps_copies(texts: [&str; 4]) -> bool {
     let texts = texts.map(lines);
     let mut counts: HashMap<&str, [usize; 4]> = HashMap::new();
@@ -1576,32 +1580,61 @@ fn keeps_copies(texts: [&str; 4]) -> bool {
         .iter()
         .filter_map(|line| positions.get(line).copied())
         .collect();
-    let mut length = vec![1_usize; anchors.len()];
-    let mut previous = vec![None; anchors.len()];
+    let before = |earlier: usize, later: usize| {
+        (1..4).all(|index| anchors[earlier][index] < anchors[later][index])
+    };
+    let mut ending = vec![1_usize; anchors.len()];
     for later in 0..anchors.len() {
         for earlier in 0..later {
-            if length[earlier] + 1 > length[later]
-                && (1..4).all(|index| anchors[earlier][index] < anchors[later][index])
-            {
-                length[later] = length[earlier] + 1;
-                previous[later] = Some(earlier);
+            if before(earlier, later) {
+                ending[later] = ending[later].max(ending[earlier] + 1);
             }
         }
     }
-    let mut chain = Vec::new();
-    let mut next = (0..anchors.len()).max_by_key(|&index| length[index]);
-    while let Some(index) = next {
-        chain.push(anchors[index]);
-        next = previous[index];
+    let mut starting = vec![1_usize; anchors.len()];
+    for earlier in (0..anchors.len()).rev() {
+        for later in earlier + 1..anchors.len() {
+            if before(earlier, later) {
+                starting[earlier] = starting[earlier].max(starting[later] + 1);
+            }
+        }
     }
-    let mut starts = [0; 4];
-    for at in chain.into_iter().rev() {
-        if !stretch_keeps_copies(&texts, starts, at) {
+    let longest = ending.iter().copied().max().unwrap_or(0);
+    let on_chain: Vec<usize> = (0..anchors.len())
+        .filter(|&index| ending[index] + starting[index] == longest + 1)
+        .collect();
+    let first = [0; 4];
+    let last = texts.each_ref().map(Vec::len);
+    let after = |index: usize| anchors[index].map(|position| position + 1);
+    let mut budget = CHECK_WORK * (last[1] + last[2] + last[3]);
+    let mut keeps = |starts: [usize; 4], ends: [usize; 4]| {
+        let work: usize = (1..4).map(|side| ends[side] - starts[side]).sum();
+        if work > budget {
             return false;
         }
-        starts = at.map(|position| position + 1);
+        budget -= work;
+        stretch_keeps_copies(&texts, starts, ends)
+    };
+    if on_chain.is_empty() {
+        return keeps(first, last);
     }
-    stretch_keeps_copies(&texts, starts, texts.each_ref().map(Vec::len))
+    for &earlier in &on_chain {
+        if ending[earlier] == 1 && !keeps(first, anchors[earlier]) {
+            return false;
+        }
+        if starting[earlier] == 1 && !keeps(after(earlier), last) {
+            return false;
+        }
+        for &later in &on_chain {
+            if ending[later] == ending[earlier] + 1
+                && before(earlier, later)
+                && !keeps(after(earlier), anchors[later])
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn stretch_keeps_copies(texts: &[Vec<&str>; 4], starts: [usize; 4], ends: [usize; 4]) -> bool {
@@ -1651,5 +1684,22 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "line cap must return before allocating the O(n*m) LCS table"
         );
+    }
+
+    #[test]
+    fn reordering_both_halves_conflicts_quickly() {
+        let half = MAX_MERGE_LINES / 2;
+        let names: Vec<String> = (0..2 * half).map(|line| format!("line {line}")).collect();
+        let mut local = names.clone();
+        local[..half].reverse();
+        local[half..].reverse();
+        let mut remote = names.clone();
+        remote[half / 2] = "remote".to_owned();
+        let started = Instant::now();
+        assert_eq!(
+            merge_markdown(&names.join("\n"), &local.join("\n"), &remote.join("\n")),
+            MarkdownMergeResult::Conflict
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
