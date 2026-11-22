@@ -846,8 +846,9 @@ mod tests {
     /// `DOHC_MEASURE_STORE` names the store file and `DOHC_MEASURE_STEP` the step:
     /// `build` writes a store of `DOHC_MEASURE_MB` megabytes as the build before
     /// the last `DOHC_MEASURE_PENDING` migrations left it, `fill` adds that many
-    /// megabytes to a store an engine made, `check` times one `quick_check`, and
-    /// `open` times the open an engine does.
+    /// megabytes to a store an engine made, `check` times one `quick_check`,
+    /// `open` times an open that checks the pages first, and `open-serving`
+    /// the open an engine's actor does, which leaves them to a later check.
     #[test]
     #[ignore = "manual store-open cost measurement"]
     fn store_open_cost_on_a_sized_store() {
@@ -938,18 +939,25 @@ mod tests {
                     pages(&conn)
                 );
             }
-            Some("open") => {
+            Some(step @ ("open" | "open-serving")) => {
                 let before = applied(&rusqlite::Connection::open(&path).unwrap());
                 let start = std::time::Instant::now();
-                let opened = super::open_engine_db(&path, 2, None).unwrap();
+                let opened = if step == "open" {
+                    super::open_engine_db(&path, 2, None)
+                } else {
+                    super::open_engine_db_serving_first(&path, 2, None, None, false)
+                }
+                .unwrap();
                 let open_ms = start.elapsed().as_millis();
                 println!(
-                    "STORE_OPEN_MEASUREMENT {{\"step\":\"open\",\"openMs\":{open_ms},\"migrationsRun\":{},\"pages\":{}}}",
+                    "STORE_OPEN_MEASUREMENT {{\"step\":\"{step}\",\"openMs\":{open_ms},\"migrationsRun\":{},\"pages\":{}}}",
                     applied(&opened.conn) - before,
                     pages(&opened.conn)
                 );
             }
-            other => panic!("DOHC_MEASURE_STEP is build, fill, check or open, not {other:?}"),
+            other => panic!(
+                "DOHC_MEASURE_STEP is build, fill, check, open or open-serving, not {other:?}"
+            ),
         }
     }
 
