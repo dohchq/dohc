@@ -168,6 +168,7 @@ export function memberReach(
         WHERE workspace_id = ? AND version_id = 'main' AND path >= ? AND path < ? LIMIT 1`)
         .get(workspaceId, path, workspaceId, `${path}/`, `${path}0`) !== undefined,
     pathVisibleBeforeMoment: (objectId, momentId, path) => {
+      if (role === "admin") return true;
       const moment = db
         .prepare(`SELECT relay_seq FROM sync_relay_object_moments
         WHERE workspace_id = ? AND version_id = 'main' AND object_id = ? AND moment_id = ?
