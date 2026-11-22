@@ -38,6 +38,7 @@ function memberAt(level: ShareAccess): WorkspaceShareSelector {
     keyedSignature: () => "test",
     levelAt: () => level,
     folderLevel: () => level,
+    pathExists: () => true,
     hasLevel: (wanted) => wanted === level,
     groupLevel: () => level,
     hasGroupLevel: (wanted) => wanted === level,

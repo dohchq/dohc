@@ -676,6 +676,7 @@ describe("what a member reaches", () => {
 
   it("serves a readable Group without naming its hidden folder", async () => {
     const { h } = await seed();
+    await ownerWrite(h, "team/welcome.md", "welcome");
     await ownerWrite(h, "private/restricted/access.yaml", "");
     await ownerAppend(h, [
       logOp(
@@ -701,6 +702,45 @@ describe("what a member reaches", () => {
       (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
     ).toBe(200);
     expect(await pulledText(h, "ana", shareId)).toContain('"folderPath":"private/restricted"');
+  });
+
+  it("withholds a Group's obsolete folder path after its hidden folder is renamed", async () => {
+    const { h } = await seed();
+    await ownerWrite(h, "private/access.yaml", "");
+    await ownerWrite(h, "private/secret.md", "PRIVATE CONTENT");
+    await ownerAppend(h, [
+      logOp(
+        "chat.channel.create",
+        chatChannelCreate(LATER_GROUP, {
+          channelId: "chan-later",
+          name: "Discussion",
+          slug: "discussion",
+          kind: "channel",
+          type: "both",
+          purpose: "",
+          folderPath: "private",
+        }).payload,
+      ),
+    ]);
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    expect(await pulledText(h, "ana", shareId)).not.toContain("private");
+
+    await ownerRename(h, "private/secret.md", "team-only/secret.md");
+    await ownerRename(h, "private/access.yaml", "team-only/access.yaml");
+
+    const asMember = await pulledText(h, "ana", shareId);
+    expect(asMember).toContain("Discussion");
+    expect(asMember).not.toContain("private");
+    expect(asMember).not.toContain("team-only");
+
+    const ownerLog = await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`));
+    expect(ownerLog.status).toBe(200);
+    expect(JSON.stringify((await json(ownerLog)).ops)).toContain('"folderPath":"private"');
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    expect(await pulledText(h, "ana", shareId)).toContain('"folderPath":"private"');
   });
 
   it("changes a member's page signature only when their reach changes, and marks moves across it in the pull", async () => {

@@ -1448,9 +1448,12 @@ export function filterOpForShare(
       );
     }
     if (!side) return { allowed: false };
-    // A Group's folder path is served only when the share reaches that folder.
+    // A Group keeps its folder path after a rename. Its old rules may be gone.
     const folderPath = asRecord(payload)?.folderPath;
-    const servesFolder = typeof folderPath === "string" && coversLink(files, folderPath);
+    const servesFolder =
+      typeof folderPath === "string" &&
+      coversLink(files, folderPath) &&
+      (selector.role === "admin" || selector.reach.pathExists(folderPath));
     return withheldLinks(
       filterChatOpForChannelShare(side, opKind, payload, chat, servesFolder),
       opKind,
