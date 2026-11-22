@@ -3301,8 +3301,12 @@ fn nested1b_desktop_frontmatter_link() {
 }
 #[test]
 fn nested1b_desktop_frontmatter_entity() {
+    assert_desktop_frontmatter_fold(2, [false, false]);
+}
+#[test]
+fn nested1b_desktop_frontmatter_kept_entity() {
     // Only the engine's own form folds; the file without it is held.
-    assert_desktop_frontmatter_fold(2, [true, false]);
+    assert_desktop_frontmatter_fold(7, [true, false]);
 }
 #[test]
 fn nested1b_desktop_frontmatter_setext_holds() {
