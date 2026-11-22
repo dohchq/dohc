@@ -434,6 +434,68 @@ describe("CSV view actions", () => {
     expect((screen.getByLabelText("Header column 1") as HTMLInputElement).value).toBe("b");
     expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("2");
     expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("");
+
+    // Deleting column 1 then row 2 from a\n1\n2,b keeps the blank header and row 1 intact, matching a Raw round-trip.
+    cleanup();
+    const sparseCol = csvFile("ws-1", "sparse-col.csv", "a\n1\n2,b");
+    const sparseNotices: Array<{ message: string; onUndo?: () => void }> = [];
+    render(
+      <CsvView
+        {...sparseCol}
+        onNotice={(message, onUndo) => {
+          sparseNotices.push({ message, onUndo });
+        }}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Delete column 1"));
+    const undoCol1 = sparseNotices.at(-1)?.onUndo;
+    expect(sparseCol.localBuffer.getSnapshot().body).toBe('""\n""\nb');
+
+    await user.click(screen.getByLabelText("Delete row 2"));
+    const undoRow2 = sparseNotices.at(-1)?.onUndo;
+    expect(sparseCol.localBuffer.getSnapshot().body).toBe('""\n""');
+    expect(screen.getByLabelText("Header column 1")).toBeTruthy();
+    expect(screen.getByLabelText("Row 1 column 1")).toBeTruthy();
+
+    await user.click(screen.getByLabelText("Delete column 1"));
+    const undoCol2 = sparseNotices.at(-1)?.onUndo;
+    expect(sparseCol.localBuffer.getSnapshot().body).toBe("");
+    expect(screen.getByTestId("csv-empty-table")).toBeTruthy();
+
+    act(() => undoCol2?.());
+    expect(sparseCol.localBuffer.getSnapshot().body).toBe('""\n""');
+    act(() => undoRow2?.());
+    expect(sparseCol.localBuffer.getSnapshot().body).toBe('""\n""\nb');
+    act(() => undoCol1?.());
+    expect(sparseCol.localBuffer.getSnapshot().body).toBe("a\n1\n2,b");
+
+    // Deleting row 1 then column 1 from a\n1,2\n3 empties the table instead of surfacing an orphan column.
+    cleanup();
+    const orphanCol = csvFile("ws-1", "orphan-col.csv", "a\n1,2\n3");
+    const orphanNotices: Array<{ message: string; onUndo?: () => void }> = [];
+    render(
+      <CsvView
+        {...orphanCol}
+        onNotice={(message, onUndo) => {
+          orphanNotices.push({ message, onUndo });
+        }}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Delete row 1"));
+    const undoOrphanRow = orphanNotices.at(-1)?.onUndo;
+    expect(orphanCol.localBuffer.getSnapshot().body).toBe("a\n3");
+
+    await user.click(screen.getByLabelText("Delete column 1"));
+    const undoOrphanCol = orphanNotices.at(-1)?.onUndo;
+    expect(orphanCol.localBuffer.getSnapshot().body).toBe("");
+    expect(screen.getByTestId("csv-empty-table")).toBeTruthy();
+
+    act(() => undoOrphanRow?.());
+    expect(orphanCol.localBuffer.getSnapshot().body).toBe('""\n2\n""');
+    act(() => undoOrphanCol?.());
+    expect(orphanCol.localBuffer.getSnapshot().body).toBe("a\n1,2\n3");
   });
 
   it("handles delete and Undo quickly on a 10,000-row CSV with a 5,000-column tail row", async () => {

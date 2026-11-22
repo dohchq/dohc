@@ -486,6 +486,7 @@ type CsvTableModel = {
   deletedColIds: Set<string>;
   visibleRowIds: string[];
   visibleColIds: string[];
+  pinnedEmptyColId: string | null;
   rows: Map<string, Map<string, string>>;
 };
 
@@ -512,6 +513,7 @@ function createCsvTableModel(rows: string[][], allocId: () => string): CsvTableM
     deletedColIds: new Set(),
     visibleRowIds: [...allRowIds],
     visibleColIds: [...allColIds],
+    pinnedEmptyColId: null,
     rows: rowMap,
   };
 }
@@ -559,10 +561,19 @@ function visibleRowsFromModel(model: CsvTableModel): string[][] {
     }
     next.push(row);
   }
-  if (!anyNonEmpty) return [];
-  for (let rowIndex = 0; rowIndex < next.length; rowIndex++) {
-    if (next[rowIndex]!.length === 0) next[rowIndex] = [""];
+  if (!anyNonEmpty) {
+    if (model.pinnedEmptyColId === null || visibleColIds[0] !== model.pinnedEmptyColId) {
+      return [];
+    }
   }
+  let materializedEmpty = false;
+  for (let rowIndex = 0; rowIndex < next.length; rowIndex++) {
+    if (next[rowIndex]!.length === 0) {
+      next[rowIndex] = [""];
+      materializedEmpty = true;
+    }
+  }
+  model.pinnedEmptyColId = materializedEmpty ? visibleColIds[0]! : null;
   return next;
 }
 
