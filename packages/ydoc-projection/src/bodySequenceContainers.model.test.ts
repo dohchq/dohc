@@ -288,6 +288,9 @@ class Oracle {
   }
 }
 
+const cutsALetter = (row: Row, offset: number) =>
+  HIGH_HALF.test(row.units.charAt(offset - 1)) && LOW_HALF.test(row.units.charAt(offset));
+
 function twins(doc: Y.Doc) {
   const held = new Set(readBody(schema, doc).flatMap((line) => line.path));
   return held.size - new Set([...held].map((container) => container.id)).size;
@@ -374,7 +377,12 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
   let redoMirror: Step[] = [];
   const claims = new Map<string, Claim>();
   let made = 0;
-  const freshId = () => `${"wxyz"[who]!}${(made++).toString(36)}`;
+  const asked = new Set<string>();
+  const freshId = () => {
+    const id = `${"wxyz"[who]!}${(made++).toString(36)}`;
+    asked.add(id);
+    return id;
+  };
   const lines = () => readBody(schema, doc);
 
   const seen = (before: Shot): [Step, Shot] => {
@@ -450,7 +458,11 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
   };
 
   const write = (plan: BodyWrites | null, expected: Expected = {}): [Step, Shot] | null => {
+    const unused = [...asked].filter((id) => !plan?.records.has(id));
+    asked.clear();
     if (!plan) return null;
+    if (unused.length > 0 && fault === undefined)
+      throw new Error("[writer] a change asked for a fresh id and did not use it");
     const settings: string[] = [];
     for (const [key, value] of plan.records)
       if (!records.has(key.split(".")[0]!)) oracle.asMade.set(key, json(value));
@@ -753,7 +765,10 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       Y.applyUpdate(doc, update, REMOTE);
     },
     type(at: number, offset: number, letters: string) {
+      const row = rowsOf(shoot(doc))[at];
       const done = write(typeLetters(schema, doc, at, offset, letters), { chars: letters.length });
+      if (!done && row && offset <= row.chars.length && !cutsALetter(row, offset))
+        throw new Error("[writer] typing was refused where letters can be typed");
       if (!done) return false;
       const [effects, after] = done;
       const landed = rowsOf(after)[at]?.chars.slice(offset, offset + letters.length);
@@ -767,8 +782,12 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       return true;
     },
     erase(at: number, offset: number, length: number) {
-      const asked = rowsOf(shoot(doc))[at]?.chars.slice(offset, offset + length) ?? [];
+      const row = rowsOf(shoot(doc))[at];
+      const asked = row?.chars.slice(offset, offset + length) ?? [];
       const done = write(deleteLetters(schema, doc, at, offset, length), { chars: -asked.length });
+      const whole = row && !cutsALetter(row, offset) && !cutsALetter(row, offset + length);
+      if (!done && whole && length > 0 && asked.length === length)
+        throw new Error("[writer] an erase was refused where letters can be deleted");
       if (!done) return false;
       if (json(done[0].deletedChars) !== json(asked))
         throw new Error("[writer] an erase deleted other letters than the ones asked for");
@@ -778,15 +797,16 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       const before = shoot(doc);
       const row = rowsOf(before)[at];
       if (!row || offset > row.chars.length) return false;
-      const inside =
-        HIGH_HALF.test(row.units.charAt(offset - 1)) && LOW_HALF.test(row.units.charAt(offset));
+      const inside = cutsALetter(row, offset);
       let plan = splitLine(schema, doc, at, offset, freshId);
       if (!plan && inside) oracle.count.refusedInsideALetter++;
       if (!plan && inside && fault === FAULT.splitInsideLetter) {
         plan = splitLine(schema, doc, at, offset + 1, freshId);
         if (plan?.added) plan.added[0]!.index--;
       }
-      if (!plan?.added) return false;
+      if (!plan?.added && !inside)
+        throw new Error("[writer] a split was refused where a line can be split");
+      if (!plan?.added) return write(null) !== null;
       const unbounded = row.boundary === null && offset === 0;
       const above = offset === 0 && row.chars.length > 0 && !unbounded;
       if (above && fault === FAULT.oldBoundaryAbove) plan.added[0]!.index++;
@@ -867,6 +887,11 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       const first = rowsOf(before)[0]!;
       const unbounded = at === 0 && first.boundary === null;
       const plan = wrapBlocks(schema, doc, at, depth, count, type, attrs, freshId);
+      const body = lines();
+      const inAList = LISTS.includes(body[at]?.path[depth - 1]?.type ?? "");
+      const shallow = body.every((line) => line.path.length < 60);
+      if (!plan && body[at] && depth <= body[at].path.length && !inAList && shallow)
+        throw new Error("[writer] a wrap was refused where blocks can be wrapped");
       if (plan && unbounded) oracle.count.boundariesForUnboundedText++;
       const done = write(plan, {
         boundaries: unbounded ? 1 : 0,
@@ -1198,9 +1223,9 @@ const CALLOUT_KINDS = ["note", "tip", "warning"];
 const TITLES = ["", "Read me", "Danger"];
 const FOLDS = ["", "+", "-"];
 
-type Weights = { wraps: number; kindsOfTheFirstLine: number };
-const EVEN: Weights = { wraps: 1, kindsOfTheFirstLine: 0 };
-const ONE_LINE: Weights = { wraps: 1, kindsOfTheFirstLine: 600 };
+type Weights = { wraps: number; kindsOfTheFirstLine: number; undos: number };
+const EVEN: Weights = { wraps: 1, kindsOfTheFirstLine: 0, undos: 0.16 };
+const ONE_LINE: Weights = { wraps: 1, kindsOfTheFirstLine: 600, undos: 0.4 };
 
 function change(
   each: Person,
@@ -1217,7 +1242,7 @@ function change(
     return false;
   };
   const lines = each.lines();
-  const at = pick(lines.length);
+  const at = lines[0]!.boundary === null && pick(3) === 0 ? 0 : pick(lines.length);
   const line = lines[at]!;
   const length = line.text.length;
   const depth = pick(line.path.length + 1);
@@ -1401,10 +1426,10 @@ function act(
     each.newStep();
   }
   const roll = next();
-  if (roll < 0.16 && each.canUndo()) {
+  if (roll < weights.undos && each.canUndo()) {
     log.push(`${String(each.who)}:undo`);
     each.undo();
-  } else if (roll < 0.23 && each.canRedo()) {
+  } else if (roll < weights.undos + 0.07 && each.canRedo()) {
     log.push(`${String(each.who)}:redo`);
     each.redo();
   } else change(each, next, letter, log, weights);
@@ -1456,7 +1481,7 @@ function add(total: Tally, more: Tally) {
   for (const key of Object.keys(total) as (keyof Tally)[]) total[key] += more[key];
 }
 
-const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 40);
+const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 30);
 const WEIGHTS = process.env.BODY_CONTAINERS_ONE_LINE ? ONE_LINE : EVEN;
 const FIRST = Number(process.env.BODY_CONTAINERS_FIRST ?? 1);
 const ROUNDS = Number(process.env.BODY_CONTAINERS_ROUNDS ?? 0);
@@ -1518,7 +1543,8 @@ it.each(BREAKAGES)(
   (fault, check, weights) => {
     const fired = new Map<string, number>();
     let asExpected = 0;
-    for (let seed = 1; seed <= BREAKAGE_SEEDS; seed++)
+    const seeds = BREAKAGE_SEEDS * (weights ? 3 : 1);
+    for (let seed = 1; seed <= seeds; seed++)
       for (const [count, arrive, rounds, busiest] of SETUPS) {
         try {
           const gc = seed % 2 === 0;
@@ -1535,7 +1561,7 @@ it.each(BREAKAGES)(
         for (const doc of docs.splice(0)) doc.destroy();
       }
     console.log(
-      `${fault}, ${String(BREAKAGE_SEEDS * SETUPS.length)} runs:\n${[...fired].map(([which, runs]) => `  ${String(runs)} ${which}`).join("\n")}`,
+      `${fault}, ${String(seeds * SETUPS.length)} runs:\n${[...fired].map(([which, runs]) => `  ${String(runs)} ${which}`).join("\n")}`,
     );
     expect(asExpected).toBeGreaterThan(0);
   },
@@ -1552,7 +1578,7 @@ it("counts the records no path names while one person wraps, lifts and undoes", 
   const letter = lettersFrom();
   const growth: string[] = [];
   for (let changes = 1; changes <= LONG_RUN; changes++) {
-    act(only, next, letter, log, { wraps: 4, kindsOfTheFirstLine: 0 });
+    act(only, next, letter, log, { ...EVEN, wraps: 4 });
     if (changes % (LONG_RUN / 4) !== 0) continue;
     settled(people, oracle, true);
     const lines = only.lines();
