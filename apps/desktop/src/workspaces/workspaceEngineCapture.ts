@@ -6211,11 +6211,10 @@ export function createWorkspaceEngineCapture(
               outsideWritesUnrecorded.delete(input.path);
               return;
             }
-            const left = deadline - Date.now();
-            if (left <= 0) throw new Error("capture still holds the change made outside dohc");
-            await new Promise((resolve) =>
-              setTimeout(resolve, Math.min(25 * 2 ** attempt, 500, left)),
-            );
+            const backoff = Math.min(25 * 2 ** attempt, 500);
+            if (Date.now() + backoff >= deadline)
+              throw new Error("capture still holds the change made outside dohc");
+            await new Promise((resolve) => setTimeout(resolve, backoff));
           }
         } catch (error) {
           if (stopped || shuttingDown) return;
