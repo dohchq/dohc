@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import { Fragment, type Node as ProseMirrorNode, type NodeType } from "@tiptap/pm/model";
 import { getDohcProseMirrorSchema, parseRichdocMarkdown } from "./import-export.js";
 import {
+  boundaryOfLeaf,
   flattenBody,
+  leafOfBoundary,
+  leavesOfSequence,
   readBodyLeaves,
+  type SequencePiece,
   type SequenceFrame,
   type SequenceInline,
   type SequenceLeaf,
@@ -97,6 +101,53 @@ describe("reading any sequence", () => {
     }
   });
 
+  it("gives a valid document for boundaries with any attributes", () => {
+    const anyValue = (next: Next): unknown =>
+      pick(next, [
+        0,
+        1,
+        2,
+        3,
+        70,
+        -1,
+        1.5,
+        "2",
+        null,
+        [],
+        {},
+        { t: pick(next, containers).name, id: pick(next, ["a", "b"]) },
+        { t: 3, id: "a" },
+        { t: pick(next, names) },
+        { checked: true, start: 4 },
+      ]);
+    const keys = ["type", "depth", "c0", "c1", "c2", "a.a", "a.b", "level", "x"];
+    const leafNames = [...leafBlocks.map((type) => type.name), "nonsense"];
+    for (let seed = 1; seed <= SEEDS * 10; seed++) {
+      const next = random(seed);
+      const pieces: SequencePiece[] = [];
+      let letters = "";
+      while (next() < 0.9) {
+        if (next() < 0.5) {
+          const text = pick(next, ["x", "yz "]);
+          letters += text;
+          pieces.push({ text, marks: {} });
+          continue;
+        }
+        const boundary: Record<string, unknown> = {};
+        while (next() < 0.8)
+          boundary[pick(next, keys)] = next() < 0.3 ? pick(next, leafNames) : anyValue(next);
+        pieces.push({ boundary });
+      }
+      const doc = readBodyLeaves(schema, leavesOfSequence(pieces));
+      try {
+        doc.check();
+      } catch (error) {
+        throw new Error(`seed ${String(seed)}: ${String(error)} ${JSON.stringify(pieces)}`);
+      }
+      expect(lettersIn(doc), `seed ${String(seed)}`).toBe(letters);
+    }
+  });
+
   it("reads no leaves as one empty paragraph", () => {
     expect(readBodyLeaves(schema, []).toJSON()).toEqual({
       type: "doc",
@@ -158,7 +209,10 @@ describe("writing a document and reading it back", () => {
   const roundTrip = (doc: ProseMirrorNode) =>
     readBodyLeaves(
       schema,
-      flattenBody(doc, (_node, index) => String(index)),
+      flattenBody(doc, (_node, index) => String(index)).map((leaf) => ({
+        ...leafOfBoundary(boundaryOfLeaf(leaf)),
+        inline: leaf.inline,
+      })),
     );
 
   const allowedIn = (parent: NodeType) => {

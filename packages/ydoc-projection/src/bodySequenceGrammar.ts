@@ -20,6 +20,56 @@ export type SequenceLeaf = {
   inline: SequenceInline[];
 };
 
+export type SequencePiece = { boundary: SequenceAttrs } | SequenceInline;
+
+const record = (value: unknown): SequenceAttrs | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as SequenceAttrs)
+    : null;
+
+/** The leaf a boundary's attributes describe: its type, its own attributes and its path. */
+export function leafOfBoundary(attributes: SequenceAttrs): Omit<SequenceLeaf, "inline"> {
+  const depth = attributes.depth;
+  const frames =
+    typeof depth === "number" && Number.isInteger(depth) && depth > 0
+      ? Math.min(depth, MAX_SEQUENCE_DEPTH)
+      : 0;
+  const path: SequenceFrame[] = [];
+  for (let at = 0; at < frames; at++) {
+    const frame = record(attributes[`c${String(at)}`]);
+    if (!frame || typeof frame.t !== "string" || typeof frame.id !== "string") break;
+    path.push({ type: frame.t, id: frame.id, attrs: record(attributes[`a.${frame.id}`]) ?? {} });
+  }
+  return {
+    type: typeof attributes.type === "string" ? attributes.type : "paragraph",
+    attrs: attributes,
+    path,
+  };
+}
+
+/** The attributes a writer gives the boundary of a leaf. */
+export function boundaryOfLeaf(leaf: Omit<SequenceLeaf, "inline">): SequenceAttrs {
+  const attributes: SequenceAttrs = { ...leaf.attrs, type: leaf.type };
+  if (leaf.path.length > 0) attributes.depth = leaf.path.length;
+  leaf.path.forEach((frame, at) => {
+    attributes[`c${String(at)}`] = { t: frame.type, id: frame.id };
+    attributes[`a.${frame.id}`] = frame.attrs;
+  });
+  return attributes;
+}
+
+/** The leaves a sequence holds. Text before the first boundary is a paragraph with no path. */
+export function leavesOfSequence(pieces: Iterable<SequencePiece>): SequenceLeaf[] {
+  const leaves: SequenceLeaf[] = [];
+  for (const piece of pieces) {
+    if ("boundary" in piece) leaves.push({ ...leafOfBoundary(piece.boundary), inline: [] });
+    else if (leaves.length === 0)
+      leaves.push({ type: "paragraph", attrs: {}, path: [], inline: [piece] });
+    else leaves.at(-1)!.inline.push(piece);
+  }
+  return leaves;
+}
+
 type Shape = {
   children: Map<NodeType, Set<NodeType>>;
   leafBlock(type: NodeType | undefined): type is NodeType;
