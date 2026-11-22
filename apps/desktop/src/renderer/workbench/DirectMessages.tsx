@@ -134,7 +134,8 @@ export function DirectPeopleSection(
   props: Reporting & {
     selectedConversationId: string | null;
     onOpen: (conversationId: string, title: string) => void;
-    onNew: () => void;
+    /** Absent where no one can be picked, such as a copy whose membership ended. */
+    onNew?: () => void;
   },
 ) {
   const { state, store } = useDirectConversations();
@@ -156,9 +157,15 @@ export function DirectPeopleSection(
         <SectionLabel as="p" className="min-w-0 flex-1">
           People
         </SectionLabel>
-        <SectionActionButton testId="chats-new-dm-action" label="New message" onClick={props.onNew}>
-          <Plus size={12} aria-hidden />
-        </SectionActionButton>
+        {props.onNew ? (
+          <SectionActionButton
+            testId="chats-new-dm-action"
+            label="New message"
+            onClick={props.onNew}
+          >
+            <Plus size={12} aria-hidden />
+          </SectionActionButton>
+        ) : null}
       </div>
       {state.status === "loading" ? (
         <SkeletonRows

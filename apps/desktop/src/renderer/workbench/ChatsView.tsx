@@ -4899,7 +4899,11 @@ export function ChatsView(props: {
             onOpen={(conversationId, title) =>
               openConversation({ level: "direct", conversationId, title })
             }
-            onNew={() => openConversation({ level: "direct-new" })}
+            // New message picks from this workspace's members. Once the membership ended,
+            // the server lists none to this account, so only the existing conversations stay.
+            {...(props.joinedWorkspace?.ended
+              ? {}
+              : { onNew: () => openConversation({ level: "direct-new" }) })}
             onError={props.onError}
             onClearError={props.onClearError}
             serverNamed={props.serverNamed}

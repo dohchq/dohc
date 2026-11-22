@@ -145,6 +145,19 @@ describe("ChatsView direct messages", () => {
     expect(screen.getAllByRole("button", { name: "New message" })).toHaveLength(1);
   });
 
+  it("offers no New message once the membership ended, and keeps the conversations and their composer", async () => {
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    renderView(vi.fn(), vi.fn(), {
+      variant: "panel",
+      joinedWorkspace: { createsGroups: false, ended: true },
+    });
+    const row = await screen.findByTestId("chats-dm-item");
+    expect(screen.queryByTestId("chats-new-dm-action")).toBeNull();
+    fireEvent.click(row);
+    expect(await screen.findByTestId("chats-dm-composer")).toBeTruthy();
+  });
+
   it("keeps toasts above the blocked line, so Unblock stays in reach", async () => {
     signedIn([conversation({ person: { ...sam, blocked: true } })]);
     history([sent(2, "sam", "See you at nine")]);
