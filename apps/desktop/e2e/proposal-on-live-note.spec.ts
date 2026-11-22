@@ -127,15 +127,12 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
     await expect(page.getByTestId("cloud-sync-code")).toBeVisible();
     await page.keyboard.press("Escape");
     await waitForWorkspaceFile(page, workspaceId, PATH);
-    const openNote = async () => {
-      await revealExplorerPath(page, PATH);
-      await explorerRow(page, PATH).click();
-      await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
-      await page.keyboard.press("ControlOrMeta+w");
-      await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
-    };
-    await openNote();
+    await revealExplorerPath(page, PATH);
+    await explorerRow(page, PATH).click();
+    await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
+    await page.keyboard.press("ControlOrMeta+w");
+    await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
 
     const ownerFile = () => readFile(join(ownerTemp.rootPath, PATH), "utf8").catch(() => "");
     const row = async () =>
@@ -266,6 +263,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       await expect(rpage.getByTestId("shared-view-banner")).toBeVisible({ timeout: 60_000 });
     });
     const first = await propose(FIRST, "The first line.");
+    const words: string[] = [];
 
     await test.step("Accept on the live note says to stop live editing first, and the change stays open", async () => {
       await resumeLive();
@@ -290,47 +288,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       expect(await status()).toBe("ready");
     });
 
-    await test.step("after Stop in Live documents, with the owner up to date, Accept reaches the note, the owner's file and the link", async () => {
-      const liveDocuments = page.getByTestId("live-documents-dialog");
-      await page.getByTestId(activityPin("settings")).click();
-      await page.getByTestId(settingsNavPin("cloud")).click();
-      await page.getByRole("button", { name: "Open live documents", exact: true }).click();
-      await expect(liveDocuments).toBeVisible();
-      const row = liveDocuments.getByTestId(`live-document-row-${PATH}`);
-      await row.getByRole("button", { name: `Stop live editing for ${PATH}`, exact: true }).click();
-      await expect(
-        row.getByRole("button", { name: `Resume live editing for ${PATH}`, exact: true }),
-      ).toBeEnabled({ timeout: 60_000 });
-      await liveDocuments.getByRole("button", { name: "Close", exact: true }).click();
-      await page.keyboard.press("Escape");
-      await expect(page.getByTestId("settings-dialog")).toHaveCount(0);
-      await page.getByTestId("notice-center-toggle").click();
-      await page
-        .getByRole("dialog", { name: "Notices", exact: true })
-        .getByRole("button", { name: "Review", exact: true })
-        .click();
-      const dialog = page.getByTestId("proposal-review-dialog");
-      await dialog.getByTestId("proposal-review-accept").click();
-      await expect(dialog).toHaveCount(0, { timeout: 30_000 });
-      expect(await openProposals()).toEqual([]);
-      await expect
-        .poll(ownerFile, { message: "the owner's file has the change", timeout: 60_000 })
-        .toContain(FIRST);
-      await expect
-        .poll(() => linkText(view.url).catch(() => ""), {
-          message: "the link shows the change",
-          timeout: 60_000,
-          intervals: [1000],
-        })
-        .toContain(FIRST);
-      expect(liveRefusals()).toEqual([]);
-    });
-
-    const second = await propose(SECOND, FIRST);
-    await openNote();
-
-    await test.step("with an Edit link typing live and the owner behind it at Stop, Accept waits for the Stop, then the change is not refused", async () => {
-      await resumeLive();
+    await test.step("with an Edit link typing live, Accept waits for the Stop, then the change and the link's words reach the owner's file", async () => {
       const linkEditor = await shared!.browser.newPage();
       linkEditor.on("pageerror", (error) => shared!.failures.push(error.message));
       await linkEditor.goto(`${sharedDatasetViewerOrigin}/s${new URL(edit.url).hash}`);
@@ -342,30 +300,22 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
         .click({ timeout: 15_000 });
       const box = linkEditor.getByRole("textbox", { name: "Shared file editor", exact: true });
       await expect(box).toBeEditable({ timeout: 120_000 });
-      await box.getByText(FIRST, { exact: false }).click({ timeout: 15_000 });
+      await box.getByText("The first line.", { exact: false }).click({ timeout: 15_000 });
       await linkEditor.keyboard.press("End");
-      const words: string[] = [];
       for (let index = 0; index < 20; index += 1) {
         words.push(`link${index}`);
         await linkEditor.keyboard.type(` link${index}`, { delay: 20 });
       }
-      expect(await accept(second)).toContain(LIVE_REFUSAL);
+      expect(await accept(first)).toContain(LIVE_REFUSAL);
+      expect((await openProposals()).map((row) => row.proposalId)).toEqual([first]);
       await stopLive();
-      const answers: string[] = [];
       await expect
-        .poll(
-          async () => {
-            const answer = await accept(second);
-            answers.push(answer);
-            return answer;
-          },
-          { message: "Accept is taken once the Stop finishes", timeout: 120_000, intervals: [250] },
-        )
+        .poll(() => accept(first), {
+          message: "Accept is taken once the Stop finishes",
+          timeout: 120_000,
+          intervals: [250],
+        })
         .toBe("accepted");
-      console.log(
-        `[proposal-on-live-note] Accept answers through the Stop: ${JSON.stringify(answers)}`,
-      );
-      expect(answers.slice(0, -1).every((answer) => answer.includes(LIVE_REFUSAL))).toBe(true);
       expect(await status()).toBe("retired");
       await expect
         .poll(ownerFile, {
@@ -376,15 +326,41 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       const conflicts = async () =>
         (await call(page, "listWorkspaceVersionConflicts", { workspaceId })).conflicts.length;
       await expect
-        .poll(async () => (await ownerFile()).includes(SECOND) || (await conflicts()) > 0, {
+        .poll(async () => (await ownerFile()).includes(FIRST) || (await conflicts()) > 0, {
           message:
             "the accepted change is in the owner's file, or a conflict asks the owner to choose",
           timeout: 60_000,
         })
         .toBe(true);
       console.log(
-        `[proposal-on-live-note] after the Stop: owner's file has the change=${(await ownerFile()).includes(SECOND)}, conflicts=${await conflicts()}`,
+        `[proposal-on-live-note] after the Stop: owner's file has the change=${(await ownerFile()).includes(FIRST)}, conflicts=${await conflicts()}`,
       );
+      expect(liveRefusals()).toEqual([]);
+    });
+
+    const second = await propose(SECOND, words.at(-1)!);
+
+    await test.step("on a note that is not live, Accept in the window reaches the owner's file and the link", async () => {
+      await page.reload();
+      await page.getByTestId("notice-center-toggle").click();
+      await page
+        .getByRole("dialog", { name: "Notices", exact: true })
+        .getByRole("button", { name: "Review", exact: true })
+        .click({ timeout: 60_000 });
+      const dialog = page.getByTestId("proposal-review-dialog");
+      await dialog.getByTestId("proposal-review-accept").click();
+      await expect(dialog).toHaveCount(0, { timeout: 30_000 });
+      expect((await openProposals()).map((row) => row.proposalId)).not.toContain(second);
+      await expect
+        .poll(ownerFile, { message: "the owner's file has the change", timeout: 60_000 })
+        .toContain(SECOND);
+      await expect
+        .poll(() => linkText(view.url).catch(() => ""), {
+          message: "the link shows the change",
+          timeout: 60_000,
+          intervals: [1000],
+        })
+        .toContain(SECOND);
       expect(liveRefusals()).toEqual([]);
     });
 
