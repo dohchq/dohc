@@ -126,7 +126,9 @@ function ruleText(
   if (!(content instanceof Uint8Array)) return null;
   let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+    // The parser strips the one byte order mark the engine strips. A decoder
+    // that strips another would read a rule the engine can't.
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content);
   } catch {
     return null;
   }
