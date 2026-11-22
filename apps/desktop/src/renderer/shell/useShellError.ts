@@ -1172,7 +1172,11 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       });
       return () => {
         if (!id) return;
-        setShellErrors((current) => current.filter((error) => error.id !== id));
+        setShellErrors((current) =>
+          current.some((error) => error.id === id)
+            ? current.filter((error) => error.id !== id)
+            : current,
+        );
       };
     },
     [push],

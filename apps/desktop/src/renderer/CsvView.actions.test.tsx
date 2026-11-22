@@ -407,6 +407,55 @@ describe("CSV view actions", () => {
     expect(ragged.localBuffer.getSnapshot().body).toBe("a,b,c\n1\n2,3,");
     act(() => raggedNotices.at(-1)?.onUndo?.());
     expect(ragged.localBuffer.getSnapshot().body).toBe(raggedOriginal);
+
+    // Deleting column 1 from a ragged CSV keeps a short trailing row intact across Raw round-trips and restores it on Undo.
+    cleanup();
+    const shortTail = csvFile("ws-1", "short-tail.csv", "a,b\n1,2\n3");
+    const shortTailNotices: Array<{ message: string; onUndo?: () => void }> = [];
+    render(
+      <CsvView
+        {...shortTail}
+        onNotice={(message, onUndo) => {
+          shortTailNotices.push({ message, onUndo });
+        }}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Delete column 1"));
+    expect(shortTail.localBuffer.getSnapshot().body).toBe('b\n2\n""');
+    expect(screen.getByLabelText("Row 2 column 1")).toBeTruthy();
+
+    act(() => shortTailNotices.at(-1)?.onUndo?.());
+    expect(shortTail.localBuffer.getSnapshot().body).toBe("a,b\n1,2\n3");
+
+    await user.click(screen.getByLabelText("Delete column 1"));
+    await user.click(mode("Raw"));
+    await user.click(mode("Table"));
+    expect((screen.getByLabelText("Header column 1") as HTMLInputElement).value).toBe("b");
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("2");
+    expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("");
+  });
+
+  it("handles delete and Undo quickly on a 10,000-row CSV with a 5,000-column tail row", async () => {
+    const user = userEvent.setup();
+    const notices: Array<{ message: string; onUndo?: () => void }> = [];
+    const lines = ["name"];
+    for (let index = 1; index <= 10000; index++) lines.push("x");
+    lines.push(Array.from({ length: 5000 }, (_, i) => `c${i}`).join(","));
+    const original = lines.join("\n");
+    const file = csvFile("ws-1", "huge-tail.csv", original);
+    render(
+      <CsvView
+        {...file}
+        onNotice={(message, onUndo) => {
+          notices.push({ message, onUndo });
+        }}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Delete row 1"));
+    act(() => notices.at(-1)?.onUndo?.());
+    expect(file.localBuffer.getSnapshot().body).toBe(original);
   });
 
   it("dismisses pending CSV Undo notices from the shell when starting a new table from empty or switching to Raw", async () => {

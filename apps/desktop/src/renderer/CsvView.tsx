@@ -486,7 +486,7 @@ type CsvTableModel = {
   deletedColIds: Set<string>;
   visibleRowIds: string[];
   visibleColIds: string[];
-  cells: Map<string, string>;
+  rows: Map<string, Map<string, string>>;
 };
 
 function createCsvTableModel(rows: string[][], allocId: () => string): CsvTableModel {
@@ -496,13 +496,14 @@ function createCsvTableModel(rows: string[][], allocId: () => string): CsvTableM
     if (rows[rowIndex]!.length > maxCols) maxCols = rows[rowIndex]!.length;
   }
   const allColIds = Array.from({ length: maxCols }, () => allocId());
-  const cells = new Map<string, string>();
+  const rowMap = new Map<string, Map<string, string>>();
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
     const row = rows[rowIndex]!;
-    const rowId = allRowIds[rowIndex]!;
+    const cells = new Map<string, string>();
     for (let colIndex = 0; colIndex < row.length; colIndex++) {
-      cells.set(`${rowId}\0${allColIds[colIndex]!}`, row[colIndex]!);
+      cells.set(allColIds[colIndex]!, row[colIndex]!);
     }
+    rowMap.set(allRowIds[rowIndex]!, cells);
   }
   return {
     allRowIds,
@@ -511,7 +512,7 @@ function createCsvTableModel(rows: string[][], allocId: () => string): CsvTableM
     deletedColIds: new Set(),
     visibleRowIds: [...allRowIds],
     visibleColIds: [...allColIds],
-    cells,
+    rows: rowMap,
   };
 }
 
@@ -527,31 +528,42 @@ function syncVisibleIds(model: CsvTableModel): void {
 }
 
 function visibleRowsFromModel(model: CsvTableModel): string[][] {
-  const { visibleRowIds, visibleColIds, cells } = model;
+  const { visibleRowIds, visibleColIds, rows } = model;
   if (visibleRowIds.length === 0 || visibleColIds.length === 0) return [];
+  const colPos = new Map<string, number>();
+  for (let colIndex = 0; colIndex < visibleColIds.length; colIndex++) {
+    colPos.set(visibleColIds[colIndex]!, colIndex);
+  }
   const next: string[][] = [];
   let anyNonEmpty = false;
   for (let rowIndex = 0; rowIndex < visibleRowIds.length; rowIndex++) {
-    const rowId = visibleRowIds[rowIndex]!;
+    const rowCells = rows.get(visibleRowIds[rowIndex]!);
+    if (!rowCells || rowCells.size === 0) {
+      next.push([]);
+      continue;
+    }
     let lastPresent = -1;
-    for (let colIndex = visibleColIds.length - 1; colIndex >= 0; colIndex--) {
-      if (cells.has(`${rowId}\0${visibleColIds[colIndex]!}`)) {
-        lastPresent = colIndex;
-        break;
-      }
+    for (const colId of rowCells.keys()) {
+      const pos = colPos.get(colId);
+      if (pos !== undefined && pos > lastPresent) lastPresent = pos;
     }
     if (lastPresent === -1) {
       next.push([]);
       continue;
     }
     anyNonEmpty = true;
-    const row: string[] = [];
-    for (let colIndex = 0; colIndex <= lastPresent; colIndex++) {
-      row.push(cells.get(`${rowId}\0${visibleColIds[colIndex]!}`) ?? "");
+    const row = new Array<string>(lastPresent + 1).fill("");
+    for (const [colId, value] of rowCells) {
+      const pos = colPos.get(colId);
+      if (pos !== undefined) row[pos] = value;
     }
     next.push(row);
   }
-  return anyNonEmpty ? next : [];
+  if (!anyNonEmpty) return [];
+  for (let rowIndex = 0; rowIndex < next.length; rowIndex++) {
+    if (next[rowIndex]!.length === 0) next[rowIndex] = [""];
+  }
+  return next;
 }
 
 export function CsvView({
@@ -787,11 +799,16 @@ export function CsvView({
           model.visibleColIds.push(id);
         }
         const rowId = model.visibleRowIds[rowIndex]!;
-        for (let col = 0; col < cellIndex; col++) {
-          const key = `${rowId}\0${model.visibleColIds[col]!}`;
-          if (!model.cells.has(key)) model.cells.set(key, "");
+        let rowCells = model.rows.get(rowId);
+        if (!rowCells) {
+          rowCells = new Map();
+          model.rows.set(rowId, rowCells);
         }
-        model.cells.set(`${rowId}\0${model.visibleColIds[cellIndex]!}`, value);
+        for (let col = 0; col < cellIndex; col++) {
+          const colId = model.visibleColIds[col]!;
+          if (!rowCells.has(colId)) rowCells.set(colId, "");
+        }
+        rowCells.set(model.visibleColIds[cellIndex]!, value);
       }
       const nextRow = [...nextRows[rowIndex]!];
       // A sliced UTF-16 draft stays wide even after its last wide cell narrows.
@@ -823,9 +840,11 @@ export function CsvView({
       const newRowId = allocId();
       model.allRowIds.push(newRowId);
       model.visibleRowIds.push(newRowId);
+      const rowCells = new Map<string, string>();
       for (let col = 0; col < width; col++) {
-        model.cells.set(`${newRowId}\0${model.visibleColIds[col]!}`, "");
+        rowCells.set(model.visibleColIds[col]!, "");
       }
+      model.rows.set(newRowId, rowCells);
     }
     setRows([...nextRows, Array.from({ length: width }, () => "")]);
   }, [allocId, resetTableModel, setRows]);
@@ -858,7 +877,12 @@ export function CsvView({
       syncVisibleIds(model);
       for (let rowIndex = 0; rowIndex < model.visibleRowIds.length; rowIndex++) {
         const rowId = model.visibleRowIds[rowIndex]!;
-        model.cells.set(`${rowId}\0${newColId}`, rowIndex === 0 ? newHeader : "");
+        let rowCells = model.rows.get(rowId);
+        if (!rowCells) {
+          rowCells = new Map();
+          model.rows.set(rowId, rowCells);
+        }
+        rowCells.set(newColId, rowIndex === 0 ? newHeader : "");
       }
       setRows(visibleRowsFromModel(model));
       return;
