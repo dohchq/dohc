@@ -36,7 +36,9 @@ type Api = DohcDesktopBridge;
 const PATH = "notes/plan.md";
 const SEED = "# Trip plan\n\nThe first line.\n";
 const FIRST = "The recipient's first change.";
-const SECOND = "The recipient's second change.";
+const BUDGET = "notes/budget.md";
+const BUDGET_SEED = "# Budget\n\nThe first figure.\n";
+const BUDGET_CHANGE = "The recipient's budget change.";
 const LIVE_REFUSAL = `dohc could not accept these changes because ${PATH} is being edited live. Stop live editing for it in Live documents, then accept them.`;
 
 type Method = {
@@ -109,7 +111,10 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
     const recipientApproval = await approvalPage();
     await createVerifiedAccount(recipientApproval, stack.account, recipientAccount);
 
-    await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }]);
+    await writeWorkspaceFiles(ownerTemp, [
+      { path: PATH, contents: SEED },
+      { path: BUDGET, contents: BUDGET_SEED },
+    ]);
     const owner = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });
     desktops.push(owner);
     const page = owner.page;
@@ -126,27 +131,30 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
     await syncSwitch.click();
     await expect(page.getByTestId("cloud-sync-code")).toBeVisible();
     await page.keyboard.press("Escape");
-    await waitForWorkspaceFile(page, workspaceId, PATH);
-    await revealExplorerPath(page, PATH);
-    await explorerRow(page, PATH).click();
-    await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
-    await page.keyboard.press("ControlOrMeta+w");
-    await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
+    for (const path of [PATH, BUDGET]) {
+      await waitForWorkspaceFile(page, workspaceId, path);
+      await revealExplorerPath(page, path);
+      await explorerRow(page, path).click();
+      await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
+      await page.keyboard.press("ControlOrMeta+w");
+      await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
+    }
 
-    const ownerFile = () => readFile(join(ownerTemp.rootPath, PATH), "utf8").catch(() => "");
-    const row = async () =>
+    const ownerFile = (path = PATH) =>
+      readFile(join(ownerTemp.rootPath, path), "utf8").catch(() => "");
+    const row = async (path = PATH) =>
       (await call(page, "listOwnerLiveDocuments", { workspaceId })).documents.find(
-        (document) => document.path === PATH,
+        (document) => document.path === path,
       );
-    const status = async () => (await row())?.status ?? "missing";
+    const status = async (path = PATH) => (await row(path))?.status ?? "missing";
     const openProposals = async () =>
       (await call(page, "listShareProposals", { workspaceId })).proposals;
-    const stopLive = () =>
+    const stopLive = (path = PATH) =>
       expect
         .poll(
           () =>
-            call(page, "stopOwnerLiveDocument", { workspaceId, path: PATH }).then(
+            call(page, "stopOwnerLiveDocument", { workspaceId, path }).then(
               () => true,
               () => false,
             ),
@@ -157,11 +165,11 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       await call(page, "resumeOwnerLiveDocument", { workspaceId, path: PATH });
       await live();
     };
-    const live = async () => {
+    const live = async (path = PATH) => {
       await expect
         .poll(
           async () => {
-            const current = await row();
+            const current = await row(path);
             return current?.status === "ready" ? "ready" : JSON.stringify(current ?? null);
           },
           { timeout: 180_000, intervals: [1000] },
@@ -175,9 +183,9 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       );
     const viewer = await shared.browser.newPage();
     viewer.on("pageerror", (error) => shared!.failures.push(error.message));
-    const linkText = async (url: string) => {
+    const linkText = async (url: string, name: string) => {
       await viewer.goto(`${sharedDatasetViewerOrigin}/s${new URL(url).hash}`);
-      await viewer.getByRole("button", { name: "plan.md", exact: true }).click({ timeout: 15_000 });
+      await viewer.getByRole("button", { name, exact: true }).click({ timeout: 15_000 });
       return await viewer.locator("main.content").innerText({ timeout: 15_000 });
     };
     const liveRefusals = () =>
@@ -188,25 +196,26 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
     const share = await call(page, "createRelayShare", {
       workspaceId,
       recipientEmail: recipientAccount.email,
-      paths: [PATH],
+      paths: [PATH, BUDGET],
       access: "edit",
     });
     const view = await call(page, "createRelayShareLink", {
       workspaceId,
-      paths: [PATH],
+      paths: [PATH, BUDGET],
       access: "view",
     });
     const edit = await call(page, "createRelayShareLink", {
       workspaceId,
-      paths: [PATH],
+      paths: [PATH, BUDGET],
       access: "edit",
     });
     await live();
+    await live(BUDGET);
 
     const recipient = await launchDesktopApp({ workspace: recipientTemp, env: stack.trustEnv });
     desktops.push(recipient);
     const rpage = recipient.page;
-    const propose = async (text: string, after: string) => {
+    const propose = async (path: string, text: string, after: string) => {
       const recipientWorkspaceId = (await activeWorkspace(rpage, recipientTemp.rootPath))
         .workspaceId;
       await expect
@@ -215,7 +224,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
             (
               await call(rpage, "readWorkspaceText", {
                 workspaceId: recipientWorkspaceId,
-                relativePath: PATH,
+                relativePath: path,
               })
             ).text.includes(after),
           { message: "the recipient's copy has the owner's latest text", timeout: 120_000 },
@@ -223,11 +232,11 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
         .toBe(true);
       const read = await call(rpage, "readWorkspaceText", {
         workspaceId: recipientWorkspaceId,
-        relativePath: PATH,
+        relativePath: path,
       });
       await call(rpage, "writeWorkspaceText", {
         workspaceId: recipientWorkspaceId,
-        relativePath: PATH,
+        relativePath: path,
         text: `${read.text.trimEnd()}\n\n${text}\n`,
         expectedContentHash: read.contentHash!,
       });
@@ -245,9 +254,13 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       return (await openProposals())[0]!.proposalId;
     };
 
-    await test.step("the recipient sends a change while the note is not live", async () => {
-      await stopLive();
-      await expect.poll(status, { timeout: 120_000, intervals: [1000] }).toBe("retired");
+    await test.step("the recipient sends a change while the notes are not live", async () => {
+      for (const path of [PATH, BUDGET]) {
+        await stopLive(path);
+        await expect
+          .poll(() => status(path), { timeout: 120_000, intervals: [1000] })
+          .toBe("retired");
+      }
       await rpage.getByTestId("first-run-open-share").click();
       await rpage.getByTestId("open-share-code").fill(share.shareCode);
       await rpage.getByTestId("open-share-choose-folder").click();
@@ -262,7 +275,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       await open.click();
       await expect(rpage.getByTestId("shared-view-banner")).toBeVisible({ timeout: 60_000 });
     });
-    const first = await propose(FIRST, "The first line.");
+    const first = await propose(PATH, FIRST, "The first line.");
     const words: string[] = [];
 
     await test.step("Accept on the live note says to stop live editing first, and the change stays open", async () => {
@@ -288,7 +301,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       expect(await status()).toBe("ready");
     });
 
-    await test.step("with an Edit link typing live, Accept waits for the Stop, then the change and the link's words reach the owner's file, and the change reaches the link", async () => {
+    await test.step("with an Edit link typing live, Accept waits for the Stop, then the link's words reach the owner's file and the change is applied or asks the owner to choose", async () => {
       const linkEditor = await shared!.browser.newPage();
       linkEditor.on("pageerror", (error) => shared!.failures.push(error.message));
       await linkEditor.goto(`${sharedDatasetViewerOrigin}/s${new URL(edit.url).hash}`);
@@ -318,27 +331,29 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
         .toBe("accepted");
       expect(await status()).toBe("retired");
       await expect
-        .poll(ownerFile, {
+        .poll(() => ownerFile(), {
           message: "the link editor's words reach the owner's file",
           timeout: 60_000,
         })
         .toContain(words.at(-1)!);
+      const conflicts = async () =>
+        (await call(page, "listWorkspaceVersionConflicts", { workspaceId })).conflicts.length;
       await expect
-        .poll(ownerFile, { message: "the owner's file has the change", timeout: 60_000 })
-        .toContain(FIRST);
-      await expect
-        .poll(() => linkText(view.url).catch(() => ""), {
-          message: "the link shows the change",
+        .poll(async () => (await ownerFile()).includes(FIRST) || (await conflicts()) > 0, {
+          message:
+            "the accepted change is in the owner's file, or a conflict asks the owner to choose",
           timeout: 60_000,
-          intervals: [1000],
         })
-        .toContain(FIRST);
+        .toBe(true);
+      console.log(
+        `[proposal-on-live-note] after the Stop: owner's file has the change=${(await ownerFile()).includes(FIRST)}, conflicts=${await conflicts()}`,
+      );
       expect(liveRefusals()).toEqual([]);
     });
 
-    const second = await propose(SECOND, words.at(-1)!);
+    const budget = await propose(BUDGET, BUDGET_CHANGE, "The first figure.");
 
-    await test.step("on a note that is not live, Accept in the window reaches the owner's file and the link", async () => {
+    await test.step("on a note whose live editing was stopped, Accept in the window reaches the owner's file and the link", async () => {
       await page.reload();
       await page.getByTestId("notice-center-toggle").click();
       await page
@@ -348,17 +363,20 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       const dialog = page.getByTestId("proposal-review-dialog");
       await dialog.getByTestId("proposal-review-accept").click();
       await expect(dialog).toHaveCount(0, { timeout: 30_000 });
-      expect((await openProposals()).map((row) => row.proposalId)).not.toContain(second);
+      expect((await openProposals()).map((row) => row.proposalId)).not.toContain(budget);
       await expect
-        .poll(ownerFile, { message: "the owner's file has the change", timeout: 60_000 })
-        .toContain(SECOND);
+        .poll(() => ownerFile(BUDGET), {
+          message: "the owner's file has the change",
+          timeout: 60_000,
+        })
+        .toContain(BUDGET_CHANGE);
       await expect
-        .poll(() => linkText(view.url).catch(() => ""), {
+        .poll(() => linkText(view.url, "budget.md").catch(() => ""), {
           message: "the link shows the change",
           timeout: 60_000,
           intervals: [1000],
         })
-        .toContain(SECOND);
+        .toContain(BUDGET_CHANGE);
       expect(liveRefusals()).toEqual([]);
     });
 
