@@ -1,8 +1,8 @@
 use dohc_engine_runtime::{ActorHandle, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
-use dohc_engine_testkit::{engine_db_path, ScratchDir};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn journal(
     rows: &[(String, Value, bool)],
