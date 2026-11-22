@@ -577,6 +577,24 @@ fn reads_only(event: &notify::Event) -> bool {
         )
 }
 
+/// Whether an error may mean the watch on the root is gone.
+///
+/// A folder below the root that the backend cannot read is reported with its
+/// own path while the watch on everything else keeps working. Attaching again
+/// would meet the same folder and report it again, without end. Reaching the
+/// limit on watches names a folder too, but the rest of the tree goes unwatched.
+/// The callback remembers each unreadable folder and attaches again once a
+/// change names it or a folder above it, because only a new watch reaches
+/// inside it.
+fn watch_lost(root: &Path, error: &notify::Error) -> bool {
+    matches!(error.kind, notify::ErrorKind::MaxFilesWatch)
+        || error.paths.is_empty()
+        || error
+            .paths
+            .iter()
+            .any(|path| path == root || !path.starts_with(root))
+}
+
 fn event_callback(
     root: PathBuf,
     dirty: Arc<dyn Fn() + Send + Sync>,
@@ -584,6 +602,7 @@ fn event_callback(
     state: Arc<WatchState>,
     backend_error: Arc<AtomicBool>,
 ) -> impl FnMut(Result<notify::Event, notify::Error>) + Send {
+    let mut unreadable: Vec<PathBuf> = Vec::new();
     move |event| {
         if event
             .as_ref()
@@ -591,7 +610,23 @@ fn event_callback(
         {
             return;
         }
-        if event.is_err() {
+        let attach_again = match &event {
+            Err(error) if watch_lost(&root, error) => true,
+            Err(error) => {
+                for path in &error.paths {
+                    if !unreadable.contains(path) {
+                        unreadable.push(path.clone());
+                    }
+                }
+                false
+            }
+            Ok(event) => event
+                .paths
+                .iter()
+                .any(|path| unreadable.iter().any(|folder| folder.starts_with(path))),
+        };
+        if attach_again {
+            unreadable.clear();
             state.disruptions.fetch_add(1, Ordering::AcqRel);
             backend_error.store(true, Ordering::Release);
             dirty();
@@ -1046,7 +1081,7 @@ mod callback_tests {
             notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join("a.md"))
         ));
         (callback.send)(Err(
-            notify::Error::generic("backend error").add_path(root.join(".dohc/engine/engine.db"))
+            notify::Error::generic("backend error").add_path(root.path().to_path_buf())
         ));
         assert_eq!(callback.dirty_calls.load(Ordering::Acquire), 1);
         assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
@@ -1059,6 +1094,60 @@ mod callback_tests {
             callback.messages.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn an_error_for_a_folder_below_the_root_is_a_change_not_a_lost_watch() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        (callback.send)(Err(notify::Error::io(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ))
+        .add_path(root.join("locked"))));
+        assert!(matches!(
+            callback.messages.try_recv(),
+            Ok(ThreadMessage::Event)
+        ));
+        callback.expect_quiet();
+    }
+
+    #[test]
+    fn a_change_above_an_unreadable_folder_attaches_the_watch_again_once() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 4);
+        (callback.send)(Err(notify::Error::io(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ))
+        .add_path(root.join("parent").join("locked"))));
+        let _ = callback.messages.try_recv();
+        callback.expect_queued(
+            notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(root.join("open").join("note.md")),
+        );
+        let unlocked = notify::Event::new(EventKind::Modify(ModifyKind::Metadata(
+            notify::event::MetadataKind::Permissions,
+        )))
+        .add_path(root.join("parent"));
+        (callback.send)(Ok(unlocked.clone()));
+        assert!(callback.backend_error.swap(false, Ordering::AcqRel));
+        assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
+        (callback.send)(Ok(unlocked));
+        assert!(!callback.backend_error.load(Ordering::Acquire));
+        assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn errors_without_a_path_or_at_the_watch_limit_are_lost_watches() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        for error in [
+            notify::Error::generic("backend error"),
+            notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path(root.join("deep")),
+        ] {
+            let mut callback = Callback::new(root.path(), 1);
+            (callback.send)(Err(error));
+            assert!(callback.backend_error.load(Ordering::Acquire));
+            assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
+        }
     }
 }
 
