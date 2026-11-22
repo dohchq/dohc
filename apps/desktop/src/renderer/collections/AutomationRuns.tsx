@@ -153,7 +153,7 @@ function writeText(write: RunWrite): ReactNode {
       );
     case "dataset-edit":
       return write.fields.map((field, index) => (
-        <Fragment key={field.field}>
+        <Fragment key={index}>
           {index > 0 ? "; " : null}
           {record}
           {` · ${field.field}: ${valueText(field.before)} → ${valueText(field.after)}`}
