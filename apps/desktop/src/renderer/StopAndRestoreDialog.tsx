@@ -654,7 +654,7 @@ export function StopAndRestoreDialog({
               </select>
             </label>
           ) : (
-            <p className="m-0 font-mono text-[12px] text-ink">{chosen.label}</p>
+            <p className="m-0 text-[12px] text-ink">{chosen.label}</p>
           )}
           <p className="m-0 text-[13px] text-muted">{words.loses}</p>
           <p className="m-0 text-[13px] text-muted">{words.restores}</p>
@@ -881,7 +881,7 @@ function Outcome({
                         else onOpenFile(kept.path);
                       }
                     }}
-                    className="max-w-full truncate rounded-md px-1 text-left font-mono text-[12px] text-ink hover:bg-hover"
+                    className="max-w-full truncate rounded-md px-1 text-left text-[12px] text-ink hover:bg-hover"
                   >
                     {kept.path}
                   </button>
@@ -903,7 +903,7 @@ function Outcome({
                 <button
                   type="button"
                   onClick={() => onOpenFile(file.path)}
-                  className="max-w-full truncate rounded-md px-1 text-left font-mono text-[12px] text-ink hover:bg-hover"
+                  className="max-w-full truncate rounded-md px-1 text-left text-[12px] text-ink hover:bg-hover"
                 >
                   {file.path}
                 </button>

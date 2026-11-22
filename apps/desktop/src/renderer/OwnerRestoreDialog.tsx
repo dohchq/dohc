@@ -124,7 +124,7 @@ function ChangeList({
   return (
     <details className="border-t border-line py-3">
       <summary className="cursor-pointer text-[13px] text-ink">
-        {label} <span className="font-mono">({events.length})</span>
+        {label} <span className="tabular-nums">({events.length})</span>
       </summary>
       <ol className="space-y-2 pl-5 text-[12px] text-muted" start={start + 1}>
         {events.slice(start, start + 50).map(({ metadata }) => {
@@ -203,7 +203,7 @@ function SourceList({
   return (
     <details className="border-t border-line py-3">
       <summary className="cursor-pointer text-[13px] text-ink">
-        {label} <span className="font-mono">({sources.length})</span>
+        {label} <span className="tabular-nums">({sources.length})</span>
       </summary>
       <p className="text-[12px] text-muted">
         These records identify local owner work. Their times do not establish an order against
@@ -631,7 +631,7 @@ export function OwnerRestoreDialog({
               ? "Restore declined"
               : "Restore shared file"}
       </h2>
-      <p className="break-all font-mono text-[12px] text-muted">{path}</p>
+      <p className="break-all text-[12px] text-muted">{path}</p>
       {/* While the choices load, the lines show it and the status words are for the screen reader. */}
       <div role="status" aria-live="polite">
         {busy ? (

@@ -170,11 +170,11 @@ export function AgentToolPicker(props: {
         {props.profile ? (
           <dl data-testid="agent-tool-launch" className={`${DETAILS} mt-2`}>
             <dt>Executable</dt>
-            <dd className="m-0 min-w-0 select-text wrap-break-word font-mono">
+            <dd className="m-0 min-w-0 select-text wrap-break-word">
               <WrappedPath path={props.profile.executable} />
             </dd>
             <dt>Working directory</dt>
-            <dd className="m-0 min-w-0 select-text wrap-break-word font-mono">
+            <dd className="m-0 min-w-0 select-text wrap-break-word">
               <WrappedPath path={result?.workingDirectory ?? "Current workspace"} />
             </dd>
             <dt>Prompt</dt>

@@ -149,13 +149,13 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
                 <th scope="row" className="px-3 py-2 font-medium text-ink">
                   {tableLabel(table.table)}
                 </th>
-                <td className="px-3 py-2 font-mono text-muted">
+                <td className="px-3 py-2 tabular-nums text-muted">
                   {table.beforeRows} {table.beforeRows === 1 ? "record" : "records"}
                 </td>
-                <td className="px-3 py-2 font-mono text-ink">
+                <td className="px-3 py-2 tabular-nums text-ink">
                   {table.afterRows} {table.afterRows === 1 ? "record" : "records"}
                 </td>
-                <td className="px-3 py-2 font-mono">
+                <td className="px-3 py-2 tabular-nums">
                   <span
                     className={
                       table.changedRows ? "rounded bg-panel-2 px-1.5 py-0.5 text-ink" : "text-muted"

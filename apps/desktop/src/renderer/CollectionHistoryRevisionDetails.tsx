@@ -108,7 +108,7 @@ export function CollectionHistoryRevisionDetails(
               >
                 <h3 className="m-0 flex items-center justify-between gap-2 text-[12px] font-semibold">
                   {index ? "After" : "Before"}
-                  <span className="font-mono text-[11px] font-normal text-muted">
+                  <span className="tabular-nums text-[11px] font-normal text-muted">
                     Revision {version.revision.revision}
                   </span>
                 </h3>
@@ -156,7 +156,7 @@ export function CollectionHistoryRevisionDetails(
                 ].map((source) => (
                   <details key={source.label}>
                     <summary className="cursor-pointer">{source.label}</summary>
-                    <p className="break-all font-mono">{source.path}</p>
+                    <p className="break-all">{source.path}</p>
                     <p className="break-all text-muted">Saved SHA-256: {source.hash}</p>
                     <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all">
                       {source.content}

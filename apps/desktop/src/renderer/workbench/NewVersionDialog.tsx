@@ -132,7 +132,7 @@ export function NewVersionCard(
             {props.lastChange ? (
               <span
                 data-testid="version-new-start-changed"
-                className="ml-auto shrink-0 font-mono text-[11px] text-subtle"
+                className="ml-auto shrink-0 tabular-nums text-[11px] text-subtle"
               >
                 Changed {relativeTime(props.lastChange.atMs)}
                 {props.lastChange.personName === undefined

@@ -188,17 +188,14 @@ function GroupRow(props: {
         <time
           dateTime={new Date(group.recordedAtMs).toISOString()}
           title={new Date(group.recordedAtMs).toLocaleString()}
-          className="ml-auto shrink-0 font-mono text-[11px] text-subtle"
+          className="ml-auto shrink-0 tabular-nums text-[11px] text-subtle"
         >
           {relativeTime(group.recordedAtMs)}
         </time>
       </div>
       <ul className="m-0 mt-1 list-none space-y-0.5 p-0">
         {group.changes.map((change) => (
-          <li
-            key={change.historyId}
-            className="break-words font-mono text-[11px] leading-snug text-ink"
-          >
+          <li key={change.historyId} className="break-words text-[11px] leading-snug text-ink">
             {change.field}: <span className="text-muted">{valueText(change.previous)} → </span>
             {valueText(change.next)}
           </li>

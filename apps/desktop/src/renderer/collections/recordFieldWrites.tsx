@@ -1114,7 +1114,7 @@ function CollectionWriteFailureRow({ failure }: { failure: CollectionWriteFailur
       data-testid="collection-write-failure"
       className="flex flex-col gap-1.5 border-t border-line pt-2 first:border-t-0 first:pt-0"
     >
-      <span className="truncate font-mono text-[11px] text-subtle">
+      <span className="truncate text-[11px] text-subtle">
         {failure.change.field} in {file}
       </span>
       <span className="text-[12px] text-ink">

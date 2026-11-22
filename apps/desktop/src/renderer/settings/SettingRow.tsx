@@ -331,7 +331,11 @@ export function StepperControl(props: {
         "w-7 rounded-l-[5px] text-muted",
         <Minus size={14} strokeWidth={1.9} aria-hidden />,
       )}
-      {part("reset", "w-[52px] border-x border-line font-mono text-[12px] text-ink", props.value)}
+      {part(
+        "reset",
+        "w-[52px] border-x border-line tabular-nums text-[12px] text-ink",
+        props.value,
+      )}
       {part(
         "increase",
         "w-7 rounded-r-[5px] text-muted",
@@ -366,7 +370,7 @@ export function TextControl(props: {
       aria-describedby={props.describedBy}
       data-testid={props.testId}
       onChange={(event) => props.onChange(event.target.value)}
-      className="h-8 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[12px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"
+      className="h-8 w-40 rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"
     />
   );
 }

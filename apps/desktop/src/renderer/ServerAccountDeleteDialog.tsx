@@ -176,10 +176,7 @@ function Delete(props: ServerAccountDeleteDialogProps) {
             bodyId="delete-server-account-server"
             title={`Delete ${preview?.email ?? props.email} on this server?`}
           >
-            <p
-              className="font-mono text-[11px] text-subtle"
-              data-testid="server-account-delete-server"
-            >
+            <p className="text-[11px] text-subtle" data-testid="server-account-delete-server">
               {server}
             </p>
           </ConfirmationHead>

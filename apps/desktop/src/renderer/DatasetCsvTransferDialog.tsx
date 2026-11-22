@@ -382,7 +382,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
                       <tbody>
                         {rows.slice(0, 100).map((row) => (
                           <tr key={row.row} className="border-t border-line">
-                            <td className="p-2 font-mono">{row.row}</td>
+                            <td className="p-2 tabular-nums">{row.row}</td>
                             <td className="max-w-72 truncate p-2">
                               {Object.values(row.values)
                                 .map((value) =>

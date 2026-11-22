@@ -9552,7 +9552,7 @@ function WorkspaceShell(props: {
                                 >
                                   <PathLine
                                     path={displayPath(props.workspace.rootPath)}
-                                    className="justify-center font-mono text-[11px] leading-4 text-muted"
+                                    className="justify-center text-[11px] leading-4 text-muted"
                                   />
                                 </p>
                                 {/* The button is the next step for a folder that can never be a workspace. */}
@@ -9663,7 +9663,7 @@ function WorkspaceShell(props: {
                                     </p>
                                     <p className="mb-0 mt-2 text-xs text-muted">
                                       The old data store is at{" "}
-                                      <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>.
+                                      <span>{ENGINE_STORE_BACKUP_DIR}</span>.
                                       {engineRebuild.result.reopenFailed
                                         ? ` ${engineRebuild.result.reopenFailed}`
                                         : " dohc is rebuilding history from your files."}
@@ -9676,8 +9676,8 @@ function WorkspaceShell(props: {
                                     </p>
                                     <p className="mb-0 mt-2 text-xs text-muted">
                                       A file or folder already exists at{" "}
-                                      <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>.
-                                      Move it away, then try again.
+                                      <span>{ENGINE_STORE_BACKUP_DIR}</span>. Move it away, then try
+                                      again.
                                     </p>
                                     {engineRebuild.result.reopenFailed ? (
                                       <p className="mb-0 mt-2 text-xs text-muted">
@@ -9692,9 +9692,8 @@ function WorkspaceShell(props: {
                                     </p>
                                     <p className="mb-0 mt-2 text-xs text-muted">
                                       {engineStoreRefusalSentence(engineRebuild.refusal)} dohc moves
-                                      it to{" "}
-                                      <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>{" "}
-                                      and rebuilds history from your files.
+                                      it to <span>{ENGINE_STORE_BACKUP_DIR}</span> and rebuilds
+                                      history from your files.
                                     </p>
                                     <p className="mb-0 mt-2 text-xs text-muted">
                                       The old data store stays in the backup location. History and

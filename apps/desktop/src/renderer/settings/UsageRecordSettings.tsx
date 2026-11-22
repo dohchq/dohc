@@ -166,12 +166,12 @@ function Table(props: { rows: readonly UsageRecordRow[]; today: string }) {
                   <td
                     key={door}
                     data-door={door}
-                    className="border-b border-line px-3 py-[7px] font-mono tabular-nums text-ink"
+                    className="border-b border-line px-3 py-[7px] tabular-nums text-ink"
                   >
                     <Cell cell={row.doors[door]} />
                   </td>
                 ))}
-                <td className="border-b border-line px-3 py-[7px] font-mono text-subtle">
+                <td className="border-b border-line px-3 py-[7px] tabular-nums text-subtle">
                   {row.lastUsed ? dayWords(row.lastUsed, props.today) : null}
                 </td>
               </tr>
@@ -223,7 +223,7 @@ export function UsageRecordCard(props: {
           What dohc records about use
         </h3>
         {readable?.since ? (
-          <span className="font-mono text-[11px] text-subtle">
+          <span className="tabular-nums text-[11px] text-subtle">
             since {dayWords(readable.since, props.today)}
           </span>
         ) : null}
@@ -322,7 +322,7 @@ export function UsageRecordCard(props: {
               <code
                 data-testid="usage-record-file"
                 title={view.file}
-                className="min-w-0 select-text truncate font-mono text-[11px] text-ink"
+                className="min-w-0 select-text truncate font-sans text-[11px] text-ink"
               >
                 {view.file}
               </code>
@@ -356,7 +356,7 @@ function SetAsideRow(props: { name: string; busy?: boolean | undefined; onRestor
       <Archive size={12} aria-hidden className="shrink-0 text-subtle" />
       <code
         title={props.name}
-        className="min-w-0 select-text truncate font-mono text-[11px] text-ink"
+        className="min-w-0 select-text truncate font-sans text-[11px] text-ink"
       >
         {props.name}
       </code>

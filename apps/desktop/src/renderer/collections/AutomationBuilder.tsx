@@ -3214,7 +3214,7 @@ export function AutomationBuilder(props: {
                       step: { ...step, file: event.target.value },
                     }))
                   }
-                  className={`${inputClass} font-mono text-[12px]`}
+                  className={inputClass}
                   {...invalid(problem(`step-${key}/source`))}
                 />
                 <SecondaryButton
@@ -4021,7 +4021,7 @@ export function AutomationBuilder(props: {
                     {MONTH_DAYS.map((day) => (
                       <label
                         key={day}
-                        className="flex items-center gap-1 font-mono text-[12px] text-ink"
+                        className="flex items-center gap-1 tabular-nums text-[12px] text-ink"
                       >
                         <input
                           type="checkbox"
@@ -4055,7 +4055,7 @@ export function AutomationBuilder(props: {
                   aria-label="Minutes past the hour"
                   value={trigger.at}
                   onChange={(event) => setWhen({ ...trigger, at: event.target.value })}
-                  className={`${selectClass} font-mono`}
+                  className={`${selectClass} tabular-nums`}
                   {...invalid(problem("when/at"))}
                 >
                   {MINUTES.includes(trigger.at) ? null : (

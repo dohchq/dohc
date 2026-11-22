@@ -2798,7 +2798,7 @@ export function NoticeCenter(props: {
                                   key={kept.recordId}
                                   className="flex items-center justify-between gap-2 border-b border-line py-1.5 text-[11px] last:border-b-0"
                                 >
-                                  <span className="min-w-0 flex-1 truncate font-mono text-muted">
+                                  <span className="min-w-0 flex-1 truncate text-muted">
                                     {kept.path}
                                   </span>
                                   <div className="flex shrink-0 items-center gap-2">

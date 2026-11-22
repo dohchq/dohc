@@ -1089,7 +1089,9 @@ export function SettingsDialog(props: {
                       copyTestId="settings-file-path-copy"
                       getText={() => settingsFilePath}
                     >
-                      <code title={settingsFilePath}>{settingsFilePath}</code>
+                      <code title={settingsFilePath} className="font-sans">
+                        {settingsFilePath}
+                      </code>
                     </CopyField>
                   </div>
                 ) : null}
@@ -1195,7 +1197,7 @@ export function SettingsDialog(props: {
                   updateState?.currentVersion ? (
                     <span
                       data-testid="desktop-updates-version"
-                      className="font-mono text-[12px] tabular-nums text-subtle"
+                      className="text-[12px] tabular-nums text-subtle"
                     >
                       <span className="sr-only">Version </span>
                       {updateState.currentVersion}

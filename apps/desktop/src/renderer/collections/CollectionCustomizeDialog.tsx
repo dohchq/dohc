@@ -71,7 +71,9 @@ export function CollectionCustomizeDialog(props: {
                       copiedLabel="Path copied"
                       getText={() => file.path}
                     >
-                      <code title={file.path}>{file.path}</code>
+                      <code title={file.path} className="font-sans">
+                        {file.path}
+                      </code>
                     </CopyField>
                   </div>
                   {file.missing ? (
