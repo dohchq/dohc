@@ -8,6 +8,7 @@
     "./artifact-markdown-guard": "./src/artifact-markdown-guard.ts",
     "./body-fragment": "./src/body-fragment.ts",
     "./removed-text": "./src/removedText.ts",
+    "./moved-text": "./src/movedText.ts",
     "./engine-markdown-reader": "./src/engine-markdown-reader.ts",
     "./browser-editor": "./src/browser-editor.ts",
     "./frontmatter": "./src/frontmatter.ts",

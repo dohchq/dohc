@@ -23,6 +23,7 @@ import {
   type RemovedText,
   type UnsentText,
 } from "@dohc/ydoc-projection/removed-text";
+import { MovedText } from "./movedText.js";
 
 export interface NamedLiveProviderLimits {
   readonly frames: LiveFrameSessionPolicy;
@@ -498,12 +499,14 @@ export function createNamedLiveProvider(
               const { ds } = Y.decodeUpdate(content);
               held.receivedCursor = begin.journalCursor;
               highestObservedCursor = Math.max(highestObservedCursor, begin.journalCursor);
+              // A repair is an edit of this page's own, so only a page that may edit follows a move.
               const removed = applyUpdateFindingRemovedText(
                 doc,
                 content,
                 REMOTE,
                 () => ds,
                 ownText,
+                status === "live" ? movedText : undefined,
               );
               if (removed) tellRemoved(removed);
               if (!current(held)) return;
@@ -533,8 +536,12 @@ export function createNamedLiveProvider(
   const refused: Uint8Array[] = [];
   // Which of this page's deletes removed text, so formatting it removed doesn't count.
   const deletedText = new DeletedText();
+  // The lines this page and the others joined, split or rebuilt, so text follows a line moved under it.
+  const movedText = new MovedText();
   function noteDeletes(transaction: Y.Transaction) {
-    if (transaction.origin !== REMOTE) deletedText.note(transaction);
+    if (transaction.origin === REMOTE) return;
+    deletedText.note(transaction);
+    movedText.note(transaction);
   }
   function refuse(why: string, bytes: Uint8Array) {
     refused.push(bytes.slice());

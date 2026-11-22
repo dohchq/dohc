@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import type { MovedText } from "./movedText.js";
 
 type DeleteSet = ReturnType<typeof Y.decodeUpdate>["ds"];
 
@@ -37,6 +38,10 @@ interface Piece {
  * update's own delete set does not list. `named` reads that set; it runs only
  * when the merge deleted text. `keep` limits the report, for example to this
  * page's own text.
+ *
+ * With `moved`, text the change moved rather than removed is followed there, and the page
+ * makes its repairs as a change of its own once the update is in. The report leaves out what
+ * a repair puts back. Pass it only when the page may edit.
  */
 export function applyUpdateFindingRemovedText(
   doc: Y.Doc,
@@ -44,19 +49,22 @@ export function applyUpdateFindingRemovedText(
   origin: unknown,
   named: () => DeleteSet,
   keep: (item: Y.Item) => boolean,
+  moved?: MovedText,
 ): RemovedText | null {
   // A delete that arrived before the text it names waits here and is applied with this update.
   const waiting = doc.store.pendingDs;
   let removed: RemovedText | null = null;
   const look = (transaction: Y.Transaction) => {
-    if (transaction.origin !== origin || transaction.deleteSet.clients.size === 0) return;
+    if (transaction.origin !== origin) return;
     // Merging also sorts each client's ranges, which `unnamed` relies on; an
     // update's own list can arrive in any order.
-    removed = findRemovedText(
-      transaction,
-      () => Y.mergeDeleteSets(waiting ? [named(), Y.decodeUpdateV2(waiting).ds] : [named()]),
-      keep,
-    );
+    let merged: DeleteSet | undefined;
+    const listed = () =>
+      (merged ??= Y.mergeDeleteSets(waiting ? [named(), Y.decodeUpdateV2(waiting).ds] : [named()]));
+    const putBack =
+      moved && named().clients.size > 0 ? moved.follow(transaction, listed(), keep) : undefined;
+    if (transaction.deleteSet.clients.size === 0) return;
+    removed = findRemovedText(transaction, listed, keep, putBack);
   };
   // Read inside the transaction: a doc with gc on drops deleted content right after it.
   doc.on("afterTransaction", look);
@@ -65,6 +73,7 @@ export function applyUpdateFindingRemovedText(
   } finally {
     doc.off("afterTransaction", look);
   }
+  moved?.repair(doc);
   return removed;
 }
 
@@ -72,6 +81,7 @@ function findRemovedText(
   transaction: Y.Transaction,
   named: () => DeleteSet,
   keep: (item: Y.Item) => boolean,
+  putBack?: (item: Y.Item, start: number, end: number) => boolean,
 ): RemovedText | null {
   const deleted: Y.Item[] = [];
   Y.iterateDeletedStructs(transaction, transaction.deleteSet, (struct) => {
@@ -82,6 +92,7 @@ function findRemovedText(
   // A piece that shows nothing, such as an embed the note never writes, is not removed text.
   const pieces = deleted
     .flatMap((item) => unnamed(item, listed).map(([start, end]) => ({ item, start, end })))
+    .filter(({ item, start, end }) => !putBack?.(item, start, end))
     .map((piece) => ({ piece, shown: render(piece) }))
     .filter(({ shown }) => shown !== "");
   if (pieces.length === 0) return null;
@@ -172,7 +183,7 @@ function inNoteOrder(pieces: readonly { piece: Piece; shown: string }[]): string
   const places = new Places();
   const sorted = pieces
     .map((entry) => ({ ...entry, line: lineOf(entry.piece.item), at: places.of(entry.piece) }))
-    .sort((left, right) => compare(left.at, right.at));
+    .sort((left, right) => comparePlaces(left.at, right.at));
   let text = "";
   let line: Y.AbstractType<unknown> | null = null;
   for (const entry of sorted) {
@@ -227,7 +238,7 @@ function lineOf(item: Y.Item): Y.AbstractType<unknown> {
 }
 
 /** Note positions, counting deleted items, so removed text sorts the way it stood. */
-class Places {
+export class Places {
   private readonly indexes = new Map<Y.Item, number>();
   private readonly paths = new Map<Y.AbstractType<unknown>, number[]>();
 
@@ -271,7 +282,7 @@ class Places {
   }
 }
 
-function compare(left: number[], right: number[]): number {
+export function comparePlaces(left: number[], right: number[]): number {
   for (let index = 0; index < Math.min(left.length, right.length); index++) {
     const difference = left[index]! - right[index]!;
     if (difference !== 0) return difference;

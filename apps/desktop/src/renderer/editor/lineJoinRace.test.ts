@@ -1,0 +1,519 @@
+// @vitest-environment jsdom
+import { createHash } from "node:crypto";
+import { afterEach, expect, it } from "vitest";
+import * as Y from "yjs";
+import { Editor } from "@tiptap/core";
+import { StarterKit } from "@tiptap/starter-kit";
+import { TableKit } from "@tiptap/extension-table";
+import { Collaboration } from "@tiptap/extension-collaboration";
+import { TextSelection } from "@tiptap/pm/state";
+import { EditorView } from "@tiptap/pm/view";
+import {
+  DohcMarkdownTable,
+  DohcTaskItem,
+  MarkdownListItem,
+  MarkdownOrderedList,
+  MarkdownTaskList,
+} from "@dohc/ydoc-projection/markdown-extensions";
+import { getDohcYDocBodyFragment, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
+import {
+  createLiveMarkdownJournalValidator,
+  WORKER_LIVE_VALIDATION_POLICY,
+} from "@dohc/ydoc-projection/live-journal-validation";
+import { MovedText } from "@dohc/ydoc-projection/moved-text";
+import { applyUpdateFindingRemovedText } from "@dohc/ydoc-projection/removed-text";
+import { bindEngineYDoc, type EngineYDocTransport } from "../collab/engineYDocProvider";
+import { desktopMarkdownExtensions } from "./extensions";
+import { ListConversions } from "./listEditing";
+
+const admit = createLiveMarkdownJournalValidator(WORKER_LIVE_VALIDATION_POLICY);
+const REMOTE = Symbol("remote");
+const stops: (() => Promise<void> | void)[] = [];
+afterEach(async () => {
+  for (const stop of stops.splice(0).reverse()) await stop();
+});
+
+type Person = {
+  doc: Y.Doc;
+  view: EditorView;
+  take(): Promise<Uint8Array>;
+  receive(update: Uint8Array): void;
+  /** Text of this person's that the page told them someone else's change removed. */
+  told: string[];
+};
+
+/**
+ * A share page: the editor's change runs inside the session's transaction, and a change from
+ * elsewhere is applied the way the page's live session applies it.
+ */
+function sharePage(baseline: Uint8Array): Promise<Person> {
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, baseline, REMOTE);
+  const sent: Uint8Array[] = [];
+  const told: string[] = [];
+  const moved = new MovedText();
+  doc.on("afterTransaction", (transaction: Y.Transaction) => {
+    if (transaction.origin !== REMOTE) moved.note(transaction);
+  });
+  doc.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin !== REMOTE) sent.push(update);
+  });
+  const mount = window.document.createElement("div");
+  window.document.body.append(mount);
+  let view: EditorView | undefined;
+  const updateState = EditorView.prototype.updateState;
+  EditorView.prototype.updateState = function (this: EditorView, state) {
+    view = this;
+    return updateState.call(this, state);
+  };
+  const editor = mountLiveBodyEditor(mount, {
+    body: getDohcYDocBodyFragment(doc),
+    label: "Shared file editor",
+    canEdit: () => true,
+    edit(change) {
+      doc.transact(change);
+      return true;
+    },
+  });
+  EditorView.prototype.updateState = updateState;
+  stops.push(() => {
+    editor.destroy();
+    mount.remove();
+    doc.destroy();
+  });
+  return Promise.resolve({
+    doc,
+    view: view!,
+    take: async () => Y.mergeUpdates(sent.splice(0)),
+    receive(update) {
+      const removed = applyUpdateFindingRemovedText(
+        doc,
+        update,
+        REMOTE,
+        () => Y.decodeUpdate(update).ds,
+        (item) => item.id.client === doc.clientID,
+        moved,
+      );
+      if (removed) told.push(removed.text);
+    },
+    told,
+  });
+}
+
+/** The desktop: the Markdown editor on the engine's document, sending what it ships to main. */
+async function desktop(baseline: Uint8Array): Promise<Person> {
+  const shipped: Uint8Array[] = [];
+  let remote: ((update: Uint8Array, generation: number) => void) | null = null;
+  const transport: EngineYDocTransport = {
+    open: async () => ({ available: true, initialUpdate: baseline, lineageGeneration: 1 }),
+    stageLocalUpdate: (() => {
+      let sequence = 0;
+      return () => ++sequence;
+    })(),
+    applyLocalUpdate(update) {
+      shipped.push(update);
+    },
+    onRemoteUpdate(listener) {
+      remote = listener;
+      return () => (remote = null);
+    },
+    onLineageReplacement: () => () => {},
+    acknowledgeLineageReplacement: async () => [],
+    close: async () => {},
+  };
+  const binding = await bindEngineYDoc(transport);
+  const doc = binding.doc!;
+  const element = window.document.createElement("div");
+  window.document.body.append(element);
+  const editor = new Editor({
+    element,
+    extensions: [
+      ...desktopMarkdownExtensions,
+      StarterKit.configure({
+        trailingNode: false,
+        undoRedo: false,
+        orderedList: false,
+        listItem: false,
+      }),
+      ListConversions,
+      MarkdownListItem,
+      MarkdownOrderedList,
+      MarkdownTaskList,
+      DohcTaskItem,
+      TableKit.configure({ table: false }),
+      DohcMarkdownTable,
+      Collaboration.configure({ document: doc, field: "body" }),
+    ],
+  });
+  stops.push(async () => {
+    editor.destroy();
+    element.remove();
+    await binding.destroy();
+  });
+  return {
+    doc,
+    view: editor.view,
+    async take() {
+      await binding.flushPendingLocalUpdates();
+      return Y.mergeUpdates(shipped.splice(0));
+    },
+    receive: (update) => remote!(update, 1),
+    told: [],
+  };
+}
+
+/** "accepted", or why the server refused the update. */
+function verdict(baseline: Uint8Array, suffix: Uint8Array[], candidate: Uint8Array) {
+  const result = admit({
+    document: {
+      workspaceId: "workspace",
+      mainVersionId: "main",
+      objectId: "object",
+      lineageClaimId: createHash("sha256").update(baseline).digest("hex"),
+    },
+    currentPath: "notes/plan.md",
+    checkpoint: baseline,
+    suffix,
+    candidate,
+  });
+  return result.kind === "refused" ? `refused: ${result.reason}` : result.kind;
+}
+
+function caretIn(person: Person, text: string, offset: number) {
+  const { view } = person;
+  let start = -1;
+  view.state.doc.descendants((node, pos) => {
+    if (!node.isTextblock) return start < 0;
+    if (start < 0 && node.textContent === text) start = pos + 1;
+    return false;
+  });
+  if (start < 0) throw new Error(`no line reads "${text}"`);
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, start + offset)));
+}
+
+function press(person: Person, key: string) {
+  const { view } = person;
+  const event = new window.KeyboardEvent("keydown", { key });
+  view.someProp("handleKeyDown", (handle) => handle(view, event));
+}
+
+function type(person: Person, text: string) {
+  for (const character of text) person.view.dispatch(person.view.state.tr.insertText(character));
+}
+
+const empty = (update: Uint8Array) => {
+  const { structs, ds } = Y.decodeUpdate(update);
+  return structs.length === 0 && ds.clients.size === 0;
+};
+
+/** The server: it keeps each change it accepts and passes it to the other page. */
+function startServer(baseline: Uint8Array) {
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, baseline);
+  const accepted: Uint8Array[] = [];
+  stops.push(() => doc.destroy());
+  return {
+    /**
+     * Takes the first person's change and then the second's, neither having received the
+     * other's. The pages go on answering each other until neither has anything left to send.
+     * Returns the server's verdict on each change.
+     */
+    async take(first: Person, second: Person) {
+      const verdicts: string[] = [];
+      let waiting: [Person, Uint8Array][] = [
+        [first, await first.take()],
+        [second, await second.take()],
+      ];
+      for (let round = 0; waiting.length > 0; round++) {
+        if (round === 6) throw new Error("the pages kept rewriting the note");
+        for (const [person, update] of waiting) {
+          if (empty(update)) continue;
+          verdicts.push(verdict(baseline, accepted, update));
+          if (verdicts.at(-1) !== "accepted") continue;
+          accepted.push(update);
+          Y.applyUpdate(doc, update);
+          (person === first ? second : first).receive(update);
+        }
+        waiting = [];
+        for (const person of [first, second]) {
+          const update = await person.take();
+          if (!empty(update)) waiting.push([person, update]);
+        }
+      }
+      return verdicts;
+    },
+    note: () => yDocToMarkdown(doc),
+  };
+}
+
+function baselineOf(note: string) {
+  const seed = markdownToYDoc(note);
+  const baseline = Y.encodeStateAsUpdate(seed);
+  seed.destroy();
+  return baseline;
+}
+
+const pages = { desktop, "share page": sharePage };
+// Two desktop editors write a to-do's Backspace another way, and #4096 covers that race.
+const pairings = [
+  ["share page", "share page"],
+  ["desktop", "share page"],
+  ["share page", "desktop"],
+] as const;
+
+const LINES = "One one\n\nTwo two two\n\nThree\n";
+const TASKS = "- [ ] alpha\n- [ ] bravo\n- [ ] charlie\n- [ ] delta\n";
+
+interface Race {
+  name: string;
+  note: string;
+  one(person: Person): void;
+  two(person: Person): void;
+  /** Words the two typed, each of which must be in the note once. */
+  typed?: string[];
+  /**
+   * The second person's own text lands in a line the first person's change deleted, so only the
+   * second person's page can put it back. The owner's desktop does not: its engine hands it the
+   * merged note, not each change. There the engine keeps the text and a Notices row offers it.
+   */
+  secondPutsBack?: true;
+}
+
+const joinsUp = (text: string) => (person: Person) => {
+  caretIn(person, text, 0);
+  press(person, "Backspace");
+};
+const splitsAt = (text: string, offset: number) => (person: Person) => {
+  caretIn(person, text, offset);
+  press(person, "Enter");
+};
+const typesAt = (text: string, offset: number, typed: string) => (person: Person) => {
+  caretIn(person, text, offset);
+  type(person, typed);
+};
+
+const races: Race[] = [
+  {
+    name: "both join the same line to the one above",
+    note: LINES,
+    one: joinsUp("Two two two"),
+    two: joinsUp("Two two two"),
+  },
+  {
+    name: "one joins a line to the one above while the other splits it",
+    note: LINES,
+    one: joinsUp("Two two two"),
+    two: splitsAt("Two two two", 3),
+  },
+  {
+    name: "both split the same line, in two places",
+    note: LINES,
+    one: splitsAt("Two two two", 3),
+    two: splitsAt("Two two two", 7),
+  },
+  {
+    name: "one joins a line to the one above while the other joins the next line to it",
+    note: LINES,
+    one: joinsUp("Two two two"),
+    two: joinsUp("Three"),
+    secondPutsBack: true,
+  },
+  {
+    name: "one joins a line to the one above while the other types at the end of it",
+    note: LINES,
+    one: joinsUp("Two two two"),
+    two: typesAt("Two two two", 11, " TYPED"),
+    typed: ["TYPED"],
+    secondPutsBack: true,
+  },
+  {
+    name: "one joins a line to the one above while the other types in the middle of it",
+    note: LINES,
+    one: joinsUp("Two two two"),
+    two: typesAt("Two two two", 4, "TYPED "),
+    typed: ["TYPED"],
+    secondPutsBack: true,
+  },
+  {
+    name: "one joins a to-do to the one above while the other joins the next to-do to it",
+    note: TASKS,
+    one: joinsUp("bravo"),
+    two: joinsUp("charlie"),
+    secondPutsBack: true,
+  },
+];
+
+/** A note's text run together: what is there and in what order, wherever the lines end. */
+const run = (markdown: string, ...without: string[]) =>
+  without
+    .reduce((text, word) => text.split(word).join(""), markdown)
+    .replace(/^- \[.\] /gmu, "")
+    .replace(/&#32;|&nbsp;|\s+/gu, "");
+
+const cases = races.flatMap((race) =>
+  pairings
+    .filter(([, two]) => !race.secondPutsBack || two === "share page")
+    .flatMap(([one, two]) =>
+      (["first", "second"] as const).map(
+        (arrives) => [race.name, one, two, arrives, race] as const,
+      ),
+    ),
+);
+
+it.each(cases)(
+  "%s (%s, then %s; the first one's change arrives %s)",
+  async (_name, one, two, arrives, race) => {
+    const baseline = baselineOf(race.note);
+    const a = await pages[one](baseline),
+      b = await pages[two](baseline);
+    const server = startServer(baseline);
+    race.one(a);
+    race.two(b);
+    const verdicts = await (arrives === "first" ? server.take(a, b) : server.take(b, a));
+
+    expect(verdicts).toEqual(verdicts.map(() => "accepted"));
+    const note = server.note();
+    for (const person of [a, b]) expect(yDocToMarkdown(person.doc)).toBe(note);
+    const typed = race.typed ?? [];
+    // The text is there once, in order, and nothing of it is gone.
+    expect(run(note, ...typed)).toBe(run(race.note));
+    for (const word of typed) expect(note.split(word)).toHaveLength(2);
+    // Nobody is told their text was removed, because none was.
+    expect([...a.told, ...b.told]).toEqual([]);
+  },
+);
+
+const SMALL = ["ab", "cde", "fg"];
+type Step = ["join", number] | ["split", number, number] | ["type", number, number];
+const steps: Step[] = SMALL.flatMap((text, line) => [
+  ...(line > 0 ? [["join", line] as Step] : []),
+  ...Array.from({ length: text.length + 1 }, (_, at) => ["split", line, at] as Step),
+  ...Array.from({ length: text.length + 1 }, (_, at) => ["type", line, at] as Step),
+]);
+
+function make(person: Person, step: Step, word: string) {
+  const text = SMALL[step[1]]!;
+  if (step[0] === "join") joinsUp(text)(person);
+  else if (step[0] === "split") splitsAt(text, step[2])(person);
+  else {
+    caretIn(person, text, step[2]);
+    person.view.dispatch(person.view.state.tr.insertText(word));
+  }
+}
+
+// Two people on share pages, three short lines, and every pair of one join, split or typed
+// word each, in both orders of arrival. Two typed words are left out: neither moves a line.
+it("keeps every letter once and in order for every pair of joins, splits and typed words", async () => {
+  const wrong: string[] = [];
+  for (const one of steps)
+    for (const two of steps)
+      for (const arrives of ["first", "second"] as const) {
+        if (one[0] === "type" && two[0] === "type") continue;
+        const baseline = baselineOf(`${SMALL.join("\n\n")}\n`);
+        const a = await sharePage(baseline),
+          b = await sharePage(baseline);
+        const server = startServer(baseline);
+        make(a, one, "XY");
+        make(b, two, "ZW");
+        const verdicts = await (arrives === "first" ? server.take(a, b) : server.take(b, a));
+        const note = server.note();
+        const letters = run(note);
+        const typed = [...(one[0] === "type" ? ["XY"] : []), ...(two[0] === "type" ? ["ZW"] : [])];
+        const right =
+          verdicts.every((verdict) => verdict === "accepted") &&
+          yDocToMarkdown(a.doc) === note &&
+          yDocToMarkdown(b.doc) === note &&
+          letters.replace(/[^a-z]/gu, "") === SMALL.join("") &&
+          letters.replace(/[a-z]/gu, "").length === typed.join("").length &&
+          typed.every((word) => letters.includes(word)) &&
+          a.told.length + b.told.length === 0;
+        if (!right)
+          wrong.push(`${JSON.stringify([one, two])}, the first arrives ${arrives}: ${note}`);
+        for (const stop of stops.splice(0).reverse()) await stop();
+      }
+  expect(wrong).toEqual([]);
+}, 120_000);
+
+function random(seed: number) {
+  let state = seed;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
+
+function lineTexts(person: Person) {
+  const texts: string[] = [];
+  person.view.state.doc.descendants((node) => {
+    if (!node.isTextblock) return true;
+    texts.push(node.textContent);
+    return false;
+  });
+  return texts;
+}
+
+/** One random join, split or typed word, somewhere in the note. Returns the word if it typed one. */
+function edit(person: Person, next: () => number, word: string): string | null {
+  const texts = lineTexts(person);
+  const index = Math.floor(next() * texts.length);
+  const text = texts[index]!;
+  const roll = next();
+  if (roll < 0.35 && index > 0) {
+    caretIn(person, text, 0);
+    press(person, "Backspace");
+    return null;
+  }
+  caretIn(person, text, Math.floor(next() * (text.length + 1)));
+  if (roll < 0.7) {
+    press(person, "Enter");
+    return null;
+  }
+  person.view.dispatch(person.view.state.tr.insertText(word));
+  return word;
+}
+
+const BASE = ["one two three", "four five six", "seven eight nine", "ten eleven twelve"];
+/** The typed word for a turn: three letters no other word and no line of the note has. */
+const typedWord = (turn: number) =>
+  String.fromCharCode(0x391 + turn * 3, 0x392 + turn * 3, 0x393 + turn * 3);
+
+// Two people on share pages each make a random join, split or typed word in the same few lines
+// at the same moment, eight times over, so later rounds meet lines the earlier ones rebuilt.
+// A split may fall inside a word, so the check reads letters. A word typed into an empty line
+// that the other person deletes at that moment is the loss #3983 covers: its author is told.
+it.each(Array.from({ length: 60 }, (_, seed) => seed + 1))(
+  "keeps every letter once through random joins, splits and typing at the same moment (seed %i)",
+  async (seed) => {
+    const next = random(seed);
+    const baseline = baselineOf(`${BASE.join("\n\n")}\n`);
+    const a = await sharePage(baseline),
+      b = await sharePage(baseline);
+    const server = startServer(baseline);
+    const typed: string[] = [];
+    for (let round = 0; round < 8; round++) {
+      for (const person of [a, b]) {
+        const word = edit(person, next, typedWord(typed.length));
+        if (word) typed.push(word);
+      }
+      const verdicts = await (next() < 0.5 ? server.take(a, b) : server.take(b, a));
+      expect(verdicts).toEqual(verdicts.map(() => "accepted"));
+      const note = server.note();
+      for (const person of [a, b]) expect(yDocToMarkdown(person.doc)).toBe(note);
+      const letters = run(note);
+      const told = [...a.told, ...b.told];
+      const kept = typed.filter((word) => !told.includes(word));
+      // A later word can be typed inside an earlier one, so each word is read by its own letters.
+      expect(
+        {
+          note: letters.replace(/[^a-z]/gu, ""),
+          typed: kept.map((word) =>
+            [...letters].filter((letter) => word.includes(letter)).join(""),
+          ),
+          letters: letters.replace(/[a-z]/gu, "").length,
+        },
+        `round ${String(round)}: ${JSON.stringify(note)}`,
+      ).toEqual({ note: run(BASE.join("")), typed: kept, letters: kept.join("").length });
+    }
+  },
+);
