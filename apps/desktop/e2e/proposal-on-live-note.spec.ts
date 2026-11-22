@@ -127,17 +127,21 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
     await expect(page.getByTestId("cloud-sync-code")).toBeVisible();
     await page.keyboard.press("Escape");
     await waitForWorkspaceFile(page, workspaceId, PATH);
-    await revealExplorerPath(page, PATH);
-    await explorerRow(page, PATH).click();
-    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 30_000 });
-    await page.keyboard.press("ControlOrMeta+w");
-    await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
+    const openNote = async () => {
+      await revealExplorerPath(page, PATH);
+      await explorerRow(page, PATH).click();
+      await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 30_000 });
+      await page.keyboard.press("ControlOrMeta+w");
+      await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
+    };
+    await openNote();
 
     const ownerFile = () => readFile(join(ownerTemp.rootPath, PATH), "utf8").catch(() => "");
-    const status = async () =>
+    const row = async () =>
       (await call(page, "listOwnerLiveDocuments", { workspaceId })).documents.find(
         (document) => document.path === PATH,
-      )?.status ?? "missing";
+      );
+    const status = async () => (await row())?.status ?? "missing";
     const openProposals = async () =>
       (await call(page, "listShareProposals", { workspaceId })).proposals;
     const stopLive = () =>
@@ -153,7 +157,15 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
         .toBe(true);
     const resumeLive = async () => {
       await call(page, "resumeOwnerLiveDocument", { workspaceId, path: PATH });
-      await expect.poll(status, { timeout: 180_000, intervals: [1000] }).toBe("ready");
+      await expect
+        .poll(
+          async () => {
+            const current = await row();
+            return current?.status === "ready" ? "ready" : JSON.stringify(current ?? null);
+          },
+          { timeout: 180_000, intervals: [1000] },
+        )
+        .toBe("ready");
     };
     const accept = (proposalId: string) =>
       call(page, "settleShareProposal", { workspaceId, proposalId, decision: "accept" }).then(
@@ -311,6 +323,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
     });
 
     const second = await propose(SECOND, FIRST);
+    await openNote();
 
     await test.step("with an Edit link typing live and the owner behind it at Stop, Accept waits for the Stop, then the change is not refused", async () => {
       await resumeLive();
