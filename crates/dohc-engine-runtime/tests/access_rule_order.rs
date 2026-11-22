@@ -4868,6 +4868,24 @@ fn a_future_rule_time_does_not_block_narrowing_or_its_files() {
             filetime::FileTime::from_system_time(SystemTime::now() + ahead),
         )
         .unwrap();
+        filetime::set_file_mtime(
+            f.root().join("team"),
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_millis(100)),
+        )
+        .unwrap();
+        for result in f.capture(&["team/a.md", "team/access.yaml"]) {
+            assert!(
+                waits(&result),
+                "a future rule time masked a recent folder change: {result:?}"
+            );
+        }
+        assert_eq!(f.journal(), before);
+        assert!(f.holds().is_empty());
+        filetime::set_file_mtime(
+            f.root().join("team"),
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(60)),
+        )
+        .unwrap();
         f.capture_ok(&["team/a.md", "team/access.yaml"]);
         assert_eq!(
             &f.journal()[before.len()..],
