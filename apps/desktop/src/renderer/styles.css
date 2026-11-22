@@ -1942,7 +1942,7 @@ body {
   background: var(--dohc-panel);
   color: var(--dohc-ink);
   box-shadow: 0 3px 10px rgba(28, 27, 24, 0.12);
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 600;
   line-height: 1.2;
   white-space: nowrap;
@@ -2924,7 +2924,7 @@ mark.dohc-highlight,
 .dohc-mermaid-preview--skipped .dohc-mermaid-preview-status {
   border: 1px solid var(--dohc-line);
   background: var(--dohc-panel-2);
-  /* subtle-on-panel-2 fails WCAG AA at this 11.5px size (light 3.46:1, dark
+  /* subtle-on-panel-2 fails WCAG AA at this size (light 3.46:1, dark
    * 4.16:1). muted clears AA in both themes (light 6.37:1, dark 7.28:1). */
   color: var(--dohc-muted);
 }
