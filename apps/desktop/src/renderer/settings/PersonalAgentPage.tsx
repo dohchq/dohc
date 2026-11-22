@@ -385,23 +385,26 @@ export function PersonalAgentPage(props: {
     );
     setRemoving(null);
   };
-  // A Remove that held focus goes with its row. Focus moves to the next Remove,
-  // else Change, else Agents, so it never drops to the page.
+  // Removing… and the row going both take focus from a Remove. Once the Remove settles, focus goes back
+  // to it if it failed, else to the next Remove, else Change, else Agents, so it never drops to the page.
   const page = useRef<HTMLElement>(null);
   const focusedRemove = useRef<string | null>(null);
+  // A Remove pressed from the keyboard hands on a visible focus ring.
+  const keyed = useRef(false);
   useEffect(() => {
     const id = focusedRemove.current;
-    if (id === null || ended.some((workspace) => workspace.workspaceId === id)) return;
-    focusedRemove.current = null;
+    if (id === null || removing !== null) return;
     const active = document.activeElement;
     if (active !== null && active !== document.body && active.isConnected) return;
-    const find = (testId: string) =>
-      page.current?.querySelector<HTMLElement>(`[data-testid="${testId}"]:not(:disabled)`);
+    focusedRemove.current = null;
+    const find = (selector: string) =>
+      page.current?.querySelector<HTMLElement>(`${selector}:not(:disabled)`);
     (
-      find("personal-agent-reach-remove") ??
-      find("personal-agent-reach") ??
-      find("agent-back")
-    )?.focus();
+      find(`[data-testid="personal-agent-reach-remove"][data-workspace-id="${CSS.escape(id)}"]`) ??
+      find('[data-testid="personal-agent-reach-remove"]') ??
+      find('[data-testid="personal-agent-reach"]') ??
+      find('[data-testid="agent-back"]')
+    )?.focus({ focusVisible: keyed.current });
   });
   const [menuOpen, setMenuOpen] = useState(false);
   const [reaching, setReaching] = useState(false);
@@ -596,9 +599,12 @@ export function PersonalAgentPage(props: {
                       <SecondaryButton
                         size="row"
                         data-testid="personal-agent-reach-remove"
+                        data-workspace-id={workspace.workspaceId}
                         aria-label={`Remove ${name} from what ${agent.name} can reach`}
                         disabled={removing !== null}
                         onFocus={() => (focusedRemove.current = workspace.workspaceId)}
+                        onKeyDown={() => (keyed.current = true)}
+                        onPointerDown={() => (keyed.current = false)}
                         // Focus a person moves away is theirs. Focus lost to Removing… or the row going isn't.
                         onBlur={(event) => {
                           if (event.currentTarget.isConnected && !event.currentTarget.disabled)

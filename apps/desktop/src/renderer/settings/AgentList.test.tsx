@@ -801,6 +801,13 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
   });
   expect(remove.textContent).toBe("Removing…");
   expect(remove.disabled).toBe(true);
+  // A browser takes focus from a button it disables, and focus lands on the page. The failed Remove gets it back.
+  act(() => {
+    const away = document.body.appendChild(document.createElement("button"));
+    away.focus();
+    away.remove();
+  });
+  expect(document.activeElement).toBe(document.body);
   act(() =>
     answer({
       ok: false,
@@ -810,6 +817,7 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
   );
   await waitFor(() => expect(remove.disabled).toBe(false));
   expect(remove.textContent).toBe("Remove");
+  expect(document.activeElement).toBe(remove);
   expect(onError).toHaveBeenCalledWith(
     "dohc could not reach relay.test to remove Old club from Grok Bot's reach. Check your connection.",
     undefined,
