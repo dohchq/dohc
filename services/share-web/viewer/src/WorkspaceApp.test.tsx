@@ -153,6 +153,8 @@ function server(
     // The account's session ended while the page was open.
     expired?: boolean;
     groups?: Array<{ wire: string; name: string; type?: "posts" | "chat" | "both" }>;
+    // A Group rule's level, where it differs from the member level. "none" hides the Group.
+    groupRules?: Record<string, "read-only" | "read-write" | "none">;
     files?: typeof FILES;
     member?: boolean;
     groupsFail?: number;
@@ -174,14 +176,17 @@ function server(
     }));
   const levelNow = () => options.level ?? "comment";
   // The relay's keyed signature of the member's reach: it changes with the level or a rule.
-  const reach = () => JSON.stringify([levelNow(), options.fileLevels ?? {}]);
+  const reach = () =>
+    JSON.stringify([levelNow(), options.fileLevels ?? {}, options.groupRules ?? {}]);
   const access = () => (levelNow() === "view" ? "read-only" : "read-write");
   // A test can add a Group, or sign in as another account, while the page is open.
   const groups = () =>
-    options.groups ?? [
-      { wire: "wire-plans", name: "plans" },
-      { wire: "wire-food", name: "food" },
-    ];
+    (
+      options.groups ?? [
+        { wire: "wire-plans", name: "plans" },
+        { wire: "wire-food", name: "food" },
+      ]
+    ).filter((group) => options.groupRules?.[group.wire] !== "none");
   const user = () => options.user ?? "sam";
   const meta = () => ({
     ok: true,
@@ -264,7 +269,7 @@ function server(
           name: group.name,
           kind: "channel",
           type: group.type ?? "both",
-          access: access(),
+          access: options.groupRules?.[group.wire] ?? access(),
         })),
       });
     // The relay answers 404 for a file or Group the member no longer reaches.
@@ -441,7 +446,8 @@ it("follows the member level in an open Group: a raise offers the composer, and 
       (node) => node.textContent,
     ),
   ).toEqual(["Copy", "Discard"]);
-  // The open Group stayed mounted: its messages read once, and the Groups once.
+  // The open Group stayed mounted: its messages read once. The Groups read once, then again after each level change,
+  // because a Group can hold its own level.
   expect(text()).toContain("Plans start here");
   const reads = (path: string) =>
     fetch.mock.calls.filter(
@@ -449,7 +455,7 @@ it("follows the member level in an open Group: a raise offers the composer, and 
         new URL(String(input), "https://share.test").pathname === path &&
         !new URL(String(input), "https://share.test").searchParams.has("since"),
     ).length;
-  expect(reads("/api/named-chat/channels")).toBe(1);
+  expect(reads("/api/named-chat/channels")).toBe(3);
 });
 
 it("says in a toast who changed the members' level, in the desktop's words, with no Try again", async () => {
@@ -1938,4 +1944,66 @@ it("says the session ended, not the membership, when it ends while the page is o
   await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
   await settle(() => text().includes("Your session ended. Sign in again to keep reading."));
   expect(text()).not.toContain("membership");
+});
+
+// A Group rule gives a member a level in that Group that can differ from the member level.
+type GroupRules = Record<string, "read-only" | "read-write" | "none">;
+const groupComposer = () =>
+  groupPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+
+it("offers the message box to a View member in a Group set to Can post", async () => {
+  server({ level: "view", groupRules: { "wire-plans": "read-write" } });
+  await render();
+  await opened();
+  expect(groupComposer()).not.toBeNull();
+  expect(groupPanel().textContent).not.toContain("Only people who can comment post here.");
+});
+
+it("offers no message box to a Comment member in a Group set to View only", async () => {
+  server({ level: "comment", groupRules: { "wire-plans": "read-only" } });
+  await render();
+  await opened();
+  expect(groupComposer()).toBeNull();
+  expect(groupPanel().textContent).toContain("Only people who can comment post here.");
+});
+
+it("follows a Group's own level when its rule changes while it is open, and keeps the draft", async () => {
+  const options: { level: Level; groupRules?: GroupRules } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await act(async () => setControlValue(groupComposer()!, "Bring a map"));
+  // The owner set the open Group to View only. The member level stays Comment.
+  options.groupRules = { "wire-plans": "read-only" };
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => groupComposer() === null);
+  expect(
+    groupPanel().querySelector<HTMLTextAreaElement>('[aria-label="Your unsent message"]')?.value,
+  ).toBe("Bring a map");
+  expect(text()).toContain("Plans start here");
+  // Set back to Can post, the box returns with the draft.
+  options.groupRules = { "wire-plans": "read-write" };
+  await settle(() => following("log").length === 1);
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 8, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(() => groupComposer()?.value === "Bring a map");
+});
+
+it("treats an open Group set to No access as gone, not the membership, without waiting for the Groups to age", async () => {
+  const options: { level: Level; groupRules?: GroupRules } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  // The owner hid the open Group. The relay refuses the files' held read, as for any rule change.
+  options.groupRules = { "wire-plans": "none" };
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(
+    () =>
+      groupPanel().querySelector(".group-list") !== null &&
+      !groupPanel().textContent?.includes("plans") &&
+      groupPanel().textContent?.includes("food") === true,
+  );
+  expect(text()).not.toContain("membership");
+  expect(text()).toContain("Leave at nine.");
 });

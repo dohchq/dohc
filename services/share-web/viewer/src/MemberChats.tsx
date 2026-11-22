@@ -112,7 +112,6 @@ export function MemberChats({
   found,
   onRetry,
   onUnlisted,
-  access,
   shown,
   onEnded,
   onUnread,
@@ -120,7 +119,6 @@ export function MemberChats({
   found: MemberListing;
   onRetry(): void;
   onUnlisted(): void;
-  access: NamedChatAccess;
   shown: boolean;
   onEnded(reason: Ended): void;
   onUnread(count: number): void;
@@ -223,10 +221,10 @@ export function MemberChats({
             </span>
             <h2>{group.name ?? "Group"}</h2>
           </div>
-          {/* A Group's access is the member level, which the workspace reads again while it stays open. */}
+          {/* A Group rule can set its level apart from the member level. A changed level reaches the open Group in place. */}
           <ChannelView
             key={`${opened.shareId}\n${group.channelWireId}`}
-            client={hub.client({ ...group, access })}
+            client={hub.client(group)}
             name={group.name}
             onEnded={(reason) => onEndedRef.current(reason)}
             readOnlyNote={READ_ONLY}
