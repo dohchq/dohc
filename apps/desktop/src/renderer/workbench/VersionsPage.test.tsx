@@ -1,13 +1,26 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render as renderBare,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useLayoutEffect, useState } from "react";
+import { type ReactElement, type ReactNode, useLayoutEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withErrorWords } from "../../ipc/errorWords";
 import { useNoticeOwner, useShellError } from "../shell/useShellError";
 import type { NoticeOwner, NoticeSink } from "../../notices/noticeOwner";
 import { VersionsPage, orderVersions } from "./VersionsPage";
 import { useWorkspaceVersions } from "./WorkspaceVersions";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
+
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="test">{children}</WorkspaceSessionProvider>;
+}
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: Session });
 
 const bridgeMock = {
   listWorkspaceVersions: vi.fn(),

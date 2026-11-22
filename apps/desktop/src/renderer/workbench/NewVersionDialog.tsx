@@ -1,5 +1,5 @@
 import { ArrowLeftRight, CircleAlert, Info, Layers, Lock, PenLine } from "lucide-react";
-import { type ReactNode, type Ref, useEffect, useId, useRef, useState } from "react";
+import { type ReactNode, type Ref, useId, useRef } from "react";
 import type { WorkspaceVersionRecord } from "../../ipc/bridgeContract";
 import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -17,7 +17,8 @@ import {
   useOpeningFocus,
 } from "../ui/ConfirmDialog";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
-import { useRequestSequence } from "../useRequestSequence";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { versionDotClass } from "./versionHue";
 
 export type VersionLastChange = { atMs: number; personName?: string };
@@ -196,24 +197,14 @@ export function NewVersionDialog(props: CardProps & { workspaceId: string }) {
   const startId = props.start?.id ?? null;
 
   // A failed read leaves the line out.
-  const [lastChange, setLastChange] = useState<VersionLastChange | null>(null);
-  const reads = useRequestSequence([props.workspaceId, startId]);
-  useEffect(() => {
-    setLastChange(null);
-    if (startId === null) return;
-    const token = reads.next();
-    bridge()
-      .listVersionLastChanges({ workspaceId: props.workspaceId })
-      .then(
-        (result) => {
-          if (!reads.isCurrent(token)) return;
-          setLastChange(
-            result.versions.find((version) => version.versionId === startId)?.lastChange ?? null,
-          );
-        },
-        () => undefined,
-      );
-  }, [props.workspaceId, startId]);
+  const lastChanges = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([props.workspaceId, startId]),
+    manual: startId === null,
+    load: () => bridge().listVersionLastChanges({ workspaceId: props.workspaceId }),
+  });
+  const lastChange: VersionLastChange | null =
+    lastChanges.value?.versions.find((version) => version.versionId === startId)?.lastChange ??
+    null;
 
   const cancel = () => {
     if (!props.busy) props.onCancel();
