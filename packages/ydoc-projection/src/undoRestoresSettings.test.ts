@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { EditorView } from "@tiptap/pm/view";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import { mountLiveBodyEditor } from "./browser-editor.js";
@@ -22,8 +22,10 @@ afterEach(() => {
 });
 
 type Person = ReturnType<typeof person>;
+const HOSTS = ["phone", "share page"] as const;
+type Host = (typeof HOSTS)[number];
 
-function person(baseline: Uint8Array) {
+function person(baseline: Uint8Array, host: Host) {
   const doc = new Y.Doc();
   Y.applyUpdate(doc, baseline, REMOTE);
   const sent: Uint8Array[] = [];
@@ -43,7 +45,8 @@ function person(baseline: Uint8Array) {
     label: "Shared file editor",
     canEdit: () => true,
     edit(change) {
-      change();
+      if (host === "share page") doc.transact(change);
+      else change();
       return true;
     },
   });
@@ -56,11 +59,11 @@ function person(baseline: Uint8Array) {
   return { doc, editor, view: view!, sent };
 }
 
-function twoPeople() {
+function twoPeople(host: Host) {
   const seed = markdownToYDoc(NOTE);
   const baseline = Y.encodeStateAsUpdate(seed);
   seed.destroy();
-  return [person(baseline), person(baseline)] as const;
+  return [person(baseline, host), person(baseline, host)] as const;
 }
 
 function exchange(a: Person, b: Person) {
@@ -116,39 +119,75 @@ function everyoneReading(note: string) {
   };
 }
 
-it("undo brings a deleted heading back at its old level for everyone, after its level changed in the same undo step", () => {
-  const [a, b] = twoPeople();
-  setLevel(a, 3);
-  deleteHeading(a);
-  exchange(a, b);
-  expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\nlast\n"));
+describe.each(HOSTS)("on the %s", (host) => {
+  it("undo brings a deleted heading back at its old level for everyone, after its level changed in the same undo step", () => {
+    const [a, b] = twoPeople(host);
+    setLevel(a, 3);
+    deleteHeading(a);
+    exchange(a, b);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\nlast\n"));
 
-  expect(a.editor.undo()).toBe(true);
-  exchange(a, b);
-  expect(everyoneReads(a, b)).toEqual(everyoneReading(NOTE));
-});
+    expect(a.editor.undo()).toBe(true);
+    exchange(a, b);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading(NOTE));
+  });
 
-it("undo brings a deleted heading back at the level its deleter last saw, when someone else changed the level meanwhile", () => {
-  const [a, b] = twoPeople();
-  deleteHeading(a);
-  setLevel(b, 3);
-  exchange(a, b);
-  expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\nlast\n"));
+  it("undo brings a deleted heading back at the level its deleter last saw, when someone else changed the level meanwhile", () => {
+    const [a, b] = twoPeople(host);
+    deleteHeading(a);
+    setLevel(b, 3);
+    exchange(a, b);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\nlast\n"));
 
-  expect(a.editor.undo()).toBe(true);
-  exchange(a, b);
-  expect(everyoneReads(a, b)).toEqual(everyoneReading(NOTE));
-});
+    expect(a.editor.undo()).toBe(true);
+    exchange(a, b);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading(NOTE));
+  });
 
-it("undo of a level change puts the old level back over a level someone else set since", () => {
-  const [a, b] = twoPeople();
-  setLevel(a, 3);
-  exchange(a, b);
-  setLevel(b, 1);
-  exchange(a, b);
-  expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\n# title\n\nlast\n"));
+  it("undo of a level change puts the old level back over a level someone else set since", () => {
+    const [a, b] = twoPeople(host);
+    setLevel(a, 3);
+    exchange(a, b);
+    setLevel(b, 1);
+    exchange(a, b);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\n# title\n\nlast\n"));
 
-  expect(a.editor.undo()).toBe(true);
-  exchange(a, b);
-  expect(everyoneReads(a, b)).toEqual(everyoneReading(NOTE));
+    expect(a.editor.undo()).toBe(true);
+    exchange(a, b);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading(NOTE));
+  });
+
+  it("redo of a level change puts that level back over a level someone else set since", () => {
+    const [a, b] = twoPeople(host);
+    setLevel(a, 3);
+    expect(a.editor.undo()).toBe(true);
+    exchange(a, b);
+    setLevel(b, 1);
+    exchange(a, b);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\n# title\n\nlast\n"));
+
+    expect(a.editor.redo()).toBe(true);
+    exchange(a, b);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\n### title\n\nlast\n"));
+  });
+
+  it("undoes and redoes a level change", () => {
+    const [a, b] = twoPeople(host);
+    setLevel(a, 3);
+    exchange(a, b);
+    expect(a.editor.undo()).toBe(true);
+    exchange(a, b);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading(NOTE));
+    expect(a.editor.redo()).toBe(true);
+    exchange(a, b);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\n### title\n\nlast\n"));
+  });
+
+  it("leaves a change that came from someone else out of a person's undo", () => {
+    const [a, b] = twoPeople(host);
+    setLevel(b, 3);
+    exchange(a, b);
+    expect(a.editor.undo()).toBe(false);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\n### title\n\nlast\n"));
+  });
 });

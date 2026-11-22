@@ -46,6 +46,7 @@ import {
 import * as Y from "yjs";
 import { getDohcProseMirrorSchema } from "./import-export.js";
 
+const EDITOR_CHANGE = "dohcEditorChange";
 const BLOB_IMAGE = /^\/api\/view\/blob\/[a-f0-9]{64}(?:\?session=[A-Za-z0-9_-]{12})?$/u;
 
 export type LiveEditorMark = "bold" | "italic" | "strike" | "code" | "highlight";
@@ -518,9 +519,11 @@ export function mountLiveBodyEditor(
         ySyncPlugin(input.body),
         yUndoPlugin({
           undoManager: new Y.UndoManager(input.body, {
-            trackedOrigins: new Set([ySyncPluginKey]),
+            trackedOrigins: new Set([ySyncPluginKey, null]),
             deleteFilter: (item) => defaultDeleteFilter(item, defaultProtectedNodes),
-            captureTransaction: (transaction) => transaction.meta.get("addToHistory") !== false,
+            captureTransaction: (transaction) =>
+              transaction.meta.get("addToHistory") !== false &&
+              (transaction.origin !== null || transaction.meta.get(EDITOR_CHANGE) === true),
             ignoreRemoteMapChanges: true,
           }),
         }),
@@ -559,7 +562,11 @@ export function mountLiveBodyEditor(
     dispatchTransaction(this: EditorView, transaction) {
       const apply = () => this.updateState(this.state.apply(transaction));
       const fromDocument = transaction.getMeta(ySyncPluginKey)?.isChangeOrigin === true;
-      if (transaction.docChanged && !fromDocument) input.edit(apply);
+      if (transaction.docChanged && !fromDocument)
+        input.edit(() => {
+          input.body.doc?.transact((hosts) => hosts.meta.set(EDITOR_CHANGE, true));
+          apply();
+        });
       else apply();
       notifyToolbar(this.state);
     },
