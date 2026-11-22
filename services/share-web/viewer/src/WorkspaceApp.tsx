@@ -545,7 +545,9 @@ function useMemberFiles(
       if (signal.aborted) return;
       setView({ status: "ready", files });
       let delay = RETRY_INITIAL_MS,
-        reload = false;
+        reload = false,
+        // The level or a rule changed, so the files shown carry levels the member no longer has.
+        stale = false;
       while (!signal.aborted) {
         const step = new AbortController(),
           stepSignal = AbortSignal.any([signal, step.signal]);
@@ -580,16 +582,15 @@ function useMemberFiles(
             };
             // A rule changed since the files were read, so the log's cursor may skip files that just became visible.
             // A file at a new path has no level yet. Either way the current files say.
-            if (
-              meta.reach !== files.meta.reach ||
-              next.files.some((file) => !files.levels.has(file.path))
-            ) {
+            stale ||= meta.reach !== files.meta.reach;
+            if (stale || next.files.some((file) => !files.levels.has(file.path))) {
               reload = true;
               continue;
             }
             files = next;
           }
           setView({ status: "ready", files });
+          stale = false;
           setFailures(0);
           delay = RETRY_INITIAL_MS;
           const elapsed = Date.now() - started;
@@ -615,6 +616,11 @@ function useMemberFiles(
           if (reading && refusedStatus(error)) {
             const confirmed = await confirm();
             if (signal.aborted || refused(confirmed, "ended")) return;
+          }
+          // Old levels would offer controls the relay now refuses.
+          if (stale) {
+            setView({ status: "load-failed" });
+            return;
           }
           reload = reading;
           setFailures((count) => count + 1);

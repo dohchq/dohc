@@ -344,7 +344,8 @@ export function MemberComments({
           empty={NO_COMMENTS}
           messageLabel="Comment"
           placeholder="Comment on this file…"
-          draftKey={`${opened.userId}\n${opened.shareId}\nfile\n${objectId}`}
+          // A relay without a link key lists no identity, so the path tells files apart.
+          draftKey={`${opened.userId}\n${opened.shareId}\nfile\n${objectId || `path\n${path}`}`}
         />
       ) : found === "failed" ? (
         <LoadFailed onRetry={onRetry} />
