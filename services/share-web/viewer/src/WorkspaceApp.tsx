@@ -617,6 +617,13 @@ function useMemberFiles(
             const confirmed = await confirm();
             if (signal.aborted || refused(confirmed, "ended")) return;
           }
+          // A refused held read may mean the level changed. The grant says, when it answers.
+          if (reading && !stale)
+            stale = await loadMeta(session, stepSignal).then(
+              (meta) => meta.reach !== files.meta.reach,
+              () => false,
+            );
+          if (signal.aborted) return;
           // Old levels would offer controls the relay now refuses.
           if (stale) {
             setView({ status: "load-failed" });
