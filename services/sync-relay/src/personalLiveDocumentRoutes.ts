@@ -128,7 +128,7 @@ export function createPersonalLiveDocumentRoute(input: {
     if (!row) return { status: "refused", reason: "document-unavailable" };
     if (row.ownerStop !== null) return { status: "refused", reason: "live_paused_by_owner" };
     // Retired without a Stop while it waited: nothing hosts it until the next open enrolls it again.
-    if (row.retired) return { status: "preparing" };
+    if (row.retired && row.note.reason !== "start-failed") return { status: "preparing" };
     const state = readiness!.state(row);
     if (state.status === "ready")
       return { status: "ready", objectId: state.objectId, binding: state.document.binding };

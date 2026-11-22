@@ -41,6 +41,7 @@ import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
 import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
 import {
   forgetIdleServiceHostUploads,
+  liveNoteStarted,
   restoreInProgress,
   SERVICE_HOST_ENROLLMENTS,
 } from "./serviceHostEnrollment";
@@ -267,6 +268,7 @@ export class ServiceActivationStore {
     host: LiveHostConnectionCoordinate;
     access: ServiceActivationAccess;
     nativeState: { adoptionId: string; pendingBytes: number };
+    nowMs: number;
     guard(): void;
   }) {
     return this.storage.tx(() => {
@@ -387,6 +389,7 @@ export class ServiceActivationStore {
           "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?",
         )
         .run(charge, input.document.workspaceId);
+      liveNoteStarted(this.storage, input.document, input.nowMs);
     });
   }
 

@@ -9,6 +9,8 @@ export const SERVICE_HOST_MAX_WORKSPACES = 16;
 export const AGENT_ONLY_MAX_DOCUMENTS = 48;
 /** Workspaces whose every unretired enrollment is agent-only. */
 export const AGENT_ONLY_MAX_WORKSPACES = 12;
+/** How long a note may stay starting, from its start, before it is off with its start failed. */
+export const LIVE_NOTE_START_MAX_MS = 10 * 60_000;
 /** How long a document only recorded demand keeps stays idle before the sweep reclaims it. */
 export const RECLAIM_RETENTION_MS = 10 * 60_000;
 /** How long such a document stays idle before an open with no room may reclaim it. */

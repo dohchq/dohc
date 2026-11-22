@@ -10,6 +10,7 @@ import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-document
 import type { SyncRelayStorage } from "./storage";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type {
+  LiveNoteStartFailure,
   ServiceHostEnrollment,
   ServiceHostHeldActivation,
   ServiceHostRetirementPreparation,
@@ -401,6 +402,11 @@ export type ServiceHostDocumentState =
  * Each enrolled document's readiness, from its row, the host, and the metadata
  * of its current activation and live document. It reads no state or baseline bytes.
  */
+const START_FAILED: Readonly<Record<LiveNoteStartFailure, string>> = {
+  refused: "session-host-refused",
+  "no-lineage": "live-document-without-lineage",
+  failing: "live-start-failing",
+};
 export function serviceHostReadiness(options: {
   storage: SyncRelayStorage;
   history: LiveJournalHistoryAuthority;
@@ -433,7 +439,10 @@ export function serviceHostReadiness(options: {
     };
     if (diverged(row)) return { ...base, status: "unavailable", reason: "session-host-diverged" };
     // A Pause still waiting for its document to unload reads as paused.
-    if (!row.enabled || row.ownerStop) return { ...base, status: "paused" };
+    if (row.note.state === "off")
+      return row.note.reason === "start-failed"
+        ? { ...base, status: "unavailable", reason: START_FAILED[row.note.cause!] }
+        : { ...base, status: "paused" };
     if (changed(row)) return { ...base, status: "unavailable", reason: "workspace-changed" };
     if (
       storage.objectIdAtPathInVersion({
@@ -471,7 +480,7 @@ export function serviceHostReadiness(options: {
       if (!(error instanceof ServiceActivationDamaged)) throw error;
       return { ...base, status: "unavailable", reason: "session-host-diverged" };
     }
-    if (!saved?.completed) return starting();
+    if (row.note.state !== "live" || !saved?.completed) return starting();
     const document = {
       workspaceId: row.workspaceId,
       mainVersionId: "main",

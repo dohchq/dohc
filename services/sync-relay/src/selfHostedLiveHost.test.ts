@@ -24,6 +24,7 @@ import {
   createLiveJournalHistoryAuthority,
 } from "./storage/liveJournalHistory";
 import { createNamedFrameChanges } from "./liveHostChanges";
+import { LIVE_NOTE_START_MAX_MS } from "./liveHostingLimits";
 import { hasRelayWriteObservers } from "./relayWriteChanges";
 import { serviceHostDocumentEnabled } from "./storage/serviceHostEnrollment";
 import type { StorageContext } from "./storage/context";
@@ -326,6 +327,7 @@ async function fixture(
     } as never;
   });
   const onError = vi.fn();
+  const clock = { now: 10 };
   const release = f.storage.releaseServiceHostEnrollment.bind(f.storage);
   vi.spyOn(f.storage, "releaseServiceHostEnrollment").mockImplementation((input) => {
     events.push(
@@ -343,6 +345,7 @@ async function fixture(
     key: new Uint8Array(32).fill(9),
     frameChanges,
     startHost,
+    nowMs: () => clock.now,
     onError,
   });
   cleanup.push(() => host.close());
@@ -422,6 +425,7 @@ async function fixture(
     host,
     history,
     data,
+    clock,
     starts,
     startHost,
     input,
@@ -885,6 +889,52 @@ it("tells the operator a document whose history is past its budget tries again l
   expect(f.onError).toHaveBeenCalledTimes(1);
 });
 
+it("turns a note off when its host refuses it or it is still starting 10 minutes on, until the owner resumes it", async () => {
+  const f = await fixture();
+  await f.waitStarted(1);
+  await f.waitUpdate(["docs/a.md"]);
+  const note = () => f.enrollment()!.note;
+  expect(note()).toMatchObject({ generation: 1, state: "starting" });
+  f.block(binding.objectId, "without-lineage");
+  f.clock.now = 10 + LIVE_NOTE_START_MAX_MS - 1;
+  await f.waitPasses();
+  expect(note()).toMatchObject({ generation: 1, state: "starting" });
+  f.clock.now = 10 + LIVE_NOTE_START_MAX_MS;
+  await vi.waitFor(
+    () => {
+      f.host.reconcile();
+      expect(note()).toEqual({
+        generation: 1,
+        state: "off",
+        reason: "start-failed",
+        cause: "no-lineage",
+        sinceMs: 10 + LIVE_NOTE_START_MAX_MS,
+        changedBy: "server",
+      });
+    },
+    { timeout: 10_000 },
+  );
+  f.unblock(binding.objectId);
+  const resumedAt = f.clock.now + 1;
+  f.storage.ensureOwnedLiveDocument({ intent: "owner-resume", ...f.input, nowMs: resumedAt });
+  expect(note()).toMatchObject({ generation: 2, state: "starting", sinceMs: resumedAt });
+  f.onError.mockClear();
+  await f.waitUpdate(["docs/a.md"]);
+  f.block(binding.objectId, "refused");
+  await vi.waitFor(
+    () => {
+      f.host.reconcile();
+      expect(note()).toMatchObject({
+        generation: 2,
+        state: "off",
+        reason: "start-failed",
+        cause: "refused",
+      });
+    },
+    { timeout: 10_000 },
+  );
+});
+
 it("logs a replacement daemon once it starts", async () => {
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   try {
@@ -917,6 +967,7 @@ async function restart(f: Awaited<ReturnType<typeof fixture>>, onError = vi.fn()
     key: new Uint8Array(32).fill(9),
     frameChanges: f.frameChanges,
     startHost: f.startHost,
+    nowMs: () => f.clock.now,
     onError,
   });
   cleanup.push(() => restarted.close());

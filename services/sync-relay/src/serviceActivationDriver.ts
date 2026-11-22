@@ -1544,6 +1544,7 @@ export class ServiceActivationDriver {
             host: o.host,
             access: this.#store.pending(document!, o.host),
             nativeState,
+            nowMs: Date.now(),
             guard: check,
           });
           held.activationPending = false;

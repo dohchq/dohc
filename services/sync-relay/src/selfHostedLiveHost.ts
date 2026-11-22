@@ -155,6 +155,8 @@ export async function startSelfHostedLiveHost(options: {
   reconcileIntervalMs?: number;
   /** Called as each reconciliation ends, so a test can wait on reconciliations rather than on their interval. */
   onReconcile?: () => void;
+  /** The clock a note's start time is read against, for a test with its own. */
+  nowMs?: () => number;
   onError?(error: unknown): void;
 }) {
   const { storage, history } = options,
@@ -471,6 +473,9 @@ export async function startSelfHostedLiveHost(options: {
         signature = "";
         replacing = true;
       }
+      storage.failLapsedLiveNoteStarts(options.nowMs?.() ?? Date.now(), (row) =>
+        current?.blocked(row) === "without-lineage" ? "no-lineage" : "failing",
+      );
       selected = selection();
       const { targets, departing } = selected,
         next = selectionSignature(selected);
@@ -508,6 +513,15 @@ export async function startSelfHostedLiveHost(options: {
           refused.delete(key);
           continue;
         }
+        if (block === "refused" && row.note.state === "starting")
+          storage.moveLiveNote({
+            workspaceId: row.workspaceId,
+            objectId: row.objectId,
+            generation: row.note.generation,
+            nowMs: options.nowMs?.() ?? Date.now(),
+            move: "start-failed",
+            cause: "refused",
+          });
         if (refused.has(key)) continue;
         refused.add(key);
         const document = `Live editing of object ${row.objectId} in workspace ${row.workspaceId}`,

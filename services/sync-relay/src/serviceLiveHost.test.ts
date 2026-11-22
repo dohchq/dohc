@@ -768,6 +768,7 @@ async function completedServiceOwner(
       host: earlier,
       access,
       nativeState: { adoptionId: capture.activationId, pendingBytes: 0 },
+      nowMs: Date.now(),
       guard() {},
     });
   }
@@ -2424,6 +2425,7 @@ async function enrolledServiceHost({
       key: new Uint8Array(32).fill(9),
       frameChanges: createNamedFrameChanges(16),
       startHost: async () => o.host,
+      nowMs: () => 10,
       onError: (error) => errors.push(error),
       ...(polls || paced ? { reconcileIntervalMs: HELD_RECONCILE_MS } : {}),
     });
@@ -3099,7 +3101,8 @@ it("activates a retired activation's successor after Resume, which admits edits 
   };
   o.engine.adoption = { activationId: SUCCESSOR, throughCursor: null };
   const complete = ServiceActivationStore.prototype.complete,
-    seen: unknown[] = [];
+    seen: unknown[] = [],
+    note = () => o.f.storage.readServiceHostEnrollment("workspace", o.sibling.path)!.note;
   vi.spyOn(ServiceActivationStore.prototype, "complete").mockImplementation(function (
     this: ServiceActivationStore,
     input,
@@ -3107,6 +3110,7 @@ it("activates a retired activation's successor after Resume, which admits edits 
     seen.push([
       o.host.isDocumentReady(o.document),
       o.f.storage.resolveCurrentLiveDocumentBinding({ document: o.document, actor }).kind,
+      note().state,
     ]);
     return complete.call(this, input);
   });
@@ -3120,7 +3124,8 @@ it("activates a retired activation's successor after Resume, which admits edits 
   });
   await o.host.update({ workspaces: [o.workspace], documents: [o.sibling], ...stay });
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
-  expect(seen).toEqual([[false, "refused"]]);
+  expect(seen).toEqual([[false, "refused", "starting"]]);
+  expect(note()).toMatchObject({ generation: 2, state: "live", changedBy: "server" });
   expect(o.client().captureOwnerActivation).toHaveBeenLastCalledWith(
     expect.anything(),
     "docs/a.md",
@@ -4455,6 +4460,7 @@ const replacementActivation = async (
     host,
     access,
     nativeState: { adoptionId: activationId, pendingBytes: 0 },
+    nowMs: Date.now(),
     guard() {},
   });
   o.otherActivations.set(activationId, capture);
@@ -6091,7 +6097,7 @@ async function reclaimedBlocked(
   // What the idle reclaim writes to the enrollment. The document has no activation, so it opens no retirement.
   o.raw
     .prepare(
-      "UPDATE sync_relay_service_host_enrollments SET enabled=0,retired=1,owner_demand=0,demand_at_ms=NULL WHERE workspace_id=? AND object_id=?",
+      "UPDATE sync_relay_service_host_enrollments SET enabled=0,retired=1,owner_demand=0,demand_at_ms=NULL,state='off',reason='access-ended' WHERE workspace_id=? AND object_id=?",
     )
     .run("workspace", o.sibling.objectId);
   if (whileDeparting) {
@@ -7643,7 +7649,7 @@ async function readyHostedHost(
       .run(`share-${workspaceId}`, workspaceId);
     raw
       .prepare(`INSERT INTO sync_relay_service_host_enrollments(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
-      created_at_ms,updated_at_ms,accounted_bytes) VALUES (?,'object','docs/note.md','person',?,'epoch','stream',1,0,0,1)`)
+      created_at_ms,updated_at_ms,accounted_bytes,generation,state,since_ms,changed_by) VALUES (?,'object','docs/note.md','person',?,'epoch','stream',1,0,0,1,1,'live',0,'server')`)
       .run(workspaceId, `share-${workspaceId}`);
     expect(f.storage.readServiceHostFeedScope(workspaceId)?.hosted.size).toBe(1);
   }

@@ -112,7 +112,11 @@ it("answers live_paused_by_owner for a Stopped document, and enrolls one retired
   const retired = await fixture();
   retired.storage.ensureOwnedLiveDocument({ intent: "share", ...retired.input });
   retired.revoke();
-  expect(retired.release()).toMatchObject({ retired: true, ownerStop: null });
+  expect(retired.release()).toMatchObject({
+    retired: true,
+    ownerStop: null,
+    note: { generation: 1, state: "off", reason: "access-ended" },
+  });
   const held = retired.agent("editor").open();
   await retired.holding(1, 1);
   expect(retired.read()).toMatchObject({
@@ -121,6 +125,7 @@ it("answers live_paused_by_owner for a Stopped document, and enrolls one retired
     ownerStop: null,
     ownerDemand: false,
     demandAtMs: 2_000,
+    note: { generation: 2, state: "starting", changedBy: "agent:connection-editor" },
   });
   retired.ready();
   retired.route.evaluateWaiting();
@@ -416,6 +421,7 @@ it("enrolls a document once when two agents open it at once, and gives both the 
   const responses = await Promise.all([first.open(), second.open()]);
   for (const response of responses) expect(await body(response, 200)).toEqual(ready);
   expect(f.storage.listServiceHostEnrollments()).toEqual([f.read()]);
+  expect(f.read()?.note.generation).toBe(1);
 });
 
 it("refuses an open at a renamed document's new path, and answers ready at the path it is enrolled at", async () => {
