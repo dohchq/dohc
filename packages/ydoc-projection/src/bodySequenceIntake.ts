@@ -139,9 +139,19 @@ function insideAPairTheNoteHolds(note: Y.Doc, client: number, clock: number): bo
 /** What can be told from the change alone and the note before it. */
 function fitsAsSent(note: Y.Doc, read: LiveUpdateAsRead): boolean {
   const seen = { nodes: 0 };
+  const insideAPair = (client: number, clock: number) =>
+    insideAPairTheNoteHolds(note, client, clock) ||
+    (read.insidePairs.get(client)?.includes(clock) ?? false);
   for (const struct of read.structs) {
-    if (struct instanceof Y.Skip || struct.length < 1) return false;
+    if (struct instanceof Y.Skip) return false;
+    const { client, clock } = struct.id;
+    if (insideAPair(client, clock) || insideAPair(client, clock + struct.length)) return false;
     if (!(struct instanceof Y.Item)) continue;
+    // Yjs cuts a letter run where an item is placed inside it, and writes U+FFFD for each half of
+    // a pair it cuts.
+    if (struct.origin && insideAPair(struct.origin.client, struct.origin.clock + 1)) return false;
+    if (struct.rightOrigin && insideAPair(struct.rightOrigin.client, struct.rightOrigin.clock))
+      return false;
     if (typeof struct.parent === "string" && !ROOTS.has(struct.parent)) return false;
     if (struct.parentSub !== null && !wellFormed(struct.parentSub)) return false;
     const content = struct.content;
@@ -153,13 +163,14 @@ function fitsAsSent(note: Y.Doc, read: LiveUpdateAsRead): boolean {
       const type = content.type as Stored;
       if (!plainType(type, Y.XmlElement) && !plainType(type, Y.Map) && !plainType(type, Y.Array))
         return false;
-    } else if (!(content instanceof Y.ContentString) && !(content instanceof Y.ContentDeleted))
-      return false;
+    } else if (content instanceof Y.ContentString) {
+      if (!wellFormed(content.str)) return false;
+    } else if (!(content instanceof Y.ContentDeleted)) return false;
   }
   return read.deletes.every(
     (range) =>
-      !insideAPairTheNoteHolds(note, range.clientId, range.startClock) &&
-      !insideAPairTheNoteHolds(note, range.clientId, range.endClock),
+      !insideAPair(range.clientId, range.startClock) &&
+      !insideAPair(range.clientId, range.endClock),
   );
 }
 
@@ -216,7 +227,6 @@ function fitsAsPlaced(
         (item.length === 1 && rules.metadata(key, { value: content.arr[0] as unknown }))
       );
     }
-    if (root !== undefined) return false;
     if (plainType(type, Y.XmlElement)) {
       if (roots.get(type._item?.parent) !== BODY_SEQUENCE_FIELD) return false;
       const name = (type as Y.XmlElement).nodeName;

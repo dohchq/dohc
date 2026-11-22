@@ -365,6 +365,10 @@ const KINDS: Record<string, unknown>[] = [
   { type: "paragraph" },
   { type: "heading", level: 2 },
   { type: "codeBlock", language: "ts" },
+  { type: "paragraph" },
+  { type: "horizontalRule" },
+  { type: "mathBlock", tex: "x^2" },
+  { type: "rawBlock", source: "<aside>kept as written</aside>" },
 ];
 const WRAPS = ["blockquote", "callout", "bulletList", "orderedList", "taskList"];
 const ITEMS_TO_INSERT: [string, Record<string, unknown>][] = [
@@ -590,6 +594,18 @@ export function updateOf(
       encoder.writeDsLen(length);
     }
   }
+  return encoder.toUint8Array();
+}
+
+/** An update that skips some of one editor's clocks and holds nothing else. */
+export function skipOf(client: number, clock: number, length: number): Uint8Array {
+  const encoder = new Y.UpdateEncoderV1();
+  encoding.writeVarUint(encoder.restEncoder, 1);
+  encoding.writeVarUint(encoder.restEncoder, 1);
+  encoder.writeClient(client);
+  encoding.writeVarUint(encoder.restEncoder, clock);
+  new Y.Skip(Y.createID(client, clock), length).write(encoder, 0);
+  encoding.writeVarUint(encoder.restEncoder, 0);
   return encoder.toUint8Array();
 }
 
