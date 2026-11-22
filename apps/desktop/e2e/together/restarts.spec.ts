@@ -33,8 +33,6 @@ async function typeWord(person: Person, ownLine: string, word: string): Promise<
   );
 }
 
-const canEdit = async (person: Person): Promise<boolean> => !(await person.sees()).stopped;
-
 test("the relay is killed and started again while two people type", async ({ stack }) => {
   const note = await stack.shareNote("note.md", NOTE);
   const one = await openPerson(stack.browser, note, "the first person");
@@ -63,20 +61,25 @@ test("the relay is killed and started again while two people type", async ({ sta
   await expect(one.page.getByText("Saving changes", { exact: false }).first()).toBeVisible();
   await stack.killRelay();
   one.release();
+
+  // Both people keep typing while the relay is gone. Each page takes the words and says they are
+  // only in that tab so far.
+  await both("DURING");
   for (const person of [one, two])
-    await expect
-      .poll(() => canEdit(person), { message: `${person.name} was never told` })
-      .toBe(false);
+    await expect(
+      person.page.getByText("Not sent yet. Your changes are only in this tab.", { exact: true }),
+      `${person.name} was never told`,
+    ).toBeVisible();
   await stack.startRelay();
 
-  // Each page comes back by itself, and each person's next word reaches the other.
+  // Each page comes back by itself and sends what was typed, and each person's next word reaches the other.
   for (const person of [one, two])
-    await expect
-      .poll(() => canEdit(person), {
-        message: `${person.name}'s page did not come back`,
-        timeout: 90_000,
-      })
-      .toBe(true);
+    await expect(
+      person.page.getByText("Changes saved", { exact: true }),
+      `${person.name}'s page did not come back`,
+    ).toBeVisible({ timeout: 90_000 });
+  await expect(editor(one.page)).toContainText("TWODURING", { timeout: 60_000 });
+  await expect(editor(two.page)).toContainText("ONEDURING", { timeout: 60_000 });
   // Neither person clicks into the note again: their next word goes where they left off.
   for (const [person, word] of [
     [one, "ONEAFTER"],
