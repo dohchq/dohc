@@ -680,6 +680,35 @@ describe("useAccessRuleHoldNotices", () => {
     expect(failed()).toBeUndefined();
   });
 
+  it("drops the failure once the program lets go of the rule", async () => {
+    const h = harness([WIDENED]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    h.bridge.decideAccessRule.mockRejectedValueOnce(
+      new Error(
+        "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [OVERLOADED]: file-locked",
+      ),
+    );
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    const failed = () =>
+      h
+        .errors()
+        .shellErrors.find(
+          (error) => error.title === "dohc could not restore the access rule for team",
+        );
+    await waitFor(() => expect(failed()).toBeDefined());
+
+    // While the program has the file open, the failure's words still hold.
+    h.list([{ ...WIDENED, unreadable: "locked" }]);
+    await waitFor(() =>
+      expect(h.row("team")?.title).toBe("dohc could not read the access rule for team"),
+    );
+    expect(failed()).toBeDefined();
+
+    h.list([WIDENED]);
+    await waitFor(() => expect(failed()).toBeUndefined());
+    expect(h.row("team")).toBeDefined();
+  });
+
   // The shell's status can trail the decision, so the row stops reading as
   // working when the decision lands, also after Try again.
   it("stops reading as working when the decision lands, before the list follows", async () => {

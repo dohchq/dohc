@@ -1070,6 +1070,12 @@ export function isAccessRuleChangedRefusal(error: unknown): boolean {
   );
 }
 
+/** Another program had the file open, so the engine could not write it. */
+export function isFileLockedError(error: unknown): boolean {
+  const { name, message } = parse(error);
+  return name === "DaemonRefusalError" && message === "file-locked";
+}
+
 /** The hold was decided already, or its Version is no longer active. The list that follows drops its Notice. */
 export function isAccessRuleNotHeldRefusal(error: unknown): boolean {
   const { name, code, message } = parse(error);

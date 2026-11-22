@@ -4,6 +4,7 @@ import {
   heldOuterAccessRuleFolder,
   isAccessRuleChangedRefusal,
   isAccessRuleNotHeldRefusal,
+  isFileLockedError,
   readError,
 } from "../../ipc/errorWords";
 import type { NoticeTarget } from "../../notices/noticeTarget";
@@ -288,10 +289,15 @@ export function useAccessRuleHoldNotices(
   // Each hold whose choice didn't run because the level changed, until the
   // owner chooses again.
   const levelMoved = useRef(new Map<string, { held: string; why: LevelMove }>());
+  // Each hold whose choice failed because another program had its rule file
+  // open, and whether the list has shown the file held since. Once the
+  // program lets go, the failure's words are no longer true, so it goes.
+  const lockFailed = useRef(new Map<string, boolean>());
   useEffect(() => {
     shown.current = new Map();
     waitingOn.current = new Map();
     levelMoved.current = new Map();
+    lockFailed.current = new Map();
   }, [workspaceId]);
   const latest = useRef(input);
   latest.current = input;
@@ -477,7 +483,10 @@ export function useAccessRuleHoldNotices(
         expectedSha256: hold.observedSha256,
         expectedReason: hold.reason,
       })
-      .finally(() => running.current.delete(identity))
+      .finally(() => {
+        running.current.delete(identity);
+        lockFailed.current.delete(identity);
+      })
       .then(
         (decided) => {
           if (currentWorkspace.current !== asked) return;
@@ -540,6 +549,10 @@ export function useAccessRuleHoldNotices(
           }
           const place = placeOf(hold.folder);
           const refused = refusalWords(error);
+          if (isFileLockedError(error)) {
+            const now = latest.current.holds?.find((held) => identityOf(held) === identity);
+            lockFailed.current.set(identity, now?.unreadable === "locked");
+          }
           // It shares the outcome's identity, so a later choice that works
           // replaces it.
           latest.current.reportShellFailure({
@@ -570,6 +583,7 @@ export function useAccessRuleHoldNotices(
     for (const identity of shown.current.keys()) {
       if (listed.has(identity)) continue;
       shown.current.delete(identity);
+      lockFailed.current.delete(identity);
       clearIdentity(identity);
       clearIdentity(waitsOf(identity));
       // A choice that waited for this folder waits for nothing now.
@@ -582,6 +596,13 @@ export function useAccessRuleHoldNotices(
     // Notices lists the newest first, so the outer folder files last.
     for (const hold of [...holds].sort((a, b) => depth(b.folder) - depth(a.folder))) {
       const identity = identityOf(hold);
+      const sawLocked = lockFailed.current.get(identity);
+      if (sawLocked !== undefined && hold.unreadable === "locked")
+        lockFailed.current.set(identity, true);
+      else if (sawLocked) {
+        lockFailed.current.delete(identity);
+        clearIdentity(decidedOf(identity));
+      }
       if (level === undefined && usesMemberLevel(hold)) continue;
       const was = shown.current.get(identity);
       const next = { judged: judgedKey(hold), content: shownContent(hold, level ?? null) };
