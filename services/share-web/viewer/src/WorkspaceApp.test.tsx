@@ -165,6 +165,8 @@ function server(
     older?: Record<string, unknown[]>;
     postFails?: { status: number; code: string };
     openHeld?: boolean;
+    // Holds a read of the log that asks for no wait too, so a test can see what each read asked for.
+    holdLogs?: boolean;
     user?: string;
     signOutFails?: boolean;
     // The only account the grant belongs to. Another account's reads are refused.
@@ -285,7 +287,7 @@ function server(
         return jsonResponse(meta());
       }
       if (url.pathname === "/api/view/log")
-        return url.searchParams.has("hold")
+        return url.searchParams.has("hold") || options.holdLogs
           ? hold("log", url, signal)
           : options.catchUpFails
             ? jsonResponse({ ok: false, error: "not found" }, 404)
@@ -1462,9 +1464,12 @@ it("keeps the unsent text when Try again opens the page again", async () => {
 // Item 3: the files never go out of date without a sign.
 it("marks the files as possibly out of date while their reads fail, raises a toast with Try again and copy, and clears both once they catch up", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  server({ level: "comment" });
+  const options: NonNullable<Parameters<typeof server>[0]> = { level: "comment" };
+  server(options);
   await render();
   await opened();
+  options.holdLogs = true;
+  const asksToWait = () => following("log")[0]!.url.searchParams.has("hold");
   const dated = () => container.querySelector<HTMLElement>("header .workspace-dated");
   const toast = () =>
     [...container.querySelectorAll<HTMLElement>(".workspace-toast")].find((node) =>
@@ -1473,6 +1478,8 @@ it("marks the files as possibly out of date while their reads fail, raises a toa
   expect(dated()).toBeNull();
   for (const [index, wait] of [1000, 2000, 4000].entries()) {
     await settle(() => following("log").length === 1);
+    // After a failure, the next read asks the server to answer at once, so a recovery shows at once.
+    expect(asksToWait()).toBe(index === 0);
     await act(async () => following("log")[0]!.answer({ ok: false, error: "unavailable" }, 500));
     await settle(() => dated() !== null);
     // The last files that arrived stay readable, marked in the desktop's words.
@@ -1494,10 +1501,14 @@ it("marks the files as possibly out of date while their reads fail, raises a toa
       .click(),
   );
   await settle(() => following("log").length === 1);
+  expect(asksToWait()).toBe(false);
   await act(async () =>
     following("log")[0]!.answer({ ops: [], nextCursor: 8, hasMore: false, epochLogFloor: 0 }),
   );
   await settle(() => dated() === null && toast() === undefined);
+  // Caught up, the page waits on the server for changes again.
+  await settle(() => following("log").length === 1);
+  expect(asksToWait()).toBe(true);
 });
 
 // Item 5: another account signed in on the same tab sees none of the first one's unsent work.
