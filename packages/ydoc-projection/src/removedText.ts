@@ -39,9 +39,9 @@ interface Piece {
  * when the merge deleted text. `keep` limits the report, for example to this
  * page's own text.
  *
- * With `moved`, the report leaves out text of the page's own that `moved.repair` is planned
- * to type again where its line went. The caller then calls `moved.repair`, and tells the person
- * of what that returns too.
+ * With `moved`, the page types its own words again where someone else's join took their line,
+ * as a change of its own once the update is in, and the report leaves those words out. When
+ * the page may not edit by then, or a place is gone, the report is the same as without `moved`.
  */
 export function applyUpdateFindingRemovedText(
   doc: Y.Doc,
@@ -49,22 +49,29 @@ export function applyUpdateFindingRemovedText(
   origin: unknown,
   named: () => DeleteSet,
   keep: (item: Y.Item) => boolean,
-  moved?: MovedText,
+  moved?: { follower: MovedText; mayEdit: () => boolean },
 ): RemovedText | null {
   // A delete that arrived before the text it names waits here and is applied with this update.
   const waiting = doc.store.pendingDs;
   let removed: RemovedText | null = null;
+  let removedBesidesPutBack: RemovedText | null = null;
   const look = (transaction: Y.Transaction) => {
-    if (transaction.origin !== origin) return;
+    if (transaction.origin !== origin || transaction.deleteSet.clients.size === 0) return;
     // Merging also sorts each client's ranges, which `unnamed` relies on; an
     // update's own list can arrive in any order.
     let merged: DeleteSet | undefined;
     const listed = () =>
       (merged ??= Y.mergeDeleteSets(waiting ? [named(), Y.decodeUpdateV2(waiting).ds] : [named()]));
-    const putBack =
-      moved && named().clients.size > 0 ? moved.follow(transaction, listed(), keep) : undefined;
-    if (transaction.deleteSet.clients.size === 0) return;
-    removed = findRemovedText(transaction, listed, keep, putBack);
+    removed = findRemovedText(transaction, listed, keep);
+    removedBesidesPutBack =
+      moved && removed
+        ? findRemovedText(
+            transaction,
+            listed,
+            keep,
+            moved.follower.follow(transaction, listed(), keep),
+          )
+        : removed;
   };
   // Read inside the transaction: a doc with gc on drops deleted content right after it.
   doc.on("afterTransaction", look);
@@ -73,7 +80,7 @@ export function applyUpdateFindingRemovedText(
   } finally {
     doc.off("afterTransaction", look);
   }
-  return removed;
+  return moved?.follower.repair(doc, moved.mayEdit()) ? removedBesidesPutBack : removed;
 }
 
 function findRemovedText(

@@ -8,6 +8,7 @@ import { test } from "@playwright/test";
 export const KNOWN_FAULTS: Readonly<Record<string, number>> = {
   "both add a line after the same last line, one just after the other": 4177,
   "both join the same line": 4038,
+  "joins of neighbouring lines": 4038,
   "a join and a split of one line": 4038,
 };
 

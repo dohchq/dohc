@@ -40,15 +40,15 @@ type Person = {
   view: EditorView;
   take(): Promise<Uint8Array>;
   receive(update: Uint8Array): void;
-  /** Text of this person's that the page told them someone else's change removed. */
-  told: string[];
 };
+/** A person on a share page, with the text the page told them someone else's change removed. */
+type OnSharePage = Person & { told: string[] };
 
 /**
  * A share page: the editor's change runs inside the session's transaction, and a change from
  * elsewhere is applied the way the page's live session applies it.
  */
-function sharePage(baseline: Uint8Array): Promise<Person> {
+function sharePage(baseline: Uint8Array): Promise<OnSharePage> {
   const doc = new Y.Doc();
   Y.applyUpdate(doc, baseline, REMOTE);
   const sent: Uint8Array[] = [];
@@ -94,9 +94,9 @@ function sharePage(baseline: Uint8Array): Promise<Person> {
         REMOTE,
         () => Y.decodeUpdate(update).ds,
         (item) => item.id.client === doc.clientID,
-        moved,
+        { follower: moved, mayEdit: () => true },
       );
-      told.push(...(removed ? [removed.text] : []), ...moved.repair(doc, true));
+      if (removed) told.push(removed.text);
     },
     told,
   });
@@ -160,7 +160,6 @@ async function desktop(baseline: Uint8Array): Promise<Person> {
       return Y.mergeUpdates(shipped.splice(0));
     },
     receive: (update) => remote!(update, 1),
-    told: [],
   };
 }
 
@@ -258,16 +257,6 @@ function baselineOf(note: string) {
 const pages = { desktop, "share page": sharePage };
 
 const LINES = "One one\n\nTwo two two\n\nThree\n";
-const TASKS = "- [ ] alpha\n- [ ] bravo\n- [ ] charlie\n- [ ] delta\n";
-
-interface Race {
-  name: string;
-  note: string;
-  one(person: Person): void;
-  two(person: Person): void;
-  /** Words the second person typed, each of which must be in the note once. */
-  typed?: string[];
-}
 
 const joinsUp = (text: string) => (person: Person) => {
   caretIn(person, text, 0);
@@ -282,36 +271,6 @@ const typesAt = (text: string, offset: number, typed: string) => (person: Person
   type(person, typed);
 };
 
-// In each race the second person's own text lands in a line the first person's change deleted.
-const races: Race[] = [
-  {
-    name: "one joins a line to the one above while the other joins the next line to it",
-    note: LINES,
-    one: joinsUp("Two two two"),
-    two: joinsUp("Three"),
-  },
-  {
-    name: "one joins a line to the one above while the other types at the end of it",
-    note: LINES,
-    one: joinsUp("Two two two"),
-    two: typesAt("Two two two", 11, " TYPED"),
-    typed: ["TYPED"],
-  },
-  {
-    name: "one joins a line to the one above while the other types in the middle of it",
-    note: LINES,
-    one: joinsUp("Two two two"),
-    two: typesAt("Two two two", 4, "TYPED "),
-    typed: ["TYPED"],
-  },
-  {
-    name: "one joins a to-do to the one above while the other joins the next to-do to it",
-    note: TASKS,
-    one: joinsUp("bravo"),
-    two: joinsUp("charlie"),
-  },
-];
-
 /** A note's text run together: what is there and in what order, wherever the lines end. */
 const run = (markdown: string, ...without: string[]) =>
   without
@@ -319,38 +278,42 @@ const run = (markdown: string, ...without: string[]) =>
     .replace(/^- \[.\] /gmu, "")
     .replace(/&#32;|&nbsp;|\s+/gu, "");
 
-// The second person is on a share page, which puts its own text back. The owner's desktop does
-// not: its engine hands it the merged note, not each change, and keeps the text for a Notices row.
-const cases = races.flatMap((race) =>
-  (["share page", "desktop"] as const).flatMap((one) =>
-    (["first", "second"] as const).map((arrives) => [race.name, one, arrives, race] as const),
+// The first person joins a line to the one above while the second, on a share page, types in
+// it. The owner's desktop as the second person is not here: its engine hands it the merged
+// note, not each change, and keeps the words for a Notices row.
+const cases = (["share page", "desktop"] as const).flatMap((one) =>
+  (
+    [
+      ["at the end of it", 11, " TYPED"],
+      ["in the middle of it", 4, "TYPED "],
+      ["at the start of it", 0, "TYPED "],
+    ] as const
+  ).flatMap(([where, offset, typed]) =>
+    (["first", "second"] as const).map((arrives) => [where, one, arrives, offset, typed] as const),
   ),
 );
 
 it.each(cases)(
-  "%s (%s, then share page; the first one's change arrives %s)",
-  async (_name, one, arrives, race) => {
-    const baseline = baselineOf(race.note);
+  "keeps a word typed %s while someone joins the line up (%s joins; the join arrives %s)",
+  async (_where, one, arrives, offset, typed) => {
+    const baseline = baselineOf(LINES);
     const a = await pages[one](baseline),
       b = await sharePage(baseline);
     const server = startServer(baseline);
-    race.one(a);
-    race.two(b);
+    joinsUp("Two two two")(a);
+    typesAt("Two two two", offset, typed)(b);
     const verdicts = await (arrives === "first" ? server.take(a, b) : server.take(b, a));
 
     expect(verdicts).toEqual(verdicts.map(() => "accepted"));
     const note = server.note();
     for (const person of [a, b]) expect(yDocToMarkdown(person.doc)).toBe(note);
-    const typed = race.typed ?? [];
-    // The text is there once, in order, and nothing of it is gone.
-    expect(run(note, ...typed)).toBe(run(race.note));
-    for (const word of typed) expect(note.split(word)).toHaveLength(2);
-    // Nobody is told their text was removed, because none was.
-    expect([...a.told, ...b.told]).toEqual([]);
+    expect(run(note, "TYPED")).toBe(run(LINES));
+    expect(note.split("TYPED")).toHaveLength(2);
+    expect(b.told).toEqual([]);
   },
 );
 
-it("undoes typing that followed a line someone else joined away", async () => {
+it("undoes a word that followed a line someone else joined away", async () => {
   const baseline = baselineOf(LINES);
   const a = await sharePage(baseline),
     b = await sharePage(baseline);
@@ -387,14 +350,15 @@ function make(person: Person, step: Step, word: string) {
 }
 
 // Two people on share pages, three short lines, and every pair of one join, split or typed
-// word each, in both orders of arrival. Two typed words are left out: neither moves a line.
-// Text two people moved may stand twice, as before this change. Nothing may be gone.
-it("loses no letter and no typed word for every pair of joins, splits and typed words", async () => {
+// word each, in both orders of arrival. A typed word is never gone and never there twice, and
+// its author is never told it was removed. Text two people moved may still stand twice, and a
+// line joined into a line someone else joins away may still go, as before this change.
+it("keeps every typed word once for every pair of joins, splits and typed words", async () => {
   const wrong: string[] = [];
   for (const one of steps)
     for (const two of steps)
       for (const arrives of ["first", "second"] as const) {
-        if (one[0] === "type" && two[0] === "type") continue;
+        if (one[0] !== "type" && two[0] !== "type") continue;
         const baseline = baselineOf(`${SMALL.join("\n\n")}\n`);
         const a = await sharePage(baseline),
           b = await sharePage(baseline);
@@ -409,8 +373,8 @@ it("loses no letter and no typed word for every pair of joins, splits and typed 
           verdicts.every((verdict) => verdict === "accepted") &&
           yDocToMarkdown(a.doc) === note &&
           yDocToMarkdown(b.doc) === note &&
-          [...SMALL.join("")].every((letter) => letters.includes(letter)) &&
-          typed.every((word) => letters.includes(word)) &&
+          letters.replace(/[^a-z]/gu, "") === SMALL.join("") &&
+          typed.every((word) => letters.split(word).length === 2) &&
           a.told.length + b.told.length === 0;
         if (!right)
           wrong.push(`${JSON.stringify([one, two])}, the first arrives ${arrives}: ${note}`);

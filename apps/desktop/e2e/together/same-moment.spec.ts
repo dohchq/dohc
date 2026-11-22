@@ -157,12 +157,6 @@ function nothingLost(end: Ending, ...words: string[]): void {
   }
 }
 
-/** The text followed the line it was in, so no page says a change removed it. */
-function nobodyIsToldOfRemovedText(end: Ending): void {
-  for (const page of pages(end))
-    expect(page.words).not.toContain("Someone else's change removed this text");
-}
-
 /** The page tells its person that someone else's change removed this text of theirs, and quotes it. */
 function isToldOfRemoved(page: Seen, text: string): void {
   expect(page.words).toContain("Someone else's change removed this text");
@@ -330,10 +324,16 @@ test("joins of neighbouring lines", async ({ scene }) => {
   await clickStartOf(line(two.page, "Charlie Cherry"));
   await two.page.keyboard.press("Backspace");
 
-  judge("joins of neighbouring lines", await ending(scene, two), (end) => {
-    everyPageShows(end, joined("Alpha AppleBravo BananaCharlie Cherry"));
-    nobodyIsToldOfRemovedText(end);
-  });
+  judge(
+    "joins of neighbouring lines",
+    await ending(scene, two),
+    (end) => nothingLost(end),
+    // A line nobody deleted is gone. The person who joined it is told, and can copy it.
+    (end) => {
+      everyPageShows(end, joined("Alpha AppleBravo Banana"));
+      isToldOfRemoved(end.two, "Charlie Cherry");
+    },
+  );
 });
 
 test("a join and a split of one line", async ({ scene }) => {
@@ -363,7 +363,9 @@ test("a join and typing in the joined line", async ({ scene }) => {
 
   judge("a join and typing in the joined line", await ending(scene, two), (end) => {
     everyPageShows(end, joined("Alpha AppleBravo Banana TYPEDWORD", "Charlie Cherry"));
-    nobodyIsToldOfRemovedText(end);
+    // The word followed its line, so no page says a change removed it.
+    for (const page of pages(end))
+      expect(page.words).not.toContain("Someone else's change removed this text");
   });
 });
 

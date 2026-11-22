@@ -3,7 +3,7 @@ import * as Y from "yjs";
 type DeleteSet = ReturnType<typeof Y.decodeUpdate>["ds"];
 
 /**
- * The origin of the change that types a person's text again where its line went. An editor
+ * The origin of the change that types a person's words again where their line went. An editor
  * adds it to the origins its undo tracks, so undo still takes that typing out.
  */
 export const PUT_BACK_ORIGIN = Symbol("dohc.movedText.putBack");
@@ -14,29 +14,16 @@ interface Span {
   readonly length: number;
 }
 
-interface Move {
-  readonly source: readonly Span[];
-  copy: readonly Span[];
-  readonly text: string;
-}
-
 interface WrittenText {
   readonly text: string;
   readonly spans: readonly Span[];
 }
 
-interface TextLeftInLine {
+interface TypedInLine {
   readonly item: Y.Item;
   readonly start: number;
   readonly end: number;
-  readonly sourceOffset: number;
-}
-
-interface MovedLine {
-  readonly move: Move;
-  readonly line: Y.XmlText;
-  readonly lineIsGone: boolean;
-  readonly neverSeenByAuthor: TextLeftInLine[];
+  readonly charactersOfLineBefore: number;
 }
 
 interface PutBack {
@@ -45,7 +32,7 @@ interface PutBack {
   readonly after: boolean;
 }
 
-const MOVES_REMEMBERED = 256;
+const TYPED_SPANS_REMEMBERED = 4096;
 
 function slice(spans: readonly Span[], from: number, to: number): Span[] {
   const part: Span[] = [];
@@ -67,34 +54,11 @@ function add(spans: Span[], client: number, clock: number, length: number): void
   else spans.push({ client, clock, length });
 }
 
-function offsetIn(spans: readonly Span[], client: number, clock: number, length: number): number {
-  let at = 0;
-  for (const span of spans) {
-    if (span.client === client && span.clock <= clock && clock + length <= span.clock + span.length)
-      return at + clock - span.clock;
-    at += span.length;
-  }
-  return -1;
-}
-
-function offsetsListed(spans: readonly Span[], named: DeleteSet): [number, number][] {
-  const stretches: [number, number][] = [];
-  let at = 0;
-  for (const span of spans) {
-    for (const range of named.clients.get(span.client) ?? []) {
-      const start = Math.max(span.clock, range.clock),
-        end = Math.min(span.clock + span.length, range.clock + range.len);
-      if (start >= end) continue;
-      const from = at + start - span.clock,
-        to = at + end - span.clock;
-      const last = stretches.at(-1);
-      if (last && last[1] === from) last[1] = to;
-      else stretches.push([from, to]);
-    }
-    at += span.length;
-  }
-  return stretches;
-}
+const holds = (spans: readonly Span[], client: number, clock: number, length: number) =>
+  spans.some(
+    (span) =>
+      span.client === client && span.clock <= clock && clock + length <= span.clock + span.length,
+  );
 
 function partsByListing(item: Y.Item, named: DeleteSet): [number, number, boolean][] {
   const from = item.id.clock,
@@ -124,20 +88,27 @@ function itemAt(doc: Y.Doc, client: number, clock: number): Y.Item | null {
   return struct instanceof Y.Item ? struct : null;
 }
 
-function linesOf(doc: Y.Doc, spans: readonly Span[]): (Y.XmlText | null)[] {
-  const lines: (Y.XmlText | null)[] = [];
-  for (const span of spans)
-    for (let clock = span.clock; clock < span.clock + span.length;) {
-      const item = itemAt(doc, span.client, clock);
-      lines.push(item && !item.deleted && item.parent instanceof Y.XmlText ? item.parent : null);
-      if (!item) break;
-      clock = item.id.clock + item.length;
-    }
-  return lines;
-}
+const standsInNote = (line: unknown): line is Y.XmlText =>
+  line instanceof Y.XmlText && line._item !== null && !line._item.deleted;
 
-const standsInNote = (line: Y.XmlText | null): line is Y.XmlText =>
-  line !== null && line._item !== null && !line._item.deleted;
+function* stringItemsWrittenBy(
+  transaction: Y.Transaction,
+): Generator<{ item: Y.Item | null; client: number; from: number }> {
+  for (const [client, to] of transaction.afterState) {
+    const from = transaction.beforeState.get(client) ?? 0;
+    if (from >= to) continue;
+    const structs = transaction.doc.store.clients.get(client)!;
+    for (let index = Y.findIndexSS(structs, from); index < structs.length; index++) {
+      const struct = structs[index]!;
+      if (struct instanceof Y.Item && struct.content instanceof Y.ContentFormat) continue;
+      const text =
+        struct instanceof Y.Item &&
+        struct.content instanceof Y.ContentString &&
+        struct.parent instanceof Y.XmlText;
+      yield { item: text ? struct : null, client, from };
+    }
+  }
+}
 
 /**
  * The text a change wrote, one entry for each run its author wrote into one line. Yjs keeps
@@ -145,48 +116,59 @@ const standsInNote = (line: Y.XmlText | null): line is Y.XmlText =>
  */
 function writesOf(transaction: Y.Transaction): WrittenText[] {
   const writes: WrittenText[] = [];
-  for (const [client, to] of transaction.afterState) {
-    const from = transaction.beforeState.get(client) ?? 0;
-    if (from >= to) continue;
-    const structs = transaction.doc.store.clients.get(client)!;
-    let open = null as { line: Y.XmlText; text: string; spans: Span[] } | null;
-    for (let index = Y.findIndexSS(structs, from); index < structs.length; index++) {
-      const item = structs[index]!;
-      if (item instanceof Y.Item && item.content instanceof Y.ContentFormat) continue;
-      if (
-        !(item instanceof Y.Item) ||
-        !(item.content instanceof Y.ContentString) ||
-        !(item.parent instanceof Y.XmlText)
-      ) {
-        open = null;
-        continue;
-      }
-      if (open?.line !== item.parent) {
-        open = { line: item.parent, text: "", spans: [] };
-        writes.push(open);
-      }
-      const skipped = Math.max(0, from - item.id.clock);
-      open.text += item.content.str.slice(skipped);
-      add(open.spans, client, item.id.clock + skipped, item.length - skipped);
+  let open = null as { line: Y.XmlText; client: number; text: string; spans: Span[] } | null;
+  for (const { item, client, from } of stringItemsWrittenBy(transaction)) {
+    if (item === null) {
+      open = null;
+      continue;
     }
+    if (open?.line !== item.parent || open.client !== client) {
+      open = { line: item.parent as Y.XmlText, client, text: "", spans: [] };
+      writes.push(open);
+    }
+    const skipped = Math.max(0, from - item.id.clock);
+    open.text += (item.content as Y.ContentString).str.slice(skipped);
+    add(open.spans, client, item.id.clock + skipped, item.length - skipped);
   }
   return writes;
 }
 
-function onlyPlaceOf(
+/** Whether the characters stand in the note side by side and in this order, in one line. */
+function standTogether(doc: Y.Doc, spans: readonly Span[]): boolean {
+  let expected: Y.Item | null = null,
+    offset = 0;
+  for (const span of spans)
+    for (let clock = span.clock; clock < span.clock + span.length;) {
+      const item = itemAt(doc, span.client, clock);
+      if (!item || item.deleted || !standsInNote(item.parent)) return false;
+      const within = clock - item.id.clock;
+      if (expected !== null && (item !== expected || within !== offset)) return false;
+      const length = Math.min(span.clock + span.length - clock, item.length - within);
+      clock += length;
+      offset = within + length;
+      expected = item;
+      if (offset === item.length) {
+        expected = item.right;
+        while (expected && (expected.deleted || expected.content instanceof Y.ContentFormat))
+          expected = expected.right;
+        offset = 0;
+      }
+    }
+  return true;
+}
+
+function onlyCopyOf(
+  doc: Y.Doc,
   text: string,
   writes: readonly WrittenText[],
-  fits: (spans: readonly Span[]) => boolean,
 ): readonly Span[] | null {
   let place: readonly Span[] | null = null;
   for (const write of writes)
     for (let at = write.text.indexOf(text); at >= 0; at = write.text.indexOf(text, at + 1)) {
-      const candidate = slice(write.spans, at, at + text.length);
-      if (!fits(candidate)) continue;
       if (place !== null) return null;
-      place = candidate;
+      place = slice(write.spans, at, at + text.length);
     }
-  return place;
+  return place !== null && standTogether(doc, place) ? place : null;
 }
 
 function charactersShownBefore(item: Y.Item): number {
@@ -196,262 +178,141 @@ function charactersShownBefore(item: Y.Item): number {
   return count;
 }
 
-function carriedOn(
-  spans: readonly Span[],
-  from: readonly Span[],
-  to: readonly Span[],
-): readonly Span[] {
-  const next: Span[] = [];
-  let changed = false;
-  for (const span of spans) {
-    const end = span.clock + span.length;
-    for (let cursor = span.clock; cursor < end;) {
-      let stop = end,
-        offset = -1,
-        at = 0;
-      for (const piece of from) {
-        if (piece.client === span.client) {
-          if (piece.clock <= cursor && cursor < piece.clock + piece.length) {
-            offset = at + cursor - piece.clock;
-            stop = Math.min(end, piece.clock + piece.length);
-            break;
-          }
-          if (piece.clock > cursor) stop = Math.min(stop, piece.clock);
-        }
-        at += piece.length;
-      }
-      if (offset < 0) add(next, span.client, cursor, stop - cursor);
-      else {
-        changed = true;
-        for (const moved of slice(to, offset, offset + stop - cursor))
-          add(next, moved.client, moved.clock, moved.length);
-      }
-      cursor = stop;
-    }
-  }
-  return changed ? next : spans;
-}
-
-function movedLineBefore(line: Y.XmlText, moved: readonly MovedLine[]): MovedLine | undefined {
-  const block = line._item?.parent;
-  if (!(block instanceof Y.XmlElement)) return undefined;
-  for (let left = block._item?.left ?? null; left !== null; left = left.left) {
-    const content = left.content;
-    if (!(content instanceof Y.ContentType) || !(content.type instanceof Y.XmlElement)) continue;
-    let last: MovedLine | undefined;
-    for (let child = content.type._start; child !== null; child = child.right) {
-      const text = child.content instanceof Y.ContentType ? child.content.type : null;
-      last = moved.find((entry) => entry.line === text) ?? last;
-    }
-    if (last) return last;
-  }
-  return undefined;
-}
-
 /**
- * Keeps a person's text when someone else joins or rebuilds the line it is in at the same
- * moment (#4038). Yjs cannot move text, so an editor writes such a change as a delete of the
- * line and a fresh copy of its text, and what the other person just wrote into the line goes
- * with the delete.
+ * Keeps the words a person typed into a line that someone else joins to another at the same
+ * moment (#4038). Yjs cannot move text, so an editor writes a join as a delete of the line and
+ * a fresh copy of its text, and words the other person just typed into the line go with the
+ * delete.
  *
- * The page reads a move in a change from elsewhere: a deleted line whose text stands once in
- * what the same change wrote. It then plans to type its own text from that line again at the
- * same place in the copy. It never deletes anything, so it cannot remove text from the note.
- * Text it cannot place stays removed, and the caller tells the person.
+ * The page reads a join in a change from elsewhere: a deleted line whose text stands once, side
+ * by side, in what the same change wrote. It then types its own words from that line again at
+ * the same place in the copy. It does this only for words the person typed and nobody else has
+ * had. Text the page wrote in a change that also deleted text, such as a line it joined itself,
+ * may be a copy that others hold too, so that is left removed, as is anything the page cannot
+ * place. The page never deletes.
  */
 export class MovedText {
-  private readonly ownMoves: Move[] = [];
+  private typed: Span[] = [];
   private planned: PutBack[] = [];
 
-  /** Reads a change this page made. Call from `afterTransaction`: Yjs then drops deleted content. */
+  /** Reads a change this page made. Call from `afterTransaction`. */
   note(transaction: Y.Transaction): void {
-    if (transaction.deleteSet.clients.size === 0) return;
-    const writes = writesOf(transaction);
-    if (writes.length === 0) return;
-    for (const { move } of this.movedLinesIn(transaction, transaction.deleteSet, writes).moved) {
-      for (const known of this.ownMoves) known.copy = carriedOn(known.copy, move.source, move.copy);
-      this.ownMoves.push(move);
-      if (this.ownMoves.length > MOVES_REMEMBERED) this.ownMoves.shift();
+    if (transaction.deleteSet.clients.size > 0) return;
+    for (const { item, client, from } of stringItemsWrittenBy(transaction)) {
+      if (item === null) continue;
+      const skipped = Math.max(0, from - item.id.clock);
+      add(this.typed, client, item.id.clock + skipped, item.length - skipped);
     }
+    if (this.typed.length > TYPED_SPANS_REMEMBERED)
+      this.typed = this.typed.slice(-TYPED_SPANS_REMEMBERED);
   }
 
   /**
-   * Reads a change from elsewhere inside its transaction and plans what `repair` types again.
-   * `named` is the change's own delete set, merged. Returns which of the page's removed text is
-   * still in the note or planned to be: the caller leaves it out of what it tells the person.
+   * Reads a change from elsewhere inside its transaction, before Yjs drops deleted content, and
+   * plans what `repair` types again. `named` is the change's own delete set, merged, and `own`
+   * tells this page's text from other people's. Returns which removed text is planned.
    */
   follow(
     transaction: Y.Transaction,
     named: DeleteSet,
     own: (item: Y.Item) => boolean,
   ): (item: Y.Item, start: number, end: number) => boolean {
-    const kept: TextLeftInLine[] = [];
-    const isKept = (item: Y.Item, start: number, end: number) =>
-      kept.some((text) => text.item === item && text.start <= start && end <= text.end);
-    if (named.clients.size === 0) return isKept;
-    const writes = writesOf(transaction);
-    if (writes.length === 0) return isKept;
-    const doc = transaction.doc;
-    const { moved, linesAuthorNeverSaw } = this.movedLinesIn(transaction, named, writes);
-
-    const ownCopiesTheAuthorAlsoWrote: Span[] = [];
-    for (const known of this.ownMoves)
-      for (const [from, to] of offsetsListed(known.source, named)) {
-        const copy = onlyPlaceOf(known.text.slice(from, to), writes, () => true);
-        if (copy !== null && linesOf(doc, copy).every(standsInNote))
-          ownCopiesTheAuthorAlsoWrote.push(...slice(known.copy, from, to));
-      }
-    const authorWroteItToo = ({ item, start, end }: TextLeftInLine) =>
-      offsetIn(ownCopiesTheAuthorAlsoWrote, item.id.client, item.id.clock + start, end - start) >=
-      0;
-
-    for (const { line, texts } of linesAuthorNeverSaw) {
-      const home = movedLineBefore(line, moved);
-      if (!home) continue;
-      for (const text of texts)
-        home.neverSeenByAuthor.push({ ...text, sourceOffset: home.move.text.length });
-    }
-
-    for (const { move, lineIsGone, neverSeenByAuthor } of moved) {
-      if (!lineIsGone) continue;
-      const mine = neverSeenByAuthor.filter(({ item }) => own(item));
-      kept.push(...mine.filter(authorWroteItToo));
-      const typedByOffset = new Map<number, string>();
-      for (const left of mine.filter((text) => !authorWroteItToo(text))) {
-        const { sourceOffset } = left;
-        const beside = slice(move.copy, Math.max(0, sourceOffset - 1), Math.max(1, sourceOffset));
-        if (!linesOf(doc, beside).every(standsInNote)) continue;
-        kept.push(left);
-        typedByOffset.set(
-          sourceOffset,
-          (typedByOffset.get(sourceOffset) ?? "") +
-            (left.item.content as Y.ContentString).str.slice(left.start, left.end),
-        );
-      }
-      for (const [sourceOffset, text] of typedByOffset)
-        this.planned.push({
-          text,
-          beside: slice(move.copy, Math.max(0, sourceOffset - 1), Math.max(1, sourceOffset))[0]!,
-          after: sourceOffset > 0,
-        });
-    }
-    return isKept;
-  }
-
-  /**
-   * Types again what `follow` planned since the last call, as one change of this page's own.
-   * Returns the text it did not type, because the page may not edit now or the place is gone.
-   * The caller tells the person that text was removed.
-   */
-  repair(doc: Y.Doc, mayEdit: boolean): string[] {
-    const planned = this.planned;
-    this.planned = [];
-    if (planned.length === 0) return [];
-    if (!mayEdit) return planned.map(({ text }) => text);
-    const notTyped: string[] = [];
-    doc.transact(() => {
-      for (const { text, beside, after } of planned) {
-        const item = itemAt(doc, beside.client, beside.clock);
-        if (!item || !(item.parent instanceof Y.XmlText) || !standsInNote(item.parent)) {
-          notTyped.push(text);
-          continue;
-        }
-        const within = item.deleted ? 0 : beside.clock - item.id.clock + (after ? 1 : 0);
-        item.parent.insert(charactersShownBefore(item) + within, text);
-      }
-    }, PUT_BACK_ORIGIN);
-    return notTyped;
-  }
-
-  private rememberedText(client: number, clock: number, length: number): string | null {
-    for (const move of this.ownMoves) {
-      const at = offsetIn(move.source, client, clock, length);
-      if (at >= 0) return move.text.slice(at, at + length);
-    }
-    return null;
-  }
-
-  private movedLinesIn(
-    transaction: Y.Transaction,
-    named: DeleteSet,
-    writes: readonly WrittenText[],
-  ) {
-    const doc = transaction.doc;
-    const linesDeletedFrom = new Map<Y.XmlText, "line gone" | "line stays">();
+    const planned: TypedInLine[] = [];
+    const isPlanned = (item: Y.Item, start: number, end: number) =>
+      planned.some((typed) => typed.item === item && typed.start <= start && end <= typed.end);
+    if (this.typed.length === 0 || named.clients.size === 0) return isPlanned;
+    const linesGone: Y.XmlText[] = [];
     Y.iterateDeletedStructs(transaction, transaction.deleteSet, (struct) => {
       if (!(struct instanceof Y.Item) || madeByChange(transaction, struct.id)) return;
       const content = struct.content;
       if (content instanceof Y.ContentType && content.type instanceof Y.XmlText)
-        linesDeletedFrom.set(content.type, "line gone");
-      else if (
-        content instanceof Y.ContentString &&
-        struct.parent instanceof Y.XmlText &&
-        standsInNote(struct.parent) &&
-        !linesDeletedFrom.has(struct.parent)
-      )
-        linesDeletedFrom.set(struct.parent, "line stays");
+        linesGone.push(content.type);
     });
-    const moved: MovedLine[] = [];
-    const linesAuthorNeverSaw: { line: Y.XmlText; texts: TextLeftInLine[] }[] = [];
-    for (const [line, fate] of linesDeletedFrom) {
-      const lineIsGone = fate === "line gone";
-      const source = this.deletedFromLine(transaction, line, named);
-      if (source === null) continue;
-      if (source.text === "") {
-        if (lineIsGone && source.neverSeenByAuthor.length > 0)
-          linesAuthorNeverSaw.push({ line, texts: source.neverSeenByAuthor });
-        continue;
-      }
-      const copy = onlyPlaceOf(source.text, writes, (spans) =>
-        linesOf(doc, spans).every(
-          (other) =>
-            other !== line &&
-            (lineIsGone ||
-              (other !== null &&
-                other._item !== null &&
-                madeByChange(transaction, other._item.id))),
-        ),
-      );
+    if (linesGone.length === 0) return isPlanned;
+    const writes = writesOf(transaction);
+    if (writes.length === 0) return isPlanned;
+
+    for (const line of linesGone) {
+      const read = this.lineAsItsDeleterHadIt(transaction, line, named, own);
+      if (read === null || read.text === "" || read.typedHere.length === 0) continue;
+      const copy = onlyCopyOf(transaction.doc, read.text, writes);
       if (copy === null) continue;
-      moved.push({
-        move: { source: source.spans, copy, text: source.text },
-        line,
-        lineIsGone,
-        neverSeenByAuthor: source.neverSeenByAuthor,
-      });
+      planned.push(...read.typedHere);
+      const byPlace = new Map<number, string>();
+      for (const { item, start, end, charactersOfLineBefore } of read.typedHere)
+        byPlace.set(
+          charactersOfLineBefore,
+          (byPlace.get(charactersOfLineBefore) ?? "") +
+            (item.content as Y.ContentString).str.slice(start, end),
+        );
+      for (const [before, text] of byPlace)
+        this.planned.push({
+          text,
+          beside: slice(copy, Math.max(0, before - 1), Math.max(1, before))[0]!,
+          after: before > 0,
+        });
     }
-    return { moved, linesAuthorNeverSaw };
+    return isPlanned;
   }
 
-  private deletedFromLine(transaction: Y.Transaction, line: Y.XmlText, named: DeleteSet) {
-    const spans: Span[] = [];
-    const neverSeenByAuthor: TextLeftInLine[] = [];
+  /**
+   * Types again what `follow` planned since the last call, as one change of this page's own.
+   * False when it typed less than was planned, because the page may not edit now or a place is
+   * gone. The caller then tells the person of all the removed text.
+   */
+  repair(doc: Y.Doc, mayEdit: boolean): boolean {
+    const planned = this.planned;
+    this.planned = [];
+    if (planned.length === 0) return true;
+    if (!mayEdit) return false;
+    let typedAll = true;
+    doc.transact(() => {
+      for (const { text, beside, after } of planned) {
+        const item = itemAt(doc, beside.client, beside.clock);
+        if (!item || item.deleted || !standsInNote(item.parent)) {
+          typedAll = false;
+          continue;
+        }
+        const within = beside.clock - item.id.clock + (after ? 1 : 0);
+        item.parent.insert(charactersShownBefore(item) + within, text);
+      }
+    }, PUT_BACK_ORIGIN);
+    return typedAll;
+  }
+
+  /**
+   * The line's text as the change's author had it, and this page's words in the line that the
+   * author never had. Null when the page cannot read the text, or when the author lacked text
+   * of this page's in the line that is not typed words: that may stand elsewhere in the note.
+   */
+  private lineAsItsDeleterHadIt(
+    transaction: Y.Transaction,
+    line: Y.XmlText,
+    named: DeleteSet,
+    own: (item: Y.Item) => boolean,
+  ) {
+    const typedHere: TypedInLine[] = [];
     let text = "";
     for (let item = line._start; item !== null; item = item.right) {
       const content = item.content;
       if (content instanceof Y.ContentFormat) continue;
       for (const [start, end, listed] of partsByListing(item, named)) {
         const id = Y.createID(item.id.client, item.id.clock + start);
-        if (!listed) {
-          if (
-            content instanceof Y.ContentString &&
-            !madeByChange(transaction, id) &&
-            Y.isDeleted(transaction.deleteSet, id)
-          )
-            neverSeenByAuthor.push({ item, start, end, sourceOffset: text.length });
+        if (listed) {
+          if (!(content instanceof Y.ContentString)) return null;
+          text += content.str.slice(start, end);
           continue;
         }
-        const part =
-          content instanceof Y.ContentString
-            ? content.str.slice(start, end)
-            : content instanceof Y.ContentDeleted
-              ? this.rememberedText(id.client, id.clock, end - start)
-              : null;
-        if (part === null) return null;
-        add(spans, id.client, id.clock, end - start);
-        text += part;
+        if (madeByChange(transaction, id) || !Y.isDeleted(transaction.deleteSet, id)) continue;
+        if (!own(item)) continue;
+        if (
+          !(content instanceof Y.ContentString) ||
+          !holds(this.typed, id.client, id.clock, end - start)
+        )
+          return null;
+        typedHere.push({ item, start, end, charactersOfLineBefore: text.length });
       }
     }
-    return { spans, text, neverSeenByAuthor };
+    return { text, typedHere };
   }
 }
