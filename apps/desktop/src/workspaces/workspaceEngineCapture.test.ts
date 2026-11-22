@@ -473,6 +473,8 @@ describe("merge rule order from the engine", () => {
     conflict?: boolean;
     // Team's rule has a conflict open from an earlier merge.
     openConflict?: boolean;
+    onlyTeamRule?: boolean;
+    deleteTeamRule?: boolean;
     // A rule whose first merges the engine refuses because Main changed.
     staleAt?: string;
     staleTimes?: number;
@@ -541,7 +543,16 @@ describe("merge rule order from the engine", () => {
         [PRIVATE, VIEW_RULE],
         ["team/private/a.md", "alpha\n"],
       ] as const) {
+        if (options.onlyTeamRule && (path === OTHER || path === PRIVATE)) continue;
         loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text });
+      }
+      if (options.deleteTeamRule) {
+        await stores.store.deleteTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: draftId,
+          path: TEAM,
+          metadata: { origin: "api" },
+        });
       }
       await engine.switchVersion("main");
       const failures: unknown[] = [];
@@ -594,7 +605,7 @@ describe("merge rule order from the engine", () => {
     expect(onDisk).toBe(VIEW_RULE);
   });
 
-  it("orders the rules after a conflicting one again, from Main as it is", async () => {
+  it("stops before files when a rule conflicts, even if the remaining rules have a safe order", async () => {
     const { failure, asked, merged } = await mergeWithRuleOrder({
       conflict: true,
       orders: [
@@ -602,9 +613,9 @@ describe("merge rule order from the engine", () => {
         { writes: [PRIVATE, OTHER], deletes: [] },
       ],
     });
-    expect(failure).toBeNull();
-    expect(asked[1]).toEqual({ writes: [OTHER, PRIVATE], deletes: [] });
-    expect(paths(merged)).toEqual([TEAM, PRIVATE, OTHER, "team/private/a.md"]);
+    expect(failure).toBeInstanceOf(MergeRuleConflictError);
+    expect(asked).toHaveLength(1);
+    expect(paths(merged)).toEqual([TEAM]);
   });
 
   it("stops at a rule's conflict when the rules after it can't be ordered, and says to resolve it", async () => {
@@ -623,7 +634,21 @@ describe("merge rule order from the engine", () => {
     expect(paths(merged)).toEqual([TEAM]);
   });
 
-  it("leaves a rule whose conflict is open out of the order", async () => {
+  it.each([false, true])(
+    "stops before files when its only rule conflicts (delete: %s)",
+    async (deleteTeamRule) => {
+      const { failure, merged } = await mergeWithRuleOrder({
+        conflict: true,
+        onlyTeamRule: true,
+        deleteTeamRule,
+        orders: [{ writes: [], deletes: [] }],
+      });
+      expect(failure).toBeInstanceOf(MergeRuleConflictError);
+      expect(paths(merged)).toEqual([TEAM]);
+    },
+  );
+
+  it("keeps a repeated merge blocked until the rule conflict is resolved", async () => {
     const { failures, asked, runs } = await mergeWithRuleOrder({
       conflict: true,
       runs: 2,
@@ -633,13 +658,9 @@ describe("merge rule order from the engine", () => {
         { writes: [PRIVATE, OTHER], deletes: [] },
       ],
     });
-    expect(failures[1]).toBeNull();
-    expect(asked[2]).toEqual({ writes: [OTHER, PRIVATE], deletes: [] });
-    expect(runs[1]).toEqual([
-      { path: PRIVATE, ruleOrder: [PRIVATE, OTHER] },
-      { path: OTHER, ruleOrder: [OTHER] },
-      { path: "team/private/a.md" },
-    ]);
+    expect(failures[1]).toBeInstanceOf(MergeRuleConflictError);
+    expect(asked).toHaveLength(1);
+    expect(runs[1]).toEqual([]);
   });
 
   it("orders the rules again when Main changed under the order", async () => {
@@ -692,7 +713,7 @@ describe("merge rule order from the engine", () => {
       });
       expect(failure).toBeInstanceOf(stop);
       expect(readError(failure)).toMatchObject({ words, canRetry: false });
-      expect(asked).toHaveLength(3);
+      expect(asked).toHaveLength(openConflict ? 0 : 3);
       expect(merged).toEqual([]);
       expect(onDisk).toBe(VIEW_RULE);
     },

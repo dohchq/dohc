@@ -250,6 +250,9 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     if let RuntimeError::RuleMergeOrderChanged = error {
         return WireError::new(ErrorCode::Conflict, "rule-merge-order-changed");
     }
+    if let RuntimeError::RuleMergeConflict { .. } = error {
+        return WireError::new(ErrorCode::Conflict, error.to_string());
+    }
     if let RuntimeError::CaptureFileHeld { path } = error {
         return WireError::new(ErrorCode::Conflict, format!("capture-file-held: {path}"));
     }

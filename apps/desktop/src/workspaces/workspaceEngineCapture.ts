@@ -7786,6 +7786,9 @@ export function createWorkspaceEngineCapture(
             afterConflictId = page.nextAfterConflictId ?? undefined;
           } while (afterConflictId !== undefined);
         }
+        const openRuleConflict = [...openConflictPaths].find(isAccessRulePath);
+        if (openRuleConflict !== undefined)
+          throw new MergeRuleConflictError(openRuleConflict, [], false);
         // A folder's rule merges before the files it covers, and its delete
         // after them, so Main never journals a file its rule does not cover
         // yet. A respelled rule's old spelling goes with the deletes: the
@@ -7793,9 +7796,9 @@ export function createWorkspaceEngineCapture(
         // engine orders the rule writes, and then the deletes, by what each
         // merge writes, so that no single one gives anyone more than Main
         // gives them before and after the merge. It tries outer writes and
-        // inner deletes first. A rule whose conflict is open writes nothing.
+        // inner deletes first. A conflicting rule stops the merge before files.
         const depth = (path: string) => path.split("/").length;
-        const isRuleStep = (path: string) => isAccessRulePath(path) && !openConflictPaths.has(path);
+        const isRuleStep = isAccessRulePath;
         const ruleDeletes = new Set(deletedPaths.filter(isRuleStep));
         const orderRules = async (rules: string[], stage: "before" | "during") => {
           const writes = rules
@@ -7804,7 +7807,7 @@ export function createWorkspaceEngineCapture(
           const deletes = rules
             .filter((path) => ruleDeletes.has(path))
             .sort((a, b) => depth(b) - depth(a));
-          if (rules.length < 2) return { first: [], writes, deletes };
+          if (rules.length === 0) return { first: [], writes, deletes };
           const order = await engine.accessRuleMergeOrder({
             workspaceId,
             sourceVersionId,
@@ -7826,7 +7829,6 @@ export function createWorkspaceEngineCapture(
         };
         const initial = await orderRules(changedPaths.filter(isRuleStep), "before");
         const mergeOrder = [
-          ...changedPaths.filter((path) => isAccessRulePath(path) && openConflictPaths.has(path)),
           ...initial.first,
           ...initial.writes,
           ...[...respelled, ...changedPaths.filter((path) => !respelled.has(path))].filter(
@@ -7878,19 +7880,7 @@ export function createWorkspaceEngineCapture(
               error instanceof DaemonRefusalError && error.message === "rule-merge-order-changed";
             if (!changed) throw error;
             if (++tries >= RULE_ORDER_TRIES) {
-              // The engine plans every rule the versions differ in, so an
-              // order without a rule whose conflict is open is refused until
-              // that conflict is resolved.
-              const conflicted = mergeOrder.find(
-                (rule) => isAccessRulePath(rule) && openConflictPaths.has(rule),
-              );
-              throw conflicted === undefined
-                ? new MergeRuleOrderUnconfirmedError()
-                : new MergeRuleConflictError(
-                    conflicted,
-                    mergeOrder.slice(index).filter(isRuleStep),
-                    false,
-                  );
+              throw new MergeRuleOrderUnconfirmedError();
             }
             await replan(index);
             index -= 1;
@@ -7903,13 +7893,9 @@ export function createWorkspaceEngineCapture(
           }
           if (result.kind === "conflict") {
             conflictCount += 1;
-            // The rule keeps Main's copy, which the order assumed it replaced.
+            // The rule keeps Main's copy. No files may follow it.
             if (isAccessRulePath(path)) {
-              await replan(index + 1).catch((error: unknown) => {
-                throw error instanceof MergeWidensAccessError
-                  ? new MergeRuleConflictError(path, error.rules)
-                  : error;
-              });
+              throw new MergeRuleConflictError(path, []);
             }
             continue;
           }

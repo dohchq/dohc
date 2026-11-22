@@ -528,6 +528,7 @@ impl ActorHandle {
     ) -> Result<MergeExecutionResult, RuntimeError> {
         self.run(move |store, cache| {
             access_order::ordered(store, |store| {
+                store.read_with(|conn| access_order::check_merge_rule_conflicts(conn, &input))?;
                 if let Some(order) = &rule_order {
                     store.read_with(|conn| {
                         access_order::check_rule_merge_order(conn, &input, order)
