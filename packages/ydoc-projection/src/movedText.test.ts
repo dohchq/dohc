@@ -29,6 +29,7 @@ function page(baseline: Uint8Array, follows = true) {
     doc,
     told,
     lines: () => body.toArray().map((line) => (line as Y.XmlElement).toArray().join("")),
+    length: (line: number) => text(line).length,
     take: () => Y.mergeUpdates(sent.splice(0)),
     receive(update: Uint8Array) {
       const removed = applyUpdateFindingRemovedText(
@@ -39,11 +40,13 @@ function page(baseline: Uint8Array, follows = true) {
         (item) => item.id.client === doc.clientID,
         follows ? moved : undefined,
       );
+      moved.repair(doc, follows);
       if (removed) told.push(removed.text);
     },
-    /** Joins a line to the one above, the way both editors write it. */
+    /** Joins a line to the one above, the way both editors write it: an empty line above just goes. */
     join(line: number) {
       doc.transact(() => {
+        if (text(line - 1).length === 0) return body.delete(line - 1, 1);
         text(line - 1).insert(text(line - 1).length, text(line).toString());
         body.delete(line, 1);
       });
@@ -104,6 +107,57 @@ it("keeps one copy when two people join the same line, on every page", () => {
   for (const each of [a, b, watcher]) expect(each.lines()).toEqual(["OneTwo", "Three"]);
 });
 
+it.each([
+  [100, 101, 102],
+  [102, 101, 100],
+  [101, 102, 100],
+])("keeps the text once when three people split the same line (clients %i, %i, %i)", (...ids) => {
+  const baseline = note("abcd", "ef");
+  const pages = ids.map((id) => {
+    const each = page(baseline);
+    each.doc.clientID = id;
+    return each;
+  });
+  const [a, b, c] = pages as [Page, Page, Page];
+  a.split(0, 1);
+  b.split(0, 1);
+  c.split(0, 2);
+  settle(a, b, c);
+  for (const each of pages) {
+    expect(each.lines()).toEqual(a.lines());
+    expect(each.lines().join("")).toBe("abcdef");
+    expect(each.told).toEqual([]);
+  }
+});
+
+it("keeps one copy and both people's typing when each types into the line they joined", () => {
+  const baseline = note("A", "BC", "D");
+  const [a, b] = [page(baseline), page(baseline)];
+  a.join(1);
+  a.type(0, 2, "X");
+  b.join(1);
+  b.type(0, 2, "Y");
+  settle(a, b);
+  for (const each of [a, b]) {
+    expect(each.lines()).toEqual(a.lines());
+    expect(each.lines()[0]!.replace(/[XY]/gu, "")).toBe("ABC");
+    expect(each.lines()[0]!.replace(/[ABC]/gu, "").split("").sort()).toEqual(["X", "Y"]);
+  }
+});
+
+it("still follows a join made 100 moves ago", () => {
+  const baseline = note("A", "B", "C", "D");
+  const [a, b] = [page(baseline), page(baseline)];
+  a.join(1);
+  b.join(1);
+  for (let pair = 0; pair < 50; pair++) {
+    a.split(1, 1);
+    a.join(2);
+  }
+  settle(a, b);
+  for (const each of [a, b]) expect(each.lines()).toEqual(["AB", "C", "D"]);
+});
+
 it("puts a person's typing back into a line someone else joined away", () => {
   const baseline = note("One", "Two", "Three");
   const [a, b] = [page(baseline), page(baseline)];
@@ -154,4 +208,51 @@ it("changes nothing on a page that did not see the first of two joins", () => {
   late.receive(b.take());
   expect(late.lines()).toEqual(["OneTwoTwo", "Three"]);
   expect(empty(late.take())).toBe(true);
+});
+
+function random(seed: number) {
+  let state = seed;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
+
+// Everyone makes one random join, split or typed letter in the same three lines at the same
+// moment, four times over. Text that goes with a line someone deleted counts as kept when its
+// author is told. Two people must end with every letter once. With more, a letter may still
+// stand twice, but none may go: a page must never delete the last copy.
+it.each([2, 3, 4])("never loses a letter when %i people join and split at once", (people) => {
+  const letters = "abcdefghijkl";
+  const wrong: string[] = [];
+  for (let seed = 1; seed <= 400; seed++) {
+    const next = random(seed);
+    const baseline = note("abcd", "efgh", "ijkl");
+    const pages = Array.from({ length: people }, (_, index) => {
+      const each = page(baseline);
+      each.doc.clientID = 100 + Math.floor(next() * 1000) * 10 + index;
+      return each;
+    });
+    for (let round = 0; round < 4; round++) {
+      for (const [index, each] of pages.entries()) {
+        const line = Math.floor(next() * each.lines().length);
+        const roll = next();
+        const at = Math.floor(next() * (each.length(line) + 1));
+        if (roll < 0.45 && line > 0) each.join(line);
+        else if (roll < 0.9) each.split(line, at);
+        else each.type(line, at, "WXYZ"[index]!);
+      }
+      settle(...pages);
+      const shown = pages[0]!.lines().join("/");
+      const kept = shown + pages.flatMap((each) => each.told).join("");
+      const counts = [...letters].map((letter) => kept.split(letter).length - 1);
+      if (
+        pages.some((each) => each.lines().join("/") !== shown) ||
+        counts.some((count) => count === 0 || (people === 2 && count > 1))
+      )
+        wrong.push(`seed ${String(seed)}, round ${String(round)}: ${shown}`);
+    }
+    for (const each of docs.splice(0)) each.destroy();
+  }
+  expect(wrong).toEqual([]);
 });

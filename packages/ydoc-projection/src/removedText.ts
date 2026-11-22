@@ -39,9 +39,8 @@ interface Piece {
  * when the merge deleted text. `keep` limits the report, for example to this
  * page's own text.
  *
- * With `moved`, text the change moved rather than removed is followed there, and the page
- * makes its repairs as a change of its own once the update is in. The report leaves out what
- * a repair puts back. Pass it only when the page may edit.
+ * With `moved`, text the change moved rather than removed is followed there, and the report
+ * leaves out what the planned repairs put back. The caller then calls `moved.repair`.
  */
 export function applyUpdateFindingRemovedText(
   doc: Y.Doc,
@@ -73,7 +72,6 @@ export function applyUpdateFindingRemovedText(
   } finally {
     doc.off("afterTransaction", look);
   }
-  moved?.repair(doc);
   return removed;
 }
 

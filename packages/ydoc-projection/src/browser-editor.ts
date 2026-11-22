@@ -5,6 +5,7 @@ import { keymap } from "@tiptap/pm/keymap";
 import { ySyncPlugin, ySyncPluginKey, yUndoPlugin, undo, redo } from "y-prosemirror";
 import type * as Y from "yjs";
 import { getDohcProseMirrorSchema } from "./import-export.js";
+import { PUT_BACK_ORIGIN } from "./movedText.js";
 
 /** An editor on the existing body fragment. Admission remains the session owner's responsibility. */
 export function mountLiveBodyEditor(
@@ -22,7 +23,7 @@ export function mountLiveBodyEditor(
       schema,
       plugins: [
         ySyncPlugin(input.body),
-        yUndoPlugin(),
+        yUndoPlugin({ trackedOrigins: [PUT_BACK_ORIGIN] }),
         keymap({
           "Mod-z": (state) => input.canEdit() && undo(state),
           "Mod-Shift-z": (state) => input.canEdit() && redo(state),

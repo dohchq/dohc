@@ -17,6 +17,7 @@ import {
 } from "@dohc/ydoc-projection/markdown-extensions";
 import { getDohcYDocBodyFragment, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
+import { undo } from "y-prosemirror";
 import {
   createLiveMarkdownJournalValidator,
   WORKER_LIVE_VALIDATION_POLICY,
@@ -95,6 +96,7 @@ function sharePage(baseline: Uint8Array): Promise<Person> {
         (item) => item.id.client === doc.clientID,
         moved,
       );
+      moved.repair(doc, true);
       if (removed) told.push(removed.text);
     },
     told,
@@ -383,6 +385,24 @@ it.each(cases)(
     expect([...a.told, ...b.told]).toEqual([]);
   },
 );
+
+it("undoes typing that followed a line someone else joined away", async () => {
+  const baseline = baselineOf(LINES);
+  const a = await sharePage(baseline),
+    b = await sharePage(baseline);
+  const server = startServer(baseline);
+  joinsUp("Two two two")(a);
+  typesAt("Two two two", 11, " TYPED")(b);
+  await server.take(a, b);
+  expect(server.note()).toBe("One oneTwo two two TYPED\n\nThree\n");
+
+  for (let press = 0; press < 2 && server.note().includes("TYPED"); press++) {
+    undo(b.view.state);
+    await server.take(b, a);
+  }
+  expect(server.note()).toBe("One oneTwo two two\n\nThree\n");
+  expect(yDocToMarkdown(a.doc)).toBe(server.note());
+});
 
 const SMALL = ["ab", "cde", "fg"];
 type Step = ["join", number] | ["split", number, number] | ["type", number, number];
