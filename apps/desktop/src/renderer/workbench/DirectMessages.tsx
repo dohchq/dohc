@@ -560,7 +560,10 @@ function ConversationForAccount(props: ConversationProps) {
             seq: result.seq,
             messageId,
             authorId: sender.viewerId,
-            authorName: null,
+            // Named as the server named this account's earlier messages, until the next read names it.
+            authorName:
+              current.messages.findLast((message) => message.authorId === sender.viewerId)
+                ?.authorName ?? null,
             body,
             createdAtMs: Date.now(),
           };

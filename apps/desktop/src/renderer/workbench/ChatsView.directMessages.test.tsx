@@ -755,6 +755,20 @@ describe("ChatsView direct messages", () => {
     expect(listReports()).toHaveLength(1);
   });
 
+  it("names a message just sent as the earlier ones from the same account, not as You", async () => {
+    const user = userEvent.setup();
+    signedIn([conversation()]);
+    history([{ ...sent(1, VIEWER, "Hi Sam"), authorName: "Ana" }, sent(2, "sam", "Hi Ana")]);
+    bridgeMock.directSend.mockResolvedValueOnce({ conversationId: "conversation-sam", seq: 3 });
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    await openSam();
+    await user.type(await screen.findByTestId("chats-dm-composer"), "On my way{Enter}");
+    await waitFor(() => expect(screen.getAllByTestId("chats-dm-message")).toHaveLength(3));
+    const last = screen.getAllByTestId("chats-dm-message").at(-1)!.textContent;
+    expect(last).toContain("Ana");
+    expect(last).not.toContain("You");
+  });
+
   it("keeps the words of a send that failed, and Try again resends them with the same message id", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);
