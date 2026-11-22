@@ -2663,6 +2663,25 @@ async fn a_release_ends_a_stop_the_relay_retired_on_its_own_and_keeps_an_asked_o
 }
 
 #[tokio::test]
+async fn an_unchanged_save_after_a_stop_sends_the_owners_file() {
+    let f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    assert_eq!(
+        stop_action(&actor, &f, "request").await.unwrap()[0].state,
+        "released"
+    );
+    f.ordinary_settle(&actor).await.unwrap().settled().unwrap();
+    let head_sent: i64 = f.store.read_with(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM replication_log r JOIN snapshots s ON s.latest_moment_id=json_extract(r.payload_json,'$.momentId') \
+         WHERE r.op_kind='moment.append' AND r.imported=0 AND s.object_id='object'",
+        [], |r| r.get(0),
+    )).unwrap();
+    assert_eq!(head_sent, 1);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
 async fn the_first_stop_request_decides_whether_the_relay_still_retires_the_note() {
     let (f, supervisor, actor) = pending_release_fixture(0).await;
     let again = stop_action(&actor, &f, "requestRetired").await.unwrap();

@@ -825,7 +825,7 @@ it.each([
     retire: true,
     userId: "owner-1",
     saves: [[C, owner]],
-    stored: last,
+    stored: owner,
   },
   {
     name: "a second save from the same old file",
@@ -835,9 +835,9 @@ it.each([
       [A, owner],
       [A, second],
     ],
-    stored: owner,
+    stored: second,
   },
-] as const)("lets the owner's save replace the host's last one: $name", async (input) => {
+] as const)("lets the owner's save after a Stop replace the stored file: $name", async (input) => {
   const f = await fixture();
   retainServiceActivation(f.raw, namespace, true);
   f.raw
