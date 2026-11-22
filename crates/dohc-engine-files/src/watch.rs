@@ -577,6 +577,21 @@ fn reads_only(event: &notify::Event) -> bool {
         )
 }
 
+/// Whether an error may mean the watch on the root is gone.
+///
+/// A folder below the root that the backend cannot read is reported with its
+/// own path while the watch on everything else keeps working. Attaching again
+/// would meet the same folder and report it again, without end. Reaching the
+/// limit on watches names a folder too, but the rest of the tree goes unwatched.
+fn watch_lost(root: &Path, error: &notify::Error) -> bool {
+    matches!(error.kind, notify::ErrorKind::MaxFilesWatch)
+        || error.paths.is_empty()
+        || error
+            .paths
+            .iter()
+            .any(|path| path == root || !path.starts_with(root))
+}
+
 fn event_callback(
     root: PathBuf,
     dirty: Arc<dyn Fn() + Send + Sync>,
@@ -591,7 +606,7 @@ fn event_callback(
         {
             return;
         }
-        if event.is_err() {
+        if event.as_ref().is_err_and(|error| watch_lost(&root, error)) {
             state.disruptions.fetch_add(1, Ordering::AcqRel);
             backend_error.store(true, Ordering::Release);
             dirty();
@@ -1046,7 +1061,7 @@ mod callback_tests {
             notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join("a.md"))
         ));
         (callback.send)(Err(
-            notify::Error::generic("backend error").add_path(root.join(".dohc/engine/engine.db"))
+            notify::Error::generic("backend error").add_path(root.path().to_path_buf())
         ));
         assert_eq!(callback.dirty_calls.load(Ordering::Acquire), 1);
         assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
@@ -1059,6 +1074,35 @@ mod callback_tests {
             callback.messages.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn an_error_for_a_folder_below_the_root_is_a_change_not_a_lost_watch() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        (callback.send)(Err(notify::Error::io(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ))
+        .add_path(root.join("locked"))));
+        assert!(matches!(
+            callback.messages.try_recv(),
+            Ok(ThreadMessage::Event)
+        ));
+        callback.expect_quiet();
+    }
+
+    #[test]
+    fn errors_without_a_path_or_at_the_watch_limit_are_lost_watches() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        for error in [
+            notify::Error::generic("backend error"),
+            notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path(root.join("deep")),
+        ] {
+            let mut callback = Callback::new(root.path(), 1);
+            (callback.send)(Err(error));
+            assert!(callback.backend_error.load(Ordering::Acquire));
+            assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
+        }
     }
 }
 
