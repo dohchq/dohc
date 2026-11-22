@@ -817,6 +817,89 @@ mod tests {
             Ok::<_, SyncError>(())
         }).unwrap();
     }
+
+    #[test]
+    fn a_save_while_stopped_leaves_the_next_settlement_starting_at_the_accepted_cut() {
+        let (_scratch, _, mut store) = dohc_engine_testkit::open_store();
+        let mut text = VersionedTextStore::new(&mut store);
+        text.ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        for (moment, body) in [
+            ("accepted", "Accepted note."),
+            ("stopped-save", "Saved while stopped."),
+            ("resumed", "Typed after Resume."),
+        ] {
+            text.write_text(
+                &WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "note.md".into(),
+                    text: body.into(),
+                    moment_id: moment.into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        }
+        let binding = LiveObjectBinding {
+            workspace_id: "ws".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: hex_sha256(b"lineage"),
+            current_path: "note.md".into(),
+            selector_paths: vec!["note.md".into()],
+            restore_fence_generation: 0,
+        };
+        let accepted = hex_sha256(b"Accepted note.");
+        store.write_with(&NoFaults, |tx| {
+            dohc_engine_storage::put_binary_blob(tx, b"lineage")?;
+            tx.execute(
+                "INSERT INTO live_device_settlements (settlement_id,relay_database_namespace,workspace_id,
+                 main_version_id,object_id,lineage_claim_id,previous_cursor,terminal_cursor,
+                 previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,
+                 markdown_digest,source_state_vector_digest,binding_json,host_coordinate_json,recorded_at_ms)
+                 VALUES ('accepted','relay','ws','main','object',?1,2,3,1,2,1,?1,
+                 'accepted',?2,?1,?3,'{}',20)",
+                params![binding.lineage_claim_id, accepted, serde_json::to_string(&binding).unwrap()],
+            ).map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO live_settlement_publication_states VALUES ('accepted',?1)",
+                [&binding.lineage_claim_id],
+            ).map_err(SyncError::persist)?;
+            for (moment, starts_at) in [("resumed", Some("accepted")), ("stopped-save", None)] {
+                let record: SettlementRecord = serde_json::from_value(serde_json::json!({
+                    "settlementId": "next", "relayDatabaseNamespace": "relay", "binding": binding,
+                    "hostCoordinate": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+                    "previousCursor":3,"terminalCursor":4,"previousYdocSequence":2,"localYdocSequence":3,
+                    "applicationCount":1,"nativeIntervalDigest":"","acceptedEventCount":1,
+                    "acceptedIntervalDigest":"","momentId":moment,"markdownDigest":"",
+                    "sourceStateVectorDigest":"","acceptedStateBlobSha256":"","recordedAtMs":30,
+                    "restoreOperationId":null
+                })).unwrap();
+                let before = publication_source_before_in_tx(tx, &record)?.map(|before| {
+                    let mut payload = serde_json::json!({});
+                    before.apply_to(&mut payload);
+                    payload
+                });
+                assert_eq!(
+                    before.as_ref().map(|payload| payload["beforeLatestMomentId"].as_str().unwrap()),
+                    starts_at,
+                    "{moment}"
+                );
+                if let Some(payload) = before {
+                    assert_eq!(payload["payloadBeforeBlobSha256"], accepted);
+                }
+            }
+            Ok::<_, SyncError>(())
+        }).unwrap();
+    }
     /// A positive cut keeps the settlement moment's recorded before-image,
     /// regardless of released, current, or competing activation sources.
     #[test]
