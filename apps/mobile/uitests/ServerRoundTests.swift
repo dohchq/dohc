@@ -386,7 +386,10 @@ final class ServerRoundTests: XCTestCase {
   @MainActor
   private func settled(_ app: XCUIApplication, _ field: XCUIElement, _ what: String) {
     XCTAssertTrue(app.activityIndicators["Saving"].waitForNonExistence(timeout: 60), "\(what) should save within 60 s")
-    XCTAssertTrue(field.buttons.firstMatch.waitForExistence(timeout: 10), "\(what): the field should take a change again")
+    // A field that takes a change is a button; while it saves, it isn't.
+    let editable = NSPredicate(format: "exists == true AND elementType == %d", XCUIElement.ElementType.button.rawValue)
+    XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: editable, evaluatedWith: field)], timeout: 10), .completed,
+                   "\(what): the field should take a change again")
     XCTAssertFalse(app.buttons["Discard"].exists, "\(what) should save, not fail or be refused")
   }
 

@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect } from "@playwright/test";
-import { createRecord, fieldCells } from "./helpers/dataCollection";
+import { createRecord, editCell, fieldCells } from "./helpers/dataCollection";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { openDesktopApproval, trustFixtureCa } from "./helpers/selfHostOnboarding";
 import {
@@ -329,7 +329,13 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
     }
     // The table has read its records once it is no longer busy.
     await expect(collection).toHaveAttribute("aria-busy", "false");
-    const seeded = (await fieldCells(collection, "Name")).getByText(recordName, { exact: true });
+    const names = await fieldCells(collection, "Name");
+    const seeded = names.getByText(recordName, { exact: true });
+    // A phone edit a stopped round left undone keeps the name as a prefix; the seed puts it back.
+    const changed = names.filter({ hasText: new RegExp(`^${recordName}.+`) }).first();
+    if ((await seeded.count()) === 0 && (await changed.count()) > 0) {
+      await editCell(collection, changed, recordName);
+    }
     if ((await seeded.count()) === 0) await createRecord(collection, recordName);
     await expect(seeded).toHaveCount(1);
 
