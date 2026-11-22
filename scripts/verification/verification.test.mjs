@@ -1977,6 +1977,22 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   }
 });
 
+test("a runner's own Postgres is used as named and left running, without Docker", async () => {
+  const url = "postgres://dohc:dohc@127.0.0.1:5432/dohc";
+  const previous = process.env.DOHC_VERIFY_POSTGRES_URL;
+  process.env.DOHC_VERIFY_POSTGRES_URL = url;
+  try {
+    const database = await postgres("unused-output", async (executable) => {
+      throw new Error(`${executable} must not run`);
+    });
+    assert.equal(database.url, url);
+    await database.stop();
+  } finally {
+    if (previous === undefined) delete process.env.DOHC_VERIFY_POSTGRES_URL;
+    else process.env.DOHC_VERIFY_POSTGRES_URL = previous;
+  }
+});
+
 test("Postgres startup rejection cleans its created container and preserves startup and cleanup failures", async () => {
   for (const cleanupFails of [false, true]) {
     const startupError = new Error("docker run timed out after creating its container");

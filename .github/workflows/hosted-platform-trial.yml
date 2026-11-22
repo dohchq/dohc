@@ -1,0 +1,109 @@
+# A trial, not a PR check: does a GitHub-hosted Windows or macOS runner give
+# the nightly verification's verdict? It runs the same full gate, on the commit
+# the nightly verified, and changes nothing else. It saves no cache, because
+# the repository's cache is full and PR checks would lose theirs.
+name: Hosted platform trial
+
+on:
+  schedule:
+    # After the nightly publish window. The nightly verifies main as of 19:05 UTC.
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Commit to verify (default main as of 19:05 UTC today)
+        type: string
+        default: ""
+      platform:
+        description: Hosted runner
+        type: choice
+        options: [all, windows, macos]
+        default: all
+      gate:
+        description: Gate to run
+        type: choice
+        options: [all, rust, js]
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.runner }} ${{ matrix.gate }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.platform == 'windows' && '["windows-2025"]' || inputs.platform == 'macos' && '["macos-15"]' || '["windows-2025","macos-15"]') }}
+        gate: ${{ fromJSON(inputs.gate == 'rust' && '["rust"]' || inputs.gate == 'js' && '["js"]' || '["rust","js"]') }}
+    env:
+      DOHC_VERIFY_POSTGRES_URL: ${{ matrix.gate == 'js' && 'postgres://dohc:dohc@127.0.0.1:5432/dohc' || '' }}
+    steps:
+      - name: Choose the commit
+        id: commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          sha="${COMMIT:-$(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=main&until=$(date -u +%Y-%m-%d)T19:05:00Z&per_page=1" --jq '.[0].sha')}"
+          echo "Verifying $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ steps.commit.outputs.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - name: Rust toolchain
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
+        with:
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-nextest@0.9.143
+      # GitHub's Windows image sets TEMP to a short 8.3 path (RUNNER~1), and
+      # tests compare it with the long path dohc resolves it to.
+      - name: Use the runner's temp folder
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # Hosted Windows and macOS runners cannot run the Linux Postgres container the hosts use.
+      - name: Start Postgres on Windows
+        if: matrix.gate == 'js' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $service = Get-Service postgresql*
+          Set-Service $service.Name -StartupType Manual
+          Start-Service $service.Name
+          & "$env:PGBIN\psql.exe" -v ON_ERROR_STOP=1 -c "CREATE ROLE dohc LOGIN SUPERUSER PASSWORD 'dohc'" -c "CREATE DATABASE dohc OWNER dohc"
+      - name: Start Postgres on macOS
+        if: matrix.gate == 'js' && runner.os == 'macOS'
+        run: |
+          brew install postgresql@17
+          brew services start postgresql@17
+          pg="$(brew --prefix postgresql@17)/bin"
+          for attempt in $(seq 60); do "$pg/pg_isready" -h 127.0.0.1 && break; sleep 1; done
+          "$pg/psql" -h 127.0.0.1 -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE dohc LOGIN SUPERUSER PASSWORD 'dohc'" -c "CREATE DATABASE dohc OWNER dohc"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify in full
+        run: node scripts/verification/verify.mjs pr --base HEAD~1 --full --job ${{ matrix.gate }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: hosted-trial-${{ matrix.runner }}-${{ matrix.gate }}-${{ github.run_attempt }}
+          path: |
+            .agent-artifacts/verification/*/result.json
+            .agent-artifacts/verification/*/*.log
+            .agent-artifacts/verification/*/js-tests/**/*.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 9

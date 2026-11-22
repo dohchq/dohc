@@ -297,6 +297,8 @@ export async function postgres(
   measure = (_name, action) => action(),
   label = "inline",
 ) {
+  const runnerDatabase = process.env.DOHC_VERIFY_POSTGRES_URL;
+  if (runnerDatabase) return { id: "runner", url: runnerDatabase, stop: async () => {} };
   const name = `dohc-verify-${randomUUID()}`;
   let id;
   let cancellation;
