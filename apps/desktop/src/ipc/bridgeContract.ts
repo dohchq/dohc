@@ -6260,6 +6260,37 @@ export const setAsideDraftOperations = {
     result: z.boolean(),
     guard: "trusted-sender",
   },
+  moveSetAsideDrafts: {
+    capabilityId: "document.aside.move",
+    scope: "device",
+    channel: "desktop:move-set-aside-drafts",
+    payload: z
+      .object({
+        workspaceId: WORKSPACE_ID,
+        changes: z.array(
+          z.union([
+            z
+              .object({
+                id: z.string(),
+                kind: z.enum(["file", "folder"]),
+                fromPath: PATH_STRING,
+                toPath: PATH_STRING,
+              })
+              .strict(),
+            z
+              .object({
+                id: z.string(),
+                kind: z.enum(["create-file", "create-folder", "delete-file", "delete-folder"]),
+                path: PATH_STRING,
+              })
+              .strict(),
+          ]),
+        ),
+      })
+      .strict(),
+    result: z.null(),
+    guard: "trusted-sender",
+  },
 } as const satisfies OperationTable;
 export const DiscardLiveDraftRecoveryPayload = z
   .object({

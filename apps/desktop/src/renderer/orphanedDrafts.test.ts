@@ -28,6 +28,10 @@ import {
 } from "./orphanedDraftStorage";
 import { draftFilesForTests } from "./orphanedDraftFiles.testHarness";
 
+const rename = (fromPath: string, toPath: string) => [
+  { id: `${fromPath}->${toPath}`, kind: "file" as const, fromPath, toPath },
+];
+
 type DraftStore = typeof import("./orphanedDrafts");
 type UseDrafts = (workspaceId: string, path: string) => readonly OrphanedDraft[];
 
@@ -98,7 +102,7 @@ it("dismisses only the original object snapshot after restart and rename", async
     objectId: "object",
     updateBase64: "AAA=",
   });
-  remapOrphanedDraftPaths("workspace", (path) => (path === "old.md" ? "new.md" : path));
+  remapOrphanedDraftPaths("workspace", rename("old.md", "new.md"));
   const next = await relaunch();
   await next.dismissOrphanedDraft("workspace", "new.md", id);
   expect(discardLiveDraftRecovery).toHaveBeenCalledWith(
@@ -284,7 +288,7 @@ it("does not duplicate a renamed recovery when main lists its original path on t
   disk.clear();
   stubBridge({ listLiveDraftRecovery: vi.fn(async () => [returnedDraft]) });
   await loadLiveDraftRecovery("workspace", () => true);
-  remapOrphanedDraftPaths("workspace", (path) => (path === "a.txt" ? "renamed.txt" : path));
+  remapOrphanedDraftPaths("workspace", rename("a.txt", "renamed.txt"));
   const next = await relaunch();
   await next.loadLiveDraftRecovery("workspace", () => true);
   expect(next.retainedOrphanedDraftPaths("workspace")).toEqual(["renamed.txt"]);
@@ -582,7 +586,7 @@ it.each(["renamed.txt", ".env"])(
     const first = await relaunch();
     const second = await relaunch();
     const id = first.captureOrphanedDraft("a", "draft.txt", "late recovery");
-    second.remapOrphanedDraftPaths("a", (path) => (path === "draft.txt" ? destination : path));
+    second.remapOrphanedDraftPaths("a", rename("draft.txt", destination));
     expect(first.atRiskOrphanedDraftIds()).toEqual([id]);
     const restarted = await relaunch();
     expect(draftsFor(restarted.useOrphanedDrafts, "a", "draft.txt")).toEqual([]);
@@ -633,7 +637,7 @@ describe("orphanedDrafts remap", () => {
   it("follows a file rename, keyed to the workspace", () => {
     captureOrphanedDraft("ws-1", "a.md", "kept");
     captureOrphanedDraft("ws-2", "a.md", "other workspace");
-    remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "renamed.md" : path));
+    remapOrphanedDraftPaths("ws-1", rename("a.md", "renamed.md"));
     expect(draftsFor(useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
     expect(draftsFor(useOrphanedDrafts, "ws-1", "renamed.md").map((d) => d.text)).toEqual(["kept"]);
     expect(draftsFor(useOrphanedDrafts, "ws-2", "a.md").map((d) => d.text)).toEqual([
@@ -644,7 +648,7 @@ describe("orphanedDrafts remap", () => {
   it("merges into the target's existing drafts instead of overwriting", () => {
     captureOrphanedDraft("ws-1", "target.md", "already there");
     captureOrphanedDraft("ws-1", "a.md", "moving in");
-    remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "target.md" : path));
+    remapOrphanedDraftPaths("ws-1", rename("a.md", "target.md"));
     expect(draftsFor(useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text)).toEqual([
       "already there",
       "moving in",
@@ -653,7 +657,7 @@ describe("orphanedDrafts remap", () => {
 
   it("keeps drafts whose path a delete projects to null", () => {
     captureOrphanedDraft("ws-1", "notes/a.md", "survives");
-    remapOrphanedDraftPaths("ws-1", () => null);
+    remapOrphanedDraftPaths("ws-1", [{ id: "delete", kind: "delete-folder", path: "notes" }]);
     // Destroying recovery text is never the store's call: a recreated or
     // restored file shows the notice again. A move dohc did not perform lands
     // on this same rule — the renderer cannot tell one from a delete, so it
@@ -665,7 +669,7 @@ describe("orphanedDrafts remap", () => {
 
   it("dismisses by id after a remap", () => {
     captureOrphanedDraft("ws-1", "a.md", "kept");
-    remapOrphanedDraftPaths("ws-1", () => "b.md");
+    remapOrphanedDraftPaths("ws-1", rename("a.md", "b.md"));
     const [draft] = draftsFor(useOrphanedDrafts, "ws-1", "b.md");
     dismissOrphanedDraft("ws-1", "b.md", draft.id);
     expect(draftsFor(useOrphanedDrafts, "ws-1", "b.md")).toHaveLength(0);
@@ -766,7 +770,7 @@ describe("orphanedDrafts persistence", () => {
 
   it("moves the stored copy with a rename", async () => {
     captureOrphanedDraft("ws-1", "a.md", "renamed with the file");
-    remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "notes/b.md" : path));
+    remapOrphanedDraftPaths("ws-1", rename("a.md", "notes/b.md"));
     const next = await relaunch();
     expect(
       draftsFor(next.useOrphanedDrafts, "ws-1", "a.md"),
@@ -780,7 +784,7 @@ describe("orphanedDrafts persistence", () => {
   it("drops the stored copy when a rename lands on a secret path", async () => {
     captureOrphanedDraft("ws-1", "a.md", "SECRET_BODY");
     expect(storedText()).toContain("SECRET_BODY");
-    remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? ".env" : path));
+    remapOrphanedDraftPaths("ws-1", rename("a.md", ".env"));
     await draftFileWritesSettled();
     expect(storedText()).not.toContain("SECRET_BODY");
     expect(atRiskOrphanedDraftIds()).toHaveLength(1);
@@ -1024,7 +1028,7 @@ describe("orphanedDrafts persistence", () => {
     const next = await relaunch(base + 2);
     clock.mockReturnValue(base + 2);
     next.captureOrphanedDraft("ws-1", "a.md", "captured last");
-    next.remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "target.md" : path));
+    next.remapOrphanedDraftPaths("ws-1", rename("a.md", "target.md"));
     expect(
       draftsFor(next.useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
       "order key: sort the merge by id again. 'captured last' holds the freed low id, so it sorts first here and second after the relaunch below — the two Copy buttons swap places across a restart.",
@@ -1040,7 +1044,7 @@ describe("orphanedDrafts persistence", () => {
   it("keeps one order for a merged rename, this run and the next", async () => {
     captureOrphanedDraft("ws-1", "a.md", "captured first");
     captureOrphanedDraft("ws-1", "target.md", "captured second");
-    remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "target.md" : path));
+    remapOrphanedDraftPaths("ws-1", rename("a.md", "target.md"));
     expect(
       draftsFor(useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
       "merge order: append the moved drafts after the target's own. This run reads newest-first while the next launch reads oldest-first, and the two Copy buttons swap places across a restart.",
@@ -1056,7 +1060,7 @@ describe("orphanedDrafts persistence", () => {
   it("keeps a secret-path draft window-only after a rename onto a tracked path", () => {
     captureOrphanedDraft("ws-1", ".env", "API_KEY=shh");
     expect(atRiskOrphanedDraftIds()).toHaveLength(1);
-    remapOrphanedDraftPaths("ws-1", (path) => (path === ".env" ? "notes.md" : path));
+    remapOrphanedDraftPaths("ws-1", rename(".env", "notes.md"));
     expect(
       draftsFor(useOrphanedDrafts, "ws-1", "notes.md").map((d) => d.text),
       "promote on rename: store eligible drafts at the remap. The text the floor refused at capture reaches plaintext storage because a file was renamed.",

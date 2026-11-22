@@ -6,7 +6,12 @@ import { setAsideDraftFiles } from "./setAsideDraftFiles";
 import { createTestScratch } from "./testTemp";
 
 const key = "00000000-0000-4000-8000-000000000001";
-const draft = (text: string, path = "a.md") => JSON.stringify({ version: 1, path, text });
+const other = "00000000-0000-4000-8000-000000000002";
+const draft = (text: string, path = "a.md", workspaceId = "ws") =>
+  JSON.stringify({ version: 1, workspaceId, path, text });
+const rename = (fromPath: string, toPath: string) => [
+  { id: "rename", kind: "file" as const, fromPath, toPath },
+];
 
 async function store() {
   const directory = join(await createTestScratch("dohc-set-aside-drafts-"), "set-aside-drafts");
@@ -61,4 +66,39 @@ it("removes a write an earlier app run left unfinished, and keeps finished draft
   await writeFile(join(directory, unfinished), draft("half"));
   expect(await files.list()).toEqual([{ key, raw: draft("kept") }]);
   expect(await readdir(directory)).toEqual([`${key}.json`]);
+});
+
+it("moves a draft with a rename after the writes sent before it, and before those sent after", async () => {
+  const { files } = await store();
+  const answers = await Promise.all([
+    files.write(key, draft("first"), null),
+    files.move("ws", rename("a.md", "b.md")),
+    files.write(key, draft("second", "b.md"), draft("first", "b.md")),
+  ]);
+  expect(answers).toEqual([true, null, true]);
+  expect(await files.list()).toEqual([{ key, raw: draft("second", "b.md") }]);
+});
+
+it("finishes renames onto a secret path with no window waiting for them", async () => {
+  const { directory, changes, files } = await store();
+  void files.write(key, draft("API_KEY=shh"), null);
+  void files.move("ws", rename("a.md", "b.md"));
+  await files.move("ws", rename("b.md", ".env"));
+  expect(await readdir(directory)).toEqual([]);
+  expect(changes.map((change) => change.raw)).toEqual([
+    draft("API_KEY=shh"),
+    draft("API_KEY=shh", "b.md"),
+    null,
+  ]);
+});
+
+it("moves only the renamed workspace's drafts", async () => {
+  const { files } = await store();
+  await files.write(key, draft("mine"), null);
+  await files.write(other, draft("theirs", "a.md", "elsewhere"), null);
+  await files.move("ws", rename("a.md", "b.md"));
+  expect(await files.list()).toEqual([
+    { key, raw: draft("mine", "b.md") },
+    { key: other, raw: draft("theirs", "a.md", "elsewhere") },
+  ]);
 });

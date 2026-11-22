@@ -1,9 +1,10 @@
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import type { SetAsideDraftChange } from "../ipc/bridgeContract";
+import { SET_ASIDE_DRAFT_VERSION, movedSetAsideDraft } from "../workspaces/movedSetAsideDraft";
 import { bridge } from "./bridge";
+import type { PendingTreeChange } from "./workbench/file-tree-optimistic";
 
 export const ORPHANED_DRAFT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-const STORED_DRAFT_VERSION = 1;
 export type DraftRecoveryIdentity = {
   objectId: string;
   updateBase64: string;
@@ -29,8 +30,7 @@ const pending = new Map<number, number>();
 const refused = new Set<number>();
 let stopHearing: (() => void) | null = null;
 let heldWhileListing: SetAsideDraftChange[] | null = null;
-const inFlight = new Map<Promise<unknown>, { key: string; ids: readonly number[] }>();
-const afterEarlierWrites = new Map<string, Promise<unknown>>();
+const inFlight = new Map<Promise<unknown>, readonly number[]>();
 // Only a tracked path's draft may reach plaintext storage.
 export function persistable(path: string): boolean {
   return classifyEngineFilePathForRead(path, bridge().platform).kind === "tracked";
@@ -41,11 +41,11 @@ function unsupportedVersion(value: unknown): boolean {
     typeof value === "object" &&
     value !== null &&
     "version" in value &&
-    value.version !== STORED_DRAFT_VERSION
+    value.version !== SET_ASIDE_DRAFT_VERSION
   );
 }
 function serialize(draft: StoredOrphanedDraft): string {
-  return JSON.stringify({ ...draft, version: STORED_DRAFT_VERSION });
+  return JSON.stringify({ ...draft, version: SET_ASIDE_DRAFT_VERSION });
 }
 function valid(value: unknown): value is StoredOrphanedDraft {
   if (typeof value !== "object" || value === null) return false;
@@ -108,7 +108,6 @@ export async function loadDraftFiles(): Promise<void> {
 }
 
 function send(
-  key: string,
   ids: readonly number[],
   request: () => Promise<boolean>,
   onAnswer: (written: boolean) => void = () => undefined,
@@ -127,31 +126,27 @@ function send(
     for (const id of ids) {
       const left = (pending.get(id) ?? 1) - 1;
       if (left > 0) pending.set(id, left);
-      else pending.delete(id);
+      else {
+        pending.delete(id);
+        if (refused.has(id)) holdWhatTheFileHolds(id);
+      }
     }
     inFlight.delete(settled);
     notifyFiles();
     return written;
   });
-  inFlight.set(settled, { key, ids });
+  inFlight.set(settled, ids);
   return settled;
 }
-function whenEarlierWritesSettle(key: string, step: () => Promise<unknown> | undefined): void {
-  const earlier = [...inFlight].filter(([, sent]) => sent.key === key).map(([answer]) => answer);
-  const chained = afterEarlierWrites.get(key);
-  if (chained === undefined && earlier.length === 0) {
-    void step();
-    return;
-  }
-  const done = Promise.all([chained, ...earlier]).then(step);
-  afterEarlierWrites.set(key, done);
-  void done.then(() => {
-    if (afterEarlierWrites.get(key) === done) afterEarlierWrites.delete(key);
-  });
+function holdWhatTheFileHolds(id: number): void {
+  const key = keys.get(id);
+  const held = key === undefined ? undefined : files.get(key);
+  if (held === undefined) expected.delete(id);
+  else expected.set(id, held);
 }
 function removeIfCurrent(key: string | undefined, raw: string | undefined): void {
   if (key === undefined || raw === undefined) return;
-  void send(key, [], () => bridge().removeSetAsideDraft({ key, ifCurrent: raw }));
+  void send([], () => bridge().removeSetAsideDraft({ key, ifCurrent: raw }));
 }
 
 export function loadStoredDrafts(
@@ -193,7 +188,7 @@ export function loadStoredDrafts(
       else {
         const normalized = serialize(restored);
         expected.set(id, normalized);
-        void send(key, [id], () =>
+        void send([id], () =>
           bridge().writeSetAsideDraft({ key, raw: normalized, ifCurrent: raw }),
         );
       }
@@ -213,7 +208,6 @@ function write(
   expected.set(draft.id, raw);
   ownedKeys.add(key);
   return send(
-    key,
     [draft.id],
     () => bridge().writeSetAsideDraft({ key, raw, ifCurrent }),
     (written) => {
@@ -221,11 +215,6 @@ function write(
       else {
         refused.add(draft.id);
         ownedKeys.delete(key);
-        if (expected.get(draft.id) === raw) {
-          const held = files.get(key);
-          if (held === undefined) expected.delete(draft.id);
-          else expected.set(draft.id, held);
-        }
       }
     },
   );
@@ -286,50 +275,44 @@ export function forgetStoredDraft(id: number): void {
 }
 export function remapStoredDraftPaths(
   workspaceId: string,
-  project: (path: string) => string | null,
+  changes: readonly PendingTreeChange[],
 ): ReadonlySet<number> {
-  const projected = (raw: string | undefined) => {
-    const row = raw === undefined ? undefined : parse(raw);
-    if (unsupportedVersion(row) || !valid(row) || row.workspaceId !== workspaceId) return null;
-    const path = project(row.path);
-    return path === null || path === row.path ? null : { row, path };
-  };
   const dropped = new Set<number>();
+  const moving: number[] = [];
   for (const [id, key] of keys) {
-    const move = projected(expected.get(id) ?? files.get(key));
-    if (move && !persistable(move.path)) {
+    const held = expected.get(id);
+    const moved = movedSetAsideDraft(held ?? files.get(key) ?? "", workspaceId, changes);
+    if (moved === null) continue;
+    moving.push(id);
+    if (!persistable(moved.path)) {
       expected.delete(id);
       dropped.add(id);
-    }
+    } else if (held !== undefined) expected.set(id, moved.raw);
   }
-  for (const key of new Set([...files.keys(), ...keys.values()])) {
-    whenEarlierWritesSettle(key, () => {
-      const raw = files.get(key);
-      const move = projected(raw);
-      if (raw === undefined || move === null) return undefined;
-      const ids = [...keys].filter(([, held]) => held === key).map(([id]) => id);
-      if (!persistable(move.path)) {
-        for (const id of ids) expected.delete(id);
-        return send(key, [], () => bridge().removeSetAsideDraft({ key, ifCurrent: raw }));
-      }
-      const next = serialize({ ...move.row, path: move.path });
-      // Only advance handles that still describe the bytes just remapped.
-      // Another window's replacement must not make stale local text durable.
-      for (const id of ids) if (expected.get(id) === raw) expected.set(id, next);
-      return send(key, ids, () => bridge().writeSetAsideDraft({ key, raw: next, ifCurrent: raw }));
-    });
-  }
+  if (
+    moving.length > 0 ||
+    [...files.values()].some((raw) => movedSetAsideDraft(raw, workspaceId, changes) !== null)
+  )
+    void send(
+      moving,
+      async () => {
+        await bridge().moveSetAsideDrafts({ workspaceId, changes: [...changes] });
+        return true;
+      },
+      (moved) => {
+        if (!moved) for (const id of moving) refused.add(id);
+      },
+    );
   return dropped;
 }
 export async function storedDraftSettled(id: number): Promise<void> {
   while (pending.has(id))
     await Promise.all(
-      [...inFlight].filter(([, sent]) => sent.ids.includes(id)).map(([answer]) => answer),
+      [...inFlight].filter(([, ids]) => ids.includes(id)).map(([answer]) => answer),
     );
 }
 export async function draftFileWritesSettled(): Promise<void> {
-  while (inFlight.size > 0 || afterEarlierWrites.size > 0)
-    await Promise.all([...inFlight.keys(), ...afterEarlierWrites.values()]);
+  while (inFlight.size > 0) await Promise.all(inFlight.keys());
 }
 export function clearStoredDrafts(): void {
   files.clear();
@@ -338,7 +321,6 @@ export function clearStoredDrafts(): void {
   ownedKeys.clear();
   pending.clear();
   refused.clear();
-  afterEarlierWrites.clear();
   stopHearing?.();
   stopHearing = null;
 }

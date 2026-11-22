@@ -3,9 +3,15 @@ import { join } from "node:path";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { atomicWriteFile } from "../atomicReplaceFile";
 import type { SetAsideDraftChange, SetAsideDraftFile } from "../ipc/bridgeContract";
+import type { PendingTreeChange } from "../renderer/workbench/file-tree-optimistic";
+import { movedSetAsideDraft } from "./movedSetAsideDraft";
 
 const DRAFT_FILE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
 const UNFINISHED_WRITE = /^[0-9a-f-]{36}\.json\.tmp-(\d+)-/;
+
+function tracked(path: string): boolean {
+  return classifyEngineFilePathForRead(path, process.platform).kind === "tracked";
+}
 
 function tracksPath(raw: string): boolean {
   let row: unknown;
@@ -19,7 +25,7 @@ function tracksPath(raw: string): boolean {
     row !== null &&
     "path" in row &&
     typeof row.path === "string" &&
-    classifyEngineFilePathForRead(row.path, process.platform).kind === "tracked"
+    tracked(row.path)
   );
 }
 
@@ -28,8 +34,9 @@ export function setAsideDraftFiles(
   changed: (change: SetAsideDraftChange) => void,
 ) {
   const work = new Map<string, Promise<unknown>>();
+  let moving: Promise<unknown> = Promise.resolve();
   const onFile = <T>(key: string, step: () => Promise<T>): Promise<T> => {
-    const result = (work.get(key) ?? Promise.resolve()).then(step, step);
+    const result = Promise.all([work.get(key), moving]).then(step, step);
     const settled = result.catch(() => undefined);
     work.set(key, settled);
     void settled.then(() => {
@@ -43,14 +50,15 @@ export function setAsideDraftFiles(
       if (error.code === "ENOENT") return null;
       throw error;
     });
+  const names = () =>
+    readdir(directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
   return {
     async list(): Promise<SetAsideDraftFile[]> {
-      const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return [];
-        throw error;
-      });
       const files: SetAsideDraftFile[] = [];
-      for (const name of names) {
+      for (const name of await names()) {
         const unfinished = UNFINISHED_WRITE.exec(name);
         if (unfinished && Number(unfinished[1]) !== process.pid) {
           await rm(join(directory, name), { force: true });
@@ -80,6 +88,26 @@ export function setAsideDraftFiles(
         changed({ key, raw: null });
         return true;
       });
+    },
+    move(workspaceId: string, changes: readonly PendingTreeChange[]): Promise<null> {
+      const result = Promise.all([moving, ...work.values()]).then(async () => {
+        for (const name of await names()) {
+          const key = DRAFT_FILE.exec(name)?.[1];
+          const raw = key === undefined ? null : await read(key);
+          const moved = raw === null ? null : movedSetAsideDraft(raw, workspaceId, changes);
+          if (key === undefined || moved === null) continue;
+          if (tracked(moved.path)) {
+            await atomicWriteFile(file(key), moved.raw);
+            changed({ key, raw: moved.raw });
+          } else {
+            await rm(file(key), { force: true });
+            changed({ key, raw: null });
+          }
+        }
+        return null;
+      });
+      moving = result.catch(() => undefined);
+      return result;
     },
   };
 }

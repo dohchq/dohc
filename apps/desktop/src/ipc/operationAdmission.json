@@ -167,6 +167,7 @@
   "desktop:list-set-aside-drafts": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:write-set-aside-draft": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:remove-set-aside-draft": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:move-set-aside-drafts": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:get-folder-app": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:suggest-workspace-folder-name": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:get-system-reduced-motion": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },

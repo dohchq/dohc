@@ -19,6 +19,9 @@ import {
 const now = 1_800_000_000_000;
 const key = "00000000-0000-4000-8000-000000000001";
 const draft = { id: 1, workspaceId: "ws", path: "a.md", text: "keep me", capturedAtMs: now };
+const rename = (fromPath: string, toPath: string) => [
+  { id: `${fromPath}->${toPath}`, kind: "file" as const, fromPath, toPath },
+];
 let disk: ReturnType<typeof draftFilesForTests>;
 
 beforeEach(async () => {
@@ -69,21 +72,13 @@ it("counts a draft kept only once main answers that its file is written", async 
 describe("a rename while the first write is still on its way", () => {
   let release!: () => void;
   beforeEach(() => {
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    vi.stubGlobal("dohcDesktop", {
-      platform: "linux",
-      ...disk.calls,
-      writeSetAsideDraft: (input: Parameters<typeof disk.calls.writeSetAsideDraft>[0]) =>
-        gate.then(() => disk.calls.writeSetAsideDraft(input)),
-      removeSetAsideDraft: (input: Parameters<typeof disk.calls.removeSetAsideDraft>[0]) =>
-        gate.then(() => disk.calls.removeSetAsideDraft(input)),
-    });
+    release = disk.hold();
   });
   afterEach(() => release());
 
   it("stores the draft under the new path", async () => {
     const stored = storeDraft(draft);
-    remapStoredDraftPaths("ws", () => "b.md");
+    remapStoredDraftPaths("ws", rename("a.md", "b.md"));
     expect(isStoredDraftPending(draft.id)).toBe(true);
     release();
     expect(await stored).toBe(true);
@@ -94,10 +89,44 @@ describe("a rename while the first write is still on its way", () => {
 
   it("removes the plaintext file when the new path is a secret", async () => {
     const stored = storeDraft(draft);
-    expect([...remapStoredDraftPaths("ws", () => ".env")]).toEqual([draft.id]);
+    expect([...remapStoredDraftPaths("ws", rename("a.md", ".env"))]).toEqual([draft.id]);
     release();
     await stored;
     await draftFileWritesSettled();
+    expect(disk.files.size).toBe(0);
+  });
+
+  it("stores a replacement sent after the rename", async () => {
+    void storeDraft(draft);
+    remapStoredDraftPaths("ws", rename("a.md", "b.md"));
+    const replaced = replaceStoredDraft({ ...draft, path: "b.md", text: "newer typing" });
+    release();
+    expect(await replaced).toBe(true);
+    await draftFileWritesSettled();
+    expect(disk.rows().map((row) => [row.path, row.text])).toEqual([["b.md", "newer typing"]]);
+    expect(isStoredDraftCurrent(draft.id)).toBe(true);
+  });
+
+  it("dismissing removes the moved file after a replacement sent after the rename fails", async () => {
+    void storeDraft(draft);
+    remapStoredDraftPaths("ws", rename("a.md", "b.md"));
+    disk.fail(new Error("No space left on device"), (raw) => raw.includes("newer typing"));
+    void replaceStoredDraft({ ...draft, path: "b.md", text: "newer typing" });
+    release();
+    await draftFileWritesSettled();
+    forgetStoredDraft(draft.id);
+    await draftFileWritesSettled();
+    expect(disk.files.size).toBe(0);
+  });
+
+  it("a second rename to a secret path stops counting the draft as kept at once", async () => {
+    void storeDraft(draft);
+    remapStoredDraftPaths("ws", rename("a.md", "b.md"));
+    expect([...remapStoredDraftPaths("ws", rename("b.md", ".env"))]).toEqual([draft.id]);
+    expect(isStoredDraftCurrent(draft.id)).toBe(false);
+    release();
+    await draftFileWritesSettled();
+    expect(isStoredDraftCurrent(draft.id)).toBe(false);
     expect(disk.files.size).toBe(0);
   });
 });
@@ -109,21 +138,10 @@ it.each([
   "moves the older file to %s when the replacement in flight during the rename fails",
   async (renamed, paths) => {
     expect(await storeDraft(draft)).toBe(true);
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    vi.stubGlobal("dohcDesktop", {
-      platform: "linux",
-      ...disk.calls,
-      writeSetAsideDraft: (input: Parameters<typeof disk.calls.writeSetAsideDraft>[0]) =>
-        gate.then(() => {
-          if (input.raw.includes("newer typing")) throw new Error("No space left on device");
-          return disk.calls.writeSetAsideDraft(input);
-        }),
-      removeSetAsideDraft: (input: Parameters<typeof disk.calls.removeSetAsideDraft>[0]) =>
-        gate.then(() => disk.calls.removeSetAsideDraft(input)),
-    });
+    const release = disk.hold();
+    disk.fail(new Error("No space left on device"), (raw) => raw.includes("newer typing"));
     const replaced = replaceStoredDraft({ ...draft, text: "newer typing" });
-    remapStoredDraftPaths("ws", () => renamed);
+    remapStoredDraftPaths("ws", rename("a.md", renamed));
     release();
     expect(await replaced).toBe(false);
     await draftFileWritesSettled();
@@ -158,20 +176,10 @@ describe("after a replacement fails during a rename", () => {
   let release!: () => void;
   beforeEach(async () => {
     expect(await storeDraft(draft)).toBe(true);
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    vi.stubGlobal("dohcDesktop", {
-      platform: "linux",
-      ...disk.calls,
-      writeSetAsideDraft: (input: Parameters<typeof disk.calls.writeSetAsideDraft>[0]) =>
-        gate.then(() => {
-          if (input.raw.includes("newer typing")) throw new Error("No space left on device");
-          return disk.calls.writeSetAsideDraft(input);
-        }),
-      removeSetAsideDraft: (input: Parameters<typeof disk.calls.removeSetAsideDraft>[0]) =>
-        gate.then(() => disk.calls.removeSetAsideDraft(input)),
-    });
+    release = disk.hold();
+    disk.fail(new Error("No space left on device"), (raw) => raw.includes("newer typing"));
     void replaceStoredDraft({ ...draft, text: "newer typing" });
-    remapStoredDraftPaths("ws", (path) => (path === "a.md" ? "b.md" : null));
+    remapStoredDraftPaths("ws", rename("a.md", "b.md"));
   });
   afterEach(() => release());
 
@@ -184,11 +192,24 @@ describe("after a replacement fails during a rename", () => {
   });
 
   it("a second rename to a secret path removes the moved file", async () => {
-    remapStoredDraftPaths("ws", (path) => (path === "b.md" ? ".env" : null));
+    remapStoredDraftPaths("ws", rename("b.md", ".env"));
     release();
     await draftFileWritesSettled();
     expect(disk.files.size).toBe(0);
   });
+});
+
+it("leaves a draft main could not move at risk, and dismissing still removes its file", async () => {
+  expect(await storeDraft(draft)).toBe(true);
+  disk.fail(new Error("No space left on device"));
+  remapStoredDraftPaths("ws", rename("a.md", "b.md"));
+  await draftFileWritesSettled();
+  expect(isStoredDraftCurrent(draft.id)).toBe(false);
+  expect(disk.rows().map((row) => row.path)).toEqual(["a.md"]);
+  disk.fail(null);
+  forgetStoredDraft(draft.id);
+  await draftFileWritesSettled();
+  expect(disk.files.size).toBe(0);
 });
 
 it("reports a draft whose write failed as not kept", async () => {
@@ -278,7 +299,7 @@ describe.each([{}, { version: 1 }])("supported format %j", (version) => {
 
   it("writes version 1 when remapping a path", async () => {
     disk.set(key, JSON.stringify({ ...draft, ...version }));
-    remapStoredDraftPaths("ws", () => "b.md");
+    remapStoredDraftPaths("ws", rename("a.md", "b.md"));
     await draftFileWritesSettled();
     expect(JSON.parse(disk.files.get(key)!)).toEqual({ ...draft, path: "b.md", version: 1 });
   });
@@ -307,10 +328,8 @@ describe.each([
   it.each(["b.md", ".env"])("leaves its bytes intact when paths move to %s", async (path) => {
     const raw = JSON.stringify(row);
     disk.set(key, raw);
-    const project = vi.fn(() => path);
-    expect(remapStoredDraftPaths("ws", project).size).toBe(0);
+    expect(remapStoredDraftPaths("ws", rename("a.md", path)).size).toBe(0);
     await draftFileWritesSettled();
-    expect(project).not.toHaveBeenCalled();
     expect(disk.files.get(key)).toBe(raw);
   });
 });

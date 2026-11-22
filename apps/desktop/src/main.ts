@@ -10398,6 +10398,7 @@ function registerIpcHandlers(): void {
     listSetAsideDrafts: () => setAsideDrafts.list(),
     writeSetAsideDraft: ({ key, raw, ifCurrent }) => setAsideDrafts.write(key, raw, ifCurrent),
     removeSetAsideDraft: ({ key, ifCurrent }) => setAsideDrafts.remove(key, ifCurrent),
+    moveSetAsideDrafts: ({ workspaceId, changes }) => setAsideDrafts.move(workspaceId, changes),
   });
 
   registerOperations(operationBoundary, liveDraftRecoveryOperations, {

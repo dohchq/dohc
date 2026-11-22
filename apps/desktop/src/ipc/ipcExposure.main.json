@@ -215,6 +215,7 @@
     "desktop:menu-command",
     "desktop:merge-workspace-version",
     "desktop:mount-share",
+    "desktop:move-set-aside-drafts",
     "desktop:move-workspace-path",
     "desktop:notices-changed",
     "desktop:old-window-state-changed",

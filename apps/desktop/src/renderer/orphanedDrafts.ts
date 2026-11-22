@@ -17,6 +17,7 @@ import {
   storeDraft,
   type DraftRecoveryIdentity,
 } from "./orphanedDraftStorage";
+import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 
 // Set-aside drafts: text a reopen took out of the save pipeline, held
 // until the user copies or dismisses it. The store lives outside the keyed
@@ -347,23 +348,23 @@ function retireOrphanedDraft(workspaceId: string, path: string, id: number): voi
 
 // A rename or move re-keys the document, and the recovery must follow it —
 // otherwise the notice dies with the old path while the tab remaps to the new
-// one. The caller supplies the same projection the shell
+// one. The caller supplies the same tree changes the shell
 // applies to tabs and pins. A null projection (a delete) keeps the drafts
 // under their old key: destroying recovery text is never this store's call,
 // and a restored or recreated file shows the notice again.
 export function remapOrphanedDraftPaths(
   workspaceId: string,
-  project: (path: string) => string | null,
+  changes: readonly PendingTreeChange[],
 ): void {
   // The stored copies move with them, and a rename onto a secret-classified
   // path drops its plaintext row instead. Those drafts stop being durable
   // and go back behind the close warning.
-  const demoted = remapStoredDraftPaths(workspaceId, project);
+  const demoted = remapStoredDraftPaths(workspaceId, changes);
   let changed = demoted.size > 0;
   for (const [key, kept] of [...drafts]) {
     const [keyWorkspaceId, path] = JSON.parse(key) as [string, string];
     if (keyWorkspaceId !== workspaceId) continue;
-    const next = project(path);
+    const next = projectTreePath(path, changes);
     if (next === null || next === path) continue;
     drafts.delete(key);
     const nextKey = keyFor(workspaceId, next);

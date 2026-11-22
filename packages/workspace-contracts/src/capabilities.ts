@@ -1444,6 +1444,9 @@ const LISTED_CAPABILITIES = {
   "document.aside.remove": capability("Remove an edit this computer set aside.", {
     ipc: ["removeSetAsideDraft"],
   }),
+  "document.aside.move": capability("Move the edits this computer set aside with a rename.", {
+    ipc: ["moveSetAsideDrafts"],
+  }),
   "document.draft.discard": capability("Discard the recovery copy of a set-aside draft.", {
     ipc: ["discardLiveDraftRecovery"],
   }),
