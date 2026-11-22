@@ -146,9 +146,15 @@ afterEach(async () => {
 function server(
   options: {
     level?: Level;
+    // A folder rule's level on a file, where it differs from the member level.
+    fileLevels?: Record<string, Level>;
     levelChangedBy?: string;
     signedIn?: boolean;
+    // The account's session ended while the page was open.
+    expired?: boolean;
     groups?: Array<{ wire: string; name: string; type?: "posts" | "chat" | "both" }>;
+    // A Group rule's level, where it differs from the member level. "none" hides the Group.
+    groupRules?: Record<string, "read-only" | "read-write" | "none">;
     files?: typeof FILES;
     member?: boolean;
     groupsFail?: number;
@@ -165,21 +171,31 @@ function server(
   let signedIn = options.signedIn ?? true,
     groupsFail = options.groupsFail ?? 0,
     deleteFails = options.deleteFails ?? 0;
-  const files = options.files ?? FILES;
-  // A test can change the level while the page is open; the next read of the workspace's meta carries it.
+  // A test can change the level, the rules or the files while the page is open; the next read carries them.
+  const files = () =>
+    (options.files ?? FILES).map((file) => ({
+      ...file,
+      access: options.fileLevels?.[file.path] ?? levelNow(),
+    }));
   const levelNow = () => options.level ?? "comment";
+  // The relay's keyed signature of the member's reach: it changes with the level or a rule.
+  const reach = () =>
+    JSON.stringify([levelNow(), options.fileLevels ?? {}, options.groupRules ?? {}]);
   const access = () => (levelNow() === "view" ? "read-only" : "read-write");
   // A test can add a Group, or sign in as another account, while the page is open.
   const groups = () =>
-    options.groups ?? [
-      { wire: "wire-plans", name: "plans" },
-      { wire: "wire-food", name: "food" },
-    ];
+    (
+      options.groups ?? [
+        { wire: "wire-plans", name: "plans" },
+        { wire: "wire-food", name: "food" },
+      ]
+    ).filter((group) => options.groupRules?.[group.wire] !== "none");
   const user = () => options.user ?? "sam";
   const meta = () => ({
     ok: true,
     effectiveSelector: { paths: [], versionId: null, wholeWorkspace: true },
     access: levelNow(),
+    reach: reach(),
     subjectName: "Trip",
     lastSettledAtMs: Date.now(),
     lastSettledKnown: true,
@@ -212,7 +228,10 @@ function server(
     const headers = new Headers(init?.headers);
     if (url.pathname === "/api/account/session")
       return jsonResponse({
-        user: signedIn ? { id: user(), name: user() === "sam" ? "Sam Rivera" : "Lee Park" } : null,
+        user:
+          signedIn && !options.expired
+            ? { id: user(), name: user() === "sam" ? "Sam Rivera" : "Lee Park" }
+            : null,
       });
     if (url.pathname === "/api/account/sign-in") {
       signedIn = true;
@@ -225,7 +244,7 @@ function server(
     }
     // share-web gives an account that holds no membership the answer it gives an unknown grant.
     if (
-      options.member === false &&
+      (options.member === false || options.expired) &&
       (url.pathname.startsWith("/api/view/") || url.pathname.startsWith("/api/named-chat/"))
     )
       return jsonResponse({ ok: false, error: "not found" }, 404);
@@ -234,7 +253,7 @@ function server(
       if (url.pathname === "/api/view/current" && options.openHeld)
         return hold("current", url, signal);
       if (url.pathname === "/api/view/current")
-        return jsonResponse({ ...meta(), files, nextCursor: 7, epochLogFloor: 0 });
+        return jsonResponse({ ...meta(), files: files(), nextCursor: 7, epochLogFloor: 0 });
       if (url.pathname === "/api/view/meta") return jsonResponse(meta());
       if (url.pathname === "/api/view/log")
         return url.searchParams.has("hold")
@@ -259,7 +278,7 @@ function server(
           name: group.name,
           kind: "channel",
           type: group.type ?? "both",
-          access: access(),
+          access: options.groupRules?.[group.wire] ?? access(),
         })),
       });
     if (url.pathname === "/api/named-chat/messages/delete") {
@@ -274,9 +293,16 @@ function server(
         deleted: { messageId: body.messageId, threadId: body.threadId, deletedAtMs: 50_000 },
       });
     }
+    // The relay answers 404 for a file or Group the member no longer reaches.
+    const gone = (place: { path?: unknown; channelWireId?: unknown }) =>
+      typeof place.path === "string"
+        ? !files().some((file) => file.path === place.path)
+        : typeof place.channelWireId === "string" &&
+          !groups().some((group) => group.wire === place.channelWireId);
     if (url.pathname === "/api/named-chat/messages" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       posts.push(body);
+      if (gone(body)) return jsonResponse({ ok: false, error: "not found" }, 404);
       if (options.postFails)
         return jsonResponse(
           { ok: false, error: "refused", code: options.postFails.code },
@@ -299,6 +325,11 @@ function server(
     }
     // A file's Comments, by the file's path.
     const path = url.searchParams.get("path");
+    if (
+      url.pathname === "/api/named-chat/messages" &&
+      gone({ path: path ?? undefined, channelWireId: url.searchParams.get("channelWireId") })
+    )
+      return jsonResponse({ ok: false, error: "not found" }, 404);
     if (url.pathname === "/api/named-chat/messages" && path !== null) {
       if (url.searchParams.has("since")) return hold("comments", url, signal);
       return jsonResponse({
@@ -436,7 +467,8 @@ it("follows the member level in an open Group: a raise offers the composer, and 
       (node) => node.textContent,
     ),
   ).toEqual(["Copy", "Discard"]);
-  // The open Group stayed mounted: its messages read once, and the Groups once.
+  // The open Group stayed mounted: its messages read once. The Groups read once, then again after each level change,
+  // because a Group can hold its own level.
   expect(text()).toContain("Plans start here");
   const reads = (path: string) =>
     fetch.mock.calls.filter(
@@ -444,7 +476,7 @@ it("follows the member level in an open Group: a raise offers the composer, and 
         new URL(String(input), "https://share.test").pathname === path &&
         !new URL(String(input), "https://share.test").searchParams.has("since"),
     ).length;
-  expect(reads("/api/named-chat/channels")).toBe(1);
+  expect(reads("/api/named-chat/channels")).toBe(3);
 });
 
 it("says in a toast who changed the members' level, in the desktop's words, with no Try again", async () => {
@@ -1604,9 +1636,12 @@ it("keeps the unsent text after the membership ends, with none of the workspace"
 });
 
 it("says the membership ended and shows none of the workspace once the member is removed", async () => {
-  server({ level: "comment" });
+  const options: { level: Level; member?: boolean } = { level: "comment" };
+  server(options);
   await render();
   await opened();
+  // The owner removed the member: every workspace read now refuses, so a fresh read confirms it.
+  options.member = false;
   await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
   await settle(() => text().includes("Your membership in Trip ended."));
   // A browser keeps no copy of the workspace. The next step is one a browser can take.
@@ -1626,7 +1661,7 @@ it("refuses an account that is not a member, names it, and offers Switch account
   await render();
   await settle(() => text().includes("dohc could not open this workspace with this account."));
   expect(container.querySelector(".state-message p")?.textContent).toBe(
-    "This browser is signed in as Sam Rivera, not the account the owner invited.",
+    "This browser is signed in as Sam Rivera. Ask the owner to invite this account, or switch to another.",
   );
   await click("Switch account");
   await settle(() => text().includes("Sign in to open this workspace"));
@@ -1937,4 +1972,191 @@ describe("deleting a Group message", () => {
     expect(groupPanel().textContent).not.toContain("Deleted older text");
     expect(groupPanel().textContent).toContain("Message deleted");
   });
+});
+
+// A folder rule gives a member a level on its files that can differ from the member level.
+const badge = () => container.querySelector(".workspace-page .badge")?.textContent;
+const commentBox = () => commentsPanel().querySelector('textarea[name="body"]');
+
+it("opens the editor and the comment box where a rule gives a View member Edit, and says Can edit", async () => {
+  server({ level: "view", fileLevels: { "trip/plan.md": "edit", "trip/to-pack.md": "edit" } });
+  vi.mocked(openMemberPage).mockResolvedValue(ADMITTED);
+  vi.mocked(memberDocument).mockReturnValue({ session: liveSession() as never, close: vi.fn() });
+  await render();
+  await settle(() => container.querySelector('[role="textbox"]') !== null);
+  expect(vi.mocked(openMemberPage)).toHaveBeenCalledWith(
+    GRANT,
+    "trip/plan.md",
+    expect.any(AbortSignal),
+  );
+  expect(badge()).toBe("Can edit");
+  await showComments();
+  expect(commentBox()).not.toBeNull();
+  // The member level still holds outside the folder.
+  const tree = container.querySelector('nav[aria-label="Workspace files"]')!;
+  await act(async () =>
+    [...tree.querySelectorAll<HTMLButtonElement>(".file")]
+      .find((node) => node.textContent === "readme.md")!
+      .click(),
+  );
+  await settle(() => text().includes("Welcome.") && badge() === "View only");
+  expect(commentBox()).toBeNull();
+});
+
+it("shows View only, no editor and no comment box where a rule lowers an Edit member to View", async () => {
+  server({ level: "edit", fileLevels: { "trip/plan.md": "view" } });
+  await render();
+  await opened();
+  expect(badge()).toBe("View only");
+  expect(vi.mocked(openMemberPage)).not.toHaveBeenCalled();
+  await click("Comments");
+  await settle(() => commentsPanel().textContent?.includes("Nine is early") === true);
+  expect(commentBox()).toBeNull();
+});
+
+it("reads the files again when a rule changes between reads, so a folder that opened shows its files at their level", async () => {
+  const options: { level: Level; files?: typeof FILES; fileLevels?: Record<string, Level> } = {
+    level: "comment",
+    files: FILES.filter((file) => !file.path.startsWith("welcome/")),
+  };
+  server(options);
+  await render();
+  await opened();
+  expect(text()).not.toContain("readme.md");
+  // The owner opened a folder and lowered another between two reads. Its files are older than the log's cursor.
+  options.files = FILES;
+  options.fileLevels = { "trip/plan.md": "view" };
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(() => text().includes("readme.md") && badge() === "View only");
+  await settle(() => following("log").length === 1);
+});
+
+it("keeps the workspace open when a rule change refuses the held read, and shows what the fresh read brings", async () => {
+  const options: { level: Level; files?: typeof FILES } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  // The owner hid a folder. The relay refuses the read it held, as it would for a lost membership.
+  options.files = FILES.filter((file) => !file.path.startsWith("welcome/"));
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => !text().includes("readme.md") && following("log").length === 1);
+  expect(text()).not.toContain("membership");
+  expect(text()).toContain("Leave at nine.");
+});
+
+it("treats an open file's Comments going away as the file gone, not the membership, and reads the files again", async () => {
+  const options: { level: Level; files?: typeof FILES } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await showComments();
+  // The owner moved the file into a hidden folder while its Comments were open.
+  options.files = FILES.filter((file) => file.path !== "trip/plan.md");
+  await act(async () => following("comments")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(
+    () =>
+      !text().includes("plan.md") &&
+      commentsPanel().textContent?.includes("No comments yet.") === true,
+  );
+  expect(text()).not.toContain("membership");
+  expect(commentsPanel().textContent).toContain("to-pack.md");
+});
+
+it("treats an open Group going away as the Group gone, not the membership, and lists the rest", async () => {
+  const options: {
+    level: Level;
+    groups?: Array<{ wire: string; name: string }>;
+  } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  const composer = () => groupPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+  await act(async () => setControlValue(composer()!, "Bring a map"));
+  // The owner deleted the open Group. The post comes back 404.
+  options.groups = [{ wire: "wire-food", name: "food" }];
+  await act(async () =>
+    groupPanel().querySelector<HTMLButtonElement>('button[type="submit"]')!.click(),
+  );
+  await settle(
+    () =>
+      groupPanel().querySelector(".group-list") !== null &&
+      !groupPanel().textContent?.includes("plans"),
+  );
+  expect(text()).not.toContain("membership");
+  expect(text()).toContain("Leave at nine.");
+});
+
+it("says the session ended, not the membership, when it ends while the page is open", async () => {
+  const options: { level: Level; expired?: boolean } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  options.expired = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => text().includes("Your session ended. Sign in again to keep reading."));
+  expect(text()).not.toContain("membership");
+});
+
+// A Group rule gives a member a level in that Group that can differ from the member level.
+type GroupRules = Record<string, "read-only" | "read-write" | "none">;
+const groupComposer = () =>
+  groupPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+
+it("offers the message box to a View member in a Group set to Can post", async () => {
+  server({ level: "view", groupRules: { "wire-plans": "read-write" } });
+  await render();
+  await opened();
+  expect(groupComposer()).not.toBeNull();
+  expect(groupPanel().textContent).not.toContain("Only people who can comment post here.");
+});
+
+it("offers no message box to a Comment member in a Group set to View only", async () => {
+  server({ level: "comment", groupRules: { "wire-plans": "read-only" } });
+  await render();
+  await opened();
+  expect(groupComposer()).toBeNull();
+  expect(groupPanel().textContent).toContain("Only people who can comment post here.");
+});
+
+it("follows a Group's own level when its rule changes while it is open, and keeps the draft", async () => {
+  const options: { level: Level; groupRules?: GroupRules } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await act(async () => setControlValue(groupComposer()!, "Bring a map"));
+  // The owner set the open Group to View only. The member level stays Comment.
+  options.groupRules = { "wire-plans": "read-only" };
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => groupComposer() === null);
+  expect(
+    groupPanel().querySelector<HTMLTextAreaElement>('[aria-label="Your unsent message"]')?.value,
+  ).toBe("Bring a map");
+  expect(text()).toContain("Plans start here");
+  // Set back to Can post, the box returns with the draft.
+  options.groupRules = { "wire-plans": "read-write" };
+  await settle(() => following("log").length === 1);
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 8, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(() => groupComposer()?.value === "Bring a map");
+});
+
+it("treats an open Group set to No access as gone, not the membership, without waiting for the Groups to age", async () => {
+  const options: { level: Level; groupRules?: GroupRules } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  // The owner hid the open Group. The relay refuses the files' held read, as for any rule change.
+  options.groupRules = { "wire-plans": "none" };
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(
+    () =>
+      groupPanel().querySelector(".group-list") !== null &&
+      !groupPanel().textContent?.includes("plans") &&
+      groupPanel().textContent?.includes("food") === true,
+  );
+  expect(text()).not.toContain("membership");
+  expect(text()).toContain("Leave at nine.");
 });

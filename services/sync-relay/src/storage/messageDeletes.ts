@@ -421,6 +421,7 @@ export function deleteWorkspaceMessage(
     appendLogBatchInTransaction(storage, {
       workspaceId,
       originId: MESSAGE_DELETE_ORIGIN,
+      quotaExempt: "message-delete",
       ops: [
         {
           originSeq: maxOriginSeq(storage, workspaceId, MESSAGE_DELETE_ORIGIN) + 1,

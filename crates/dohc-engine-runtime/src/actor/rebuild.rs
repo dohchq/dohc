@@ -118,6 +118,9 @@ const OWN_CHAT: &str = "SELECT r.op_kind, r.payload_json FROM replication_log r 
        'chat.attachment.add') \
      AND r.origin_seq > COALESCE((SELECT p.pushed_seq FROM shared_channel_push_state p \
        WHERE p.workspace_id = ?1 AND p.share_id = ?2), -1) \
+     AND NOT EXISTS (SELECT 1 FROM chat_deleted_messages d \
+       WHERE d.workspace_id = r.workspace_id \
+       AND d.message_id = json_extract(r.payload_json, '$.messageId')) \
      ORDER BY r.origin_seq";
 
 /// Whether the moment under alias `moment` is one the relay never served
@@ -192,7 +195,9 @@ impl ActorHandle {
                             "SELECT json_extract(payload_json, '$.authorDisplayName'), \
                              json_extract(payload_json, '$.body') FROM replication_log \
                              WHERE workspace_id = ?1 AND op_kind = 'chat.message.append' \
-                             AND json_extract(payload_json, '$.messageId') = ?2 LIMIT 1",
+                             AND json_extract(payload_json, '$.messageId') = ?2 \
+                             AND NOT EXISTS (SELECT 1 FROM chat_deleted_messages d \
+                               WHERE d.workspace_id = ?1 AND d.message_id = ?2) LIMIT 1",
                             params![workspace_id, message],
                             |row| Ok((row.get(0)?, row.get(1)?)),
                         )

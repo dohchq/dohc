@@ -78,6 +78,7 @@ export interface MemberReach {
   listed(key: string | Uint8Array): ListedMemberReach;
   levelAt(path: string): ShareAccess | null;
   folderLevel(folder: string): ShareAccess | null;
+  pathVisibleBeforeMoment(objectId: string, momentId: string, path: string): boolean;
   objectVisible(objectId: string): boolean;
   objectPath(objectId: string): string | null;
   nearestRule(path: string): string;
@@ -296,6 +297,21 @@ export function memberReach(
     },
     levelAt,
     folderLevel: atFolder,
+    pathVisibleBeforeMoment: (objectId, momentId, path) => {
+      const moment = db
+        .prepare(`SELECT relay_seq FROM sync_relay_object_moments
+        WHERE workspace_id = ? AND version_id = 'main' AND object_id = ? AND moment_id = ?
+        ORDER BY relay_seq LIMIT 1`)
+        .get(workspaceId, objectId, momentId);
+      return (
+        !!moment &&
+        fileLevel(
+          knownRules(accessRuleSetBefore(db, workspaceId, Number(moment.relay_seq), parsedRules)),
+          viewer,
+          path,
+        ) !== null
+      );
+    },
     nearestRule: (path) => nearestRuleFolder(rules, path),
     objectVisible: (id) => object(id).visible,
     objectPath: (id) => object(id).path,

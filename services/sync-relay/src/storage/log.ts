@@ -160,6 +160,11 @@ export function appendLogBatchInTransaction(
       references: readonly import("@dohc/workspace-engine-client/daemon").WorkReferenceMapping[];
       datasetAccess?: import("./workReferences").DatasetReferenceAccess;
     };
+    /**
+     * Only a message delete skips the quota. Its tombstone can free less than
+     * its delete op adds, and a full workspace must still let a message go.
+     */
+    quotaExempt?: "message-delete";
   },
 ): AppendLogBatchResult {
   for (const op of input.ops) {
@@ -321,7 +326,7 @@ export function appendLogBatchInTransaction(
         : Buffer.byteLength(JSON.stringify(op.settlementAdmission))),
     0,
   );
-  assertWorkspaceQuota(storage, input.workspaceId, addedLogBytes);
+  if (!input.quotaExempt) assertWorkspaceQuota(storage, input.workspaceId, addedLogBytes);
 
   // Data-integrity gate: a log op must never be made
   // durable while it references a blob the relay does not hold. The blob
@@ -465,7 +470,8 @@ export function appendLogBatchInTransaction(
   }
   // Applying a rule file charges its rule row, which the check above
   // couldn't count. A batch that took the workspace over rolls back.
-  if (newOps.length > 0) assertWorkspaceQuota(storage, input.workspaceId, 0, { afterWrite: true });
+  if (newOps.length > 0 && !input.quotaExempt)
+    assertWorkspaceQuota(storage, input.workspaceId, 0, { afterWrite: true });
   for (const relaySeq of chatMessages) recordChatMessageAlerts(storage, relaySeq);
   const settlementRefusals = input.ops
     .filter((op) => op.settlementAdmission?.status === "refused")

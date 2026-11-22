@@ -2,6 +2,8 @@ import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
+import type { StorageContext } from "./storage/context";
+import { workspaceUsageBytes } from "./storage/workspaces";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import {
   RELAY_EXCHANGE_KEY,
@@ -478,6 +480,29 @@ describe("deleting a message", () => {
     expect(rowsOf(storage, "m-ana")).toEqual(before);
     expect((await deleteMessage(h, "ben", "m-ana", "t-team")).status).toBe(404);
     expect((await deleteMessage(h, "stranger", "m-ana", "t-team")).status).toBe(404);
+  });
+
+  it("deletes a message when the workspace is at its quota, and still refuses a post", async () => {
+    const { storage, h } = await seed();
+    const ana = await member(h, "ana");
+    expect((await push(h, "ana", ana.shareId, memberBatch("ana", "m-ana", "hi", 0))).status).toBe(
+      200,
+    );
+    // A short message's tombstone frees less than the delete op adds.
+    const context = storage as unknown as StorageContext;
+    context.options.workspaceQuotaBytes = workspaceUsageBytes(context, WORKSPACE);
+
+    const refused = await push(h, "ana", ana.shareId, memberBatch("ana", "m-ana-2", "more", 1));
+    expect(refused.status).toBe(413);
+    const deleted = await deleteMessage(h, "ana", "m-ana", "t-team");
+    expect(deleted.status, await deleted.clone().text()).toBe(200);
+    expect(rowsOf(storage, "m-ana").map((row) => row.op_kind)).toEqual([
+      "chat.message.tombstone",
+      "chat.message.delete",
+    ]);
+    expect(
+      (await push(h, "ana", ana.shareId, memberBatch("ana", "m-ana-2", "more", 1))).status,
+    ).toBe(413);
   });
 
   it("refuses a browser cookie from any origin but the share site", async () => {

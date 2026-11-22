@@ -1125,9 +1125,11 @@ fn settled(root: &Path, folder: &str, disk: &OnDisk) -> bool {
         candidate = (!dir.is_empty()).then(|| access_rule_folder(dir));
     }
     newest.is_none_or(|time| {
+        // A future timestamp cannot measure quiet time. Do not wait for
+        // another computer's clock before committing a narrowing.
         SystemTime::now()
             .duration_since(time)
-            .is_ok_and(|quiet| quiet >= ACCESS_RULE_SETTLE)
+            .map_or(true, |quiet| quiet >= ACCESS_RULE_SETTLE)
     })
 }
 
@@ -2936,6 +2938,36 @@ pub(super) fn check_rule_merge_order(
     } else {
         Err(RuntimeError::RuleMergeOrderChanged)
     }
+}
+
+/// A rule conflict must be resolved before any more files enter the target.
+/// This also covers callers that merge one file without planning rule order.
+pub(super) fn check_merge_rule_conflicts(
+    conn: &Connection,
+    input: &MergeTextFileFromVersion,
+) -> Result<(), RuntimeError> {
+    if is_access_rule_path(&input.path) {
+        return Ok(());
+    }
+    let mut query = conn
+        .prepare_cached(
+            "SELECT path FROM conflicts WHERE workspace_id=?1 \
+             AND target_version_id=?2 AND status='open' ORDER BY conflict_id",
+        )
+        .map_err(StorageError::corrupt_public)?;
+    let paths = query
+        .query_map(
+            params![input.workspace_id, input.target_version_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(StorageError::corrupt_public)?;
+    for path in paths {
+        let path = path.map_err(StorageError::corrupt_public)?;
+        if is_access_rule_path(&path) {
+            return Err(RuntimeError::RuleMergeConflict { path });
+        }
+    }
+    Ok(())
 }
 
 impl ActorHandle {

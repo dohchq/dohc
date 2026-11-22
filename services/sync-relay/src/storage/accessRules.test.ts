@@ -316,10 +316,18 @@ describe("the relay's access rule index", () => {
       r.write("A/access.yaml", "members: view\n", "binary");
       r.write("B/access.yaml", new Uint8Array([0x6d, 0xff, 0x0a]));
       r.write("C/access.yaml", `members: view\n#${"x".repeat(64 * 1024)}\n`);
+      // The engine strips one byte order mark, so a second one makes the rule
+      // unreadable there. The relay must read the same bytes the same way.
+      const bom = [0xef, 0xbb, 0xbf];
+      const edit = [...Buffer.from("members: edit\n")];
+      r.write("D/access.yaml", new Uint8Array([...bom, ...bom, ...edit]));
+      r.write("E/access.yaml", new Uint8Array([...bom, ...edit]));
       expect(r.rows().map((row) => [row.folder, row.rule_text])).toEqual([
         ["A", null],
         ["B", null],
         ["C", null],
+        ["D", null],
+        ["E", "members: edit\n"],
       ]);
     } finally {
       r.db.close();
