@@ -625,6 +625,55 @@ describe("what a member reaches", () => {
     expect(asAdmin).toContain("People/salaries-2026.md");
   });
 
+  it.each(["delete", "rename"] as const)(
+    "serves a move out of a hidden folder as an arrival after the owner %ss the folder",
+    async (operation) => {
+      const { h } = await seed();
+      const ana = await invited(h, "ana");
+      const shareId = await shareIdOf(h, "ana");
+      await ownerWrite(h, "HR/access.yaml", "");
+      await ownerWrite(h, "HR/layoff-plan.md", "published plan");
+      await ownerRename(h, "HR/layoff-plan.md", "Public/plan.md");
+      const before = await pulledText(h, "ana", shareId);
+      expect(before).not.toContain("HR/");
+      expect(before).toContain('"reachMove":"arrival"');
+
+      if (operation === "rename") await ownerWrite(h, "People/access.yaml", "");
+      await ownerAppend(h, [
+        logOp("moment.append", {
+          momentId: `m-${ownerSeq++}`,
+          versionId: "main",
+          objectId: "object-HR/access.yaml",
+          path: "HR/access.yaml",
+          recordedAtMs: 5000,
+          operation: "delete",
+          payloadBeforeBlobSha256: ownerHeads.get("HR/access.yaml"),
+          payloadBeforePath: "HR/access.yaml",
+          payloadAfterBlobSha256: null,
+          payloadAfterPath: null,
+          metadata: { origin: "user" },
+          beforePresent: "null",
+        }),
+      ]);
+
+      const after = await pulledText(h, "ana", shareId);
+      expect(after).not.toContain("HR/");
+      expect(after).not.toContain("People/");
+      expect(after).toBe(before);
+      expect(
+        (await h(request("ana", `/sync/shares/${shareId}/blobs/${sha256("published plan")}`)))
+          .status,
+      ).toBe(200);
+      expect(
+        (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+      ).toBe(200);
+      const asAdmin = await pulledText(h, "ana", shareId);
+      expect(asAdmin).toContain('"operation":"rename"');
+      expect(asAdmin).toContain('"payloadBeforePath":"HR/layoff-plan.md"');
+      expect(asAdmin).toContain('"payloadAfterPath":"Public/plan.md"');
+    },
+  );
+
   it("serves a readable Group without naming its hidden folder", async () => {
     const { h } = await seed();
     await ownerWrite(h, "private/restricted/access.yaml", "");
