@@ -130,7 +130,8 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
     const openNote = async () => {
       await revealExplorerPath(page, PATH);
       await explorerRow(page, PATH).click();
-      await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 30_000 });
+      await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
       await page.keyboard.press("ControlOrMeta+w");
       await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
     };
