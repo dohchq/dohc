@@ -42,10 +42,24 @@ const whole = (value: unknown): unknown =>
     ? Number(value)
     : value;
 
+const MAX_SPAN = 1000;
+const MAX_LIST_START = 999_999_999;
+const MAX_ROW_HEIGHT = 1_000_000;
+
 const text = (value: unknown) => typeof value === "string";
 const textOrNone = (value: unknown) => value === null || typeof value === "string";
 const yesOrNo = (value: unknown) => typeof value === "boolean";
 const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value);
+const integerIn = (least: number, most: number) => (value: unknown) =>
+  typeof value === "number" && Number.isInteger(value) && value >= least && value <= most;
+const span = integerIn(1, MAX_SPAN);
+const widths = (value: unknown) =>
+  value === null ||
+  (Array.isArray(value) &&
+    value.length <= MAX_SPAN &&
+    value.every((width) => finite(width) && (width as number) >= 0));
+const side = (value: unknown) =>
+  value === null || value === "left" || value === "right" || value === "center";
 const plain = (value: unknown) =>
   value === null ||
   typeof value === "string" ||
@@ -75,24 +89,17 @@ const VALUE_RULES: Record<string, (value: unknown) => boolean> = {
   "codeBlock.language": textOrNone,
   "orderedList.type": textOrNone,
   "callout.fold": (value) => value === "" || value === "+" || value === "-",
-  "heading.level": (value) =>
-    typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 6,
-  "orderedList.start": finite,
-  "tableCell.colspan": finite,
-  "tableCell.rowspan": finite,
-  "tableHeader.colspan": finite,
-  "tableHeader.rowspan": finite,
-  "tableCell.colwidth": (value) =>
-    value === null ||
-    (Array.isArray(value) && value.every((width) => typeof width === "number" && width >= 0)),
-  "tableHeader.colwidth": (value) =>
-    value === null ||
-    (Array.isArray(value) && value.every((width) => typeof width === "number" && width >= 0)),
-  "tableCell.align": (value) =>
-    value === null || value === "left" || value === "right" || value === "center",
-  "tableHeader.align": (value) =>
-    value === null || value === "left" || value === "right" || value === "center",
-  "tableRow.height": (value) => value === null || (finite(value) && (value as number) > 0),
+  "heading.level": integerIn(1, 6),
+  "orderedList.start": integerIn(0, MAX_LIST_START),
+  "tableCell.colspan": span,
+  "tableCell.rowspan": span,
+  "tableHeader.colspan": span,
+  "tableHeader.rowspan": span,
+  "tableCell.colwidth": widths,
+  "tableHeader.colwidth": widths,
+  "tableCell.align": side,
+  "tableHeader.align": side,
+  "tableRow.height": (value) => value === null || integerIn(1, MAX_ROW_HEIGHT)(value),
   "link.href": textOrNone,
   "link.target": textOrNone,
   "link.rel": textOrNone,
@@ -108,7 +115,8 @@ function attrsFor(type: NodeType | MarkType, raw: unknown): SequenceAttrs {
   const given = record(raw) ?? {};
   const attrs: SequenceAttrs = {};
   for (const key of Object.keys(type.spec.attrs ?? {})) {
-    const value = whole(given[key]);
+    const held = whole(given[key]);
+    const value = Array.isArray(held) ? held.map(whole) : held;
     if (value !== undefined && (VALUE_RULES[`${type.name}.${key}`] ?? plain)(value))
       attrs[key] = value;
   }
@@ -162,30 +170,40 @@ export function allowedChildren(schema: Schema): Record<string, string[]> {
 }
 
 function pathOf(schema: Schema, value: unknown, containers: ContainerRecords): SequenceFrame[] {
+  const shape = shapeOf(schema);
   const path: SequenceFrame[] = [];
   if (!Array.isArray(value)) return path;
   const seen = new Set<string>();
+  let parent = schema.topNodeType;
   for (const id of value.slice(0, MAX_SEQUENCE_DEPTH) as unknown[]) {
     if (typeof id !== "string" || !CONTAINER_ID.test(id) || seen.has(id)) break;
-    const type = containers.get(id);
-    if (typeof type !== "string") break;
+    const recorded = containers.get(id);
+    if (typeof recorded !== "string") break;
+    const allowed = shape.children.get(parent)!;
+    const type = allowed.size === 1 ? [...allowed][0] : schema.nodes[recorded];
+    if (!shape.container(type) || !allowed.has(type)) break;
     seen.add(id);
     const attrs: SequenceAttrs = {};
-    for (const key of Object.keys(schema.nodes[type]?.spec.attrs ?? {})) {
+    for (const key of Object.keys(type.spec.attrs ?? {})) {
       const held = containers.get(`${id}.${key}`);
       if (held !== undefined) attrs[key] = held;
     }
-    path.push({ type, id, attrs });
+    path.push({ type: type.name, id, attrs });
+    parent = type;
   }
   return path;
 }
 
-/** The leaves a sequence holds. Content before the first boundary is a paragraph with no path. */
+/**
+ * The leaves a sequence holds. What stands before the first boundary is a paragraph with no path,
+ * if any of it is a letter or an inline item the schema knows.
+ */
 export function leavesOfSequence(
   schema: Schema,
   pieces: Iterable<SequencePiece>,
   containers: ContainerRecords,
 ): SequenceLeaf[] {
+  const shape = shapeOf(schema);
   const leaves: SequenceLeaf[] = [];
   for (const piece of pieces) {
     if ("boundary" in piece)
@@ -195,9 +213,9 @@ export function leavesOfSequence(
         path: pathOf(schema, piece.boundary.path, containers),
         inline: [],
       });
-    else if (leaves.length === 0)
+    else if (leaves.length > 0) leaves.at(-1)!.inline.push(piece);
+    else if ("text" in piece ? piece.text !== "" : shape.inlineItem(schema.nodes[piece.atom]))
       leaves.push({ type: "paragraph", attrs: {}, path: [], inline: [piece] });
-    else leaves.at(-1)!.inline.push(piece);
   }
   return leaves;
 }

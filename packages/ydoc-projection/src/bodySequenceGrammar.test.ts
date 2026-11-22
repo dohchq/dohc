@@ -70,6 +70,8 @@ const anyValue = (next: Next): unknown =>
     -1,
     1.5,
     2n,
+    Infinity,
+    [100n],
     "x",
     "",
     true,
@@ -264,6 +266,73 @@ describe("reading any sequence", () => {
     expect(heading("x")).toBe(1);
     expect(heading(9)).toBe(1);
     expect(heading({ nested: true })).toBe(1);
+  });
+
+  it("holds table and list numbers to whole numbers in range", () => {
+    const records = new Map<string, unknown>([
+      ["t", "table"],
+      ["r", "tableRow"],
+      ["c", "tableCell"],
+      ["l", "orderedList"],
+      ["i", "listItem"],
+    ]);
+    const read = (extra: [string, unknown][], path: string[]) => {
+      const all = new Map([...records, ...extra]);
+      const doc = readBodyLeaves(schema, leavesOfSequence(schema, [{ boundary: { path } }], all));
+      doc.check();
+      return doc;
+    };
+    const cell = (extra: [string, unknown][]) =>
+      read(extra, ["t", "r", "c"]).firstChild!.firstChild!.firstChild!.attrs;
+    expect(cell([["c.colspan", 3]]).colspan).toBe(3);
+    for (const bad of [1e9, 0, -5, 1.5, Infinity, "2"])
+      expect(cell([["c.colspan", bad]]).colspan, String(bad)).toBe(1);
+    expect(cell([["c.colwidth", [100n, 20]]]).colwidth).toEqual([100, 20]);
+    expect(cell([["c.colwidth", [Infinity]]]).colwidth).toBeNull();
+    expect(cell([["c.colwidth", [-1]]]).colwidth).toBeNull();
+    const start = (value: unknown) =>
+      read([["l.start", value]], ["l", "i"]).firstChild!.attrs.start as unknown;
+    expect(start(7)).toBe(7);
+    expect(start(0)).toBe(0);
+    for (const bad of [1.5, -5, 1e20]) expect(start(bad), String(bad)).toBe(1);
+    const height = (value: unknown) =>
+      read([["r.height", value]], ["t", "r", "c"]).firstChild!.firstChild!.attrs.height as unknown;
+    expect(height(40)).toBe(40);
+    for (const bad of [1.5, 1e20, 0]) expect(height(bad), String(bad)).toBeNull();
+  });
+
+  it("reads an item as the kind its list holds, whatever its own record says", () => {
+    const kinds = (list: string, recorded: string) => {
+      const records = new Map<string, unknown>([
+        ["l", list],
+        ["i", recorded],
+      ]);
+      const [leaf] = leavesOfSequence(schema, [{ boundary: { path: ["l", "i"] } }], records);
+      return leaf!.path.map((frame) => frame.type);
+    };
+    expect(kinds("bulletList", "taskItem")).toEqual(["bulletList", "listItem"]);
+    expect(kinds("orderedList", "taskItem")).toEqual(["orderedList", "listItem"]);
+    expect(kinds("taskList", "listItem")).toEqual(["taskList", "taskItem"]);
+    expect(kinds("taskList", "blockquote")).toEqual(["taskList", "taskItem"]);
+    expect(kinds("table", "listItem")).toEqual(["table", "tableRow"]);
+    expect(kinds("blockquote", "listItem")).toEqual(["blockquote"]);
+  });
+
+  it("starts no paragraph for an empty string or an unknown element before the first boundary", () => {
+    const read = (first: SequencePiece) =>
+      (
+        readBodyLeaves(
+          schema,
+          leavesOfSequence(
+            schema,
+            [first, { boundary: { type: "heading", level: 2 } }, { text: "Hi", marks: {} }],
+            new Map(),
+          ),
+        ).toJSON() as { content: { type: string }[] }
+      ).content.map((node) => node.type);
+    expect(read({ text: "", marks: {} })).toEqual(["heading"]);
+    expect(read({ atom: "nonsense", attrs: {} })).toEqual(["heading"]);
+    expect(read({ atom: "hardBreak", attrs: {} })).toEqual(["paragraph", "heading"]);
   });
 
   it("turns a mark on only for an object, and reads code alone when code is on", () => {

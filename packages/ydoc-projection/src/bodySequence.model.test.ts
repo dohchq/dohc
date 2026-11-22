@@ -27,8 +27,9 @@ function read(text: Y.Text): Token[] {
     if (item.deleted) continue;
     const content = item.content;
     if (content instanceof Y.ContentFormat) {
-      if (content.value === null) marks.delete(content.key);
-      else marks.set(content.key, content.value);
+      if (typeof content.value === "object" && content.value !== null)
+        marks.set(content.key, content.value);
+      else marks.delete(content.key);
     } else if (content instanceof Y.ContentString) {
       const on = [...marks.keys()].sort().join(",");
       for (let at = 0; at < content.str.length; at++)
@@ -378,7 +379,7 @@ AFTER  ${raw()}`,
       }, {});
     },
     markAt(index: number, length: number, mark: string) {
-      return local(() => text.format(index, length, { [mark]: true }), { marks: true });
+      return local(() => text.format(index, length, { [mark]: {} }), { marks: true });
     },
     newStep: () => manager.stopCapturing(),
     undo: () => back("undo"),

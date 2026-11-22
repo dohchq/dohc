@@ -79,6 +79,7 @@ function person(baseline: Uint8Array, clientID: number) {
   const history = new Y.UndoManager([text, records], {
     trackedOrigins: new Set([LOCAL]),
     ignoreRemoteMapChanges: true,
+    deleteFilter: (item) => item.parent !== records,
   });
   const changes = () => text.toDelta() as Change[];
   return {
@@ -246,14 +247,14 @@ it("takes one person's whole path when one indents and another outdents a to-do"
   }
 });
 
-it("turns a list into a to-do list for every item, with an item added at the same moment", () => {
-  const baseline = note(
+const twoBullets = () =>
+  note(
     { L: "bulletList", a: "listItem", b: "listItem" },
     { path: ["L", "a"], text: "a" },
     { path: ["L", "b"], text: "b" },
   );
-  const changer = person(baseline, 10);
-  const adder = person(baseline, 20);
+const item = (type: string, text: string) => ({ type, content: [paragraph(text)] });
+const toTodos = (changer: Person) =>
   changer.change(() => {
     changer.records.set("L", "taskList");
     for (const id of ["a", "b"]) {
@@ -261,15 +262,57 @@ it("turns a list into a to-do list for every item, with an item added at the sam
       changer.records.set(`${id}.checked`, false);
     }
   });
+
+it("keeps a list one list when it becomes to-dos and someone adds an item in the middle", () => {
+  const changer = person(twoBullets(), 10);
+  const adder = person(twoBullets(), 20);
+  toTodos(changer);
   adder.change(() => {
     adder.records.set("c", "listItem");
-    adder.text.insertEmbed(adder.text.length, boundary(["L", "c"]), {});
-    adder.text.insert(adder.text.length, "c", {});
+    const at = adder.indexOf(1);
+    adder.text.insertEmbed(at, boundary(["L", "c"]), {});
+    adder.text.insert(at + 1, "c", {});
   });
-  const text = JSON.stringify(settle(changer, adder));
-  for (const letter of ["a", "b", "c"]) expect(text).toContain(`"text":"${letter}"`);
-  expect(text).toContain('"type":"taskList"');
-  expect(text).not.toContain('"type":"bulletList"');
+  expect(settle(changer, adder)).toMatchObject({
+    content: [
+      {
+        type: "taskList",
+        content: [item("taskItem", "a"), item("taskItem", "c"), item("taskItem", "b")],
+      },
+    ],
+  });
+});
+
+it("keeps a list one list when two people change its kind differently at the same moment", () => {
+  for (const [numberer, ticker] of [
+    [20, 10],
+    [10, 20],
+  ] as const) {
+    const first = person(twoBullets(), numberer);
+    const second = person(twoBullets(), ticker);
+    first.change(() => first.records.set("L", "orderedList"));
+    toTodos(second);
+    const top = (settle(first, second) as { content: { type: string; content: unknown[] }[] })
+      .content;
+    expect(top).toHaveLength(1);
+    const kind = top[0]!.type;
+    expect(["orderedList", "taskList"]).toContain(kind);
+    const each = kind === "taskList" ? "taskItem" : "listItem";
+    expect(top[0]).toMatchObject({ content: [item(each, "a"), item(each, "b")] });
+  }
+});
+
+it("keeps a list one list when its change to a numbered list is undone after it became to-dos", () => {
+  const first = person(twoBullets(), 10);
+  const second = person(twoBullets(), 20);
+  first.change(() => first.records.set("L", "orderedList"));
+  settle(first, second);
+  toTodos(second);
+  settle(first, second);
+  first.history.undo();
+  expect(settle(first, second)).toMatchObject({
+    content: [{ type: "bulletList", content: [item("listItem", "a"), item("listItem", "b")] }],
+  });
 });
 
 it("undoes a tick, and brings a joined line back in its to-do", () => {
@@ -295,7 +338,7 @@ it("undoes a tick, and brings a joined line back in its to-do", () => {
   });
 });
 
-it("unwraps a line added to a quote at the same moment the quote is undone", () => {
+it("leaves a line someone added to a quote in the quote when the quote is undone", () => {
   const baseline = note({}, { path: [], text: "one" });
   const wrapper = person(baseline, 10);
   const writer = person(baseline, 20);
@@ -311,6 +354,75 @@ it("unwraps a line added to a quote at the same moment the quote is undone", () 
   wrapper.history.undo();
   expect(settle(wrapper, writer)).toEqual({
     type: "doc",
-    content: [paragraph("one"), paragraph("two")],
+    content: [paragraph("one"), { type: "blockquote", content: [paragraph("two")] }],
+  });
+});
+
+it("keeps a to-do someone added to a list when the change that made the list is undone", () => {
+  const baseline = note(
+    {
+      L: "taskList",
+      I1: "taskItem",
+      "I1.checked": false,
+      I2: "taskItem",
+      "I2.checked": false,
+      I3: "taskItem",
+      "I3.checked": false,
+    },
+    { path: ["L", "I1"], text: "one" },
+    { path: ["L", "I2"], text: "two" },
+    { path: ["L", "I3"], text: "three" },
+  );
+  const splitter = person(baseline, 10);
+  const adder = person(baseline, 20);
+  splitter.change(() => {
+    splitter.records.set("L2", "taskList");
+    splitter.line(1).setAttribute("path", [] as unknown as string);
+    splitter.line(2).setAttribute("path", ["L2", "I3"] as unknown as string);
+  });
+  settle(splitter, adder);
+  adder.change(() => {
+    adder.records.set("I4", "taskItem");
+    adder.records.set("I4.checked", false);
+    adder.text.insertEmbed(adder.text.length, boundary(["L2", "I4"]), {});
+    adder.text.insert(adder.text.length, "four", {});
+  });
+  settle(splitter, adder);
+  splitter.history.undo();
+  expect(settle(splitter, adder)).toMatchObject({
+    content: [
+      {
+        type: "taskList",
+        content: [
+          todo(false, paragraph("one")),
+          todo(false, paragraph("two")),
+          todo(false, paragraph("three")),
+        ],
+      },
+      { type: "taskList", content: [todo(false, paragraph("four"))] },
+    ],
+  });
+});
+
+it("reads one callout as two when a line is lifted out of it while another is added to it", () => {
+  const baseline = note(
+    { q: "callout", "q.calloutType": "note", "q.title": "Note", "q.fold": "" },
+    { path: ["q"], text: "a" },
+    { path: ["q"], text: "b" },
+  );
+  const lifter = person(baseline, 10);
+  const adder = person(baseline, 20);
+  lifter.change(() => lifter.line(1).setAttribute("path", [] as unknown as string));
+  adder.change(() => {
+    adder.text.insertEmbed(adder.text.length, boundary(["q"]), {});
+    adder.text.insert(adder.text.length, "c", {});
+  });
+  const callout = (text: string) => ({
+    type: "callout",
+    attrs: { title: "Note" },
+    content: [paragraph(text)],
+  });
+  expect(settle(lifter, adder)).toMatchObject({
+    content: [callout("a"), paragraph("b"), callout("c")],
   });
 });
