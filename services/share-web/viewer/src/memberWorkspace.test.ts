@@ -271,6 +271,7 @@ it("ends every Group when the member is removed, and pauses while the tab is hid
     onMessages: vi.fn(),
     onEnded,
   });
+  hub.start();
   const signal = new AbortController().signal;
   const reading = hub.client(group("wire-plans"), false).follow(10, 30_000, signal);
   await vi.waitFor(() => expect(open()).toHaveLength(1));
@@ -327,5 +328,34 @@ it("offers Delete on a member's own messages, and on every message to the owner 
     admin = hub.client(group("wire-plans"), true).remove!;
   expect([own, other, gone].map((item) => member.can(item))).toEqual([true, false, false]);
   expect([own, other, gone].map((item) => admin.can(item))).toEqual([true, true, false]);
+  hub.close();
+});
+
+it("reads only from a started follow, and reads again once React closes and starts it", async () => {
+  const { follow, open } = heldFollows();
+  const make = () =>
+    createGroupFollow({
+      shareId: "share",
+      userId: "sam",
+      follow,
+      onMessages: vi.fn(),
+      onEnded: vi.fn(),
+      since: 22,
+    });
+  // Strict Mode builds the follow twice and keeps one, then starts, closes and starts it.
+  make();
+  const hub = make();
+  hub.start();
+  hub.close();
+  hub.start();
+  await vi.waitFor(() => expect(open()).toHaveLength(1));
+  visibility = "hidden";
+  document.dispatchEvent(new Event("visibilitychange"));
+  expect(open()).toHaveLength(0);
+  visibility = "visible";
+  document.dispatchEvent(new Event("visibilitychange"));
+  await vi.waitFor(() => expect(open()).toHaveLength(1));
+  expect(open()[0]!.since).toBe(22);
+  expect(open()).toHaveLength(1);
   hub.close();
 });

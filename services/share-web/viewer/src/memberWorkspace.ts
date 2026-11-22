@@ -193,6 +193,8 @@ export function createGroupFollow(options: {
   follow?: typeof followMemberGroups;
   onMessages(counts: ReadonlyMap<string, number>): void;
   onEnded(reason: Ended): void;
+  // Where an earlier follow stopped. A follow that starts there needs no open Group to start it.
+  since?: number | null;
 }) {
   const follow = options.follow ?? followMemberGroups;
   // A delete names no Group, so every Group's view hears it; one it does not hold changes nothing.
@@ -201,10 +203,14 @@ export function createGroupFollow(options: {
   const buffers = new Map<string, NamedChatMessage[]>(),
     counted = new Map<string, number>(),
     waiters = new Set<Waiter>();
-  let cursor: number | null = null,
-    floor = 0,
+  let cursor: number | null = options.since ?? null,
+    floor = options.since ?? 0,
     loop: AbortController | null = null,
-    over = false;
+    // The follow ended for good.
+    over = false,
+    // The page closed the follow. React may start it again, as Strict Mode does.
+    closed = false,
+    listening = false;
 
   const ready = (wireId: string, since: number): FollowPage | null => {
     const messages = (buffers.get(wireId) ?? []).filter((item) => item.relaySeq > since);
@@ -257,7 +263,7 @@ export function createGroupFollow(options: {
 
   const run = () => {
     loop?.abort();
-    if (over || cursor === null || document.visibilityState !== "visible") {
+    if (over || closed || cursor === null || document.visibilityState !== "visible") {
       loop = null;
       return;
     }
@@ -303,7 +309,6 @@ export function createGroupFollow(options: {
       loop = null;
     }
   };
-  document.addEventListener("visibilitychange", visibility);
 
   const followGroup = (wireId: string, since: number, signal: AbortSignal) => {
     // The buffers hold every Group's messages after `floor`. A Group that read its history before that starts the follow again there.
@@ -337,6 +342,15 @@ export function createGroupFollow(options: {
     });
   };
   return {
+    cursor: () => cursor,
+    // Starts the follow from `since`, if it has one. Otherwise the first open Group starts it.
+    start() {
+      closed = false;
+      // Only a started follow listens, so an instance React discards never reads.
+      if (!listening) document.addEventListener("visibilitychange", visibility);
+      listening = true;
+      if (!loop) run();
+    },
     client(group: NamedChatChannel, moderates: boolean): ChatChannelClient {
       return {
         access: group.access,
@@ -349,10 +363,11 @@ export function createGroupFollow(options: {
       };
     },
     close() {
-      over = true;
+      closed = true;
       loop?.abort();
       loop = null;
       document.removeEventListener("visibilitychange", visibility);
+      listening = false;
       fail(new DOMException("Closed", "AbortError"));
     },
   };
