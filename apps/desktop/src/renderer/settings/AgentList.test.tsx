@@ -524,6 +524,17 @@ it("holds Check back in Restricted Mode with the band's words, and adds an agent
   expect(onSave).toHaveBeenCalledTimes(2);
 });
 
+// A joined workspace is a shared view too, and it has chat. The note says
+// only why Send test is off, and only where there is an agent to test.
+it("says Send test works only in your own workspace in a shared view, and only beside an agent", () => {
+  const { rerender } = renderList({ sharedView: true });
+  expect(screen.getByTestId("agents-check-note").textContent).toBe(
+    "Send test works only in a workspace you own.",
+  );
+  rerender({ settings: { ...SETTINGS, agents: {} } });
+  expect(screen.queryByTestId("agents-check-note")).toBeNull();
+});
+
 it("asks main whether the workspace is restricted when a closed panel's Try again runs", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
   const { onError, unmount } = renderList({ trust: trust(true) });

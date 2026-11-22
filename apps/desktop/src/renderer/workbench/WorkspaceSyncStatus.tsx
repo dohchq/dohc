@@ -131,6 +131,10 @@ const OTHER_ACCOUNT_LABEL = "Another account signed in";
 const OTHER_ACCOUNT_DESCRIPTION =
   "Not syncing. This computer is signed in to another account than the one the owner invited.";
 const SERVER_BUSY_DESCRIPTION = "Server busy. dohc keeps trying to sync.";
+// An ended membership or share no longer syncs. Its band says why and what
+// is left, so the mark carries no words beside it.
+const ENDED_LABEL = "Not syncing";
+const ENDED_DESCRIPTION = "Not syncing. This copy stays on this computer.";
 
 // The title bar says "Server unreachable". Features that need the server
 // then add no indicator, toast or row of their own, since the server's
@@ -164,26 +168,32 @@ export function WorkspaceSyncStatus({
   syncStatus,
   failedSaves,
   otherAccount = false,
+  ended = false,
 }: {
   syncStatus: SyncStatusResult | null;
   failedSaves: number;
   // A joined workspace whose account is not the one signed in: nothing syncs,
   // whatever the last state main reported.
   otherAccount?: boolean;
+  // A membership or share that ended: nothing syncs, whatever the last state
+  // main reported.
+  ended?: boolean;
 }) {
   const state = syncStatus?.state;
   const conflictCount = state === "conflict" ? (syncStatus?.conflictCount ?? 0) : 0;
   // A failed sync names the server when the server is what failed.
   const busy = syncWaitsOnBusyServer(syncStatus);
-  const stateLabel = otherAccount
-    ? OTHER_ACCOUNT_LABEL
-    : state === "sync-failed" && syncNamesServer(syncStatus)
-      ? "Server unreachable"
-      : busy
-        ? SERVER_BUSY_LABEL
-        : state
-          ? SYNC_LABEL[state]
-          : null;
+  const stateLabel = ended
+    ? ENDED_LABEL
+    : otherAccount
+      ? OTHER_ACCOUNT_LABEL
+      : state === "sync-failed" && syncNamesServer(syncStatus)
+        ? "Server unreachable"
+        : busy
+          ? SERVER_BUSY_LABEL
+          : state
+            ? SYNC_LABEL[state]
+            : null;
   const label = stateLabel
     ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
     : "Checking status";
@@ -195,16 +205,19 @@ export function WorkspaceSyncStatus({
       : state === "syncing" && syncStatus?.claimingIdentity
         ? "Setting up sync…"
         : label);
-  const stateDescription = otherAccount
-    ? OTHER_ACCOUNT_DESCRIPTION
-    : busy
-      ? SERVER_BUSY_DESCRIPTION
-      : state
-        ? SYNC_DESCRIPTION[state]
-        : undefined;
+  const stateDescription = ended
+    ? ENDED_DESCRIPTION
+    : otherAccount
+      ? OTHER_ACCOUNT_DESCRIPTION
+      : busy
+        ? SERVER_BUSY_DESCRIPTION
+        : state
+          ? SYNC_DESCRIPTION[state]
+          : undefined;
   const description = (shownLabel === label ? stateDescription : undefined) ?? shownLabel;
-  const dot: DotKind =
-    saveFailed || syncStatus?.updateRequired || otherAccount
+  const dot: DotKind = ended
+    ? "off"
+    : saveFailed || syncStatus?.updateRequired || otherAccount
       ? "attention"
       : busy
         ? "working"
@@ -213,7 +226,7 @@ export function WorkspaceSyncStatus({
           : "waiting";
   // A state that needs the person, or waits on the person to connect, says
   // so in words beside the mark.
-  const worded = dot === "attention" || dot === "off";
+  const worded = !ended && (dot === "attention" || dot === "off");
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either. Live editing waits on a server the
   // title bar already names.

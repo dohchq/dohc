@@ -217,20 +217,21 @@ describe("workspace summary changes", () => {
     expect(screen.getByTestId("workspace-updating-access-line").textContent).toBe(
       "Your access to this workspace changed.",
     );
-    // A stopped update is one thing that failed: a toast and a Notices row with Try again.
-    const [toast] = await waitFor(() => {
-      const found = toastsWith(detail);
-      expect(found).toHaveLength(1);
-      return found;
-    });
-    expect(within(toast!).getByRole("button", { name: "Try again" })).toBeTruthy();
+    // This state shows the failure with Try again, so it files a Notices row
+    // with Try again and no toast.
+    const toggle = await screen.findByTestId("notice-center-toggle");
+    expect(toastsWith(detail)).toHaveLength(0);
+    fireEvent.click(toggle);
+    const center = screen.getByTestId("notice-center");
+    expect(center.textContent).toContain(detail);
+    expect(within(center).getByRole("button", { name: "Try again" })).toBeTruthy();
     fireEvent.click(within(panel).getByRole("button", { name: "Try again" }));
     await waitFor(() =>
       expect(retryShareViewRebuild).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a" }),
     );
   });
 
-  it("titles a stop that says only why, and keeps its code out of the toast", async () => {
+  it("titles a stop that says only why, and keeps its code out of its Notices row", async () => {
     const h = setup();
     vi.stubGlobal("dohcDesktop", {
       ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
@@ -261,19 +262,15 @@ describe("workspace summary changes", () => {
     const panel = screen.getByTestId("workspace-updating-access");
     expect(within(panel).getByText(title)).toBeTruthy();
     expect(within(panel).getByText(detail)).toBeTruthy();
-    const [toast] = await waitFor(() => {
-      const found = screen
-        .queryAllByTestId(/^workspace-shell-(?:toast|error)$/u)
-        .filter((t) => t.textContent?.includes(title));
-      expect(found).toHaveLength(1);
-      return found;
-    });
-    expect(toast!.textContent).toContain(detail);
-    expect(toast!.textContent).not.toContain("share-view-rebuild-linked-folder");
+    fireEvent.click(await screen.findByTestId("notice-center-toggle"));
+    const center = screen.getByTestId("notice-center");
+    expect(center.textContent).toContain(title);
+    expect(center.textContent).toContain(detail);
+    expect(center.textContent).not.toContain("share-view-rebuild-linked-folder");
   });
 
-  // The panel's Details is the toast's: what it copies, with the engine's
-  // code, shows under the actions, and Copy details copies exactly that.
+  // The panel's Details is its Notices row's: what it copies, with the
+  // engine's code, shows under the actions, and Copy details copies exactly that.
   it("shows a stop's code and copies it from the panel's Details", async () => {
     const h = setup();
     const writeText = vi.fn(async (_text: string) => undefined);
@@ -318,20 +315,15 @@ describe("workspace summary changes", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(report));
     fireEvent.click(details);
     expect(document.getElementById(details.getAttribute("aria-controls")!)).toBeNull();
-    // The toast's Details carries the same code.
-    const [toast] = await waitFor(() => {
-      const found = screen
-        .queryAllByTestId(/^workspace-shell-(?:toast|error)$/u)
-        .filter((t) => t.textContent?.includes(title));
-      expect(found).toHaveLength(1);
-      return found;
-    });
-    fireEvent.click(within(toast!).getByRole("button", { name: "Details" }));
-    expect(toast!.textContent).toContain(`Code: ${code}`);
+    // The Notices row's Details carries the same code.
+    fireEvent.click(await screen.findByTestId("notice-center-toggle"));
+    const center = screen.getByTestId("notice-center");
+    fireEvent.click(within(center).getByRole("button", { name: "Details" }));
+    expect(center.textContent).toContain(`Code: ${code}`);
   });
 
   // A new try clears the stop, and an ended membership offers no Try again:
-  // the stop's toast and Notices row go with it.
+  // the stop's Notices row goes with it.
   it.each([
     ["a new try runs", { updatingAccess: true as const }],
     [
@@ -341,7 +333,8 @@ describe("workspace summary changes", () => {
         updatingAccess: true as const,
         updatingAccessStopped: {
           reason: "ended" as const,
-          detail: "Your membership ended. What arrived stays in this folder.",
+          detail:
+            "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
         },
       },
     ],
@@ -355,10 +348,6 @@ describe("workspace summary changes", () => {
     render(<DesktopRoot />);
     await screen.findByTestId("workspace-shell");
     const detail = "dohc could not update access: the disk is full.";
-    const noticesWith = (text: string) =>
-      screen
-        .queryAllByTestId(/^workspace-shell-(?:toast|error)$|^workspace-error-notice$/u)
-        .filter((notice) => notice.textContent?.includes(text));
     const view = {
       shareId: "share",
       granterEmail: null,
@@ -377,12 +366,11 @@ describe("workspace summary changes", () => {
       },
     ]);
     await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
-    await waitFor(() => expect(noticesWith(detail).length).toBeGreaterThan(0));
+    await screen.findByTestId("connection-notices");
     h.replace([{ ...workspace("a"), shareView: { ...view, ...next } }]);
     await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
     expect(screen.getByTestId("workspace-updating-access")).toBeTruthy();
-    await waitFor(() => expect(noticesWith(detail)).toHaveLength(0));
-    expect(screen.queryByTestId("connection-notices")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("connection-notices")).toBeNull());
   });
 
   // Try again's own refresh can fail before it starts the update again.
@@ -424,6 +412,8 @@ describe("workspace summary changes", () => {
   it("says a membership ended during an update, with no Try again, and shows its folder", async () => {
     const h = setup();
     const revealWorkspaceFolder = vi.fn(async () => undefined);
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     vi.stubGlobal("dohcDesktop", {
       ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
       platform: "win32",
@@ -433,7 +423,8 @@ describe("workspace summary changes", () => {
     });
     render(<DesktopRoot />);
     await screen.findByTestId("workspace-shell");
-    const detail = "Your membership ended. What arrived stays in this folder.";
+    const detail =
+      "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.";
     const shareView = {
       shareId: "share",
       granterEmail: null,
@@ -453,8 +444,11 @@ describe("workspace summary changes", () => {
     expect(screen.queryByTestId("workspace-updating-access-line")).toBeNull();
     expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
     expect(within(panel).getByRole("button", { name: "Open another workspace" })).toBeTruthy();
-    // "This folder" is named, and opens.
+    // The folder is named, copies from beside its path, and opens.
     expect(panel.textContent).toContain("/tmp/a");
+    expect(within(panel).queryByRole("button", { name: "Copy" })).toBeNull();
+    fireEvent.click(within(panel).getByRole("button", { name: "Copy path" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith("/tmp/a"));
     fireEvent.click(within(panel).getByRole("button", { name: "Show in File Explorer" }));
     expect(revealWorkspaceFolder).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a" });
   });

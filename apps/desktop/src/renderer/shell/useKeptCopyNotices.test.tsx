@@ -55,9 +55,10 @@ function harness(initial: KeptCopy[]) {
 }
 
 describe("useKeptCopyNotices", () => {
-  // Restore rule's own toast names the copies it kept, so their rows are
-  // quiet results, not failures, and file no summary of colliding saves.
-  it("shows copies Restore rule kept as quiet results, path first, with no summary", async () => {
+  // Copies Restore rule kept are results, not failures: no toast and no
+  // summary of colliding saves. Their rows stay unread, since only they offer
+  // Save copy.
+  it("shows copies Restore rule kept as unread results, path last, with no summary", async () => {
     const h = harness([
       { id: 4, path: "new/access.yaml", keptAtMs: 1 },
       { id: 5, path: "team/ACCESS.yaml", keptAtMs: 2 },
@@ -66,23 +67,21 @@ describe("useKeptCopyNotices", () => {
     await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(3));
     expect(h.result.current.shellErrors).toMatchObject([
       {
-        message:
-          "new/access.yaml: dohc kept the file from outside dohc when you chose Restore rule.",
+        message: "dohc kept the rule from outside dohc for new/access.yaml.",
         action: { label: "Save copy" },
         tone: "success",
         seen: true,
-        read: true,
       },
       {
-        message:
-          "team/ACCESS.yaml: dohc kept the file from outside dohc when you chose Restore rule.",
+        message: "dohc kept the rule from outside dohc for team/ACCESS.yaml.",
         action: { label: "Save copy" },
         tone: "success",
         seen: true,
-        read: true,
       },
       { message: keptCopyMessage("notes/a.md"), seen: false },
     ]);
+    expect(h.result.current.shellErrors[0]!.read).toBeUndefined();
+    expect(h.result.current.shellErrors[1]!.read).toBeUndefined();
     // A collided save is a failure the person hasn't read yet.
     expect(h.result.current.shellErrors[2]!.tone).toBeUndefined();
     expect(h.result.current.shellErrors[2]!.read).toBeUndefined();

@@ -28,45 +28,53 @@ function open(
 }
 
 describe("GroupSettingsDialog", () => {
-  it("shows the member level for a Group with no rule, and saves the level picked", async () => {
+  it("shows Default for a Group with no rule, and saves the level picked", async () => {
     const { save, onClose } = open({ level: null, memberLevel: "comment" });
-    await waitFor(() => expect(checked("Can post")).toBe(true));
+    await waitFor(() => expect(checked("Default")).toBe(true));
+    expect(checked("Can post")).toBe(false);
     expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
-      "Follows the member level, Comment.",
+      "Follows the member level, Comment, so members can post.",
     );
     expect(screen.getByTestId("chats-group-access-always").textContent).toBe(
       "The owner and admins can always read and post.",
     );
     fireEvent.click(radio("View only"));
     expect(screen.queryByTestId("chats-group-access-follows")).toBeNull();
-    expect(screen.getByTestId("chats-group-access-set").textContent).toBe("Set for this Group.");
     fireEvent.click(screen.getByTestId("chats-group-settings-save"));
     await waitFor(() => expect(save).toHaveBeenCalledWith("view"));
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("keeps following the member level when a Group with no rule comes back to it", async () => {
-    const { save, onClose } = open({ level: null, memberLevel: "edit" });
-    await waitFor(() => expect(checked("Can post")).toBe(true));
+  it("keeps following the member level when a Group with no rule comes back to Default", async () => {
+    const { save, onClose } = open({ level: null, memberLevel: "view" });
+    await waitFor(() => expect(checked("Default")).toBe(true));
+    expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
+      "Follows the member level, View, so members can read only.",
+    );
     fireEvent.click(radio("View only"));
-    fireEvent.click(radio("Can post"));
-    expect(screen.queryByTestId("chats-group-access-follow")).toBeNull();
+    fireEvent.click(radio("Default"));
     fireEvent.click(screen.getByTestId("chats-group-settings-save"));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(save).not.toHaveBeenCalled();
-    expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
-      "Follows the member level, Edit.",
-    );
   });
 
-  it("keeps a saved rule that matches the member level until Follow the member level", async () => {
+  // Can post is a rule of the Group's own, even where the member level would also post.
+  it("sets Can post as the Group's own rule, apart from Default", async () => {
+    const { save } = open({ level: null, memberLevel: "comment" });
+    await waitFor(() => expect(checked("Default")).toBe(true));
+    fireEvent.click(radio("Can post"));
+    expect(checked("Default")).toBe(false);
+    expect(screen.queryByTestId("chats-group-access-follows")).toBeNull();
+    fireEvent.click(screen.getByTestId("chats-group-settings-save"));
+    await waitFor(() => expect(save).toHaveBeenCalledWith("comment"));
+  });
+
+  it("keeps a saved rule that matches the member level until Default", async () => {
     const { save } = open({ level: "comment", memberLevel: "comment" });
     await waitFor(() => expect(checked("Can post")).toBe(true));
-    expect(screen.getByTestId("chats-group-access-set").textContent).toBe("Set for this Group.");
-    fireEvent.click(radio("View only"));
-    fireEvent.click(radio("Can post"));
-    expect(screen.getByTestId("chats-group-access-set")).toBeTruthy();
-    fireEvent.click(screen.getByTestId("chats-group-access-follow"));
+    expect(checked("Default")).toBe(false);
+    expect(screen.queryByTestId("chats-group-access-follows")).toBeNull();
+    fireEvent.click(radio("Default"));
     expect(screen.getByTestId("chats-group-access-follows")).toBeTruthy();
     fireEvent.click(screen.getByTestId("chats-group-settings-save"));
     await waitFor(() => expect(save).toHaveBeenCalledWith(null));
@@ -77,13 +85,25 @@ describe("GroupSettingsDialog", () => {
     await waitFor(() => expect(checked("View only")).toBe(true));
     fireEvent.click(radio("No access"));
     expect(screen.getByTestId("chats-group-access-hiding").textContent).toBe(
-      "Members will no longer see Announcements. People who read it may keep a copy.",
+      "Members will no longer see the Announcements Group. People who read it may keep a copy.",
     );
-    fireEvent.click(screen.getByTestId("chats-group-access-follow"));
-    expect(checked("Can post")).toBe(true);
+    fireEvent.click(radio("Default"));
+    expect(checked("Default")).toBe(true);
     expect(screen.queryByTestId("chats-group-access-hiding")).toBeNull();
     fireEvent.click(screen.getByTestId("chats-group-settings-save"));
     await waitFor(() => expect(save).toHaveBeenCalledWith(null));
+  });
+
+  it("offers only Close while no one else is in the workspace", async () => {
+    const { save, onClose } = open("no-members");
+    expect((await screen.findByTestId("chats-group-access-alone")).textContent).toContain(
+      "Only you are in this workspace.",
+    );
+    expect(screen.queryByTestId("chats-group-settings-save")).toBeNull();
+    expect(screen.queryByTestId("chats-group-settings-cancel")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(save).not.toHaveBeenCalled();
   });
 
   it("keeps Save off while access loads, and offers Try again when the read fails", async () => {
@@ -110,7 +130,7 @@ describe("GroupSettingsDialog", () => {
   it("keeps the dialog open with the error in place when the save fails", async () => {
     const save = vi.fn(async () => "dohc could not change this Group's access.");
     const { onClose } = open({ level: null, memberLevel: "comment" }, save);
-    await waitFor(() => expect(checked("Can post")).toBe(true));
+    await waitFor(() => expect(checked("Default")).toBe(true));
     fireEvent.click(radio("No access"));
     fireEvent.click(screen.getByTestId("chats-group-settings-save"));
     expect((await screen.findByTestId("chats-group-access-error")).textContent).toBe(
@@ -120,17 +140,17 @@ describe("GroupSettingsDialog", () => {
     expect(checked("No access")).toBe(true);
   });
 
-  it("says a hidden Group's folder keeps its files as they are, and closes to show it", async () => {
+  it("says members keep their access to a hidden Group's folder, and closes to show it", async () => {
     const onOpenFolder = vi.fn();
     const { onClose } = open({ level: null, memberLevel: "comment" }, undefined, {
       folderPath: "Team/Plans",
       onOpenFolder,
     });
-    await waitFor(() => expect(checked("Can post")).toBe(true));
+    await waitFor(() => expect(checked("Default")).toBe(true));
     expect(screen.queryByTestId("chats-group-access-folder")).toBeNull();
     fireEvent.click(radio("No access"));
     expect(screen.getByTestId("chats-group-access-hiding").textContent).toBe(
-      "Members will no longer see Announcements. Files in Plans stay as they are.",
+      "Members will no longer see the Announcements Group. Their access to files in Plans stays the same.",
     );
     fireEvent.click(screen.getByTestId("chats-group-access-folder"));
     expect(onOpenFolder).toHaveBeenCalledWith("Team/Plans");

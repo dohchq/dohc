@@ -612,7 +612,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     "dohc_delete_message",
     {
       description:
-        "Delete one of your own messages in a Group or a file's discussion. This can't be undone. Its text leaves every chat view; " +
+        "Delete one of your own messages in a Group or a file's Comments. This can't be undone. Its text leaves every chat view; " +
         "people see that a message was there. People who already read it may keep a copy. " +
         "You can delete only messages you posted, whatever your level.",
       inputSchema: z.object({
@@ -636,7 +636,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
           deletedSchema,
           {
             not_found:
-              "dohc could not delete this message. You can delete only your own messages in a Group or a file's discussion.",
+              "dohc could not delete this message. You can delete only your own messages in a Group or a file's Comments.",
             bad_request:
               "dohc could not delete this message. Check its workspace, threadId and messageId.",
           },

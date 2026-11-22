@@ -75,7 +75,12 @@ it("keeps Notices open on a step that runs in place, with focus on its row and t
     target: { to: "folder", path: "team" },
   };
   const action = vi.fn();
-  const props = { onWorkspaceErrorAction: action, onOpenTarget: async () => null };
+  const retry = vi.fn();
+  const props = {
+    onWorkspaceErrorAction: action,
+    onRetryWorkspaceError: retry,
+    onOpenTarget: async () => null,
+  };
   const view = renderNotices({ ...props, workspaceErrors: [held] });
   await userEvent.click(screen.getByTestId("notice-center-toggle"));
   await userEvent.click(
@@ -136,11 +141,27 @@ it("keeps Notices open on a step that runs in place, with focus on its row and t
     message: "dohc could not restore the access rule for team",
     atMs: 3,
     canRetry: true,
+    retryStays: true,
     seen: true,
   };
   view.rerender(noticeElement({ ...props, workspaceErrors: [held, failed] }));
   expect(screen.getByTestId("notice-failed")).toBeTruthy();
   expect(document.activeElement).toBe(opens("held"));
+
+  // Its Try again runs the choice again in place too: Notices stays open, and focus goes to the outcome.
+  await userEvent.click(
+    within(screen.getByTestId("notice-failed")).getByRole("button", { name: "Try again" }),
+  );
+  expect(retry).toHaveBeenCalledExactlyOnceWith("failed");
+  view.rerender(
+    noticeElement({
+      ...props,
+      workspaceErrors: [{ ...held, actionLabel: "Restoring…", actionBusy: 0 }],
+    }),
+  );
+  expect(screen.getByTestId("notice-held")).toBeTruthy();
+  view.rerender(noticeElement({ ...props, workspaceErrors: [{ ...done, id: "restored" }] }));
+  expect(screen.getByTestId("notice-restored").contains(document.activeElement)).toBe(true);
 });
 
 it("shows a row's lead above its rows and reads it out while Notices is open", async () => {

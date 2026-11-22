@@ -2,7 +2,7 @@ import { Layers, MessagesSquare, Newspaper, TriangleAlert, type LucideIcon } fro
 import { useEffect, useId, useRef, useState } from "react";
 import type { GroupRuleLevel, MemberLevel } from "@dohc/security-contract/workspace-members";
 import { Overlay } from "../Overlay";
-import { GroupAccessPicker, pickedGroupLevel } from "./GroupSettingsDialog";
+import { GroupAccessPicker } from "./GroupSettingsDialog";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
 import { useRadioGroup } from "../ui/SegmentedControl";
 import { isComposingKey } from "../ui/keys";
@@ -124,7 +124,7 @@ export function NewGroupDialog(props: {
         className="dohc-elevated flex w-[480px] max-w-[calc(100vw-2rem)] flex-col gap-6 rounded-xl border border-line bg-panel p-6"
       >
         <h2 id={`${id}-title`} className="m-0 text-base font-semibold text-ink">
-          New group
+          New Group
         </h2>
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
@@ -153,20 +153,19 @@ export function NewGroupDialog(props: {
                 data-testid="chats-new-channel-name-error"
                 className="m-0 text-[12px] text-danger"
               >
-                Give the group a name.
+                Give the Group a name.
               </p>
             ) : null}
           </div>
           <div className="flex flex-col gap-2">
             <label htmlFor={`${id}-purpose`} className="dohc-section-label">
-              What it&apos;s for
+              What it&apos;s for <span className="ml-1 font-normal">Optional</span>
             </label>
             <input
               id={`${id}-purpose`}
               data-testid="chats-new-channel-purpose"
               value={purpose}
               maxLength={200}
-              placeholder="Optional"
               disabled={busy}
               onChange={(event) => setPurpose(event.target.value)}
               className={FIELD}
@@ -239,11 +238,7 @@ export function NewGroupDialog(props: {
                   level={level}
                   memberLevel={access.memberLevel}
                   disabled={busy}
-                  onChange={(picked) =>
-                    setLevel(
-                      picked === null ? null : pickedGroupLevel(picked, null, access.memberLevel),
-                    )
-                  }
+                  onChange={setLevel}
                 />
               )}
             </div>
@@ -273,7 +268,7 @@ export function NewGroupDialog(props: {
               data-testid="chats-new-channel-submit"
               disabled={!named || busy}
             >
-              Create group
+              Create Group
             </PrimaryButton>
           </div>
         </div>

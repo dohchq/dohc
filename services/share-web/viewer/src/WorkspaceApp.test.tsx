@@ -1768,6 +1768,10 @@ it("says the membership ended and shows none of the workspace once the member is
   expect(container.querySelector('nav[aria-label="Workspace files"]')).toBeNull();
   expect(text()).not.toContain("Leave at nine.");
   expect(text()).not.toContain("Plans start here");
+  // The browser is still signed in, so it names the account and offers Sign out.
+  expect(text()).toContain("Signed in as Sam Rivera · Sign out");
+  await click("Sign out");
+  await settle(() => text().includes("Sign in to open this workspace"));
 });
 
 it("refuses an account that is not a member, names it, and offers Switch account", async () => {
@@ -1984,7 +1988,7 @@ describe("deleting a Group message", () => {
     expect(dialog()!.querySelector("h2")?.textContent).toBe("Delete this message?");
     expect(dialog()!.querySelector(".chat-delete-quote")?.textContent).toBe("Mine to take back");
     expect(dialog()!.querySelector("#chat-delete-body")?.textContent).toContain(
-      "Everyone loses it, and you can't undo this. People who already read it may keep a copy.",
+      "This removes the message from this conversation for everyone. You can't undo it. People who already read it may keep a copy.",
     );
     // Delete takes focus, as on the desktop. A held Enter does nothing, and the arrows move between the buttons.
     expect(document.activeElement).toBe(inDialog("Delete"));
@@ -2024,8 +2028,33 @@ describe("deleting a Group message", () => {
     expect(line.querySelector(".icon circle")).not.toBeNull();
     expect(groupPanel().textContent).toContain("Plans start here");
     expect(deletes()).toHaveLength(0);
-    // Its Delete has gone, so focus goes to the messages rather than the page.
-    expect(document.activeElement).toBe(groupPanel().querySelector(".chat-scroller"));
+    // As on the desktop, the deleted line offers no Reply; Ana's post keeps hers.
+    expect(groupPanel().querySelector('.chat-message[data-seq="4"] .chat-replies')).toBeNull();
+    expect(
+      groupPanel().querySelector('.chat-message[data-seq="3"] .chat-replies')?.textContent,
+    ).toBe("Reply");
+    // Its Delete has gone and no message follows, so focus goes to the composer, not the pane.
+    expect(document.activeElement).toBe(groupPanel().querySelector(".chat-composer textarea"));
+  });
+
+  it("keeps a deleted post's replies link and puts focus on it", async () => {
+    server({
+      history: {
+        "wire-plans": [
+          chat(3, "Plans start here"),
+          chat(4, "Mine to take back", "sam"),
+          chat(5, "Noted", "ana", { threadId: "t4", startsPost: false }),
+        ],
+      },
+    });
+    await render();
+    await settledOpen();
+    await act(async () => deletes()[0]!.click());
+    await act(async () => inDialog("Delete").click());
+    await settle(() => dialog() === null && !text().includes("Mine to take back"));
+    const replies = groupPanel().querySelector('.chat-message[data-seq="4"] .chat-replies');
+    expect(replies?.textContent).toBe("1 reply");
+    expect(document.activeElement).toBe(replies);
   });
 
   it("offers Delete on every message to the owner or an admin, and Cancel deletes nothing", async () => {
@@ -2307,9 +2336,9 @@ it("says another account signed in, not that the membership ended, when another 
   // Another tab signed this browser in as Lee. Sam's grant now refuses every read.
   options.user = "lee";
   await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
-  await settle(() => text().includes("This browser is signed in as another account."));
+  await settle(() => text().includes("This browser is now signed in as Lee Park."));
   expect(container.querySelector(".state-message p")?.textContent).toBe(
-    "It is now signed in as Lee Park. Sign in as Sam Rivera to keep working in Trip.",
+    "Sign in as Sam Rivera to keep working in Trip.",
   );
   expect(text()).not.toContain("membership");
   expect(text()).not.toContain("Leave at nine.");

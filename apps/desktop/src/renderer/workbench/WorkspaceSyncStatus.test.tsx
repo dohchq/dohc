@@ -217,6 +217,20 @@ describe("sync status surface", () => {
     expect(dotOf()).toBe("saved");
   });
 
+  // An ended copy syncs nothing, whatever main last reported. Its band says
+  // why, so the mark carries no words beside it.
+  it("takes the off mark, with no words beside it, once a membership ends", () => {
+    const { rerender } = render(
+      <WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} ended />,
+    );
+    const status = screen.getByTestId("sync-status");
+    expect(status.getAttribute("title")).toBe("Not syncing. This copy stays on this computer.");
+    expect(dotOf()).toBe("off");
+    expect(worded()).toBe(false);
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} />);
+    expect(dotOf()).toBe("saved");
+  });
+
   // A file whose save failed: the title bar must not say saved over it.
   it("names the files that couldn't save instead of saved, and says saved again once they clear", () => {
     const { rerender } = renderStatus({ syncStatus: syncState("synced"), failedSaves: 1 });

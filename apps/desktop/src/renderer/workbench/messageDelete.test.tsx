@@ -229,7 +229,7 @@ describe("Delete on a message", () => {
     expect(within(dialog).getByRole("heading").textContent).toBe("Delete this message?");
     expect(within(dialog).getByTestId("message-delete-quote").textContent).toBe("My plan");
     expect(dialog.textContent).toContain(
-      "Everyone loses it, and you can't undo this. People who already read it may keep a copy.",
+      "This removes the message from this conversation for everyone. You can't undo it. People who already read it may keep a copy.",
     );
     const confirm = screen.getByTestId("message-delete-confirm") as HTMLButtonElement;
     expect(document.activeElement).toBe(confirm);

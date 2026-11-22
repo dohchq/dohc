@@ -147,6 +147,13 @@ describe("ChatsView channels", () => {
       await screen.findByTestId("chats-channel");
       expect(screen.queryByTestId("chats-new-channel")).toBeNull();
     });
+
+    it("puts one muted line under an empty Groups heading", async () => {
+      joined(false, []);
+      expect((await screen.findByTestId("chats-channels-empty")).textContent).toBe(
+        "No Groups yet.",
+      );
+    });
   });
 
   it("keeps reaction writes ordered when switching away from and remounting a chat lane", async () => {

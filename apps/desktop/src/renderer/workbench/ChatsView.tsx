@@ -5072,16 +5072,25 @@ export function ChatsView(props: {
             {createsGroups ? (
               <SectionActionButton
                 testId="chats-new-channel"
-                label="New group"
+                label="New Group"
                 onClick={() => setCreatingGroup(true)}
               >
                 <Plus size={12} aria-hidden />
               </SectionActionButton>
             ) : null}
           </div>
-          <ul className="m-0 list-none p-0">
-            {activeGroups.map((channel) => groupRow(channel, false))}
-          </ul>
+          {activeGroups.length > 0 ? (
+            <ul className="m-0 list-none p-0">
+              {activeGroups.map((channel) => groupRow(channel, false))}
+            </ul>
+          ) : (
+            <p
+              data-testid="chats-channels-empty"
+              className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted"
+            >
+              No Groups yet.
+            </p>
+          )}
           {receivedNotJoined.length > 0 || shareReadFailure !== null ? (
             <div data-testid="chats-shared-with-you">
               <SectionLabel as="p" className="mt-4 flex h-6 items-center px-3">
@@ -5147,7 +5156,11 @@ export function ChatsView(props: {
             onOpen={(conversationId, title) =>
               openConversation({ level: "direct", conversationId, title })
             }
-            onNew={() => openConversation({ level: "direct-new" })}
+            // New message picks from this workspace's members. Once the membership ended,
+            // the server lists none to this account, so only the existing conversations stay.
+            {...(props.joinedWorkspace?.ended
+              ? {}
+              : { onNew: () => openConversation({ level: "direct-new" }) })}
             onError={props.onError}
             onClearError={props.onClearError}
             serverNamed={props.serverNamed}

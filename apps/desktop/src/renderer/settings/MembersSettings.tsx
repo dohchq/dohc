@@ -133,7 +133,8 @@ ${status.email ?? ""}`,
 type Load =
   | { status: "loading" }
   | { status: "ready"; view: WorkspaceMembersView }
-  | { status: "failed"; message: string }
+  // The line says what failed; the toast and Notices row say why.
+  | { status: "failed" }
   | { status: "refused" }
   | { status: "left"; workspaceName: string };
 
@@ -182,6 +183,8 @@ export function MembersSettings(props: {
   onMessage?: (memberId: string) => void;
   /** The members' level changed here. */
   onLevelSaved?: () => void;
+  /** The title bar says the server is unreachable, so its report covers a failure here. */
+  serverNamed?: boolean;
 }) {
   const { workspaceId } = props;
   const gate = membersGate(props.cloud, props.joined);
@@ -201,12 +204,28 @@ export function MembersSettings(props: {
     onError: props.onError,
     onClearError: props.onClearError,
     onLevelSaved: props.onLevelSaved,
+    serverNamed: props.serverNamed,
   });
   report.current = {
     onError: props.onError,
     onClearError: props.onClearError,
     onLevelSaved: props.onLevelSaved,
+    serverNamed: props.serverNamed,
   };
+  // One outage, one notice: while the title bar names the server, a failure
+  // here says so only in place, and a row filed before then is taken back.
+  // Choosing the level or confirming Remove again is the retry.
+  const filed = useRef(new Set<string>());
+  const fileFailure = useCallback<ReportError>((message, cause, retry, details, identity) => {
+    if (report.current.serverNamed) return;
+    if (identity !== undefined) filed.current.add(identity);
+    report.current.onError?.(message, cause, retry, details, identity);
+  }, []);
+  useEffect(() => {
+    if (!props.serverNamed) return;
+    for (const identity of filed.current) report.current.onClearError?.(identity);
+    filed.current.clear();
+  }, [props.serverNamed]);
 
   const [load, setLoad] = useState<{ key: string; load: Load } | null>(null);
   // One change runs at a time. Its controls wait, and the view it answers is
@@ -243,10 +262,9 @@ export function MembersSettings(props: {
         },
         (cause: unknown) => {
           if (!scope.isCurrent(token)) return;
-          const message = ipcErrorMessage(cause, FALLBACK.list);
-          setLoad({ key: scopeKey, load: { status: "failed", message } });
-          report.current.onError?.(
-            message,
+          setLoad({ key: scopeKey, load: { status: "failed" } });
+          fileFailure(
+            ipcErrorMessage(cause, FALLBACK.list),
             cause,
             async () => setAttempt((count) => count + 1),
             undefined,
@@ -279,7 +297,7 @@ export function MembersSettings(props: {
         // workspace or account never hears it.
         if (scope.isCurrent(token) || (closed.current && scope.isCutOff(token))) {
           const reportFailure = (): void =>
-            report.current.onError?.(
+            fileFailure(
               ipcErrorMessage(cause, FALLBACK[request.action]),
               cause,
               async () => {
@@ -454,7 +472,7 @@ function MembersLoadState(props: Parameters<typeof MembersLoadView>[0]) {
           className="rounded-lg border border-line bg-panel p-1"
         >
           <RetryRow testId="settings-members-retry" onRetry={props.onRetry}>
-            {load.message}
+            {FALLBACK.list}
           </RetryRow>
         </div>
       );
@@ -958,7 +976,8 @@ function MembersConfirm(props: {
           confirmLabel="Remove"
         >
           <p className="m-0">
-            Copies already on their computers stay with them. You can let them back in from Removed.
+            Copies already on their computers stay with them. Direct messages with them stay open.
+            You can let them back in from Removed.
           </p>
         </ConfirmDialog>
       );
