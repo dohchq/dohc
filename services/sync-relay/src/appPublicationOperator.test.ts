@@ -44,6 +44,20 @@ function exchange(path: string, value: unknown) {
   });
 }
 
+it.skipIf(process.platform === "win32")(
+  "keeps the operator socket path short whatever the temp folder",
+  () => {
+    vi.stubEnv("TMPDIR", "/var/folders/9d/l02zfgrs7c16twd3wbpdmhkc0000gn/T/");
+    try {
+      const path = operatorSocketPath({});
+      expect(path.startsWith("/tmp/dohc-relay-operator-")).toBe(true);
+      expect(Buffer.byteLength("/private" + path)).toBeLessThan(104);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
 it("accepts only one disable request shape and keeps a not-found failure local to that request", async () => {
   const disableAppPublication = vi.fn(() => {
     throw notFound();

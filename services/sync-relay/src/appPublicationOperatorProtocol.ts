@@ -32,11 +32,7 @@ export function operatorSocketPath(env: NodeJS.ProcessEnv = process.env): string
   );
   const key = createHash("sha256").update(identity).digest("hex").slice(0, 24);
   if (typeof process.getuid !== "function") return `\\\\.\\pipe\\dohc-relay-operator-${key}`;
-  return join(
-    process.platform === "linux" ? "/tmp" : tmpdir(),
-    `dohc-relay-operator-${key}`,
-    "control.sock",
-  );
+  return join("/tmp", `dohc-relay-operator-${key}`, "control.sock");
 }
 
 export function parseDisableRequest(value: unknown): DisablePublicationRequest {
