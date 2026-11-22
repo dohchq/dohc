@@ -989,11 +989,12 @@ function keepsCopies(lines: string[][]): boolean {
   });
   const onceInThree = (count: number[]): boolean =>
     count[0] === 1 && count[1] === 1 && count[2] === 1;
-  const followsChange = ([base, local, remote, merged]: number[]): boolean =>
+  const followsChange = (line: string, [base, local, remote, merged]: number[]): boolean =>
     Math.max(base!, local!, remote!) > 1 ||
     (base === 0 && local === 1 && remote === 1) ||
+    (line.trim() === "" && !(base === 1 && local === 1 && remote === 1)) ||
     merged === (base === local ? remote : local);
-  if (![...counts.values()].every(followsChange)) return false;
+  if (![...counts].every(([line, count]) => followsChange(line, count))) return false;
   const positions = new Map<string, number[]>();
   lines.forEach((text, index) => {
     text.forEach((line, position) => {
