@@ -146,6 +146,40 @@ function linkProvenanceHolds(p: Record<string, unknown>, originId: string): bool
   );
 }
 
+/**
+ * Names each person by their account, as a member's desktop pull does, never by
+ * the name their own computer wrote: that computer calls a person with no
+ * profile name "You". An agent's or automation's message names the account it
+ * ran for the same way. Each account is looked up once per page.
+ */
+async function namedByAccount<Message extends NamedChatMessage>(
+  messages: Message[],
+  lookup: LogAuthorNameLookup | undefined,
+): Promise<Message[]> {
+  const names = new Map<string, Promise<string>>();
+  const nameOf = (userId: string) => {
+    let name = names.get(userId);
+    if (!name) {
+      name = accountDisplayName(lookup, userId).then((found) => found ?? "Unnamed");
+      names.set(userId, name);
+    }
+    return name;
+  };
+  return Promise.all(
+    messages.map(async (message) => {
+      if (message.authorUserId === null) return message;
+      if (message.authorKind === "human")
+        return { ...message, authorDisplayName: await nameOf(message.authorUserId) };
+      if (
+        (message.authorKind === "agent" || message.authorKind === "automation") &&
+        message.authorOwnerDisplayName !== null
+      )
+        return { ...message, authorOwnerDisplayName: await nameOf(message.authorUserId) };
+      return message;
+    }),
+  );
+}
+
 /** A stored chat message as a browser reads it; `originId` is the origin the relay stored it under. */
 export function messageFromOp(
   op: Record<string, unknown>,
@@ -650,24 +684,26 @@ export function createNamedRecipientChat(options: {
               ),
           });
         }
-        return json(
-          await readSharedChannelPage({
-            storage,
-            resolver: resolver ?? options.reads.chatResolverFor(share.workspaceId),
-            workspaceId: share.workspaceId,
-            shareId,
-            channelWireId,
-            query: url.searchParams,
-            comments: file && commentsOn(storage, share.workspaceId, file),
-            authorize: () => recheck().effectiveSelector,
-            activity: options.activity,
-            waiter: `named:${actor.userId}`,
-            signal: controller.signal,
-            maxResponseBytes: limits.maxResponseBytes,
-            busyCode: "share_access_rate_limited",
-            project: (message) => message,
-          }),
-        );
+        const page = await readSharedChannelPage({
+          storage,
+          resolver: resolver ?? options.reads.chatResolverFor(share.workspaceId),
+          workspaceId: share.workspaceId,
+          shareId,
+          channelWireId,
+          query: url.searchParams,
+          comments: file && commentsOn(storage, share.workspaceId, file),
+          authorize: () => recheck().effectiveSelector,
+          activity: options.activity,
+          waiter: `named:${actor.userId}`,
+          signal: controller.signal,
+          maxResponseBytes: limits.maxResponseBytes,
+          busyCode: "share_access_rate_limited",
+          project: (message) => message,
+        });
+        return json({
+          ...page,
+          messages: await namedByAccount(page.messages, options.lookupUserDisplayName),
+        });
       } catch (error) {
         return controller.signal.aborted ? cancelledResponse(request) : errorResponse(error);
       } finally {
