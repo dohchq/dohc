@@ -293,7 +293,9 @@ export function directMessageRecord(
     threadId: conversationId,
     presentation: directPresentation(message.authorId, viewerId),
     authorKind: "human",
-    authorDisplayName: message.authorName ?? (self ? "You" : "Someone"),
+    // Your own messages read "You", as your posts in a Group do, whether the
+    // server named them or this window just sent them.
+    authorDisplayName: self ? "You" : (message.authorName ?? "Someone"),
     authorUserId: message.authorId,
     body: message.body,
     createdAtMs: message.createdAtMs,
