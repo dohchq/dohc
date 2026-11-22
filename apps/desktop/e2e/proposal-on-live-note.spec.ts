@@ -209,7 +209,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
         workspaceId: recipientWorkspaceId,
         relativePath: PATH,
         text: `${read.text.trimEnd()}\n\n${text}\n`,
-        expectedContentHash: read.contentHash,
+        expectedContentHash: read.contentHash!,
       });
       await expect
         .poll(
