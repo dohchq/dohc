@@ -1084,9 +1084,7 @@ it("loads later access after an empty source page and preserves the selected poi
   );
   render(<OwnerRestoreDialog {...f.props} />);
   await screen.findByRole("button", { name: "More access choices" });
-  expect(
-    screen.queryByText("No active edit access is available for this file. Close this review."),
-  ).toBeNull();
+  expect(screen.queryByText("No active edit access is available for this file.")).toBeNull();
   fireEvent.change(screen.getByRole("combobox", { name: "Shared restore point" }), {
     target: { value: "0" },
   });

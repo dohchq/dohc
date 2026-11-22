@@ -220,7 +220,7 @@ describe("a History diff the rules hide", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open files.toml" }));
     expect(page.onOpenRulesFile).toHaveBeenCalledExactlyOnceWith(".dohc/files.toml");
     expect(page.onPathResolved).toHaveBeenCalledWith("m-1", null);
-    expect(screen.queryByText("This change is no longer in the history record.")).toBeNull();
+    expect(screen.queryByText("This change is no longer in History.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByTestId("engine-diff-lines")).toBeTruthy();
     expect(page.onPathResolved).toHaveBeenLastCalledWith("m-1", "notes/plan.md");

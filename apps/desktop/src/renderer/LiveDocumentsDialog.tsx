@@ -187,7 +187,7 @@ const REFUSAL_PATHS_SHOWN = 5;
 
 const REFUSAL_REASONS: Record<string, string> = {
   quota_exceeded:
-    "This workspace reached the server's live editing limit. Stop live editing for unused documents, or check the server limits.",
+    "A server limit prevented live editing. Stop live editing for unused documents, or check the server limits.",
   bad_request:
     "The server could not accept this share for live editing. Copy the details to check the server setup.",
   conflict:

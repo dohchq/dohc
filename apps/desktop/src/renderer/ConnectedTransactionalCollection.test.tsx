@@ -1531,7 +1531,8 @@ it.each([
         onOpenScheduleSettings={vi.fn()}
       />,
     );
-    await waitFor(() => expect(screen.queryByText("Opening collection…")).toBeNull());
+    await screen.findByLabelText("Collection view state");
+    expect(screen.queryByText("Opening Collection…")).toBeNull();
     expect(screen.queryByRole("button", { name: "Pending responses" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Export recovery" })).toBeNull();
   },

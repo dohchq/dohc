@@ -2577,7 +2577,7 @@ describe("a Data Collection's record panel and forms", () => {
     expect(panel()).toBe(record);
     expect(within(record).queryByRole("button", { name: /^Open / })).toBeNull();
     expect(
-      within(record).queryByText("Open an action to review its inputs before running it."),
+      within(record).queryByText("Choose an action to review its inputs before running it."),
     ).toBeNull();
   });
 
