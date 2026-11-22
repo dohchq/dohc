@@ -181,7 +181,7 @@ function inNoteOrder(pieces: readonly { piece: Piece; shown: string }[]): string
   const places = new Places();
   const sorted = pieces
     .map((entry) => ({ ...entry, line: lineOf(entry.piece.item), at: places.of(entry.piece) }))
-    .sort((left, right) => comparePlaces(left.at, right.at));
+    .sort((left, right) => compare(left.at, right.at));
   let text = "";
   let line: Y.AbstractType<unknown> | null = null;
   for (const entry of sorted) {
@@ -236,7 +236,7 @@ function lineOf(item: Y.Item): Y.AbstractType<unknown> {
 }
 
 /** Note positions, counting deleted items, so removed text sorts the way it stood. */
-export class Places {
+class Places {
   private readonly indexes = new Map<Y.Item, number>();
   private readonly paths = new Map<Y.AbstractType<unknown>, number[]>();
 
@@ -280,7 +280,7 @@ export class Places {
   }
 }
 
-export function comparePlaces(left: number[], right: number[]): number {
+function compare(left: number[], right: number[]): number {
   for (let index = 0; index < Math.min(left.length, right.length); index++) {
     const difference = left[index]! - right[index]!;
     if (difference !== 0) return difference;

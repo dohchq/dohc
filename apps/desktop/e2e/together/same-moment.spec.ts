@@ -341,9 +341,9 @@ test("a join and a split of one line", async ({ scene }) => {
   await move(two, ...Array.from("Bravo", () => "ArrowRight"));
   await two.page.keyboard.press("Enter");
 
-  judge("a join and a split of one line", await ending(scene, two), (end) =>
-    everyPageShows(end, joined("Alpha AppleBravo", "Banana", "Charlie Cherry")),
-  );
+  // The split-off part stands once: on its own line, or back in the joined line with an
+  // empty line where the split was.
+  judge("a join and a split of one line", await ending(scene, two), (end) => nothingLost(end));
 });
 
 test("a join and typing in the joined line", async ({ scene }) => {

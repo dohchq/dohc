@@ -193,6 +193,10 @@ test(`${String(PEOPLE)} people make ordinary edits for ${String(MINUTES)} minute
         if (count < 3) return;
         const target = lines(page).nth(1 + Math.floor(random() * (count - 1)));
         const text = await target.innerText();
+        // Backspace on an empty line deletes it. A word someone is typing into it at that moment
+        // goes with the line and its author is told, which "one presses Enter on a new empty
+        // line" checks. This run cannot tell whose word that was, so it joins lines with text.
+        if (!text.trim()) return;
         await clickStartOf(target);
         await page.keyboard.press("Backspace");
         log(by, `joined "${text.slice(0, 50)}" to the line above`);

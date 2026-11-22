@@ -31,6 +31,7 @@ function page(baseline: Uint8Array, follows = true) {
     lines: () => body.toArray().map((line) => (line as Y.XmlElement).toArray().join("")),
     length: (line: number) => text(line).length,
     take: () => Y.mergeUpdates(sent.splice(0)),
+    sent,
     receive(update: Uint8Array) {
       const removed = applyUpdateFindingRemovedText(
         doc,
@@ -174,7 +175,10 @@ it("keeps the join and the split when one person joins a line and the other spli
   a.join(1);
   b.split(1, 3);
   settle(a, b);
-  for (const each of [a, b]) expect(each.lines()).toEqual(["OneTwo", " two", "Three"]);
+  for (const each of [a, b]) {
+    expect(each.lines()).toEqual(a.lines());
+    expect(each.lines().join("")).toBe("OneTwo twoThree");
+  }
 });
 
 it("still tells a person whose typing went with a line someone else deleted", () => {
@@ -249,6 +253,82 @@ it.each([2, 3, 4])("never loses a letter when %i people join and split at once",
       if (
         pages.some((each) => each.lines().join("/") !== shown) ||
         counts.some((count) => count === 0 || (people === 2 && count > 1))
+      )
+        wrong.push(`seed ${String(seed)}, round ${String(round)}: ${shown}`);
+    }
+    for (const each of docs.splice(0)) each.destroy();
+  }
+  expect(wrong).toEqual([]);
+});
+
+it.each([
+  [100, 101],
+  [101, 100],
+])(
+  "keeps the text when both split a line and one joins it again, each change arriving on its own (clients %i, %i)",
+  (first, second) => {
+    const baseline = note("abc", "d");
+    const [a, b] = [page(baseline), page(baseline)];
+    a.doc.clientID = first;
+    b.doc.clientID = second;
+    a.split(0, 1);
+    a.join(1);
+    b.split(0, 1);
+    while (a.sent.length + b.sent.length > 0)
+      for (const [from, to] of [
+        [a, b],
+        [b, a],
+      ] as const) {
+        const update = from.sent.shift();
+        if (update) to.receive(update);
+      }
+    for (const each of [a, b]) {
+      expect(each.lines()).toEqual(a.lines());
+      expect(each.lines().join("")).toBe("abcd");
+    }
+  },
+);
+
+// As above, but everyone makes one or two changes a turn. They travel each on its own, in a
+// random order between people, or as one change a person. A copy can then be moved on before
+// the others have seen it.
+it.each([
+  [2, "one by one"],
+  [3, "one by one"],
+  [2, "together"],
+  [3, "together"],
+] as const)("never loses a letter when %i people's changes arrive %s", (people, arrive) => {
+  const letters = "abcdefghijkl";
+  const wrong: string[] = [];
+  for (let seed = 1; seed <= 400; seed++) {
+    const next = random(seed);
+    const baseline = note("abcd", "efgh", "ijkl");
+    const pages = Array.from({ length: people }, (_, index) => {
+      const each = page(baseline);
+      each.doc.clientID = 100 + Math.floor(next() * 1000) * 10 + index;
+      return each;
+    });
+    for (let round = 0; round < 3; round++) {
+      for (const each of pages)
+        for (let changes = 1 + Math.floor(next() * 2); changes > 0; changes--) {
+          const line = Math.floor(next() * each.lines().length);
+          if (next() < 0.5 && line > 0) each.join(line);
+          else each.split(line, Math.floor(next() * (each.length(line) + 1)));
+        }
+      if (arrive === "together")
+        for (const each of pages) each.sent.push(Y.mergeUpdates(each.sent.splice(0)));
+      for (let sends = 0; pages.some((each) => each.sent.length > 0); sends++) {
+        if (sends === 2000) throw new Error("the pages kept rewriting the note");
+        const waiting = pages.filter((each) => each.sent.length > 0);
+        const from = waiting[Math.floor(next() * waiting.length)]!;
+        const update = from.sent.shift()!;
+        for (const to of pages) if (to !== from) to.receive(update);
+      }
+      const shown = pages[0]!.lines().join("/");
+      const kept = shown + pages.flatMap((each) => each.told).join("");
+      if (
+        pages.some((each) => each.lines().join("/") !== shown) ||
+        [...letters].some((letter) => !kept.includes(letter))
       )
         wrong.push(`seed ${String(seed)}, round ${String(round)}: ${shown}`);
     }
