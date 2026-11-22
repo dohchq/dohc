@@ -556,9 +556,12 @@ export function CsvView({
     target.current = { workspaceId, path };
     return () => {
       target.current = null;
-      retirePendingUndos();
     };
-  }, [workspaceId, path, retirePendingUndos]);
+  }, [workspaceId, path]);
+  useEffect(
+    () => () => retirePendingUndos(),
+    [workspaceId, path, reopenKey, locked, localBuffer, retirePendingUndos],
+  );
   const draft = useAutosavedTextDraft({
     body,
     contentHash,
@@ -588,6 +591,8 @@ export function CsvView({
   const rowsRef = useRef(rows);
   const rawRef = useRef(raw);
   rawRef.current = raw;
+  const undoScopeRef = useRef({ reopenKey, locked, localBuffer });
+  undoScopeRef.current = { reopenKey, locked, localBuffer };
   const showRows = useCallback((nextRows: string[][], editedColumn?: number) => {
     rowsRef.current = nextRows;
     setGrid((shown) => ({
@@ -749,6 +754,9 @@ export function CsvView({
         if (
           undone ||
           rawRef.current ||
+          undoScopeRef.current.locked ||
+          undoScopeRef.current.reopenKey !== reopenKey ||
+          undoScopeRef.current.localBuffer !== localBuffer ||
           tableSessionRef.current !== session ||
           target.current?.workspaceId !== workspaceId ||
           target.current?.path !== path
@@ -765,7 +773,16 @@ export function CsvView({
         pendingUndoDismissRef.current.push(dismiss);
       }
     },
-    [clearDismiss, onNotice, path, retirePendingUndos, setRows, workspaceId],
+    [
+      clearDismiss,
+      localBuffer,
+      onNotice,
+      path,
+      reopenKey,
+      retirePendingUndos,
+      setRows,
+      workspaceId,
+    ],
   );
 
   const deleteColumn = useCallback(
@@ -799,6 +816,9 @@ export function CsvView({
           if (
             undone ||
             rawRef.current ||
+            undoScopeRef.current.locked ||
+            undoScopeRef.current.reopenKey !== reopenKey ||
+            undoScopeRef.current.localBuffer !== localBuffer ||
             tableSessionRef.current !== session ||
             target.current?.workspaceId !== workspaceId ||
             target.current?.path !== path
@@ -835,7 +855,16 @@ export function CsvView({
         pendingUndoDismissRef.current.push(dismiss);
       }
     },
-    [clearDismiss, onNotice, path, retirePendingUndos, setRows, workspaceId],
+    [
+      clearDismiss,
+      localBuffer,
+      onNotice,
+      path,
+      reopenKey,
+      retirePendingUndos,
+      setRows,
+      workspaceId,
+    ],
   );
 
   const chooseMode = useCallback(
