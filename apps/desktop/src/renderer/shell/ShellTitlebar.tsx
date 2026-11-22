@@ -24,6 +24,8 @@ export function ShellTitlebar(props: {
   failedSaves: number;
   // A joined workspace whose account is not the one signed in.
   otherAccount?: boolean;
+  // A membership or share that ended.
+  ended?: boolean;
   showWorkbenchMenu: (context: "status") => Promise<void>;
   agentActive: boolean;
   restrictedMode?: { asking: boolean; onTrust: () => void };
@@ -59,6 +61,7 @@ export function ShellTitlebar(props: {
             syncStatus={syncStatus}
             failedSaves={failedSaves}
             otherAccount={props.otherAccount}
+            ended={props.ended}
           />
           {props.restrictedMode ? <RestrictedModeIndicator {...props.restrictedMode} /> : null}
         </>

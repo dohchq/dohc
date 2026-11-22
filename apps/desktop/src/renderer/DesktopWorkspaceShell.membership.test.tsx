@@ -715,6 +715,10 @@ describe("a joined workspace", () => {
     render(shell(bridge, ENDED));
     const band = await screen.findByTestId("shared-view-banner");
     expect(band.dataset.ended).toBe("true");
+    // The title bar no longer claims the copy syncs.
+    expect(screen.getByTestId("sync-status").getAttribute("title")).toBe(
+      "Not syncing. This copy stays on this computer.",
+    );
     expect(band.textContent).toBe(
       "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
     );

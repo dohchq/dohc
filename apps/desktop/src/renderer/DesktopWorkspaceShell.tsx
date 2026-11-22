@@ -8261,6 +8261,7 @@ export function DesktopWorkspaceShell(props: {
                           syncStatus={syncStatus}
                           failedSaves={failedSaves}
                           otherAccount={otherAccountApplies}
+                          ended={shareViewEnded}
                           showWorkbenchMenu={showWorkbenchMenu}
                           agentActive={agentActive}
                           restrictedMode={
