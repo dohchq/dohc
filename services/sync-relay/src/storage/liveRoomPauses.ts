@@ -62,7 +62,7 @@ export interface LiveRoomPause {
   /** A save refused for a reason that will not clear by itself, or saves failing for too long. */
   readonly cause: LiveRoomPauseCause;
   readonly refusal: LiveUpdateRefusal | null;
-  /** Each sender in the refused save, or in the unsaved edits when saves kept failing. */
+  /** The senders whose unsaved edits went into the copy, up to the most a pause names. */
   readonly named: readonly LiveAuthorSnapshot[];
   /** Null once the owner's desktop has written the copy next to the note. */
   readonly copy: { readonly sha256: string; readonly byteLength: number } | null;
