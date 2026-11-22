@@ -4858,21 +4858,47 @@ fn merged_files_wait_for_rule_conflict(delete_rule: bool) {
 #[test]
 fn a_future_rule_time_does_not_block_narrowing_or_its_files() {
     for ahead in [Duration::from_secs(1), Duration::from_secs(86_400)] {
-        let f = ruled_team();
-        let before = f.journal();
-        f.put("team/access.yaml", NOBODY);
-        f.put("team/a.md", "alpha 2");
-        f.settle();
-        filetime::set_file_mtime(
-            f.root().join("team/access.yaml"),
-            filetime::FileTime::from_system_time(SystemTime::now() + ahead),
-        )
-        .unwrap();
-        f.capture_ok(&["team/a.md", "team/access.yaml"]);
-        assert_eq!(
-            &f.journal()[before.len()..],
-            ["write team/access.yaml", "write team/a.md"]
-        );
-        assert!(f.holds().is_empty());
+        for future_folder in [false, true] {
+            let f = ruled_team();
+            let before = f.journal();
+            f.put("team/access.yaml", NOBODY);
+            f.put("team/a.md", "alpha 2");
+            f.settle();
+            filetime::set_file_mtime(
+                f.root().join("team/access.yaml"),
+                filetime::FileTime::from_system_time(SystemTime::now() + ahead),
+            )
+            .unwrap();
+            filetime::set_file_mtime(
+                f.root().join("team"),
+                filetime::FileTime::from_system_time(
+                    SystemTime::now() - Duration::from_millis(100),
+                ),
+            )
+            .unwrap();
+            for result in f.capture(&["team/a.md", "team/access.yaml"]) {
+                assert!(
+                    waits(&result),
+                    "a future rule time masked a recent folder change: {result:?}"
+                );
+            }
+            assert_eq!(f.journal(), before);
+            assert!(f.holds().is_empty());
+            filetime::set_file_mtime(
+                f.root().join("team"),
+                filetime::FileTime::from_system_time(if future_folder {
+                    SystemTime::now() + ahead
+                } else {
+                    SystemTime::now() - Duration::from_secs(60)
+                }),
+            )
+            .unwrap();
+            f.capture_ok(&["team/a.md", "team/access.yaml"]);
+            assert_eq!(
+                &f.journal()[before.len()..],
+                ["write team/access.yaml", "write team/a.md"]
+            );
+            assert!(f.holds().is_empty());
+        }
     }
 }
