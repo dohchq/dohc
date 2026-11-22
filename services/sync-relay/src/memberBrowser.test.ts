@@ -248,6 +248,10 @@ describe("a member reads the workspace through the link read routes", () => {
     expect(await share()).not.toHaveProperty("levelChangedBy");
     await setLevel(h, "view");
     expect(await share()).toMatchObject({ access: "view", levelChangedBy: `Name ${OWNER}` });
+    // The page reads the files again after a level change, and takes the name from that answer.
+    expect(await json(await memberRead(h, "/sync/link/current", ana.grantId, "ana"))).toMatchObject(
+      { access: "view", levelChangedBy: `Name ${OWNER}` },
+    );
   });
 
   it("serves files the owner adds after the member joined", async () => {
