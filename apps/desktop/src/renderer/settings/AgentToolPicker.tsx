@@ -9,10 +9,11 @@ import {
 } from "../../agents/agentToolCatalog";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
-import { useRequestSequence } from "../useRequestSequence";
 import { SecondaryButton } from "../ui/controls";
 import { pathPieces } from "../ui/PathLine";
 import { ToolReadiness } from "./ToolReadiness";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 // A whole path that wraps only between folders. Each folder is one box, so a
 // space or hyphen inside it is no break; it wraps inside only when wider than the line.
@@ -47,35 +48,22 @@ export function AgentToolPicker(props: {
   onChange(profile: AgentLaunchProfile): void;
   onError(message: string, cause?: unknown): void;
 }) {
-  const [result, setResult] = useState<AgentToolsResult | null>(null);
-  const [loading, setLoading] = useState(true);
   const [refresh, setRefresh] = useState(0);
-  const requests = useRequestSequence([props.workspaceId]);
+  const detection = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([props.workspaceId, refresh]),
+    load: () => bridge().detectAgentTools({ workspaceId: props.workspaceId }),
+  });
+  const result: AgentToolsResult | null = detection.value ?? null;
+  const loading = detection.pending || (detection.value === undefined && detection.error === null);
   const onError = useRef(props.onError);
   onError.current = props.onError;
   useEffect(() => {
-    const token = requests.next();
-    setResult(null);
-    setLoading(true);
-    void bridge()
-      .detectAgentTools({ workspaceId: props.workspaceId })
-      .then((value) => {
-        if (requests.isCurrent(token)) setResult(value);
-      })
-      .catch((cause: unknown) => {
-        if (requests.isCurrent(token))
-          onError.current(
-            ipcErrorMessage(cause, "dohc could not detect agent tools. Try again."),
-            cause,
-          );
-      })
-      .finally(() => {
-        if (requests.isCurrent(token)) setLoading(false);
-      });
-    return () => {
-      requests.next();
-    };
-  }, [props.workspaceId, refresh, requests]);
+    if (detection.error !== null)
+      onError.current(
+        ipcErrorMessage(detection.error, "dohc could not detect agent tools. Try again."),
+        detection.error,
+      );
+  }, [detection.error]);
 
   return (
     <div className="flex flex-col gap-2">
