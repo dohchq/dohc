@@ -69,7 +69,8 @@ type View =
   | { status: "other-account"; name: string }
   | { status: "refused" | "ended" | "too-large" | "load-failed" | "version-mismatch" };
 // What the grant's own read and the account's session say after a refusal of the files.
-type Confirmed = "open" | "ended" | "signed-out" | "failed" | { other: string };
+// An open grant answers with its reach, which says whether the level changed.
+type Confirmed = { open: ViewMeta } | "ended" | "signed-out" | "failed" | { other: string };
 type Tab = "files" | "page" | "comments" | "chats";
 type Side = "comments" | "chats";
 const TABS: { id: Tab; label: string; panel: string }[] = [
@@ -258,9 +259,9 @@ export default function WorkspaceApp({ grantId }: { grantId: string | null }) {
   const [unsent, setUnsent] = useState<Unsent[]>(readUnsent);
   const unsentId = useRef(Math.max(0, ...unsent.map((item) => item.id)));
   const [toastSlot, setToastSlot] = useState<HTMLElement | null>(null);
-  // The account last signed in on this page. Signed out, its kept edits still show, so an ended session keeps them in view.
-  // Before any account signs in, as after a reload, none show: the tab may hold another person's text.
-  const [lastAccount, setLastAccount] = useState<string | null>(null);
+  // The account confirmed signed in on this page. Kept edits show only while their own account is, so nobody at the
+  // sign-in form or after a switch of account sees them. The tab keeps them until that account signs in again.
+  const [signedIn, setSignedIn] = useState<string | null>(null);
   const keep = useCallback(
     (accountId: string, path: string, text: string, discarded?: boolean) =>
       setUnsent((list) => [
@@ -285,7 +286,7 @@ export default function WorkspaceApp({ grantId }: { grantId: string | null }) {
             : { id: item.id, accountId: item.accountId, path: item.path, text: item.text },
       ),
     );
-  const shown = unsent.filter((item) => item.accountId === lastAccount);
+  const shown = unsent.filter((item) => item.accountId === signedIn);
   useEffect(() => writeUnsent(unsent), [unsent]);
   // Closing the tab loses the kept text, so the browser asks first while any remains.
   const holding = unsent.some((item) => !item.discarded);
@@ -311,7 +312,7 @@ export default function WorkspaceApp({ grantId }: { grantId: string | null }) {
       <MemberEntry
         grantId={grantId}
         onUnsent={keep}
-        onAccount={setLastAccount}
+        onAccount={setSignedIn}
         toastSlot={toastSlot}
         kept={kept}
         nameFor={(path) => shownPath(path, shown)}
@@ -335,14 +336,14 @@ function MemberEntry({
 }: {
   grantId: string | null;
   onUnsent(accountId: string, path: string, text: string, discarded?: boolean): void;
-  onAccount(id: string): void;
+  onAccount(id: string | null): void;
   toastSlot: HTMLElement | null;
   kept: ReactNode;
   nameFor(path: string): string;
 }) {
   const [account, setAccount] = useState<Account | null | undefined>(undefined);
   useEffect(() => {
-    if (account) onAccount(account.id);
+    if (account !== undefined) onAccount(account?.id ?? null);
   }, [account, onAccount]);
   const [pending, setPending] = useState<"account" | "sign-in" | "sign-out" | null>(
     grantId ? "account" : null,
@@ -419,7 +420,6 @@ function MemberEntry({
     return (
       <StatePage icon="unlink" title="This workspace link isn't valid.">
         <p>Open the workspace again from your invitation.</p>
-        {kept}
       </StatePage>
     );
   if (account === undefined) return <WorkspaceOpening />;
@@ -454,7 +454,6 @@ function MemberEntry({
                 </button>
               </p>
             )}
-            {kept}
           </div>
         </main>
       </div>
@@ -506,8 +505,7 @@ function useMemberFiles(
     // A refused grant may only mean that the account signed out, or that another account signed in.
     const confirm = async (): Promise<Confirmed> => {
       try {
-        await loadMeta(session, signal);
-        return "open";
+        return { open: await loadMeta(session, signal) };
       } catch (error) {
         if (!refusedStatus(error)) return "failed";
       }
@@ -521,7 +519,8 @@ function useMemberFiles(
     };
     // Shows what a confirmed refusal says, and returns false when the files may still open.
     const refused = (confirmed: Confirmed, status: "refused" | "ended") => {
-      if (confirmed === "open" || confirmed === "failed") return false;
+      if (confirmed === "failed" || (typeof confirmed === "object" && "open" in confirmed))
+        return false;
       if (confirmed === "signed-out") signedOut.current();
       else if (confirmed === "ended") setView({ status });
       else setView({ status: "other-account", name: confirmed.other });
@@ -547,7 +546,9 @@ function useMemberFiles(
       if (signal.aborted) return;
       setView({ status: "ready", files });
       let delay = RETRY_INITIAL_MS,
-        reload = false;
+        reload = false,
+        // The level or a rule changed, so the files shown carry levels the member no longer has.
+        stale = false;
       while (!signal.aborted) {
         const step = new AbortController(),
           stepSignal = AbortSignal.any([signal, step.signal]);
@@ -582,16 +583,15 @@ function useMemberFiles(
             };
             // A rule changed since the files were read, so the log's cursor may skip files that just became visible.
             // A file at a new path has no level yet. Either way the current files say.
-            if (
-              meta.reach !== files.meta.reach ||
-              next.files.some((file) => !files.levels.has(file.path))
-            ) {
+            stale ||= meta.reach !== files.meta.reach;
+            if (stale || next.files.some((file) => !files.levels.has(file.path))) {
               reload = true;
               continue;
             }
             files = next;
           }
           setView({ status: "ready", files });
+          stale = false;
           setFailures(0);
           delay = RETRY_INITIAL_MS;
           const elapsed = Date.now() - started;
@@ -599,7 +599,11 @@ function useMemberFiles(
             await waitForRetry(VIEW_LOG_HOLD_MS - elapsed, stepSignal).catch(() => {});
         } catch (error) {
           if (signal.aborted) return;
-          if (step.signal.aborted) continue;
+          // Try again ends a read of the current files only to start another.
+          if (step.signal.aborted) {
+            reload ||= reading;
+            continue;
+          }
           if (error instanceof VersionMismatchError) {
             setView({ status: "version-mismatch" });
             return;
@@ -608,15 +612,31 @@ function useMemberFiles(
             setView({ status: "too-large" });
             return;
           }
-          // A new epoch starts again from the current files. So does a refusal: a rule change refuses a held read
-          // as a lost membership does, and only a refused read of the current files ends the membership.
-          if (!reading && (error instanceof EpochFloorChangedError || refusedStatus(error))) {
-            reload = true;
-            continue;
-          }
+          let granted: ViewMeta | undefined;
           if (reading && refusedStatus(error)) {
             const confirmed = await confirm();
             if (signal.aborted || refused(confirmed, "ended")) return;
+            if (typeof confirmed === "object" && "open" in confirmed) granted = confirmed.open;
+          }
+          // Any failed read may hide a level change. The grant says, when it answers.
+          if (!stale) {
+            granted ??= await loadMeta(session, stepSignal).catch(() => undefined);
+            if (signal.aborted) return;
+            stale = granted !== undefined && granted.reach !== files.meta.reach;
+          }
+          // A new epoch starts again from the current files. So do a refusal and a level change: a rule change
+          // refuses a held read as a lost membership does, and only a refused read of the current files ends the membership.
+          if (
+            !reading &&
+            (stale || error instanceof EpochFloorChangedError || refusedStatus(error))
+          ) {
+            reload = true;
+            continue;
+          }
+          // The current files could not load at the new level.
+          if (stale) {
+            setView({ status: "load-failed" });
+            return;
           }
           reload = reading;
           setFailures((count) => count + 1);
@@ -839,8 +859,8 @@ function MemberWorkspace({
         >
           {signingOut ? "Signing out…" : "Switch account"}
         </button>
+        {/* The browser now names another account, so it shows none of this one's kept edits. */}
         {signOutError && <LaunchFailure role="alert" message={SWITCH_FAILED} />}
-        {kept}
       </StatePage>
     );
   if (view.status === "too-large")
