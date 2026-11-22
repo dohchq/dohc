@@ -978,7 +978,7 @@ describe("SettingsDialog", () => {
 
   // sharedView is a synchronous prop, but sessionRecorderOn only resolves
   // once main's openWorkspace status arrives. In that window a shared view
-  // already knows it has no chat to test, so Check must not wait on it.
+  // already knows Send test cannot run, so Check must not wait on it.
   it("turns Check off in a shared view before the recorder status resolves", async () => {
     const user = userEvent.setup();
     bridge.getUserSettings.mockResolvedValueOnce({

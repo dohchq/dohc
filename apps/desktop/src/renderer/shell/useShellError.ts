@@ -211,6 +211,8 @@ export type ReportShellFailure = (failure: {
   title?: string;
   message: string;
   cause?: unknown;
+  // Files the row with no toast, for a failure its own surface already shows.
+  quiet?: boolean;
   retry?: (() => void) | null;
   action?: ShellError["action"];
   target?: NoticeTarget;
@@ -1264,13 +1266,17 @@ export function useShellError(
     [clearKind, push],
   );
   const showWarningNotice = useCallback(
-    (message: string, options?: { change?: true; paths?: readonly string[] }) => {
+    (
+      message: string,
+      options?: { change?: true; paths?: readonly string[]; identity?: string },
+    ) => {
       push({
         message,
         retry: null,
         tone: "warning",
         ...(options?.paths ? { paths: options.paths } : {}),
         ...(options?.change ? { change: true } : {}),
+        ...(options?.identity ? { identity: options.identity } : {}),
       });
     },
     [push],

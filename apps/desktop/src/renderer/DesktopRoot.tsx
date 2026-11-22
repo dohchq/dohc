@@ -129,11 +129,10 @@ function UpdatingAccess(props: { workspace: Workspace }) {
         });
       });
   }, [workspaceId, reportFailure, identity]);
-  // A stopped update is one thing that failed. Waiting for the server shows
-  // here only, as an ended membership does. A new try or an ended
+  // A stopped update is one thing that failed. This state shows it with Try
+  // again, so it files a Notices row and no toast. Waiting for the server
+  // shows here only, as an ended membership does. A new try or an ended
   // membership takes the failure back.
-  // The toast holds two lines, so a title says what failed and the body
-  // says why and what to do.
   const failed = stopped?.reason === "failed" ? stopped : null;
   const failedTitle = failed?.title,
     failedDetail = failed?.detail ?? null,
@@ -141,6 +140,7 @@ function UpdatingAccess(props: { workspace: Workspace }) {
   useEffect(() => {
     if (failedDetail !== null) {
       reportFailure?.({
+        quiet: true,
         ...(failedTitle ? { title: failedTitle } : {}),
         message: failedDetail,
         ...(failedCause ? { details: [["Code", failedCause] as const] } : {}),
@@ -183,22 +183,25 @@ function UpdatingAccess(props: { workspace: Workspace }) {
         </p>
       )}
       {stopped ? (
-        <div className="flex max-w-md items-start gap-2 text-left">
+        <div className="flex max-w-md items-start gap-2">
           <div className="m-0 select-text text-[13px] leading-relaxed text-ink">
             {stopped.title ? <p className="m-0 font-medium">{stopped.title}</p> : null}
             <p className="m-0">{stopped.detail}</p>
           </div>
-          {report === null ? (
+          {report === null && !ended ? (
             <CopyButton label="Copy" pinName iconOnly getText={() => stopped.detail} />
           ) : null}
         </div>
       ) : null}
-      {/* "This folder" is the copy's own: name it, and open it. */}
+      {/* The copy's own folder: name it, copy it, and open it. */}
       {ended ? (
-        <PathLine
-          path={props.workspace.rootPath}
-          className="max-w-md justify-center select-text text-[12px] text-muted"
-        />
+        <div className="flex w-full max-w-md items-center justify-center gap-2">
+          <PathLine
+            path={props.workspace.rootPath}
+            className="justify-center select-text text-[12px] text-muted"
+          />
+          <CopyButton label="Copy path" pinName iconOnly getText={() => props.workspace.rootPath} />
+        </div>
       ) : null}
       <div className="flex flex-wrap items-center justify-center gap-2">
         {stopped && !ended ? <SecondaryButton onClick={tryAgain}>Try again</SecondaryButton> : null}

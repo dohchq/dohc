@@ -136,6 +136,47 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dms-section")).toBeNull();
   });
 
+  it("puts one muted line under an empty People, with New message only in its header", async () => {
+    signedIn([]);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    expect((await screen.findByTestId("chats-dms-empty")).textContent).toBe(
+      "No direct messages yet.",
+    );
+    expect(screen.getAllByRole("button", { name: "New message" })).toHaveLength(1);
+  });
+
+  it("offers no New message once the membership ended, and keeps the conversations and their composer", async () => {
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    renderView(vi.fn(), vi.fn(), {
+      variant: "panel",
+      joinedWorkspace: { createsGroups: false, ended: true },
+    });
+    const row = await screen.findByTestId("chats-dm-item");
+    expect(screen.queryByTestId("chats-new-dm-action")).toBeNull();
+    fireEvent.click(row);
+    expect(await screen.findByTestId("chats-dm-composer")).toBeTruthy();
+  });
+
+  it("keeps toasts above the blocked line, so Unblock stays in reach", async () => {
+    signedIn([conversation({ person: { ...sam, blocked: true } })]);
+    history([sent(2, "sam", "See you at nine")]);
+    const rect = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: Element,
+    ) {
+      return this.getAttribute("data-testid") === "chats-dm-blocked-line"
+        ? new DOMRect(0, window.innerHeight - 40, 600, 40)
+        : new DOMRect();
+    });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "direct", conversationId: "conversation-sam" },
+    });
+    await screen.findByTestId("chats-dm-blocked-line");
+    expect(document.documentElement.style.getPropertyValue("--dohc-composer-room")).toBe("40px");
+    rect.mockRestore();
+  });
+
   it("lists each conversation by the other person's name, with unread, preview, and blocked marks, and no email", async () => {
     signedIn([
       conversation({ unread: 2 }),
@@ -755,6 +796,20 @@ describe("ChatsView direct messages", () => {
     expect(listReports()).toHaveLength(1);
   });
 
+  it("names a message just sent as the earlier ones from the same account, not as You", async () => {
+    const user = userEvent.setup();
+    signedIn([conversation()]);
+    history([{ ...sent(1, VIEWER, "Hi Sam"), authorName: "Ana" }, sent(2, "sam", "Hi Ana")]);
+    bridgeMock.directSend.mockResolvedValueOnce({ conversationId: "conversation-sam", seq: 3 });
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    await openSam();
+    await user.type(await screen.findByTestId("chats-dm-composer"), "On my way{Enter}");
+    await waitFor(() => expect(screen.getAllByTestId("chats-dm-message")).toHaveLength(3));
+    const last = screen.getAllByTestId("chats-dm-message").at(-1)!.textContent;
+    expect(last).toContain("Ana");
+    expect(last).not.toContain("You");
+  });
+
   it("keeps the words of a send that failed, and Try again resends them with the same message id", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);
@@ -896,7 +951,7 @@ describe("ChatsView direct messages", () => {
     members([{ memberId: "sam", name: "Sam Rivera" }]);
     bridgeMock.directResolve.mockResolvedValue({ conversationId: null, person: sam });
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     await screen.findAllByTestId("chats-dm-new-member");
     const to = screen.getByTestId("chats-dm-recipients");
     fireEvent.keyDown(to, { key: "Enter", isComposing: true });
@@ -917,7 +972,7 @@ describe("ChatsView direct messages", () => {
     history([sent(1, VIEWER, "First")]);
     const onError = vi.fn();
     renderView(vi.fn(), onError, { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     await user.click((await screen.findAllByTestId("chats-dm-new-member"))[0]!);
     const composer = screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement;
     await user.type(composer, "First{Enter}");
@@ -939,7 +994,7 @@ describe("ChatsView direct messages", () => {
     bridgeMock.directStart.mockRejectedValueOnce(new Error(DIRECT_START_INACTIVE_MESSAGE));
     const onError = vi.fn();
     renderView(vi.fn(), onError, { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     await user.click((await screen.findAllByTestId("chats-dm-new-member"))[0]!);
     await user.type(screen.getByTestId("chats-dm-new-composer"), "First{Enter}");
     await waitFor(() => expect(onError).toHaveBeenCalled());
@@ -963,7 +1018,7 @@ describe("ChatsView direct messages", () => {
     bridgeMock.directStart.mockResolvedValue({ conversationId: "conversation-sam", seq: 1 });
     history([sent(1, VIEWER, "Lunch?")]);
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     await screen.findByTestId("chats-dm-new");
     const options = await screen.findAllByTestId("chats-dm-new-member");
     // Active members other than the viewer, by name, never by email.
@@ -976,8 +1031,8 @@ describe("ChatsView direct messages", () => {
     expect(
       screen.getByRole("listbox", { name: "Members" }).getAttribute("aria-multiselectable"),
     ).toBeNull();
-    // To shows an example of what to type: the first member's first name, the row Enter would pick.
-    expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).placeholder).toBe("Ana");
+    // To holds no example, so it never reads as a name already typed.
+    expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).placeholder).toBe("");
 
     // A message without anyone picked asks who it is for.
     const composer = screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement;
@@ -1014,15 +1069,21 @@ describe("ChatsView direct messages", () => {
     );
     // With a pick, To shows no example beside it.
     expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).placeholder).toBe("");
+    // One person is picked, so the list closes, and Enter in To picks no hidden row.
+    expect(screen.queryByTestId("chats-dm-new-members")).toBeNull();
+    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-expanded")).toBe("false");
+    fireEvent.keyDown(screen.getByTestId("chats-dm-recipients"), { key: "ArrowDown" });
+    fireEvent.keyDown(screen.getByTestId("chats-dm-recipients"), { key: "Enter" });
+    expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
+      ["ana"],
+    );
     // Keyboard: type to filter, Enter picks.
     await user.type(screen.getByTestId("chats-dm-recipients"), "sam{Enter}");
     expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
       ["sam"],
     );
-    // The whole list is back, and the active row is the pick, not the row that was first in the filter.
-    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-activedescendant")).toMatch(
-      /-sam$/,
-    );
+    // The new pick closes the list again.
+    expect(screen.queryByTestId("chats-dm-new-members")).toBeNull();
     await waitFor(() =>
       expect(bridgeMock.directResolve).toHaveBeenLastCalledWith({
         viewerId: VIEWER,
@@ -1159,12 +1220,11 @@ describe("ChatsView direct messages", () => {
     fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     await user.click(await screen.findByTestId("chats-dm-new-member"));
     const existing = await screen.findByTestId("chats-dm-new-existing");
-    expect(existing.textContent).toContain("You already have a conversation with Sam Rivera.");
-    // The line sits under the list, so the rows don't move when it appears.
-    expect(
-      screen.getByTestId("chats-dm-new-members").compareDocumentPosition(existing) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    expect(existing.textContent).toContain(
+      "You already have a conversation with Sam Rivera. Sending adds your message to it.",
+    );
+    // The pick closed the list.
+    expect(screen.queryByTestId("chats-dm-new-members")).toBeNull();
     expect(screen.queryByRole("button", { name: "Mention" })).toBeNull();
     await user.type(screen.getByTestId("chats-dm-new-composer"), "Lunch?");
     fireEvent.click(within(existing).getByTestId("chats-dm-new-open-existing"));

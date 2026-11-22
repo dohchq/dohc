@@ -271,6 +271,7 @@ import { Overlay } from "./Overlay";
 import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
+import { titleBarNamesServer } from "./workbench/WorkspaceSyncStatus";
 import { workspaceName } from "./Titlebar";
 import { membershipRefreshFailure, otherAccountWords } from "./shell/membershipRefreshWords";
 import { joinedByAnother } from "../ipc/joinedAccountWords";
@@ -309,7 +310,6 @@ import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { countInput, inputCount } from "./ui/inputCount";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCenter";
-import { titleBarNamesServer } from "./workbench/WorkspaceSyncStatus";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import {
@@ -430,6 +430,9 @@ import { ipcErrorMessage } from "./ipcError";
 
 // A lower level is a change of state, not a success.
 const LEVEL_RANK = { view: 0, comment: 1, edit: 2 } as const;
+// One warning for a lowered member level: a newer one replaces it, and an
+// ended membership takes it back, since the band then says what is left.
+const LOWERED_LEVEL_NOTICE = "member-level-lowered";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
@@ -2437,6 +2440,9 @@ export function DesktopWorkspaceShell(props: {
   // A registry update replaces this snapshot, including when access returns.
   const [endedFor, setEndedFor] = useState<NonNullable<Workspace["shareView"]> | null>(null);
   const shareViewEnded = !!shareView && (shareView.ended || endedFor === shareView);
+  useEffect(() => {
+    if (shareViewEnded) clearIdentity(LOWERED_LEVEL_NOTICE);
+  }, [shareViewEnded, clearIdentity]);
   // A workspace this account joined. Inside, it looks like an owned one: no
   // share banner while it lasts, and its level said once, in the workspace menu.
   const membershipView = shareView?.membership === true;
@@ -3228,7 +3234,7 @@ export function DesktopWorkspaceShell(props: {
       if (shareView.membership && result.levelChanged && result.access) {
         const words = levelChangedWords(result.access, result.levelChangedBy);
         if (shareAccess && LEVEL_RANK[result.access] < LEVEL_RANK[shareAccess])
-          showWarningNotice(words, { change: true });
+          showWarningNotice(words, { change: true, identity: LOWERED_LEVEL_NOTICE });
         else showSuccessNotice(words);
       }
       if (result.status === "ended" || (result.access && result.access !== shareAccess)) {
@@ -6610,7 +6616,7 @@ export function DesktopWorkspaceShell(props: {
     ? ""
     : shareViewEnded
       ? membershipView
-        ? "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it."
+        ? "Your membership ended. This copy stays on this computer, and your direct messages stay open. Ask the owner to invite you again to keep working in it."
         : `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
       : shareViewDamaged
         ? !shareView.recipientUserId || needsReopenFor === shareView
@@ -8182,6 +8188,7 @@ export function DesktopWorkspaceShell(props: {
                           syncStatus={syncStatus}
                           failedSaves={failedSaves}
                           otherAccount={otherAccountApplies}
+                          ended={shareViewEnded}
                           showWorkbenchMenu={showWorkbenchMenu}
                           agentActive={agentActive}
                           restrictedMode={
@@ -10002,6 +10009,7 @@ export function DesktopWorkspaceShell(props: {
                               onError={reportSettingsFailure}
                               onClearError={clearIdentity}
                               onMemberLevelSaved={readMemberLevel}
+                              serverNamed={chatsServerNamed}
                               onNotice={showSettingsNotice}
                               onWorkspaceSettingsRead={onWorkspaceSettingsRead}
                               workspaceId={workspaceId}

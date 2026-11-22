@@ -113,8 +113,8 @@ export function runnerEngineNote(
   sessionRecorderOn: boolean | undefined,
   restricted = false,
 ): string | null {
-  if (sharedView)
-    return "This workspace is a shared view. dohc records nothing here, so there is no chat to test.";
+  // A received share and a joined workspace both have no recorder here.
+  if (sharedView) return "Send test works only in a workspace you own.";
   if (restricted) return AGENTS_RESTRICTED_MESSAGE;
   return sessionRecorderOn === false
     ? "The workspace engine starts when dohc starts. Restart dohc to check an agent."
@@ -1367,7 +1367,8 @@ export function AgentList(props: {
               />
             ))
           : null}
-        {checkNote && !restricted ? (
+        {/* The note says why Send test is off, so it waits for an agent to test. */}
+        {checkNote && !restricted && listed.length > 0 ? (
           <p data-testid="agents-check-note" className="m-0 mt-2 text-[12px] text-muted">
             {checkNote}
           </p>

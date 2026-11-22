@@ -531,7 +531,7 @@ test("@two-client a member opens the workspace from Sharing and keeps a readable
     // The held pull hears it: the ended band, and the copy stays readable.
     const band = mine.getByTestId("shared-view-banner");
     await expect(band).toHaveText(
-      "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
+      "Your membership ended. This copy stays on this computer, and your direct messages stay open. Ask the owner to invite you again to keep working in it.",
       { timeout: 60_000 },
     );
     await expect(band).toHaveAttribute("data-ended", "true");
