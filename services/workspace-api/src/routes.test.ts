@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { describe, expect, it, vi } from "vitest";
 import { ACCOUNT_CSS_PATH, ACCOUNT_FONT_PATH, ACCOUNT_JS_PATH } from "./assets";
 import type { ServerDescriptor } from "./config";
@@ -346,8 +348,15 @@ describe("account pages", () => {
     expect(font.status).toBe(200);
     expect(font.headers.get("content-type")).toBe("font/woff2");
     expect(font.headers.get("cache-control")).toContain("immutable");
-    const bytes = new Uint8Array(await font.arrayBuffer());
-    expect(new TextDecoder().decode(bytes.subarray(0, 4))).toBe("wOF2");
+    const packaged = readFileSync(
+      createRequire(import.meta.url).resolve(
+        "@fontsource-variable/inter/files/inter-latin-opsz-normal.woff2",
+      ),
+    );
+    expect(
+      Buffer.from(await font.arrayBuffer()).equals(packaged),
+      "src/accountFont.ts is not the installed Inter file. Run pnpm --filter @dohc/workspace-api write:account-font.",
+    ).toBe(true);
   });
 });
 

@@ -8,17 +8,18 @@
     "dev": "tsx watch src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "write:account-font": "node scripts/write-account-font.mjs"
   },
   "dependencies": {
     "@dohc/service-http": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",
-    "@fontsource-variable/inter": "^5.3.0",
     "better-auth": "^1.6.26",
     "nodemailer": "10.0.10",
     "pg": "^8.22.0"
   },
   "devDependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
     "@types/node": "^24.13.3",
     "@types/pg": "^8.20.4",
     "esbuild": "0.28.1",

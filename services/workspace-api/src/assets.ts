@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { ACCOUNT_FONT_BASE64 } from "./accountFont";
 
 function hashed(
   name: string,
@@ -11,13 +10,7 @@ function hashed(
   return `/account/assets/${name}.${digest}.${extension}`;
 }
 
-export const ACCOUNT_FONT = new Uint8Array(
-  readFileSync(
-    createRequire(import.meta.url).resolve(
-      "@fontsource-variable/inter/files/inter-latin-opsz-normal.woff2",
-    ),
-  ),
-);
+export const ACCOUNT_FONT = new Uint8Array(Buffer.from(ACCOUNT_FONT_BASE64, "base64"));
 export const ACCOUNT_FONT_PATH = hashed("inter-latin", "woff2", ACCOUNT_FONT);
 
 export const ACCOUNT_CSS = `@font-face {
