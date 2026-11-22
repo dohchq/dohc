@@ -30,6 +30,12 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "owner": "dohc",
+    "extra": {
+      "eas": {
+        "projectId": "e53b2b15-d4c9-488d-8dc3-a77d7c370ed9"
+      }
     }
   }
 }
