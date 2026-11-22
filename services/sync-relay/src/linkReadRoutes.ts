@@ -17,6 +17,7 @@ import {
   type LinkAuthorityResolver,
   type LinkJsonResponse,
 } from "./linkAuthority";
+import { linkRefusal } from "./linkRefusal";
 import type { LinkEgressRateLimiter } from "./linkSecurity";
 import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
 import { authorizeLinkChatAction } from "./shareAuthorization";
@@ -172,13 +173,19 @@ export function createLinkReadRoutes(
     }
 
     if (route.route === "link-current") {
+      // A member hears that the list is too long, once their grant proves fresh. A link holder's
+      // refusal stays generic.
+      const tooManyFiles = () => {
+        if (requireFresh().credential.kind !== "member") throw notFound();
+        return linkRefusal("link_too_many_files");
+      };
       if (replica) {
         const body = replica.inventory(
           { grantId: capability.grantId, generation: capability.generation },
           () => requireFresh(),
           new URL(request.url).searchParams.get("collectionPath"),
         );
-        if (body.files.length > linkCurrentFileLimit) throw notFound();
+        if (body.files.length > linkCurrentFileLimit) return tooManyFiles();
         return linkJsonResponse(
           capability,
           { ...body, ...linkChannel(capability.grantId) },
@@ -193,7 +200,7 @@ export function createLinkReadRoutes(
           selectorPaths: capability.effectiveSelector.paths,
           limit: linkCurrentFileLimit,
         });
-        if (snapshot.tooMany) throw notFound();
+        if (snapshot.tooMany) return tooManyFiles();
         const freshness = newestFilteredOpFreshness(
           share.workspaceId,
           () => requireFresh().effectiveSelector,

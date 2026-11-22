@@ -26,6 +26,12 @@ export const LINK_REFUSALS = {
     status: 429,
     error: "This link has reached its request limit. Try again later.",
   },
+  // A member's workspace with more files than a browser lists. Its grant still opens.
+  link_too_many_files: {
+    status: 413,
+    error:
+      "This workspace has too many files to open in a browser. Open it in the dohc desktop app.",
+  },
   app_collection_missing: {
     status: 410,
     error: "This app can't find its data. Ask the person who shared it with you.",
