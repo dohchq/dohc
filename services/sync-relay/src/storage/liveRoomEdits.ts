@@ -76,7 +76,6 @@ const saves = {
   FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
 ) STRICT`,
 } as const;
-// The access each taken edit came in under. An edit taken before this table has no row here.
 const LIVE_ROOM_EDIT_AUTHORITIES = "sync_relay_live_room_edit_authorities";
 const authorities = {
   [LIVE_ROOM_EDIT_AUTHORITIES]: `CREATE TABLE ${LIVE_ROOM_EDIT_AUTHORITIES} (

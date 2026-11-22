@@ -1897,8 +1897,7 @@ export function commitLiveUpdateJournal(
             committed: save.committed as (journalCursor: number) => () => void,
           };
         })();
-  // A room's save is the room's own write on the owner's capture, never an editor's. It holds one
-  // sender's edits, stored under the access the sender had when the room took them.
+  // A room's save is the room's own write on the owner's capture, never an editor's.
   if (room && (actorKind !== "owner" || trustedAutomation || rawMetadata.authorContext))
     return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
   if (room && (!liveOneAuthor(room.authors) || room.authors.some((a) => a.kind === "automation")))

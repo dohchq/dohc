@@ -1,11 +1,9 @@
 // A live room: one shared note's live copy in memory, plus the edits taken and not yet saved.
 //
 // An edit is admitted, written down, applied, answered and passed on, in that order. The room
-// saves what it holds every few seconds on the owner's capture, one sender's run of edits per
-// save, each stored under the access the sender had when the room took it. The saved rows are
-// deleted in the save's own
-// journal transaction. Everything else that changes the note reaches the room through that
-// capture's feed of applied changes.
+// saves what it holds every few seconds on the owner's capture. The saved rows are deleted in
+// the save's own journal transaction. Everything else that changes the note reaches the room
+// through that capture's feed of applied changes.
 //
 // The note's owner edits in the room too, but keeps the feed of its own capture: the owner's
 // computer holds the note as saved and, on top, the room's unsaved edits at their positions.
@@ -657,9 +655,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       // saved first, in the order they were taken. New edits follow them in the list.
       const left = liveRoomEdits(storage, document);
       for (const [index, edit] of left.entries()) {
-        // A taken edit is never skipped. One that no longer applies, or that was taken before
-        // the room kept the access each edit came in under, pauses the note with every one left
-        // in its copy, for the owner to review.
+        // A taken edit is never skipped. The note pauses with every one left in its copy.
         if (!edit.authority || !roomAdmissible(room.doc, edit.updateBytes)) {
           const copy = Y.mergeUpdates([
             Y.encodeStateAsUpdate(room.doc),

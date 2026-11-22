@@ -554,8 +554,7 @@ function captureLiveFrameHost(options: {
         (!trustedAutomation || actor.kind !== "owner" || trustedAutomationPress)
       )
         return { result: "refused", reason: "authority-refused" };
-      // A live room saves on the owner's capture. Each save holds one sender's edits, stored under
-      // the access the sender had when the room took them.
+      // A live room saves on the owner's capture.
       const room = input.room;
       if (room && (actor.kind !== "owner" || trustedAutomation || input.authorContext))
         return { result: "refused", reason: "authority-refused" };
