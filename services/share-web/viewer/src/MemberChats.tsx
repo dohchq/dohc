@@ -167,14 +167,17 @@ export function MemberChats({
     setFollows((count) => count + 1);
   }, [reads]);
   // A read of the Groups that brings a new one keeps the follow, so the open Group keeps its messages.
+  // A new follow starts where the last one stopped, so All Groups keeps counting with no Group open.
   const shareId = opened?.shareId,
     userId = opened?.userId;
+  const lastHub = useRef<ReturnType<typeof createGroupFollow> | null>(null);
   const hub = useMemo(
     () =>
       shareId && userId
         ? createGroupFollow({
             shareId,
             userId,
+            since: lastHub.current?.cursor(),
             onEnded: followGone,
             onMessages: (counts) => {
               if ([...counts.keys()].some((wireId) => !listedIds.current.has(wireId)))
@@ -193,7 +196,11 @@ export function MemberChats({
         : null,
     [shareId, userId, follows],
   );
-  useEffect(() => () => hub?.close(), [hub]);
+  lastHub.current = hub;
+  useEffect(() => {
+    hub?.start();
+    return () => hub?.close();
+  }, [hub]);
 
   // Opening a Group, or showing the panel, reads what it holds.
   useEffect(() => {

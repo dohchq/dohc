@@ -158,13 +158,15 @@ export function createGroupFollow(options: {
   follow?: typeof followMemberGroups;
   onMessages(counts: ReadonlyMap<string, number>): void;
   onEnded(reason: Ended): void;
+  // Where an earlier follow stopped. A follow that starts there needs no open Group to start it.
+  since?: number | null;
 }) {
   const follow = options.follow ?? followMemberGroups;
   const buffers = new Map<string, NamedChatMessage[]>(),
     counted = new Map<string, number>(),
     waiters = new Set<Waiter>();
-  let cursor: number | null = null,
-    floor = 0,
+  let cursor: number | null = options.since ?? null,
+    floor = options.since ?? 0,
     loop: AbortController | null = null,
     over = false;
 
@@ -296,6 +298,11 @@ export function createGroupFollow(options: {
     );
   };
   return {
+    cursor: () => cursor,
+    // Starts the follow from `since`, if it has one. Otherwise the first open Group starts it.
+    start() {
+      if (!loop) run();
+    },
     client(group: NamedChatChannel): ChatChannelClient {
       return {
         access: group.access,
