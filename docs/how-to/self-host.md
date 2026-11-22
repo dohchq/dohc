@@ -509,15 +509,6 @@ The amd64 and arm64 images include the Markdown reader. The relay refuses to sta
 To override `DOHC_ENGINE_READER_CONFIG`, point its `node`, `bundle` and `manifest` fields at the absolute paths of root-owned regular files.
 Keep those files and their parent directories unwritable by the service user and other accounts.
 
-## Development read replicas
-
-Replicas remain disabled by default.
-Development read replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled.
-Other hosts refuse replicas. The relay must run under Docker's default seccomp profile or an equivalent outer filter.
-Replicas refuse startup when `/proc/self/status` reports no seccomp filter.
-`node scripts/check-self-host.mjs --running` reports whether the running container can apply the sandbox.
-Replicas use the separate `/replicas` volume. Backups and deployment archives skip this disposable data.
-
 ## Live editing limits
 
 The live editing profile allows 128 connections in the relay and 96 per workspace.
@@ -683,7 +674,7 @@ Use Compose's `--env-file`, `-f`, or `--project-name` options when selecting a c
 Exit codes are 0 for success, 2 for bad input, 3 for not found, and 1 for connection or operation failures.
 The operator socket requires a secret from `/continuity/publication-operator.secret`, beside the deployment configuration.
 The relay creates this file with mode 0600. The takedown command reads it automatically.
-Run the command with access to the continuity volume. Replica children cannot read the secret.
+Run the command with access to the continuity volume.
 
 The client times out after 10 seconds. Retries preserve the first takedown record.
 A retry after a lift holds the owner's app publishing again.

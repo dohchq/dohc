@@ -103,11 +103,10 @@ An 8-vCPU runner costs twice as much per minute. Choose it only after comparing 
 
 ## Sandbox suites run on GitHub's image
 
-Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
+Blacksmith's kernel has no Landlock, which the app compiler applies.
 The `shared preparation` job therefore always uses GitHub's `ubuntu-24.04` image, whenever either gate runs.
-It runs both confinement suites after publishing the prepared artifacts and fails if any required test skips.
+It runs the compiler confinement suites after publishing the prepared artifacts and fails if any required test skips.
 If confinement fails, select **Re-run all jobs**. **Re-run failed jobs** does not create preparation artifacts for the new attempt.
-The local gate runs no Linux JavaScript, so the replica suites run only in shared preparation.
 The workflow holds the rest of the job graph and the confinement setup.
 
 ## Read the result

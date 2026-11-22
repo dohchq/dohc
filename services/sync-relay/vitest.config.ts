@@ -1,35 +1,14 @@
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { configDefaults, defineConfig } from "vitest/config";
-
-// Replicas need Landlock and the relay's outer seccomp filter. PR checks run these files
-// in their confinement job, under Docker's default profile, and leave them out elsewhere.
-const confinementSuites = [
-  "src/replicaJournal.integration.test.ts",
-  "src/replicaJournal.native.test.ts",
-  "src/replicaSupervisor.native.test.ts",
-  "src/replicaSupervisor.test.ts",
-];
-// A renamed suite would otherwise drop out of the confinement job without failing it.
-const missing = confinementSuites.filter(
-  (suite) => !existsSync(fileURLToPath(new URL(suite, import.meta.url))),
-);
-if (missing.length) throw new Error(`Confinement suites not found: ${missing.join(", ")}.`);
-const selection = process.env.DOHC_CONFINEMENT_SUITES;
-if (selection !== undefined && selection !== "only" && selection !== "exclude") {
-  throw new Error(
-    `DOHC_CONFINEMENT_SUITES must be "only" or "exclude", not ${JSON.stringify(selection)}.`,
-  );
-}
+import { defineConfig } from "vitest/config";
 
 // macOS $TMPDIR is a link into /private. Tests that make folders under
 // os.tmpdir() must hold the path that code resolving links sees.
 if (process.platform === "darwin") process.env.TMPDIR = privateShortTmpdir();
 else if (process.platform !== "win32") process.env.TMPDIR = realpathSync(tmpdir());
 
-// macOS $TMPDIR is a long /var/folders path, and a replica's relay.sock must fit
+// macOS $TMPDIR is a long /var/folders path, and a test socket must fit
 // in the 104-byte sun_path. Use this user's own folder in the shared /tmp instead.
 function privateShortTmpdir(): string {
   const uid = process.getuid!();
@@ -53,10 +32,6 @@ export default defineConfig({
     testTimeout: 30_000,
     maxConcurrency: 2,
     setupFiles: ["./vitest.setup.ts"],
-    ...(selection === "only" ? { include: confinementSuites } : {}),
-    ...(selection === "exclude"
-      ? { exclude: [...configDefaults.exclude, ...confinementSuites] }
-      : {}),
     // expect.poll's own default is 1 s; a loaded host needs the same 10 s as desktop.
     expect: { poll: { timeout: 10_000 } },
   },

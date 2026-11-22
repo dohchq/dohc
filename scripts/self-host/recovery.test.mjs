@@ -6,8 +6,6 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parseRecoveryArguments, runRecovery } from "./recovery.mjs";
-import { archiveDeployment } from "./archive.mjs";
-import { writeFileSync } from "node:fs";
 
 const config = {
   name: "recovery-test",
@@ -19,43 +17,6 @@ const config = {
   },
   volumes: { data: { name: "recovery_data" } },
 };
-
-test("deployment archives skip the disposable replicas volume", async (t) => {
-  const root = await fixture(t),
-    directory = join(root, "archive"),
-    envFile = join(root, "environment");
-  await writeFile(envFile, "LOCAL_PROOF=1\n");
-  const calls = [];
-  const run = (args) => {
-    calls.push(args);
-    if (args[0] === "run")
-      writeFileSync(
-        join(
-          directory,
-          args.find((arg) => /^volume-\d+\.tar\.gz$/.test(arg)),
-        ),
-        "archive test bytes",
-      );
-    return "[]";
-  };
-  await archiveDeployment(
-    { directory, envFile },
-    {
-      ...config,
-      volumes: {
-        ...config.volumes,
-        replicas: { name: "disposable_replicas", labels: { "dohc.backup": "skip" } },
-      },
-    },
-    run,
-  );
-  assert.deepEqual(
-    calls.find((args) => args[0] === "volume"),
-    ["volume", "inspect", "recovery_data"],
-  );
-  assert.equal(calls.filter((args) => args[0] === "run").length, 1);
-  assert(!calls.flat().some((arg) => arg.includes("source=disposable_replicas")));
-});
 
 test("help describes archive scope and service restart behavior", () => {
   const result = spawnSync(
@@ -71,7 +32,7 @@ test("help describes archive scope and service restart behavior", () => {
   );
   assert.match(
     usage,
-    /Backup, check-backup, and restore affect only relay data\. Archive preserves deployment data and configuration, excluding disposable replicas\./,
+    /Backup, check-backup, and restore affect only relay data\. Archive preserves deployment data and configuration\./,
   );
 });
 

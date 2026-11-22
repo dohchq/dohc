@@ -41,7 +41,6 @@ import {
   LINK_INVENTORY_PAGE_SIZE,
   LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT,
 } from "./limits";
-import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 import {
   retireUncoveredServiceActivations,
   serviceHostEnrollmentsCoveredByShare,
@@ -456,7 +455,6 @@ export function retuneNamedShareGrant(
       nextShareDiscussionRevision(storage, grant.shareId);
       retireUncoveredServiceActivations(storage, covered, Math.trunc(input.changedAtMs));
     }
-    forgetReplicaCurrentViewCaches(storage, share.workspaceId);
     return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
   });
 }
@@ -533,7 +531,6 @@ export function revokeShareGrantInTransaction(
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
     .run(grant.shareId, grant.shareId);
   retireUncoveredServiceActivations(storage, covered, revokedAtMs, keep);
-  forgetReplicaCurrentViewCaches(storage, storage.getShare(input.shareId)!.workspaceId);
   return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
 }
 
@@ -1304,7 +1301,6 @@ export function revokeShareInTransaction(
     .run(Math.trunc(revokedAtMs), shareId);
   retireAgentConnectionsInTransaction(storage, { shareId }, revokedAtMs);
   retireUncoveredServiceActivations(storage, covered, Math.trunc(revokedAtMs));
-  forgetReplicaCurrentViewCaches(storage, String(existing.workspace_id));
   storage.db
     .prepare(`UPDATE sync_relay_share_removals SET voided = 1
         WHERE share_id = ? AND (removed_grant_id IS NOT NULL OR ? > 0)`)

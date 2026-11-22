@@ -141,7 +141,6 @@ import {
 import { DiscussionActivityHub } from "./discussionActivity";
 import { PresenceHub } from "./presence";
 import { ReplicaWatches } from "./replicaWatches";
-import type { DevelopmentReplicaReads } from "./replicaLinkReadService";
 import { createPresenceRoutes } from "./presenceRoutes";
 import { createProposalRoutes } from "./proposalRoutes";
 import { parseShareId, parseWorkspaceId } from "./requestInputs";
@@ -222,8 +221,7 @@ export interface CreateSyncRelayHandlerOptions {
   // Wake-only long-poll coordination. Durable revisions and data stay in
   // storage, so replacing this hub cannot invalidate a client watermark.
   discussionActivity?: DiscussionActivityHub;
-  replicaWatches?: Pick<ReplicaWatches, "watched"> & Partial<Pick<ReplicaWatches, "holdReader">>;
-  developmentReplicaReads?: DevelopmentReplicaReads;
+  replicaWatches?: Pick<ReplicaWatches, "watched">;
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
@@ -304,7 +302,6 @@ export function createSyncRelayHandler({
   presence = new PresenceHub(),
   discussionActivity = new DiscussionActivityHub(),
   replicaWatches = new ReplicaWatches(discussionActivity),
-  developmentReplicaReads,
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
@@ -1101,15 +1098,6 @@ export function createSyncRelayHandler({
     reads: { chatResolverFor },
   });
 
-  const replicaLinkReads = developmentReplicaReads
-    ? storage.createReplicaLinkReadService(
-        developmentReplicaReads,
-        { holdReader: (authorized) => replicaWatches.holdReader?.(authorized) },
-        discussionActivity,
-        newestFilteredOpFreshness,
-        linkKey,
-      )
-    : undefined;
   const respondToLinkRead = createLinkReadRoutes(
     storage,
     nowMs,
@@ -1128,7 +1116,6 @@ export function createSyncRelayHandler({
     admitLinkBlobBytes,
     respondWithLinkBytes,
     linkKey,
-    replicaLinkReads,
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({
@@ -1773,7 +1760,6 @@ export function createSyncRelayHandler({
     personalAgents,
     personalLimiter: linkReadRateLimiter,
     dispose() {
-      replicaLinkReads?.close();
       accountFeedWaits.close();
       chatWakeWaits.close();
       noticeWaits.close();
