@@ -8,7 +8,7 @@ import type { KeptCopyNotice } from "./useShellError";
 export function keptCopyMessage(path: string): string {
   // What happened leads and the path ends it, so a clamp cuts only the path.
   if (isAccessRulePath(path)) {
-    return `dohc kept the rule from outside dohc for ${path}.`;
+    return `dohc kept a copy of the rule from outside dohc for ${path}.`;
   }
   return `Another program changed ${path} while dohc was saving it. dohc kept both copies.`;
 }

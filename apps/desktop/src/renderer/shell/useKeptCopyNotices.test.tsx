@@ -67,13 +67,13 @@ describe("useKeptCopyNotices", () => {
     await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(3));
     expect(h.result.current.shellErrors).toMatchObject([
       {
-        message: "dohc kept the rule from outside dohc for new/access.yaml.",
+        message: "dohc kept a copy of the rule from outside dohc for new/access.yaml.",
         action: { label: "Save copy" },
         tone: "success",
         seen: true,
       },
       {
-        message: "dohc kept the rule from outside dohc for team/ACCESS.yaml.",
+        message: "dohc kept a copy of the rule from outside dohc for team/ACCESS.yaml.",
         action: { label: "Save copy" },
         tone: "success",
         seen: true,
