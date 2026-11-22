@@ -243,7 +243,12 @@ it("deletes one of the agent's own messages through the relay, and says when it 
     arguments: { workspace: "trip", threadId: "thread-1", messageId: "someone-else" },
   });
   expect(refused.isError).toBe(true);
-  expect(structured(refused)).toMatchObject({ ok: false, code: "not_found" });
+  expect(structured(refused)).toMatchObject({
+    ok: false,
+    code: "not_found",
+    error:
+      "dohc could not delete this message. You can delete only your own messages in a Group or a file's Comments.",
+  });
   expect(f.calls).toEqual([
     {
       action: "delete",
