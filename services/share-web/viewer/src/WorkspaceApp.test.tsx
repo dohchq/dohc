@@ -171,6 +171,8 @@ function server(
     tooLarge?: boolean;
     // The relay refuses the file list, as it does past its scan cap, while the grant still opens.
     currentRefused?: boolean;
+    // The file list fails to arrive, as on a lost connection.
+    currentUnreachable?: boolean;
     // The account's session cannot be checked.
     sessionFails?: boolean;
   } = {},
@@ -258,6 +260,8 @@ function server(
         return jsonResponse(linkRefusalBody("link_too_many_files"), 413);
       if (url.pathname === "/api/view/current" && options.currentRefused)
         return jsonResponse({ ok: false, error: "not found" }, 404);
+      if (url.pathname === "/api/view/current" && options.currentUnreachable)
+        throw new TypeError("Failed to fetch");
       if (url.pathname === "/api/view/current")
         return jsonResponse({ ...meta(), files: files(), nextCursor: 7, epochLogFloor: 0 });
       if (url.pathname === "/api/view/meta") return jsonResponse(meta());
@@ -2126,6 +2130,32 @@ it("opens a replaced file's own Comments, not its predecessor's", async () => {
   await settle(() => commentsPanel().textContent?.includes("Nine is early") === true);
   await settle(() => box().value === "Meant for the old plan");
 });
+
+it.each(["currentRefused", "currentUnreachable"] as const)(
+  "stops offering the old level's controls when a level change refuses the held read and the files then fail (%s)",
+  async (failure) => {
+    const options: {
+      level: Level;
+      currentRefused?: boolean;
+      currentUnreachable?: boolean;
+    } = { level: "comment" };
+    server(options);
+    await render();
+    await opened();
+    await click("Comments");
+    await settle(() => commentBox() !== null);
+    // The owner lowered the members to View. The relay refuses the read it held, and the fresh file list fails.
+    options.level = "view";
+    options[failure] = true;
+    await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+    await settle(() => text().includes("dohc could not open this workspace."));
+    expect(container.querySelector('textarea[name="body"]')).toBeNull();
+    expect(text()).not.toContain("Can comment");
+    options[failure] = false;
+    await click("Try again");
+    await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+  },
+);
 
 it("keeps each file's comment draft apart when the relay lists files without their identity", async () => {
   // A development relay without a link key lists files with no object identity.
