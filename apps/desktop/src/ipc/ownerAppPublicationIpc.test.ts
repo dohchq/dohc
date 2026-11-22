@@ -918,7 +918,101 @@ it("keeps the publication candidate unchanged when no read is approved", async (
   const publication = h.relay.mock.calls.find((call) => call[1].endsWith("/app-publications"))!;
   const candidate = JSON.parse(String(publication[2]!.body)).candidate;
   expect(hash(JSON.stringify(candidate))).toBe(prepared.candidateDigest);
+  expect(candidate.capabilities[0].operations[0]).not.toHaveProperty("display");
+  expect(candidate.capabilities[0].operations[1]).not.toHaveProperty("display");
   expect(candidate.capabilities[0].operations[1]).not.toHaveProperty("fields");
+  expect(prepared.capabilities[0]).toMatchObject({
+    kind: "dataset",
+    operations: [
+      {
+        operationId: id(5),
+        display: { kind: "create", label: "Submit", fields: ["Name"] },
+      },
+      {
+        operationId: id(6),
+        display: { kind: "read", label: "List", fields: ["ID", "Name"] },
+      },
+    ],
+  });
+});
+
+it("adds verified display metadata on dataset reactivation review and publication listing without changing stored digests", async () => {
+  const h = withDataset(harness(), true);
+  const prepared = await h.prepare();
+  await h.approve(prepared);
+  const publishCall = h.relay.mock.calls.find((call) => call[1].endsWith("/app-publications"))!;
+  const { candidate } = JSON.parse(String(publishCall[2]!.body));
+  const storedCapability = candidate.capabilities[0];
+  expect(storedCapability.operations[0]).not.toHaveProperty("display");
+  const owner = {
+    workspaceId: "w",
+    ownerUserId: "owner",
+    shareId: "s",
+    grantId: "g",
+    generation: 7,
+  };
+  const original = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) => {
+    if (args[1].endsWith(`/app-publications/${"a".repeat(64)}`)) {
+      return {
+        publicationId: "a".repeat(64),
+        candidate,
+        owner,
+        active: false,
+        authorityRevision: 2,
+      };
+    }
+    if (args[1].includes("/app-publications?")) {
+      return {
+        publications: [
+          {
+            publicationId: "a".repeat(64),
+            authorityRevision: 2,
+            shareId: "s",
+            grantId: "g",
+            appRoot: "app",
+            sourceRevision: candidate.sourceRevision,
+            active: true,
+            datasetCapability: storedCapability,
+            collectionCapability: null,
+            linkCurrent: true,
+            manifestUnavailable: false,
+          },
+        ],
+        nextCursor: null,
+      };
+    }
+    return original(...args);
+  });
+  const reactivated = await h.invoke({
+    action: "reviewReactivation",
+    workspaceId: "w",
+    publicationId: "a".repeat(64),
+  });
+  expect(reactivated).toMatchObject({
+    kind: "prepared",
+    candidateDigest: prepared.candidateDigest,
+    capabilities: [
+      {
+        kind: "dataset",
+        operations: [
+          { operationId: id(5), display: { kind: "create", label: "Submit", fields: ["Name"] } },
+          { operationId: id(6), display: { kind: "read", label: "List", fields: ["ID", "Name"] } },
+        ],
+      },
+    ],
+  });
+  const artifactsBeforeList = h.relay.mock.calls.filter((call) =>
+    call[1].endsWith("/artifacts"),
+  ).length;
+  const listed = await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" });
+  expect(listed).toMatchObject({
+    kind: "listed",
+    publications: [{ datasetCapability: storedCapability }],
+  });
+  expect(h.relay.mock.calls.filter((call) => call[1].endsWith("/artifacts"))).toHaveLength(
+    artifactsBeforeList,
+  );
 });
 
 it("checks relay-returned revisions directly on every publication preparation", async () => {

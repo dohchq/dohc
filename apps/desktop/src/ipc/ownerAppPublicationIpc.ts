@@ -33,6 +33,7 @@ import {
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
 import {
+  displayAppDatasetCapability,
   resolveAppDatasetCapability,
   verifyAppDatasetCapability,
   hasGeneratedDatasetRevision,
@@ -257,40 +258,50 @@ export function createOwnerAppPublicationHandler<
         reactivation?: { publicationId: string; authorityRevision: number },
         access: "view" | "comment" | "edit" = "view",
         selector?: { paths: string[]; versionId: string | null },
+        resolvedDataset?: DatasetRevision,
       ) => {
         session.assertCurrent();
         operation.signal.throwIfAborted();
         const candidate = prepared.candidate;
         const capabilities = await Promise.all(
           candidate.capabilities.map(async (capability) => {
-            if (capability.kind !== "dataset" || reactivation) return capability;
-            const revision = await resolveDatasetRevision(capability);
-            return {
-              ...capability,
-              operations: capability.operations.map((operation) => {
-                const read = revision.definition.operations.find(
-                  (read) =>
-                    read.operationId === operation.operationId &&
-                    read.kind === "read" &&
-                    read.access === "helper",
-                );
-                if (!read || !hasGeneratedDatasetRevision(revision)) return operation;
-                const table = revision.definition.tables.find(
-                  (table) => table.tableId === read.tableId,
-                )!;
-                const primary = datasetColumnFields(table).find(
-                  (field) => field.sqlColumn === table.primaryKey,
-                )!;
-                if (!read.fieldIds.includes(primary.fieldId)) return operation;
-                return {
-                  ...operation,
-                  fields: revision.definition.tables
-                    .find((table) => table.tableId === read.tableId)!
-                    .fields.filter((field) => read.fieldIds.includes(field.fieldId))
-                    .map(({ fieldId, name }) => ({ fieldId, name })),
+            if (capability.kind !== "dataset") return capability;
+            const revision =
+              resolvedDataset &&
+              resolvedDataset.datasetId === capability.datasetId &&
+              resolvedDataset.revision === capability.revision &&
+              resolvedDataset.revisionSha256 === capability.revisionSha256
+                ? resolvedDataset
+                : await resolveDatasetRevision(capability);
+            const generated = hasGeneratedDatasetRevision(revision);
+            const withFields = reactivation
+              ? capability
+              : {
+                  ...capability,
+                  operations: capability.operations.map((operation) => {
+                    const read = revision.definition.operations.find(
+                      (read) =>
+                        read.operationId === operation.operationId &&
+                        read.kind === "read" &&
+                        read.access === "helper",
+                    );
+                    if (!read || !generated) return operation;
+                    const table = revision.definition.tables.find(
+                      (table) => table.tableId === read.tableId,
+                    )!;
+                    const primary = datasetColumnFields(table).find(
+                      (field) => field.sqlColumn === table.primaryKey,
+                    )!;
+                    if (!read.fieldIds.includes(primary.fieldId)) return operation;
+                    return {
+                      ...operation,
+                      fields: table.fields
+                        .filter((field) => read.fieldIds.includes(field.fieldId))
+                        .map(({ fieldId, name }) => ({ fieldId, name })),
+                    };
+                  }),
                 };
-              }),
-            };
+            return displayAppDatasetCapability(withFields, revision, generated);
           }),
         );
         session.assertCurrent();
@@ -389,7 +400,9 @@ export function createOwnerAppPublicationHandler<
           );
         const candidate = parseAppPublicationCandidate(row.candidate, APP_PUBLICATION_LIMITS);
         const dataset = candidate.capabilities.find((capability) => capability.kind === "dataset");
-        if (dataset) verifyAppDatasetCapability(dataset, await resolveDatasetRevision(dataset));
+        const verifiedDatasetRevision = dataset ? await resolveDatasetRevision(dataset) : undefined;
+        if (dataset && verifiedDatasetRevision)
+          verifyAppDatasetCapability(dataset, verifiedDatasetRevision);
         const selection = OwnerAppPublicationRequest.parse({
           action: "prepare",
           workspaceId: input.workspaceId,
@@ -410,6 +423,7 @@ export function createOwnerAppPublicationHandler<
           { publicationId: input.publicationId, authorityRevision: row.authorityRevision! },
           grant.access as "view" | "comment" | "edit",
           grant.selector ?? undefined,
+          verifiedDatasetRevision,
         );
       }
       if (input.action === "list") {

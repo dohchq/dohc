@@ -9,6 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import type {
@@ -120,7 +121,7 @@ async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPubl
     return { kind: "withdrawn", publicationId: published.publicationId, authorityRevision: 2 };
   return { kind: "cancelled" };
 }
-const datasetAnswer = async (): Promise<unknown> => ({
+const datasetAnswer = async (_request?: { action?: string }): Promise<unknown> => ({
   kind: "list",
   datasets: [
     {
@@ -469,6 +470,169 @@ describe("owner app publication", () => {
     expect(reportError).toHaveBeenCalledOnce();
   });
 
+  it("loads plain-English action descriptions for published dataset details only after expanding, without blocking Unpublish", async () => {
+    const historyPending = deferred<unknown>();
+    const definition = {
+      formatVersion: 1 as const,
+      datasetId: datasetCapability.datasetId,
+      name: "Orders",
+      schemaPath: "data/schema.sql",
+      operationsPath: "data/operations.js",
+      tables: [
+        {
+          tableId: "00000000-0000-4000-8000-000000000020",
+          name: "Orders",
+          sqlName: "orders",
+          primaryKey: "id",
+          fields: [
+            {
+              fieldId: "00000000-0000-4000-8000-000000000021",
+              name: "ID",
+              sqlColumn: "id",
+              type: "text" as const,
+              required: true,
+              unique: true,
+            },
+            {
+              fieldId: "00000000-0000-4000-8000-000000000022",
+              name: "Item",
+              sqlColumn: "item",
+              type: "text" as const,
+              required: true,
+              unique: false,
+            },
+          ],
+        },
+      ],
+      operations: [
+        {
+          operationId: datasetCapability.operations[0]!.operationId,
+          name: "submit",
+          label: "Submit order",
+          tableId: "00000000-0000-4000-8000-000000000020",
+          kind: "create" as const,
+          access: "link" as const,
+          readOnly: false,
+          fieldIds: ["00000000-0000-4000-8000-000000000022"],
+        },
+      ],
+    };
+    api.dataset.mockImplementation(async (request) => {
+      if (request?.action === "historyRevision") return historyPending.promise;
+      return datasetAnswer();
+    });
+    api.publishOwnerApp.mockImplementation(async (request) =>
+      request.action === "list"
+        ? { kind: "listed", publications: [datasetRow], nextCursor: null }
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    expect(
+      screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }),
+    ).toBeTruthy();
+    expect(api.dataset).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Approved Collection access"));
+    await waitFor(() =>
+      expect(api.dataset).toHaveBeenCalledWith({
+        action: "historyRevision",
+        workspaceId: "ws-trip",
+        datasetPath: "data/dataset.json",
+        revisionSha256: datasetCapability.revisionSha256,
+      }),
+    );
+    const card = screen.getByTestId("app-publication-capability");
+    expect(card.textContent).toContain("Link actions: submit (changes data)");
+    await act(async () =>
+      historyPending.resolve({
+        kind: "history-revision",
+        revision: {
+          datasetId: datasetCapability.datasetId,
+          definition,
+          revision: datasetCapability.revision,
+          revisionSha256: datasetCapability.revisionSha256,
+          definitionSha256: "b".repeat(64),
+          schemaSha256: "c".repeat(64),
+          operationsSha256: "d".repeat(64),
+        },
+        schemaSql: "",
+        operationSource: generateDatasetOperations(definition),
+      }),
+    );
+    expect(card.textContent).toContain("Link actions: Adds records with Item · submit");
+  });
+
+  it("shows plain-English dataset action summaries and surfaces address warnings in the share-link review card", async () => {
+    const datasetWithDisplay = {
+      ...datasetCapability,
+      operationIds: [
+        "00000000-0000-4000-8000-000000000002",
+        "00000000-0000-4000-8000-000000000003",
+        "00000000-0000-4000-8000-000000000004",
+      ],
+      operations: [
+        {
+          operationId: "00000000-0000-4000-8000-000000000002",
+          name: "submit",
+          access: "link" as const,
+          readOnly: false,
+          display: { kind: "create" as const, label: "Submit", fields: ["Item", "Quantity"] },
+        },
+        {
+          operationId: "00000000-0000-4000-8000-000000000003",
+          name: "list",
+          access: "helper" as const,
+          readOnly: true,
+          display: { kind: "read" as const, label: "View orders", fields: ["Item", "Status"] },
+        },
+        {
+          operationId: "00000000-0000-4000-8000-000000000004",
+          name: "cancel",
+          access: "owner" as const,
+          readOnly: false,
+          display: { kind: "action" as const, label: "Cancel order", fields: [] },
+        },
+      ],
+    };
+    api.dataset.mockResolvedValueOnce({
+      kind: "list",
+      datasets: [
+        {
+          datasetId: datasetCapability.datasetId,
+          datasetPath: null,
+          datasetAddressStatus: "ambiguous",
+        },
+      ],
+      nextCursor: null,
+    });
+    api.publishOwnerApp.mockImplementation((request) =>
+      request.action === "prepare"
+        ? Promise.resolve({ ...prepared, capabilities: [datasetWithDisplay] })
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await review();
+    const card = screen.getByTestId("app-publication-capability");
+    expect(card.textContent).toContain(
+      "Multiple dataset.json files name this Collection. Remove the duplicate file.",
+    );
+    expect(card.textContent).toContain("Link actions: Adds records with Item, Quantity · submit");
+    expect(card.textContent).toContain("Helper actions: Reads Item, Status · list");
+    expect(card.textContent).not.toContain("(reads only)");
+    expect(card.textContent).toContain(
+      'Owner actions: Runs "Cancel order" · cancel (changes data)',
+    );
+    expect(card.textContent).toContain(
+      "This app uses only this Collection's approved actions. Its responses appear in the same Collection, and approving this app does not change the Collection's rules.",
+    );
+    expect(card.querySelector("details")?.open).toBe(false);
+    expect(
+      screen.getByText(
+        "Unpublishing stops new access through this app. It cannot remove copies sent elsewhere.",
+      ),
+    ).toBeTruthy();
+  });
+
   it("shows the fixed collection capability before approving the unchanged digest", async () => {
     const capability = {
       kind: "collection-create" as const,
@@ -495,6 +659,11 @@ describe("owner app publication", () => {
     );
     expect(scope.textContent).toContain(capability.schemaSha256);
     expect(scope.textContent).toContain("cannot change or delete existing records");
+    expect(
+      screen.getByText(
+        "Unpublishing stops new access through this app. The share link still opens its response files. Copies sent elsewhere stay.",
+      ),
+    ).toBeTruthy();
     await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
     expect(api.publishOwnerApp).toHaveBeenCalledWith({
       action: "approve",
@@ -777,6 +946,9 @@ describe("owner app publication", () => {
       expect(reach("Reads")).toBe("Item, Status");
       expect(reach("Changes")).toBe("Adds records with Item, Quantity");
       expect(within(access).queryByText("New")).toBeNull();
+      expect(screen.getByTestId("app-access-boundary").textContent).toBe(
+        "Uses only this Collection's approved actions. It cannot read other workspace files.",
+      );
       expect(access.textContent).toContain("It can send what it receives to other websites.");
       expect(screen.getByRole("heading", { name: "What it can reach" })).toBeTruthy();
       expect(await screen.findByRole("heading", { name: "Share links" })).toBeTruthy();
@@ -798,6 +970,81 @@ describe("owner app publication", () => {
       expect(actions("cancel")).toEqual([]);
       expect(actions("launchLocal")).toEqual([]);
       expect(api.openExternalUrl).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        "no workspace data",
+        [] as Capability[],
+        "Cannot read or change workspace files or Collections.",
+      ],
+      [
+        "collection-create",
+        [approvedCollection] as Capability[],
+        "Cannot change or delete existing records, or read other workspace files.",
+      ],
+    ])(
+      "states the accurate boundary line for %s",
+      async (_label, capabilities, expectedBoundary) => {
+        api.publishOwnerApp.mockImplementation(local([], { capabilities }));
+        renderLocal();
+        await openLocal();
+        await ready();
+        expect(screen.getByTestId("app-access-boundary").textContent).toBe(expectedBoundary);
+      },
+    );
+
+    it("marks newly added fields when changed source widens createFields on an existing operation", async () => {
+      const restrictedSubmit = {
+        ...submitOperation,
+        display: { kind: "create" as const, label: "Submit", fields: ["Item"] },
+      };
+      const narrowApproval = {
+        ...approvedAccess,
+        operations: [listOperation, restrictedSubmit],
+        createFields: [
+          {
+            operationId: submitOperation.operationId,
+            fieldIds: ["00000000-0000-4000-8000-000000000010"],
+          },
+        ],
+      };
+      api.publishOwnerApp.mockImplementation(
+        local([{ ...localRow, datasetCapability: narrowApproval }], {
+          revision: "e".repeat(64),
+          capabilities: [approvedAccess],
+        }),
+      );
+      renderLocal();
+      await openLocal();
+      await ready();
+      expect(lines("Changes")).toEqual(["Adds records with Item, QuantityNew"]);
+      expect(within(screen.getByTestId("app-access")).getAllByText("New")).toHaveLength(1);
+    });
+
+    it("marks a widened createFields operation even when display metadata is unavailable", async () => {
+      const bareSubmit = datasetCapability.operations[0]!;
+      const narrowApproval = {
+        ...datasetCapability,
+        operations: [bareSubmit],
+        createFields: [
+          {
+            operationId: bareSubmit.operationId,
+            fieldIds: ["00000000-0000-4000-8000-000000000010"],
+          },
+        ],
+      };
+      api.publishOwnerApp.mockImplementation(
+        local([{ ...localRow, datasetCapability: narrowApproval }], {
+          revision: "e".repeat(64),
+          capabilities: [datasetCapability],
+        }),
+      );
+      renderLocal();
+      await openLocal();
+      await ready();
+      expect(lines("Changes")).toEqual(["RecordsNew"]);
+      expect(within(screen.getByTestId("app-access")).getAllByText("New")).toHaveLength(1);
     });
 
     it("marks what changed source adds and approves the changes", async () => {
@@ -1207,8 +1454,16 @@ it("reviews a chosen read and its fields, with approval off by default", async (
   const choice = screen.getByRole("checkbox", { name: /records.list/ }) as HTMLInputElement;
   expect(choice.checked).toBe(false);
   expect(screen.getByText("Fields: Record ID, Email, Name")).toBeTruthy();
+  expect(
+    screen.getByText(
+      "Selected reads are added to this app's link access and show current records and later changes. Unpublish to withdraw access.",
+    ),
+  ).toBeTruthy();
   fireEvent.click(choice);
   expect(choice.checked).toBe(true);
+  expect(screen.getByTestId("app-publication-capability").textContent).toContain(
+    "Selected link reads: records.list (Record ID, Email, Name). People with the link can use these once published.",
+  );
   fireEvent.click(choice);
   expect(choice.checked).toBe(false);
   fireEvent.click(choice);
