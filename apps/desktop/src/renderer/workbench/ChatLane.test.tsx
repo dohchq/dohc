@@ -582,6 +582,97 @@ describe("ChatLane", () => {
     });
   });
 
+  it("shows every conversation two devices started before they synced, and goes on in the oldest", async () => {
+    // Each device started the group's conversation, so sync kept two chat-lane threads.
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [
+        thread({ id: "thread-later", createdAtMs: 2_000, messageCount: 2 }),
+        thread({ id: "thread-first", createdAtMs: 1_000, messageCount: 1 }),
+      ],
+    });
+    bridgeMock.listChatMessages.mockImplementation(async ({ threadId }) => ({
+      messages:
+        threadId === "thread-first"
+          ? [message({ id: "a", threadId, body: "From the laptop", createdAtMs: 1_000 })]
+          : [
+              message({ id: "b", threadId, body: "From the phone", createdAtMs: 2_000 }),
+              message({
+                id: "b-reply",
+                threadId,
+                body: "Booked",
+                parentMessageId: "b",
+                createdAtMs: 3_000,
+              }),
+            ],
+    }));
+    render(lane());
+    await screen.findByText("From the laptop");
+    expect(screen.getByText("From the phone")).toBeTruthy();
+    // A run in either thread is the conversation's.
+    expect(bridgeMock.chatDispatchStateForThread).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a",
+      threadId: "thread-first",
+      laneThreadIds: ["thread-later"],
+    });
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({
+      message: message({ id: "c", threadId: "thread-first", body: "Next" }),
+    });
+    send("Next");
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-first",
+        body: "Next",
+      }),
+    );
+    // Both threads are marked read up to what showed.
+    await waitFor(() =>
+      expect(bridgeMock.markChatThreadRead).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-later",
+        upToSequence: 2,
+      }),
+    );
+    // A reply to the phone's message goes on in the phone's thread.
+    fireEvent.click(await screen.findByTestId("chats-lane-thread-summary"));
+    const reply = await screen.findByTestId("chats-lane-thread-composer");
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({
+      message: message({ id: "d", threadId: "thread-later", body: "Thanks", parentMessageId: "b" }),
+    });
+    fireEvent.change(reply, { target: { value: "Thanks" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenLastCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-later",
+        body: "Thanks",
+        parentMessageId: "b",
+      }),
+    );
+  });
+
+  it("stops an agent's run from a group's chat and goes on in the composer", async () => {
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      ...working,
+      liveAgent: { agentId: "nova", name: "Nova" },
+    });
+    render(lane());
+    expect((await screen.findByTestId("chats-lane-working")).textContent).toContain("Nova");
+    expect(screen.getByTestId("chats-lane-dispatch-announcement").textContent).toBe(
+      "Agent working",
+    );
+    bridgeMock.stopAgentRun.mockImplementationOnce(async () => {
+      bridgeMock.chatDispatchStateForThread.mockResolvedValue(idle);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stop agent run" }));
+    await waitFor(() => expect(screen.queryByTestId("chats-lane-working")).toBeNull());
+    expect(bridgeMock.stopAgentRun).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      runId: "run-1",
+    });
+    expect(document.activeElement).toBe(screen.getByTestId("chats-lane-composer"));
+  });
+
   it("hides the waiting line while this computer pauses agent replies, and reads it again on resume", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [

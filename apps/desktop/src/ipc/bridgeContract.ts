@@ -6933,6 +6933,9 @@ export const ChatDispatchStateForThreadPayload = z
     threadId: OPAQUE_ID.nullable(),
     // An agent's chat's earlier posts, where a reply can wait for the agent too.
     postThreadIds: z.array(OPAQUE_ID).max(CHAT_DISPATCH_POST_THREADS_MAX).optional(),
+    // The conversation's other threads, when two devices started it before
+    // they synced. A run there is the conversation's too.
+    laneThreadIds: z.array(OPAQUE_ID).max(CHAT_DISPATCH_POST_THREADS_MAX).optional(),
   })
   .strict();
 export type ChatDispatchStateForThreadPayload = z.infer<typeof ChatDispatchStateForThreadPayload>;
@@ -6998,6 +7001,11 @@ export const ChatDispatchStateForThreadResult = z
     liveRunId: OPAQUE_ID.nullable(),
     // The message the live run answers, so its working line sits under it.
     liveTriggerMessageId: OPAQUE_ID.nullable(),
+    // The agent at work in the live run, so a group's chat can name it.
+    liveAgent: z
+      .object({ agentId: AgentId, name: z.string().min(1).max(1_000) })
+      .strict()
+      .optional(),
     pendingCount: z.number().int().nonnegative(),
     paused: z.boolean(),
     // The messages here and in the earlier posts asked for that wait for the
