@@ -2354,6 +2354,18 @@ export function createWorkspaceEngineCapture(
     await engine.flushCapture?.();
     return (await engine.watcherStatus?.())?.deferredWrites.includes(path) ?? false;
   }
+  async function untilCaptureAnswers(path: string, signal: AbortSignal): Promise<void> {
+    for (let attempt = 1; !stopped; attempt += 1) {
+      try {
+        await outsideWriteWaits(path);
+        return;
+      } catch (error) {
+        if (!isCaptureBusy(error)) return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(25 * 2 ** attempt, 500)));
+      signal.throwIfAborted();
+    }
+  }
   // Set-aside drafts of a deleted file's text that a newer draft or a save
   // replaced, and that the draft store has not removed yet. Every later draft
   // step and the capture's stop try again, so none lingers as a duplicate.
@@ -5189,14 +5201,18 @@ export function createWorkspaceEngineCapture(
     // failed there — holding the chain for that ladder and rejecting with a
     // rebind error the surface reads as an ordinary fallback, which is the
     // writable plain editor this bound exists to prevent.
-    return enqueueResult("open ydoc session", () => {
-      ydocOpenAbort.signal.throwIfAborted();
-      return options.rustEngineSessions.withRetryBudget(
-        YDOC_OPEN_RETRY_DEADLINE_MS,
-        openYDocSessionTask,
-        ydocOpenAbort.signal,
-      );
-    });
+    const open = () =>
+      enqueueResult("open ydoc session", () => {
+        ydocOpenAbort.signal.throwIfAborted();
+        return options.rustEngineSessions.withRetryBudget(
+          YDOC_OPEN_RETRY_DEADLINE_MS,
+          openYDocSessionTask,
+          ydocOpenAbort.signal,
+        );
+      });
+    return outsideWritesUnrecorded.has(input.path)
+      ? untilCaptureAnswers(input.path, ydocOpenAbort.signal).then(open)
+      : open();
 
     async function openYDocSessionTask(): Promise<
       WorkspaceEngineYDocOpenedSession | RecordEditSession
@@ -6210,7 +6226,7 @@ export function createWorkspaceEngineCapture(
           }
         } catch (error) {
           outsideWritesUnrecorded.add(input.path);
-          onError(`capture of ${input.path} after its close`, error);
+          if (!isCaptureBusy(error)) onError(`capture of ${input.path} after its close`, error);
         }
       };
       // The save this close refused over the outside change reads as that

@@ -125,6 +125,7 @@ function transportLost(): Error {
   });
 }
 let captureErrors: string[] = [];
+let busyOutsideCapture: { path: string; text: string; flushes: number } | null = null;
 let versioned: VersionedLoopbackEngine;
 let ydoc: YdocLoopbackEngine;
 // The daemon's disk side: ingests the folder on `capture.flush`, rewrites it
@@ -147,6 +148,34 @@ function daemonSessions(): EngineWorkspaceSessions {
     },
     async sendRequest(request: Request): Promise<Response> {
       requests.push(request);
+      if (busyOutsideCapture && request.method === "watcher.status") {
+        const ready = daemonCaptureLifecycleAnswer(request)!;
+        return {
+          ...ready,
+          result: {
+            ...(ready.result as Record<string, JsonValue>),
+            deferredWrites: [busyOutsideCapture.path],
+            phase: busyOutsideCapture.flushes > 0 ? "importing" : "ready",
+          },
+        };
+      }
+      if (busyOutsideCapture && request.method === "capture.flush") {
+        if (busyOutsideCapture.flushes > 0) {
+          busyOutsideCapture.flushes -= 1;
+          return {
+            id: request.id,
+            result: {
+              deferredWrites: [busyOutsideCapture.path],
+              settled: false,
+              running: true,
+              degraded: false,
+              heldFiles: [],
+            },
+          };
+        }
+        seedYdoc("main", busyOutsideCapture.text);
+        busyOutsideCapture = null;
+      }
       if (request.method === YDOC_METHOD.recordUpdate && beforeRecordUpdate) {
         const hook = beforeRecordUpdate;
         beforeRecordUpdate = null;
@@ -353,6 +382,7 @@ beforeEach(async () => {
   resyncCount = 0;
   lostResyncs = new Set();
   captureErrors = [];
+  busyOutsideCapture = null;
   recordUpdateDelayMs = 0;
   versioned = new VersionedLoopbackEngine();
   versioned.seedTextFile({
@@ -911,6 +941,19 @@ it("settles and closes the Rust Y.Doc session before a version switch", async ()
   await capture.switchVersion(draft.activeVersionId);
   expect(await readFile(join(root, PATH), "utf8")).toContain("Unsaved draft edit.");
   await session.close();
+});
+
+it("reopens a note that changed outside dohc once a busy capture records the change", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  const outside = "# Solo\n\nEdited in another app.\n";
+  await writeFile(join(root, PATH), outside, "utf8");
+  busyOutsideCapture = { path: PATH, text: outside, flushes: 3 };
+  capture.noteWriteDeferred(PATH);
+  await session.close();
+  const reopened = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  expect(documentMarkdown(reopened.initialUpdate)).toBe(outside);
+  expect(captureErrors).toEqual([]);
+  await reopened.close();
 });
 
 it("releases a verified synced document and reports changed-on-disk after a terminal close settle refusal", async () => {
