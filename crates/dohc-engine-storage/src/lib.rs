@@ -14,8 +14,9 @@
 //!   `quick_check`. A rejected store is left byte-unchanged.
 //! - **An actor's store serves before its pages are checked**
 //!   ([`EngineStore::open_serving_first`]). `quick_check` reads the whole
-//!   file, so it runs while the store serves. A store that fails it stops
-//!   serving and is refused at its next open.
+//!   file, so it runs while the store serves, after any pending migration has
+//!   committed. A store that fails it stops serving and is refused at its
+//!   next open.
 //! - **The v1-vs-v2 fence.** A database stamped with any schema version other
 //!   than `2` is rejected with [`StorageError::UnsupportedFingerprint`] — never
 //!   auto-migrated, never written over.

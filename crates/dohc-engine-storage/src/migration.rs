@@ -41,6 +41,7 @@ pub(crate) struct MigrationContext {
     pub protocol_version: i64,
     pub now_ms: i64,
     pub initial_root_token: Option<String>,
+    pub pages_checked_after_open: bool,
 }
 
 impl MigrationContext {
@@ -51,6 +52,7 @@ impl MigrationContext {
             protocol_version: ENGINE_STORAGE_PROTOCOL_VERSION,
             now_ms,
             initial_root_token: None,
+            pages_checked_after_open: false,
         }
     }
 }
@@ -5028,8 +5030,8 @@ pub(crate) fn newer_build_refusal(
 /// What a store's ledger says about this build's migrations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerState {
-    /// Every migration completed from this build's definition and passed its
-    /// integrity check.
+    /// Every migration completed from this build's definition. One that
+    /// checked the store's pages before it committed passed that check.
     Current,
     /// Some migrations have not run, as in a store an older build last
     /// opened. Every recorded one matches this build's definition.
@@ -5038,9 +5040,11 @@ pub enum LedgerState {
 
 /// Classify the ledger of an existing store against `migrations`, reading
 /// only. A recorded migration must match its definition's ordinal and, once
-/// completed, its checksum and a passed integrity check; anything else is a
-/// ledger the runner would refuse or this build cannot judge. A migration
-/// this build does not define means a newer build ran it.
+/// completed, its checksum. Its integrity mark is 1 when it checked the
+/// store's pages before it committed, and empty when it left them to the
+/// check after the open. Anything else is a ledger the runner would refuse or
+/// this build cannot judge. A migration this build does not define means a
+/// newer build ran it.
 pub(crate) fn classify_ledger(
     conn: &Connection,
     migrations: &[Migration],
@@ -5076,7 +5080,8 @@ pub(crate) fn classify_ledger(
         };
         if i64::from(migration.ordinal) != *ordinal
             || (*complete
-                && (*checksum != migration_checksum(migration.sql) || *integrity_ok != Some(1)))
+                && (*checksum != migration_checksum(migration.sql)
+                    || integrity_ok.is_some_and(|ok| ok != 1)))
         {
             return Err(StorageError::MigrationFailed {
                 source: Some(
@@ -5260,17 +5265,19 @@ fn apply_transactional(
         }
     }
 
-    let integrity_ok = quick_check_ok(&tx)?;
-    if !integrity_ok {
-        // A migration that produces a structurally broken store never commits.
+    let integrity_ok = if ctx.pages_checked_after_open {
+        None
+    } else if quick_check_ok(&tx)? {
+        Some(1)
+    } else {
         return Err(StorageError::MigrationFailed { source: None });
-    }
+    };
 
     tx.execute(
         "INSERT INTO engine_migrations \
          (ordinal, id, checksum, engine_build, protocol_version, transactional, \
           started_at, completed_at, integrity_ok) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6, 1) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6, ?7) \
          ON CONFLICT(id) DO UPDATE SET \
            checksum = excluded.checksum, completed_at = excluded.completed_at, \
            integrity_ok = excluded.integrity_ok",
@@ -5281,6 +5288,7 @@ fn apply_transactional(
             ctx.engine_build,
             ctx.protocol_version,
             ctx.now_ms,
+            integrity_ok,
         ],
     )
     .map_err(StorageError::migration)?;
