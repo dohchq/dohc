@@ -21,8 +21,8 @@ function note(clientID: number, from?: Uint8Array) {
   doc.clientID = clientID;
   const sequence = doc.getText(BODY_SEQUENCE_FIELD);
   const records = doc.getMap<unknown>(BODY_CONTAINERS_FIELD);
-  doc.getMap("meta").set("schemaVersion", 2);
   if (from) Y.applyUpdate(doc, from);
+  else doc.getMap("meta").set("schemaVersion", 2);
   const element = (name: string, attrs: Record<string, unknown>) => {
     const made = new Y.XmlElement(name);
     for (const [key, value] of Object.entries(attrs)) made.setAttribute(key, value as string);

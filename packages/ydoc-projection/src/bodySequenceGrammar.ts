@@ -258,6 +258,10 @@ export function writtenLeaves(
 } {
   const containers = new Map<string, unknown>();
   const boundaries = leaves.map((leaf) => {
+    if (leaf.path.length > MAX_SEQUENCE_DEPTH)
+      throw new RangeError(
+        `A line sits in ${String(leaf.path.length)} containers; a note holds at most ${String(MAX_SEQUENCE_DEPTH)}.`,
+      );
     for (const frame of leaf.path)
       if (!containers.has(frame.id))
         for (const [key, value] of recordsOfContainer(schema, frame)) containers.set(key, value);

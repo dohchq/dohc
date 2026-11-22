@@ -516,6 +516,16 @@ describe("writing a document and reading it back", () => {
     });
   });
 
+  it("writes a line 64 containers deep and refuses one 65 deep", () => {
+    const nested = (depth: number) => {
+      let node = schema.nodes.paragraph!.create(null, schema.text("deep"));
+      for (let at = 0; at < depth; at++) node = schema.nodes.blockquote!.create(null, node);
+      return schema.topNodeType.create(null, node);
+    };
+    expect(roundTrip(nested(64)).eq(nested(64))).toBe(true);
+    expect(() => roundTrip(nested(65))).toThrow("at most 64");
+  });
+
   it("keeps two neighbouring quotes two, and makes them one when they share a name", () => {
     const quote = (text: string) =>
       schema.nodes.blockquote!.create(

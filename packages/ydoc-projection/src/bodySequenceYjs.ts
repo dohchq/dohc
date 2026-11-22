@@ -21,16 +21,21 @@ function attributesOf(element: Y.XmlElement): SequenceAttrs {
 /**
  * The pieces of a body sequence, in order: boundaries, letters with their marks, and inline items.
  * It reads the stored items, not Yjs's delta, which shows an embedded string as text and builds
- * its attributes on an object a key named `__proto__` can reshape.
+ * its attributes on an object a key named `__proto__` can reshape. With `markNames`, formatting
+ * under any other key is left out.
  */
-export function piecesOfSequence(sequence: Y.Text): SequencePiece[] {
+export function piecesOfSequence(
+  sequence: Y.Text,
+  markNames?: ReadonlySet<string>,
+): SequencePiece[] {
   const pieces: SequencePiece[] = [];
   const marks = new Map<string, unknown>();
   for (let item = sequence._start; item !== null; item = item.right) {
     if (item.deleted) continue;
     const content = item.content;
-    if (content instanceof Y.ContentFormat) marks.set(content.key, content.value);
-    else if (content instanceof Y.ContentString)
+    if (content instanceof Y.ContentFormat) {
+      if (!markNames || markNames.has(content.key)) marks.set(content.key, content.value);
+    } else if (content instanceof Y.ContentString)
       pieces.push({ text: content.str, marks: Object.fromEntries(marks) });
     else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
       const attrs = attributesOf(content.type);
@@ -50,7 +55,7 @@ export function readBodySequence(schema: Schema, doc: Y.Doc): ProseMirrorNode {
     schema,
     leavesOfSequence(
       schema,
-      piecesOfSequence(doc.getText(BODY_SEQUENCE_FIELD)),
+      piecesOfSequence(doc.getText(BODY_SEQUENCE_FIELD), new Set(Object.keys(schema.marks))),
       doc.getMap(BODY_CONTAINERS_FIELD),
     ),
   );

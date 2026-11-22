@@ -243,6 +243,10 @@ AFTER  ${raw()}`,
       throw new Error(
         `expected ${JSON.stringify(expected)} and saw ${String(chars)} letters and ${String(boundaries)} boundaries`,
       );
+    if ((expected.boundaries ?? 0) >= 0 && effects.deletedBoundaries.length > 0)
+      throw new Error("a change that deletes no boundary deleted one");
+    if ((expected.boundaries ?? 0) <= 0 && effects.insertedBoundaries.length > 0)
+      throw new Error("a change that adds no boundary added one");
     if ((expected.chars ?? 0) >= 0 && effects.deletedChars.length > 0)
       throw new Error("a change that deletes no letters deleted letters");
     if ((expected.chars ?? 0) <= 0 && effects.insertedChars.length > 0)

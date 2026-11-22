@@ -12,7 +12,7 @@ The reader is `packages/ydoc-projection/src/bodySequenceGrammar.ts`, read from Y
 - A note with `schemaVersion = 1`, or with no `schemaVersion`, is today's format and is unchanged.
 - `meta.schemaVersion` is written when the note is made or converted, by the engine only. No page changes or deletes it.
 - An editor declares `sequence` as Y.Text and `containers` as Y.Map before applying an update. A late declaration leaves Yjs's formatting flags unset for editing.
-- A new note's format is chosen where the note is made. The engine has one setting for it, off by default, and tells a client that seeds a note which format to write. The relay has one setting to admit format-2 notes, off by default.
+- A new note's format is chosen where the note is made. Neither setting exists yet; the work that turns the format on adds them: one in the engine for the format of new notes, which also tells a client that seeds a note which format to write, and one in the relay to admit format-2 notes. Both are off unless set.
 
 ## 2. What is stored
 
@@ -69,7 +69,7 @@ The schema has no other attribute; a test pins the list and the defaults.
 - An attribute name that the item's own node or mark type does not have is ignored (a `language` left on a boundary whose type is now `heading` is not read).
 - An attribute, a mark and a mark's attribute are read by their own key only. A key named `__proto__` is a key like any other and names nothing here; what it holds is not read as the item's attributes.
 - An array holds a value at every position: one with a hole or `undefined` in it breaks the rule for `colwidth`.
-- A mark is ON for a letter when the nearest earlier `ContentFormat` with that key holds an object (the mark's attributes; `{}` for none), and OFF when it holds anything else or there is none. Keys that are not exactly a mark name are ignored (no hashed names).
+- A mark is ON for a letter when the nearest earlier `ContentFormat` with that key holds a plain object (the mark's attributes; `{}` for none), and OFF when it holds anything else, an array included, or there is none. Keys that are not exactly a mark name are ignored (no hashed names).
 - When `code` is on, every other mark is ignored for that letter.
 - Marks apply to letters only. Formatting around a boundary or an inline item means nothing and is not read.
 
@@ -120,7 +120,7 @@ INLINE = letters, `escapedPunctuation`, `hardBreak`, `image`, `inlineAtom`, `mat
 - Changing a block's kind or path: `setAttribute` on the same boundary. Never delete and insert. A writer sets `path` as one whole array.
 - Typing: insert letters with the marks the editor gives them.
 - Never copy letters.
-- A boundary always carries `path`, `[]` for a line in no container, so a later change to it is an overwrite.
+- A boundary always carries `path`, `[]` for a line in no container, so a later change to it is an overwrite. No writer writes a path longer than 64: a change that would nest a line deeper is refused, since a reader would cut the path.
 - Containers:
   - a container keeps its id through a change if any of its leaves survives the change in it;
   - a new container gets a fresh id. The transaction that writes the paths naming it also writes its type record and a record for EVERY attribute of every kind it can become where it stands, with the values it starts with and defaults for the rest. The kinds: `blockquote` and `callout`; `bulletList`, `orderedList` and `taskList`; `listItem` and `taskItem`; `tableCell` and `tableHeader`. (`recordsOfContainer` does this.) Every later change to a record is then an overwrite, also a tick on an item that became a to-do because someone else changed its list;
@@ -140,12 +140,12 @@ INLINE = letters, `escapedPunctuation`, `hardBreak`, `image`, `inlineAtom`, `mat
 - Intake (per change, at the room and at each capture's `admitSubmission`), cheap, no rule across items:
   - it looks at EVERY struct the change adds. One the same change also deletes may arrive as `ContentDeleted` or `GC`, or as a keyed `ContentAny` longer than 1 whose earlier values are the deleted ones (Yjs merges them on a reconnect); what can still be read of it is checked like any other value;
   - it reads the note's format from its copy; a format-1 note takes no item under `sequence` or `containers`, a format-2 note none under `body`;
-  - it refuses a change after which `meta.schemaVersion` differs (written or deleted);
+  - it refuses a change that adds or deletes an item under `meta.schemaVersion`, also one that writes the value already there;
   - under `sequence`: `ContentString`; `ContentFormat` whose key is exactly a mark name; `ContentType` `XmlElement` named `block` or an inline node; nothing keyed;
   - under such an element: only keyed items; a live one is `ContentAny` of length 1 whose key is an attribute that name has (`block`: `type`, `path`, `level`, `language`, `tex`, `source`); no unkeyed child;
   - under `containers`: only keyed items; a live one is `ContentAny` of length 1 whose key is `<id>` or `<id>.<attribute>` with `<attribute>` from the list in 2.2;
   - a keyed item has no right origin (Yjs never writes one);
-  - every value, in `ContentAny` and in `ContentFormat` alike, is JSON-like (null, boolean, finite number, BigInt in int64, string, array, plain object), with no key named `__proto__`, no key twice in one object (read from the wire, not from the decoded object), and the depth, node and byte limits the later checks apply;
+  - every value is JSON-like (null, boolean, finite number, string, array, plain object; in `ContentAny` also a BigInt in int64, which the update encoding cannot carry inside a `ContentFormat`), with no key named `__proto__`, no key twice in one object (read from the wire, not from the decoded object), and the depth, node and byte limits the later checks apply;
   - no string anywhere (a letter run, a value, a key) holds a lone surrogate; no struct starts or ends, and no delete range starts or ends, between the two units of a surrogate pair;
   - formatting cleanup is as today. Yjs, with a text declared, deletes formatting items on its own when changes meet (one person bolds a word, another deletes it), and those deletes are in no change. Today's checks refuse such a history for a format-1 note, inside one paragraph's text (`concurrentLiveDeletes.test.ts`). A format-2 note has the same exposure for the same pair of edits. This format does not change that policy and does not depend on it. Making the checks take such a history is the first job of the work on the server's checks, for both formats. If it cannot be done without storing marks differently, sections 2 and 3 change and every reader is told.
 - The full check before a save, for format 2: capacity, then read. It never refuses a note for what its sequence or records hold: reading is total and repairs every value. It does not rebuild the note and compare (format 1's fingerprint step has no meaning here).

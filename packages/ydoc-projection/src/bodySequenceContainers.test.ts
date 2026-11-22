@@ -5,11 +5,9 @@ import {
   BLOCK_ELEMENT,
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
-  leavesOfSequence,
-  readBodyLeaves,
   recordsOfContainer,
-  type SequencePiece,
 } from "./bodySequenceGrammar.js";
+import { readBodySequence } from "./bodySequenceYjs.js";
 
 const schema = getDohcProseMirrorSchema();
 const FIELD = BODY_SEQUENCE_FIELD;
@@ -25,21 +23,8 @@ type Change = { insert: unknown; attributes?: Record<string, unknown> };
 const isBoundary = (value: unknown): value is Y.XmlElement =>
   value instanceof Y.XmlElement && value.nodeName === BLOCK_ELEMENT;
 
-function pieces(text: Y.Text): SequencePiece[] {
-  return (text.toDelta() as Change[]).flatMap(({ insert, attributes }): SequencePiece[] => {
-    if (isBoundary(insert))
-      return [{ boundary: insert.getAttributes() as Record<string, unknown> }];
-    if (insert instanceof Y.XmlElement)
-      return [{ atom: insert.nodeName, attrs: insert.getAttributes() as Record<string, unknown> }];
-    return typeof insert === "string" ? [{ text: insert, marks: attributes ?? {} }] : [];
-  });
-}
-
 function shown(doc: Y.Doc) {
-  const node = readBodyLeaves(
-    schema,
-    leavesOfSequence(schema, pieces(doc.getText(FIELD)), doc.getMap(CONTAINERS)),
-  );
+  const node = readBodySequence(schema, doc);
   node.check();
   return node.toJSON() as unknown;
 }
@@ -237,6 +222,11 @@ it("takes one person's whole path when one indents and another outdents a to-do"
     indentSecondUnderFirst(indenter);
     outdenter.change(() => outdenter.line(1).setAttribute("path", [] as unknown as string));
     const top = (settle(indenter, outdenter) as { content: { type: string }[] }).content;
+    const stored = [indenter, outdenter].map(
+      (each) => each.line(1).getAttribute("path") as unknown,
+    );
+    expect(stored[0]).toEqual(stored[1]);
+    expect([["L", "I1", "L2", "I2"], []]).toContainEqual(stored[0]);
     const nested = {
       content: [
         {
