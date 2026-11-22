@@ -474,7 +474,9 @@ export async function startSelfHostedLiveHost(options: {
         replacing = true;
       }
       storage.failLapsedLiveNoteStarts(options.nowMs?.() ?? Date.now(), (row) =>
-        current?.blocked(row) === "without-lineage" ? "no-lineage" : "failing",
+        current?.blocked(row) === "without-lineage" || !storage.mainLiveLineageExists(row)
+          ? "no-lineage"
+          : "failing",
       );
       selected = selection();
       const { targets, departing } = selected,

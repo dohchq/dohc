@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   AGENT_ONLY_MAX_DOCUMENTS,
   AGENT_ONLY_MAX_WORKSPACES,
+  LIVE_NOTE_START_MAX_MS,
   RECLAIM_MIN_HOLD_MS,
   RECLAIM_RETENTION_MS,
   SERVICE_HOST_MAX_DOCUMENTS,
@@ -233,7 +234,7 @@ it("never reclaims an owner-opened document for an agent's open, and reclaims on
   expect(await body(await held, 200)).toEqual(ready);
 });
 
-it("clears the demand a refused note's open left once it is idle past retention, and keeps it until then", async () => {
+it("leaves a refused note's open to its start clock, which turns it off past 10 minutes", async () => {
   const f = await fixture(),
     a = f.agent("editor");
   f.revoke();
@@ -248,16 +249,19 @@ it("clears the demand a refused note's open left once it is idle past retention,
   });
   expect(f.storage.reclaimIdleLiveDocuments(2_000 + RECLAIM_RETENTION_MS)).toEqual([]);
   expect(f.read()).toEqual(refused);
-  expect(f.storage.reclaimIdleLiveDocuments(2_000 + RECLAIM_RETENTION_MS + 1)).toMatchObject([
+  expect(f.storage.reclaimIdleLiveDocuments(2_000 + RECLAIM_RETENTION_MS + 1)).toEqual([]);
+  expect(f.read()).toEqual(refused);
+  expect(
+    f.storage.failLapsedLiveNoteStarts(2_000 + LIVE_NOTE_START_MAX_MS, () => "no-lineage"),
+  ).toMatchObject([
     {
       objectId: binding.objectId,
       enabled: false,
       retired: true,
-      ownerStop: null,
-      ownerDemand: false,
-      demandAtMs: null,
+      note: { state: "off", reason: "start-failed", cause: "no-lineage" },
     },
   ]);
+  await expectCode(await a.open(), 409, "live-document-without-lineage");
 });
 
 it("ends a held open when its owner signs the agent out, and answers one whose agent stays signed in", async () => {

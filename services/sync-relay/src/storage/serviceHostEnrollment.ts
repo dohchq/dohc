@@ -484,7 +484,7 @@ export function initializeServiceHostEnrollmentSchema(db: SqliteDb): void {
         CASE e.owner_stop WHEN 'retire' THEN 'stopped' WHEN 'pause' THEN 'paused' ELSE CASE WHEN e.enabled=0 THEN 'access-ended' END END,
         NULL,
         CASE WHEN ${V4_OFF} OR ${ACTIVATED} THEN e.updated_at_ms ELSE ? END,
-        CASE WHEN e.owner_stop IS NULL THEN 'server' ELSE 'person:'||e.owner_user_id END
+        CASE WHEN e.owner_stop IS NULL OR e.owner_user_id='' THEN 'server' ELSE 'person:'||e.owner_user_id END
       FROM ${SERVICE_HOST_ENROLLMENTS}_v4 e`).run(Date.now());
     db.exec(`DROP TABLE ${SERVICE_HOST_ENROLLMENTS}_v4;
       ${ACTIVE_INDEX_SQL};
@@ -1122,6 +1122,7 @@ function idleSince(
   if (
     enrollment.retired ||
     enrollment.ownerStop !== null ||
+    enrollment.note.state === "starting" ||
     demandAtMs === null ||
     demandAtMs >= idleBefore ||
     liveEditors(storage).connected(enrollment)

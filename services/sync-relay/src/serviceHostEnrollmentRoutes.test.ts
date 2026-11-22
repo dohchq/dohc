@@ -1531,6 +1531,11 @@ it("answers a note whose start failed with why, keeps it off on the owner's open
       retired: true,
       note: { state: "off", reason: "start-failed", cause, generation: 1 },
     });
+    expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({
+      ok: true,
+      documents: [{ ...base, status: "retired", stopped: false, reason }],
+      nextCursor: null,
+    });
     const resumed = await f.handle(f.request("POST", { path: binding.currentPath }));
     expect(await resumed.json()).toEqual({ ok: true, ...base, status: "preparing", changed: true });
     expect(

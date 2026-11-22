@@ -979,9 +979,19 @@ const reclaimed = {
   ownerDemand: false,
   demandAtMs: null,
 };
-async function demandedOnly(owner = false) {
+async function demandedOnly(owner = false, started = true) {
   const f = await fixture();
   f.enroll();
+  if (started)
+    expect(
+      f.storage.moveLiveNote({
+        workspaceId: scope.workspaceId,
+        objectId: binding.objectId,
+        generation: noteOf(f.storage).generation,
+        nowMs: 10,
+        move: "started",
+      }).moved,
+    ).toBe(true);
   if (owner) ownerOpen(f, 10);
   else
     expect(
@@ -1029,6 +1039,16 @@ it("reclaims an agent-only note idle past retention, and keeps it while a live c
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
   expect(f.sweep(past + 1)).toEqual([]);
   expect(stored(f)).toHaveLength(before.length);
+});
+
+it("leaves a note that never started to its start clock, not to idle reclaim", async () => {
+  const f = await demandedOnly(false, false),
+    past = 10 + RECLAIM_RETENTION_MS + 1;
+  expect(f.sweep(past)).toEqual([]);
+  expect(
+    f.storage.failLapsedLiveNoteStarts(past, () => "failing").map((row) => row.note),
+  ).toMatchObject([{ state: "off", reason: "start-failed", cause: "failing" }]);
+  expect(f.sweep(past + 1)).toEqual([]);
 });
 
 it("never reclaims a note the owner's restore kept live, and reclaims it once the restore keeps nothing", async () => {

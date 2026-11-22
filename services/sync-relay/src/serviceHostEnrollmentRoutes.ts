@@ -657,9 +657,11 @@ export function createServiceHostEnrollmentRoutes(options: {
             ),
             ...(diverged(row)
               ? { reason: "session-host-diverged" }
-              : !changed(row) && storage.hasServiceHostConflictEffect(row)
-                ? { reason: "conflict-parent-withheld" }
-                : {}),
+              : row.note.reason === "start-failed"
+                ? { reason: START_FAILED[row.note.cause!] }
+                : !changed(row) && storage.hasServiceHostConflictEffect(row)
+                  ? { reason: "conflict-parent-withheld" }
+                  : {}),
           })),
           nextCursor: page.nextCursor,
         });
