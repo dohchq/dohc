@@ -305,7 +305,7 @@ it("describes open pages in Edit reach when live hosting is enabled, and include
   const jar = new CookieJar();
   const { as, html } = await liveStack.open(jar, TRIP);
   expect(html).toContain(
-    "Edit also changes Collections and pages open in dohc, but no other files.",
+    "Edit also changes Collections, and pages you have opened in dohc, but no other files.",
   );
   expect(selected(html)).toEqual({ [TRIP]: "view", [FUNDRAISER]: "none" });
 

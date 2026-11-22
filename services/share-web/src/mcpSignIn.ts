@@ -507,7 +507,7 @@ function levelMeaning(level: PersonalLevel, liveDocuments: boolean): string {
   if (level === "view") return "View reads files and chats.";
   if (level === "comment") return "Comment also posts in chats and Comments.";
   return liveDocuments
-    ? "Edit also changes Collections and pages open in dohc, but no other files."
+    ? "Edit also changes Collections, and pages you have opened in dohc, but no other files."
     : "Edit also changes Collections, but no other files.";
 }
 const isLevel = (value: unknown): value is PersonalLevel =>
