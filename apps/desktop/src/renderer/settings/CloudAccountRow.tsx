@@ -111,9 +111,7 @@ export function CloudAccountRow(props: {
       }
       description={
         <span className="flex flex-wrap items-center gap-x-2">
-          <span data-testid="cloud-connected-server" className="font-mono">
-            {server}
-          </span>
+          <span data-testid="cloud-connected-server">{server}</span>
           {props.networkAccess === "private" ? (
             <Explained
               explanation={PRIVATE_NETWORK_EXPLANATION}
