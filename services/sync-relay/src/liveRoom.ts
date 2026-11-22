@@ -137,7 +137,7 @@ interface Room {
   readonly document: LiveDocumentKey;
   readonly doc: Y.Doc;
   readonly subscribers: Set<Subscriber>;
-  readonly unsaved: Unsaved[];
+  unsaved: Unsaved[];
   readonly lifetime: AbortController;
   /** Seeded from the owner's capture, with any edits a stopped relay left saved. */
   opened: Promise<void>;
@@ -150,8 +150,6 @@ interface Room {
   connecting?: Promise<NonNullable<Room["saver"]>>;
   timer?: ReturnType<typeof setTimeout>;
   saving?: Promise<unknown>;
-  /** The highest position a committed save held. */
-  savedThrough: number;
   /** Recent saves' journal cursors, each with the position through which every row is saved. */
   readonly saves: Map<number, number>;
   /** When saves started failing, until one is taken. */
@@ -275,7 +273,8 @@ function buildsOn(update: ReturnType<typeof Y.decodeUpdate>, leftOut: ReadonlyMa
 /**
  * Which unsaved edits one save holds, oldest first: the oldest edit's sender's edits under its
  * access, up to the largest update the engine passes on. Others' edits are left for their own
- * saves, and so is any of the sender's that builds on one left out.
+ * saves, and so is any of the sender's that builds on one left out. `inOrder` ends the save at
+ * someone else's edit instead, so it holds the note as it was when its last edit was taken.
  */
 export function nextSave(
   unsaved: readonly {
@@ -284,6 +283,7 @@ export function nextSave(
     readonly bytes: Uint8Array;
   }[],
   maxBytes: number,
+  inOrder = false,
 ): number[] {
   const first = unsaved[0];
   const taken: number[] = [];
@@ -292,6 +292,7 @@ export function nextSave(
   const leftOut = new Map<number, number>();
   for (const [index, edit] of unsaved.entries()) {
     const sender = isDeepStrictEqual(edit.sender, first!.sender);
+    if (!sender && inOrder) break;
     if (sender && !isDeepStrictEqual(edit.authority, first!.authority)) break;
     if (sender && taken.length && bytes + edit.bytes.byteLength > maxBytes) break;
     const update = sender && !leftOut.size ? undefined : Y.decodeUpdate(edit.bytes);
@@ -442,10 +443,9 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
   }
 
   /** One save, of the edits `nextSave` picks. */
-  async function saveOnce(room: Room): Promise<SaveOutcome> {
-    const batch = nextSave(room.unsaved, options.maxAppliedBytes).map(
-      (index) => room.unsaved[index]!,
-    );
+  async function saveOnce(room: Room, inOrder = false): Promise<SaveOutcome> {
+    const picked = nextSave(room.unsaved, options.maxAppliedBytes, inOrder);
+    const batch = picked.map((index) => room.unsaved[index]!);
     if (!batch.length) return "saved";
     const { sender: authors, authority } = batch[0]!;
     const merged =
@@ -467,9 +467,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
             authors,
             authority,
             committed(journalCursor) {
-              const savedThrough = Math.max(room.savedThrough, batch.at(-1)!.position);
               const left = room.unsaved.find((edit) => !held.has(edit));
-              const through = left ? left.position - 1 : savedThrough;
+              const through = (left?.position ?? journalCursor) - 1;
               deleteSavedLiveRoomEdits(
                 storage,
                 room.document,
@@ -478,12 +477,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
               recordLiveRoomSave(storage, room.document, journalCursor, through);
               // The room moves on only once the save's transaction has committed.
               return () => {
-                room.savedThrough = savedThrough;
-                room.unsaved.splice(
-                  0,
-                  room.unsaved.length,
-                  ...room.unsaved.filter((edit) => !held.has(edit)),
-                );
+                room.unsaved = room.unsaved.filter((edit) => !held.has(edit));
                 // The save's journal row is in the room already, and a page that joins may have
                 // read the note through it. Its echo changes nothing, so it moves no position.
                 room.position = Math.max(room.position, journalCursor);
@@ -510,8 +504,12 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     if (!committed) {
       log(room, "save not taken", { edits: batch.length, answer });
       if (answer?.result !== "refused") return "retry";
-      if (!STALE_CAPTURE.has(answer.reason))
+      if (!STALE_CAPTURE.has(answer.reason)) {
+        // A save that left someone's edits out holds a note nobody had, which the journal can
+        // refuse where the same edits in the order they were taken pass.
+        if (picked.some((index, at) => index !== at)) return saveOnce(room, true);
         return { refusal: answer.reason, named: senders(room.unsaved) };
+      }
       if (room.saver) dropSaver(room);
       return "retry";
     }
@@ -654,7 +652,6 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       position: liveRoomPosition(storage),
       bytes: 0,
       members: 0,
-      savedThrough: 0,
       saves: new Map(),
       closing: 0,
     };

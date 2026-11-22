@@ -30,6 +30,7 @@ import { appendLiveRoomEdit, liveRoomEdits } from "./storage/liveRoomEdits.js";
 import { liveRoomPaused, liveRoomPauses, pauseLiveRoom } from "./storage/liveRoomPauses.js";
 import { liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
 import { readRetiredJournalPage } from "./storage/serviceActivationRetirement.js";
+import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
 
 const open: Fixture[] = [];
 const rooms_: { close(): Promise<void> }[] = [];
@@ -38,8 +39,8 @@ afterEach(async () => {
   for (const f of open.splice(0)) f.close();
   cleanupLiveDeliveryFixtures();
 });
-function note() {
-  const f = registered({ deployment: true });
+function note(baselineBytes?: Uint8Array) {
+  const f = registered({ deployment: true, ...(baselineBytes ? { baselineBytes } : {}) });
   open.push(f);
   return f;
 }
@@ -520,10 +521,11 @@ it("saves each person's edits together while two people type side by side, and t
   expect(frames.slice(0, rows.length)).toEqual(
     rows.map((journalCursor) => ({ journalCursor, roomRow: true })),
   );
-  // Ana's save holds rows 1, 3 and 5, so every row is saved only through her first.
+  // Ana's save holds rows 1, 3 and 5, so every row is saved only through her first. Ben's holds
+  // the rest, so then every row below its own journal row is.
   expect(frames.slice(rows.length).map((frame) => frame.rowsThrough)).toEqual([
     rows[0],
-    rows.at(-1),
+    frames.at(-1)!.journalCursor - 1,
   ]);
   expect(engine.saves).toBe(2);
   expect(savedAuthors(f)).toEqual([ana, ben]);
@@ -564,6 +566,44 @@ it("leaves a person's edit that builds on someone else's unsaved edit for a save
   expect(saved.getMap("frontmatter").get("title")).toBe("Faro");
 });
 
+it("saves edits in the order they were taken when a save that left some out would hold a note the journal refuses", async () => {
+  const f = note(Y.encodeStateAsUpdate(markdownToYDoc("Original\r\nline\r\n")));
+  const engine: Engine = {};
+  const room = rooms(f, {}, engine);
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben);
+  await a.open();
+  await b.open();
+  const change = (page: typeof a, edit: (body: Y.XmlFragment) => void) => {
+    const before = Y.encodeStateVector(page.doc);
+    edit(page.doc.getXmlFragment("body"));
+    return Y.encodeStateAsUpdate(page.doc, before);
+  };
+  const first = (body: Y.XmlFragment) => (body.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+  expect((await a.submit(change(a, (body) => first(body).insert(1, "A")))).result).toBe("success");
+  await b.next();
+  const added = (body: Y.XmlFragment) => {
+    const text = new Y.XmlText();
+    text.insert(0, "B");
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [text]);
+    body.insert(1, [paragraph]);
+  };
+  expect((await b.submit(change(b, added))).result).toBe("success");
+  await a.next();
+  // Without Ben's paragraph, Ana's two edits leave a note with no text, which a CRLF note can't be.
+  expect((await a.submit(change(a, (body) => body.delete(0, 1)))).result).toBe("success");
+  a.session.close();
+  b.session.close();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(pauses(f)).toEqual([]);
+  expect(savedAuthors(f)).toEqual([ana, ben, ana]);
+  const saved = new Y.Doc();
+  Y.applyUpdate(saved, Y.encodeStateAsUpdate(f.doc));
+  for (const row of f.journalRows().journal) Y.applyUpdate(saved, rowBytes(row));
+  expect(saved.getXmlFragment("body").toString()).toBe("<paragraph>B</paragraph>");
+});
+
 it("counts a committed save whose engine answer never comes, and goes on saving", async () => {
   const f = note();
   const room = rooms(f, { saveTimeoutMs: 50 }, { silent: true });
@@ -580,7 +620,7 @@ it("counts a committed save whose engine answer never comes, and goes on saving"
   expect(savedAuthors(f)).toEqual([ana, ben]);
 });
 
-it("gives the owner others' edits as rows, and each save the last row it holds, below its cursor", async () => {
+it("gives the owner others' edits as rows, and each save the row through which all are saved, below its cursor", async () => {
   const f = note();
   const room = rooms(f, { saveEveryMs: 20 });
   const owner = ownerDesktop(f, room),
@@ -597,7 +637,7 @@ it("gives the owner others' edits as rows, and each save the last row it holds, 
 
   // One save for each sender's run: Ana's, then the owner's.
   const saved = [await owner.next(), await owner.next()];
-  expect(saved.map((frame) => frame.rowsThrough)).toEqual([first, own]);
+  expect(saved.map((frame) => frame.rowsThrough)).toEqual([first, saved[1]!.journalCursor - 1]);
   for (const frame of saved) {
     expect(frame.roomRow).toBeUndefined();
     expect(frame.journalCursor).toBeGreaterThan(own);
@@ -618,7 +658,7 @@ it("keeps each save's last row with its journal row, for a retired note's journa
   await a.open();
   const first = position(await a.submit(a.change("title", "Lisbon")));
   await owner.next();
-  const own = position(await owner.submit(owner.change("place", "Porto")));
+  expect((await owner.submit(owner.change("place", "Porto"))).result).toBe("success");
   const saved = [await owner.next(), await owner.next()];
   const storage = f.storage as StorageContext,
     document = f.input.evidence.document;
@@ -653,7 +693,7 @@ it("keeps each save's last row with its journal row, for a retired note's journa
   expect(all.rows.filter((row) => row.rowsThrough !== undefined)).toEqual(
     saved.map((frame, index) => ({
       journalCursor: frame.journalCursor,
-      rowsThrough: [first, own][index],
+      rowsThrough: [first, saved[1]!.journalCursor - 1][index],
       updateBytes: expect.any(Uint8Array),
     })),
   );
