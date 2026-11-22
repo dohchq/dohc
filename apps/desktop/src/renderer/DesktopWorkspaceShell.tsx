@@ -10056,6 +10056,7 @@ export function DesktopWorkspaceShell(props: {
                               workspacePath={props.workspace.rootPath}
                               workspaceName={workspaceName(props.workspace)}
                               membership={!!shareView?.membership}
+                              membershipEnded={!!shareView?.membership && shareViewEnded}
                               sharedView={!!shareView}
                               // Main's own decision, not the renderer's settings read:
                               // only main knows whether a recorder exists for this session, and
