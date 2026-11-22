@@ -548,7 +548,9 @@ function useMemberFiles(
       let delay = RETRY_INITIAL_MS,
         reload = false,
         // The level or a rule changed, so the files shown carry levels the member no longer has.
-        stale = false;
+        stale = false,
+        // After a failure the server answers at once, so the files show they caught up as soon as they do.
+        held = true;
       while (!signal.aborted) {
         const step = new AbortController(),
           stepSignal = AbortSignal.any([signal, step.signal]);
@@ -571,7 +573,7 @@ function useMemberFiles(
               MAX_LOG_PAGES,
               stepSignal,
               files.epochLogFloor,
-              VIEW_LOG_HOLD_MS,
+              held ? VIEW_LOG_HOLD_MS : undefined,
               files.meta.access !== "edit",
             );
             const meta = await loadMeta(session, stepSignal);
@@ -594,8 +596,10 @@ function useMemberFiles(
           stale = false;
           setFailures(0);
           delay = RETRY_INITIAL_MS;
-          const elapsed = Date.now() - started;
-          if (!reading && files.nextCursor === previous && elapsed < VIEW_LOG_HOLD_MS)
+          const elapsed = Date.now() - started,
+            waited = held;
+          held = true;
+          if (!reading && waited && files.nextCursor === previous && elapsed < VIEW_LOG_HOLD_MS)
             await waitForRetry(VIEW_LOG_HOLD_MS - elapsed, stepSignal).catch(() => {});
         } catch (error) {
           if (signal.aborted) return;
@@ -640,6 +644,7 @@ function useMemberFiles(
           }
           reload = reading;
           setFailures((count) => count + 1);
+          held = false;
           // Try again ends the wait at once.
           await waitForRetry(delay, stepSignal).catch(() => {});
           delay = Math.min(delay * 2, RETRY_MAX_MS);
