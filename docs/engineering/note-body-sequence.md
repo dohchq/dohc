@@ -4,7 +4,7 @@ How a note's body is stored so that joining and splitting lines cannot double or
 
 Sections 1 to 3 are frozen as of 2026-11-23: where the format lives, what is stored, and how it is read. A change to them goes through the owner of #4038 and is told to every lane building on them. Sections 4 and 5 are the rules writers and checks follow; the editor adapter and the server's checks finish and test them. Section 6 lists behaviour people can meet.
 
-The reader is `packages/ydoc-projection/src/bodySequenceGrammar.ts`, read from Yjs by `bodySequenceYjs.ts`. `packages/ydoc-projection/src/fixtures/body-sequence.json` holds stored notes and the documents they read as; every reader, in any language, must match it.
+The reader is `packages/ydoc-projection/src/bodySequenceGrammar.ts`, read from Yjs by `bodySequenceYjs.ts`. `packages/ydoc-projection/src/fixtures/body-sequence.json` holds stored notes, the documents they read as and the Markdown they are written as; every reader, in any language, must match it.
 
 ## 1. Where it lives
 
@@ -171,8 +171,8 @@ INLINE = letters, `escapedPunctuation`, `hardBreak`, `image`, `inlineAtom`, `mat
   - no string anywhere (a letter run, a value, a key) holds a lone surrogate; no struct starts or ends, and no delete range starts or ends, between the two units of a surrogate pair;
   - formatting cleanup is as today. Yjs, with a text declared, deletes formatting items on its own when changes meet (one person bolds a word, another deletes it), and those deletes are in no change. Today's checks refuse such a history for a format-1 note, inside one paragraph's text (`concurrentLiveDeletes.test.ts`). A format-2 note has the same exposure for the same pair of edits. This format does not change that policy and does not depend on it. Making the checks take such a history is the first job of the work on the server's checks, for both formats. If it cannot be done without storing marks differently, sections 2 and 3 change and every reader is told.
 - The full check before a save, for format 2: capacity, then read. It never refuses a note for what its sequence or records hold: reading is total and repairs every value. It does not rebuild the note and compare (format 1's fingerprint step has no meaning here).
-- Engine: the same reading rules in Rust, giving the existing `MarkdownNode` tree, pinned byte for byte against TypeScript on the shared fixtures.
-- Before the engine writes this format, its Yjs library needs one patch: `clean_format_gap` (`vendor/yrs-0.27.3/src/types/text.rs`) scans past an embedded element as if it were not content, where Yjs stops. A local delete in the engine can then remove the formatting items on both sides of a boundary, and a letter someone types plain after that boundary at the same moment comes out marked. `crates/yrs-interop/tests/body_sequence.rs` records today's behaviour and must flip. The engine writes marks with attributed inserts, not `Text::format`, whose right edge differs from Yjs's.
+- Engine: the same reading rules in Rust (`crates/dohc-engine-collab/src/ydoc/body_sequence.rs`), giving the existing `MarkdownNode` tree, pinned byte for byte against TypeScript on the shared fixtures. A document reads this format only when the engine's setting for it is on (`Ydoc::reading_body_sequence`); nothing turns it on yet.
+- The engine's Yjs library carries one patch for this format (`vendor/yrs-0.27.3/DOHC-PATCH.md`): `clean_format_gap` stops at an embedded element, as Yjs does. Before it, a local delete in the engine could remove the formatting items on both sides of a boundary, and a letter someone typed plain after that boundary at the same moment came out marked. `crates/yrs-interop/tests/body_sequence.rs` pins it. The engine writes marks with attributed inserts, not `Text::format`, whose right edge differs from Yjs's.
 
 ## 6. Known behaviour
 
