@@ -72,7 +72,6 @@ export function QuickOpenPalette(props: {
       toggleShortcut="quick-open"
       placeholder="Go to…"
       ariaLabel="File"
-      listAriaLabel="Files"
       commands={commands}
       rank={rank}
       emptyText={quickOpenEmptyText}

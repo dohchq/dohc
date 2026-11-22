@@ -10,7 +10,6 @@ const NON_FILE_LINK = /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/iu;
 const HEADING_ID = /^h-[\p{L}\p{M}\p{N}-]+$/u;
 
 const ALLOWED_CLASS_TOKENS = new Set([
-  "sr-only",
   "task-list",
   "task-item",
   "task-item-checked",
@@ -375,8 +374,8 @@ export function renderSafeMarkdown(
         const body = this.parser.parse(innerTokens);
         const itemClass = item.checked ? "task-item task-item-checked" : "task-item";
         const checkClass = item.checked ? "task-check task-check-checked" : "task-check";
-        const statusLabel = item.checked ? "Completed task: " : "Incomplete task: ";
-        return `<li class="${itemClass}"><span class="${checkClass}"></span><span class="sr-only">${statusLabel}</span><div class="task-body">${body}</div></li>\n`;
+        const statusLabel = item.checked ? "Completed task" : "Incomplete task";
+        return `<li class="${itemClass}"><span class="${checkClass}" title="${statusLabel}"></span><div class="task-body">${body}</div></li>\n`;
       },
       table(token: Tokens.Table) {
         const headCells = token.header

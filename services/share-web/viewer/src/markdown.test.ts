@@ -356,10 +356,14 @@ describe("MarkdownContent link navigation", () => {
     expect(headingIds[3]).toBe("h-计划");
     expect(headingIds[4]).toBe("h-हिन्दी");
 
-    const srLabels = [...container.querySelectorAll("li.task-item .sr-only")].map((el) =>
+    const checkTitles = [...container.querySelectorAll("li.task-item span.task-check")].map((el) =>
+      el.getAttribute("title"),
+    );
+    expect(checkTitles).toEqual(["Completed task", "Incomplete task"]);
+    const itemTexts = [...container.querySelectorAll("li.task-item")].map((el) =>
       el.textContent?.trim(),
     );
-    expect(srLabels).toEqual(["Completed task:", "Incomplete task:"]);
+    expect(itemTexts).toEqual(["Shipped", "Pending"]);
   });
 });
 

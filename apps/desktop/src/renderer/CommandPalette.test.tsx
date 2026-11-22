@@ -148,4 +148,18 @@ describe("CommandPalette keyboard selection", () => {
     expect(onClose).toHaveBeenCalledOnce();
     expect(ran).toEqual([]);
   });
+
+  it("keeps the listbox label distinct from the combobox label", () => {
+    render(
+      <CommandPalette
+        ariaLabel="File"
+        commands={[{ id: "notes.md", label: "notes.md", run: vi.fn() }]}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("File", { exact: false })).toBe(
+      screen.getByRole("combobox", { name: "File" }),
+    );
+    expect(screen.getByRole("listbox", { name: "Results" })).toBeTruthy();
+  });
 });

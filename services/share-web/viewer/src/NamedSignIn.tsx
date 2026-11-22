@@ -22,11 +22,16 @@ export function NamedSignIn(props: {
   const [showPassword, setShowPassword] = useState(false);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const values = new FormData(event.currentTarget);
-    props.onSignIn({
-      email: String(values.get("email") ?? ""),
-      password: String(values.get("password") ?? ""),
-    });
+    const form = event.currentTarget;
+    const values = new FormData(form);
+    const email = String(values.get("email") ?? "");
+    const password = String(values.get("password") ?? "");
+    const passwordInput = form.elements.namedItem("password");
+    if (passwordInput instanceof HTMLInputElement) {
+      passwordInput.value = "";
+    }
+    setShowPassword(false);
+    props.onSignIn({ email, password });
   };
   return (
     <main className="download-card named-sign-in">

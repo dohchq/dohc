@@ -244,7 +244,11 @@ export function WorkspaceSyncStatus({
         role="status"
         aria-label={description}
         title={description}
-        className="flex h-6 shrink-0 items-center"
+        className={
+          action
+            ? "flex h-6 shrink-0 items-center"
+            : `flex h-6 shrink-0 items-center gap-1.5 text-[12px] text-muted ${worded ? "px-1" : "w-5 justify-center"}`
+        }
       >
         {action ? (
           <button
@@ -256,12 +260,10 @@ export function WorkspaceSyncStatus({
             <span className={worded ? undefined : "sr-only"}>{shownLabel}</span>
           </button>
         ) : (
-          <span
-            className={`flex h-6 shrink-0 items-center gap-1.5 text-[12px] text-muted ${worded ? "px-1" : "w-5 justify-center"}`}
-          >
+          <>
             <Dot kind={dot} />
             <span className={worded ? undefined : "sr-only"}>{shownLabel}</span>
-          </span>
+          </>
         )}
       </span>
       {liveDelivery && liveLabel ? (

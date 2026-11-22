@@ -216,7 +216,6 @@ export function CommandPalette(props: {
   testId?: string;
   placeholder?: string;
   ariaLabel?: string;
-  listAriaLabel?: string;
   toggleShortcut?: "command-palette" | "quick-open";
   // Optional ranking seam: Quick Open passes its prepared path
   // ranker. Default palettes use word-prefix + ordered-subsequence scoring.
@@ -363,7 +362,7 @@ export function CommandPalette(props: {
           id={listId}
           ref={listRef}
           role="listbox"
-          aria-label={props.listAriaLabel ?? "Commands"}
+          aria-label="Results"
           className="m-0 max-h-96 list-none overflow-y-auto p-1"
         >
           {matches.length === 0 ? (
@@ -392,7 +391,12 @@ export function CommandPalette(props: {
                       {groupHeader}
                     </li>
                   ) : null}
-                  <li id={optionId(index)} role="option" aria-selected={index === selected}>
+                  <li
+                    id={optionId(index)}
+                    role="option"
+                    aria-selected={index === selected}
+                    aria-label={command.ariaLabel}
+                  >
                     <button
                       type="button"
                       aria-label={command.ariaLabel}
