@@ -17,6 +17,8 @@ export interface ViewMeta {
   channel?: { channelWireId: string };
   /** For a member, who last set the members' level, by name. */
   levelChangedBy?: string;
+  /** For a member, a signature of their reach. It changes when a rule or level does. */
+  reach?: string;
 }
 
 export interface RelayOp {

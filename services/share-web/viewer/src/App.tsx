@@ -545,7 +545,7 @@ export function App() {
     };
     const commit = (
       previous: ReadyState,
-      loaded: LoadedCurrentState,
+      loaded: Omit<LoadedCurrentState, "levels">,
       expectedVersion: number,
     ): ReadyState | null => {
       if (!current || operationVersion !== expectedVersion) return null;
