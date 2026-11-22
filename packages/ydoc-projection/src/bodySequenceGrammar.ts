@@ -37,6 +37,9 @@ const record = (value: unknown): SequenceAttrs | null =>
     ? (value as SequenceAttrs)
     : null;
 
+const own = (holder: SequenceAttrs, key: string): unknown =>
+  Object.hasOwn(holder, key) ? holder[key] : undefined;
+
 const whole = (value: unknown): unknown =>
   typeof value === "bigint" &&
   value >= BigInt(Number.MIN_SAFE_INTEGER) &&
@@ -59,7 +62,7 @@ const widths = (value: unknown) =>
   value === null ||
   (Array.isArray(value) &&
     value.length <= MAX_SPAN &&
-    value.every((width) => finite(width) && (width as number) >= 0));
+    Array.from(value as unknown[]).every((width) => finite(width) && (width as number) >= 0));
 const side = (value: unknown) =>
   value === null || value === "left" || value === "right" || value === "center";
 const plain = (value: unknown) =>
@@ -113,8 +116,8 @@ function attrsFor(type: NodeType | MarkType, raw: unknown): SequenceAttrs {
   const given = record(raw) ?? {};
   const attrs: SequenceAttrs = {};
   for (const key of Object.keys(type.spec.attrs ?? {})) {
-    const held = whole(given[key]);
-    const value = Array.isArray(held) ? held.map(whole) : held;
+    const held = whole(own(given, key));
+    const value = Array.isArray(held) ? Array.from(held as unknown[], whole) : held;
     if (value !== undefined && (VALUE_RULES[`${type.name}.${key}`] ?? plain)(value))
       attrs[key] = value;
   }
@@ -206,9 +209,12 @@ export function leavesOfSequence(
   for (const piece of pieces) {
     if ("boundary" in piece)
       leaves.push({
-        type: typeof piece.boundary.type === "string" ? piece.boundary.type : "paragraph",
+        type:
+          typeof own(piece.boundary, "type") === "string"
+            ? String(piece.boundary.type)
+            : "paragraph",
         attrs: piece.boundary,
-        path: pathOf(schema, piece.boundary.path, containers),
+        path: pathOf(schema, own(piece.boundary, "path"), containers),
         inline: [],
       });
     else if (leaves.length > 0) leaves.at(-1)!.inline.push(piece);
@@ -263,7 +269,7 @@ export function writtenLeaves(
 function marksFor(schema: Schema, holder: NodeType, raw: SequenceAttrs): readonly Mark[] {
   let marks: readonly Mark[] = Mark.none;
   for (const [name, type] of Object.entries(schema.marks)) {
-    const value = record(raw[name]);
+    const value = record(own(raw, name));
     if (value) marks = type.create(attrsFor(type, value)).addToSet(marks);
   }
   return holder.allowedMarks(marks);

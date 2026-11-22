@@ -26,18 +26,6 @@ function random(seed: number) {
 type Next = () => number;
 const pick = <T>(next: Next, from: readonly T[]): T => from[Math.floor(next() * from.length)]!;
 
-const lettersOf = (leaves: readonly SequenceLeaf[]) =>
-  leaves
-    .flatMap((leaf) => leaf.inline.map((piece) => ("text" in piece ? piece.text : "")))
-    .join("");
-function lettersIn(doc: ProseMirrorNode) {
-  let letters = "";
-  doc.descendants((node) => {
-    if (node.isText) letters += node.text ?? "";
-  });
-  return letters;
-}
-
 const blocks = Object.values(schema.nodes).filter(
   (type) => type.isBlock && type !== schema.topNodeType,
 );
@@ -46,18 +34,25 @@ const leafBlocks = blocks.filter((type) => type.isTextblock || type.isLeaf);
 const inlineItems = Object.values(schema.nodes).filter(
   (type) => type.isInline && type.isLeaf && !type.isText,
 );
-const itemsOf = (leaves: readonly SequenceLeaf[]) =>
-  leaves
-    .flatMap((leaf) => leaf.inline)
-    .flatMap((piece) =>
-      "atom" in piece && inlineItems.some((type) => type.name === piece.atom) ? [piece.atom] : [],
-    );
-function itemsIn(doc: ProseMirrorNode) {
-  const items: string[] = [];
+const isInlineItem = (name: string) => inlineItems.some((type) => type.name === name);
+
+const contentOf = (pieces: readonly SequencePiece[]) =>
+  pieces
+    .map((piece) =>
+      "text" in piece
+        ? piece.text
+        : "atom" in piece && isInlineItem(piece.atom)
+          ? `<${piece.atom}>`
+          : "",
+    )
+    .join("");
+function contentIn(doc: ProseMirrorNode) {
+  let content = "";
   doc.descendants((node) => {
-    if (inlineItems.includes(node.type)) items.push(node.type.name);
+    if (node.isText) content += node.text ?? "";
+    else if (inlineItems.includes(node.type)) content += `<${node.type.name}>`;
   });
-  return items;
+  return content;
 }
 
 const names = [...Object.keys(schema.nodes), "nonsense", ""];
@@ -117,22 +112,25 @@ describe("reading any sequence", () => {
       inline,
     };
   };
-  const reads = (seed: number, leaves: SequenceLeaf[], shown: unknown) => {
+  const reads = (seed: number, leaves: SequenceLeaf[], given: readonly SequencePiece[]) => {
     const doc = readBodyLeaves(schema, leaves);
     try {
       doc.check();
     } catch (error) {
-      throw new Error(`seed ${String(seed)}: ${String(error)} ${JSON.stringify(shown)}`);
+      throw new Error(`seed ${String(seed)}: ${String(error)}`);
     }
-    expect(lettersIn(doc), `seed ${String(seed)}`).toBe(lettersOf(leaves));
-    expect(itemsIn(doc), `seed ${String(seed)}`).toEqual(itemsOf(leaves));
+    expect(contentIn(doc), `seed ${String(seed)}`).toBe(contentOf(given));
   };
 
-  it("gives a valid document that holds every letter and inline item once, in order", () => {
+  it("gives a valid document that holds every letter and inline item once, in the order given", () => {
     for (let seed = 1; seed <= SEEDS * 10; seed++) {
       const next = random(seed);
       const leaves = Array.from({ length: Math.floor(next() * 12) }, () => anyLeaf(next));
-      reads(seed, leaves, null);
+      reads(
+        seed,
+        leaves,
+        leaves.flatMap((leaf) => leaf.inline),
+      );
     }
   });
 
@@ -290,6 +288,7 @@ describe("reading any sequence", () => {
     expect(cell([["c.colwidth", [100n, 20]]]).colwidth).toEqual([100, 20]);
     expect(cell([["c.colwidth", [Infinity]]]).colwidth).toBeNull();
     expect(cell([["c.colwidth", [-1]]]).colwidth).toBeNull();
+    expect(cell([["c.colwidth", Array(1)]]).colwidth).toBeNull();
     const start = (value: unknown) =>
       read([["l.start", value]], ["l", "i"]).firstChild!.attrs.start as unknown;
     expect(start(7)).toBe(7);
@@ -424,7 +423,7 @@ describe("writing a document and reading it back", () => {
     return type.create(null, rest ? content.append(rest) : content);
   }
 
-  it("gives the same document for any valid document", () => {
+  it("gives the same document for any valid document whose table rows all hold a cell", () => {
     let nested = 0;
     for (let seed = 1; seed <= SEEDS * 4; seed++) {
       const doc = anyNode(random(seed), schema.topNodeType, 0);

@@ -164,6 +164,64 @@ it("reads each stored note as the document recorded beside it", () => {
   expect(stored).toEqual(made);
 });
 
+it("reads what is stored, not what a key named __proto__ or an embedded string makes Yjs show", () => {
+  const made = note(9);
+  const named = (key: string, value: unknown) => Object.fromEntries([[key, value]]);
+  made.doc.transact((transaction) => {
+    new Y.Item(
+      Y.createID(made.doc.clientID, Y.getState(made.doc.store, made.doc.clientID)),
+      null,
+      null,
+      null,
+      null,
+      made.sequence,
+      null,
+      new Y.ContentEmbed("ghost"),
+    ).integrate(transaction, 0);
+  });
+  const boundary = new Y.XmlElement(BLOCK_ELEMENT);
+  boundary.setAttribute("__proto__", { type: "heading", level: 5 } as unknown as string);
+  made.sequence.insertEmbed(made.sequence.length, boundary, {});
+  made.sequence.insert(made.sequence.length, "real", named("__proto__", { bold: {} }));
+  made.sequence.insert(
+    made.sequence.length,
+    " link",
+    named("link", named("__proto__", { href: "https://example.com" })),
+  );
+  const reopened = new Y.Doc({ gc: false });
+  reopened.getText(BODY_SEQUENCE_FIELD);
+  Y.applyUpdate(reopened, Y.encodeStateAsUpdate(made.doc));
+  for (const doc of [made.doc, reopened])
+    expect(shown(doc)).toEqual({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "real" },
+            {
+              type: "text",
+              text: " link",
+              marks: [
+                {
+                  type: "link",
+                  attrs: {
+                    href: null,
+                    target: "_blank",
+                    rel: "noopener noreferrer nofollow",
+                    class: null,
+                    title: null,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  reopened.destroy();
+});
+
 it("reads the join that two people made and one undid as three lines with the typed letter", () => {
   const stored = JSON.parse(readFileSync(FILE, "utf8")) as Fixture[];
   const document = stored.at(-1)!.document as { content: { content?: { text: string }[] }[] };

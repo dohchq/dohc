@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 
 const REMOTE = Symbol("remote");
@@ -91,8 +91,14 @@ class Oracle {
 }
 
 const docs: Y.Doc[] = [];
+// Yjs joins changes made within its capture window into one undo step. A stopped clock makes the
+// steps depend only on where the model ends one.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+});
 afterEach(() => {
   for (const doc of docs.splice(0)) doc.destroy();
+  vi.useRealTimers();
 });
 
 function person(

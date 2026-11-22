@@ -67,6 +67,8 @@ The reader is `packages/ydoc-projection/src/bodySequenceGrammar.ts`, read from Y
 The schema has no other attribute; a test pins the list and the defaults.
 
 - An attribute name that the item's own node or mark type does not have is ignored (a `language` left on a boundary whose type is now `heading` is not read).
+- An attribute, a mark and a mark's attribute are read by their own key only. A key named `__proto__` is a key like any other and names nothing here; what it holds is not read as the item's attributes.
+- An array holds a value at every position: one with a hole or `undefined` in it breaks the rule for `colwidth`.
 - A mark is ON for a letter when the nearest earlier `ContentFormat` with that key holds an object (the mark's attributes; `{}` for none), and OFF when it holds anything else or there is none. Keys that are not exactly a mark name are ignored (no hashed names).
 - When `code` is on, every other mark is ignored for that letter.
 - Marks apply to letters only. Formatting around a boundary or an inline item means nothing and is not read.
@@ -75,7 +77,7 @@ The schema has no other attribute; a test pins the list and the defaults.
 
 Implemented by `leavesOfSequence` then `readBodyLeaves`.
 
-0. Skip every item that is not a non-empty string, a `block` element, or an element named after an inline node the schema knows. Skipped items take no part in what follows.
+0. Skip every item that is not a non-empty letter run (`ContentString`), a `block` element, or an element named after an inline node the schema knows. Skipped items take no part in what follows. An embedded value that is not such an element is skipped also when it is a string, so a reader reads the stored items and not Yjs's delta, which shows such a string as text.
 1. Cut the sequence at each boundary. Letters and inline items before the first boundary are a `paragraph` leaf with no path; with none before it, there is no such leaf.
 2. A leaf's path: walk its `path` array from the start, for at most 64 entries, keeping a current parent that starts as the top level. Stop at the first entry that is not a string matching the id pattern, or was already used in this path, or has no string under key `<id>`. Otherwise the entry's type is:
    - the one type the parent may hold, when the parent may hold only one (table 3.1: under `bulletList` or `orderedList` it is `listItem`, under `taskList` it is `taskItem`, under `table` it is `tableRow`), whatever the record says;
