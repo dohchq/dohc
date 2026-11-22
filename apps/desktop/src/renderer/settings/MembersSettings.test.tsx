@@ -510,6 +510,7 @@ describe("Members page", () => {
     const dialog = screen.getByTestId("settings-members-confirm-remove");
     expect(dialog.textContent).toContain("Remove Bo from Community?");
     expect(dialog.textContent).toContain("Copies already on their computers stay with them.");
+    expect(dialog.textContent).toContain("Direct messages with them stay open.");
     await userEvent.click(screen.getByTestId("settings-members-confirm-cancel"));
     expect(requests()).toEqual([{ action: "list" }]);
     await openMenu("m-bo");

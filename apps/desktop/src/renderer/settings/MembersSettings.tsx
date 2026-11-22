@@ -941,7 +941,8 @@ function MembersConfirm(props: {
           confirmLabel="Remove"
         >
           <p className="m-0">
-            Copies already on their computers stay with them. You can let them back in from Removed.
+            Copies already on their computers stay with them. Direct messages with them stay open.
+            You can let them back in from Removed.
           </p>
         </ConfirmDialog>
       );
