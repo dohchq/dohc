@@ -370,6 +370,32 @@ describe("a member reads the workspace through the link read routes", () => {
     );
   });
 
+  // The size answer must not tell a member how much work is hidden from them.
+  it("counts only a member's readable files against the file limit, and refuses a scan past its cap generically", async () => {
+    const { h, storage } = await seed(undefined, { linkCurrentFileLimit: 1 });
+    const ana = await member(h, storage, "ana");
+    const ben = await member(h, storage, "ben");
+    await ownerWrite(h, "hidden/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "private");
+    const one = await memberRead(h, "/sync/link/current", ana.grantId, "ana");
+    expect(one.status, await one.clone().text()).toBe(200);
+    expect(((await json(one)).files as Array<{ path: string }>).map((file) => file.path)).toEqual([
+      "docs/plan.md",
+    ]);
+    // Ben reads the hidden folder too, so his own list is over the limit.
+    const many = await memberRead(h, "/sync/link/current", ben.grantId, "ben");
+    expect(many.status).toBe(413);
+    expect(await json(many)).toEqual(linkRefusalBody("link_too_many_files"));
+    // Past the cap on what the relay reads, a member gets an unknown grant's answer, whatever they can read.
+    for (let index = 0; index < 8; index++) await ownerWrite(h, `hidden/${index}.md`, "private");
+    const unknown = await refusalBytes(
+      await memberRead(h, "/sync/link/current", "grant-never", "ana"),
+    );
+    expect(await refusalBytes(await memberRead(h, "/sync/link/current", ana.grantId, "ana"))).toBe(
+      unknown,
+    );
+  });
+
   it("refuses a removed member, an ended membership, a fenced owner and a forged person with the bytes of an unknown grant", async () => {
     const { h, storage } = await seed();
     const ana = await member(h, storage, "ana");

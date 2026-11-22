@@ -125,6 +125,26 @@ async function ownerRename(h: SyncRelayHandler, from: string, to: string): Promi
   ownerHeads.set(to, sha);
 }
 
+async function ownerDelete(h: SyncRelayHandler, path: string): Promise<void> {
+  await ownerAppend(h, [
+    logOp("moment.append", {
+      momentId: `m-${ownerSeq++}`,
+      versionId: "main",
+      objectId: `object-${path}`,
+      path,
+      recordedAtMs: 5000,
+      operation: "delete",
+      payloadBeforeBlobSha256: ownerHeads.get(path),
+      payloadBeforePath: path,
+      payloadAfterBlobSha256: null,
+      payloadAfterPath: null,
+      metadata: { origin: "user" },
+      beforePresent: "null",
+    }),
+  ]);
+  ownerHeads.delete(path);
+}
+
 // The owner's workspace: a Group, General, a direct message, an agent chat,
 // a message in a channel the log never created, a file, a version fork, and
 // a secret. Everything a member must not see says SENTINEL.
@@ -655,22 +675,7 @@ describe("what a member reaches", () => {
       expect(before).toContain('"reachMove":"arrival"');
 
       if (operation === "rename") await ownerWrite(h, "People/access.yaml", "");
-      await ownerAppend(h, [
-        logOp("moment.append", {
-          momentId: `m-${ownerSeq++}`,
-          versionId: "main",
-          objectId: "object-HR/access.yaml",
-          path: "HR/access.yaml",
-          recordedAtMs: 5000,
-          operation: "delete",
-          payloadBeforeBlobSha256: ownerHeads.get("HR/access.yaml"),
-          payloadBeforePath: "HR/access.yaml",
-          payloadAfterBlobSha256: null,
-          payloadAfterPath: null,
-          metadata: { origin: "user" },
-          beforePresent: "null",
-        }),
-      ]);
+      await ownerDelete(h, "HR/access.yaml");
 
       const after = await pulledText(h, "ana", shareId);
       expect(after).not.toContain("HR/");
@@ -689,6 +694,67 @@ describe("what a member reaches", () => {
       expect(asAdmin).toContain('"payloadAfterPath":"Public/plan.md"');
     },
   );
+
+  it.each(["delete", "rename"] as const)(
+    "withholds a published file's hidden drafts from an Edit member after the owner %ss the folder",
+    async (operation) => {
+      const { h } = await seed();
+      await invited(h, "ana");
+      const shareId = await shareIdOf(h, "ana");
+      await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" });
+      await ownerWrite(h, "Public/notes.md", "notes v1");
+      await ownerWrite(h, "Public/notes.md", "notes v2");
+      await ownerWrite(h, "HR/access.yaml", "");
+      await ownerWrite(h, "HR/layoff-plan.md", "SECRET DRAFT v1");
+      await ownerWrite(h, "HR/layoff-plan.md", "published plan");
+      await ownerRename(h, "HR/layoff-plan.md", "Public/plan.md");
+      if (operation === "rename") await ownerWrite(h, "People/access.yaml", "");
+      await ownerDelete(h, "HR/access.yaml");
+
+      const pulled = await pulledText(h, "ana", shareId);
+      expect(pulled).not.toContain("HR/");
+      expect(pulled).not.toContain(sha256("SECRET DRAFT v1"));
+      expect(pulled).toContain('"reachMove":"arrival"');
+      const blob = async (text: string) =>
+        (await h(request("ana", `/sync/shares/${shareId}/blobs/${sha256(text)}`))).status;
+      expect(await blob("SECRET DRAFT v1")).toBe(404);
+      expect(await blob("published plan")).toBe(200);
+      // A path the member could see keeps its full history at Edit.
+      expect(pulled).toContain(`"payloadBeforeBlobSha256":"${sha256("notes v1")}"`);
+      expect(await blob("notes v1")).toBe(200);
+    },
+  );
+
+  it("gives an Edit member each file once at its current path after the owner opens a hidden folder", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" });
+    await ownerWrite(h, "HR/access.yaml", "");
+    await ownerWrite(h, "HR/a.md", "kept");
+    await ownerRename(h, "HR/a.md", "HR/b.md");
+    await ownerDelete(h, "HR/access.yaml");
+
+    const ops = (await json(await pull(h, "ana", shareId))).ops as Array<{
+      opKind: string;
+      payload: Record<string, unknown>;
+    }>;
+    const text = JSON.stringify(ops);
+    expect(text).not.toContain("HR/a.md");
+    expect(text).toContain('"path":"HR/b.md"');
+    // The engine moves an object only on a rename, so a write never names a
+    // second path for an object it already holds.
+    const held = new Map<unknown, unknown>();
+    for (const { opKind, payload } of ops) {
+      if (opKind !== "moment.append") continue;
+      const path = payload.payloadAfterPath ?? payload.path;
+      if (payload.operation === "write" && held.has(payload.objectId))
+        expect(held.get(payload.objectId)).toBe(path);
+      if (payload.operation === "delete") held.delete(payload.objectId);
+      else held.set(payload.objectId, path);
+    }
+    expect([...held.values()]).toContain("HR/b.md");
+  });
 
   it("serves a readable Group without naming its hidden folder", async () => {
     const { h } = await seed();
