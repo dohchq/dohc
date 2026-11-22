@@ -10,7 +10,7 @@ import type { RemovedText } from "@dohc/ydoc-projection/removed-text";
 import { NamedDocumentEditor } from "./NamedDocumentEditor";
 
 let container: HTMLDivElement, root: Root;
-function session(markdown: string) {
+function session(markdown: string, reported: Partial<NamedLiveBrowserState> = {}) {
   const doc = markdownToYDoc(markdown);
   const state: NamedLiveBrowserState = {
     status: "live",
@@ -23,6 +23,7 @@ function session(markdown: string) {
     membership: null,
     typingAhead: false,
     typingStopped: false,
+    ...reported,
   };
   const removed = new Set<(removed: RemovedText) => void>();
   return {
@@ -295,5 +296,32 @@ it.each(Object.entries(LIVE_CONNECTION_LIMIT_MESSAGES))(
       expect(container.querySelector('[role="status"]')?.textContent).toBe(message);
       expect(container.querySelector("button")?.textContent).toBe("Try again");
     }
+  },
+);
+
+it.each([
+  [{ reason: "transport-closed" }, true, "Reconnecting. You can keep typing."],
+  [
+    { reason: "transport-closed", pendingUpdates: 2 },
+    true,
+    "Not sent yet. Your changes are only in this tab.",
+  ],
+  [
+    { reason: "live_person_limit", pendingUpdates: 2 },
+    true,
+    LIVE_CONNECTION_LIMIT_MESSAGES.live_person_limit,
+  ],
+  [{ reason: "paused" }, false, "Editing paused. Check your connection, then retry."],
+] as const)(
+  "after it was live, a page that disconnects with %o takes typing: %s",
+  async (reported, editable, words) => {
+    const page = session("Body", { status: "disconnected", typingAhead: true, ...reported });
+    await act(async () =>
+      root.render(<NamedDocumentEditor session={page} path="docs/a.md" link onState={() => {}} />),
+    );
+    expect(container.querySelector('[role="textbox"]')?.getAttribute("contenteditable")).toBe(
+      String(editable),
+    );
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(words);
   },
 );

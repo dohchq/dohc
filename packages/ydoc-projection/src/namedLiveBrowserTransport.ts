@@ -30,17 +30,25 @@ export interface NamedLiveBrowserState extends Omit<NamedLiveProviderState, "sta
   /** An attempt to open stopped before the page was live, so typing on the early state waits for live. */
   typingStopped: boolean;
 }
+/** A page disconnected for one of these reasons doesn't reconnect by itself. */
+export const NAMED_LIVE_NO_AUTOMATIC_RETRY: readonly string[] = [
+  "authority-unavailable",
+  "access-removed",
+  "link-full",
+  "paused",
+  "live-stopped",
+];
 /**
- * Whether the page takes edits: live, or holding the host's early state while it first opens. A page whose opening
- * stopped takes none until it is live, so no more words wait on attempts that may never succeed.
+ * Whether the page takes edits: live, holding the host's early state while it first opens, or reconnecting by
+ * itself after it was live. The edits wait in the page until it is live again. A page whose first opening stopped
+ * takes none until it is live, so no more words wait on attempts that may never succeed.
  */
 export function namedLiveEditable(state: NamedLiveBrowserState): boolean {
-  return (
-    state.status === "live" ||
-    (state.typingAhead &&
-      !state.typingStopped &&
-      ["authorizing", "connecting", "syncing"].includes(state.status))
-  );
+  if (state.status === "live") return true;
+  if (!state.typingAhead || state.typingStopped) return false;
+  return state.status === "disconnected"
+    ? !NAMED_LIVE_NO_AUTOMATIC_RETRY.includes(state.reason ?? "")
+    : ["authorizing", "connecting", "syncing"].includes(state.status);
 }
 type BrowserSocket = Pick<
   WebSocket,
@@ -144,7 +152,8 @@ export function createNamedLiveBrowserTransport<
     // Once an attempt has stopped before the page was live, typing on the early state waits for live. A retry that
     // took typing again would show the editor for each attempt and let words join a draft that may never be sent.
     let attempted = false,
-      typingStopped = false;
+      typingStopped = false,
+      everLive = false;
     // Automatic retries keep the page's session. A refusal of it may mean the server lost it, so
     // the page asks for a new one on its own once in an outage, and again only in an outage that
     // began PASSING_REFUSAL_MS after that request. Each request counts when it is sent.
@@ -162,10 +171,7 @@ export function createNamedLiveBrowserTransport<
         closed ||
         reconnectTimer !== undefined ||
         value.status !== "disconnected" ||
-        value.reason === "authority-unavailable" ||
-        value.reason === "access-removed" ||
-        value.reason === "link-full" ||
-        value.reason === "live-stopped"
+        NAMED_LIVE_NO_AUTOMATIC_RETRY.includes(value.reason ?? "")
       )
         return;
       reconnectTimer = setTimeout(() => {
@@ -184,7 +190,7 @@ export function createNamedLiveBrowserTransport<
       typingStopped,
     });
     const notify = () => {
-      if (attempted && { ...provider.state(), ...override }.status === "disconnected")
+      if (attempted && !everLive && { ...provider.state(), ...override }.status === "disconnected")
         typingStopped = true;
       for (const listener of listeners) {
         try {
@@ -228,6 +234,8 @@ export function createNamedLiveBrowserTransport<
     }
     const unsubscribe = provider.subscribe((value) => {
       if (value.status === "live") {
+        everLive = true;
+        typingStopped = false;
         clearTimeout(attempt?.timer);
         reconnectDelayMs = 250;
         accessStoodAt = Date.now();

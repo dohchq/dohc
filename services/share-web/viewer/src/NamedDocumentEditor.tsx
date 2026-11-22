@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
 import {
+  NAMED_LIVE_NO_AUTOMATIC_RETRY,
   namedLiveEditable,
   type createNamedLiveBrowserTransport,
   type NamedLiveBrowserState,
@@ -17,14 +18,6 @@ export type NamedDocumentSession = ReturnType<
   ReturnType<typeof createNamedLiveBrowserTransport>["select"]
 >;
 const OPENING = ["authorizing", "connecting", "syncing"];
-// A disconnected page reconnects by itself and sends a pending change again, except for these reasons.
-const NO_AUTOMATIC_RETRY = [
-  "authority-unavailable",
-  "access-removed",
-  "link-full",
-  "paused",
-  "live-stopped",
-];
 // Trying again can't change these, so the page offers no Try again.
 const FINAL = ["access-removed", "link-full"];
 /** Editing stopped with a change the page will not send again by itself. */
@@ -37,7 +30,7 @@ export function draftNeedsReview(state: NamedLiveBrowserState): boolean {
       (state.status === "closed" ||
         (state.status === "disconnected" &&
           state.reason !== null &&
-          NO_AUTOMATIC_RETRY.includes(state.reason))))
+          NAMED_LIVE_NO_AUTOMATIC_RETRY.includes(state.reason))))
   );
 }
 function statusText(state: NamedLiveBrowserState, link: boolean): string {
@@ -47,12 +40,12 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
       : state.lastApplied
         ? "Changes saved"
         : "Ready to edit";
-  if (OPENING.includes(state.status))
-    return state.typingAhead && state.pendingUpdates
-      ? "Not sent yet. Your changes are only in this tab."
-      : "Opening the file…";
   const limit = liveConnectionLimitMessage(state.reason);
   if (limit) return limit;
+  const takesEdits = namedLiveEditable(state);
+  if (state.typingAhead && state.pendingUpdates && (takesEdits || OPENING.includes(state.status)))
+    return "Not sent yet. Your changes are only in this tab.";
+  if (OPENING.includes(state.status)) return "Opening the file…";
   if (state.status === "quarantined")
     return "Editing stopped. Review your draft before opening the current file.";
   if (state.status === "refused")
@@ -69,7 +62,9 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
   if (state.reason === "live-stopped") return LINK_REFUSALS.link_live_stopped.error;
   if (state.reason === "host-unavailable")
     return "The server could not open the file for editing. dohc keeps trying.";
-  return "Editing paused. Check your connection, then retry.";
+  return takesEdits
+    ? "Reconnecting. You can keep typing."
+    : "Editing paused. Check your connection, then retry.";
 }
 type Removed = { id: string; text: string };
 
@@ -252,7 +247,8 @@ export function NamedDocumentEditor({
       editor.destroy();
     };
   }, [session, onState]);
-  const working = state.status === "live" || OPENING.includes(state.status);
+  const working =
+    state.status === "live" || (OPENING.includes(state.status) && !state.pendingUpdates);
   const status = (
     <p
       className={working ? "named-document-status" : "named-document-status stopped"}
