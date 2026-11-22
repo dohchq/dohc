@@ -661,6 +661,8 @@ export function MembersPage(props: {
     }
     return items;
   };
+  // A member's rows have Message but their own has none, so the roles keep one edge.
+  const peopleAct = manages || groups.active.some((person) => rowMenu(person).length > 0);
 
   return (
     <div data-testid="settings-members-page" data-viewer-role={view.viewer.role}>
@@ -815,7 +817,7 @@ export function MembersPage(props: {
             person={person}
             viewer={view.viewer.memberId}
             showEmail={manages}
-            actions={manages}
+            actions={peopleAct}
             busy={busy(`person:${person.memberId}`)}
             disabled={waiting}
             menu={rowMenu(person)}
