@@ -792,6 +792,7 @@ import type { SitePreviewResultBody } from "./ipc/sitePreviewIpc";
 import {
   readWorkspaceText,
   resolveWorkspaceDocument,
+  resolveWorkspaceFile,
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
   writeWorkspaceText,
@@ -2718,7 +2719,7 @@ type DesktopWorkspaceAuthorityLease = WorkspaceAuthorityLease<
 
 async function noteFileBytes(rootPath: string, path: string): Promise<number | null> {
   try {
-    const info = await lstat(join(rootPath, path));
+    const info = await lstat((await resolveWorkspaceFile(rootPath, path, "read")).realTarget);
     return info.isFile() ? info.size : null;
   } catch {
     return null;

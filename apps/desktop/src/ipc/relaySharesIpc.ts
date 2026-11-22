@@ -761,7 +761,9 @@ export function createOwnerLiveDocumentActions<
       input.workspaceId,
       input.path,
       async (): Promise<ResumeOwnerLiveDocumentResult> => {
-        if (await tooLarge(operation.workspace, input.path)) {
+        const large = await tooLarge(operation.workspace, input.path);
+        operation.assertCurrent();
+        if (large) {
           const row = await serverRow(operation, { path: input.path });
           operation.assertCurrent();
           if (row !== "unread" && row?.reason === "live-document-without-lineage")
@@ -940,7 +942,7 @@ export function createOwnerLiveDocumentActions<
         const large = await Promise.all(
           notStarted.map((row) => tooLarge(operation.workspace, row.path)),
         );
-        operation.assertCurrent();
+        session.assertCurrent();
         notStarted.forEach((row, index) => {
           if (large[index])
             Object.assign(row, { reason: "live-document-too-large", canResume: false });
