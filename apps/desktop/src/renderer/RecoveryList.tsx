@@ -41,7 +41,7 @@ export function DismissDraftControls(props: { onDismiss: () => void | Promise<vo
       .catch((cause) => {
         if (mounted.current)
           report?.({
-            message: "dohc could not dismiss this draft. Your saved copy remains available.",
+            message: "dohc could not dismiss this draft. Your saved copy is still here.",
             cause,
             retry: dismiss,
           });

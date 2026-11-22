@@ -945,7 +945,7 @@ function OwnerAutomationsPanel(props: {
         if (!scope.isCurrent(epoch)) return;
         if (result.status === "roster-unknown") {
           onError(
-            "Couldn't reset automation holds.",
+            "dohc could not reset automation holds.",
             new Error("dohc cannot check who can edit this workspace yet. Try again in a moment."),
             resetHolds,
           );
@@ -954,7 +954,8 @@ function OwnerAutomationsPanel(props: {
         }
       })
       .catch((error: unknown) => {
-        if (scope.isCurrent(epoch)) onError("Couldn't reset automation holds.", error, resetHolds);
+        if (scope.isCurrent(epoch))
+          onError("dohc could not reset automation holds.", error, resetHolds);
       });
   };
   const revealHolds = () => {
@@ -962,7 +963,7 @@ function OwnerAutomationsPanel(props: {
     void bridge()
       .revealAutomationHolds({ workspaceId })
       .catch((error: unknown) => {
-        if (scope.isCurrent(epoch)) onError("Couldn't open the automations folder.", error);
+        if (scope.isCurrent(epoch)) onError("dohc could not open the automations folder.", error);
       });
   };
 
@@ -1053,7 +1054,7 @@ function OwnerAutomationsPanel(props: {
       stopLeaving();
       if (stillOpen) setEditing({ ...open, original: null });
       onError(
-        `"${original.name}" was deleted from ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to add it back.`,
+        `The automation "${original.name}" was deleted from ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to add it back.`,
         null,
       );
       return;
@@ -1066,7 +1067,7 @@ function OwnerAutomationsPanel(props: {
       const theirs = now ?? listed.find((entry) => entry.id === automation.id) ?? null;
       if (stillOpen) setEditing({ ...open, original: theirs, baseline: theirs ?? open.baseline });
       onError(
-        `"${automation.name}" changed in ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to replace it with yours.`,
+        `The automation "${automation.name}" changed in ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to replace it with yours.`,
         null,
       );
       return;
@@ -1449,7 +1450,7 @@ function OwnerAutomationsPanel(props: {
           }}
         >
           <p>
-            dohc rewrites the whole file when it saves, so you lose its comments and hand
+            dohc rewrites the whole file when it saves, so you lose its comments and custom
             formatting.
           </p>
         </ConfirmDialog>

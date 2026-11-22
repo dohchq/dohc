@@ -99,7 +99,7 @@ function DatasetApproval({
             status: dataset.datasetAddressStatus ?? (dataset.datasetPath ? "available" : "missing"),
           };
         after = page.nextCursor ?? undefined;
-        if (after && seen.has(after)) throw Error("The Collection list changed. Try again.");
+        if (after && seen.has(after)) throw Error("The Collection list changed.");
         if (after) seen.add(after);
       } while (after);
       return { path: null, status: "missing" };
@@ -129,10 +129,10 @@ function DatasetApproval({
             (found.status === "ambiguous"
               ? "Multiple dataset.json files name this Collection. Remove the duplicate file."
               : found.status === "unreadable"
-                ? "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History."
+                ? "dohc cannot read this Collection's dataset.json. Fix the file, or restore it from History."
                 : found.status === "missing"
                   ? "Collection source missing. Restore its dataset.json file."
-                  : "Collection path unavailable"))}
+                  : "Collection path unavailable."))}
       </p>
       <p className="m-0">
         This app uses the Collection's approved actions. Its responses appear in the same
@@ -206,7 +206,7 @@ function CollectionApproval({ capability }: { capability: AppCollectionCapabilit
   return (
     <div data-testid="app-publication-capability" className="space-y-2">
       <p className="m-0">
-        Create records only in <span className="break-all">{capability.collectionPath}</span>.
+        Creates records only in <span className="break-all">{capability.collectionPath}</span>.
       </p>
       <dl className="m-0 space-y-1 text-[12px]">
         <div>
@@ -263,7 +263,7 @@ export async function openLocalApp(
   const result = await api.publishOwnerApp({ action: "launchLocal", workspaceId, publicationId });
   if (!current()) return false;
   if (result.kind !== "localLaunched" || result.publicationId !== publicationId)
-    throw new Error("dohc could not confirm which app started. Try again.");
+    throw new Error("dohc could not confirm which app started.");
   const url = localLaunchUrl(result.url);
   if (!url) throw new Error("The app address is not on this device. dohc did not open it.");
   await api.openExternalUrl({ url });
@@ -705,8 +705,7 @@ function PublicationDialog(
       }
     })()
       .catch((error) => {
-        if (current)
-          setLoadError(ipcErrorMessage(error, "dohc could not load the links. Try again."));
+        if (current) setLoadError(ipcErrorMessage(error, "dohc could not load the links."));
       })
       .finally(() => {
         if (current) setLoading(false);
@@ -751,8 +750,7 @@ function PublicationDialog(
           setLinksFailed(false);
           return;
         }
-        if (page.kind !== "listed")
-          throw new Error("dohc could not load app publications. Reload the publications.");
+        if (page.kind !== "listed") throw new Error("dohc could not load app publications.");
         for (const row of page.publications) {
           if (
             (row.manifestUnavailable || row.appRoot === props.appRoot) &&
@@ -761,8 +759,7 @@ function PublicationDialog(
             rows.push(row);
         }
         cursor = page.nextCursor ?? undefined;
-        if (cursor && seen.has(cursor))
-          throw new Error("The publication list changed. Reload the publications.");
+        if (cursor && seen.has(cursor)) throw new Error("The publication list changed. Try again.");
         if (cursor) seen.add(cursor);
       } while (cursor);
       if (current) {
@@ -781,9 +778,7 @@ function PublicationDialog(
           /* Without a status, the line shows. */
         }
         if (!current) return;
-        setPublicationsError(
-          ipcErrorMessage(error, "dohc could not load app publications. Reload the publications."),
-        );
+        setPublicationsError(ipcErrorMessage(error, "dohc could not load app publications."));
         const offline = syncNamesServer(status) || status?.updateRequired !== undefined;
         setLinksHidden(offline);
         setLinksFailed(!offline);
@@ -886,7 +881,7 @@ function PublicationDialog(
       ) {
         if (result.kind === "prepared") cancel(result);
         if (!fresh) return;
-        throw new Error("dohc could not prepare this app. Try again.");
+        throw new Error("dohc could not prepare this app.");
       }
       let verified: Prepared;
       try {
@@ -1016,7 +1011,7 @@ function PublicationDialog(
       }
       if (result.kind !== "prepared" || result.appRoot !== props.appRoot || result.local === true) {
         if (result.kind === "prepared") cancel(result);
-        throw new Error("dohc could not prepare this app. Try again.");
+        throw new Error("dohc could not prepare this app.");
       }
       candidate.current = result;
       const verified = verifiedPrepared(result);
@@ -1082,7 +1077,7 @@ function PublicationDialog(
       }
       if (result.kind !== "prepared" || result.appRoot !== props.appRoot) {
         if (result.kind === "prepared") cancel(result);
-        throw new Error("dohc could not load this publication. Reload the publications.");
+        throw new Error("dohc could not load this publication.");
       }
       candidate.current = result;
       const verified = verifiedPrepared(result);
@@ -1093,9 +1088,7 @@ function PublicationDialog(
       if (alive.current && mine === request.current) {
         cancel(candidate.current);
         candidate.current = null;
-        setError(
-          ipcErrorMessage(cause, "dohc could not load this publication. Reload the publications."),
-        );
+        setError(ipcErrorMessage(cause, "dohc could not load this publication."));
         setPublicationsReload((value) => value + 1);
       }
     } finally {
@@ -1123,7 +1116,7 @@ function PublicationDialog(
       });
       if (!alive.current || mine !== request.current) return;
       if (result.kind !== "published" || result.local === true)
-        throw new Error("dohc could not confirm publication. Reload the app publications.");
+        throw new Error("dohc could not confirm this publication.");
       candidate.current = null;
       localChanged();
       setPublicationsReload((value) => value + 1);
@@ -1136,12 +1129,7 @@ function PublicationDialog(
         setPrepared(null);
         localChanged();
         setPublicationsReload((value) => value + 1);
-        setError(
-          ipcErrorMessage(
-            cause,
-            "dohc could not confirm publication. Reload the app publications.",
-          ),
-        );
+        setError(ipcErrorMessage(cause, "dohc could not confirm this publication."));
       }
     } finally {
       if (alive.current && mine === request.current) setBusy(null);
@@ -1218,20 +1206,15 @@ function PublicationDialog(
         result.publicationId !== publication.publicationId ||
         result.authorityRevision !== publication.authorityRevision + 1
       )
-        throw new Error(
-          "dohc could not confirm collection access was revoked. Reload the publications.",
-        );
+        throw new Error("dohc could not confirm Collection access was revoked.");
       setPublicationsReload((value) => value + 1);
       setNotice(
-        "App collection access revoked. Prepare the app again to review and restore access.",
+        "App Collection access revoked. Prepare the app again to review and restore access.",
       );
     } catch (cause) {
       if (alive.current && mine === request.current) {
         setError(
-          ipcErrorMessage(
-            cause,
-            "dohc could not confirm revocation. Reload the publications to check current access.",
-          ),
+          ipcErrorMessage(cause, "dohc could not confirm that Collection access was revoked."),
         );
         setPublicationsReload((value) => value + 1);
       }
@@ -1385,7 +1368,7 @@ function PublicationDialog(
                 <StateLine
                   icon={TriangleAlert}
                   tone="text-warning"
-                  text="Its source changed since you approved it."
+                  text="The app's source changed since you approved it."
                 >
                   <More>The app runs the approved version until you approve the changes.</More>
                 </StateLine>
@@ -1393,9 +1376,9 @@ function PublicationDialog(
                 <StateLine
                   icon={CircleDashed}
                   tone="text-muted"
-                  text="Approve it to run this version on this device."
+                  text="Approve this app to run it on this device."
                 >
-                  <More>Later edits to its source wait for your approval.</More>
+                  <More>Later source edits wait for your approval.</More>
                 </StateLine>
               )}
               {review?.rows
@@ -1419,7 +1402,7 @@ function PublicationDialog(
                     ) : null
                   ) : "datasetCapability" in row ? (
                     <p key={row.publicationId} className="m-0 text-[12px] text-warning">
-                      Its data is not active here. If you moved it to a share link, open that
+                      This app's data is not active here. If you moved it to a share link, open that
                       publication.
                     </p>
                   ) : null,
@@ -1478,7 +1461,7 @@ function PublicationDialog(
                         className="m-0 min-w-0 flex-1 text-ink"
                         title={publicationsError ?? undefined}
                       >
-                        The server didn't return this app's links.
+                        The server did not return this app's links.
                       </p>
                       <SecondaryButton
                         size="row"
@@ -1866,7 +1849,7 @@ function PublicationDialog(
                             ) : publication.collectionCapability ? (
                               <details className="mt-1">
                                 <summary className="cursor-pointer">
-                                  Approved collection access
+                                  Approved Collection access
                                 </summary>
                                 <p className="mb-0 break-all">
                                   {publication.collectionCapability.collectionPath}
@@ -1890,7 +1873,7 @@ function PublicationDialog(
                                 </p>
                               </details>
                             ) : publication.datasetCapability ? null : (
-                              <p className="mb-0 mt-1">No collection access</p>
+                              <p className="mb-0 mt-1">No Collection access</p>
                             )}
                             {publication.datasetCapability === "unavailable" ? (
                               <p className="mb-0 mt-1 text-warning">
@@ -1916,13 +1899,13 @@ function PublicationDialog(
                             {publication.collectionCapability ? (
                               <SecondaryButton
                                 disabled={!!busy || responsesBusy}
-                                aria-label={`Revoke collection access ${publication.publicationId}`}
+                                aria-label={`Revoke Collection access ${publication.publicationId}`}
                                 onClick={() => setPendingRevoke(publication)}
                               >
                                 {busy === "revokeCollection" &&
                                 busyPublicationId === publication.publicationId
                                   ? "Revoking…"
-                                  : "Revoke collection access"}
+                                  : "Revoke Collection access"}
                               </SecondaryButton>
                             ) : null}
                             {publication.active ? (
@@ -1986,7 +1969,7 @@ function PublicationDialog(
                 <p className="mb-0 mt-1 text-[12px] text-muted">
                   {synced === false
                     ? "Sync this workspace to publish on a share link. Opening on this device does not need sync."
-                    : "Publishing on a link needs a connection to your dohc host. Approval for this device does not."}
+                    : "Publishing on a link needs a connection to your dohc server. Approval for this device does not."}
                 </p>
               </div>
               {synced === false ? null : (
@@ -2044,7 +2027,7 @@ function PublicationDialog(
               ) : null}
               {synced === false ? null : (
                 <p className="m-0 text-[13px] text-muted">
-                  Prepare the app to review its source and data access before publishing.
+                  Review this app's source and data access before publishing.
                 </p>
               )}
               <footer className="flex justify-end gap-2">
@@ -2084,7 +2067,7 @@ function PublicationDialog(
           testId="app-collection-revoke-confirm"
           cancelTestId="app-collection-revoke-cancel"
           confirmTestId="app-collection-revoke-action"
-          title="Revoke collection access?"
+          title="Revoke Collection access?"
           confirmLabel="Revoke access"
           onCancel={closeRevocation}
           onConfirm={() => {
@@ -2094,14 +2077,9 @@ function PublicationDialog(
           }}
         >
           <p>
-            The app stays published. It can no longer read the collection or accept responses
-            through dohc.
-          </p>
-          <p>Saved responses stay in your workspace. Copies already received cannot be removed.</p>
-          <p>Prepare the app again to review and restore access.</p>
-          <p>
-            To reduce access, revoke it first. Change the app's data request, then prepare and
-            review a new publication.
+            The app stays published, but it can no longer read the Collection or accept responses
+            through dohc. Saved responses stay in your workspace, and copies already received cannot
+            be removed.
           </p>
           {pendingRevoke.manifestUnavailable ? (
             <p className="text-warning">
@@ -2132,7 +2110,7 @@ function PublicationDialog(
             {!pendingWithdraw.linkCurrent
               ? "This publication belongs to a changed link. Choose a current link to publish the app again."
               : pendingWithdraw.manifestUnavailable
-                ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished."
+                ? "Source details are unavailable. This publication may belong to another app and cannot be republished."
                 : "You can review this stored revision and publish it again."}
           </p>
           <p

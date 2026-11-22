@@ -698,8 +698,12 @@ function automationStopsCopy(stops: readonly AutomationStopNotice[]): {
       file: `${stop.collectionPath}/automations.yaml`,
       reasons: new Set<string>(),
     };
-    const who = stop.stoppedFor ?? "Someone you shared with";
-    entry.reasons.add(`${who} cannot ${automationReachCopy(stop, true)}.`);
+    const who = stop.stoppedFor;
+    entry.reasons.add(
+      who
+        ? `Access for ${who} does not allow this step to ${automationReachCopy(stop, true)}.`
+        : `Someone you shared with cannot ${automationReachCopy(stop, true)}.`,
+    );
     automations.set(stop.automationId, entry);
   }
   const [only] = automations.values();
@@ -742,7 +746,7 @@ function liveDeliveryCopy(
           : "A file has";
     return {
       title: "Live editing paused",
-      body: `${subject} too many edits waiting to reach the server. They are saved on this device, and live editing is paused there until they arrive.`,
+      body: `${subject} too many edits waiting to reach the server. They are saved on this computer, and live editing is paused until they arrive.`,
       recovery: "retry",
       Icon: RefreshCw,
     };
@@ -750,7 +754,7 @@ function liveDeliveryCopy(
   if (reason === "document-unavailable") {
     return {
       title: "Live editing paused",
-      body: "A document this workspace was editing live is no longer available. Open Live documents to review it.",
+      body: "A live document in this workspace is no longer available. Open Live documents to review it.",
       recovery: "live-documents",
       Icon: RefreshCw,
     };
@@ -768,7 +772,7 @@ function liveDeliveryCopy(
   if (reason === "session-host-refused") {
     return {
       title: "Live editing stopped",
-      body: "The server stopped live editing for a document in this workspace. Your copy and its history are unchanged. People you shared it with can't edit it live for now. Open Live documents to try again.",
+      body: "The server stopped live editing for a document in this workspace. Your copy and its History are unchanged. Others cannot edit it live. Open Live documents to try again.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -778,7 +782,7 @@ function liveDeliveryCopy(
   if (reason === "session-host-diverged") {
     return {
       title: "Live editing stopped",
-      body: "The server stopped live editing because its copy of this workspace no longer matches the synced one. Edits people made live may not have reached your files. People you shared its documents with can't edit them live. Contact the server's operator.",
+      body: "The server stopped live editing because its copy of this workspace no longer matches the synced one. Live edits may not have reached your files, and others cannot edit them live. Contact the server's operator.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -787,8 +791,8 @@ function liveDeliveryCopy(
   // dohc has opened once, so the owner's first step is to open it.
   if (reason === "live-document-without-lineage") {
     return {
-      title: "Live editing can't start",
-      body: "The server can't start live editing for a document in this workspace until you open it once in dohc. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it. Open Live documents to see which document. After you open it, resume live editing there.",
+      title: "Live editing cannot start",
+      body: "The server cannot start live editing for a document until you open it once in dohc. Notes larger than 256 KB do not open as live documents. Open Live documents to see which document it is, make it smaller or split it if needed, open it in dohc, and then resume live editing.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -798,7 +802,7 @@ function liveDeliveryCopy(
   if (reason === "live-edit-unadmitted") {
     return {
       title: "Live editing stopped",
-      body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
+      body: "The server has not applied an edit to a document in this workspace. You can keep editing it in dohc, but others cannot edit it live. Open Live documents to resume live editing.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -806,8 +810,8 @@ function liveDeliveryCopy(
   // Resume in Live documents tries again now. An older server doesn't try again by itself, so it keeps the warning mark.
   if (reason === "live-history-over-budget") {
     return {
-      title: "Live editing can't start",
-      body: "A document in this workspace has too much edit history for the server to check, so live editing can't start for it. Your edits are saved and keep syncing. Open Live documents to resume live editing for it.",
+      title: "Live editing cannot start",
+      body: "A document in this workspace has too much edit history for the server to check, so live editing cannot start. Your edits are saved and keep syncing. Open Live documents to try again.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -815,16 +819,16 @@ function liveDeliveryCopy(
   // The server keeps trying it, so it shows the retry mark. Resume in Live documents tries now.
   if (reason === "live-start-failing") {
     return {
-      title: "Live editing can't start",
-      body: "The server can't start live editing for a document in this workspace. It keeps trying. Open Live documents to see which one.",
+      title: "Live editing cannot start",
+      body: "The server cannot start live editing for a document in this workspace and keeps trying. Open Live documents to see which one.",
       recovery: "live-documents",
       Icon: RefreshCw,
     };
   }
   if (reason === "conflict-parent-withheld") {
     return {
-      title: "Live editing can't resume",
-      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. A copy of it can go live. Open Live documents to see which document and make a copy.",
+      title: "Live editing cannot resume",
+      body: "A conflict was resolved in a document, so live editing cannot resume for it. People with the link can still read the last shared version, but your edits may not reach them. Open Live documents to make a copy that can go live.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -832,14 +836,14 @@ function liveDeliveryCopy(
   if (reason === "restart-required") {
     return {
       title: "Live editing paused",
-      body: "Restart dohc to enable live editing. Your edits are saved on this device.",
+      body: "Restart dohc to enable live editing. Your edits are saved on this computer.",
       recovery: "restart",
       Icon: RefreshCw,
     };
   }
   return {
     title: "Live editing retrying",
-    body: "Your edits are saved on this device.",
+    body: "Your edits are saved on this computer.",
     recovery: "retry",
     Icon: RefreshCw,
   };
@@ -913,7 +917,7 @@ export function notConnectedNotice(input: { onConnectServer: (() => void) | unde
 
 // Signed in, but not as the account that syncs this workspace. Try again
 // reads the signed-in account's session again, the same enable Settings runs.
-const ACCOUNT_UNCONFIRMED_TITLE = "Couldn't confirm this workspace's account";
+const ACCOUNT_UNCONFIRMED_TITLE = "dohc could not confirm this workspace's account";
 export function accountUnconfirmedNotice(input: {
   onTryAgain: (() => void) | undefined;
   onOpenSyncSettings: (() => void) | undefined;
@@ -1534,7 +1538,7 @@ export function NoticeCenter(props: {
       try {
         note = await onRunSentNoticeNow(notice);
       } catch (error) {
-        note = error instanceof Error ? error.message : "The automation did not start.";
+        note = error instanceof Error ? error.message : "dohc could not start the automation.";
       } finally {
         setRunningKey((current) => (current === key ? null : current));
       }
@@ -1741,7 +1745,7 @@ export function NoticeCenter(props: {
       next.push({
         id: `share-changes-${sent.proposalId}`,
         tone: "neutral",
-        title: `${sent.sender} sent you changes`,
+        title: `Changes from ${sent.sender}`,
         body: "Review them to choose what to keep.",
         ...(props.onReviewShareChanges
           ? {
@@ -1951,7 +1955,7 @@ export function NoticeCenter(props: {
             : `dohc held back ${projection.heldPathCount} shared files`,
         ...(projection.heldPaths.some((entry) => entry.reason === "local-collision")
           ? {
-              body: `${unjournalablePathMessages(projection.heldPaths).join(" ")} Then choose Refresh.`,
+              body: unjournalablePathMessages(projection.heldPaths).join(" "),
               actions: [{ label: "Refresh", onClick: props.onRefreshShareView }],
             }
           : { body: unjournalablePathMessages(projection.heldPaths).join(" ") }),
@@ -1962,7 +1966,7 @@ export function NoticeCenter(props: {
         id: "share-projection-pending",
         tone: "warning",
         title: "Shared files need repair",
-        body: "Some shared files are not current in this folder. Refresh the shared view to repair them.",
+        body: "Some shared files are out of date in this folder. Refresh the shared view to repair them.",
         actions: [{ label: "Refresh", onClick: props.onRefreshShareView }],
         Icon: AlertTriangle,
       });
@@ -1992,7 +1996,7 @@ export function NoticeCenter(props: {
         body: `${RELAY_API_VERSION_CAUSE[update]} ${
           update === "app"
             ? "Update dohc to sync again."
-            : "Ask the person who runs it to update it. Then restart dohc."
+            : "Ask the server's operator to update it, then restart dohc."
         } Your changes stay on this computer.`,
         // An app update lives on the title bar's Update button.
         ...(update === "server" ? { target: { to: "server-connection" } as const } : {}),
@@ -2016,7 +2020,7 @@ export function NoticeCenter(props: {
         id: `owner-admission-pending-${pending.originId}-${pending.originSeq}`,
         tone: "warning",
         title: "Saved locally · Pending share",
-        body: `Your edits to "${pending.path}" are saved on this device. The shared file update is pending.`,
+        body: `Your edits to "${pending.path}" are saved on this computer. The shared file update is pending.`,
         target: { to: "file", path: pending.path },
         Icon: CloudOff,
       });
@@ -2067,7 +2071,7 @@ export function NoticeCenter(props: {
         tone: "danger",
         title: engineStoreRefusalSentence(refusal),
         body: rebuild
-          ? `Your files are untouched. Rebuild moves the data store to ${ENGINE_STORE_BACKUP_DIR} and rebuilds history from your files.`
+          ? `Your files are untouched. Rebuild moves the data store to ${ENGINE_STORE_BACKUP_DIR} and rebuilds History from your files.`
           : ENGINE_STORE_UPDATE_NEXT_STEP,
         ...(rebuild
           ? {
@@ -2105,7 +2109,7 @@ export function NoticeCenter(props: {
         id: "history-recording-unavailable",
         tone: "warning",
         title: "History is off for this workspace",
-        body: "dohc could not start recording history for this workspace. Your files still save normally. Restart dohc to try again.",
+        body: "dohc could not start recording History for this workspace. Your files still save normally. Restart dohc to try again.",
         Icon: AlertTriangle,
       });
     }
@@ -2115,7 +2119,7 @@ export function NoticeCenter(props: {
         id: "agent-active",
         tone: "success",
         title: "Agent running",
-        body: "Workspace changes from this run will be attributed in history.",
+        body: "Workspace changes from this run are recorded in History.",
         actions: [{ label: "Open History", onClick: props.onOpenHistory }],
         target: { to: "history" },
         Icon: Sparkles,
@@ -2782,7 +2786,7 @@ export function NoticeCenter(props: {
                                 : `${recoveryRows.length} set-aside edits are waiting`}
                             </p>
                             <p className="m-0 mt-0.5 text-[12px] leading-snug text-muted">
-                              Copy an edit to keep its text. Dismiss deletes it for good.
+                              Copy an edit to keep its text. Dismiss deletes it permanently.
                             </p>
                             <RecoveryList rows={recoveryRows} />
                           </div>
@@ -2806,7 +2810,7 @@ export function NoticeCenter(props: {
                               Typing kept from a workspace no longer in your list
                             </p>
                             <p className="m-0 mt-0.5 text-[12px] leading-snug text-muted">
-                              Copy the typing to keep it. Dismiss deletes it for good.
+                              Copy the typing to keep it. Dismiss deletes it permanently.
                             </p>
                             <ul className="m-0 list-none p-0">
                               {keptTyping.map((kept) => (

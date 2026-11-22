@@ -75,7 +75,7 @@ export function usePersonalChatFeed({
         }
       } catch (error) {
         if (requestIsCurrent()) {
-          onError(ipcErrorMessage(error, "Could not load your Feed."), error);
+          onError(ipcErrorMessage(error, "dohc could not load Home."), error);
         }
       } finally {
         if (requestIsCurrent()) setPersonalFeedLoading(false);

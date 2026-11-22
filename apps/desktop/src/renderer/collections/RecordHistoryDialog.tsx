@@ -454,7 +454,7 @@ export function RecordHistoryDialog(props: {
       : page === null
         ? "Loading history…"
         : page.entries.length === 0
-          ? "No field of this record has changed yet."
+          ? "No field changes recorded yet."
           : "";
 
   useEffect(() => {

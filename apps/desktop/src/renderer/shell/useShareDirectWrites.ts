@@ -139,8 +139,8 @@ export function useShareDirectWrites(input: {
           showNotice({
             kind: "direct-write-stale",
             message: draft
-              ? `${writeLabel(stale[0]!)} is taken. Your text draft is kept in ${draft} on this computer. Use New record to create another record.`
-              : `${writesLabel(stale)} changed before your change reached ${ownerName}. Check the new version, or send yours as a proposal.`,
+              ? `The name ${writeLabel(stale[0]!)} is already taken. Your draft is saved in ${draft} on this computer. Use New record to create another.`
+              : `${stale.length === 1 ? "The file" : "The files"} ${writesLabel(stale)} changed before your update reached ${ownerName}. Check the new version, or send yours as a proposal.`,
             retry: draft ? null : () => void push(),
             send: sendAsProposal,
           });
@@ -161,7 +161,7 @@ export function useShareDirectWrites(input: {
           lasting
             ? {
                 kind: "direct-write-refused",
-                message: `${refusal ? `${refusal} ` : ""}${ownerName}'s share doesn't take your Collection changes directly. Send them as a proposal.`,
+                message: `${refusal ? `${refusal} ` : ""}This share from ${ownerName} does not accept Collection changes directly. Send them as a proposal.`,
                 retry: () => void push(),
                 send: sendAsProposal,
               }
@@ -230,8 +230,8 @@ function refusalSentence(
   const reason = refused[0]!.reason.trim().replace(/[.\s]+$/u, "");
   const changes = refused.length === 1 ? "your change" : `${refused.length} of your changes`;
   return reason
-    ? `The sync relay did not accept ${changes}: ${reason}.`
-    : `The sync relay did not accept your change to ${writesLabel(refused)}.`;
+    ? `The server did not accept ${changes}: ${reason}.`
+    : `The server did not accept your change to ${writesLabel(refused)}.`;
 }
 
 // The name a person knows a write by: its Collection's folder for a new

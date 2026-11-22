@@ -316,7 +316,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
         <div className="dohc-elevated w-130 max-w-[85vw] rounded-xl border border-line bg-panel p-5">
           <h2 className="m-0 text-base font-semibold text-ink">Create form</h2>
           <p className="mt-2 text-[13px] text-muted">
-            This collection has no approved public create action.
+            This Collection has no approved public create action.
           </p>
           <SecondaryButton className="mt-3" onClick={close}>
             Close
@@ -467,7 +467,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                             Create public choices
                           </summary>
                           <p className="text-[12px] text-muted">
-                            The new action can expose every related record's key and selected label.
+                            The new action exposes every related record's ID and selected label.
                             Choose a label safe to share.
                           </p>
                           <label className="text-[12px] text-muted">
@@ -497,11 +497,11 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                             </select>
                           </label>
                           <p className="text-[12px] text-muted">
-                            This changes the rules. Existing apps need review before they can use
-                            the new revision.
+                            This changes the Collection's rules. Existing apps need review before
+                            using the new revision.
                           </p>
                           <p className="text-[12px] text-muted">
-                            After approval, choose Create form again and select the new public
+                            After approving, open Create form again and choose the new public
                             action.
                           </p>
                           <SecondaryButton
@@ -518,8 +518,8 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                         </details>
                       ) : choiceActions(field).length === 0 ? (
                         <p className="m-0 text-[12px] text-muted">
-                          Approve a public read action for the related key and label in this
-                          dataset, then reopen this form.
+                          Approve a public read action for the related ID and label in this
+                          Collection, then reopen this form.
                         </p>
                       ) : null}
                     </div>

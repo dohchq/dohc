@@ -132,7 +132,7 @@ export function FieldsDialog(props: {
         <div className="flex flex-col gap-1">
           {props.schema.fields.length === 0 ? (
             <span className="text-sm text-muted">
-              No fields in this collection yet. Add one below.
+              No fields in this Collection yet. Add one below.
             </span>
           ) : null}
           {props.schema.fields.map((field) =>
@@ -206,11 +206,11 @@ export function FieldsDialog(props: {
                 props.onChooseButtonAutomation &&
                 props.buttonStates?.get(field.name)?.kind === "no-automation" ? (
                   <SecondaryButton
-                    aria-label={`Choose what it does: ${field.name}`}
+                    aria-label={`Choose action: ${field.name}`}
                     disabled={pending}
                     onClick={() => props.onChooseButtonAutomation?.(field.name)}
                   >
-                    Choose what it does
+                    Choose action
                   </SecondaryButton>
                 ) : null}
                 {field.type === "select" || field.type === "multi-select" ? (

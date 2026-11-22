@@ -485,7 +485,7 @@ it("leaves an agent that came back after Undo read the file", async () => {
   onNotice.mock.calls[0]![1]!();
   await vi.waitFor(() =>
     expect(onError).toHaveBeenCalledWith(
-      "Undo didn't replace the new Codex, so the one you removed stays removed.",
+      "Undo did not replace the new Codex, so the removed agent stays removed.",
     ),
   );
   expect(onOrder).not.toHaveBeenCalled();
@@ -516,7 +516,7 @@ it("holds Check back in Restricted Mode with the band's words, and adds an agent
   expect(Object.keys(onSave.mock.calls[0]![0].agents)).toContain("codex-2");
   expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
   expect(onError).not.toHaveBeenCalled();
-  expect(screen.queryByText("Didn't reply.")).toBeNull();
+  expect(screen.queryByText("Did not reply")).toBeNull();
   await userEvent.click(
     (await openAgent("Codex")).getByRole("switch", { name: "Run Codex on this computer" }),
   );

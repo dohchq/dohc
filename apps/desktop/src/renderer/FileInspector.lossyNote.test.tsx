@@ -195,16 +195,16 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     const notice = await screen.findByTestId("lossy-note-notice");
-    expect(notice.textContent).toContain("This note has parts dohc can't show.");
+    expect(notice.textContent).toContain("This note has parts dohc cannot show.");
     await waitFor(() =>
       expect(screen.getByTestId("view-markdown").textContent).toContain("See the docs."),
     );
     expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).toBe("true");
     expect(
       screen
-        .getByRole("button", { name: "Edit", description: "This note has parts dohc can't show." })
+        .getByRole("button", { name: "Edit", description: "This note has parts dohc cannot show." })
         .getAttribute("title"),
-    ).toBe("This note has parts dohc can't show.");
+    ).toBe("This note has parts dohc cannot show.");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(screen.queryByTestId("properties-panel")).toBeNull();
     expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
@@ -274,7 +274,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" receivedShare />);
 
     const notice = await screen.findByTestId("lossy-note-notice");
-    expect(notice.textContent).toContain("This note has parts dohc can't show.");
+    expect(notice.textContent).toContain("This note has parts dohc cannot show.");
     expect(screen.queryByTestId("lossy-note-edit-anyway")).toBeNull();
     await user.click(screen.getByTestId("lossy-note-open-externally"));
     expect(bridge.openFileExternally).toHaveBeenCalledWith({
@@ -300,7 +300,7 @@ describe("a lossy note", () => {
     const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() =>
       expect(dialog.textContent).toContain(
-        "Saving rewrites the parts dohc can't show. History keeps the original.",
+        "Saving rewrites the parts dohc cannot show. History keeps the original.",
       ),
     );
     expect(bridge.listEngineMoments).toHaveBeenCalledWith({

@@ -97,7 +97,7 @@ export async function removeAgentWithUndo(input: {
     Object.hasOwn(saved.settings.agents, agent.id) ||
     saved.agentProblems?.some((problem) => problem.id === agent.id)
   ) {
-    onError?.(`dohc didn't remove ${agent.name} because the settings file still lists it.`);
+    onError?.(`dohc did not remove ${agent.name} because the settings file still lists it.`);
     return false;
   }
   if (
@@ -132,7 +132,7 @@ export async function removeAgentWithUndo(input: {
         const holder =
           current.agents[agent.id]?.name ?? (problem ? (problem.name ?? problem.id) : null);
         const keep = (name: string) =>
-          onError?.(`Undo didn't replace the new ${name}, so the one you removed stays removed.`);
+          onError?.(`Undo did not replace the new ${name}, so the removed agent stays removed.`);
         if (holder !== null) {
           keep(holder);
           return;

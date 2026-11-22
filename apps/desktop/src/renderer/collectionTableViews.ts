@@ -138,7 +138,7 @@ export async function writeTableViews(
       text,
       expectedContentHash: previous.contentHash,
     });
-    if (result.status !== "written") throw Error("The saved views changed elsewhere. Try again.");
+    if (result.status !== "written") throw Error("The saved views changed elsewhere.");
   }
   signal.throwIfAborted();
   return readTableViews(workspaceId, document.datasetId, document.tableId, signal);

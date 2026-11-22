@@ -396,7 +396,7 @@ describe("the Sharing view's two lists", () => {
       within(rows.find((row) => row.dataset.shareId === shareId)!).queryByTestId("sharing-row-note")
         ?.textContent ?? null;
     expect(note("share-1")).toBe(
-      "This note hasn't been sent yet. Leave the note or close its tab to send it.",
+      "This note has not been sent yet. Leave it or close its tab to send it.",
     );
     expect(note("share-2")).toBeNull();
     // An ended share has no link left to show the note.
@@ -411,7 +411,7 @@ describe("the Sharing view's two lists", () => {
     await showLane("received");
     const failed = await screen.findByTestId("sharing-received-failed");
     expect(failed.querySelector("p")!.textContent).toBe(
-      "dohc could not check the shares to your account.",
+      "dohc could not check shares to your account.",
     );
     expect(notices.report).toHaveBeenCalledWith(
       expect.objectContaining({ identity: "sharing-received" }),
@@ -569,7 +569,7 @@ describe("the actions Settings offers on a share", () => {
     );
     const confirm = screen.getByTestId("sharing-end-confirm");
     expect(confirm.textContent).toContain(
-      "End this share with 1 person? sam@example.com keeps a read-only copy and stops receiving updates.",
+      "End this share with 1 person? Updates stop for sam@example.com, and their copy stays read-only.",
     );
     expect(document.activeElement).toBe(screen.getByTestId("sharing-end-cancel"));
     await userEvent.keyboard("{Escape}");
@@ -713,9 +713,7 @@ describe("the actions Settings offers on a share", () => {
 
     await choose(await byShare("in-2"), "Add to workspace");
     await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledTimes(2));
-    expect(callbacks.reportError.mock.calls[1]![0]).toBe(
-      "This share is no longer shared with you.",
-    );
+    expect(callbacks.reportError.mock.calls[1]![0]).toBe("This item is no longer shared with you.");
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   });
 
@@ -727,7 +725,9 @@ describe("the actions Settings offers on a share", () => {
     await choose(row, "Leave share…");
     expect(bridgeMock.leaveRelayShare).not.toHaveBeenCalled();
     const confirm = within(row).getByTestId("sharing-leave-confirm");
-    expect(confirm.textContent).toContain("You lose access to funnel.csv. Sam can share it");
+    expect(confirm.textContent).toContain(
+      "You lose access to funnel.csv. To regain access, ask Sam to share it again.",
+    );
     expect(document.activeElement).toBe(within(confirm).getByTestId("sharing-leave-cancel"));
 
     answerWith({ received: answer("received", { rows: [] }) });
@@ -786,7 +786,7 @@ describe("the actions Settings offers on a share", () => {
 
     await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
     expect(callbacks.reportError.mock.calls[0]![0]).toBe(
-      "dohc could not take this share off your list.",
+      "dohc could not remove this share from your list.",
     );
     answerWith({ received: answer("received", { rows: [] }) });
     await act(async () => callbacks.reportError.mock.calls[0]![2]());
@@ -1021,7 +1021,7 @@ describe("copying a share's code or invitation", () => {
       "Remove access",
     ]);
     expect(within(pending!).getByTestId("sharing-person-detail").textContent).toBe(
-      "Invited, not signed in yet",
+      "Pending invite",
     );
     expect(await offered(pending!)).toContain("Resend invitation");
     expect(within(dependent!).getByTestId("sharing-person-detail").textContent).toBe(
@@ -1050,7 +1050,7 @@ describe("copying a share's code or invitation", () => {
       grantId: "grant-1",
     });
     expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
-    expect(detail.textContent).toBe("Sending the email…");
+    expect(detail.textContent).toBe("Sending email…");
 
     const held = menuItem(await personMenu(person!), /^Resend invitation/);
     expect(held.getAttribute("aria-disabled")).toBe("true");
@@ -1064,17 +1064,17 @@ describe("copying a share's code or invitation", () => {
     );
 
     await act(async () => sent({ invitationEmail: "sent" }));
-    expect(detail.textContent).toBe("Email invite sent.");
-    expect(within(person!).getByRole("status").textContent).toBe("Email invite sent.");
+    expect(detail.textContent).toBe("Email invitation sent.");
+    expect(within(person!).getByRole("status").textContent).toBe("Email invitation sent.");
 
     const limited = {
       invitationEmail: "limit" as const,
       invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
     };
     for (const [next, words] of [
-      [{ invitationEmail: "unavailable" }, "This server sends no email."],
+      [{ invitationEmail: "unavailable" }, "This server does not send email."],
       [limited, "No email sent: 50 of 50 invitation emails used in the last 24 hours."],
-      [{ invitationEmail: "recent" }, "Tried a moment ago. Try again in a minute."],
+      [{ invitationEmail: "recent" }, "Sent recently. Wait a minute before trying again."],
     ] as const) {
       bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce(next);
       await userEvent.click(menuItem(await personMenu(person!), "Resend invitation"));
@@ -1106,7 +1106,7 @@ describe("copying a share's code or invitation", () => {
         retry: expect.any(Function),
       }),
     );
-    expect(detail.textContent).toBe("The email could not be sent.");
+    expect(detail.textContent).toBe("dohc could not send the email.");
     expect(detail.querySelector(".text-danger")).not.toBeNull();
     expect(clearNotice).not.toHaveBeenCalled();
 
@@ -1132,7 +1132,7 @@ describe("copying a share's code or invitation", () => {
       shareId: "share-1",
       grantId: "grant-1",
     });
-    expect(detail.textContent).toBe("Sending the email…");
+    expect(detail.textContent).toBe("Sending email…");
     const held = menuItem(await personMenu(person!), /^Resend invitation/);
     expect(held.getAttribute("aria-disabled")).toBe("true");
     await userEvent.keyboard("{Escape}");
@@ -1140,7 +1140,7 @@ describe("copying a share's code or invitation", () => {
     await act(async () => sent({ invitationEmail: "sent" }));
     expect(clearNotice).toHaveBeenCalledExactlyOnceWith("share-invitation-email:grant-1");
     expect(reportFailure).toHaveBeenCalledTimes(2);
-    expect(detail.textContent).toBe("Email invite sent.");
+    expect(detail.textContent).toBe("Email invitation sent.");
   });
 
   it("keeps the notice when its Try again is pressed while the person's resend is under way", async () => {
@@ -1191,12 +1191,12 @@ describe("copying a share's code or invitation", () => {
         .textContent;
     const [person] = await people(item);
     await userEvent.click(menuItem(await personMenu(person!), "Resend invitation"));
-    expect(detail()).toBe("Sending the email…");
+    expect(detail()).toBe("Sending email…");
 
     await userEvent.click(toggle);
     expect(within(item).queryByTestId("sharing-person")).toBeNull();
     await userEvent.click(toggle);
-    expect(detail()).toBe("Sending the email…");
+    expect(detail()).toBe("Sending email…");
     const [reopened] = await people(item);
     expect(
       menuItem(await personMenu(reopened!), /^Resend invitation/).getAttribute("aria-disabled"),
@@ -1204,19 +1204,19 @@ describe("copying a share's code or invitation", () => {
     await userEvent.keyboard("{Escape}");
     expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledOnce();
     await act(async () => sends[0]!({ invitationEmail: "sent" }));
-    expect(detail()).toBe("Email invite sent.");
+    expect(detail()).toBe("Email invitation sent.");
 
     await userEvent.click(menuItem(await personMenu(reopened!), "Resend invitation"));
     await userEvent.click(toggle);
     await act(async () => sends[1]!({ invitationEmail: "unavailable" }));
     expect(reportFailure).toHaveBeenCalledExactlyOnceWith({
       message: "dohc could not email sam@example.com their invitation.",
-      cause: new Error("This server sends no email."),
+      cause: new Error("This server does not send email."),
       identity: "share-invitation-email:grant-1",
       retry: expect.any(Function),
     });
     await userEvent.click(toggle);
-    expect(detail()).toBe("This server sends no email.");
+    expect(detail()).toBe("This server does not send email.");
 
     await userEvent.click(toggle);
     await userEvent.click(toggle);
@@ -1674,7 +1674,7 @@ describe("Shared by me, by what is shared", () => {
     await userEvent.click(within(item).getByTestId("sharing-item-toggle"));
 
     expect(within(item).getByTestId("sharing-person").textContent).toBe(
-      "Nnew@example.comCan editInvited, not signed in yet",
+      "Nnew@example.comCan editPending invite",
     );
   });
 
@@ -1975,7 +1975,7 @@ describe("Shared by me, by what is shared", () => {
     );
     const confirm = within(nova!).getByTestId("sharing-end-confirm");
     expect(confirm.textContent).toContain(
-      "Remove nova@example.com's access to product-plan.md? This ends the access their email invitation gave. Copies they already made stay with them.",
+      "Remove nova@example.com's access to product-plan.md? Their access ends. Copies they already made stay with them.",
     );
     expect(document.activeElement).toBe(within(confirm).getByTestId("sharing-end-cancel"));
     await userEvent.click(within(confirm).getByRole("button", { name: "Remove access" }));
@@ -2052,7 +2052,7 @@ describe("Shared by me, by what is shared", () => {
       within(await personMenu(sam!)).getByRole("menuitem", { hidden: true, name: "Remove access" }),
     );
     expect(within(sam!).getByTestId("sharing-end-confirm").textContent).toBe(
-      "Remove sam@example.com's access to product-plan.md? This ends the access they got by joining through a link. They can join again while the link is active. End the link in Share to keep them out.CancelRemove access",
+      "Remove sam@example.com's access to product-plan.md? Their link access ends, though they can join again while the link is active. End the link in Share to keep them out.CancelRemove access",
     );
     await userEvent.click(within(sam!).getByRole("button", { name: "Remove access" }));
     await waitFor(() =>
@@ -2088,7 +2088,7 @@ describe("Shared by me, by what is shared", () => {
       within(menu).getByRole("menuitem", { hidden: true, name: "Remove access" }),
     );
     expect(within(nova!).getByTestId("sharing-end-confirm").textContent).toBe(
-      "Remove nova@example.com's access to product-plan.md? This ends the email invitation they have not used yet.CancelRemove access",
+      "Remove nova@example.com's access to product-plan.md? Their pending email invitation ends.CancelRemove access",
     );
     await userEvent.click(within(nova!).getByRole("button", { name: "Remove access" }));
     await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledOnce());
@@ -2142,7 +2142,7 @@ describe("Shared by me, by what is shared", () => {
       within(await openMenu(other)).getByRole("menuitem", { hidden: true, name: "End share…" }),
     );
     expect(within(other).getByTestId("sharing-end-confirm").textContent).toContain(
-      "End this share with 1 person? sam@example.com keeps a read-only copy and stops receiving updates.Cancel",
+      "End this share with 1 person? Updates stop for sam@example.com, and their copy stays read-only.Cancel",
     );
   });
 
@@ -2156,7 +2156,7 @@ describe("Shared by me, by what is shared", () => {
       within(await openMenu(item)).getByRole("menuitem", { hidden: true, name: "End share…" }),
     );
     expect(within(item).getByTestId("sharing-end-confirm").textContent).toBe(
-      "End this share with 1 person? sam@example.com keeps a read-only copy and stops receiving updates. Not every share is shown yet. Any others stay as they are.CancelEnd share",
+      "End this share with 1 person? Updates stop for sam@example.com, and their copy stays read-only. Not every share is loaded yet. Any others stay unchanged.CancelEnd share",
     );
     expect(bridgeMock.listSharingAccess).not.toHaveBeenCalledWith(
       expect.objectContaining({ cursor: expect.anything() }),
@@ -2185,7 +2185,7 @@ describe("Shared by me, by what is shared", () => {
     expect(remove).toHaveProperty("disabled", true);
     expect(remove.textContent).toBe("Remove access");
     const why = within(confirm).getByTestId("sharing-end-held");
-    expect(why.textContent).toBe("dohc is changing this access.");
+    expect(why.textContent).toBe("Changing access…");
     expect(remove.getAttribute("aria-describedby")).toBe(why.id);
     await userEvent.click(remove);
     expect(bridgeMock.revokeRelayShareGrant).not.toHaveBeenCalled();
@@ -3019,7 +3019,7 @@ describe("Shared with me, by who shared", () => {
       await openRow("in-4");
       await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledTimes(2));
       expect(callbacks.reportError.mock.calls[1]![0]).toBe(
-        "This share is no longer shared with you.",
+        "This item is no longer shared with you.",
       );
       expect(callbacks.onOpenShare).not.toHaveBeenCalled();
     });

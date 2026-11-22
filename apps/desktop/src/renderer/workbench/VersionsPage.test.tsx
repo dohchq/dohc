@@ -1187,12 +1187,12 @@ describe("VersionsPage", () => {
     const empty = await waitFor(() => screen.getByTestId("versions-page-empty"));
     expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
     expect(empty.textContent).toBe(
-      "Make a version to try changes without touching Main.New version…",
+      "Create a version to try changes without touching Main.New version…",
     );
     expect(screen.getAllByTestId("versions-page-new")).toHaveLength(1);
     await user.click(within(empty).getByTestId("versions-page-new"));
     expect(screen.getByTestId("version-new-same").textContent).toBe(
-      "Chats are the same in every version. Files over 5\u00a0MB (text over 10\u00a0MB) aren't copied, so changing one here changes it in Main too.",
+      "Chats are the same in every version. Files over 5\u00a0MB, or text over 10\u00a0MB, are not copied, so changing one here changes it in Main too.",
     );
   });
 
@@ -1204,7 +1204,7 @@ describe("VersionsPage", () => {
     expect(document.activeElement).toBe(screen.getByTestId("version-new-input"));
     expect(screen.getByTestId("version-new-start").textContent).toBe("DraftChanged 1h ago by Ice");
     expect(screen.getByTestId("version-new-no-merge").textContent).toBe(
-      "It can't merge into Main, because it starts from Draft.",
+      "It cannot merge into Main because it starts from Draft.",
     );
     await user.keyboard("{Escape}");
     expect(screen.queryByTestId("version-new-dialog")).toBeNull();

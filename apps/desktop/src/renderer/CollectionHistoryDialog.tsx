@@ -125,7 +125,7 @@ function History(props: CollectionHistoryDialogProps) {
         ))}
       {page && !page.entries.length && (
         <p className="m-0 text-[13px] text-muted">
-          No saved operations on this page. Refresh to check for changes.
+          No saved actions on this page. Refresh to check for changes.
         </p>
       )}
       <div className="min-h-0 overflow-auto">
@@ -204,8 +204,7 @@ function History(props: CollectionHistoryDialogProps) {
                 </dl>
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <span className="max-w-80 text-muted">
-                    Undo restores the shown values only if the record has not changed since that
-                    edit.
+                    Undo restores these values only if the record has not changed since.
                   </span>
                   <SecondaryButton
                     className="flex items-center gap-1.5"
@@ -263,7 +262,7 @@ function History(props: CollectionHistoryDialogProps) {
             if (page?.nextBeforeRevision) void load(page.nextBeforeRevision);
           }}
         >
-          Older operations
+          Older actions
         </SecondaryButton>
       </div>
     </Overlay>

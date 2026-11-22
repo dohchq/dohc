@@ -222,7 +222,7 @@ export function WorkingLine(props: { testIdPrefix: string; working: ChatWorking 
         kind="agent"
         size="strip"
       />
-      <span className="min-w-0 truncate">{working.agentName} is working</span>
+      <span className="min-w-0 truncate">{`Working: ${working.agentName}`}</span>
       <WorkingDots presentation={working.presentation} />
       {working.onStop ? (
         <StopButton
@@ -254,7 +254,7 @@ export function WaitingLine(props: {
         kind="agent"
         size="strip"
       />
-      <span className="min-w-0 truncate">{`${props.agentName} will reply when it's free.`}</span>
+      <span className="min-w-0 truncate">{`Waiting for ${props.agentName} to finish its current run.`}</span>
     </div>
   );
 }
@@ -540,7 +540,7 @@ export function ChatThreadPanel(props: {
         testIdPrefix={`${props.testIdPrefix}-thread`}
         messages={messages}
         loading={props.loading && !props.parent}
-        emptyLabel="This message isn't here anymore."
+        emptyLabel="This message is no longer here."
         key={parentId ?? "none"}
         listRef={props.listRef}
         flashMessageId={props.flashMessageId}

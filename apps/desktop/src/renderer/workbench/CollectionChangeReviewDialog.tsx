@@ -48,7 +48,7 @@ export const CHANGE_ICONS: Record<CollectionChangeIcon, { icon: LucideIcon; tone
   rule: { icon: Shield, tone: "text-muted" },
   data: { icon: Database, tone: "text-muted" },
 };
-export const CHANGE_LOSS = "History can't undo this change.";
+export const CHANGE_LOSS = "History cannot undo this change.";
 
 export type CollectionChangeReviewLoad =
   | { kind: "loading" }
@@ -232,8 +232,10 @@ export function CollectionChangeReviewCard(props: {
         {/* One message asks for one change, so there is nothing to pick yet. */}
         <span className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-md border border-line bg-bg px-2.5 py-[5px] text-[13px] text-ink">
           <span className="min-w-0 truncate">
-            Change to {asked.proposal.name} ·{" "}
-            {ready ? ready.files.length : asked.proposal.files.length} files
+            {(() => {
+              const fileCount = ready ? ready.files.length : asked.proposal.files.length;
+              return `Change to ${asked.proposal.name} · ${fileCount} ${fileCount === 1 ? "file" : "files"}`;
+            })()}
           </span>
           {authors.length ? (
             <span className="shrink-0 text-[12px] text-subtle">{authors.join(", ")}</span>

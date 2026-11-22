@@ -124,8 +124,7 @@ const LANE = {
     short: "By me",
     scope: "for this workspace",
     empty: "Nothing shared from this workspace yet.",
-    unexplained:
-      "Access information is unavailable for this workspace. This does not mean that nothing is shared.",
+    unexplained: "dohc could not check access for this workspace. Some files may still be shared.",
     signedOut: SIGNED_OUT_ACCESS,
     failed: "dohc could not check the shares from this workspace.",
     moreFailed: "dohc could not load more shares from this workspace.",
@@ -138,9 +137,9 @@ const LANE = {
     scope: "for your account",
     empty: "Nothing shared with you yet.",
     unexplained:
-      "Access information is unavailable for your account. This does not mean that nothing is shared with you.",
-    signedOut: "Connect a server to get what others share with you.",
-    failed: "dohc could not check the shares to your account.",
+      "dohc could not check access for your account. Some items may still be shared with you.",
+    signedOut: "Connect a server to see what others share with you.",
+    failed: "dohc could not check shares to your account.",
     moreFailed: "dohc could not load more shares to your account.",
   },
 } as const;
@@ -373,10 +372,10 @@ const levelNow = (row: LeveledRow, change: AccessChange | undefined): Level =>
 const changingAccess = (change: AccessChange | undefined) => !!change?.asked;
 const writeUnderWay = (change: AccessChange | undefined, shareBusy: boolean) =>
   changingAccess(change) || shareBusy;
-const CHANGING_ACCESS = "dohc is changing this access.";
+const CHANGING_ACCESS = "Changing access…";
 
 const END_LINKS_IN_SHARE = "End links in Share.";
-const NOT_ALL_SHOWN = "Not every share is shown yet. Any others stay as they are.";
+const NOT_ALL_SHOWN = "Not every share is loaded yet. Any others stay unchanged.";
 const HELD_WHO: Who = {
   text: "Show more to see who has it",
   title: "dohc has not loaded all of this share yet.",
@@ -398,10 +397,12 @@ function endConfirmWords(
     also.unseen ? ` ${NOT_ALL_SHOWN}` : ""
   }`;
   if (!waiting) {
-    const who = also.more || names.length > 3 ? "They" : namesOf(names, "The recipient");
-    return `End this share with ${people}? ${who} ${
-      several ? "keep read-only copies and stop" : "keeps a read-only copy and stops"
-    } receiving updates.${link}`;
+    const who = also.more || names.length > 3 ? null : namesOf(names, "");
+    return `End this share with ${people}? ${
+      who
+        ? `Updates stop for ${who}, and ${several ? "their copies stay" : "their copy stays"} read-only.`
+        : `${several ? "They keep read-only copies and stop" : "The recipient keeps a read-only copy and stops"} receiving updates.`
+    }${link}`;
   }
   const senders = namesOf(waiting.senders, "someone");
   return `End this share with ${people} and decline ${
@@ -419,10 +420,10 @@ const invitedOnly = (grant: AccessShareRow) =>
 function removalConfirmWords(grant: AccessShareRow, item: string): string {
   const what =
     grant.via === "dependent"
-      ? "This ends the access they got by joining through a link. They can join again while the link is active. End the link in Share to keep them out."
+      ? "Their link access ends, though they can join again while the link is active. End the link in Share to keep them out."
       : invitedOnly(grant)
-        ? "This ends the email invitation they have not used yet."
-        : "This ends the access their email invitation gave. Copies they already made stay with them.";
+        ? "Their pending email invitation ends."
+        : "Their access ends. Copies they already made stay with them.";
   return `Remove ${recipientOf(grant)}'s access to ${item}? ${what}`;
 }
 
@@ -1493,7 +1494,7 @@ function ReceivedRow(props: {
       : null;
   const from = entry.ended ? `From ${sender.name}` : null;
   const note = entry.removed
-    ? [row?.removalMessage, mount ? "Your copy stays readable but won't update." : null]
+    ? [row?.removalMessage, mount ? "Your copy stays readable but will not update." : null]
         .filter(Boolean)
         .join(" ") || null
     : null;
@@ -1603,7 +1604,7 @@ function ReceivedRow(props: {
           testId="sharing-leave"
           words={`Leave this share? You lose access to ${subject.name}${
             mount ? ", and its folder leaves this workspace" : ""
-          }. ${sender.heading} can share it with you again.`}
+          }. To regain access, ask ${sender.heading} to share it again.`}
           verb="Leave share"
           running="Leaving…"
           busy={props.busy}
@@ -2446,9 +2447,7 @@ export function SharingView(props: {
   async function receivedFiles(shareId: string) {
     const found = await bridge().getRelayReceivedShare({ shareId });
     if (!found.found)
-      throw new NoLongerShared(
-        found.removed?.message ?? "This share is no longer shared with you.",
-      );
+      throw new NoLongerShared(found.removed?.message ?? "This item is no longer shared with you.");
     if ("chats" in found) throw new Error("Join this from Chats.");
     return found.share;
   }
@@ -2528,7 +2527,7 @@ export function SharingView(props: {
     } catch (cause) {
       props.reportError(
         ended
-          ? "dohc could not take this share off your list."
+          ? "dohc could not remove this share from your list."
           : "dohc could not leave this share.",
         cause,
         () => void leave(shareId, ended ? undefined : mounted, ended),
@@ -2554,7 +2553,7 @@ export function SharingView(props: {
     }
     if (what === "code") return details.shareCode;
     if (!details.browserInvitationUrl)
-      throw new Error("This server does not make browser invitations.");
+      throw new Error("This server does not support browser invitations.");
     return details.browserInvitationUrl;
   }
 

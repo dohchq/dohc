@@ -53,8 +53,7 @@ async function changeAccess(target: Target, dataset: DatasetDescription, change:
           },
         },
   );
-  if (result.kind !== "grant-updated")
-    throw Error("dohc could not confirm Collection access. Try again.");
+  if (result.kind !== "grant-updated") throw Error("dohc could not confirm Collection access.");
 }
 // A change that answered after its dialog closed takes a toast and a row, whose Try again runs it again.
 function reportClosed(
@@ -67,8 +66,8 @@ function reportClosed(
   report({
     title:
       change.principalKey !== undefined
-        ? "Access wasn't removed"
-        : `Access wasn't saved for ${change.person}`,
+        ? "dohc could not remove access"
+        : `dohc could not save access for ${change.person}`,
     message: readError(namingCollectionMove(cause, dataset.name)).words ?? UNKNOWN_ERROR_WORDS,
     cause,
     identity: changeIdentity(dataset.datasetId),
@@ -140,8 +139,7 @@ function Permissions({
         bridge().listRelayShares(),
       ]);
       if (!alive.current || token !== request.current) return;
-      if (permissions.kind !== "permissions")
-        throw Error("dohc could not read Collection access. Try again.");
+      if (permissions.kind !== "permissions") throw Error("dohc could not read Collection access.");
       setPage({ permissions: permissions.permissions, nextCursor: permissions.nextCursor });
       setPlace(permissions.place ?? null);
       setRecipients(
@@ -152,7 +150,7 @@ function Permissions({
       );
     } catch (cause) {
       if (alive.current && token === request.current)
-        onError("Could not load Collection access.", cause, () => {
+        onError("dohc could not load Collection access.", cause, () => {
           void load(after);
         });
     } finally {
@@ -196,7 +194,7 @@ function Permissions({
         onFailure({
           ...(principalKey ? { principalKey } : {}),
           words: withErrorWords(
-            principalKey ? "Access wasn't removed." : "Access wasn't saved.",
+            principalKey ? "dohc could not remove access." : "dohc could not save access.",
             cause,
           ),
         });
@@ -278,8 +276,7 @@ function Permissions({
             ))}
             {!actions.length ? (
               <p className="m-0 text-[12px] text-muted">
-                These rules contain no actions that can be shared. Review the Collection source to
-                add one.
+                This Collection has no shareable actions. Add one in the Collection source.
               </p>
             ) : null}
           </fieldset>
@@ -312,7 +309,7 @@ function Permissions({
             busy ? (
               <SkeletonRows rows={2} label="Loading access…" />
             ) : (
-              <p className="m-0 text-[12px] text-muted">Load access to review people and apps.</p>
+              <p className="m-0 text-[12px] text-muted">Refresh to see who has access.</p>
             )
           ) : !page.permissions.length ? (
             <p className="m-0 text-[12px] text-muted">Only you have access.</p>
@@ -341,7 +338,8 @@ function Permissions({
                       {permission.principal}
                     </div>
                     <div className="text-muted">
-                      {permission.metadata.operationIds.length} allowed actions
+                      {permission.metadata.operationIds.length} allowed{" "}
+                      {permission.metadata.operationIds.length === 1 ? "action" : "actions"}
                     </div>
                   </div>
                   {permission.kind === "data" ? (

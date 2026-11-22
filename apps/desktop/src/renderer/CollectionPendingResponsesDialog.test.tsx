@@ -45,7 +45,7 @@ describe("CollectionPendingResponsesDialog", () => {
     expect(screen.queryByText(saved.reference)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Clear retry" }));
     const confirmation = await screen.findByRole("alertdialog");
-    expect(confirmation.textContent).toContain("participant may not have seen");
+    expect(confirmation.textContent).toContain("person might not have seen a confirmation");
     expect(confirmation.textContent).toContain("This cannot be undone");
     expect(props.onReconcile).not.toHaveBeenCalled();
     props.onLoad.mockResolvedValueOnce({ datasetId, entries: [], nextAfter: null });
@@ -56,7 +56,7 @@ describe("CollectionPendingResponsesDialog", () => {
         expect.any(AbortSignal),
       ),
     );
-    await screen.findByText("No pending responses. Refresh to check for changes.");
+    await screen.findByText("No pending responses.");
   });
   it("keeps unconfirmed attempts for the original app", async () => {
     const props = fixture();
@@ -74,7 +74,7 @@ describe("CollectionPendingResponsesDialog", () => {
       nextAfter: null,
     });
     render(<CollectionPendingResponsesDialog {...props} />);
-    await screen.findByText("No saved result is confirmed yet.");
+    await screen.findByText("dohc has not confirmed a saved result yet.");
     expect(screen.getByText("Retry in the original app")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Clear retry" })).toBeNull();
     expect(props.onCancel).not.toHaveBeenCalled();
@@ -91,7 +91,7 @@ describe("CollectionPendingResponsesDialog", () => {
     render(<CollectionPendingResponsesDialog {...props} />);
     fireEvent.click(await screen.findByRole("button", { name: "Cancel response" }));
     const confirmation = screen.getByRole("alertdialog");
-    expect(confirmation.textContent).toContain("prevents its old retry from saving later");
+    expect(confirmation.textContent).toContain("an older retry cannot save later");
     expect(confirmation.textContent).toContain("cannot be undone");
     expect(props.onCancel).not.toHaveBeenCalled();
     fireEvent.click(within(confirmation).getByRole("button", { name: "Cancel response" }));
@@ -99,10 +99,12 @@ describe("CollectionPendingResponsesDialog", () => {
       { workspaceId: "w", datasetId, reference: saved.reference, acknowledge: true },
       expect.any(AbortSignal),
     );
-    expect(screen.getByText("No saved result is confirmed yet. 1 attached file.")).toBeTruthy();
+    expect(
+      screen.getByText("dohc has not confirmed a saved result yet. 1 attached file."),
+    ).toBeTruthy();
     props.onLoad.mockResolvedValue({ datasetId, entries: [], nextAfter: null });
     await act(async () => pending.resolve({ cancelled: true }));
-    await screen.findByText("No pending responses. Refresh to check for changes.");
+    await screen.findByText("No pending responses.");
     expect(props.onReconcile).not.toHaveBeenCalled();
   });
   it("ignores a previous workspace's late response and aborts its request", async () => {
@@ -115,7 +117,7 @@ describe("CollectionPendingResponsesDialog", () => {
     view.rerender(<CollectionPendingResponsesDialog {...props} workspaceId="other" />);
     expect(props.onLoad.mock.calls[0]![1].aborted).toBe(true);
     await act(async () => pending.resolve({ datasetId, entries: [saved], nextAfter: null }));
-    await screen.findByText("No pending responses. Refresh to check for changes.");
+    await screen.findByText("No pending responses.");
     expect(screen.queryByText("Submit registration")).toBeNull();
   });
 });

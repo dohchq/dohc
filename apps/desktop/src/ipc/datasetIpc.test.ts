@@ -1103,7 +1103,7 @@ it.each(
   ).rejects.toThrow(
     waiting
       ? `"${path}" has an outside change waiting`
-      : `dohc cannot use "${path}" for this change. dohc cannot take in this file's Markdown.`,
+      : `dohc cannot use "${path}" for this change. dohc cannot read this file's Markdown.`,
   );
   expect(
     f.sourceRequests.filter((request) => request.method === "versionedText.captureSources"),
@@ -1465,7 +1465,7 @@ it.each([2, 3])("recovers revision %s to the base address", async (number) => {
 });
 
 const unclaimed =
-  "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
+  "dohc does not know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
 
 it("returns an unclaimed Collections list refusal as data on every refresh (#3016)", async () => {
   const root = await createTestScratch("dohc-dataset-ipc-unclaimed-");

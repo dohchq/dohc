@@ -280,7 +280,7 @@ describe("desktop chat bookmarks", () => {
   it("keeps a bookmark and its page when the page has live editing on", async () => {
     const test = fixture();
     const refused = Object.assign(
-      new Error("dohc can't archive the page while it has live editing on"),
+      new Error("dohc cannot archive the page while it has live editing on"),
       { name: "LivePageOwnedError" },
     );
     test.capture.checkGeneratedTextArchive.mockRejectedValueOnce(refused);
@@ -302,7 +302,7 @@ describe("desktop chat bookmarks", () => {
     const test = fixture();
     // Live editing starts between the first check and the page's move.
     const refused = Object.assign(
-      new Error("dohc can't archive the page while it has live editing on"),
+      new Error("dohc cannot archive the page while it has live editing on"),
       { name: "LivePageOwnedError" },
     );
     test.capture.archiveGeneratedTextFile.mockRejectedValueOnce(refused);

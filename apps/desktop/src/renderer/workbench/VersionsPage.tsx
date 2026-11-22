@@ -342,14 +342,14 @@ export function VersionsPage(props: {
     body = versions.loadFailed ? (
       <RetryRow testId="versions-page-retry" onRetry={versions.reload} />
     ) : (
-      <SkeletonRows layout="list" label="Loading versions..." />
+      <SkeletonRows layout="list" label="Loading versions…" />
     );
   } else if (onlyMain) {
     body = (
       <EmptyState
         picture={EMPTY_ART.versions}
         data-testid="versions-page-empty"
-        title="Make a version to try changes without touching Main."
+        title="Create a version to try changes without touching Main."
       >
         {newVersion}
       </EmptyState>

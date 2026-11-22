@@ -639,7 +639,7 @@ export function GraphView(props: {
         setState((previous) => ({
           ...previous,
           status: "error",
-          error: ipcErrorMessage(error, "Graph failed to load"),
+          error: ipcErrorMessage(error, "dohc could not load the graph."),
         }));
         reportError.current?.("dohc could not load the graph.", error, retry);
       }
@@ -909,10 +909,10 @@ export function GraphView(props: {
         {gathering ? (
           <p
             role="status"
-            title="Gathering linked mentions"
+            title="Gathering linked mentions…"
             className="min-w-0 truncate text-[12px] text-subtle"
           >
-            Gathering linked mentions
+            Gathering linked mentions…
           </p>
         ) : null}
         <span className="ml-auto" />
@@ -959,7 +959,7 @@ export function GraphView(props: {
       </div>
 
       {empty ? (
-        <EmptyState icon={FileText} title="Add a Markdown file to start building your graph." />
+        <EmptyState icon={FileText} title="Add a page to start a graph." />
       ) : (
         <div
           className={
@@ -978,7 +978,7 @@ export function GraphView(props: {
             >
               {showLoading ? (
                 <p role="status" className="text-[12px] text-subtle">
-                  Gathering linked mentions
+                  Gathering linked mentions…
                 </p>
               ) : null}
             </div>
@@ -995,7 +995,7 @@ export function GraphView(props: {
           deferredSearch.trim() &&
           variant === "page" ? (
             <p className="absolute inset-x-0 top-1/2 text-center text-sm text-muted">
-              {`No files match "${deferredSearch.trim()}". Try a shorter search.`}
+              {`No files match "${deferredSearch.trim()}".`}
             </p>
           ) : null}
           {settingsOpen ? (

@@ -67,7 +67,7 @@ export function CollectionAttachmentInput(
       const uploaded = parseAppBackendFile(await props.upload(request, abort.signal));
       if (!alive.current || abort.signal.aborted) return;
       if (uploaded.name !== request.file.name || uploaded.byteLength !== request.file.size)
-        throw new Error("The collection returned a different file.");
+        throw new Error("The Collection returned a different file.");
       setFile(uploaded);
       props.onChange(uploaded.fileId);
     } catch (cause) {
@@ -97,7 +97,7 @@ export function CollectionAttachmentInput(
           event.target.value = "";
           if (!selected) return;
           if (selected.size < 1 || selected.size > APP_BACKEND_UPLOAD_BYTES) {
-            setInvalid("Choose a nonempty file up to 5 MB.");
+            setInvalid("Choose a non-empty file up to 5 MB.");
             return;
           }
           void upload({
@@ -251,7 +251,7 @@ export function CollectionRelationInput(
         new Set(response.options.map((option) => JSON.stringify(option.value))).size !==
           response.options.length
       )
-        throw new Error("The collection returned invalid related records.");
+        throw new Error("The Collection returned invalid related records.");
       setOptions(response.options);
       setHasMore(response.hasMore);
     } catch (cause) {
@@ -348,7 +348,7 @@ export function CollectionRelationInput(
               </SecondaryButton>
             ))}
           {options.length === 0 ? (
-            <span className="text-[12px] text-muted">No records match. Try another search.</span>
+            <span className="text-[12px] text-muted">No records match your search.</span>
           ) : null}
           {hasMore ? (
             <span className="text-[12px] text-muted">More records match. Narrow your search.</span>

@@ -107,7 +107,7 @@ function importCsv(
 const importFailed = (path: string) =>
   `dohc could not import this file to ${deriveImportTarget(path).dbPath}.`;
 // Main's refusals start with these words and go on to say why.
-const UNDO_FAILED = "Cannot undo this import.";
+const UNDO_FAILED = "dohc could not undo this import.";
 
 // The shell's hooks an import answers through. They outlive the CSV's view,
 // and the shell remounts for each workspace (DesktopRoot), so they never
@@ -1097,7 +1097,7 @@ export function CsvPreviewBound(props: {
   if (!props.onImport) {
     return (
       <p data-testid="csv-preview-bound" className="mb-0 mt-2 text-[12px] text-subtle">
-        Showing the first {MAX_CSV_PREVIEW_ROWS} of {props.rowCount} rows — import to SQLite to work
+        Showing the first {MAX_CSV_PREVIEW_ROWS} of {props.rowCount} rows. Import to SQLite to work
         with all of them.
       </p>
     );

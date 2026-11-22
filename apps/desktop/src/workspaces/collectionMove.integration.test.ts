@@ -377,7 +377,7 @@ it("gives a teammate access to a Collection once it has gone up to the server, a
 });
 
 const stopped =
-  "This Collection didn't finish moving to relay.test. Its records are kept on this computer.";
+  "This Collection did not finish moving to relay.test. Its records are kept on this computer.";
 
 it.each([
   [

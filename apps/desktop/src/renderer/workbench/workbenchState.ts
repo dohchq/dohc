@@ -397,7 +397,7 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     virtual: true,
     singleton: false,
     title: () => "Compare with Main",
-    tooltip: () => "Compare this Version with Main",
+    tooltip: () => "Compare this version with Main",
     explorerTitle: () => "Compare with Main",
     glyph: () => "compare",
   },

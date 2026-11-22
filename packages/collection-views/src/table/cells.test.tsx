@@ -502,7 +502,7 @@ describe("CellEditor", () => {
       expect(close).not.toHaveBeenCalled();
     }
     const error = screen.getByRole("alert");
-    expect(error.textContent).toBe("This value is not a number. Enter a number.");
+    expect(error.textContent).toBe("Enter a number.");
     expect(input.getAttribute("aria-invalid")).toBe("true");
     expect(input.getAttribute("aria-describedby")).toBe(error.id);
     expect(input.hasAttribute("data-unsaved")).toBe(true);
@@ -1058,10 +1058,10 @@ describe("option picker", () => {
       />
     );
     const view = render(editor({}));
-    expect(screen.queryByRole("button", { name: "todo options" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Options for todo" })).toBeNull();
     view.rerender(editor({ onOptionColorChange }));
 
-    const menu = screen.getByRole("button", { name: "todo options" });
+    const menu = screen.getByRole("button", { name: "Options for todo" });
     expect(menu.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(menu);
     const colors = screen.getByRole("radiogroup", { name: "Color for todo" });
@@ -1089,7 +1089,7 @@ describe("option picker", () => {
         onOptionColorChange={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "doing options" }));
+    fireEvent.click(screen.getByRole("button", { name: "Options for doing" }));
     fireEvent.keyDown(search(), { key: "Escape" });
     expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(close).not.toHaveBeenCalled();

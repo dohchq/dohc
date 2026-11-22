@@ -91,7 +91,7 @@ function reportNoteCopyFailure(notices: CopyNotices, failure: unknown, note: Cop
   const notOpen = failure instanceof NoteNotOpen;
   notices.report?.({
     message: notOpen
-      ? `dohc could not copy ${note.name} as Markdown, because ${note.name} is not open.`
+      ? `dohc could not copy ${note.name} as Markdown because it is not open.`
       : `dohc could not copy ${note.name} as Markdown.`,
     cause: failure,
     retry: () => copyNoteAsMarkdown(note, notices),
@@ -266,7 +266,7 @@ export function DocumentMenu(props: DocumentMenuProps) {
     );
     const serialized = await serializeOrFail(
       "copy-markdown",
-      "Couldn't copy",
+      "Could not copy",
       "Copy as Markdown",
       action,
       attempt,
@@ -295,7 +295,7 @@ export function DocumentMenu(props: DocumentMenuProps) {
       failure = error ?? new Error("clipboard write failed");
     }
     if (attempts.isCurrent(attempt)) {
-      showFeedback("copy-markdown", failure ? "Couldn't copy" : "Copied");
+      showFeedback("copy-markdown", failure ? "Could not copy" : "Copied");
     }
     // The write took this note's text, so its outcome is the note's, even
     // after the menu closed, another action ran or another note opened. Only
@@ -325,7 +325,7 @@ export function DocumentMenu(props: DocumentMenuProps) {
   ) {
     const serialized = await serializeOrFail(
       `export-${kind}`,
-      "Couldn't export",
+      "Could not export",
       `Export as ${kind.toUpperCase()}`,
       action,
       attempt,

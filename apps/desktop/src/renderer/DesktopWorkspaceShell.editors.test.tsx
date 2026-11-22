@@ -696,7 +696,7 @@ describe("ui-state merge-on-load", () => {
     expect(
       boundary?.textContent,
       "reading the last refresh instead of the record clears the warning while the content is still missing",
-    ).toContain("dohc skipped 1 update outside what this share covers");
+    ).toContain("dohc skipped 1 update outside this share");
     expect(boundary?.textContent).toContain("granter@dohc.test");
     expect(boundary?.getAttribute("title")).toContain("version-other");
     // The overflow keeps no class, so it names no cause and sends the reader

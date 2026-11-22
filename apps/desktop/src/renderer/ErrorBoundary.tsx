@@ -98,7 +98,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
         </span>
         <span className="max-w-md text-[12px] text-subtle">
           {this.props.recoveryMessage ?? (
-            <>The rest of dohc keeps working. Try again, or switch to another file or view.</>
+            <>The rest of dohc keeps working. Switch to another file or view.</>
           )}
         </span>
         <button
@@ -147,12 +147,12 @@ export class AppErrorBoundary extends Component<{ children: ReactNode }, AppErro
           style={{ height: TITLEBAR_HEIGHT_PX }}
         />
         <DohcMark size={30} className="text-line" />
-        <span className="text-sm font-semibold text-ink">something went wrong</span>
+        <span className="text-sm font-semibold text-ink">dohc ran into an unexpected error</span>
         <span className="max-w-lg break-words text-xs leading-relaxed text-muted">
           {errorMessage(this.state.error)}
         </span>
         <span className="max-w-lg text-[12px] text-subtle">
-          Your files are safe on disk. Reload to pick up where you left off.
+          Your files are saved on this computer. Reload to continue.
         </span>
         <button
           type="button"

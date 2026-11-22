@@ -79,7 +79,7 @@ export function undoSentence(undone: Undone, onServer = false): string {
     );
   }
   if (undone.actions > 0)
-    parts.push(`${count(undone.actions, "action", "actions")} can't be undone.`);
+    parts.push(`${count(undone.actions, "action", "actions")} cannot be undone.`);
   return parts.join(" ");
 }
 
@@ -117,9 +117,9 @@ export function undoPreviewSentences(preview: Preview): string[] {
       `The Collection's rules do not let dohc undo ${count(preview.irreversible, "change", "changes")}.`,
     );
   if (preview.actions > 0)
-    lines.push(`${count(preview.actions, "action", "actions")} can't be undone.`);
+    lines.push(`${count(preview.actions, "action", "actions")} cannot be undone.`);
   if (tried > 0)
-    lines.push(`You cannot undo ${tried === 1 ? "this deletion" : "these deletions"} in dohc.`);
+    lines.push(`dohc cannot undo ${tried === 1 ? "this deletion" : "these deletions"}.`);
   return lines;
 }
 
@@ -228,7 +228,10 @@ function runSummary(run: Run): string {
     ...(fields > 0 ? [`changed ${count(fields, "field", "fields")}`] : []),
     ...(added > 0 ? [`added ${count(added, "record", "records")}`] : []),
   ];
-  const text = parts.length === 0 ? "Nothing changed" : parts.join(" and ");
+  const text =
+    parts.length === 0
+      ? "Nothing changed"
+      : new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(parts);
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 

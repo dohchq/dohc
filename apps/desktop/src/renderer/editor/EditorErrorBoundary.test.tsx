@@ -37,7 +37,7 @@ describe("EditorErrorBoundary", () => {
     render(<Harness />);
 
     expect(screen.getByTestId("editor-crash-recovery")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Render again" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(screen.getByTestId("editor-crash-recovery")).toBeTruthy();
   });
 

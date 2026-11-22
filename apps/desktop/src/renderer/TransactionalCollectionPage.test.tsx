@@ -942,7 +942,7 @@ describe("a Data Collection's table", () => {
     expect(sent(invoke, edit)).toHaveLength(1);
     rerender(<TransactionalCollectionPage {...props} copy={{ offline: true, savedAtMs: 1 }} />);
     const offline =
-      "dohc didn't save this change. This Collection is read-only until it is back online.";
+      "dohc did not save this change. This Collection is read-only until it is back online.";
     expect(mark("Name", 1)).toBe("refused");
     expect(why("Name", 1)).toBe(offline);
     expect(cell("Name", 1).textContent).toContain("Bea");
@@ -1025,7 +1025,7 @@ describe("a Data Collection's table", () => {
       Object.assign(new Error("This record changed. Refresh the table."), {
         code: "operation_refused",
       }),
-      "People refused the change. Open it to check its records.",
+      "The Collection People refused the change. Open it to check its records.",
     ],
   ])(
     "reports a change that fails after its page closed, naming the Collection (%s)",
@@ -1325,7 +1325,7 @@ describe("a Data Collection's table", () => {
       expect(
         document.getElementById(row.getAttribute("aria-describedby")!)!.textContent,
         name,
-      ).toBe("dohc could not load the records. Refresh first.");
+      ).toBe("dohc could not load the records. Refresh to try again.");
       fireEvent.click(row);
     }
     expect(handlers.onReviewSchema).not.toHaveBeenCalled();
@@ -1363,7 +1363,7 @@ describe("a Data Collection's table", () => {
     expect(handlers.onReviewSchema).not.toHaveBeenCalled();
     expect(handlers.onArchive).not.toHaveBeenCalled();
     expect(viewTabs().every((tab) => (tab as HTMLButtonElement).disabled)).toBe(true);
-    expect(screen.getByLabelText<HTMLInputElement>("Search collection").disabled).toBe(true);
+    expect(screen.getByLabelText<HTMLInputElement>("Search Collection").disabled).toBe(true);
     expect(command("Open source").getAttribute("aria-disabled")).toBeNull();
     fireEvent.click(command("Open source"));
     expect(handlers.onOpenSource).toHaveBeenCalledOnce();
@@ -2416,7 +2416,7 @@ describe("a Data Collection's record panel and forms", () => {
     expect(kept.value).toBe("Bob");
     expect(
       screen.getByText(
-        "This field changed, so this value can't be saved. Copy it if you need it, then clear it.",
+        "This field changed, so dohc cannot save this value. Copy it if you need it, then clear it.",
       ),
     ).toBeTruthy();
   });
@@ -2577,7 +2577,7 @@ describe("a Data Collection's record panel and forms", () => {
     expect(panel()).toBe(record);
     expect(within(record).queryByRole("button", { name: /^Open / })).toBeNull();
     expect(
-      within(record).queryByText("Open an action to review its inputs before running it."),
+      within(record).queryByText("Choose an action to review its inputs before running it."),
     ).toBeNull();
   });
 
@@ -2881,9 +2881,7 @@ describe("a Data Collection's record panel and forms", () => {
     expect(sent(invoke, create)).toHaveLength(1);
     await act(async () => answer.resolve({ result: { id: 7, version: 1 } }));
     await waitFor(() =>
-      expect(onNotice).toHaveBeenCalledWith(
-        "Created a record. It is not among the records on screen.",
-      ),
+      expect(onNotice).toHaveBeenCalledWith("Created 1 record. It is not shown in this view."),
     );
     expect(onNotice).toHaveBeenCalledTimes(1);
     expect(sent(invoke, create)).toHaveLength(1);
@@ -2903,9 +2901,7 @@ describe("a Data Collection's record panel and forms", () => {
     expect(new Set(sent(invoke, create).map((request) => request.idempotencyKey)).size).toBe(3);
     // None of the three is among this page's records. The burst gets one notice, after the read that follows it.
     await waitFor(() =>
-      expect(onNotice).toHaveBeenCalledWith(
-        "Created 3 records. They are not among the records on screen.",
-      ),
+      expect(onNotice).toHaveBeenCalledWith("Created 3 records. They are not shown in this view."),
     );
     expect(onNotice).toHaveBeenCalledTimes(1);
     expect(strip()).toBeNull();
@@ -3290,9 +3286,9 @@ describe("a Data Collection's reads", () => {
         within(region).getByText("This Collection is waiting to reopen. Try again in 5 seconds."),
       ).toBeTruthy();
       await act(() => vi.advanceTimersByTimeAsync(1));
-      expect(within(region).getByText("The wait has ended.")).toBeTruthy();
+      expect(within(region).getByText("Ready to try again.")).toBeTruthy();
       fireEvent.click(within(region).getByRole("button", { name: "Try again" }));
-      expect(within(region).queryByText("The wait has ended.")).toBeNull();
+      expect(within(region).queryByText("Ready to try again.")).toBeNull();
       expect(within(region).getByText("Loading records…")).toBeTruthy();
       expect(onSettled).not.toHaveBeenCalled();
       await act(async () => answer.resolve({ result: page() }));
@@ -3494,22 +3490,17 @@ it("shows the ⚡ button before New record, and a ⚡ that names the automations
   expect(marks.map((found) => found.closest("button")?.textContent)).toEqual(["Amount", "Status"]);
   const sortStatus = screen.getByRole("button", { name: "Status" });
   expect(document.getElementById(sortStatus.getAttribute("aria-describedby")!)?.textContent).toBe(
-    '"Review new people" and "Stamp" set this field',
+    'Set by "Review new people" and "Stamp"',
   );
   expect(screen.queryByRole("tooltip")).toBeNull();
   fireEvent.focus(sortStatus);
-  expect(screen.getByRole("tooltip").textContent).toBe(
-    '"Review new people" and "Stamp" set this field',
-  );
+  expect(screen.getByRole("tooltip").textContent).toBe('Set by "Review new people" and "Stamp"');
   fireEvent.blur(sortStatus);
   expect(
     within(openPanel())
       .getAllByTestId("table-field-mark")
       .map((found) => found.getAttribute("aria-label")),
-  ).toEqual([
-    '"Round the amount" sets this field',
-    '"Review new people" and "Stamp" set this field',
-  ]);
+  ).toEqual(['Set by "Round the amount"', 'Set by "Review new people" and "Stamp"']);
 });
 
 describe("when the Collection's fields change", () => {
@@ -3533,7 +3524,7 @@ describe("when the Collection's fields change", () => {
     };
   const reads = (invoke: Invoke) => sent(invoke, read);
   const CHANGED =
-    "This field changed, so this value can't be saved. Copy it if you need it, then clear it.";
+    "This field changed, so dohc cannot save this value. Copy it if you need it, then clear it.";
   const newRecord = () =>
     fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
 
@@ -3954,7 +3945,7 @@ describe("when the Collection's fields change", () => {
         .map((cell) => cell.textContent),
     ).toEqual(["Bob", ""]);
     expect(newRowNote()!.textContent).toContain(
-      "Amount changed, or a new record no longer takes it, so its value left this row. A notice has what you typed.",
+      "The Amount field changed or a new record no longer takes it, so its value was cleared. Check Notices for what you typed.",
     );
     fireEvent.keyDown(grid(), { key: "Enter" });
     await waitFor(() => expect(sent(result.invoke, create)).toHaveLength(1));
@@ -5386,7 +5377,7 @@ describe("what a change that did not save leaves for the person", () => {
     await waitFor(() => expect(sent(invoke, create)).toHaveLength(2));
     await waitFor(() =>
       expect(view.onError).toHaveBeenLastCalledWith(
-        "People refused the change. Open it to check its records.",
+        "The Collection People refused the change. Open it to check its records.",
         expect.objectContaining({ code: "operation_refused" }),
         null,
       ),

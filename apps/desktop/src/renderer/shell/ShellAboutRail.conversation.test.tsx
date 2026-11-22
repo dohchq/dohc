@@ -203,7 +203,7 @@ afterEach(() => {
 describe("About for an open conversation", () => {
   it("loads until the conversation's page says what it shows", async () => {
     render(<Rail />);
-    expect(screen.getByText("Loading About...")).toBeTruthy();
+    expect(screen.getByText("Loading About…")).toBeTruthy();
     expect(screen.queryByTestId("about-header")).toBeNull();
     publish("workspace-a", GENERAL, conversation({}));
     expect((await screen.findByTestId("about-header")).textContent).toBe("general");
@@ -289,7 +289,7 @@ describe("About for an open conversation", () => {
 
     act(() => forA());
     rerender(<Rail workspaceId="workspace-a" />);
-    expect(screen.getByText("Loading About...")).toBeTruthy();
+    expect(screen.getByText("Loading About…")).toBeTruthy();
     expect(screen.queryByTestId("about-header")).toBeNull();
     expect(screen.queryByText("b-general")).toBeNull();
   });
@@ -427,7 +427,7 @@ describe("About for an open conversation", () => {
     await screen.findByTestId("about-access-empty");
 
     rerender(<Rail focusedTabPath={LAUNCH} />);
-    expect(screen.getByText("Loading About...")).toBeTruthy();
+    expect(screen.getByText("Loading About…")).toBeTruthy();
     publish("workspace-a", LAUNCH, conversation({ name: "launch", channelWireId: "wire-launch" }));
     expect((await screen.findByTestId("about-header")).textContent).toBe("launch");
     expect(screen.getByTestId("about-access-toggle").getAttribute("aria-expanded")).toBe("true");
@@ -660,7 +660,7 @@ describe("Links for an open conversation", () => {
     [
       "a known reason",
       new Error("Error [EBUSY]: EBUSY: resource busy or locked"),
-      "dohc could not load the links. Another program is using this file or folder.",
+      "dohc could not load the links. Another program is using this file or folder. Close it there, then try again.",
     ],
     [
       "its own words",
@@ -772,7 +772,7 @@ describe("Links for an open conversation", () => {
   it("reads nothing before the page says what it shows, or while Links is closed, which it stays", async () => {
     bridgeMock.chatLinks.mockResolvedValue(linksPage([mention("notes/plan.md", SAM, 1)]));
     const { rerender } = render(<Rail />);
-    expect(screen.getByText("Loading About...")).toBeTruthy();
+    expect(screen.getByText("Loading About…")).toBeTruthy();
     expect(bridgeMock.chatLinks).not.toHaveBeenCalled();
     publish("workspace-a", GENERAL, conversation({}));
     publish("workspace-a", LAUNCH, conversation({ name: "launch", channelWireId: "wire-launch" }));

@@ -237,7 +237,7 @@ describe("FileInspector renders markdown through the shared component map", () =
     // About lists the links into a document, so the document asks for none.
     expect(bridgeMock.linksIn).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open the full file externally" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open full file externally" }));
     await waitFor(() =>
       expect(bridgeMock.openFileExternally).toHaveBeenCalledWith({
         workspaceId: "ws-1",

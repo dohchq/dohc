@@ -220,7 +220,7 @@ const LAYOUT_TABS: readonly CollectionFrameTab[] = [
 const NEW_RECORD_OPEN = "Create or cancel the new record first.";
 const RECORDS_LOADING = "Wait for the records to load.";
 const FILE_UPLOADING = "Wait for the file to upload.";
-const RECORDS_FAILED = "dohc could not load the records. Refresh first.";
+const RECORDS_FAILED = "dohc could not load the records. Refresh to try again.";
 type Query = {
   after: TransactionalCursor | null;
   search: string;
@@ -241,7 +241,7 @@ type Undo = {
 /** A field of the new record in the panel: its definition now, or the one its value was typed under once it is gone, and whether its value no longer fits. */
 type FormField = { field: TransactionalField; value: AppBackendJson; changed: boolean };
 const VALUE_CHANGED =
-  "This field changed, so this value can't be saved. Copy it if you need it, then clear it.";
+  "This field changed, so dohc cannot save this value. Copy it if you need it, then clear it.";
 const CHANGE_GONE =
   "The Collection's rules no longer allow this change. Copy what you need, then choose Cancel.";
 const SAVE_OFFLINE = "You can save this once the Collection is back online.";
@@ -765,7 +765,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (alive.current && sequence.current === mine && !abort.signal.aborted) {
         setPage(null);
         setDetails(null);
-        failLoad(`dohc could not load ${table?.name ?? "this collection"}.`, cause, () => {
+        failLoad(`dohc could not load ${table?.name ?? "this Collection"}.`, cause, () => {
           if (alive.current) void load(next, history);
         });
       }
@@ -891,7 +891,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       setPrevious([]);
     }
     if (page === null) void load(next, []);
-    else void reread(`dohc could not load ${table?.name ?? "this collection"}.`);
+    else void reread(`dohc could not load ${table?.name ?? "this Collection"}.`);
   }, [contractKey]);
   // A new record in the panel, with changes, when the page closes opens again once the page shows its records.
   const keptKey = JSON.stringify([workspaceId, dataset.datasetId, tableId]);
@@ -1182,7 +1182,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     }
     readWanted.current = false;
     if (visual) setVisualChanged((value) => value + 1);
-    else void reread(`dohc could not load ${table?.name ?? "this collection"}.`);
+    else void reread(`dohc could not load ${table?.name ?? "this Collection"}.`);
   }
   useEffect(() => {
     if (readWanted.current && !busy && !visualBusy) readForQueue();
@@ -1530,8 +1530,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (unseen > 0)
       props.onNotice?.(
         unseen === 1
-          ? "Created a record. It is not among the records on screen."
-          : `Created ${unseen} records. They are not among the records on screen.`,
+          ? "Created 1 record. It is not shown in this view."
+          : `Created ${unseen} records. They are not shown in this view.`,
       );
   }, [records]);
   const editableIds = fields
@@ -1727,7 +1727,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
           `dohc did not save what you typed in the ${field} field of the new record. The field changed, or a new record no longer takes it.`,
           row.values,
         );
-        return `${field} changed, or a new record no longer takes it, so its value left this row. A notice has what you typed.`;
+        return `The ${field} field changed or a new record no longer takes it, so its value was cleared. Check Notices for what you typed.`;
       },
     };
   }, [creatableKey]);
@@ -1852,7 +1852,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   if (!table || !read)
     return (
       <section aria-label="Collection" className="p-4 text-sm text-muted">
-        This collection is unavailable. Ask its owner for access.
+        This Collection is unavailable. Ask its owner for access.
       </section>
     );
   // Why the panel's new record can't be made, or why its buttons wait, over them.
@@ -2160,7 +2160,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
               {recordActions.length ? (
                 <div className="mt-4 flex flex-col gap-2">
                   <p className="m-0 text-[12px] text-muted">
-                    Open an action to review its inputs before running it.
+                    Choose an action to review its inputs before running it.
                   </p>
                   <div className="flex flex-wrap gap-2">
                     {recordActions.map((operation) => (
@@ -2572,8 +2572,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
                 page.rows.length > 0 || (!query.search && canCreate)
                   ? undefined
                   : query.search
-                    ? "No records match. Try a shorter search."
-                    : "No records yet. Refresh to check for new submissions."
+                    ? "No records match your search."
+                    : "No records yet. Refresh to check for updates."
               }
             />
           </div>
@@ -2610,7 +2610,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
 }
 
 type LoadFailure = { words: string; retry(): void; wait: { ms: number; ended: boolean } | null };
-const WAIT_ENDED = "The wait has ended.";
+const WAIT_ENDED = "Ready to try again.";
 /** Records that could not load: why, and Try again, which reads them as the toast's Try again does. A Collection waiting to reopen shows a clock. */
 export function CollectionUnavailable({
   waiting,

@@ -3163,7 +3163,7 @@ mark.dohc-highlight,
  * visible and clickable instead of collapsing to nothing. */
 .dohc-math--empty .dohc-math__preview::after,
 .dohc-math__preview.dohc-math--empty::after {
-  content: 'Empty math — click to edit';
+  content: 'Empty math. Click to edit.';
   color: var(--dohc-subtle);
   font-size: 12px;
   font-style: italic;

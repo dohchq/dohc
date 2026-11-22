@@ -52,10 +52,10 @@ describe("an app move while History is off", () => {
     const renaming = move("notes/page.md", "notes/renamed.md");
     await expect(renaming).rejects.toBeInstanceOf(HistoryOffError);
     await expect(renaming).rejects.toThrow(
-      `dohc can't rename "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`,
+      `dohc cannot rename "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`,
     );
     await expect(move("notes/page.md", "page.md")).rejects.toThrow(
-      `dohc can't move "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`,
+      `dohc cannot move "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`,
     );
     expect(await notes()).toEqual(["box", "page.md", "plain.txt"]);
   });
@@ -76,10 +76,10 @@ describe("an app delete while History is off", () => {
     const page = remove("notes/page.md");
     await expect(page).rejects.toBeInstanceOf(HistoryOffError);
     await expect(page).rejects.toThrow(
-      `dohc can't delete "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`,
+      `dohc cannot delete "notes/page.md" while History is off\n${HISTORY_OFF_PAGE_BODY}`,
     );
     await expect(remove("notes")).rejects.toThrow(
-      `dohc can't delete "notes" while History is off\n${HISTORY_OFF_FOLDER_BODY}`,
+      `dohc cannot delete "notes" while History is off\n${HISTORY_OFF_FOLDER_BODY}`,
     );
     expect(trashItem).not.toHaveBeenCalled();
     expect(await notes()).toEqual(["box", "page.md", "plain.txt"]);

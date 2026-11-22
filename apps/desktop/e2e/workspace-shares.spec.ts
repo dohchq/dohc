@@ -400,7 +400,7 @@ confidentialTest.describe("View link lifecycle", () => {
         ).toBeVisible();
         await expect(dialog).toContainText("The link includes files added later.");
         await expect(dialog).toContainText("The sync relay can read this content.");
-        await expect(dialog).toContainText("Can read, but not change.");
+        await expect(dialog).toContainText("Can read, not change.");
         await page.keyboard.press("Escape");
 
         await dialog.getByRole("button", { name: "Create link", exact: true }).click();
@@ -881,7 +881,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         engineYDocApply,
       };
     });
-    expect(bypassAttempts.agent).toContain("Agents can't run in a shared view");
+    expect(bypassAttempts.agent).toContain("Agents cannot run in a shared view");
     expect(bypassAttempts.sitePreview).toContain("disabled in a shared view");
     // The copyable MCP config for a shared view carries the share's level, so
     // the launched server registers only the write tools that level grants.
@@ -906,7 +906,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     expect(revoke.status).toBe(200);
     await page.getByTestId("shared-view-refresh").click();
     await expect(banner).toContainText("This share was ended");
-    await expect(banner).toContainText("Your copy stays readable but won't update anymore.");
+    await expect(banner).toContainText("Your copy stays readable but will not update anymore.");
     await expect(page.getByTestId("shared-view-refresh")).toHaveCount(0);
     await expect(page.getByText("The comet-tail draft, round two.")).toBeVisible();
   } finally {

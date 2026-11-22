@@ -271,7 +271,7 @@ describe("usage record in Privacy", () => {
       true,
     );
     expect(confirm.textContent).toContain("Clear the usage record?");
-    expect(confirm.textContent).toContain("dohc cannot restore them.");
+    expect(confirm.textContent).toContain("This cannot be undone.");
     fireEvent.click(within(confirm).getByTestId("usage-record-clear-copy"));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(usageRecordText(RECORD)));
     expect(bridge.clearUsageRecord).not.toHaveBeenCalled();
@@ -307,14 +307,14 @@ describe("usage record in Privacy", () => {
     [
       "EACCES",
       "usage-record-retry",
-      "Fix the file or its permissions at the path below, then try again.",
-      "dohc could not read the usage record (EACCES). Fix the file or its permissions, then try again.",
+      "Fix the file or its permissions at the path below.",
+      "dohc could not read the usage record (EACCES). Fix the file or its permissions.",
     ],
     [
       "INVALID_USAGE_RECORD",
       "usage-record-start",
-      "Start a new record, and dohc keeps this file in the same folder.",
-      "dohc could not read the usage record (INVALID_USAGE_RECORD). Start a new record in Privacy, or fix the file and try again.",
+      "Starting a new record keeps the old file in the same folder.",
+      "dohc could not read the usage record (INVALID_USAGE_RECORD). Start a new record in Privacy, or fix the file.",
     ],
   ])(
     "reports %s once with Try again, and offers only its way out",

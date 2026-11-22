@@ -527,7 +527,7 @@ test("protected join preserves a failed folder, then restores exact secret and b
 
     await expect(page.getByTestId("join-sync-passphrase")).toBeFocused();
     await expect(page.getByTestId("join-used-folder")).toHaveText(
-      `Files stay in ${temp.rootPath}.`,
+      `Files from the last attempt stay in ${temp.rootPath}.`,
     );
     await expect(page.getByTestId("join-error")).toHaveCount(0);
     await expect.poll(async () => (await readdir(temp.rootPath)).sort()).toContain(".dohc");

@@ -51,7 +51,7 @@ describe("application menu template", () => {
     const { template, sendCommand } = build();
     const fileItems = items(template, "File");
     const importFiles = fileItems.find((entry) => entry.label === "Import files");
-    const exportWorkspace = fileItems.find((entry) => entry.label === "Export workspace as zip");
+    const exportWorkspace = fileItems.find((entry) => entry.label === "Export workspace as ZIP");
     const fakeWindow = { id: 4 };
 
     (importFiles?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);

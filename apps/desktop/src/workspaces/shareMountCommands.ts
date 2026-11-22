@@ -407,7 +407,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               );
             }
             throw new Error(
-              "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
+              "dohc could not add the share. Nothing was added to this workspace. Check your connection and try again.",
             );
           }
         });

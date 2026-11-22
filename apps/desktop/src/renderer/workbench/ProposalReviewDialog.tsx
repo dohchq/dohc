@@ -15,7 +15,7 @@ import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unif
 // The name the granter reads. A submitter whose email the relay could not
 // state reads the same way the share banner names an unknown account.
 export function proposerName(sent: { proposedByEmail: string | null } | null): string {
-  return sent?.proposedByEmail ?? "another dohc user";
+  return sent?.proposedByEmail ?? "another person";
 }
 
 function operationLabel(operation: ShareProposalOperation): string {
@@ -82,7 +82,7 @@ function ProposalFileSection(props: {
         if (!liveToken.isCurrent(token)) return;
         setContent({
           status: "error",
-          message: ipcErrorMessage(error, "Couldn't load this file."),
+          message: ipcErrorMessage(error, "dohc could not load this file."),
         });
       }
     })();
@@ -168,7 +168,10 @@ export function ProposalReviewDialog(props: {
   }, [workspaceId, proposalId]);
   const load: LoadState =
     read.error !== null
-      ? { status: "error", message: ipcErrorMessage(read.error, "Couldn't load these changes.") }
+      ? {
+          status: "error",
+          message: ipcErrorMessage(read.error, "dohc could not load these changes."),
+        }
       : read.value
         ? { status: "ready", changes: read.value }
         : { status: "loading" };
@@ -185,7 +188,7 @@ export function ProposalReviewDialog(props: {
         props.onClose();
       } catch (error) {
         if (!liveToken.isCurrent(token)) return;
-        setSettleError(ipcErrorMessage(error, "dohc couldn't record your decision."));
+        setSettleError(ipcErrorMessage(error, "dohc could not record your decision."));
         setSettling(false);
       }
     },
@@ -206,7 +209,7 @@ export function ProposalReviewDialog(props: {
       >
         <header className="border-b border-line px-4 py-3">
           <h3 id="proposal-review-title" className="m-0 text-base font-semibold text-ink">
-            Changes from {sender}
+            {load.status === "ready" ? `Changes from ${sender}` : "Review changes"}
           </h3>
         </header>
 

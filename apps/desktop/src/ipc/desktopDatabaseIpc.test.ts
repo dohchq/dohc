@@ -497,7 +497,7 @@ describe("database import Undo", () => {
       await readFile(join(h.workspace.rootPath, ".dohc", "local", "trash", recovery!.staged!)),
     ).toEqual(bytes);
     await expect(undo(h, result.operationId)).rejects.toThrow(
-      "Cannot undo this import. Undo is no longer available. Delete the database yourself if you don't want it.",
+      "dohc could not undo this import. Undo is no longer available. Delete the database yourself if you do not want it.",
     );
   });
 
@@ -510,7 +510,7 @@ describe("database import Undo", () => {
     await writeFile(path, bytes);
     const changed = await readFile(path);
     await expect(undo(h, result.operationId)).rejects.toThrow(
-      "Cannot undo this import. data.sqlite changed after the import. Keep it or delete it yourself.",
+      "dohc could not undo this import. data.sqlite changed after the import. Keep it or delete it yourself.",
     );
     expect(await readFile(path)).toEqual(changed);
   });
@@ -545,7 +545,7 @@ describe("database import Undo", () => {
       join(h.workspace.rootPath, result.path),
     );
     await expect(undo(h, result.operationId)).rejects.toThrow(
-      "Cannot undo this import. data.sqlite is no longer the imported file. Keep it or delete it yourself.",
+      "dohc could not undo this import. data.sqlite is no longer the imported file. Keep it or delete it yourself.",
     );
   });
 });
@@ -577,7 +577,7 @@ describe("database import Undo isolation", () => {
     await expect(
       h.invoke(undoChannel, { workspaceId: "workspace-b", operationId: result.operationId }),
     ).rejects.toThrow(
-      "Cannot undo this import in another workspace. Open the workspace where you imported it.",
+      "dohc could not undo this import in another workspace. Open the workspace where you imported it.",
     );
     expect(h.remove).not.toHaveBeenCalled();
     await open("workspace-a");
@@ -594,7 +594,7 @@ describe("database import Undo isolation", () => {
     await expect(h.invoke(undoChannel, input)).rejects.toThrow("History refused");
     await writeFile(join(h.workspace.rootPath, result.path), "replacement");
     await expect(h.invoke(undoChannel, input)).rejects.toThrow(
-      "Cannot undo this import. Undo is no longer available. Delete the database yourself if you don't want it.",
+      "dohc could not undo this import. Undo is no longer available. Delete the database yourself if you do not want it.",
     );
     expect(await readFile(join(h.workspace.rootPath, result.path), "utf8")).toBe("replacement");
     expect(h.remove).toHaveBeenCalledTimes(1);

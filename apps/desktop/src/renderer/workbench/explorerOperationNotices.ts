@@ -89,10 +89,10 @@ export function undoRefusedNotice(
   const word = operationWord(change);
   const failed =
     word === "delete"
-      ? `Cannot restore ${basenameOf(pathOf(change))}.`
+      ? `dohc could not restore ${basenameOf(pathOf(change))}.`
       : word === "rename"
-        ? "Cannot undo the rename."
-        : `Cannot move ${basenameOf(pathOf(change))} back.`;
+        ? "dohc could not undo the rename."
+        : `dohc could not move ${basenameOf(pathOf(change))} back.`;
   if (refusal.code === "unexplained") return failed;
   const name = basenameOf(refusal.path);
   if (refusal.code === "live-page-owned") return `${failed} Stop live editing for ${name} first.`;

@@ -25,7 +25,7 @@ import {
 // copy stays and reads read-only. A different account signing in removes it.
 const SIGNED_OUT = "Offline copy · Read-only until you connect your server";
 const REFUSED =
-  "dohc didn't save this change. This Collection is read-only until you connect your server.";
+  "dohc did not save this change. This Collection is read-only until you connect your server.";
 
 test("@signed-out-copy a Collection reads read-only signed out, and goes when a different account signs in", async () => {
   test.setTimeout(420_000);

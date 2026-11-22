@@ -18,7 +18,7 @@ describe("NewGroupDialog", () => {
     expect(submit.disabled).toBe(false);
     fireEvent.click(submit);
     expect(screen.getByTestId("chats-new-channel-name-error").textContent).toBe(
-      "Give the group a name.",
+      "Give the Group a name.",
     );
     expect(nameField().getAttribute("aria-invalid")).toBe("true");
     expect(document.activeElement).toBe(nameField());
@@ -30,7 +30,7 @@ describe("NewGroupDialog", () => {
     render(<NewGroupDialog onCreate={onCreate} onClose={vi.fn()} />);
     fireEvent.keyDown(screen.getByTestId("chats-new-channel-purpose"), { key: "Enter" });
     expect(screen.getByTestId("chats-new-channel-name-error").textContent).toBe(
-      "Give the group a name.",
+      "Give the Group a name.",
     );
     expect(nameField().getAttribute("aria-invalid")).toBe("true");
     expect(document.activeElement).toBe(nameField());

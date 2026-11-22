@@ -686,7 +686,7 @@ describe("ChatLane", () => {
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...waiting, pendingCount: 2 });
     view.rerender(lane("agent-dm", "workspace-a", "agent", "nova", [], false));
     expect((await screen.findByTestId("chats-lane-waiting")).textContent).toBe(
-      "Nova will reply when it's free.",
+      "Waiting for Nova to finish its current run.",
     );
   });
 
@@ -737,7 +737,7 @@ describe("ChatLane", () => {
     await screen.findByText("Here is a plan");
     fireEvent.click(screen.getByTestId("chats-lane-more"));
     fireEvent.click(await screen.findByTestId("chats-lane-more-run-details"));
-    expect((await screen.findByTestId("chats-run-exit-code")).textContent).toBe("—");
+    expect((await screen.findByTestId("chats-run-exit-code")).textContent).toBe("-");
     bridgeMock.chatRunRecordsForThread.mockResolvedValue({
       runs: { reply: { ...run, exitCode: 0 } },
     });

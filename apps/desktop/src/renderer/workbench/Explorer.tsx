@@ -1609,7 +1609,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       void bridge()
         .exportWorkspaceZip({ workspaceId, relativePath })
         .catch((cause) =>
-          onError(ipcErrorMessage(cause, "Could not export this workspace."), cause),
+          onError(ipcErrorMessage(cause, "dohc could not export this workspace."), cause),
         );
     },
     [onError, workspaceId],
@@ -2610,13 +2610,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                         aria-level={3}
                         className="h-6 px-3 pt-1"
                       >
-                        Group {groupIndex + 1}
+                        Editor group {groupIndex + 1}
                       </SectionLabel>
                     ) : null}
                     <ul
                       aria-label={
                         props.editorGroups.length > 1
-                          ? `Group ${groupIndex + 1} open editors`
+                          ? `Editor group ${groupIndex + 1} open editors`
                           : undefined
                       }
                       className="m-0 list-none p-0"
@@ -3010,7 +3010,7 @@ export function CollectionsRefusalRow({
         : null;
   const words =
     refusal.kind === "unclaimed"
-      ? "Which computer keeps these Collections?"
+      ? "Choose which computer keeps these Collections"
       : named !== null
         ? `On ${named}`
         : refusal.words;

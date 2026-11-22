@@ -15,7 +15,7 @@ export async function createInstalledDatasetCompiler(resourcesRoot: string) {
         : undefined;
   if (!binary)
     throw Error(
-      "Creating Collection actions currently requires Windows x64, an Apple silicon Mac, or Linux.",
+      "Creating Collection actions requires Windows x64, an Apple silicon Mac, or Linux.",
     );
   const modulePath = pathToFileURL(
     join(resourcesRoot, "app-backend-runtime", "dataset-compiler.mjs"),

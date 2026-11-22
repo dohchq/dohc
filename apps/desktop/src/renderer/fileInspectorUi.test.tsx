@@ -26,7 +26,7 @@ const NO_RECOVERY: ReadonlySet<string> = new Set();
 describe("DocumentControls", () => {
   it.each([
     "dohc could not open this file.",
-    "This note has parts dohc can't show.",
+    "This note has parts dohc cannot show.",
     OPENING_TITLE,
   ])("keeps a disabled toggle reachable and describes why: %s", async (reason) => {
     const user = userEvent.setup();
@@ -165,7 +165,7 @@ describe("ViewActions", () => {
 
   it.each([
     ["file-locked", "File in use"],
-    ["error", "Couldn't save"],
+    ["error", "Could not save"],
     ["changed-on-disk", "Changed outside dohc"],
   ] as const)("shows a %s state in words beside Share", (saveState, words) => {
     render(
@@ -194,7 +194,7 @@ describe("ViewActions", () => {
       act(() => vi.advanceTimersByTime(PENDING_SHARE_WORDS_DELAY_MS));
       const mark = screen.getByTestId("status-left");
       expect(mark.classList.contains("sr-only")).toBe(false);
-      expect(mark.textContent).toBe("Saved locally · Pending share");
+      expect(mark.textContent).toBe("Saved locally · pending share");
     });
 
     it("keeps its words while the person types, until the host takes the edits", () => {
@@ -207,13 +207,13 @@ describe("ViewActions", () => {
       };
       const { rerender } = render(group("pending-share"));
       act(() => vi.advanceTimersByTime(PENDING_SHARE_WORDS_DELAY_MS));
-      expect(words()).toBe("Saved locally · Pending share");
+      expect(words()).toBe("Saved locally · pending share");
       for (let keystroke = 0; keystroke < 5; keystroke += 1) {
         rerender(group("saving"));
-        expect(words()).toBe("Saved locally · Pending share");
+        expect(words()).toBe("Saved locally · pending share");
         act(() => vi.advanceTimersByTime(100));
         rerender(group("pending-share"));
-        expect(words()).toBe("Saved locally · Pending share");
+        expect(words()).toBe("Saved locally · pending share");
       }
       rerender(group("saving"));
       expect(screen.getByTestId("status-left").dataset.state).toBe("saving");

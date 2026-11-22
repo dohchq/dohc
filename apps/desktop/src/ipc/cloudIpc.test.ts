@@ -479,7 +479,7 @@ describe("registered cloud handlers", () => {
       const expected =
         action === "enable"
           ? "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again."
-          : `This drive can't store the workspace's secret key safely. Files stay in ${h.joinPayload.rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`;
+          : `This drive cannot store the workspace's secret key safely. Files stay in ${h.joinPayload.rootPath}. Choose an empty folder on an NTFS, APFS, or ext4 drive to try again.`;
       const failure = await result.catch((error) => error);
       expect(failure).toMatchObject({ message: expected });
       const channel = action === "enable" ? CHANNELS.cloudEnableSync : CHANNELS.cloudJoinWorkspace;
@@ -935,7 +935,7 @@ describe("registered cloud handlers", () => {
     h.readdir.mockResolvedValue([]);
     h.probe.mockResolvedValue({ hasContent: false, identity: null });
     await expect(h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload)).rejects.toThrow(
-      "hasn't synced anything yet",
+      "has not synced anything yet",
     );
     expect(h.mkdir).not.toHaveBeenCalled();
     expect(h.createFolder).not.toHaveBeenCalled();
@@ -1021,7 +1021,7 @@ describe("registered cloud handlers", () => {
     );
     expect(h.registry.has("joined")).toBe(true);
     await expect(h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload)).rejects.toThrow(
-      "already on this machine",
+      "already on this computer",
     );
     expect(h.bootstrap).toHaveBeenCalledTimes(1);
   });

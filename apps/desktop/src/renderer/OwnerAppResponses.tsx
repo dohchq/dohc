@@ -12,7 +12,7 @@ type Undo = Extract<OwnerAppResponsesResult, { action: "undo" }>;
 type Selection = { principalId: string; operationId: string; cursor?: string };
 function resultFrom(value: unknown) {
   const parsed = OwnerAppResponsesResult.safeParse(value);
-  if (!parsed.success) throw new Error("dohc could not read the response result. Try again.");
+  if (!parsed.success) throw new Error("dohc could not read the response result.");
   return parsed.data;
 }
 
@@ -83,11 +83,11 @@ function ResponsePanel({
         }),
       );
       if (!current.current || request.current !== mine) return;
-      if (next.action !== "list") throw new Error("dohc could not load responses. Try again.");
+      if (next.action !== "list") throw new Error("dohc could not load responses.");
       setPage(next);
     } catch (cause) {
       if (current.current && request.current === mine)
-        setError(ipcErrorMessage(cause, "dohc could not load responses. Try again."));
+        setError(ipcErrorMessage(cause, "dohc could not load responses."));
     } finally {
       if (current.current && request.current === mine) setBusy(null);
     }
@@ -114,7 +114,7 @@ function ResponsePanel({
       );
       if (!current.current || request.current !== mine) return;
       if (next.action !== "undo")
-        throw new Error("dohc could not confirm which responses were removed. Try again.");
+        throw new Error("dohc could not confirm which responses were removed.");
       setResult(next);
       setContinuation(
         next.items.some((row) => row.status === "failed")
@@ -129,7 +129,7 @@ function ResponsePanel({
         setError(
           ipcErrorMessage(
             cause,
-            "dohc could not confirm which responses were removed. Retry to check the same responses.",
+            "dohc could not confirm which responses were removed. Try again to check the same responses.",
           ),
         );
       }
@@ -159,7 +159,7 @@ function ResponsePanel({
         </SecondaryButton>
       </div>
       <p className="mt-2 text-[12px] text-muted">
-        Review the response files before removing a link holder’s responses.
+        Review the response files before removing a link holder's responses.
       </p>
       {busy ? (
         <p role="status" className="text-[12px] text-muted">
@@ -173,7 +173,7 @@ function ResponsePanel({
       ) : null}
       {page?.acceptances.length === 0 ? (
         <p className="text-[12px] text-muted">
-          No responses in this page. Reload to check for new responses.
+          No responses on this page. Reload to check for new responses.
         </p>
       ) : null}
       <ul className="m-0 list-none space-y-3 p-0">
@@ -198,7 +198,7 @@ function ResponsePanel({
                   setConfirmation({ principalId, operationId: crypto.randomUUID() });
                 }}
               >
-                Remove this holder’s responses
+                Remove this holder's responses
               </SecondaryButton>
             </li>
           );
@@ -215,11 +215,11 @@ function ResponsePanel({
       {counts ? (
         <div role="status" className="mt-3 text-[12px] text-muted">
           <p>
-            {counts.deleted} removed. {counts.absent} already absent. {counts.conflict} conflicts
-            kept. {counts.failed} failed.
+            {counts.deleted} removed. {counts.absent} already absent. {counts.conflict}{" "}
+            {counts.conflict === 1 ? "conflict" : "conflicts"} kept. {counts.failed} failed.
           </p>
-          {counts.deleted > 0 ? <p>Restore removed files from workspace history.</p> : null}
-          {counts.failed > 0 ? <p>Retry this batch to check the failed responses.</p> : null}
+          {counts.deleted > 0 ? <p>Restore removed files from History.</p> : null}
+          {counts.failed > 0 ? <p>Try this batch again to check the failed responses.</p> : null}
         </div>
       ) : null}
       {continuation ? (
@@ -243,7 +243,7 @@ function ResponsePanel({
             <ConfirmDialog
               intent="danger"
               icon={Trash2}
-              title="Remove this holder’s responses?"
+              title="Remove this holder's responses?"
               confirmLabel="Remove responses"
               testId="app-responses-confirm"
               cancelTestId="app-responses-cancel"
@@ -255,16 +255,9 @@ function ResponsePanel({
               onConfirm={() => void undo(confirmation)}
             >
               <p>
-                This removes up to 100 responses from this holder on this link, including responses
-                outside this page.
-              </p>
-              <p>
-                This includes responses to other apps on this link. Each continuation removes up to
-                100 more.
-              </p>
-              <p>
-                Files with conflicts stay in place. You can restore removed files from workspace
-                history.
+                This removes up to 100 responses from this holder across all apps on this link,
+                including responses outside this page. Files with conflicts stay in place, and you
+                can restore removed files from History.
               </p>
               <p className="break-all font-mono text-[12px]">{confirmation.principalId}</p>
             </ConfirmDialog>,

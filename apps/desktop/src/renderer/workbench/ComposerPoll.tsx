@@ -138,7 +138,7 @@ export function ComposerPoll(props: {
                 role="alert"
                 className="m-0 pl-5.5 text-[12px] text-danger"
               >
-                {trimChoice(choice)} is already a choice.
+                Already a choice: {trimChoice(choice)}.
               </p>
             ) : null}
           </Fragment>

@@ -95,7 +95,7 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
 
   return (
     <div className="dohc-find-replace-anchor">
-      <div className="dohc-find-replace dohc-pop-in" role="search" aria-label="find and replace">
+      <div className="dohc-find-replace dohc-pop-in" role="search" aria-label="Find and replace">
         <div className="dohc-find-replace__row">
           <input
             ref={findInputRef}

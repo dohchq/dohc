@@ -203,7 +203,7 @@ export function liveFolderBody(action: LiveFolderAction): string {
 }
 
 export function liveFolderTitle(folder: string, action: LiveFolderAction): string {
-  return `dohc can't ${action} "${folder}" while a page in it has live editing on`;
+  return `dohc cannot ${action} "${folder}" while a page in it has live editing on`;
 }
 
 // A folder move or delete the engine refuses because a page under the folder
@@ -6031,8 +6031,8 @@ export function createWorkspaceEngineCapture(
             // write, and must keep retrying.
             standDownFromWrite(
               isConflictStaleTargetCause(retryError)
-                ? `locked-write retry stopped: ${input.path} changed outside dohc while another program held it, so the pending write no longer matches the file. The edits stay in the document's history — open ${input.path} to write them again.`
-                : `locked-write retry stopped: the engine cannot write ${input.path} (${String((retryError as Error).message)}). Retrying cannot change that. The edits stay in the document's history — open ${input.path} to write them again.`,
+                ? `locked-write retry stopped: ${input.path} changed outside dohc while another program held it, so the pending write no longer matches the file. The edits stay in the document's history. Open ${input.path} to write them again.`
+                : `locked-write retry stopped: the engine cannot write ${input.path} (${String((retryError as Error).message)}). Retrying cannot change that. The edits stay in the document's history. Open ${input.path} to write them again.`,
             );
             return;
           }
@@ -8246,7 +8246,7 @@ export function createWorkspaceEngineCapture(
           }
           if (disk.kind === "untracked-content") {
             throw new Error(
-              `Only text files can be restored — ${secretPath} is no longer a text file.`,
+              `Only text files can be restored. ${secretPath} is no longer a text file.`,
             );
           }
           if (disk.kind === "text") {
@@ -8425,7 +8425,7 @@ export function createWorkspaceEngineCapture(
           }
           if (disk.kind === "untracked-content") {
             throw new Error(
-              `Only engine-owned files can be restored — ${path} is no longer capturable.`,
+              `Only tracked files can be restored. ${path} is no longer tracked by dohc.`,
             );
           }
           const saveMetadata: ActorNeutralWriteMetadata = {

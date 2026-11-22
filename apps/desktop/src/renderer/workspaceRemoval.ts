@@ -5,7 +5,7 @@ import type { WorkspaceSummary } from "../ipc/bridgeContract";
 // only its place, so it is removed without asking.
 
 const SETTINGS_SYNC = "Settings › Sync and sharing";
-const READDED = "A share added again with its code arrives as a new folder.";
+const READDED = "Adding the share again with its code creates a new folder.";
 
 export function namesList(names: readonly string[]): string {
   if (names.length <= 1) return names[0] ?? "";
@@ -18,7 +18,7 @@ export function removalFacts(workspace: WorkspaceSummary): string[] {
   if (workspace.sync === "on") {
     facts.push(`Sync turns off. Turn it on again in ${SETTINGS_SYNC}.`);
   } else if (workspace.sync === "paused") {
-    facts.push(`Its paused sync ends. Turn sync on again in ${SETTINGS_SYNC}.`);
+    facts.push(`Paused sync ends. Turn sync on again in ${SETTINGS_SYNC}.`);
   }
 
   const chats = workspace.joinedChatCount ?? 0;
@@ -28,7 +28,7 @@ export function removalFacts(workspace: WorkspaceSummary): string[] {
     );
   } else if (chats > 1) {
     facts.push(
-      `${chats} shared chats leave this workspace. In Chats, join groups again from Shared with you and direct messages from Message requests, unless their share has ended.`,
+      `${chats} shared chats leave this workspace. In Chats, join Groups again from Shared with you and direct messages from Message requests, unless their share has ended.`,
     );
   }
 
@@ -36,10 +36,12 @@ export function removalFacts(workspace: WorkspaceSummary): string[] {
   const mounts = (workspace.shareMounts ?? []).filter((mount) => !mount.ended && !mount.damaged);
   const [onlyMount] = mounts;
   if (mounts.length === 1 && onlyMount) {
-    facts.push(`Shared folder ${onlyMount.label} stops refreshing, and its files stay. ${READDED}`);
+    facts.push(
+      `Received share ${onlyMount.label} stops refreshing, and its files stay. ${READDED}`,
+    );
   } else if (mounts.length > 1) {
     facts.push(
-      `Shared folders ${namesList(mounts.map((mount) => mount.label))} stop refreshing, and their files stay. ${READDED}`,
+      `Received shares ${namesList(mounts.map((mount) => mount.label))} stop refreshing, and their files stay. ${READDED}`,
     );
   }
 

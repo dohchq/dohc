@@ -79,7 +79,7 @@ describe("New record row", () => {
       />,
     );
     expect(screen.getByRole("columnheader", { name: /title/ })).toBeDefined();
-    expect(screen.queryByText("No records in this collection yet.")).toBeNull();
+    expect(screen.queryByText("No records in this Collection yet.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "New record" }));
     expect(onNewRecord).toHaveBeenCalledTimes(1);
   });
@@ -94,7 +94,7 @@ describe("New record row", () => {
     );
     rerender(<TableView schema={schema} records={[]} />);
     expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
-    expect(screen.getByText("No records in this collection yet.")).toBeDefined();
+    expect(screen.getByText("No records in this Collection yet.")).toBeDefined();
   });
 });
 
@@ -659,9 +659,7 @@ describe("selection and keys", () => {
     const input = editorInput()!;
     fireEvent.change(input, { target: { value: "twelve" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(screen.getByRole("alert").textContent).toBe(
-      "This value is not a number. Enter a number.",
-    );
+    expect(screen.getByRole("alert").textContent).toBe("Enter a number.");
     expect(editorInput()).toBe(input);
     expect(selection()).toEqual([0, 1]);
 
@@ -1157,7 +1155,7 @@ describe("pickers", () => {
     const onOptionColorChange = vi.fn();
     const { open, press, search } = setup({ onOptionColorChange });
     open(0, STATUS);
-    fireEvent.click(screen.getByRole("button", { name: "doing options" }));
+    fireEvent.click(screen.getByRole("button", { name: "Options for doing" }));
     const unchosen = screen
       .getAllByRole("radio")
       .find((swatch) => swatch.getAttribute("aria-checked") === "false")!;
@@ -1170,7 +1168,7 @@ describe("pickers", () => {
     fireEvent.keyDown(search(), { key: "Escape" });
     press("ArrowRight");
     press("Enter");
-    expect(screen.getByRole("button", { name: "beta options" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Options for beta" })).toBeDefined();
   });
 
   it("saves a picked date and gives the keys back to the grid", () => {

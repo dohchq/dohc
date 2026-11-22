@@ -109,7 +109,7 @@ describe("ServerAccountDeleteDialog", () => {
     );
     // The server counts revoked grants too, so the dialog names no number.
     expect(screen.getByTestId("server-account-delete-grants").textContent).toBe(
-      "Your access to shares others gave you ends.",
+      "Your access to received shares ends.",
     );
     expect(dialog.textContent).toContain("Workspaces on this computer stay, with their files.");
     expect(dialog.textContent).toContain(
@@ -182,7 +182,7 @@ describe("ServerAccountDeleteDialog", () => {
     fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
 
     expect((await screen.findByTestId("server-account-delete-changed")).textContent).toBe(
-      "What deletion removes changed, or the review expired. Check it again.",
+      "The account data changed, or this review expired. Check the updated list.",
     );
     expect((await screen.findByTestId("server-account-delete-elsewhere")).textContent).toBe(
       "3 workspaces not on this computer",
@@ -391,6 +391,29 @@ describe("ServerAccountDeleteDialog", () => {
       });
     });
     expect(props.onDeleted).not.toHaveBeenCalled();
+  });
+
+  it("uses singular grammar for 1 owned share and omits the line when 0", async () => {
+    bridgeMock.previewServerAccountDeletion.mockResolvedValueOnce({
+      ...preview,
+      ownedShareCount: 1,
+    });
+    const first = renderDialog();
+    expect((await screen.findByTestId("server-account-delete-shares")).textContent).toBe(
+      "1 share you own ends. People you shared with lose access and keep their copies.",
+    );
+    first.unmount();
+
+    bridgeMock.previewServerAccountDeletion.mockResolvedValueOnce({
+      ...preview,
+      workspaces: [],
+      workspacesElsewhere: 0,
+      ownedShareCount: 0,
+    });
+    renderDialog();
+    await screen.findByTestId("server-account-delete-scope");
+    expect(screen.queryByTestId("server-account-delete-shares")).toBeNull();
+    expect(screen.getByText("Only this account, with no synced workspaces")).toBeTruthy();
   });
 });
 

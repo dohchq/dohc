@@ -61,13 +61,13 @@ function reasonWords(reason: SaveFailureReason): { message: string; cause: strin
       };
     case "read-only":
       return {
-        message: "The file is read-only. Make it writable, then try again.",
+        message: "The file is read-only. Make it writable.",
         cause: "The file is read-only.",
       };
     case "document-too-dense":
       return { message: DOCUMENT_TOO_DENSE_WORDS, cause: "document-too-dense" };
     case null:
-      return { message: "dohc couldn't write the file.", cause: null };
+      return { message: "dohc could not write the file.", cause: null };
   }
 }
 
@@ -77,7 +77,7 @@ export function saveFailureNotice(
 ): Pick<DocumentSaveFailure, "title" | "message" | "details"> {
   const { message, cause } = reasonWords(reason);
   return {
-    title: `Couldn't save ${path}`,
+    title: `Could not save ${path}`,
     message,
     details: [["File", path, path.length], ...(cause ? [["Cause", cause] as const] : [])],
   };
@@ -116,10 +116,10 @@ interface DocumentReplacement {
 }
 
 export const REPLACED_DOCUMENT_SAVED =
-  "This document changed while you were editing. Find your earlier edits in Notices.";
+  "This page changed while you were editing. Find your earlier edits in Notices.";
 export const REPLACED_DOCUMENT_UNSAVED =
-  "dohc could not save your earlier edits. Keep this document open and try again.";
-const REPLACED_DOCUMENT_NOT_SHOWN = "dohc could not finish replacing this document.";
+  "dohc could not save your earlier edits. Keep this page open.";
+const REPLACED_DOCUMENT_NOT_SHOWN = "dohc could not replace this page.";
 
 const replacementListeners = new Set<(replacement: DocumentReplacement) => void>();
 
@@ -311,7 +311,7 @@ export function useDocumentSaveNotices(input: {
         tone: "warning",
         title: `Someone else's change removed your text from ${path}`,
         message: [
-          `It read "${quoted}"`,
+          `It read "${quoted}".`,
           more > 0 ? `Copy text copies all ${text.length.toLocaleString()} characters.` : "",
           "The file's owner keeps a copy in History.",
         ]

@@ -145,8 +145,8 @@ export function AgentsMcpSettings(props: {
             changed || !attempted
               ? "dohc could not load agent settings."
               : starting
-                ? "dohc could not start an agent run in this workspace. Try again."
-                : "dohc could not stop this workspace's agent run. Try again.";
+                ? "dohc could not start an agent run in this workspace."
+                : "dohc could not stop this workspace's agent run.";
           onError?.(ipcErrorMessage(cause, fallback), cause, askAgain);
           if (!attempted) return;
           // Reread live status alone: the config did not change, and a refusal
@@ -208,7 +208,7 @@ export function AgentsMcpSettings(props: {
             onClick={retry}
             className="rounded-md border border-line px-2 py-1 text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
           >
-            Retry
+            Try again
           </button>
         </div>
       ) : null}

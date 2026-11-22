@@ -1112,7 +1112,7 @@ function assertWritableWorkspace(workspace: { workspaceId: string }): void {
 // refused with honest copy.
 function assertAgentRunnableWorkspace(workspaceId: string): void {
   if (sharedViewOf(workspaceId)) {
-    throw new Error("Agents can't run in a shared view — it's read-only.");
+    throw new Error("Agents cannot run in a shared view because it is read-only.");
   }
 }
 
@@ -1960,7 +1960,7 @@ async function remoteForWorkspace(workspace: RegistryEntry, options?: { allowPau
   const credentials = requireCredentials(cachedCredentials);
   if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
     if (normalizeServerUrl(credentials.serverUrl) !== normalizeServerUrl(remote.serverUrl)) {
-      throw new Error("Sign in to the cloud server this workspace uses.");
+      throw new Error("Sign in to the server this workspace uses.");
     }
     throw new Error("Sign in to the account that synced this workspace.");
   }
@@ -1994,7 +1994,7 @@ async function recordSyncedIfNeeded(workspace: RegistryEntry): Promise<void> {
 // legacy workspace-api). The token is the same signed-in session bearer and
 // only ever goes to the relay this machine signed in with.
 function relayShareErrorCopy(
-  status: number,
+  _status: number,
   data: { error?: string; code?: string; sessionHost?: unknown; path?: unknown } | null,
 ): string {
   switch (data?.code) {
@@ -2006,24 +2006,24 @@ function relayShareErrorCopy(
     case "host-not-loaded":
       return liveStopHostCopy(data.code, data.sessionHost, data.path);
     case "secret_path":
-      return "Secret files can't be shared.";
+      return "dohc cannot share secret files.";
     case "recipient_not_found":
       return "No account on this server matches that email. Ask them to create an account here, then share again.";
     case "empty_selector":
       return "Pick a file, folder, or version to share.";
     case "invalid_path":
-      return "That path can't be shared.";
+      return "dohc cannot share that path.";
     case "not_found":
-      return "That share isn't available anymore.";
+      return "That share is no longer available.";
     // One relay code for every chat refusal, and the desktop refuses the
     // general group, the agent lane, and direct-message-as-group before it
     // asks the relay. What remains is a group the relay has not synced yet.
     case "invalid_chat":
-      return "This can't be shared yet. Wait for it to sync, then try again.";
+      return "dohc cannot share this Group yet. Wait for it to sync, then try again.";
     case "ambiguous_selector":
-      return "A group is shared as it is now, not at a version. Share it without choosing a version.";
+      return "A Group is shared as it is now, not at a version. Share it without choosing a version.";
     default:
-      return data?.error ?? `Sharing failed (${status}).`;
+      return data?.error ?? "dohc could not update this share. Try again.";
   }
 }
 
@@ -2153,7 +2153,7 @@ async function relayShareJsonWithCredentials<T>(
       ...cloudSessionChange(),
       invalidatePersistedSessionIf: (expected) => cloudLogin().invalidateSessionIf(expected),
     });
-    throw new RelaySessionError("Your server session expired. Sign in again, then retry.", {
+    throw new RelaySessionError("Your server session expired. Sign in again, then try again.", {
       sessionWasCurrent,
     });
   }
@@ -3314,7 +3314,7 @@ function engineForWorkspace(
   if (!remote || !credentials) return null;
   if (!capture || !credentials.relayUrl) return null;
   if (!workspace.attachmentId) {
-    throw new Error("Open this workspace again to start cloud sync.");
+    throw new Error("Open this workspace again to start sync.");
   }
   // Only sync when the session belongs to the server this workspace is bound
   // to; a mismatch keeps it local-only (no token leak, no mass-delete).
@@ -4943,7 +4943,7 @@ const chatDispatchService = createChatDispatchService({
 
 function assertChatRunnerIdle(workspaceId: string): void {
   if (chatDispatchService.hasLiveRun(workspaceId)) {
-    throw new Error("Your chat runner is already working in this workspace.");
+    throw new Error("An agent is already working in this workspace.");
   }
 }
 
@@ -5416,7 +5416,7 @@ async function runSkippedScheduleNow(
     !automationId ||
     notice.workspaceId === null
   ) {
-    return "This notice has no schedule to run.";
+    return "This Notice has no schedule to run.";
   }
   // Saved before the dismissal, so a crash before the claim resumes it.
   const intent: RunNowIntent = {
@@ -5436,7 +5436,7 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
   const workspace = findWorkspace(intent.workspaceId);
   if (!workspace || workspace.shareView !== undefined) {
     await runNowIntents.remove(intent.notice);
-    return "This workspace isn't on this computer. Run it from the computer that has it.";
+    return "This workspace is not on this computer. Run it from the computer that has it.";
   }
   await desktopEngine.startup;
   const release = await acquireDispatchRunActivity(workspace);
@@ -5466,10 +5466,10 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
     // before a phone restored it. Which one isn't known here, so the words claim neither.
     if (dismissal === "not-first") {
       await runNowIntents.remove(intent.notice);
-      return "This Notice was already handled, so Run now won't start it.";
+      return "This Notice was already handled, so Run now will not start it.";
     }
     if (!(await automations.runNow(intent.automationId, intent.notice.noticeId))) {
-      return "dohc could not start the automation. Its engine did not answer.";
+      return "dohc could not start the automation. It will try again when you reopen or focus dohc.";
     }
     // The claim is in the engine now; it runs from there.
     await runNowIntents.remove(intent.notice);
@@ -5493,7 +5493,7 @@ async function retryAutomationFromNotice(
       : (listWorkspaces().find((entry) => entry.shareView?.shareId === notice.recipientShareId) ??
         null);
   if (!workspace)
-    return { status: "refused", reason: "This workspace isn't on this computer anymore." };
+    return { status: "refused", reason: "This workspace is not on this computer anymore." };
   await desktopEngine.startup;
   const release = await acquireDispatchRunActivity(workspace);
   const automations = withWorkspaceAttachment(
@@ -6693,7 +6693,7 @@ async function serverHomeFor(
     allowPaused: true,
   });
   signal.throwIfAborted();
-  if (!credentials.relayUrl) throw new Error("Sign in to the cloud server this workspace uses.");
+  if (!credentials.relayUrl) throw new Error("Sign in to the server this workspace uses.");
   const origin = new URL(credentials.relayUrl).origin,
     session = { credentials, credentialGeneration };
   const data = (signal: AbortSignal, assertCurrent: () => void) =>
@@ -6736,7 +6736,7 @@ function serverCollectionsTransport(workspaceId: string): ServerCollectionsTrans
     const { credentials, credentialGeneration } = await remoteForWorkspace(entry, {
       allowPaused: true,
     });
-    if (!credentials.relayUrl) throw new Error("Sign in to the cloud server this workspace uses.");
+    if (!credentials.relayUrl) throw new Error("Sign in to the server this workspace uses.");
     const host = new URL(credentials.relayUrl).host;
     const value = await relayShareJsonWithCredentials<unknown>(credentials, path, {
       method: "POST",
@@ -6747,7 +6747,7 @@ function serverCollectionsTransport(workspaceId: string): ServerCollectionsTrans
     }).catch((error: unknown) => {
       if (error instanceof TypeError)
         throw new CollectionServerUnreachableError(
-          `This Collection needs ${host}, which dohc can't reach.`,
+          `dohc could not reach ${host} for this Collection. Check your connection, then try again.`,
           { cause: error },
         );
       throw error;
@@ -8705,8 +8705,8 @@ const exitRounds = createExitRounds<BrowserWindow>({
     const verb = kind === "quit" ? "Quitting" : "Installing";
     const { response } = await showMessageBox({
       type: "warning",
-      message: "dohc isn't responding.",
-      detail: `${verb} now can lose unsaved recovery text. Wait, or ${kind === "quit" ? "quit" : "install"} anyway.`,
+      message: "dohc is not responding",
+      detail: `${verb} now can lose unsaved text. Wait, or ${kind === "quit" ? "quit" : "install"} anyway.`,
       buttons: [kind === "quit" ? "Quit anyway" : "Install anyway", "Wait"],
       defaultId: 1,
       cancelId: 1,
@@ -9366,7 +9366,7 @@ function registerIpcHandlers(): void {
         const host = new URL(credentials.relayUrl ?? credentials.serverUrl).host;
         const reason = error instanceof Error ? error.message : String(error);
         throw new Error(
-          `This workspace didn't start syncing, because the Collection "${name}" couldn't go to ${host}. ${reason}`,
+          `dohc could not start syncing this workspace because it could not move Collection "${name}" to ${host}. ${reason}`,
           { cause: error },
         );
       }
@@ -9407,7 +9407,7 @@ function registerIpcHandlers(): void {
     relayShareJsonWithCredentials,
     pushRecorded: activity.pushRecorded,
     keepOutsideChange: async (workspace, path) =>
-      (await requireEngineCapture(workspace, "Engine history")).capture.keepOutsideChange(path),
+      (await requireEngineCapture(workspace, "History")).capture.keepOutsideChange(path),
     ownerLiveStop: async (workspace, action, path, binding, acceptedCursor) => {
       let result: Awaited<ReturnType<EngineClient["ownerYDocStopRequest"]>> | undefined;
       try {
@@ -10425,9 +10425,9 @@ function registerIpcHandlers(): void {
         isRecordValue(marker) && typeof marker.relayUrl === "string" ? marker.relayUrl : null;
       if (!credentials?.relayUrl) throw new Error("Sign in to your server first.");
       if (shareId === null)
-        throw new Error("This shared view has lost its share. Open it again from the link.");
+        throw new Error("This shared view has lost its share. Open it again with its share code.");
       if (shareRelayUrl !== null && !relayUrlsMatch(credentials.relayUrl, shareRelayUrl)) {
-        throw new Error("Sign in to the cloud server this share came from.");
+        throw new Error("Sign in to the server this share came from.");
       }
       await automationPressRelay({
         baseUrl: normalizeServerUrl(credentials.relayUrl),
@@ -10604,7 +10604,7 @@ function registerIpcHandlers(): void {
       invalidateHistoryLabels(workspaceId);
       shareRosters.sharesChanged(workspaceId);
     },
-    requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
+    requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "History"),
     localPerson,
     stopLiveEditing: async (operation, path, objectId) => {
       const release = watchReleaseOutsideFile(ownerLiveDocumentDependencies.ownerLiveStop);
@@ -11285,7 +11285,7 @@ function registerIpcHandlers(): void {
     readyAgentThread: async ({ workspaceId, agentId, name, threadId }) => {
       const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
       // A new agent only: this marks the agent's unread messages read.
-      if (agents[agentId]) throw new Error("An agent already has this id. Add the agent again.");
+      if (agents[agentId]) throw new Error("An agent already has this ID. Add the agent again.");
       // One thread is one agent. A second agent on it would put another
       // workspace's messages in the same thread with no warning (ADR 0016).
       const connected = Object.values(agents).find((agent) => agent.thread?.id === threadId);

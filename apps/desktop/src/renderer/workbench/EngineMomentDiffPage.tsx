@@ -328,8 +328,8 @@ export function EngineMomentDiffPage({
           message:
             kind === "undo"
               ? result.restored === "deleted"
-                ? "Undid the restore by removing the file again. This was recorded in history."
-                : "Undid the restore. This was recorded in history."
+                ? "Undid the restore by removing the file again. This was recorded in History."
+                : "Undid the restore. This was recorded in History."
               : result.restored === "deleted"
                 ? "Removed the file this change created."
                 : "Restored the earlier state.",
@@ -441,7 +441,7 @@ export function EngineMomentDiffPage({
         data-testid="engine-diff-error"
         icon={TriangleAlert}
         tone="danger"
-        title="Could not load this history diff."
+        title="dohc could not load this History diff."
       >
         {momentId ? (
           <SecondaryButton data-testid="engine-diff-retry" onClick={readAgain}>
@@ -452,7 +452,7 @@ export function EngineMomentDiffPage({
     );
   }
   if (state.status === "loading") {
-    return <SkeletonRows layout="panel" label="Loading history diff..." />;
+    return <SkeletonRows layout="panel" label="Loading History diff…" />;
   }
   if (state.status === "hidden") {
     return (
@@ -476,7 +476,7 @@ export function EngineMomentDiffPage({
   if (!moment || !prepared) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle">
-        This change is no longer in the history record.
+        This change is no longer in History.
       </div>
     );
   }
@@ -510,12 +510,12 @@ export function EngineMomentDiffPage({
   const counts = isProtected || bytesOnly ? null : prepared.diff.counts;
   // Restore returns the before state, so its wording follows that side.
   const restoreDetail = createdFile
-    ? "This change created the file, so restoring removes it from the folder. It stays in history and you can undo."
+    ? "This change created the file, so restoring removes it from the folder. It stays in History and you can undo."
     : isProtected
-      ? "The protected file will be returned to how it was before this change. Its contents stay encrypted and are never shown."
+      ? "Restoring returns this protected file to how it was before this change. Its contents stay encrypted and are never shown."
       : beforeIsBinary
-        ? "The binary file will be returned byte-for-byte to how it was before this change."
-        : "The file will be returned to how it was before this change.";
+        ? "Restoring returns this binary file byte-for-byte to how it was before this change."
+        : "Restoring returns this file to how it was before this change.";
   // Restoring a create moment removes the file ("deleted"): no open-file
   // affordances for a file that is no longer in the folder (mirrors the
   // legacy HistoryDiffPage guard).
@@ -687,7 +687,7 @@ export function EngineMomentDiffPage({
                 void restoreFile();
               }}
               disabled={!canRestore || restoreBusy}
-              title={canRestore ? restoreDetail : "This change can't be restored directly"}
+              title={canRestore ? restoreDetail : "This change cannot be restored directly."}
             >
               {restoreState.status === "restoring" ? "Restoring…" : "Restore earlier state"}
             </PrimaryButton>
@@ -739,7 +739,7 @@ export function EngineMomentDiffPage({
             <Lock size={16} aria-hidden className="text-subtle" />
             <span className="text-sm text-muted">Contents are protected</span>
             <span className="text-xs text-subtle">
-              dohc versions this file encrypted and never shows its contents in history, search, or
+              dohc versions this file encrypted and never shows its contents in History, search, or
               comparisons.
             </span>
           </div>
@@ -751,7 +751,8 @@ export function EngineMomentDiffPage({
             <FileArchive size={16} aria-hidden className="text-subtle" />
             <span className="text-sm text-muted">Binary contents</span>
             <span className="text-xs text-subtle">
-              {binaryByteLength} bytes are versioned byte-for-byte and are not shown in text diffs.
+              {binaryByteLength} {binaryByteLength === 1 ? "byte is" : "bytes are"} versioned
+              byte-for-byte and not shown in text diffs.
             </span>
           </div>
         ) : (
@@ -762,8 +763,12 @@ export function EngineMomentDiffPage({
                 className="m-0 border-b border-line bg-panel-2 px-4 py-2 text-[12px] leading-4 text-subtle"
               >
                 {afterIsBinary
-                  ? `This file became a binary file. Its ${moment.afterBinary?.byteLength ?? 0} bytes are not shown in text diffs.`
-                  : `This file was a binary file before this change. Its ${moment.beforeBinary?.byteLength ?? 0} bytes are not shown in text diffs.`}
+                  ? `This file became a binary file. Its ${moment.afterBinary?.byteLength ?? 0} ${
+                      (moment.afterBinary?.byteLength ?? 0) === 1 ? "byte is" : "bytes are"
+                    } not shown in text diffs.`
+                  : `This file was a binary file before this change. Its ${moment.beforeBinary?.byteLength ?? 0} ${
+                      (moment.beforeBinary?.byteLength ?? 0) === 1 ? "byte is" : "bytes are"
+                    } not shown in text diffs.`}
               </p>
             ) : null}
             <UnifiedDiffLines lines={diffLines} testId="engine-diff-lines" />

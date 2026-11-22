@@ -526,7 +526,7 @@ export function SearchView(props: {
           data-testid="search-cap-notice"
           className="border-b border-line bg-panel-2 px-3 py-1.5 text-[12px] text-warning"
         >
-          Showing the first {RESULT_CAP} matches — narrow your search to see everything.
+          Showing the first {RESULT_CAP} matches. Narrow your search to see more.
         </div>
       ) : null}
 

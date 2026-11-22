@@ -72,7 +72,7 @@ describe("LazyDesktopSettings", () => {
       </Overlay>,
     );
 
-    expect(screen.getByTestId("settings-loading").textContent).toBe("Loading settings...");
+    expect(screen.getByTestId("settings-loading").textContent).toBe("Loading settings…");
     const panel = document.querySelector<HTMLElement>(
       '[data-dohc-modal="true"] > [data-focus-surface="dialog"]',
     );

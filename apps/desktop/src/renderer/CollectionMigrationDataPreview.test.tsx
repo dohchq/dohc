@@ -85,7 +85,7 @@ it("shows exact changed values and loads bounded pages on request", async () => 
     { workspaceId: "workspace-a", preparationId: "review-a", after: "next", limit: 50 },
     expect.any(AbortSignal),
   );
-  expect(screen.getByText("Field absent")).toBeTruthy();
+  expect(screen.getByText("Not set")).toBeTruthy();
   expect(screen.queryByText('"Before"')).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Previous changes" }));
   await screen.findByText('"Before"');

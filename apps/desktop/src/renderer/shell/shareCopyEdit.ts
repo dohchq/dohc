@@ -41,7 +41,7 @@ export function addedShareNotice(
   const edit = mounted.access === "edit";
   return {
     message: mounted.alreadyAdded
-      ? `${mounted.name} is already in shared-with-me.`
+      ? `The share ${mounted.name} is already in shared-with-me.`
       : edit
         ? `Added ${mounted.name} to shared-with-me as a read-only copy.`
         : `Added ${mounted.name} to shared-with-me. Its files are read-only and stay up to date.`,

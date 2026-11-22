@@ -788,9 +788,9 @@ test("failed agent checks stay readable above Settings and remain in Notices", a
     await page.getByTestId(settingsNavPin("agents")).click();
     await page.getByTestId("agent-row").click();
     await page.getByTestId("agent-check").click();
-    await expect(page.getByTestId("agent-check-state")).toContainText("Didn't reply.");
-    const message = "Nova didn't reply to the check.";
-    const reason = "Runner exited before reporting self-test success.";
+    await expect(page.getByTestId("agent-check-state")).toContainText("Did not reply");
+    const message = "The agent Nova did not reply to the check.";
+    const reason = "The agent exited before replying to the test.";
     const toast = page.getByTestId("workspace-shell-error");
     await expect(toast).toContainText(message);
     const settings = page.getByTestId(desktopPins.settingsDialog);

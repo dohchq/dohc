@@ -383,7 +383,7 @@ describe("SlashCommandMenu on the Menu part's recipe", () => {
       const { rerender } = render(
         createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE }, ...props }),
       );
-      const list = screen.getByRole("listbox", { name: "slash commands" });
+      const list = screen.getByRole("listbox", { name: "Slash commands" });
       const options = screen.getAllByRole("option");
       const last = options.at(-1)!;
       expect(options[0]!.hasAttribute("data-active")).toBe(true);
@@ -461,7 +461,7 @@ describe("SlashCommandMenu on the Menu part's recipe", () => {
         onDismiss,
       }),
     );
-    fireEvent.mouseDown(screen.getByRole("listbox", { name: "slash commands" }));
+    fireEvent.mouseDown(screen.getByRole("listbox", { name: "Slash commands" }));
     expect(onDismiss).not.toHaveBeenCalled();
     fireEvent.mouseDown(document.body);
     expect(onDismiss).toHaveBeenCalledTimes(1);

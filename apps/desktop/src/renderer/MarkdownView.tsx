@@ -266,11 +266,7 @@ function PropertiesFallback() {
   return (
     <div className={PROPERTIES_PANEL}>
       <div className={PROPERTIES_LINE}>
-        <SkeletonRows
-          rows={1}
-          label="Loading properties..."
-          className="h-6 w-full justify-center"
-        />
+        <SkeletonRows rows={1} label="Loading properties…" className="h-6 w-full justify-center" />
       </div>
     </div>
   );
@@ -981,7 +977,7 @@ export function MarkdownView(props: {
       })
       .catch((error) => {
         if (current())
-          props.onButtonError?.("This link could not be opened.", error, () =>
+          props.onButtonError?.("dohc could not open this link.", error, () =>
             navigate(literal, kind),
           );
       });
@@ -1852,7 +1848,7 @@ export function MarkdownView(props: {
           if (!unmounted.current)
             setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
           if (options.rejectOnError) {
-            throw new Error("dohc cannot save this draft without a content hash.");
+            throw new Error("dohc cannot save this draft without the current file version.");
           }
           return;
         }
@@ -2301,7 +2297,7 @@ export function MarkdownView(props: {
         message={
           engine.permanentFailureWhileEditing
             ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
-            : "This document became read-only. Copy your edits to keep them."
+            : "This file became read-only before your edits saved. Copy your edits to keep them."
         }
         messageDraftId={
           engine.permanentFailureWhileEditing
@@ -2373,7 +2369,7 @@ export function MarkdownView(props: {
                 label: showSource ? "Editor" : "Source",
                 testId: "markdown-source-toggle",
                 pressed: showSource,
-                title: `Toggle markdown source (${shortcutTitle("toggle-markdown-source", window.dohcDesktop?.platform)})`,
+                title: `Toggle Markdown source (${shortcutTitle("toggle-markdown-source", window.dohcDesktop?.platform)})`,
                 onClick: toggleSourceView,
               }}
               menu={{
@@ -2400,14 +2396,14 @@ export function MarkdownView(props: {
               words={
                 readOnly
                   ? readOnlyWords
-                  : "Read-only markdown source — switch back to Editor to make changes."
+                  : "Read-only Markdown source. Switch back to Editor to make changes."
               }
               getText={() => sourceMarkdown}
             />
             {sourceMarkdown === null ? (
-              <SkeletonRows layout="panel" label="Loading source..." />
+              <SkeletonRows layout="panel" label="Loading source…" />
             ) : (
-              <Suspense fallback={<SkeletonRows layout="panel" label="Loading source..." />}>
+              <Suspense fallback={<SkeletonRows layout="panel" label="Loading source…" />}>
                 <LazySourceCodeEditor
                   testId="markdown-source-view"
                   value={sourceMarkdown}
@@ -2629,7 +2625,7 @@ export function MarkdownView(props: {
       ) : null}
       {documentNotices}
       {surfaceMode === "source" ? (
-        <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor..." />}>
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor…" />}>
           <LazySourceCodeEditor
             testId="markdown-editor"
             value={draft}
@@ -2715,7 +2711,7 @@ export function MarkdownView(props: {
         // rich document. Keep view-markdown: callers use it as the mounted
         // document surface regardless of which read representation owns it.
         <div data-testid="view-markdown" className="flex min-h-0 flex-1 flex-col">
-          <Suspense fallback={<SkeletonRows layout="panel" label="Loading source..." />}>
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading source…" />}>
             <LazySourceCodeEditor
               testId="markdown-source-view"
               value={props.body}

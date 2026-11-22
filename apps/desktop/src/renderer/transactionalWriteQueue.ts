@@ -150,7 +150,7 @@ const REFUSED = "The Collection refused this change.";
 const WAITING_BEHIND = "Waiting for an earlier change to this record";
 /** What an offline copy says of a change it did not send. dohc keeps no change to send later. */
 const OFFLINE =
-  "dohc didn't save this change. This Collection is read-only until it is back online.";
+  "dohc did not save this change. This Collection is read-only until it is back online.";
 const WAITING_READ = "Waiting for dohc to read this record again";
 export const RULES_DISALLOW =
   "The Collection's rules no longer allow this change, so dohc did not save it.";
@@ -1087,7 +1087,9 @@ export class WriteQueue {
         true,
       );
       reports?.onError(
-        open ? REFUSED : `${rules.tableName} refused the change. Open it to check its records.`,
+        open
+          ? REFUSED
+          : `The Collection ${rules.tableName} refused the change. Open it to check its records.`,
         cause,
         null,
       );

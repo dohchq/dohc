@@ -265,11 +265,11 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     await settle();
     expect(screen.getByTestId("version-conflict-error").textContent).toBe(
-      "dohc can't bring back c-1.md, because that could stop sync",
+      "dohc cannot bring back c-1.md, because that could stop sync",
     );
     const notice = readError(report.mock.calls[0]![1]);
     expect(notice.words).toBe(
-      "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for c-1.md, keep the removal there.",
+      "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other computer shows a conflict for c-1.md, keep the removal there.",
     );
     expect(notice.canRetry).toBe(false);
   });
@@ -292,7 +292,7 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     await openSurface(async () => () => {}, vi.fn(), row, report);
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     await settle();
-    const title = "dohc can't settle the conflict in c-1.md";
+    const title = "dohc cannot settle the conflict in c-1.md";
     expect(screen.getByTestId("version-conflict-error").textContent).toBe(
       shape === "sync-delete" ? title : "dohc could not apply that choice.",
     );
@@ -305,7 +305,7 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
       expect(notice.canRetry).toBe(false);
       // The Reason says why once. The error's own message repeats it, so it adds no Cause.
       expect(notice.details).toBe(
-        "c-1.md changed on this machine after the conflict appeared, so either choice would overwrite the newer lines.",
+        "c-1.md changed on this computer after the conflict appeared, so either choice would overwrite the newer lines.",
       );
       expect(notice.cause).toBeNull();
     }
@@ -738,7 +738,7 @@ describe("VersionComparePage paging", () => {
     render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
     await settle();
 
-    expect(screen.getByRole("alert").textContent).toBe("Could not compare with Main.");
+    expect(screen.getByRole("alert").textContent).toBe("dohc could not compare with Main.");
   });
 
   it("says a version with no differences matches Main, under the versions picture", async () => {
@@ -883,7 +883,7 @@ it("reports a refused conflict choice from the Versions menu's merge with the re
     expect.anything(),
   );
   expect(readError(onConflictError.mock.calls[0]![1]).title).toBe(
-    "dohc can't bring back c-1.md, because that could stop sync",
+    "dohc cannot bring back c-1.md, because that could stop sync",
   );
   expect(onError).not.toHaveBeenCalled();
 });

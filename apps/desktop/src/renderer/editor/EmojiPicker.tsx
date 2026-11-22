@@ -174,12 +174,12 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
         ...menuEnterFrom(position.placement),
       }}
       role="listbox"
-      aria-label="emoji"
+      aria-label="Emoji"
       aria-activedescendant={matches.length > 0 ? optionId(activeIdx) : undefined}
       onMouseDown={(e) => e.preventDefault()}
     >
       {matches.length === 0 ? (
-        <div className={MENU_EMPTY}>No emoji match "{state.query}"</div>
+        <div className={MENU_EMPTY}>No emoji match "{state.query}".</div>
       ) : (
         <div>
           {matches.map((entry, i) => (

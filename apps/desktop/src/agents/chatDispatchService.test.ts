@@ -857,7 +857,7 @@ describe("chatDispatchService", () => {
         notice: {
           reason: "no-runner",
           threadId: asked.thread.id,
-          message: "Scout's chat runner is off. Turn it on in Settings → Agents.",
+          message: "Scout is off. Turn it on in Settings › Agents.",
         },
       },
     ]);
@@ -1201,7 +1201,7 @@ describe("chatDispatchService", () => {
       failureReason: expect.stringContaining("runner failed to start"),
     });
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      'Nova didn\'t reply in "Fail during runner setup while the daemon is unavailable."',
+      'Nova did not reply in "Fail during runner setup while the daemon is unavailable."',
     ]);
     expect(fixture.runActivity).toEqual({ acquires: 2, releases: 1 });
     expect(fixture.spawnCalls).toHaveLength(1);
@@ -1666,7 +1666,7 @@ describe("chatDispatchService", () => {
     await fixture.service.betweenScans(WORKSPACE_ID, async () => {});
     expect(fixture.dispatchNotices).toEqual([]);
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      'Nova didn\'t reply in "Wait for my CLI reply provenance."',
+      'Nova did not reply in "Wait for my CLI reply provenance."',
     ]);
     expect(await owedRuns(fixture)).toEqual([]);
   });
@@ -1779,7 +1779,7 @@ describe("chatDispatchService", () => {
     expect(fixture.notices).toEqual([
       expect.objectContaining({
         noticeId: `agent-run:${WORKSPACE_ID}:${interrupted.run.runId}`,
-        title: 'Nova didn\'t reply in "Resume this after restart."',
+        title: 'Nova did not reply in "Resume this after restart."',
       }),
     ]);
   });
@@ -1946,7 +1946,7 @@ describe("chatDispatchService", () => {
     const stateOf = async (fixture: Fixture, threadId: string) =>
       (await fixture.service.dispatchStateForThread(WORKSPACE_ID, threadId)).failedRun;
     const wordsFor = (ending: "restarted" | "quit") =>
-      `Nova didn't reply. dohc ${ending} during its run.`;
+      `Nova did not reply. dohc ${ending} during its run.`;
 
     it.each(["quit"] as const)(
       "runs the request of a run stopped when dohc %s once more",
@@ -2260,7 +2260,7 @@ describe("chatDispatchService", () => {
     expect(messages.filter((message) => message.author.kind === "agent")).toEqual([]);
     expect(fixture.dispatchNotices).toEqual([]);
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      'Nova didn\'t reply in "This harness will hang."',
+      'Nova did not reply in "This harness will hang."',
     ]);
 
     await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
@@ -2654,7 +2654,7 @@ describe("chatDispatchService", () => {
 
       await expect(resultPromise).resolves.toEqual({
         ok: true,
-        detail: "Runner self-test passed. The runner replied through dohc.",
+        detail: "Test passed. The agent replied through dohc.",
       });
       expect(fixture.attributions.at(-1)).toEqual({
         workspaceId: WORKSPACE_ID,
@@ -2732,7 +2732,7 @@ describe("chatDispatchService", () => {
     ).toEqual(expect.any(String));
     await expect(resultPromise).resolves.toEqual({
       ok: true,
-      detail: "Runner self-test passed. The runner replied through dohc.",
+      detail: "Test passed. The agent replied through dohc.",
     });
     call.process.emitExit(0);
     expect(await chatThreads()).toEqual({ channels: [], threads: [] });

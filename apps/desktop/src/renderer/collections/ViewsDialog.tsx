@@ -144,7 +144,7 @@ export function ViewsDialog(props: {
         <div className="flex flex-col gap-1">
           {props.schema.views.length === 0 ? (
             <span className="text-sm text-muted">
-              No saved views yet. This collection shows a table. Create a view below.
+              No saved views yet. This Collection shows a table. Create a view below.
             </span>
           ) : null}
           {props.schema.views.map((view) =>
@@ -208,7 +208,7 @@ export function ViewsDialog(props: {
                     disabled={pending}
                     onClick={() => void remove(view.name)}
                   >
-                    Confirm delete
+                    Delete view
                   </DangerButton>
                 ) : (
                   <SecondaryButton

@@ -33,7 +33,7 @@ type FieldErrors = { code?: string; folder?: string; passphrase?: string };
 const CODE_ERROR = "Enter a workspace code.";
 const FOLDER_ERROR = "Choose an empty folder.";
 const PASSPHRASE_ERROR = "Enter the protected-file passphrase.";
-const WRONG_PASSPHRASE_ERROR = "That passphrase didn't unlock the protected files.";
+const WRONG_PASSPHRASE_ERROR = "That passphrase did not unlock the protected files.";
 
 function isWindows(): boolean {
   return bridge().platform === "win32";
@@ -156,7 +156,7 @@ export function JoinSyncedWorkspace(
     } catch (cause) {
       if (!actionRequests.isCurrent(actionRequest)) return;
       if (isCloudSyncFolderCancelled(cause)) return;
-      const message = ipcErrorMessage(cause, "Couldn't join the workspace.");
+      const message = ipcErrorMessage(cause, "dohc could not join this workspace.");
       const required = /passphrase required to unlock synced secrets/i.test(message);
       const wrong = /^Passphrase could not\b/u.test(message);
       if (required || wrong) {
@@ -222,7 +222,7 @@ export function JoinSyncedWorkspace(
           ) : (
             <>
               <p className="sr-only">
-                Connect your server first, then enter the code from your other machine.
+                Connect your server first, then enter the code from your other computer.
               </p>
               <CloudLogin
                 onConnected={checkSession}
@@ -237,7 +237,7 @@ export function JoinSyncedWorkspace(
 
         <Step
           number={2}
-          title="Enter the code from your other machine"
+          title="Enter the code from your other computer"
           state={fieldState}
           labelFor="join-sync-code"
         >
@@ -307,7 +307,7 @@ export function JoinSyncedWorkspace(
           ) : null}
         </Step>
 
-        <Step number={3} title="Choose an empty folder on this machine" state={fieldState} last>
+        <Step number={3} title="Choose an empty folder on this computer" state={fieldState} last>
           <FolderChip
             ref={folderChip}
             folder={folder ? displayPath(folder) : null}
@@ -322,7 +322,7 @@ export function JoinSyncedWorkspace(
           ) : null}
           {usedFolder ? (
             <p data-testid="join-used-folder" className="m-0 text-xs text-muted">
-              Files stay in {displayPath(usedFolder)}.
+              Files from the last attempt stay in {displayPath(usedFolder)}.
             </p>
           ) : null}
 

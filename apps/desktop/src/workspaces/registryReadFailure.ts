@@ -1,11 +1,11 @@
 // dohc refuses a workspace registry it could not read, so it never overwrites
 // it. The registry error screen and the startup failure box share these words.
-export const REGISTRY_READ_FAILURE_TITLE = "dohc couldn't read its workspace registry";
+export const REGISTRY_READ_FAILURE_TITLE = "dohc could not read its workspace list";
 export const REGISTRY_READ_FAILURE_NEXT =
-  "Your files are untouched. Fix or move the registry file named in the technical details, then relaunch dohc.";
+  "Your files are untouched. Fix or move the workspace list file named in the technical details, then restart dohc.";
 // A registry from a newer dohc isn't broken, so it gets no "fix or move".
 export const REGISTRY_NEWER_NEXT =
-  "Your files are untouched. A newer version of dohc wrote this registry. Update dohc to open it.";
+  "Your files are untouched. A newer version of dohc wrote this workspace list. Update dohc to open it.";
 
 // The code a registry from a newer dohc carries. Main's IPC boundary keeps it.
 export const REGISTRY_NEWER = "registry-newer";

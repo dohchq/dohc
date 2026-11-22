@@ -16,7 +16,7 @@ icon: 🧳
 Five friends, four days in Portugal. The plan, the guest list, a small app, and the chat about them all live in this workspace.
 
 > [!tip] Try it
-> - Open **Trip planner** under Apps. It's a web app whose source is in this workspace.
+> - Open **Trip planner** under Apps. Its source lives in this workspace.
 > - Open **Guests** under Collections and give Mei a room.
 > - Type **/** on an empty line for commands, or **[[** to link a page.
 
@@ -151,7 +151,7 @@ export const APP_SOURCE = `<!doctype html>
 </head>
 <body>
 <main>
-  <h1>Lisbon, May 14–17</h1>
+  <h1>Lisbon, May 14 to 17</h1>
   <p class="lede">Five of us. Tick things off as you go.</p>
   <nav aria-label="Days"></nav>
   <ol></ol>

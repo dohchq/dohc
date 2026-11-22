@@ -1271,7 +1271,7 @@ export function ChatsView(props: {
         if (!claimLanes(["overview"], ticket)) return;
         setOverview({
           status: "unavailable",
-          message: ipcErrorMessage(error, "Could not load Chats."),
+          message: ipcErrorMessage(error, "dohc could not load Chats."),
         });
       }
     },
@@ -1704,7 +1704,7 @@ export function ChatsView(props: {
           const refusedPage =
             existing && isLivePageOwnedRefusal(error) ? existing.destinationPath : undefined;
           props.onError(
-            ipcErrorMessage(error, "Could not update this bookmark."),
+            ipcErrorMessage(error, "dohc could not update this bookmark."),
             error,
             refusedPage !== undefined ? () => void toggleBookmark(input) : undefined,
             refusedPage,
@@ -1852,7 +1852,7 @@ export function ChatsView(props: {
         applyChannelSnapshot(snapshot);
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not load this group."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not load this Group."), error);
       } finally {
         if (token === liveToken.current && refreshSeq === channelRefreshSeq.current) {
           setThreadsLoading(false);
@@ -2144,7 +2144,7 @@ export function ChatsView(props: {
         applyThreadSnapshot(thread.id, snapshot, !channelIsLocked(channel));
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not load this chat."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not load this chat."), error);
       } finally {
         if (token === liveToken.current && refreshSeq === threadRefreshSeq.current) {
           setMessagesLoading(false);
@@ -2429,7 +2429,7 @@ export function ChatsView(props: {
       setChannelThreads((current) => [result.thread, ...current]);
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not start that chat."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not start that chat."), error);
     } finally {
       startingThreadRef.current = false;
       setStartingThread(false);
@@ -2573,7 +2573,7 @@ export function ChatsView(props: {
       }
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
-      props.onError(ipcErrorMessage(error, "Could not send that message."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not send that message."), error);
     } finally {
       const ownsContext = inFlightSendByContext.current.get(sendContextKey) === request;
       if (ownsContext) {
@@ -2711,7 +2711,7 @@ export function ChatsView(props: {
         if (token !== liveToken.current || request !== dmRefreshSeq.current) {
           return;
         }
-        props.onError(ipcErrorMessage(error, "Could not load this conversation."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not load this conversation."), error);
       } finally {
         if (token === liveToken.current) {
           if (request === dmRefreshSeq.current) setMessagesLoading(false);
@@ -2963,7 +2963,7 @@ export function ChatsView(props: {
       flatChatListRef.current?.scrollToEnd();
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
-      props.onError(ipcErrorMessage(error, "Could not send that message."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not send that message."), error);
     } finally {
       const ownsContext = inFlightSendByContext.current.get(sendContextKey) === request;
       if (ownsContext) {
@@ -3015,7 +3015,7 @@ export function ChatsView(props: {
         return true;
       } catch (error) {
         if (activeSendContext.current === context)
-          props.onError(ipcErrorMessage(error, "Could not send that reply."), error);
+          props.onError(ipcErrorMessage(error, "dohc could not send that reply."), error);
         return false;
       }
     },
@@ -3066,7 +3066,7 @@ export function ChatsView(props: {
       }
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not start that conversation."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not start that conversation."), error);
     } finally {
       startingDmRef.current = false;
       setStartingDm(false);
@@ -3711,7 +3711,7 @@ export function ChatsView(props: {
         return true;
       } catch (error) {
         if (token !== liveToken.current) return false;
-        props.onError(ipcErrorMessage(error, "Could not share that group."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not share that Group."), error);
         return false;
       }
     },
@@ -3730,7 +3730,7 @@ export function ChatsView(props: {
           undo: result.undo,
           message: result.undo
             ? `Removed ${member} from ${group}.`
-            : `${member} no longer has access to ${group}.`,
+            : `Access to ${group} had already ended for ${member}.`,
           restoredMessage: `Restored ${member} to ${group}.`,
           restored: () => {
             if (token === liveToken.current) void refreshShares();
@@ -3768,7 +3768,7 @@ export function ChatsView(props: {
         await refreshShares();
       } catch (error) {
         if (token !== liveToken.current) return;
-        const message = "Could not remove that person.";
+        const message = "dohc could not remove that person.";
         if (props.shareRemovals) {
           props.shareRemovals.failed({
             workspaceId,
@@ -3794,10 +3794,10 @@ export function ChatsView(props: {
   const endedGroupNotice = useCallback(
     (joined: JoinedSharedChannelRow) =>
       ownerRemoved(joined.shareId)
-        ? "The owner removed your access to this group. You can still read it."
+        ? "The owner removed your access to this Group. You can still read it."
         : channelShares?.received.some((row) => row.shareId === joined.shareId)
-          ? "You left this group. You can still read it."
-          : "This group is no longer shared with you. You can still read it.",
+          ? "You left this Group. You can still read it."
+          : "This Group is no longer shared with you. You can still read it.",
     [channelShares, ownerRemoved],
   );
 
@@ -3812,7 +3812,7 @@ export function ChatsView(props: {
         await refreshOverview();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not join that group."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not join that Group."), error);
       } finally {
         // Unconditional reset (the sendingRef/startingThreadRef precedent):
         // refreshOverview bumps liveToken itself, so a token-equality check
@@ -3838,7 +3838,7 @@ export function ChatsView(props: {
         await refreshOverview();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not leave that group."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not leave that Group."), error);
       }
     },
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
@@ -4174,13 +4174,13 @@ export function ChatsView(props: {
       } catch (error) {
         // The open dialog says why and keeps the draft. Notices hears of it
         // only if the person closes the dialog without a retry that worked.
-        const message = ipcErrorMessage(error, `dohc couldn't create ${input.name}.`);
+        const message = ipcErrorMessage(error, `dohc could not create ${input.name}.`);
         if (token !== liveToken.current) return message;
         let notice: ChatErrorNotice | undefined;
         if (isGroupNameTaken(error)) {
           const slug = nameSlug(input.name);
           notice = {
-            title: `dohc couldn't create #${input.name}`,
+            title: `dohc could not create #${input.name}`,
             identity: `group-name-taken:${slug}`,
           };
           const listing = await bridge()
@@ -4300,10 +4300,7 @@ export function ChatsView(props: {
         // already stopped the channel — without this the client goes
         // invisible to peers until it navigates away and back.
         presence.restart();
-        props.onError(
-          ipcErrorMessage(error, "dohc could not leave that conversation. Try again."),
-          error,
-        );
+        props.onError(ipcErrorMessage(error, "dohc could not leave that conversation."), error);
       }
     },
     [goBack, presence.leave, presence.restart, props.onError, workspaceId],
@@ -4454,7 +4451,7 @@ export function ChatsView(props: {
       if (token !== liveToken.current || refreshSeq !== threadRefreshSeq.current) {
         return;
       }
-      props.onError(ipcErrorMessage(error, "Could not stop this agent run."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not stop this agent run."), error);
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
@@ -4583,7 +4580,7 @@ export function ChatsView(props: {
       editorTab.target.kind === "dm" &&
       !dmRestoreReady)
   ) {
-    return <SkeletonRows inSlot layout="panel" label="Loading Chats..." />;
+    return <SkeletonRows inSlot layout="panel" label="Loading Chats…" />;
   }
 
   if (overview.status === "unavailable") {
@@ -4607,7 +4604,7 @@ export function ChatsView(props: {
           testId="chats-feed"
           onBack={variant === "panel" ? goBack : undefined}
           icon={<House size={12} aria-hidden className="shrink-0 text-subtle" />}
-          description="Posts and comments from your groups and files, newest first"
+          description="Posts and comments from your Groups and files, newest first"
         />
         <PostFeedList
           key={`${workspaceId}:home`}
@@ -4617,7 +4614,7 @@ export function ChatsView(props: {
           empty={
             personalFeedLoading ? undefined : (
               <div className="flex flex-1 py-12">
-                <EmptyState picture={EMPTY_ART.posts} title="No posts in your groups yet.">
+                <EmptyState picture={EMPTY_ART.posts} title="No posts in your Groups yet.">
                   <SecondaryButton
                     data-testid="chats-feed-empty-groups"
                     size="compact"
@@ -4933,7 +4930,7 @@ export function ChatsView(props: {
               className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
             />
             <p className="m-0 px-1 text-[12px] leading-4 text-subtle">
-              Separate several people with commas. They&apos;ll see the conversation on their next
+              Separate several people with commas. They will see the conversation on their next
               sync.
             </p>
           </div>
@@ -5209,7 +5206,7 @@ export function ChatsView(props: {
                 Resume
               </button>
             ) : (
-              <span className="text-muted">read-only</span>
+              <span className="text-muted">Read-only</span>
             )}
           </div>
         ) : dispatchState?.paused ? (
@@ -5229,7 +5226,7 @@ export function ChatsView(props: {
                 Resume
               </button>
             ) : (
-              <span className="text-muted">read-only</span>
+              <span className="text-muted">Read-only</span>
             )}
           </div>
         ) : dispatchState && (liveRunId !== null || dispatchState.pendingCount > 0) ? (
@@ -5238,7 +5235,7 @@ export function ChatsView(props: {
             className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[12px] tabular-nums text-muted"
           >
             {liveRunId !== null
-              ? `agent working${
+              ? `Agent working${
                   dispatchState.pendingCount > 0 ? ` · ${dispatchState.pendingCount} queued` : ""
                 }`
               : `${dispatchState.pendingCount} queued`}
@@ -5307,7 +5304,7 @@ export function ChatsView(props: {
             <ComposerNotice testId="chats-readonly-note">
               {threadJoined?.ended
                 ? endedGroupNotice(threadJoined)
-                : "This group is read-only for you."}
+                : "This Group is read-only for you."}
             </ComposerNotice>
           ) : (
             <div
@@ -5407,10 +5404,19 @@ export function ChatsView(props: {
       !agentDm || !props.agentSetup
         ? null
         : agentRemoved(nav.channel)
-          ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
+          ? {
+              words: channelAgent?.label
+                ? `The agent ${channelAgent.label} was removed.`
+                : "This agent was removed.",
+              action: "Agents",
+            }
           : (channelSettingsAgent?.launch || channelSettingsAgent?.thread) &&
               !channelSettingsAgent.enabled
-            ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
+            ? {
+                words: `The agent ${channelSettingsAgent.name} is off.`,
+                action: "Turn on",
+                off: true,
+              }
             : null;
     const channelGrants = nav.channel.wireId ? (grantedByWire.get(nav.channel.wireId) ?? []) : [];
     // Sharing an owned channel needs the sharing surface up; a joined channel
@@ -5711,7 +5717,7 @@ export function ChatsView(props: {
             }
             empty={
               threadsLoading ? (
-                <SkeletonRows label="Loading..." className="pt-4" />
+                <SkeletonRows label="Loading…" className="pt-4" />
               ) : (
                 <div className="flex flex-1 py-12">
                   <EmptyState
@@ -5767,7 +5773,7 @@ export function ChatsView(props: {
           <ComposerNotice testId="chats-readonly-note">
             {channelJoined?.ended
               ? endedGroupNotice(channelJoined)
-              : "This group is read-only for you."}
+              : "This Group is read-only for you."}
           </ComposerNotice>
         ) : null}
       </div>
@@ -5952,7 +5958,7 @@ export function ChatsView(props: {
           })}
           trailing={
             <>
-              {dm.connected ? null : <span className="shrink-0 text-[12px] text-muted">ended</span>}
+              {dm.connected ? null : <span className="shrink-0 text-[12px] text-muted">Ended</span>}
               <UnreadPill
                 count={dm.unreadCount}
                 tone={archived ? "quiet" : "ink"}
@@ -6009,7 +6015,7 @@ export function ChatsView(props: {
           <>
             {off && !archived ? (
               <span data-testid="chats-my-agent-state" className="shrink-0 text-[12px] text-muted">
-                off
+                Off
               </span>
             ) : null}
             {archived ? null : (
@@ -6054,7 +6060,7 @@ export function ChatsView(props: {
             </SectionLabel>
             <SectionActionButton
               testId="chats-new-channel"
-              label="New group"
+              label="New Group"
               onClick={() => setCreatingGroup(true)}
             >
               <Plus size={12} aria-hidden />
@@ -6096,10 +6102,10 @@ export function ChatsView(props: {
                     />
                     <div
                       className="min-w-0 flex-1"
-                      title={`${row.subjectName ?? "a Group"} · ${shareSenderLabel(row.sharerName, row.granterEmail)}`}
+                      title={`${row.subjectName ?? "Untitled Group"} · ${shareSenderLabel(row.sharerName, row.granterEmail)}`}
                     >
                       <div className="truncate text-[13px] text-ink">
-                        {row.subjectName ?? "a Group"}
+                        {row.subjectName ?? "Untitled Group"}
                         <span className="sr-only"> · </span>
                       </div>
                       <ShareSender name={row.sharerName} email={row.granterEmail} />

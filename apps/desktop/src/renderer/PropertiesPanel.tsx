@@ -608,9 +608,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 <span
                   data-testid="property-reserved"
                   className={TOPMATTER_FLAG}
-                  title="dohc uses this name for the page's title, icon or ID. Choose another name."
+                  title="dohc uses this name for the page's title, icon, or ID. Choose another name."
                 >
-                  reserved name
+                  Reserved name
                 </span>
               ) : duplicate ? (
                 <span
@@ -619,10 +619,10 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   title={
                     held === undefined
                       ? "Use a unique property name."
-                      : "This name isn't saved. Another property has it."
+                      : "This name is not saved. Another property has it."
                   }
                 >
-                  duplicate name
+                  Duplicate name
                 </span>
               ) : entry.readOnly !== undefined ? (
                 <ReadOnlyValue
@@ -693,8 +693,8 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
           <button
             type="button"
             data-testid="property-add"
-            aria-label="Add a property"
-            title="Add a property"
+            aria-label="Add property"
+            title="Add property"
             onClick={add}
             className={`${ADD} transition duration-100 hover:bg-hover hover:text-muted${
               isEmpty

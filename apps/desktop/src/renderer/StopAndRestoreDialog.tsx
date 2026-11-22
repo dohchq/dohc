@@ -709,7 +709,7 @@ export function StopAndRestoreDialog({
 function wordsFor({ target, label }: StopTarget) {
   if (target.kind === "person") {
     return {
-      loses: `${label} loses Edit access to this workspace. Share again to give it back.`,
+      loses: `This removes Edit access for ${label} on this workspace. Share again to give it back.`,
       restores:
         "Each file they changed directly goes back to how it was before their first change. Collections they created are removed. Runs of automations they changed are undone on this computer and your server. You can undo the file changes, not the runs.",
       stopFailed: `dohc could not stop ${label} and restore their changes.`,
@@ -717,7 +717,7 @@ function wordsFor({ target, label }: StopTarget) {
         files: `Stopped ${label}'s access. dohc has not finished restoring their changes.`,
         runs: `Stopped ${label}'s access. dohc has not finished undoing runs of automations they changed.`,
       },
-      waiting: `Access stopped. dohc has not received all of ${label}'s changes yet. Try again in a moment.`,
+      waiting: `Access stopped. dohc has not received all of ${label}'s changes yet.`,
       stopped: (files: string) => `Stopped ${label}'s access and restored ${files}.`,
       undone: (files: string) =>
         `Put back ${files} as ${label} left them. Their access stays stopped.`,
@@ -726,7 +726,7 @@ function wordsFor({ target, label }: StopTarget) {
     };
   }
   return {
-    loses: `${label} stops working for everyone who has it, including people who opened it in dohc. Share again to give access back.`,
+    loses: `This stops ${label} from working for everyone who has it, including people who opened it in dohc. Share again to give access back.`,
     restores:
       "Each file changed through it goes back to how it was before its first change. Collections created through it are removed. Runs of automations changed through it are undone on this computer and your server. You can undo the file changes, not the runs.",
     stopFailed: `dohc could not end ${label} and restore its changes.`,
@@ -734,8 +734,7 @@ function wordsFor({ target, label }: StopTarget) {
       files: `Ended ${label}. dohc has not finished restoring its changes.`,
       runs: `Ended ${label}. dohc has not finished undoing runs of automations changed through it.`,
     },
-    waiting:
-      "Link ended. dohc has not received every change made through it yet. Try again in a moment.",
+    waiting: "Link ended. dohc has not received every change made through it yet.",
     stopped: (files: string) => `Ended ${label} and restored ${files}.`,
     undone: (files: string) => `Put back ${files} as ${label} left them. The link stays ended.`,
     automations: `automations changed through ${label}`,
@@ -813,13 +812,13 @@ function Outcome({
       ) : null}
       {result.sharedReversals?.some((write) => write.state === "pending") ? (
         <p className="m-0 text-[13px] text-muted">
-          Reversals saved on this computer. The shared host has not accepted them yet.
+          Reversals saved on this computer. The server has not accepted them yet.
         </p>
       ) : null}
       {result.sharedReversals?.some((write) => write.state === "not-accepted") ? (
         <p className="m-0 text-[13px] text-muted">
-          Reversals saved on this computer. The shared host did not accept them. Try Undo again in
-          Run History.
+          Reversals saved on this computer. The server did not accept them. Try Undo again in run
+          history.
         </p>
       ) : null}
       {result.unfinished?.step === "runs" && result.wroteAutomations ? (
@@ -855,7 +854,7 @@ function Outcome({
       ) : null}
       {result.sendsMessages ? (
         <p className="m-0 text-[13px] text-muted">
-          Messages and notices from {words.automations} stay sent.
+          Messages and Notices from {words.automations} stay sent.
         </p>
       ) : null}
       {result.wroteAutomations ? (
@@ -866,9 +865,7 @@ function Outcome({
       ) : null}
       {result.review.length > 0 || result.keptFields.length > 0 ? (
         <div>
-          <p className="m-0 text-[13px] text-muted">
-            dohc left these changes as they are. Check them:
-          </p>
+          <p className="m-0 text-[13px] text-muted">dohc kept these changes. Check them:</p>
           <ul className="mt-1 max-h-48 list-none space-y-1 overflow-auto p-0">
             {result.keptFields.map((kept) => (
               <li key={`field:${kept.id}`}>
@@ -921,7 +918,7 @@ function Outcome({
 
 function reviewReason(file: Restored["review"][number], after: string): string {
   if (file.reason === "changed-since")
-    return `${file.changedBy ?? "Another author"} changed it after ${after}.`;
+    return `Changed after ${after} by ${file.changedBy ?? "another author"}.`;
   if (file.reason === "folder-in-use") return "This Collection holds files someone else added.";
   if (file.reason === "rules-unreadable") return restoreRulesUnreadableWords(file.unreadable);
   return file.detail;

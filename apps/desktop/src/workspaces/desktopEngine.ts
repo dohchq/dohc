@@ -1812,8 +1812,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             dialog.showErrorBox(
               "The workspace engine stopped",
               "dohc stopped restarting the workspace engine.\n\n" +
-                "Restart dohc. If this happens again, review the desktop logs. " +
-                "If it continues, reinstall dohc.",
+                "Restart dohc. If this happens again, check the desktop logs or reinstall dohc.",
             );
           }
         },
@@ -1948,8 +1947,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       console.error("[desktop] Rust engine daemon failed to start:", error);
       recordEngineProblem(error, "startup");
       dialog.showErrorBox(
-        "Rust engine failed to start",
-        `${message}\n\nThe desktop cannot start without the Rust engine.`,
+        "dohc could not start the workspace engine",
+        `${message}\n\ndohc cannot start without the workspace engine. Restart dohc. If it fails again, reinstall dohc.`,
       );
       // Contained: a stop() throw here would reject engineDaemonStartup itself
       // and rethrow from every gated await instead of letting the caller's

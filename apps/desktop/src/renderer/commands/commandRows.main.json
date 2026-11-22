@@ -46,7 +46,7 @@
     },
     {
       "id": "export-workspace",
-      "label": "Export workspace as zip"
+      "label": "Export workspace as ZIP"
     },
     {
       "id": "toggle-sidebar",
@@ -70,7 +70,7 @@
     },
     {
       "id": "toggle-markdown-source",
-      "label": "Toggle markdown source view"
+      "label": "Toggle Markdown source"
     },
     {
       "id": "share-file",
@@ -118,11 +118,11 @@
     },
     {
       "id": "settings-appearance",
-      "label": "Settings: Open Appearance"
+      "label": "Settings: Appearance"
     },
     {
       "id": "settings-agents",
-      "label": "Settings: Open Agents (MCP)"
+      "label": "Settings: Agents"
     },
     {
       "id": "check-updates",
@@ -138,7 +138,7 @@
     },
     {
       "id": "toggle-theme",
-      "label": "Toggle light/dark theme"
+      "label": "Toggle light or dark theme"
     },
     {
       "id": "zoom-in",

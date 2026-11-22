@@ -162,7 +162,7 @@ it("stops waiting when the read is cancelled, and leaves the move running", asyn
 });
 
 const unfinished =
-  "This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.";
+  "This Collection did not finish moving to sync.example.test. Its records are kept on this computer.";
 
 it("fails a read that waited for the move this app is running with the server's name, marked as waited, when the move stops", async () => {
   const stopped = Error("The server stopped answering.");

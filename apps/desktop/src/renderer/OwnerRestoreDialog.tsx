@@ -51,14 +51,13 @@ const beforeAdmission = (phase: OwnerRestorePhase) => {
 const STAGE_MESSAGES: Record<UnfinishedRestoreStage, string> = {
   decide:
     "Access stopped for this restore. Review the restore, or decline it to keep the file unchanged.",
-  waiting:
-    "The restore has not finished. Live editing of this file stays stopped until it does. Retry to continue it.",
-  finishing: "The restore has not finished. Retry to finish it.",
+  waiting: "The restore has not finished. Live editing of this file stays stopped until it does.",
+  finishing: "The restore has not finished.",
 };
 const QUOTA_MESSAGE =
-  "This workspace has reached its limit on the server. Free some space, then retry the restore.";
+  "This workspace has reached its limit on the server. Free some space, then try again.";
 const DECLINING_MESSAGE =
-  "Declining has not finished. Live editing of this file stays stopped until it does. Retry to finish declining.";
+  "Declining has not finished. Live editing of this file stays stopped until it does.";
 /** A Decline the relay refused to end. Asking again gets the same refusal. */
 export const DECLINE_REFUSED_MESSAGE =
   "Declining did not finish, and trying again will not finish it. Live editing of this file stays stopped.";
@@ -80,7 +79,7 @@ const author = (authority: Authority, emails: Emails) =>
   authority.principalKind === "owner"
     ? "Owner"
     : authority.principalKind === "link"
-      ? "Link participant"
+      ? "Link holder"
       : authority.principalKind === "personal"
         ? "Personal agent"
         : (emails.get(authority.principalId) ?? `Account ${authority.principalId}`);
@@ -206,15 +205,15 @@ function SourceList({
         {label} <span className="tabular-nums">({sources.length})</span>
       </summary>
       <p className="text-[12px] text-muted">
-        These records identify local owner work. Their times do not establish an order against
-        accepted changes.
+        These records identify your local changes. Their times do not show an order against accepted
+        changes.
       </p>
       <ul className="space-y-2 pl-5 text-[12px] text-muted">
         {sources.slice(start, start + 50).map((source) => (
           <li key={source.source.deliveryId}>
             <details>
               <summary className="cursor-pointer">
-                Local owner work <span className="font-mono">{source.source.deliveryId}</span>
+                Local change <span className="font-mono">{source.source.deliveryId}</span>
               </summary>
               <pre className="overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">
                 {JSON.stringify(source, null, 2)}
@@ -280,13 +279,13 @@ function Review({ review, emails }: { review: OwnerRestoreReview; emails: Emails
         </label>
       </div>
       <ChangeList label="Removed by this restore" events={outcomes.removed} emails={emails} />
-      <SourceList label="Local owner work removed by this restore" sources={outcomes.local} />
+      <SourceList label="Local changes removed by this restore" sources={outcomes.local} />
       <ChangeList
         label="Already excluded by an earlier restore"
         events={outcomes.excluded}
         emails={emails}
       />
-      <SourceList label="Local owner work already excluded" sources={outcomes.earlierLocal} />
+      <SourceList label="Local changes already excluded" sources={outcomes.earlierLocal} />
       <p className="text-[12px] text-muted">This restore keeps the selected version of the file.</p>
       <SourceList label="Kept at or before the selected point" sources={outcomes.kept} />
     </>
@@ -428,7 +427,7 @@ export function OwnerRestoreDialog({
         ? { kind: "pending", message: STAGE_MESSAGES[stage] }
         : saved.phase === "declined"
           ? { kind: "declined" }
-          : { kind: "error", message: "The restore changed. Close this review and open it again." },
+          : { kind: "error", message: "The restore changed. Close this dialog and open it again." },
     );
   }
   useEffect(() => {
@@ -496,8 +495,8 @@ export function OwnerRestoreDialog({
             prepared.result.cause === "quota"
               ? QUOTA_MESSAGE
               : unprepared.current > 1
-                ? "dohc could not prepare the restore again. Live editing of this file stays stopped until it finishes. Retry later."
-                : "dohc could not prepare the restore. Retry in a moment.",
+                ? "dohc could not prepare the restore again. Live editing of this file stays stopped until it finishes."
+                : "dohc could not prepare the restore.",
         });
         return;
       }
@@ -516,7 +515,7 @@ export function OwnerRestoreDialog({
     if (!checked.result || "kind" in checked.result) {
       setState({
         kind: "pending",
-        message: "dohc could not prepare the full change review. Retry to review it again.",
+        message: "dohc could not prepare the full change review.",
       });
       return;
     }
@@ -524,7 +523,7 @@ export function OwnerRestoreDialog({
       checked.result.operationId !== saved.operationId ||
       checked.result.proposalDigest !== proposalDigest
     )
-      throw Error("The restore review changed. Retry to review it again.");
+      throw Error("The restore review changed.");
     setState({ kind: "review", review: checked.result });
   }
   async function confirm(token: number, proposalDigest: string) {
@@ -556,7 +555,7 @@ export function OwnerRestoreDialog({
             result.result.kind !== "resumed" && result.result.cause === "quota"
               ? QUOTA_MESSAGE
               : result.result.kind === "review-required"
-                ? "The restore needs a new review. Retry to review it again."
+                ? "The restore needs a new review."
                 : STAGE_MESSAGES.finishing,
         });
     } finally {
@@ -683,7 +682,7 @@ export function OwnerRestoreDialog({
           </label>
           {!state.options.grants.length && state.options.nextGrantCursor === null && (
             <p className="text-[12px] text-muted">
-              No active edit access is available for this file. Close this review.
+              No active edit access is available for this file.
             </p>
           )}
           {state.options.nextGrantCursor !== null && (
@@ -751,8 +750,8 @@ export function OwnerRestoreDialog({
       {state.kind === "complete" && (
         <p className="text-[13px] text-muted">
           {state.moved
-            ? "The file moved before the restore finished, so the renamed file is unchanged. Share again when you want to give access."
-            : "The file has been restored. Share again when you want to give access."}
+            ? "The file moved before the restore finished, so the renamed file is unchanged. Share again to give access."
+            : "File restored. Share again to give access."}
         </p>
       )}
       {state.kind === "declined" && (
@@ -846,7 +845,7 @@ export function OwnerRestoreDialog({
           >
             {!declining && operation.current?.phase === "authority-invalidated"
               ? "Review restore"
-              : "Retry"}
+              : "Try again"}
           </PrimaryButton>
         )}
       </div>

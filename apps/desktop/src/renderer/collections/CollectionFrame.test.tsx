@@ -504,7 +504,7 @@ describe("a tab's menu", () => {
     await user.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(views.remove).not.toHaveBeenCalled();
     expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull();
-    await user.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+    await user.click(screen.getByRole("menuitem", { name: "Delete view" }));
     expect(views.remove).toHaveBeenCalledExactlyOnceWith("all");
     expect(screen.queryByRole("menu")).toBeNull();
   });
@@ -753,7 +753,7 @@ describe("the toolbar", () => {
       return <Frame search={{ value, onChange: setValue, onSubmit }} />;
     }
     render(<Searching />);
-    const box = screen.getByLabelText<HTMLInputElement>("Search collection");
+    const box = screen.getByLabelText<HTMLInputElement>("Search Collection");
     expect(box.maxLength).toBe(200);
     await user.type(box, "camera{Enter}");
     expect(box.value).toBe("camera");
@@ -798,7 +798,7 @@ describe("the toolbar", () => {
         );
       }
       render(<SwitchingSearch />);
-      const box = screen.getByLabelText<HTMLInputElement>("Search collection");
+      const box = screen.getByLabelText<HTMLInputElement>("Search Collection");
 
       fireEvent.change(box, { target: { value: "old query" } });
       fireEvent.click(tab("By status"));
@@ -826,10 +826,10 @@ describe("the toolbar", () => {
 
   it("shows no search for a page that has none, and holds one that is disabled", () => {
     const first = render(<Frame />);
-    expect(screen.queryByLabelText("Search collection")).toBeNull();
+    expect(screen.queryByLabelText("Search Collection")).toBeNull();
     first.unmount();
     render(<Frame search={{ value: "", onChange: vi.fn(), onSubmit: vi.fn(), disabled: true }} />);
-    expect(screen.getByLabelText<HTMLInputElement>("Search collection").disabled).toBe(true);
+    expect(screen.getByLabelText<HTMLInputElement>("Search Collection").disabled).toBe(true);
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Search" }).disabled).toBe(true);
   });
 

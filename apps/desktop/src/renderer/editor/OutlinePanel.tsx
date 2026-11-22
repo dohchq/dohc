@@ -557,8 +557,9 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
           ))}
         </ul>
         <div className="dohc-outline-wordcount">
-          {wordCount.words.toLocaleString()} words · {wordCount.characters.toLocaleString()}{" "}
-          characters
+          {wordCount.words.toLocaleString()} {wordCount.words === 1 ? "word" : "words"} ·{" "}
+          {wordCount.characters.toLocaleString()}{" "}
+          {wordCount.characters === 1 ? "character" : "characters"}
         </div>
       </div>
     </nav>

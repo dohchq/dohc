@@ -459,7 +459,7 @@ describe("desktop workspace windows", () => {
     const f = fixture();
     f.windows.reportActivationFailure(workspace("a"), new Error("load failed"));
     expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith(
-      "Open workspace",
+      "dohc could not open this workspace",
       expect.stringContaining("C:\\work\\a"),
     );
   });
@@ -1168,7 +1168,7 @@ describe("desktop native menus", () => {
       await reported.promise;
       expect(f.dependencies.stepWindowZoom).toHaveBeenCalledExactlyOnceWith("in");
       expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith(
-        "Zoom",
+        "dohc could not change the window zoom",
         error instanceof Error
           ? "dohc did not save settings. Fix the file."
           : "dohc could not change the window zoom.",

@@ -698,7 +698,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   }, [appsReveal, appsSettled, appsShown, collapsed, firstAppKey, onAppsRevealed, toggleSection]);
 
   if (!explorer.listed) {
-    return <SkeletonRows layout="list" className="mt-4 px-3 py-2" label="Loading files..." />;
+    return <SkeletonRows layout="list" className="mt-4 px-3 py-2" label="Loading files…" />;
   }
 
   const selectionIsOpenRow =

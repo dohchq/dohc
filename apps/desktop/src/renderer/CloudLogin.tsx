@@ -241,7 +241,7 @@ export function CloudLogin(
               reason:
                 result.status === "denied"
                   ? "The request was denied in the browser."
-                  : "The code expired. Start again.",
+                  : "This code expired. Try again.",
             });
           }
         })
@@ -297,10 +297,7 @@ export function CloudLogin(
       reportConnectionError({
         // Main reports the concrete validation or discovery failure. The
         // fallback only covers a rejection that carries no message.
-        message: ipcErrorMessage(
-          cause,
-          "dohc could not reach this server. Check the address, then choose Try again.",
-        ),
+        message: ipcErrorMessage(cause, "dohc could not reach this server. Check the address."),
         cause,
         serverUrl: origin,
         retry: retryFor(session, () => void connect(origin)),
@@ -480,7 +477,7 @@ export function CloudLogin(
                 <Pill>Coming soon</Pill>
               </p>
               <p className="m-0 mt-1 text-[12px] leading-relaxed text-muted">
-                Hosting, setup, and maintenance managed by dohc.
+                dohc handles hosting, setup, and maintenance.
               </p>
             </div>
           )}

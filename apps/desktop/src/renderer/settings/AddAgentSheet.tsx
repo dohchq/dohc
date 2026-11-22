@@ -68,7 +68,7 @@ function nameProblem(
       ? "Another agent has this name."
       : null;
   } catch {
-    return "This name can't be used.";
+    return "This name cannot be used.";
   }
 }
 
@@ -304,7 +304,7 @@ export function AddAgentSheet(props: {
                     {TILE_STATE[found.status].text}
                   </ToolReadiness>
                 ) : props.detectionFailed ? (
-                  <span className="text-muted">Couldn't check</span>
+                  <span className="text-muted">Could not check</span>
                 ) : (
                   <span className="flex text-muted">
                     <LoaderCircle
@@ -332,7 +332,7 @@ export function AddAgentSheet(props: {
                 Through MCP
               </span>,
               false,
-              "Cursor, OpenCode or any agent with MCP",
+              "Cursor, OpenCode, or any agent with MCP",
             )}
             {option(
               "link",
@@ -352,7 +352,7 @@ export function AddAgentSheet(props: {
                 </span>
               ) : (
                 <span className="text-muted">
-                  {link.status === "failed" ? "Couldn't check" : "Not signed in to a server"}
+                  {link.status === "failed" ? "Could not check" : "Not signed in to a server"}
                 </span>
               ),
               link.status !== "ready",
@@ -386,7 +386,7 @@ export function AddAgentSheet(props: {
             {/* Why the link can't be copied takes the place of what copying it does. */}
             <p data-testid="agent-add-link-note" className="m-0 -mt-2 text-[12px] text-muted">
               {link.link !== null
-                ? "The agent signs in in your browser, where you choose what it can reach."
+                ? "The agent signs in through your browser, where you choose what it can reach."
                 : `Sync this workspace to ${link.host} to give an agent a link.`}
             </p>
           </>

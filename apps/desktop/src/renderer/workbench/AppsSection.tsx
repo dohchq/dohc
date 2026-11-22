@@ -50,7 +50,7 @@ export function useApps(
         setState({ status: "failed", workspaceId });
         notices.report({
           identity: appsIdentity(workspaceId),
-          message: ipcErrorMessage(error, "Could not load apps."),
+          message: ipcErrorMessage(error, "dohc could not load apps."),
           cause: error,
           retry,
         });

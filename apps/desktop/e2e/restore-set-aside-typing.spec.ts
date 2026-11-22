@@ -79,7 +79,7 @@ async function typeAfter(
     { timeout: 60_000 },
   );
   if (expectedState === "pending-share")
-    await expect(saveState(page)).toHaveText("Saved locally · Pending share");
+    await expect(saveState(page)).toHaveText("Saved locally · pending share");
 }
 
 async function screenshots(page: Page, info: TestInfo, stage: string): Promise<void> {
@@ -263,7 +263,7 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await page.keyboard.press("Escape");
     });
     await test.step("Restore earlier state on the shared note says to stop live editing first", async () => {
-      const title = `dohc can't restore "${PATH}" while it has live editing on`;
+      const title = `dohc cannot restore "${PATH}" while it has live editing on`;
       const body = "In Live documents, stop live editing for this page, then restore it again.";
       const expectRefusal = async (shown: Locator) => {
         await expect(shown.locator("[id$='-title']")).toHaveText(title);
@@ -300,7 +300,7 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
     });
     await test.step("Restore earlier state on the note's creation is refused too, and the note stays", async () => {
       // Restoring to before the creation would delete the shared note.
-      const title = `dohc can't restore "${PATH}" while it has live editing on`;
+      const title = `dohc cannot restore "${PATH}" while it has live editing on`;
       const body = "In Live documents, stop live editing for this page, then restore it again.";
       // Clear the earlier refusal, so the toast below can only be this one.
       const toasts = page.getByTestId("notice-toasts").getByTestId("workspace-shell-error");

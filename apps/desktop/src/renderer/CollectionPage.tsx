@@ -297,7 +297,7 @@ export function CollectionPage({
       setLoadError(null);
     } catch (error) {
       if (!detailsRequest.isCurrent(request)) return;
-      setLoadError(withErrorWords("dohc could not load this collection.", error));
+      setLoadError(withErrorWords("dohc could not load this Collection.", error));
     }
   }, [workspaceId, collectionPath]);
   useEffect(() => {
@@ -618,8 +618,8 @@ export function CollectionPage({
     if (unseen > 0)
       onNotice(
         unseen === 1
-          ? "Created a record. It is not among the records on screen."
-          : `Created ${unseen} records. They are not among the records on screen.`,
+          ? "Created 1 record. It is not shown in this view."
+          : `Created ${unseen} records. They are not shown in this view.`,
       );
   }, [rowsRead, state.status]);
   // The record made a moment ago from a board, a calendar, or New record beside one, which opens in the panel with its name ready to type.
@@ -1088,11 +1088,11 @@ export function CollectionPage({
       if (result.status === "conflict") {
         // The conflict machinery holds the other write; re-read and retry.
         void refreshDetails();
-        failure = "This collection changed while you were editing. Try again.";
+        failure = "This Collection changed while you were editing. Try again.";
       } else {
         failure = result.detail
-          ? `dohc could not update this collection. ${result.detail}`
-          : "dohc could not update this collection.";
+          ? `dohc could not update this Collection. ${result.detail}`
+          : "dohc could not update this Collection.";
       }
       if (currentSchemaDialog.current !== dialog) onError(failure, new Error(failure));
       return failure;
@@ -1252,7 +1252,7 @@ export function CollectionPage({
             readAgain();
           }}
         >
-          Retry
+          Try again
         </SecondaryButton>
       </div>
     );
@@ -1264,7 +1264,7 @@ export function CollectionPage({
   const neverLoaded =
     (state.status === "loading" || state.status === "idle") && state.collection === null;
   if (details === null || neverLoaded) {
-    return <SkeletonRows inSlot layout="panel" label="Loading collection..." />;
+    return <SkeletonRows inSlot layout="panel" label="Loading Collection…" />;
   }
 
   const schema = details.schema;
@@ -1515,10 +1515,10 @@ export function CollectionPage({
         state.status === "error" ? (
           <>
             <span className="truncate text-[12px] text-danger">
-              dohc could not read this collection's records. {state.error}
+              dohc could not read this Collection's records. {state.error}
             </span>
             <SecondaryButton size="compact" onClick={readAgain}>
-              Retry
+              Try again
             </SecondaryButton>
           </>
         ) : writesPaused ? (
@@ -1616,12 +1616,12 @@ export function CollectionPage({
                 {accessEnded
                   ? "Access ended. This draft cannot be sent. It is kept on this computer."
                   : readOnly
-                    ? "This draft cannot be sent with the current share access. It is kept on this computer."
+                    ? "Your share access does not allow sending this draft. It is saved on this computer."
                     : record.creationDelivery === "offline"
-                      ? "Saved on this computer. This computer is offline"
+                      ? "Saved on this computer while offline"
                       : record.creationDelivery === "pending"
-                        ? "Saved on this computer. Waiting to send"
-                        : (record.creationRefusal ?? "The sync relay did not accept this draft")}
+                        ? "Saved on this computer, waiting to send"
+                        : (record.creationRefusal ?? "The server did not accept this draft")}
               </span>
               {!readOnly ? (
                 <SecondaryButton

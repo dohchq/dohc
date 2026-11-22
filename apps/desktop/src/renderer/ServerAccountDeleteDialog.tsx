@@ -72,7 +72,10 @@ function Delete(props: ServerAccountDeleteDialogProps) {
       setPreview(result);
     } catch (cause) {
       if (!alive.current || request.current !== token) return;
-      props.onError(ipcErrorMessage(cause, "dohc could not list what deletion removes."), cause);
+      props.onError(
+        ipcErrorMessage(cause, "dohc could not load what deleting this account removes."),
+        cause,
+      );
     } finally {
       if (alive.current && request.current === token) setBusy(false);
     }
@@ -129,7 +132,7 @@ function Delete(props: ServerAccountDeleteDialogProps) {
         return;
       }
       if (result.code === "preview-changed") {
-        void load("What deletion removes changed, or the review expired. Check it again.");
+        void load("The account data changed, or this review expired. Check the updated list.");
         return;
       }
       if (result.code === "rate-limited") {
@@ -190,7 +193,7 @@ function Delete(props: ServerAccountDeleteDialogProps) {
             </p>
           ) : null}
           {!preview ? (
-            <SkeletonRows rows={3} label="Listing what deletion removes…" />
+            <SkeletonRows rows={3} label="Loading deletion details…" />
           ) : (
             <>
               <section
@@ -199,7 +202,7 @@ function Delete(props: ServerAccountDeleteDialogProps) {
               >
                 <h3 className="m-0 text-[12px] font-semibold">The server deletes</h3>
                 {preview.workspaces.length === 0 && preview.workspacesElsewhere === 0 ? (
-                  <p className="m-0 text-muted">The account and no workspaces</p>
+                  <p className="m-0 text-muted">Only this account, with no synced workspaces</p>
                 ) : (
                   <ul
                     className="m-0 flex list-none flex-col gap-1 p-0"
@@ -228,12 +231,16 @@ function Delete(props: ServerAccountDeleteDialogProps) {
                 <p className="m-0 text-muted" data-testid="server-account-delete-size">
                   {formatStoredBytes(preview.storedBytes)} of files, data, apps, chats, and history
                 </p>
-                <p className="m-0 text-muted" data-testid="server-account-delete-shares">
-                  {counted(preview.ownedShareCount, "share", "shares")} you own end. People you
-                  shared with lose access and keep their copies.
-                </p>
+                {preview.ownedShareCount > 0 ? (
+                  <p className="m-0 text-muted" data-testid="server-account-delete-shares">
+                    {preview.ownedShareCount === 1
+                      ? "1 share you own ends."
+                      : `${preview.ownedShareCount} shares you own end.`}{" "}
+                    People you shared with lose access and keep their copies.
+                  </p>
+                ) : null}
                 <p className="m-0 text-muted" data-testid="server-account-delete-grants">
-                  Your access to shares others gave you ends.
+                  Your access to received shares ends.
                 </p>
               </section>
               <div

@@ -104,7 +104,7 @@ export function CollectionCustomizeDialog(props: {
 /** A Collection's automations file, which its first automation makes. */
 export function automationsFile(folder: string, made: boolean): CollectionFile {
   const file = { path: `${folder}/${AUTOMATIONS_FILE}`, holds: "automations" };
-  return made ? file : { ...file, missing: "Made with the first automation." };
+  return made ? file : { ...file, missing: "Created with your first automation" };
 }
 
 /** The files a document Collection keeps in its folder. */

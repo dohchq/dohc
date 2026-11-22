@@ -372,7 +372,7 @@ function SearchBox({
       }}
     >
       <input
-        aria-label="Search collection"
+        aria-label="Search Collection"
         placeholder="Search records"
         type="search"
         maxLength={200}
@@ -625,7 +625,7 @@ function ViewTabs(props: {
       });
     items.push({
       id: "delete",
-      label: armed ? "Confirm delete" : "Delete",
+      label: armed ? "Delete view" : "Delete",
       danger: true,
       icon: <Trash2 size={14} strokeWidth={1.9} aria-hidden />,
       onSelect: () => {

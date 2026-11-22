@@ -244,13 +244,13 @@ describe("crash report store", () => {
     const refused = store(refusing.url);
     refused.record(EVERY_KIND[0]!);
     await expect(refused.send(dialog(true).confirm)).rejects.toThrow(
-      "The report server answered 500.",
+      "dohc could not send the crash report, HTTP 500. Try again later.",
     );
     expect(refused.read().report).not.toBeNull();
 
     const redirected = store(redirecting.url);
     await expect(redirected.send(dialog(true).confirm)).rejects.toThrow(
-      "The connection to the report server failed.",
+      "dohc could not reach the report server. Check your connection, then try again.",
     );
     expect(redirected.read().report).not.toBeNull();
     expect(elsewhere.received).toEqual([]);

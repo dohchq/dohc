@@ -10,7 +10,7 @@ export function keptCopyMessage(path: string): string {
 
 /** Why a copy stays kept when no name beside its file fits. */
 export function keptCopyNoNameMessage(path: string): string {
-  return `dohc could not save the other copy of ${path}: no name beside it is short enough. Rename ${path} or its folder to something shorter, then try again.`;
+  return `dohc could not save the other copy of ${path} because the file path is too long. Shorten the file or folder name.`;
 }
 
 /**
@@ -67,7 +67,7 @@ export function useKeptCopyNotices(input: {
           if (!workspace.isCurrent(epoch)) return;
           if (saved.status === "saved") {
             const { path } = saved;
-            latest.current.showSaved(`Saved the other copy of ${copy.path} as ${path}`, {
+            latest.current.showSaved(`Saved the other copy of ${copy.path} as ${path}.`, {
               path,
               open: () => latest.current.openFile(path),
             });

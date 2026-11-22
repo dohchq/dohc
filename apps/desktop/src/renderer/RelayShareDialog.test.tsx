@@ -889,7 +889,7 @@ describe("RelayShareDialog", () => {
     expect(row.textContent).toBe("No linkCan viewCreate link");
     expect(screen.queryByText(PATHS_WARNING)).toBeNull();
     expect(await newLinkLevels(user)).toEqual([
-      "Can viewCan read, but not change.",
+      "Can viewCan read, not change.",
       "Can commentCan read and comment.",
     ]);
     await user.click(screen.getByTestId("share-link-create-access"));
@@ -1108,7 +1108,7 @@ describe("RelayShareDialog", () => {
     expect(within(rows[2]!).getByText(`Ended ${shortDate(endedAt)}`)).toBeTruthy();
     expect(within(rows[2]!).queryByRole("button")).toBeNull();
     expect(
-      within(rows[3]!).getByText("Unreadable link. dohc can't read what this link shares."),
+      within(rows[3]!).getByText("Unreadable link. dohc cannot read what this link shares."),
     ).toBeTruthy();
     expect(
       within(rows[3]!)
@@ -1208,7 +1208,7 @@ describe("RelayShareDialog", () => {
     });
     expect(bridgeMock.createRelayShareLink).not.toHaveBeenCalled();
     expect((await screen.findByTestId("share-automation-warning")).textContent).toBe(
-      'This share stops the automation "Spend" in Trip, because anyone who opens this link cannot edit Budget.',
+      'This share stops the automation "Spend" in Trip because anyone who opens this link cannot edit Budget.',
     );
     expect(create.textContent).toBe("Create link anyway");
     await user.click(create);
@@ -1488,11 +1488,11 @@ codex mcp login dohc-share`);
     });
     const named = within(agents).getByTestId("share-link-agent-connection-1");
     expect(named.textContent).toContain("Claude Code");
-    expect(named.textContent).toContain("Name reported by the agent");
+    expect(named.textContent).toContain("Name reported by agent");
     expect(named.textContent).toContain(`Last action ${shortTimestamp(CREATED_MS + 60_000)}`);
     const unnamed = within(agents).getByTestId("share-link-agent-connection-2");
     expect(unnamed.textContent).toContain("Agent");
-    expect(unnamed.textContent).toContain("The agent reported no name");
+    expect(unnamed.textContent).toContain("No name reported");
     expect(unnamed.textContent).toContain(`Signed in ${shortTimestamp(CREATED_MS)}`);
 
     await user.click(within(named).getByRole("button", { name: "Disconnect Claude Code" }));
@@ -2052,7 +2052,7 @@ codex mcp login dohc-share`);
 
     expect(
       await screen.findByText(
-        "Who has access through this link changed. Check the updated names and confirm again.",
+        "Access through this link changed. Check the updated names and confirm again.",
       ),
     ).toBeTruthy();
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
@@ -2277,7 +2277,7 @@ codex mcp login dohc-share`);
       });
     });
 
-    expect(screen.queryByText(/Who has access through this link changed/)).toBeNull();
+    expect(screen.queryByText(/Access through this link changed/)).toBeNull();
     expect(screen.queryByText(/stale@example\.test/)).toBeNull();
     row = await screen.findByTestId("share-link-row-version-grant");
     await chooseLinkOption(user, row, "End link");
@@ -2859,7 +2859,7 @@ codex mcp login dohc-share`);
       "Separate linkIts own commentsCan viewCreate link",
     );
     expect(await newLinkLevels(user)).toEqual([
-      "Can viewCan read, but not change.",
+      "Can viewCan read, not change.",
       "Can commentCan read and comment.",
     ]);
     await chooseNewLinkAccess(user, "Can comment");
@@ -2992,7 +2992,7 @@ codex mcp login dohc-share`);
     await chooseLinkAccess(user, commentRow, "Can view");
     confirmation = screen.getByTestId("share-link-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
-      "Turn off comments for this link? The same link keeps working, for viewing only. These people drop to view too: drops@example.test, editor@example.test.",
+      "Turn off comments for this link? The same link keeps working, for viewing only. These people drop to View too: drops@example.test, editor@example.test.",
     );
     expect(within(confirmation).getByRole("button", { name: "Turn off comments" })).toBeTruthy();
     await user.click(within(confirmation).getByRole("button", { name: "Cancel" }));
@@ -3410,7 +3410,7 @@ codex mcp login dohc-share`);
 
     expect(
       await screen.findByText(
-        "Who has access through this link changed. Check the updated names and confirm again.",
+        "Access through this link changed. Check the updated names and confirm again.",
       ),
     ).toBeTruthy();
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
@@ -3493,7 +3493,7 @@ codex mcp login dohc-share`);
     for (const name of ["Add another link", "New separate link", "Reset link", "End link"]) {
       const item = screen.getByRole("menuitem", { name, hidden: true });
       expect(item.getAttribute("aria-disabled")).toBe("true");
-      expect(item.textContent).toBe(`${name}Finish the change under way first.`);
+      expect(item.textContent).toBe(`${name}Wait for the current change to finish.`);
     }
     await user.click(screen.getByRole("menuitem", { name: "End link", hidden: true }));
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
@@ -4353,7 +4353,7 @@ codex mcp login dohc-share`);
     await user.click(within(namedRow).getByRole("button", { name: "Delete comment" }));
     let confirmation = screen.getByTestId("owner-comments-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
-      "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted.",
+      "Delete this comment? This cannot be undone. Readers see that a comment was deleted.",
     );
     await user.click(within(confirmation).getByRole("button", { name: "Delete comment" }));
     expect(bridgeMock.deleteRelayShareDiscussionMessage).toHaveBeenCalledWith({
@@ -4367,7 +4367,7 @@ codex mcp login dohc-share`);
     await user.click(within(linkRow).getByRole("button", { name: "Block" }));
     confirmation = screen.getByTestId("owner-comments-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
-      "Block Link Visitor? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.",
+      "Block Link Visitor? They cannot comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.",
     );
     await user.click(within(confirmation).getByRole("button", { name: "Block" }));
     expect(bridgeMock.blockRelayShareDiscussionPrincipal).toHaveBeenCalledWith({
@@ -6414,7 +6414,7 @@ describe("people and links on one surface", () => {
     expect(ana.textContent).toContain("Invited by email");
     expect(await itemsOf(ana)).toEqual(["Copy invitation", "Resend invitation", "Remove access"]);
     const pending = screen.getByTestId("share-invited-new");
-    expect(pending.textContent).toContain("Invited, not signed in yet");
+    expect(pending.textContent).toContain("Pending invite");
     expect(await itemsOf(pending)).toEqual([
       "Copy invitation",
       "Resend invitation",
@@ -6451,7 +6451,7 @@ describe("people and links on one surface", () => {
       shareId: "share-ana",
       grantId: "ana",
     });
-    expect(line()).toContain("ana@dohc.testSending the email…");
+    expect(line()).toContain("ana@dohc.testSending email…");
 
     await user.click(screen.getByTestId("share-person-access-ana"));
     const item = await screen.findByTestId("share-resend-invitation-ana");
@@ -6462,14 +6462,14 @@ describe("people and links on one surface", () => {
     expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledOnce();
 
     await act(async () => sending.resolve({ invitationEmail: "sent" }));
-    expect(line()).toContain("ana@dohc.testEmail invite sent.");
-    expect(within(ana).getByRole("status").textContent).toBe("Email invite sent.");
+    expect(line()).toContain("ana@dohc.testEmail invitation sent.");
+    expect(within(ana).getByRole("status").textContent).toBe("Email invitation sent.");
 
     const limited = { invitationEmail: "limit" as const, invitationEmailLimit: EMAIL_LIMIT };
     for (const [answer, words] of [
-      [{ invitationEmail: "unavailable" }, "This server sends no email."],
+      [{ invitationEmail: "unavailable" }, "This server does not send email."],
       [limited, "No email sent: 50 of 50 invitation emails used in the last 24 hours."],
-      [{ invitationEmail: "recent" }, "Tried a moment ago. Try again in a minute."],
+      [{ invitationEmail: "recent" }, "Sent recently. Wait a minute before trying again."],
     ] as const) {
       bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce(answer);
       await choosePersonOption(user, ana, "Resend invitation");
@@ -6508,21 +6508,21 @@ describe("people and links on one surface", () => {
     bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "failed" });
     await choosePersonOption(user, ana, "Resend invitation");
     await waitFor(() =>
-      expect(ana.textContent).toContain("ana@dohc.testThe email could not be sent."),
+      expect(ana.textContent).toContain("ana@dohc.testdohc could not send the email."),
     );
-    expect(ana.querySelector(".text-danger")?.textContent).toBe("The email could not be sent.");
+    expect(ana.querySelector(".text-danger")?.textContent).toBe("dohc could not send the email.");
 
     bridgeMock.resendRelayShareInvitation.mockRejectedValueOnce(new Error("relay down"));
     await choosePersonOption(user, ana, "Resend invitation");
     await waitFor(() => expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(2));
     await waitFor(() =>
-      expect(ana.textContent).toContain("ana@dohc.testThe email could not be sent."),
+      expect(ana.textContent).toContain("ana@dohc.testdohc could not send the email."),
     );
     expect(report).not.toHaveBeenCalled();
 
     bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "sent" });
     await choosePersonOption(user, ana, "Resend invitation");
-    await waitFor(() => expect(ana.textContent).toContain("ana@dohc.testEmail invite sent."));
+    await waitFor(() => expect(ana.textContent).toContain("ana@dohc.testEmail invitation sent."));
     expect(clear).toHaveBeenCalledExactlyOnceWith("share-invitation-email:ana");
     expect(report).not.toHaveBeenCalled();
   });
@@ -6553,7 +6553,7 @@ describe("people and links on one surface", () => {
     await act(async () => sending.resolve({ invitationEmail: "recent" }));
     expect(report).toHaveBeenCalledExactlyOnceWith({
       message: "dohc could not email late@dohc.test their invitation.",
-      cause: new Error("Tried a moment ago. Try again in a minute."),
+      cause: new Error("Sent recently. Wait a minute before trying again."),
       identity: "share-invitation-email:late",
       retry: expect.any(Function),
     });
@@ -6866,7 +6866,7 @@ describe("people and links on one surface", () => {
     const people = await screen.findByTestId("share-people");
     await within(people).findByTestId("share-independent-joined");
     const pending = await within(people).findByTestId("share-invited-pending");
-    expect(pending.textContent).toContain("new@dohc.testInvited, not signed in yet");
+    expect(pending.textContent).toContain("new@dohc.testPending invite");
     expect(within(people).queryByTestId("share-invited-joined")).toBeNull();
     expect(within(people).queryByTestId("share-independent-pending")).toBeNull();
 
@@ -7012,9 +7012,9 @@ describe("people and links on one surface", () => {
     expect(
       screen.getAllByRole("menuitemradio", { hidden: true }).map((level) => level.textContent),
     ).toEqual([
-      "Can viewCan read, but not change.",
+      "Can viewCan read, not change.",
       "Can commentCan read and comment.",
-      "Can editCan make changes and see History.",
+      "Can editCan edit and view History.",
     ]);
     expect(
       screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent),
@@ -7124,7 +7124,7 @@ describe("people and links on one surface", () => {
 
     const people = await screen.findByTestId("share-people");
     expect((await within(people).findByTestId("share-invited-new")).textContent).toContain(
-      "new@dohc.testInvited, not signed in yet",
+      "new@dohc.testPending invite",
     );
     expect(within(people).getByTestId("share-invited-ana").textContent).toContain(
       "ana@dohc.testInvited by email",
@@ -8237,7 +8237,7 @@ describe("people and links on one surface", () => {
     await user.click(await screen.findByTestId("share-person-access-named-1"));
     await user.click(await screen.findByTestId("share-person-access-named-1-edit"));
     expect((await screen.findByTestId("share-automation-warning")).textContent).toBe(
-      'This share stops the automation "Spend" in Trip, because user-sam cannot edit Budget.',
+      'This share stops the automation "Spend" in Trip because user-sam cannot edit Budget.',
     );
     expect(bridgeMock.automationShareImpact).toHaveBeenCalledExactlyOnceWith({
       workspaceId: "ws-1",
@@ -8659,7 +8659,7 @@ describe("advertised public Edit release", () => {
       expect(confirmation.querySelector("p")?.textContent).toBe(
         access === "View"
           ? "Turn off editing for this link? The same link keeps working, for viewing only."
-          : "Turn off editing for this link? The same link keeps working. Holders can view and comment.",
+          : "Turn off editing for this link? The same link keeps working. Anyone with the link can view and comment.",
       );
       expect(
         within(confirmation).getByRole("button", {
@@ -8684,7 +8684,7 @@ describe("advertised public Edit release", () => {
           onClose={() => {}}
         />,
       );
-      expect(await newLinkLevels(user)).toContain("Can editCan make changes and see History.");
+      expect(await newLinkLevels(user)).toContain("Can editCan edit and view History.");
       await chooseNewLinkAccess(user, "Can edit");
       await user.click(await screen.findByTestId("share-link-create"));
       expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
@@ -8709,7 +8709,7 @@ describe("advertised public Edit release", () => {
       />,
     );
     expect(await newLinkLevels(user)).toEqual([
-      "Can viewCan read, but not change.",
+      "Can viewCan read, not change.",
       "Can commentCan read and comment.",
     ]);
   });
@@ -8734,7 +8734,7 @@ describe("sharing that cannot work yet", () => {
     {
       reason: "signed-out",
       cloud: { connected: false, workspaceSynced: true, workspaceSyncConnected: false },
-      words: ["Not connected to sync.example.org", "Others may have access."],
+      words: ["Not connected to sync.example.org.", "Others may have access."],
       action: "Connect server",
       runs: "connect",
     },
@@ -8826,18 +8826,18 @@ describe("sharing that cannot work yet", () => {
     };
     expect(band([])).toBeNull();
     expect(band(["docs/plan.md"])).toEqual([
-      "This note hasn't been sent yet.",
-      "Leave the note or close its tab to send it.",
+      "This note has not been sent yet.",
+      "Leave it or close its tab to send it.",
     ]);
     // Another note, or one whose name only begins the same, is not this one.
     expect(band(["docs/other.md", "docs/plan.md.bak"])).toBeNull();
     const docs: RelayShareTarget = { kind: "paths", paths: ["docs"] };
     expect(band(["docs/plan.md", "docs-old/a.md"], docs)).toEqual([
-      "1 open note here hasn't been sent yet.",
-      "Leave the note or close its tab to send it.",
+      "1 open note has not been sent yet.",
+      "Leave it or close its tab to send it.",
     ]);
     expect(band(["docs/plan.md", "docs/a/b.md", "notes/c.md"], docs)).toEqual([
-      "2 open notes here haven't been sent yet.",
+      "2 open notes have not been sent yet.",
       "Leave them or close their tabs to send them.",
     ]);
     expect(band(["docs/plan.md"], { kind: "version", versionId: "version-7" })).toBeNull();

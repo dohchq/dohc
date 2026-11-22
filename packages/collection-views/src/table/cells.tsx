@@ -138,8 +138,8 @@ export const FLAGGED_REASON_TITLES: Record<FieldValueReasonCode, string> = {
   "unknown-option":
     "This field's options do not include this value. Edit the value to pick or add an option.",
   "duplicate-value": "This list repeats a value. Edit the value to remove the duplicate.",
-  "empty-person-id": "This person id is empty. Edit the value to enter a person id.",
-  "invalid-record-id": "This value is not a record id. Edit the value to pick a record.",
+  "empty-person-id": "This person ID is empty. Edit the value to enter a person ID.",
+  "invalid-record-id": "This value is not a record ID. Edit the value to pick a record.",
   "invalid-url": "This value is not a URL. Edit the value to replace it.",
   "expected-empty": "A button field stores no value. Remove this value from the record's file.",
 };
@@ -345,7 +345,7 @@ export function CellEditor({
             const parsed = Number(trimmed);
             return Number.isFinite(parsed) ? parsed : undefined;
           }}
-          invalid="This value is not a number. Enter a number."
+          invalid="Enter a number."
         />
       );
     case "date":

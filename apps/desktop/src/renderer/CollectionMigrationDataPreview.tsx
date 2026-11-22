@@ -24,7 +24,7 @@ export interface MigrationDataPreviewProps {
 }
 
 function Value({ value }: { value: MigrationPreviewValue | undefined }) {
-  if (value === undefined) return <span className="text-muted">Field absent</span>;
+  if (value === undefined) return <span className="text-muted">Not set</span>;
   if (value === null) return <span className="text-muted">Empty</span>;
   if (typeof value === "object" && value.type === "blob")
     return (
@@ -171,7 +171,7 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
       </div>
       {page.changes.length === 0 ? (
         <p className="m-0 text-[12px] text-muted">
-          No record values change. Review the fields and actions before approving.
+          No records change. Review the fields and actions before approving.
         </p>
       ) : (
         page.changes.map((change, index) => {

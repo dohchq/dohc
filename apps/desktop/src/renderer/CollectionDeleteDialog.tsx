@@ -88,7 +88,7 @@ function Delete(props: CollectionDeleteDialogProps) {
         result.cursor.workspaceId !== props.workspaceId ||
         result.name !== props.name
       )
-        throw Error("dohc returned a different Collection. Try again.");
+        throw Error("dohc returned a different Collection.");
       // Delete sends the first page's cursor and review token, so a later page from another state starts the review again.
       if (
         after &&
@@ -110,7 +110,7 @@ function Delete(props: CollectionDeleteDialogProps) {
       if (alive.current && request.current === token && !lifetime.current.signal.aborted) {
         setFailed({ after });
         setAcknowledged(false);
-        props.onError("Could not read the deletion preview.", error, () => {
+        props.onError("dohc could not read the deletion preview.", error, () => {
           void load(after);
         });
       }
@@ -146,7 +146,7 @@ function Delete(props: CollectionDeleteDialogProps) {
     } catch (error) {
       if (alive.current && request.current === token && !lifetime.current.signal.aborted) {
         setAcknowledged(false);
-        props.onError("Could not delete this Collection.", error, () => {
+        props.onError("dohc could not delete this Collection.", error, () => {
           void load();
         });
       }
@@ -172,17 +172,15 @@ function Delete(props: CollectionDeleteDialogProps) {
             title={`Delete ${props.name} permanently?`}
           >
             <p>
-              This deletes every table, record, upload, history entry, and app grant in this
-              Collection.{" "}
+              Deletes every table, record, upload, history entry, and app grant in this Collection.{" "}
               {props.folder ? (
                 <>
                   The <span className="wrap-anywhere">{props.folder}</span> folder and its files
-                  stay.
+                  stay in Files.
                 </>
               ) : (
-                "Its files stay."
-              )}{" "}
-              Find them in Files.
+                "Its files stay in Files."
+              )}
             </p>
             <p className="text-danger">This cannot be undone on this host.</p>
           </ConfirmationHead>
@@ -248,7 +246,7 @@ function Delete(props: CollectionDeleteDialogProps) {
                 disabled={busy || !page || failed !== null}
                 onChange={(event) => setAcknowledged(event.target.checked)}
               />
-              I understand that dohc cannot undo this deletion.
+              I understand this deletion cannot be undone.
             </label>
             <ConfirmActions>
               <SecondaryButton className={FOCUS_RING} disabled={deleting} onClick={props.onClose}>

@@ -306,8 +306,8 @@ function SearchList({
                   type="button"
                   // The right arrow opens the colors from the search box.
                   tabIndex={-1}
-                  aria-label={`${row.color.option} options`}
-                  title={`${row.color.option} options`}
+                  aria-label={`Options for ${row.color.option}`}
+                  title={`Options for ${row.color.option}`}
                   aria-expanded={coloring?.key === row.key}
                   onClick={() =>
                     setColoring(coloring?.key === row.key ? null : { key: row.key, byKey: false })
@@ -667,7 +667,7 @@ export function PeoplePicker({
                 listed.findIndex((person) => person.id === current),
               )
         }
-        empty={name === "" ? "No people to choose from yet." : `No people match "${name}".`}
+        empty={name === "" ? "No people yet." : `No people match "${name}".`}
       />
     </PickerFrame>
   );
