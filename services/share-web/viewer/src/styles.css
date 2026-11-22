@@ -20,7 +20,9 @@
   --viewer-warning: #855f1e;
   --viewer-danger: #9d3c28;
   --viewer-danger-tint: #eadcd3;
-  --viewer-on-danger: #ffffff;
+  /* A danger confirm's fill and label. Dark has its own deeper fill, as on the desktop. */
+  --viewer-danger-fill: #9d3c28;
+  --viewer-on-danger: #faf9f5;
   --viewer-skeleton: #e6e3db;
   --viewer-scrim: rgba(0, 0, 0, 0.4);
   --viewer-shadow: 0 1px 2px rgba(28, 27, 24, 0.05), 0 8px 24px rgba(28, 27, 24, 0.12);
@@ -53,7 +55,8 @@
     --viewer-warning: #d9a94e;
     --viewer-danger: #e1866c;
     --viewer-danger-tint: #30241f;
-    --viewer-on-danger: #131211;
+    --viewer-danger-fill: #b04530;
+    --viewer-on-danger: #f6f4ee;
     --viewer-skeleton: #2a2926;
     --viewer-scrim: rgba(0, 0, 0, 0.65);
     --viewer-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 28px rgba(0, 0, 0, 0.45);
@@ -90,7 +93,7 @@ h1 { margin: 4px 0 0; font-family: Georgia, serif; font-size: 24px; font-weight:
 .handoff-button.secondary { border: 1px solid var(--viewer-line-strong); background: transparent; color: var(--viewer-muted); }
 .handoff-button.secondary:hover { background: var(--viewer-panel-2); color: var(--viewer-ink); }
 /* A confirm that loses work. */
-.handoff-button.danger { border: 1px solid var(--viewer-danger); background: var(--viewer-danger); color: var(--viewer-on-danger); }
+.handoff-button.danger { border: 1px solid var(--viewer-danger-fill); background: var(--viewer-danger-fill); color: var(--viewer-on-danger); }
 .handoff-button.danger:hover { opacity: .9; }
 .freshness { padding: 10px 32px; border-bottom: 1px solid var(--viewer-line); background: var(--viewer-panel-2); color: var(--viewer-muted); font-family: ui-monospace, monospace; font-size: 11px; }
 .layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(280px, 360px); min-height: calc(100vh - 116px); }
