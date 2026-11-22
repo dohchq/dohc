@@ -583,6 +583,8 @@ fn reads_only(event: &notify::Event) -> bool {
 /// own path while the watch on everything else keeps working. Attaching again
 /// would meet the same folder and report it again, without end. Reaching the
 /// limit on watches names a folder too, but the rest of the tree goes unwatched.
+/// The callback remembers each unreadable folder and attaches again once a
+/// change names it, because only a new watch reaches inside it.
 fn watch_lost(root: &Path, error: &notify::Error) -> bool {
     matches!(error.kind, notify::ErrorKind::MaxFilesWatch)
         || error.paths.is_empty()
@@ -599,6 +601,7 @@ fn event_callback(
     state: Arc<WatchState>,
     backend_error: Arc<AtomicBool>,
 ) -> impl FnMut(Result<notify::Event, notify::Error>) + Send {
+    let mut unreadable: Vec<PathBuf> = Vec::new();
     move |event| {
         if event
             .as_ref()
@@ -606,7 +609,20 @@ fn event_callback(
         {
             return;
         }
-        if event.as_ref().is_err_and(|error| watch_lost(&root, error)) {
+        let attach_again = match &event {
+            Err(error) if watch_lost(&root, error) => true,
+            Err(error) => {
+                for path in &error.paths {
+                    if !unreadable.contains(path) {
+                        unreadable.push(path.clone());
+                    }
+                }
+                false
+            }
+            Ok(event) => event.paths.iter().any(|path| unreadable.contains(path)),
+        };
+        if attach_again {
+            unreadable.clear();
             state.disruptions.fetch_add(1, Ordering::AcqRel);
             backend_error.store(true, Ordering::Release);
             dirty();
@@ -1089,6 +1105,31 @@ mod callback_tests {
             Ok(ThreadMessage::Event)
         ));
         callback.expect_quiet();
+    }
+
+    #[test]
+    fn a_change_to_an_unreadable_folder_attaches_the_watch_again_once() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 4);
+        (callback.send)(Err(notify::Error::io(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ))
+        .add_path(root.join("locked"))));
+        let _ = callback.messages.try_recv();
+        callback.expect_queued(
+            notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(root.join("open").join("note.md")),
+        );
+        let unlocked = notify::Event::new(EventKind::Modify(ModifyKind::Metadata(
+            notify::event::MetadataKind::Permissions,
+        )))
+        .add_path(root.join("locked"));
+        (callback.send)(Ok(unlocked.clone()));
+        assert!(callback.backend_error.swap(false, Ordering::AcqRel));
+        assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
+        (callback.send)(Ok(unlocked));
+        assert!(!callback.backend_error.load(Ordering::Acquire));
+        assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
     }
 
     #[test]
