@@ -644,7 +644,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
           };
         });
       if (shown.names > 0)
-        failures.push(`a Collection's name (${theme}) is cut at the sidebar's default width`);
+        failures.push(`a Collection's name (${theme}) is cut in a narrow sidebar`);
       if (shown.lines > 0)
         failures.push(`a Collection change's parts (${theme}) run past their line`);
       if (shown.parts === 0)
