@@ -42,7 +42,7 @@ In a Group, View means read only. Comment and Edit mean read and post.
 
 ## Access rules
 
-The owner can give a folder an access rule. The owner or an admin can give a Group one. A single file has no rule of its own; it takes its folder's. The rule lists the Member role and people, each with a level. A rule can raise a level as well as lower it. A member who is not covered by the rule loses access to the item and everything in it. A rule further down can change a member's level inside a folder they reach, but it never shows them a folder inside one they cannot reach. When a rule lists both a person and the Member role, the person's own entry wins. Rules never limit the owner or admins, who always have Edit, so a rule does not list them.
+The owner can give a folder an access rule. The owner or an admin can give a Group one. A single file has no rule of its own; it takes its folder's. A folder's rule lists the Member role and people, each with a level. A Group's rule sets only the Member role's level. A rule can raise a level as well as lower it. A member who is not covered by the rule loses access to the item and everything in it. A rule further down can change a member's level inside a folder they reach, but it never shows them a folder inside one they cannot reach. When a rule lists both a person and the Member role, the person's own entry wins. Rules never limit the owner or admins, who always have Edit, so a rule does not list them.
 
 Examples:
 
@@ -96,9 +96,9 @@ When an item is hidden from a member, or a member is removed, the copies already
 
 Members see the Groups they can reach and the Comments on files they can see. Only the owner and admins create Groups. A new Group reaches members without an invite.
 
-A member can start a direct message with anyone in the workspace from the member list. A direct message is between two people. The server holds it for those two, connects them without showing either person's email, and keeps it out of the workspace, so the owner cannot read it. Reading one needs a connection to the server. Either person can block the other, which stops new messages. General, direct messages, and chats with agents stay private to the people in them.
+A member can start a direct message with anyone in the workspace from the member list. A direct message is between two people. The server holds it for those two, connects them without showing either person's email, and keeps it out of the workspace, so the owner cannot read it. Reading one needs a connection to the server. Either person can block the other, which stops the blocked person's new messages to them. General, direct messages, and chats with agents stay private to the people in them.
 
-A direct message belongs to the people in it, on one server, not to a workspace. Two people have one conversation in every workspace they share on that server, and it continues if one of them leaves or is removed. A person can block another, and the server enforces the block. Typing an email is another way to find a person, and it opens the same conversation. The server's operator can read direct messages, so dohc never calls them encrypted.
+A direct message belongs to the people in it, on one server, not to a workspace. Two people have one conversation in every workspace they share on that server, and it continues if one of them leaves or is removed. A person can block another, and the server enforces the block. The server's operator can read direct messages, so dohc never calls them encrypted.
 
 General is each workspace's personal chat. In a community, people may expect a "general" room to be public. The community makes a Group for that.
 
@@ -115,7 +115,9 @@ The dohc CLI and MCP do what the Members page does, in a workspace the person ow
 ## Not in this version
 
 - Custom roles, a Moderator role, a Guest role, and named sets of people.
-- Rules on single files.
+- Rules on single files, and Group rules that name people.
+- Agents reading or sending direct messages.
+- Starting a direct message by typing an email.
 - Admins changing a folder's access rule.
 - Direct messages with more than two people, or read offline.
 - Invite links that expire or count uses.
