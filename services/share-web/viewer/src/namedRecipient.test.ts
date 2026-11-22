@@ -44,9 +44,10 @@ it.each([
   );
 });
 
-// app_collection_missing comes only from an app's routes, never from a live link.
+// app_collection_missing comes only from an app's routes, and link_too_many_files only from a
+// member's file list, never from a live link.
 const liveLinkRefusals = (Object.keys(LINK_REFUSALS) as LinkRefusalCode[]).filter(
-  (code) => code !== "app_collection_missing",
+  (code) => code !== "app_collection_missing" && code !== "link_too_many_files",
 );
 it.each(liveLinkRefusals)("preserves the verified link refusal %s", async (code) => {
   vi.stubGlobal(
