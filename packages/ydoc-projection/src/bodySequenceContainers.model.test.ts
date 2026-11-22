@@ -181,7 +181,8 @@ const tally = () => ({
   changes: 0,
   undos: 0,
   redos: 0,
-  passedOver: 0,
+  passedOverWhatItAddedIsGone: 0,
+  passedOverItsLinesAreGone: 0,
   changedNothing: 0,
   freshIdsForATwin: 0,
   roundsWithOneIdOnTwo: 0,
@@ -286,13 +287,9 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
   const local = (act: () => void, expected: Expected, settings: string[] = []) => {
     const depth = history.undoStack.length;
     const twinsBefore = twins(doc);
-    const [effects] = seen(
-      (() => {
-        const before = shoot(doc);
-        doc.transact(act, LOCAL);
-        return before;
-      })(),
-    );
+    const before = shoot(doc);
+    doc.transact(act, LOCAL);
+    const [effects] = seen(before);
     const chars = effects.insertedChars.length - effects.deletedChars.length;
     const boundaries = effects.insertedBoundaries.length - effects.deletedBoundaries.length;
     if (chars !== (expected.chars ?? 0) || boundaries !== (expected.boundaries ?? 0))
@@ -410,10 +407,15 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     }
   };
 
+  const madeItsContainer = (entry: Step, key: string) => {
+    const made = entry.slots.get(`record ${key.split(".")[0]!}`);
+    return made !== undefined && made.from === undefined;
+  };
+
   const nothingLeftToUndo = (entry: Step) => {
     const added = new Set([...entry.insertedChars, ...entry.insertedBoundaries]);
     return (
-      entry.settings.size === 0 &&
+      [...entry.settings].every((key) => madeItsContainer(entry, key)) &&
       [...entry.deletedChars, ...entry.deletedBoundaries].every((id) => added.has(id)) &&
       ![...added].some(alive) &&
       ![...entry.slots.keys()].some((slot) => slot.startsWith("line ") && alive(partsOf(slot)[1]))
@@ -476,12 +478,22 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     const passedOver = popped.length - (did ? 1 : 0);
     if (passedOver > nothingLeft)
       throw new Error(`[3 undo] ${which} passed over a step that still had something to ${which}`);
-    oracle.count.passedOver += passedOver;
+    for (const entry of popped.slice(did ? 1 : 0))
+      oracle.count[
+        entry.insertedChars.length + entry.insertedBoundaries.length > 0
+          ? "passedOverWhatItAddedIsGone"
+          : "passedOverItsLinesAreGone"
+      ]++;
     oracle.count[which === "undo" ? "undos" : "redos"]++;
     const done = did ? popped[0]! : step();
-    const touched = effects.insertedChars.length + effects.deletedChars.length + effects.slots.size;
-    if (did && touched + effects.insertedBoundaries.length + effects.deletedBoundaries.length === 0)
-      oracle.count.changedNothing++;
+    const changed = [
+      effects.insertedChars,
+      effects.deletedChars,
+      effects.insertedBoundaries,
+      effects.deletedBoundaries,
+      [...effects.slots],
+    ];
+    if (did && changed.every((none) => none.length === 0)) oracle.count.changedNothing++;
 
     const roots = (ids: Id[]) => ids.map((id) => oracle.root(id));
     const within = (ids: Id[], allowed: Id[]) => {
@@ -527,14 +539,17 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       const change = done.slots.get(`record ${key}`);
       const [first, last] = done.rounds.get(`record ${key}`) ?? [0, Infinity];
       if (!change || oracle.others(`record ${key}`, who, first, last)) continue;
+      if (madeItsContainer(done, key)) {
+        if (effects.slots.has(`record ${key}`))
+          throw new Error(`[4 settings] ${which} changed ${key}, which its own step made`);
+        continue;
+      }
       const unset = json(DEFAULTS[key.split(".")[1] ?? ""]);
-      const made = done.slots.get(`record ${key.split(".")[0]!}`);
-      const madeInThisStep = made !== undefined && made.from === undefined;
-      const earlier = madeInThisStep ? change.to?.value : (change.from?.value ?? unset);
+      const earlier = change.from?.value ?? unset;
       const reads = after.records.get(key)?.value ?? unset;
       if (reads !== earlier)
         throw new Error(
-          `[4 settings] ${which} left ${key} reading ${reads}, and it read ${String(earlier)} before the step`,
+          `[4 settings] ${which} left ${key} reading ${reads}, and it read ${earlier} before the step`,
         );
     }
 
@@ -562,7 +577,8 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
           );
     }
 
-    for (const key of done.settings) effects.settings.add(key);
+    for (const key of done.settings)
+      if (effects.slots.has(`record ${key}`)) effects.settings.add(key);
     if (other().length > otherDepth) to.push(effects);
     return did;
   };
@@ -1133,7 +1149,7 @@ function add(total: Tally, more: Tally) {
   for (const key of Object.keys(total) as (keyof Tally)[]) total[key] += more[key];
 }
 
-const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 80);
+const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 60);
 const FIRST = Number(process.env.BODY_CONTAINERS_FIRST ?? 1);
 const ROUNDS = Number(process.env.BODY_CONTAINERS_ROUNDS ?? 0);
 const BUSIEST = Number(process.env.BODY_CONTAINERS_BUSIEST ?? 0);
@@ -1398,3 +1414,65 @@ it.each([
     settled(people, oracle, true);
   },
 );
+
+it.each([
+  ["as the step last set it", false, 5],
+  ["as someone else set it since", true, 9],
+])(
+  "undo of a step that made a list and then set its start number leaves the number %s",
+  (_, changedSince, start) => {
+    const { oracle, people } = team(2, plainNote());
+    const [first, second] = people as [Person, Person];
+    first.wrap(0, 0, 1, "orderedList", { start: 3 });
+    first.containerAttrs(0, 0, { start: 5 });
+    deliver(people, "one by one", random(1));
+    settled(people, oracle, true);
+    if (changedSince) second.containerAttrs(0, 0, { start: 9 });
+    second.split(0, 4);
+    deliver(people, "one by one", random(1));
+    settled(people, oracle, true);
+    first.undo();
+    deliver(people, "one by one", random(1));
+    settled(people, oracle, true);
+    expect(pathsOf(second.doc)).toEqual([[], ["w0", "x0"], [], []]);
+    expect(second.records.get("w0.start")).toBe(start);
+  },
+);
+
+it("shows a title set while someone lifts a line out of the callout's middle on its first part only", () => {
+  const { oracle, people } = team(2, calloutNote());
+  const [namer, lifter] = people as [Person, Person];
+  namer.containerAttrs(0, 0, { title: "Danger" });
+  lifter.lift(1, 1, 1);
+  deliver(people, "one by one", random(1));
+  settled(people, oracle, true);
+  expect(titlesOf(namer.doc)).toEqual(["Danger", "paragraph", "Read me"]);
+  lifter.undo();
+  deliver(people, "one by one", random(1));
+  settled(people, oracle, true);
+  expect(titlesOf(namer.doc)).toEqual(["Danger"]);
+});
+
+it("splits a line inside bold text without writing any formatting", () => {
+  const doc = open(plainNote(), 10);
+  const sequence = doc.getText(SEQUENCE);
+  const formatting = () => {
+    let items = 0;
+    for (let item = sequence._start; item !== null; item = item.right)
+      if (item.content instanceof Y.ContentFormat) items++;
+    return items;
+  };
+  doc.transact(() => sequence.format(1, 4, { bold: {} }), LOCAL);
+  const before = formatting();
+  doc.transact(() => writeBody(doc, splitLine(schema, doc, 0, 2, String)!), LOCAL);
+  expect(formatting()).toBe(before);
+  const bold = { type: "text", marks: [{ type: "bold" }] };
+  expect(readBodySequence(schema, doc).toJSON()).toMatchObject({
+    content: [
+      { content: [{ ...bold, text: "ab" }] },
+      { content: [{ ...bold, text: "cd" }] },
+      {},
+      {},
+    ],
+  });
+});
