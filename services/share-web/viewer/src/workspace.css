@@ -43,6 +43,8 @@
 /* A toast that is only its title centres it on the icon. */
 .toast-slot .edit-notice.title-only, .title-only .toast-text { align-items: center; }
 .title-only .toast-close, .title-only .toast-copy { margin-top: 0; }
+/* The mark is bare, as on the desktop's toast: a tinted tile is for a danger confirmation. It sits on the title's first line. */
+.toast-slot .edit-notice .tile { width: auto; height: 18px; background: none; }
 @keyframes workspace-toast { from { opacity: 0; transform: translateY(8px); } }
 /* Unsent live text sits in the page's flow, under the band, one compact row per page that opens in place. */
 .workspace-kept { display: flex; flex: none; flex-direction: column; gap: 8px; width: 100%; max-width: 720px; box-sizing: border-box; margin: 0 auto; padding: 8px 16px 0; text-align: start; }
