@@ -107,7 +107,6 @@
     "apps/desktop/src/renderer/settings/AgentList.tsx | getUserSettings #2",
     "apps/desktop/src/renderer/settings/AgentList.tsx | readChatDispatchPaused",
     "apps/desktop/src/renderer/settings/AgentList.tsx | readWorkspaceTrust",
-    "apps/desktop/src/renderer/settings/AgentToolPicker.tsx | detectAgentTools",
     "apps/desktop/src/renderer/settings/AgentsMcpSettings.tsx | getAgentRunStatus",
     "apps/desktop/src/renderer/settings/AgentsMcpSettings.tsx | getAgentRunStatus #2",
     "apps/desktop/src/renderer/settings/AgentsMcpSettings.tsx | getMcpConfig",
