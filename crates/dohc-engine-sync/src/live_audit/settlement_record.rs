@@ -334,7 +334,7 @@ pub(super) fn journal_ready_in_tx(
     if let Some(moment) = unavailable {
         let terminal: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_settlement_attribution_unavailable WHERE workspace_id=?1 AND moment_id=?2 AND settlement_id=?3 AND reason='terminal-owner-source')",params![workspace,moment,id],|r|r.get(0)).map_err(SyncError::corrupt)?;
         let before = if terminal {
-            publication_source_before_in_tx(tx, &read_native_metadata(tx, workspace, id)?, false)?
+            publication_source_before_in_tx(tx, &read_native_metadata(tx, workspace, id)?)?
         } else {
             None
         };
@@ -364,7 +364,7 @@ pub(super) fn journal_ready_in_tx(
         params![workspace, record.moment_id], |row| row.get(0),
     ).map_err(SyncError::corrupt)?;
     if !published {
-        match publication_source_before_in_tx(tx, &record, true)? {
+        match publication_source_before_in_tx(tx, &record)? {
             Some(before) => crate::outbound::journal_moment_append_from_in_tx(
                 tx,
                 workspace,
@@ -387,7 +387,6 @@ pub(super) fn journal_ready_in_tx(
 fn publication_source_before_in_tx(
     tx: &Transaction<'_>,
     record: &SettlementRecord,
-    settlement_proof: bool,
 ) -> Result<Option<crate::outbound::PortableBefore>, SyncError> {
     if record.restore_operation_id.is_some() {
         return Ok(None);
@@ -414,16 +413,14 @@ fn publication_source_before_in_tx(
     {
         return Ok(Some(before));
     }
-    // The relay starts each proof at its prior accepted cut and names that
-    // artifact. An unavailable interval does not advance the cut, and a save
-    // while stopped moves the file past it.
+    // An unavailable interval does not advance the relay's verified chain.
+    // The next proof starts at its prior accepted cut and names that artifact.
     let skipped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id AND u.settlement_id=s.settlement_id WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor>?6 AND s.terminal_cursor<?7)",params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,record.terminal_cursor],|r|r.get(0)).map_err(SyncError::corrupt)?;
-    if record.previous_cursor > 0
-        && let Some(before) = tx.query_row(concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest AND (?7 OR (?9 AND s.binding_json=?10 AND s.markdown_digest IS NOT (SELECT payload_before_blob_sha256 FROM moments WHERE workspace_id=?1 AND moment_id=?8)))"),params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,skipped,record.moment_id,settlement_proof,serde_json::to_string(b).map_err(SyncError::corrupt)?],portable_before_from_row).optional().map_err(SyncError::corrupt)?
-    {
-        return Ok(Some(before));
-    }
     if skipped && record.previous_cursor > 0 {
+        let accepted = tx.query_row(concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest"),params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor],portable_before_from_row).optional().map_err(SyncError::corrupt)?;
+        if let Some(before) = accepted {
+            return Ok(Some(before));
+        }
         // An empty handover writes the cut but leaves no settlement row.
         // The first unavailable interval from that exact cut kept its preimage.
         let mut statement = tx
@@ -717,16 +714,14 @@ mod tests {
             restore_operation_id: None,
         };
         let outcome = store.write_with(&NoFaults, |tx| {
-            Ok::<_, SyncError>(
-                publication_source_before_in_tx(tx, &record, true)?.map(|before| {
-                    let mut payload = serde_json::json!({});
-                    before.apply_to(&mut payload);
-                    payload["payloadBeforeBlobSha256"]
-                        .as_str()
-                        .unwrap()
-                        .to_owned()
-                }),
-            )
+            Ok::<_, SyncError>(publication_source_before_in_tx(tx, &record)?.map(|before| {
+                let mut payload = serde_json::json!({});
+                before.apply_to(&mut payload);
+                payload["payloadBeforeBlobSha256"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            }))
         })?;
         match outcome {
             TxnOutcome::Committed(digest) => Ok(digest),
@@ -815,112 +810,11 @@ mod tests {
                 "sourceStateVectorDigest":"","acceptedStateBlobSha256":"","recordedAtMs":30,
                 "restoreOperationId":null
             })).unwrap();
-            let before = publication_source_before_in_tx(tx, &record, true)?.unwrap();
+            let before = publication_source_before_in_tx(tx, &record)?.unwrap();
             let mut payload = serde_json::json!({});
             before.apply_to(&mut payload);
             assert_eq!(payload["payloadBeforeBlobSha256"], accepted);
             assert_eq!(payload["beforeLatestMomentId"], "accepted");
-            Ok::<_, SyncError>(())
-        }).unwrap();
-    }
-
-    #[test]
-    fn a_save_while_stopped_leaves_the_next_settlement_starting_at_the_accepted_cut() {
-        let (_scratch, _, mut store) = dohc_engine_testkit::open_store();
-        let mut text = VersionedTextStore::new(&mut store);
-        text.ensure_main_version("ws", "main", 1, &NoFaults)
-            .unwrap();
-        for (moment, body) in [
-            ("accepted", "Accepted note."),
-            ("stopped-save", "Saved while stopped."),
-            ("resumed", "Typed after Resume."),
-        ] {
-            text.write_text(
-                &WriteText {
-                    workspace_id: "ws".into(),
-                    version_id: "main".into(),
-                    object_id: "object".into(),
-                    path: "note.md".into(),
-                    text: body.into(),
-                    moment_id: moment.into(),
-                    metadata_origin: "ydoc".into(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: 10,
-                    request_id: None,
-                },
-                &NoFaults,
-            )
-            .unwrap();
-        }
-        let binding = LiveObjectBinding {
-            workspace_id: "ws".into(),
-            main_version_id: "main".into(),
-            object_id: "object".into(),
-            lineage_claim_id: hex_sha256(b"lineage"),
-            current_path: "note.md".into(),
-            selector_paths: vec!["note.md".into()],
-            restore_fence_generation: 0,
-        };
-        let accepted = hex_sha256(b"Accepted note.");
-        store.write_with(&NoFaults, |tx| {
-            dohc_engine_storage::put_binary_blob(tx, b"lineage")?;
-            tx.execute(
-                "INSERT INTO live_device_settlements (settlement_id,relay_database_namespace,workspace_id,
-                 main_version_id,object_id,lineage_claim_id,previous_cursor,terminal_cursor,
-                 previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,
-                 markdown_digest,source_state_vector_digest,binding_json,host_coordinate_json,recorded_at_ms)
-                 VALUES ('accepted','relay','ws','main','object',?1,2,3,1,2,1,?1,
-                 'accepted',?2,?1,?3,'{}',20)",
-                params![binding.lineage_claim_id, accepted, serde_json::to_string(&binding).unwrap()],
-            ).map_err(SyncError::persist)?;
-            tx.execute(
-                "INSERT INTO live_settlement_publication_states VALUES ('accepted',?1)",
-                [&binding.lineage_claim_id],
-            ).map_err(SyncError::persist)?;
-            for (moment, starts_at) in [("resumed", Some("accepted")), ("stopped-save", None)] {
-                let record: SettlementRecord = serde_json::from_value(serde_json::json!({
-                    "settlementId": "next", "relayDatabaseNamespace": "relay", "binding": binding,
-                    "hostCoordinate": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
-                    "previousCursor":3,"terminalCursor":4,"previousYdocSequence":2,"localYdocSequence":3,
-                    "applicationCount":1,"nativeIntervalDigest":"","acceptedEventCount":1,
-                    "acceptedIntervalDigest":"","momentId":moment,"markdownDigest":"",
-                    "sourceStateVectorDigest":"","acceptedStateBlobSha256":"","recordedAtMs":30,
-                    "restoreOperationId":null
-                })).unwrap();
-                let before = publication_source_before_in_tx(tx, &record, true)?.map(|before| {
-                    let mut payload = serde_json::json!({});
-                    before.apply_to(&mut payload);
-                    payload
-                });
-                assert_eq!(
-                    before.as_ref().map(|payload| payload["beforeLatestMomentId"].as_str().unwrap()),
-                    starts_at,
-                    "{moment}"
-                );
-                if let Some(payload) = before {
-                    assert_eq!(payload["payloadBeforeBlobSha256"], accepted);
-                }
-            }
-            let renamed = LiveObjectBinding {
-                current_path: "renamed.md".into(),
-                selector_paths: vec!["renamed.md".into()],
-                ..binding.clone()
-            };
-            let record: SettlementRecord = serde_json::from_value(serde_json::json!({
-                "settlementId": "next", "relayDatabaseNamespace": "relay", "binding": renamed,
-                "hostCoordinate": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
-                "previousCursor":3,"terminalCursor":4,"previousYdocSequence":2,"localYdocSequence":3,
-                "applicationCount":1,"nativeIntervalDigest":"","acceptedEventCount":1,
-                "acceptedIntervalDigest":"","momentId":"resumed","markdownDigest":"",
-                "sourceStateVectorDigest":"","acceptedStateBlobSha256":"","recordedAtMs":30,
-                "restoreOperationId":null
-            })).unwrap();
-            assert!(
-                publication_source_before_in_tx(tx, &record, true)?.is_none(),
-                "a renamed note keeps its own preimage"
-            );
             Ok::<_, SyncError>(())
         }).unwrap();
     }
