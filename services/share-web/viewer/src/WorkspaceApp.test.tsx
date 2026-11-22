@@ -2024,8 +2024,33 @@ describe("deleting a Group message", () => {
     expect(line.querySelector(".icon circle")).not.toBeNull();
     expect(groupPanel().textContent).toContain("Plans start here");
     expect(deletes()).toHaveLength(0);
-    // Its Delete has gone, so focus goes to the messages rather than the page.
-    expect(document.activeElement).toBe(groupPanel().querySelector(".chat-scroller"));
+    // As on the desktop, the deleted line offers no Reply; Ana's post keeps hers.
+    expect(groupPanel().querySelector('.chat-message[data-seq="4"] .chat-replies')).toBeNull();
+    expect(
+      groupPanel().querySelector('.chat-message[data-seq="3"] .chat-replies')?.textContent,
+    ).toBe("Reply");
+    // Its Delete has gone and no message follows, so focus goes to the composer, not the pane.
+    expect(document.activeElement).toBe(groupPanel().querySelector(".chat-composer textarea"));
+  });
+
+  it("keeps a deleted post's replies link and puts focus on it", async () => {
+    server({
+      history: {
+        "wire-plans": [
+          chat(3, "Plans start here"),
+          chat(4, "Mine to take back", "sam"),
+          chat(5, "Noted", "ana", { threadId: "t4", startsPost: false }),
+        ],
+      },
+    });
+    await render();
+    await settledOpen();
+    await act(async () => deletes()[0]!.click());
+    await act(async () => inDialog("Delete").click());
+    await settle(() => dialog() === null && !text().includes("Mine to take back"));
+    const replies = groupPanel().querySelector('.chat-message[data-seq="4"] .chat-replies');
+    expect(replies?.textContent).toBe("1 reply");
+    expect(document.activeElement).toBe(replies);
   });
 
   it("offers Delete on every message to the owner or an admin, and Cancel deletes nothing", async () => {

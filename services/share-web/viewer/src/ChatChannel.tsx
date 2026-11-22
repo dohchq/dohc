@@ -138,6 +138,7 @@ function ChatMessage({
     dated = !Number.isNaN(sent.getTime());
   const owner = agent ? message.authorOwnerDisplayName : null,
     unnamed = owner !== null && message.authorDisplayName === "Agent";
+  const deleted = message.deletedAtMs !== undefined;
   return (
     <li className="chat-message" data-seq={message.relaySeq} data-author-kind={message.authorKind}>
       <p className="chat-meta">
@@ -176,12 +177,12 @@ function ChatMessage({
       ) : (
         <div className="markdown chat-body" dangerouslySetInnerHTML={{ __html: html }} />
       )}
-      {/* A person who can't post has nothing to reply with, so only a thread with replies opens,
-          or one holding the reply they wrote before they lost Comment, for them to copy. */}
-      {replies && (canReply || replies.count > 0 || replies.drafted) && (
+      {/* A person who can't post has nothing to reply with, and a deleted message nothing to reply to,
+          as on the desktop. So only a thread with replies opens, or one holding an unsent reply to copy. */}
+      {replies && ((canReply && !deleted) || replies.count > 0 || replies.drafted) && (
         <button type="button" className="chat-replies" onClick={replies.open}>
           {replies.count === 0
-            ? canReply
+            ? canReply && !deleted
               ? "Reply"
               : "Unsent reply"
             : replies.count === 1
@@ -209,6 +210,17 @@ const ARROW_STEP: Partial<Record<string, -1 | 1>> = {
   ArrowDown: 1,
 };
 
+// A deleted message's place: its replies, else the next message's first control, else the composer.
+function survivor(scroller: HTMLElement | null, seq: number): HTMLElement | null {
+  const item = scroller?.querySelector(`.chat-message[data-seq="${seq}"]`);
+  return (
+    item?.querySelector<HTMLElement>(".chat-replies") ??
+    item?.nextElementSibling?.querySelector<HTMLElement>(".chat-delete, .chat-replies") ??
+    scroller?.closest(".chat-channel")?.querySelector<HTMLElement>(".chat-composer textarea") ??
+    null
+  );
+}
+
 // The message stays as it is until the relay answers, so a refusal has nothing to restore.
 // The card is the desktop's confirmation: a tile beside one text column, its keys included.
 function DeleteMessage({
@@ -220,13 +232,14 @@ function DeleteMessage({
   removing: Removing;
   cancel(): void;
   confirm(): void;
-  // Takes focus when the control that opened the dialog has gone.
+  // Takes focus when the deleted message leaves no control in its place.
   fallback: RefObject<HTMLElement | null>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null),
     confirmButton = useRef<HTMLButtonElement>(null);
-  // The control that opened the dialog, read before the dialog takes focus.
-  const [opener] = useState(() => document.activeElement);
+  // The control that opened the dialog, read before the dialog takes focus, and the message it asks about.
+  const [opener] = useState(() => document.activeElement),
+    [seq] = useState(() => removing.message.relaySeq);
   useEffect(() => {
     const current = dialog.current;
     current?.showModal();
@@ -234,12 +247,12 @@ function DeleteMessage({
     return () => {
       current?.close();
       // React removes the dialog before this runs, so the browser can't hand
-      // focus back. A deleted message has lost its Delete.
+      // focus back. A deleted message has lost its Delete, so focus stays in its place.
       if (opener instanceof HTMLElement && opener !== document.body && opener.isConnected)
         opener.focus();
-      else fallback.current?.focus();
+      else (survivor(fallback.current, seq) ?? fallback.current)?.focus();
     };
-  }, [opener, fallback]);
+  }, [opener, seq, fallback]);
   const deleting = removing.phase === "deleting",
     failed = removing.phase === "failed";
   // The confirm was disabled while the delete ran; Try again takes focus back.
