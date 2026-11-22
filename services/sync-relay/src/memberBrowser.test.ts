@@ -442,6 +442,28 @@ describe("a member's Chats in a browser", () => {
     ).toBe(404);
   });
 
+  it("names each person by their account, not by the name their computer wrote", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    // An owner's desktop with no profile name writes its own messages as "You".
+    await ownerAppend(h, [
+      logOp(
+        "chat.message.append",
+        chatMessageAppend("msg-you", "t-team", "tickets booked", {
+          authorUserId: OWNER,
+          authorDisplayName: "You",
+        }).payload,
+      ),
+    ]);
+    const page = await json(
+      await chat(h, `messages?shareId=${ana.shareId}&since=0&limit=50`, "ana"),
+    );
+    expect(page.messages).toContainEqual(
+      expect.objectContaining({ messageId: "msg-you", authorDisplayName: `Name ${OWNER}` }),
+    );
+    expect(JSON.stringify(page)).not.toContain('"You"');
+  });
+
   it("ends a held follow when the member is removed", async () => {
     const { h, storage } = await seed();
     const ana = await member(h, storage, "ana");
