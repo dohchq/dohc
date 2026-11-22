@@ -811,15 +811,14 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
   act(() =>
     answer({
       ok: false,
-      error:
-        "dohc could not reach relay.test to remove Old club from Grok Bot's reach. Check your connection.",
+      error: "dohc could not remove Old club from Grok Bot's reach. Check your connection.",
     }),
   );
   await waitFor(() => expect(remove.disabled).toBe(false));
   expect(remove.textContent).toBe("Remove");
   expect(document.activeElement).toBe(remove);
   expect(onError).toHaveBeenCalledWith(
-    "dohc could not reach relay.test to remove Old club from Grok Bot's reach. Check your connection.",
+    "dohc could not remove Old club from Grok Bot's reach. Check your connection.",
     undefined,
     expect.any(Function),
   );
@@ -1025,8 +1024,7 @@ it("says in the list that the account's agents couldn't be listed, with the caus
       {
         ...account(),
         roster: null,
-        failure:
-          "dohc could not reach relay.test to list your personal agents. Check your connection.",
+        failure: "dohc could not list your personal agents. Check your connection.",
       },
     ],
   });
@@ -1036,7 +1034,7 @@ it("says in the list that the account's agents couldn't be listed, with the caus
   );
   await waitFor(() =>
     expect(onError).toHaveBeenCalledWith(
-      "dohc could not reach relay.test to list your personal agents. Check your connection.",
+      "dohc could not list your personal agents. Check your connection.",
       undefined,
       expect.any(Function),
       undefined,

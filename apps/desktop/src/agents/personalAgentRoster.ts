@@ -137,7 +137,8 @@ function failureWords(error: unknown, host: string, what: string): string {
     error instanceof TypeError ||
     (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
   ) {
-    return `dohc could not reach ${host} to ${what}. Check your connection.`;
+    // Like dohc's other connection failures, it says what didn't happen, not the server's address.
+    return `dohc could not ${what}. Check your connection.`;
   }
   return `${host} could not ${what}.`;
 }

@@ -187,8 +187,7 @@ describe("the personal agents roster in main", () => {
     );
     expect(result).toEqual({
       ok: false,
-      error:
-        "dohc could not reach relay.test to remove Garden club from Sprout's reach. Check your connection.",
+      error: "dohc could not remove Garden club from Sprout's reach. Check your connection.",
     });
   });
 
