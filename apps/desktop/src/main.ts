@@ -2716,6 +2716,15 @@ type DesktopWorkspaceAuthorityLease = WorkspaceAuthorityLease<
   DesktopWorkspaceAuthorityState
 >;
 
+async function noteFileBytes(rootPath: string, path: string): Promise<number | null> {
+  try {
+    const info = await lstat(join(rootPath, path));
+    return info.isFile() ? info.size : null;
+  } catch {
+    return null;
+  }
+}
+
 type DesktopWorkspaceOperation = WorkspaceAuthorityOperation<
   RegistryEntry,
   DesktopWorkspaceAuthorityState
@@ -7494,13 +7503,7 @@ const backgroundLiveStart = createBackgroundLiveStart({
   showsOnPhone: (workspaceId) => showOnPhone.shows(workspaceId),
   noteBytes: async (workspaceId, path) => {
     const rootPath = findWorkspace(workspaceId)?.rootPath;
-    if (!rootPath) return null;
-    try {
-      const info = await lstat(join(rootPath, path));
-      return info.isFile() ? info.size : null;
-    } catch {
-      return null;
-    }
+    return rootPath ? await noteFileBytes(rootPath, path) : null;
   },
   isLossyNote: async (workspaceId, path) => {
     const rootPath = findWorkspace(workspaceId)?.rootPath;
@@ -9455,6 +9458,7 @@ function registerIpcHandlers(): void {
       desktopEngine.unwrittenOwnerLiveReleases(workspace.workspaceId),
     retryOwnerLiveRelease: (workspace, objectId) =>
       desktopEngine.retryOwnerLiveRelease(workspace, objectId),
+    noteBytes: (workspace, path) => noteFileBytes(workspace.rootPath, path),
     listOwnerLiveStops: (workspace) =>
       requireEngineSessions().run(workspace, async (session) => {
         const client = desktopEngine.daemon?.currentClient();

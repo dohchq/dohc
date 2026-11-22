@@ -589,6 +589,7 @@ export const OwnerLiveDocument = z
         "session-host-refused",
         "session-host-diverged",
         "live-document-without-lineage",
+        "live-document-too-large",
         "live-edit-unadmitted",
         "conflict-parent-withheld",
         "live-history-over-budget",

@@ -84,6 +84,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { createPresencePollRegistry } from "../collab/presencePollRegistry";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/change-author";
 import { liveChangeOutcome, type LiveDocumentStatus } from "@dohc/workspace-contracts/live-changes";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const liveDocumentStatus = OwnerLiveDocument.omit({ canResume: true }).strip();
@@ -218,6 +219,8 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
   ): Promise<OwnerLiveStop | "requested" | undefined>;
   // This computer's Stops, as the engine holds them.
   listOwnerLiveStops(workspace: Workspace): Promise<OwnerLiveStop[]>;
+  // The size of the file at a path on this computer. Null when there is none.
+  noteBytes(workspace: Workspace, path: string): Promise<number | null>;
   // Who stopped or resumed a document, as this computer's engine records it. Absent where nothing records it.
   liveChanges?: OwnerLiveChangeRecord<Workspace>;
   // The person at this computer, who the window's Stop and Resume record as their author. The renderer names no author.
@@ -324,6 +327,8 @@ export function createOwnerLiveDocumentActions<
     credentialGeneration: currentCredentialGeneration,
   });
   const changed = () => new Error("This document changed. Open Live documents to check it.");
+  const tooLarge = async (workspace: Workspace, path: string) =>
+    ((await dependencies.noteBytes(workspace, path)) ?? 0) > WYSIWYG_MARKDOWN_THRESHOLD_BYTES;
   // A Stop reports "recovered" only when the engine says settlement wrote the
   // refused edits into the file. Otherwise they stay kept: in their queue, or
   // in the document with a record that its file still needs them.
@@ -756,6 +761,14 @@ export function createOwnerLiveDocumentActions<
       input.workspaceId,
       input.path,
       async (): Promise<ResumeOwnerLiveDocumentResult> => {
+        if (await tooLarge(operation.workspace, input.path)) {
+          const row = await serverRow(operation, { path: input.path });
+          operation.assertCurrent();
+          if (row !== "unread" && row?.reason === "live-document-without-lineage")
+            throw new Error(
+              `dohc could not resume live editing for ${input.path} because it is larger than 256 KB. Make it smaller or split it, then open it in dohc.`,
+            );
+        }
         // A note the server paused for good resumes there first; the rest is an ordinary Resume.
         const paused = await dependencies.resumeOwnerLivePause?.(operation.workspace, input.path);
         operation.assertCurrent();
@@ -921,13 +934,26 @@ export function createOwnerLiveDocumentActions<
         // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
         const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
         const pauses = dependencies.ownerLivePauses?.(operation.workspace) ?? [];
+        const notStarted = [...documents.values()].filter(
+          (row) => row.reason === "live-document-without-lineage",
+        );
+        const large = await Promise.all(
+          notStarted.map((row) => tooLarge(operation.workspace, row.path)),
+        );
+        operation.assertCurrent();
+        notStarted.forEach((row, index) => {
+          if (large[index])
+            Object.assign(row, { reason: "live-document-too-large", canResume: false });
+        });
         for (const row of documents.values()) {
           // Each row speaks for the server's document, never for another that had or has its path.
           const deferred = localStops.find(
             (stop) => stop.document.objectId === row.objectId,
           )?.deferred;
           const startable =
-            row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld";
+            row.reason !== "session-host-diverged" &&
+            row.reason !== "conflict-parent-withheld" &&
+            row.reason !== "live-document-too-large";
           if (deferred) Object.assign(row, { deferredStop: deferred, canResume: startable });
           // A note the server paused stays enrolled until Resume ends its pause.
           // Resume of an ended pause starts nothing, so only it ignores the server's copy.

@@ -432,6 +432,11 @@ describe("LiveDocumentsDialog", () => {
           reason: "live-document-without-lineage",
           canResume: true,
         }),
+        row("docs/large.md", {
+          status: "unavailable",
+          reason: "live-document-too-large",
+          canResume: false,
+        }),
         row("docs/diverged.md", {
           status: "unavailable",
           reason: "session-host-diverged",
@@ -466,6 +471,7 @@ describe("LiveDocumentsDialog", () => {
       "Workspace changed",
       "Stopped by the server",
       "Not started",
+      "Too large",
       "Server copy doesn't match",
       "Server copy is missing an edit",
       "Can't resume",
@@ -490,11 +496,16 @@ describe("LiveDocumentsDialog", () => {
     );
     expect(actions("docs/diverged.md")).toEqual([]);
     const openFirst =
-      "Live editing can't start until you open this document once in dohc. After you open it, resume live editing. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.";
+      "Live editing can't start until you open this document once in dohc. After you open it, resume live editing.";
     expect(screen.getAllByText(openFirst)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/unopened.md").textContent).toContain(
       openFirst,
     );
+    const large =
+      "This note is larger than 256 KB, so it can't be edited live. Make it smaller or split it, then open it in dohc.";
+    expect(screen.getAllByText(large)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-docs/large.md").textContent).toContain(large);
+    expect(actions("docs/large.md")).toEqual(["Stop live editing"]);
 
     expect(actions("docs/live.md")).toEqual(["Stop live editing"]);
     expect(actions("docs/preparing.md")).toEqual(["Stop live editing"]);

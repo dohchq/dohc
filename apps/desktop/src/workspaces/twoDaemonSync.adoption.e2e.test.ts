@@ -806,6 +806,7 @@ it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
           },
           relayShareErrorCopy: unexpected,
           relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+          noteBytes: async () => null,
           listOwnerLiveStops: () =>
             source.sessions.run(source.workspace, async ({ workspace }) =>
               source

@@ -70,6 +70,7 @@ export function pendingStopHarness(
     unwrittenOwnerLiveReleases: async () => [],
     retryOwnerLiveRelease: async () => undefined,
     listOwnerLiveStops: async () => (recorded ? [recorded] : []),
+    noteBytes: async () => null,
     ...options,
   });
   return { actions, document, ownerLiveStop, relay, recorded: () => recorded };
