@@ -115,7 +115,7 @@ it("previews the workspace and its owner, says before Join that dohc can't open 
   ).toBeTruthy();
   expect(text()).toContain("Signed in as Sam · Sign out");
   await click("Join workspace");
-  expect(heading()?.textContent).toBe("You joined Community");
+  expect(heading()?.textContent).toBe("You joined Community.");
   expect(container.querySelector('[data-testid="join-limit"]')?.textContent).toBe(
     "It's listed in the dohc app, in Sharing under Shared with me. This version of dohc can't open it yet.",
   );
@@ -134,7 +134,7 @@ it("tells a person already in the workspace so, with no Join", async () => {
     "/api/members/join-preview": () => jsonResponse({ ...PREVIEW, alreadyMember: true }),
   });
   await render();
-  expect(heading()?.textContent).toBe("You're already in Community");
+  expect(heading()?.textContent).toBe("You're already in Community.");
   expect(text()).toContain("It's listed in the dohc app");
   expect([...container.querySelectorAll("button")].map((node) => node.textContent)).toEqual([
     "Sign out",
@@ -178,7 +178,7 @@ it("says who signed in, with Sign out, when the server fails right after sign-in
   });
   await render();
   await signInAs("sam@example.com", "pw");
-  await settle(() => heading()?.textContent === "dohc could not check this invite link");
+  await settle(() => heading()?.textContent === "dohc could not check this invite link.");
   await settle(ready);
   expect(text()).toContain("Signed in as Sam · Sign out");
   up = true;
@@ -205,16 +205,16 @@ it.each([
   [
     "link_off",
     404,
-    "This invite link no longer works",
+    "This invite link no longer works.",
     "Ask them to turn it on, then choose Try again.",
   ],
   [
     "removed",
     403,
-    "You were removed from this workspace",
+    "You were removed from this workspace.",
     "Ask them to let you back in, then choose Try again.",
   ],
-  ["full", 409, "This workspace is full", "It already has 1,000 people."],
+  ["full", 409, "This workspace is full.", "It already has 1,000 people."],
 ] as const)(
   "says why a %s link cannot join, keeps the link and the account, and previews again from Try again",
   async (code, status, title, words) => {
@@ -265,7 +265,7 @@ it("previews again after a refresh once an admin fixed access", async () => {
       removed ? jsonResponse({ ok: false, code: "removed" }, 403) : jsonResponse(PREVIEW),
   });
   await render(takeJoinToken());
-  expect(heading()?.textContent).toBe("You were removed from this workspace");
+  expect(heading()?.textContent).toBe("You were removed from this workspace.");
   await act(async () => root.unmount());
   root = createRoot(container);
   removed = false;
@@ -303,7 +303,7 @@ it("keeps the preview when the server is down at join, and joins from Try again"
   );
   up = true;
   await click("Try again");
-  expect(heading()?.textContent).toBe("You joined Community");
+  expect(heading()?.textContent).toBe("You joined Community.");
 });
 
 it("retries a failed sign-out as a sign-out, never a join", async () => {
@@ -338,7 +338,7 @@ it("reads the link again from Try again when the server could not be reached at 
     },
   });
   await render();
-  expect(heading()?.textContent).toBe("dohc could not check this invite link");
+  expect(heading()?.textContent).toBe("dohc could not check this invite link.");
   expect(text()).toContain("Signed in as Sam · Sign out");
   up = true;
   await click("Try again");
@@ -371,7 +371,7 @@ it("moves focus to each new stage's heading, or to the sign-in form's first fiel
   await act(async () => button("Join workspace").click());
   expect(button("Joining…").getAttribute("aria-busy")).toBe("true");
   await act(async () => joining.send(jsonResponse(JOINED)));
-  await settle(() => heading()?.textContent === "You joined Community");
+  await settle(() => heading()?.textContent === "You joined Community.");
   expect(document.activeElement).toBe(heading());
   expect(announced()).toBe("");
 });
@@ -391,7 +391,7 @@ it("asks a person with no token in this tab to open the invite link again, and a
   // A person who confirmed their email in another tab arrives here signed in, without the token.
   const fetch = server({ "/api/account/session": signedIn });
   await render(null);
-  expect(heading()?.textContent).toBe("Open your invite link again");
+  expect(heading()?.textContent).toBe("Open your invite link again.");
   expect(text()).toContain("To join, open the whole invite link you were sent.");
   expect(fetch).not.toHaveBeenCalled();
 });
