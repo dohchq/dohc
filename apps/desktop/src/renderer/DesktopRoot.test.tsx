@@ -285,7 +285,7 @@ describe("workspace summary changes", () => {
     await screen.findByTestId("workspace-shell");
     const title = "dohc could not update access";
     const detail =
-      "dohc could not read private/vm.vhdx. If another program has it open, close it, then choose Try again.";
+      "It could not read private/vm.vhdx. If another program has it open, close it, then choose Try again.";
     const code = "share-view-rebuild-disk-unreadable";
     const shareView = {
       shareId: "share",
