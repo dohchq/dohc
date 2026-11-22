@@ -2,7 +2,7 @@ import { Layers, MessagesSquare, Newspaper, TriangleAlert, type LucideIcon } fro
 import { useEffect, useId, useRef, useState } from "react";
 import type { GroupRuleLevel, MemberLevel } from "@dohc/security-contract/workspace-members";
 import { Overlay } from "../Overlay";
-import { GroupAccessPicker, pickedGroupLevel } from "./GroupSettingsDialog";
+import { GroupAccessPicker } from "./GroupSettingsDialog";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
 import { useRadioGroup } from "../ui/SegmentedControl";
 import { isComposingKey } from "../ui/keys";
@@ -239,11 +239,7 @@ export function NewGroupDialog(props: {
                   level={level}
                   memberLevel={access.memberLevel}
                   disabled={busy}
-                  onChange={(picked) =>
-                    setLevel(
-                      picked === null ? null : pickedGroupLevel(picked, null, access.memberLevel),
-                    )
-                  }
+                  onChange={setLevel}
                 />
               )}
             </div>

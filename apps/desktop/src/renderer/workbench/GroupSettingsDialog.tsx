@@ -37,30 +37,16 @@ export function groupAccessFrom(list: MembersList, wireId: string): GroupAccess 
   return { level, memberLevel: list.memberLevel };
 }
 
+// "default" follows the member level; the others set the Group's own rule.
+type AccessPick = GroupRuleLevel | "default";
 const OPTIONS = [
+  { value: "default", label: "Default" },
   { value: "comment", label: "Can post" },
   { value: "view", label: "View only" },
   { value: "none", label: "No access" },
 ] as const;
 
-// A Group with no rule takes the member level: Comment and Edit post there.
-const memberChoice = (level: MemberLevel): GroupRuleLevel =>
-  level === "view" ? "view" : "comment";
-
 const MEMBER_LEVEL_NAME = { view: "View", comment: "Comment", edit: "Edit" } as const;
-
-/**
- * What a pick in the Members picker sets. For a Group with no rule, picking
- * the level the member level already gives keeps following it, so trying
- * another level and coming back saves no rule.
- */
-export function pickedGroupLevel(
-  picked: GroupRuleLevel,
-  saved: GroupRuleLevel | null,
-  memberLevel: MemberLevel,
-): GroupRuleLevel | null {
-  return saved === null && picked === memberChoice(memberLevel) ? null : picked;
-}
 
 /** The Members picker. A null `level` follows the member level and names it. */
 export function GroupAccessPicker(props: {
@@ -73,34 +59,21 @@ export function GroupAccessPicker(props: {
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
         <span className="text-[13px] text-ink">Members</span>
-        <SegmentedControl<GroupRuleLevel>
+        <SegmentedControl<AccessPick>
           label="Members"
           testId="chats-group-access-level"
-          value={props.level ?? memberChoice(props.memberLevel)}
+          value={props.level ?? "default"}
           options={OPTIONS}
           disabled={props.disabled === true}
-          onChange={props.onChange}
+          onChange={(picked) => props.onChange(picked === "default" ? null : picked)}
         />
       </div>
       {props.level === null ? (
         <p data-testid="chats-group-access-follows" className="m-0 text-[12px] text-muted">
-          Follows the member level, {MEMBER_LEVEL_NAME[props.memberLevel]}.
+          Follows the member level, {MEMBER_LEVEL_NAME[props.memberLevel]}, so members{" "}
+          {props.memberLevel === "view" ? "can read only" : "can post"}.
         </p>
-      ) : (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <p data-testid="chats-group-access-set" className="m-0 text-[12px] text-muted">
-            Set for this Group.
-          </p>
-          <SecondaryButton
-            size="row"
-            data-testid="chats-group-access-follow"
-            disabled={props.disabled}
-            onClick={() => props.onChange(null)}
-          >
-            Follow the member level
-          </SecondaryButton>
-        </div>
-      )}
+      ) : null}
       <p data-testid="chats-group-access-always" className="m-0 text-[12px] text-muted">
         The owner and admins can always read and post.
       </p>
@@ -240,11 +213,7 @@ export function GroupSettingsDialog(props: {
                 memberLevel={ready.memberLevel}
                 disabled={busy}
                 onChange={(level) => {
-                  setChosen(
-                    level === null
-                      ? "member"
-                      : (pickedGroupLevel(level, ready.level, ready.memberLevel) ?? "member"),
-                  );
+                  setChosen(level ?? "member");
                   setFailure(null);
                 }}
               />
