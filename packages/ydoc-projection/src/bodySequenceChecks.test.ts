@@ -17,7 +17,7 @@ import {
   type Change,
   type ChangeKind,
   type Person,
-} from "./bodySequenceTestSupport.js";
+} from "./bodySequenceChecksTestSupport.js";
 import { getDohcProseMirrorSchema, markdownToYDoc } from "./import-export.js";
 import {
   createLiveMarkdownHistoryValidator,

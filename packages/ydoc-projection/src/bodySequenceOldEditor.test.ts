@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
-import { seededNote, storedReading } from "./bodySequenceTestSupport.js";
+import { seededNote, storedReading } from "./bodySequenceChecksTestSupport.js";
 import { mountLiveBodyEditor } from "./browser-editor.js";
 import { admitBodySequenceNotes, liveEditFitsCopy } from "./liveDocumentValidation.js";
 

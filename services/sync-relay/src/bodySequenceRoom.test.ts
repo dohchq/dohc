@@ -10,7 +10,7 @@ import {
   randomChange,
   seededNote,
   storedReading,
-} from "../../../packages/ydoc-projection/src/bodySequenceTestSupport.js";
+} from "../../../packages/ydoc-projection/src/bodySequenceChecksTestSupport.js";
 import {
   cleanupLiveDeliveryFixtures,
   registered,

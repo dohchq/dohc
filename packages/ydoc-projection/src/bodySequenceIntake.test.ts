@@ -21,7 +21,7 @@ import {
   storedReading,
   updateOf,
   type Change,
-} from "./bodySequenceTestSupport.js";
+} from "./bodySequenceChecksTestSupport.js";
 import { getDohcProseMirrorSchema, markdownToYDoc, yDocToMarkdown } from "./import-export.js";
 import {
   admitBodySequenceNotes,

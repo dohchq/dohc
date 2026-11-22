@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import {
   changeMadeBy,
   seededNote,
-} from "../../../packages/ydoc-projection/src/bodySequenceTestSupport.js";
+} from "../../../packages/ydoc-projection/src/bodySequenceChecksTestSupport.js";
 import { BODY_SEQUENCE_SETTING, bodySequenceNotesAdmitted } from "./bodySequenceSetting.js";
 import { createLiveValidationExecutor } from "./liveValidation.js";
 
