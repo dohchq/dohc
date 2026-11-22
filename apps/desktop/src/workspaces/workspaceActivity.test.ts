@@ -1066,6 +1066,28 @@ describe("workspaceActivity cloud sync nudge", () => {
     await service.stop(state);
   });
 
+  it("opens without waiting for the cloud-sync-folder check, then pushes what it found", async () => {
+    const notify = vi.fn();
+    const check = Promise.withResolvers<{
+      service: string | null;
+      acknowledged?: boolean;
+    } | null>();
+    const cloudSyncFolder = vi.fn(() => check.promise);
+    const service = createPhysicalWorkspaceActivity(notify, {
+      observationFor: idleObservation,
+      cloudSyncFolder,
+    });
+    const state = new WorkspaceActivityState();
+    const opened = await service.open(workspace(), state);
+    expect(cloudSyncFolder).toHaveBeenCalledWith(workspace().rootPath);
+    expect(opened.cloudSyncFolder).toBeUndefined();
+    notify.mockClear();
+    check.resolve({ service: "OneDrive" });
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledWith({ workspaceId: "activity-test" }));
+    expect(service.getStatus(workspace(), state).cloudSyncFolder).toEqual({ service: "OneDrive" });
+    await service.stop(state);
+  });
+
   it("says nothing about a root on this computer's disk, or after the workspace closed", async () => {
     const notify = vi.fn();
     const late = Promise.withResolvers<boolean>();

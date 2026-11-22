@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { FolderSheets } from "./FolderSheets";
+import { isCloudSyncFolderCancelled } from "../ipc/errorWords";
 import { ipcErrorMessage } from "./ipcError";
 import { FieldError, GhostButton, PrimaryButton } from "./ui/controls";
 import { PathLine } from "./ui/PathLine";
@@ -134,7 +135,7 @@ export function NewWorkspaceCard(props: { onWorkspaceReady: (workspace: Workspac
       });
       props.onWorkspaceReady(workspace);
     } catch (cause) {
-      setError(ipcErrorMessage(cause));
+      if (!isCloudSyncFolderCancelled(cause)) setError(ipcErrorMessage(cause));
       setCreating(false);
     }
   }
@@ -264,7 +265,7 @@ export async function openExistingFolder(
     if (!picked) return null;
     return await bridge().attachWorkspaceFolder({ rootPath: picked });
   } catch (error) {
-    refused(error, picked);
+    if (!isCloudSyncFolderCancelled(error)) refused(error, picked);
     return null;
   }
 }

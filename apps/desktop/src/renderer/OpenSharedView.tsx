@@ -6,6 +6,7 @@ import {
 import { isComposingKey } from "./ui/keys";
 import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
+import { isCloudSyncFolderCancelled } from "../ipc/errorWords";
 import { ipcErrorMessage } from "./ipcError";
 import { ArrowLeft, Check, FolderInput, FolderOpen, AppWindow } from "lucide-react";
 import { useContext, useEffect, useRef, useState } from "react";
@@ -324,6 +325,7 @@ export function OpenSharedView(
         return;
       }
       if (!actionRequests.isCurrent(actionRequest)) return;
+      if (isCloudSyncFolderCancelled(cause)) return;
       setError(ipcErrorMessage(cause, "Couldn't open the share."));
     } finally {
       if (actionRequests.isCurrent(actionRequest)) setOpening(false);

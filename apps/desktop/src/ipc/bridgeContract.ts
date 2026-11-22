@@ -1658,6 +1658,16 @@ const SYNC_STATUS_BASE_FIELDS = {
   // True when the workspace is on a network share, whose server, not dohc,
   // decides who can read its History. Omitted otherwise.
   onNetworkShare: z.boolean().optional(),
+  // Present when a Windows workspace sits inside a cloud-synced folder such as
+  // OneDrive, Google Drive, or Dropbox, which can corrupt `.dohc/engine`.
+  // `acknowledged` is true when the person already confirmed this folder at
+  // pick or open time, so the shell records it without toasting again.
+  cloudSyncFolder: z
+    .object({
+      service: z.string().min(1).nullable(),
+      acknowledged: z.boolean().optional(),
+    })
+    .optional(),
   recoveryUnavailable: z.boolean().optional(),
   // Why protected files such as `.env` wait on the workspace secret key, as
   // the engine's code, such as `key-missing`. Omitted while the key works.

@@ -104,6 +104,7 @@ export type ShellErrorKind =
   | "kept-copies-more"
   | "drive-no-atomic-placement"
   | "network-share"
+  | "cloud-sync-folder"
   | "file-recovery-unavailable"
   | "secret-key-unavailable"
   | "kept-files"
@@ -846,6 +847,24 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       ),
     [push],
   );
+  const reportCloudSyncFolder = useCallback(
+    (notice: { title: string; message: string; service: string | null; toast: boolean }) =>
+      push(
+        {
+          tone: "warning",
+          title: notice.title,
+          message: notice.message,
+          details: [
+            ["Detail", "cloud-sync-folder"],
+            ...(notice.service ? ([["Service", notice.service]] as const) : []),
+          ],
+          retry: null,
+          kind: "cloud-sync-folder",
+        },
+        !notice.toast,
+      ),
+    [push],
+  );
   const reportRecoveryUnavailable = useCallback(
     (unavailable: boolean, retry: () => void, openFolder: () => void) => {
       if (!unavailable) {
@@ -1568,6 +1587,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     clearCollectionsWaiting,
     reportDriveLimit,
     reportNetworkShare,
+    reportCloudSyncFolder,
     reportKeptFiles,
     reportImportSkips,
     showRetainedCopies,

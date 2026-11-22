@@ -40,6 +40,7 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { EngineRelayWorkspaceClient } from "../workspaces/engineRelayClient";
+import { cloudSyncFolderCancelledError } from "../workspaces/cloudSyncFolder";
 import type { createJoinedWorkspaceRunner } from "../workspaces/createJoinedWorkspace";
 import type { probeRelayWorkspace } from "../workspaces/relayWorkspaceProbe";
 import type {
@@ -120,6 +121,7 @@ export function registerCloudIpcHandlers<
   /** Sends, in the background, the Collections this computer still keeps once the workspace syncs. */
   sendCollectionsUpLater(workspace: RegistryEntry): void;
   usableRoot(rootPath: string): string;
+  confirmNewWorkspaceFolder?(rootPath: string, event: Event): Promise<boolean>;
   readdir(rootPath: string): Promise<string[]>;
   mkdir(rootPath: string, options: { recursive: true }): Promise<unknown>;
   probeRelayWorkspace: typeof probeRelayWorkspace;
@@ -167,6 +169,7 @@ export function registerCloudIpcHandlers<
     sendCollectionsUp,
     sendCollectionsUpLater,
     usableRoot,
+    confirmNewWorkspaceFolder,
     readdir,
     mkdir,
     probeRelayWorkspace,
@@ -417,6 +420,9 @@ export function registerCloudIpcHandlers<
       throw new Error(
         "Choose an empty folder — the synced workspace's files will be placed inside it.",
       );
+    }
+    if (confirmNewWorkspaceFolder && !(await confirmNewWorkspaceFolder(rootPath, event))) {
+      throw cloudSyncFolderCancelledError();
     }
 
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };

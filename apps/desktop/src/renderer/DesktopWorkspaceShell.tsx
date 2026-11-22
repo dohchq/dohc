@@ -162,6 +162,7 @@ import { useSavedTabsReread } from "./shell/useSavedTabsReread";
 import { leaveAppPage, routeAppTab } from "./shell/appTabOrder";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
+import { useCloudSyncFolderNotice } from "./shell/useCloudSyncFolderNotice";
 import {
   fitImportMessage,
   importedPathDetails,
@@ -1061,6 +1062,7 @@ function WorkspaceShell(props: {
     clearCollectionsWaiting,
     reportDriveLimit,
     reportNetworkShare,
+    reportCloudSyncFolder,
     reportKeptFiles,
     reportImportSkips,
     showRetainedCopies,
@@ -7816,6 +7818,11 @@ function WorkspaceShell(props: {
     platform: bridge().platform,
     report: reportNetworkShare,
   });
+  const cloudSyncFolderNotice = useCloudSyncFolderNotice({
+    workspaceId,
+    cloudSyncFolder: syncStatus?.cloudSyncFolder,
+    report: reportCloudSyncFolder,
+  });
   const revealRecoveryWorkspace = useCallback(() => {
     const askedFor = workspaceId;
     void bridge()
@@ -8017,6 +8024,7 @@ function WorkspaceShell(props: {
       if (kind === "collections-waiting") collectionsWaitingNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
       if (kind === "network-share") networkShareNotice.noteDismissed();
+      if (kind === "cloud-sync-folder") cloudSyncFolderNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
       if (kind === "collection-copies-left") collectionCopiesLeftNotice.noteDismissed();
       if (kind === "share-capture" && shareView?.shareId) {
@@ -8059,6 +8067,7 @@ function WorkspaceShell(props: {
       dismissShellError,
       driveLimitNotice,
       networkShareNotice,
+      cloudSyncFolderNotice,
       keptFilesNotice,
       collectionCopiesLeftNotice,
       shellErrors,

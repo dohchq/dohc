@@ -11,6 +11,7 @@ import type {
 } from "../workspaces/createWorkspaceFolder";
 import type { ForgottenShareViews } from "../workspaces/forgottenShareViews";
 import type { Computer } from "../workspaces/syncHistory";
+import { cloudSyncFolderCancelledError } from "../workspaces/cloudSyncFolder";
 import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
 import {
   AttachWorkspaceFolderPayload,
@@ -80,6 +81,8 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
       properties: ("openDirectory" | "createDirectory")[];
     }): Promise<{ canceled: boolean; filePaths: string[] }>;
   };
+  confirmPickedFolder?(picked: string, event: Event): Promise<boolean>;
+  confirmNewWorkspaceFolder?(rootPath: string, event: Event): Promise<boolean>;
   roots: ReturnType<typeof createWorkspaceRootApproval>;
   effectiveHome(): string;
   // dohc's own state folder, which no workspace may be or contain.
@@ -115,6 +118,8 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     assertTrustedSender,
     app,
     dialog,
+    confirmPickedFolder,
+    confirmNewWorkspaceFolder,
     roots: { approveRoot, usableRoot },
     effectiveHome,
     stateDir,
@@ -138,6 +143,9 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     // Test seam: native dialogs cannot be driven by Playwright.
     const testPick = process.env.DOHC_TEST_PICK_PATH;
     if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && testPick) {
+      if (confirmPickedFolder && !(await confirmPickedFolder(testPick, event))) {
+        return PickWorkspaceRootResult.parse(null);
+      }
       approveRoot(testPick);
       return PickWorkspaceRootResult.parse(testPick);
     }
@@ -145,6 +153,9 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
       properties: ["openDirectory", "createDirectory"],
     });
     const picked = result.canceled ? null : (result.filePaths[0] ?? null);
+    if (picked && confirmPickedFolder && !(await confirmPickedFolder(picked, event))) {
+      return PickWorkspaceRootResult.parse(null);
+    }
     if (picked) approveRoot(picked);
     return PickWorkspaceRootResult.parse(picked);
   });
@@ -181,11 +192,15 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   registerHandler(CHANNELS.createLocalWorkspace, async (event, payload) => {
     assertTrustedSender(event);
     const input = CreateLocalWorkspacePayload.parse(payload);
+    const rootPath = usableRoot(input.rootPath);
+    if (confirmNewWorkspaceFolder && !(await confirmNewWorkspaceFolder(rootPath, event))) {
+      throw cloudSyncFolderCancelledError();
+    }
     desktopMarks.mark("workspace-create-start");
     // A folder that held files, or a manifest, is an existing folder,
     // whichever button opened it: creation says whether it made this one.
     const { workspace: created, fresh } = await createWorkspaceFolder({
-      rootPath: usableRoot(input.rootPath),
+      rootPath,
       homeDir: effectiveHome(),
       stateDir: stateDir(),
       computer: thisComputer(),
@@ -211,10 +226,14 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   registerHandler(CHANNELS.attachWorkspaceFolder, async (event, payload) => {
     assertTrustedSender(event);
     const input = AttachWorkspaceFolderPayload.parse(payload);
+    const rootPath = usableRoot(input.rootPath);
+    if (confirmNewWorkspaceFolder && !(await confirmNewWorkspaceFolder(rootPath, event))) {
+      throw cloudSyncFolderCancelledError();
+    }
     // Adopts an existing dohc workspace (manifest identity preserved) or
     // turns the folder into a fresh personal workspace in place.
     const { workspace: attached } = await createWorkspaceFolder({
-      rootPath: usableRoot(input.rootPath),
+      rootPath,
       homeDir: effectiveHome(),
       stateDir: stateDir(),
       computer: thisComputer(),
