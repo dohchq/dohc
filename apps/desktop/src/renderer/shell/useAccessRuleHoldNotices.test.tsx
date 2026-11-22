@@ -642,6 +642,8 @@ describe("useAccessRuleHoldNotices", () => {
       message:
         "dohc still doesn't record or share changes in team. Members keep their earlier access.",
       retry: expect.any(Function),
+      // Try again keeps Notices open, as Restore rule does.
+      retryStays: true,
     });
     expect(h.row("team")!.action?.busy).toBeUndefined();
   });

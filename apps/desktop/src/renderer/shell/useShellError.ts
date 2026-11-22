@@ -160,6 +160,8 @@ export interface ShellError {
   // Answers false when it could not run, so the row stays.
   retry: (() => void | false) | null;
   retryBusy?: boolean;
+  // Try again runs where the row is, as an action that `stays` does, so Notices stays open on its outcome.
+  retryStays?: true;
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs; one that `reads` it
@@ -678,6 +680,7 @@ export function useShellError(
       rows?: readonly string[];
       lead?: string;
       retry?: ShellError["retry"];
+      retryStays?: true;
       onDismiss?: () => void;
       action?: ShellError["action"];
       target?: NoticeTarget;
@@ -724,6 +727,7 @@ export function useShellError(
             isStoppedWorkspaceCall(failure.cause) || isStoppedWorkspaceCall(failure.message)
               ? null
               : (failure.retry ?? null),
+          ...(failure.retryStays ? { retryStays: true } : {}),
           ...(failure.command ? { command: failure.command } : {}),
           ...(failure.paths?.length ? { paths: failure.paths } : {}),
           ...(failure.rows?.length ? { rows: failure.rows } : {}),

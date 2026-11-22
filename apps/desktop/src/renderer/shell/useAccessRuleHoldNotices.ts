@@ -553,6 +553,8 @@ export function useAccessRuleHoldNotices(
               `dohc still doesn't record or share changes in ${place}. Members keep their earlier access.`,
             cause: error,
             retry: refused?.final ? null : () => decideRef.current(asked, hold, decision),
+            // Try again runs the choice again on the waiting row, as its own button does.
+            retryStays: true,
           });
         },
       );

@@ -7620,6 +7620,7 @@ export function DesktopWorkspaceShell(props: {
           : {}),
         ...(error.action?.busy !== undefined ? { actionBusy: error.action.busy } : {}),
         ...(error.action?.stays ? { actionStays: true } : {}),
+        ...(error.retryStays ? { retryStays: true } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
         ...(error.noDismiss ? { noDismiss: true } : {}),
