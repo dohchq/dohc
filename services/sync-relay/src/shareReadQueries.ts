@@ -166,16 +166,32 @@ export function createShareReadQueries(
   // it is judged at each path, never once for the reader.
   const editAt = (selector: ShareSelector, path: unknown) =>
     typeof path === "string" && pathLevel(selector, path) === "edit";
-  const momentAtEdit = (selector: ShareSelector, served: Record<string, unknown>) =>
-    editAt(selector, served.path) &&
-    [served.payloadBeforePath, served.payloadAfterPath].every(
-      (path) => path == null || editAt(selector, path),
+  // A member also needs to have seen the path when the op was made. A folder
+  // opened later shows only its current files, so its hidden drafts and names
+  // stay out and the desktop first hears of each file at its current path.
+  const momentAtEdit = (
+    selector: ShareSelector,
+    served: Record<string, unknown>,
+    row: Pick<SyncRelayLogRow, "payloadJson">,
+  ) => {
+    const paths = [served.path, served.payloadBeforePath, served.payloadAfterPath].filter(
+      (path) => path != null,
     );
+    if (served.path == null || !paths.every((path) => editAt(selector, path))) return false;
+    const reach = "reach" in selector ? selector.reach : undefined;
+    if (!reach) return true;
+    const { objectId, momentId } = JSON.parse(row.payloadJson) as Record<string, unknown>;
+    return (
+      typeof objectId === "string" &&
+      typeof momentId === "string" &&
+      paths.every((path) => reach.pathVisibleBeforeMoment(objectId, momentId, path as string))
+    );
+  };
   // One level everywhere: a named path share or a link.
   const levelEverywhere = (selector: ShareSelector) =>
     "access" in selector && !selector.levelAt ? selector.access : null;
 
-  // Rewrites a served file op where the recipient is below Edit, or drops it.
+  // Rewrites a served file op the recipient may not read as history, or drops it.
   // A replaced write is dropped. A replaced rename becomes a delete of its old
   // path, so a recipient that already holds that path loses it. A delete is
   // served without content: the engine records the deleted content as its
@@ -183,7 +199,7 @@ export function createShareReadQueries(
   const currentFilesOp = (
     workspaceId: string,
     selector: ShareSelector,
-    row: Pick<SyncRelayLogRow, "relaySeq" | "opKind">,
+    row: Pick<SyncRelayLogRow, "relaySeq" | "opKind" | "payloadJson">,
     served: Record<string, unknown>,
   ): Record<string, unknown> | null => {
     if (row.opKind === "version.create") {
@@ -195,7 +211,7 @@ export function createShareReadQueries(
       );
       return served;
     }
-    if (row.opKind !== "moment.append" || momentAtEdit(selector, served)) return served;
+    if (row.opKind !== "moment.append" || momentAtEdit(selector, served, row)) return served;
     served.payloadBeforeBlobSha256 = null;
     if (served.operation === "delete") {
       delete served.payloadAfterBlobSha256;
@@ -538,7 +554,7 @@ export function createShareReadQueries(
             (snapshot: Record<string, unknown>) =>
               snapshot.blobSha256 === sha256 && editAt(selector, snapshot.path),
           )
-        : momentAtEdit(selector, served);
+        : momentAtEdit(selector, served, row);
     });
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
   };

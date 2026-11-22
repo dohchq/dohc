@@ -32,6 +32,10 @@ export type LinkReadRoute =
   | { route: "link-log" }
   | { route: "link-blob"; sha256: string };
 
+// The current files are read before reach filters them, so the read is capped at this many times the listing limit.
+// Past the cap the relay refuses as for an unknown grant: the answer must not say how much work a member cannot see.
+const CURRENT_SCAN_FACTOR = 10;
+
 /**
  * A member's level on one file, which varies by folder. An admin reads rule
  * files but edits none, so Edit there reads as Comment, as live editing judges.
@@ -198,9 +202,9 @@ export function createLinkReadRoutes(
           workspaceId: share.workspaceId,
           versionId: targetVersionId(capability.effectiveSelector),
           selectorPaths: capability.effectiveSelector.paths,
-          limit: linkCurrentFileLimit,
+          limit: linkCurrentFileLimit * CURRENT_SCAN_FACTOR,
         });
-        if (snapshot.tooMany) return tooManyFiles();
+        if (snapshot.tooMany) throw notFound();
         const freshness = newestFilteredOpFreshness(
           share.workspaceId,
           () => requireFresh().effectiveSelector,
@@ -218,46 +222,48 @@ export function createLinkReadRoutes(
           },
         );
         // The listing selects by path prefix; a rule file under it stays hidden.
-        const files = snapshot.files
-          .filter((file) => visibleSharePath(fresh.effectiveSelector, file.path) !== null)
-          .map((file) => {
-            const path = presentation.projectPath(file.path);
-            if (path === null) throw notFound();
-            return {
-              path,
-              objectId: identity.object(
-                ["link", fresh.grantId],
-                share.workspaceId,
-                storage.currentFileObjectId({
-                  workspaceId: share.workspaceId,
-                  versionId: targetVersionId(fresh.effectiveSelector),
-                  path: file.path,
-                }),
-              ),
-              blobSha256: file.blobSha256,
-              contentKind: file.contentKind,
-              ...(fresh.credential.kind === "member"
-                ? { access: memberFileAccess(fresh.effectiveSelector, file.path) }
-                : {}),
-              ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml`
-                ? {
-                    automationSwitchable:
-                      pathLevel(fresh.effectiveSelector, file.path) === "edit" &&
-                      fresh.effectiveSelector.versionId === null &&
-                      (fresh.effectiveSelector.wholeWorkspace === true ||
-                        fresh.effectiveSelector.paths.some(
-                          (root) =>
-                            file.path.slice(0, -"/automations.yaml".length) === root ||
-                            file.path.startsWith(`${root}/`),
-                        )) &&
-                      storage.automationSwitchableFolder(
-                        share.workspaceId,
-                        file.path.slice(0, -"/automations.yaml".length),
-                      ),
-                  }
-                : {}),
-            };
-          });
+        const visible = snapshot.files.filter(
+          (file) => visibleSharePath(fresh.effectiveSelector, file.path) !== null,
+        );
+        if (visible.length > linkCurrentFileLimit) return tooManyFiles();
+        const files = visible.map((file) => {
+          const path = presentation.projectPath(file.path);
+          if (path === null) throw notFound();
+          return {
+            path,
+            objectId: identity.object(
+              ["link", fresh.grantId],
+              share.workspaceId,
+              storage.currentFileObjectId({
+                workspaceId: share.workspaceId,
+                versionId: targetVersionId(fresh.effectiveSelector),
+                path: file.path,
+              }),
+            ),
+            blobSha256: file.blobSha256,
+            contentKind: file.contentKind,
+            ...(fresh.credential.kind === "member"
+              ? { access: memberFileAccess(fresh.effectiveSelector, file.path) }
+              : {}),
+            ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml`
+              ? {
+                  automationSwitchable:
+                    pathLevel(fresh.effectiveSelector, file.path) === "edit" &&
+                    fresh.effectiveSelector.versionId === null &&
+                    (fresh.effectiveSelector.wholeWorkspace === true ||
+                      fresh.effectiveSelector.paths.some(
+                        (root) =>
+                          file.path.slice(0, -"/automations.yaml".length) === root ||
+                          file.path.startsWith(`${root}/`),
+                      )) &&
+                    storage.automationSwitchableFolder(
+                      share.workspaceId,
+                      file.path.slice(0, -"/automations.yaml".length),
+                    ),
+                }
+              : {}),
+          };
+        });
         return linkJsonResponse(
           fresh,
           {

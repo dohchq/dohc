@@ -316,7 +316,7 @@ function LoadFailed({ onRetry }: { onRetry(): void }) {
 /**
  * A file's Comments beside it: the threads on the file that the owner's dohc and every member read.
  * At View there is nothing to write in, only the note.
- * The relay keeps Comments on the file's object, so a new object at the same path opens its own.
+ * The relay keeps Comments on the file's object, so a new object at the same path opens its own, with its own draft.
  */
 export function MemberComments({
   found,
@@ -366,7 +366,8 @@ export function MemberComments({
           empty={NO_COMMENTS}
           messageLabel="Comment"
           placeholder="Comment on this file…"
-          draftKey={`${opened.userId}\n${opened.shareId}\nfile\n${path}`}
+          // A relay without a link key lists no identity, so the path tells files apart.
+          draftKey={`${opened.userId}\n${opened.shareId}\nfile\n${objectId || `path\n${path}`}`}
         />
       ) : found === "failed" ? (
         <LoadFailed onRetry={onRetry} />
