@@ -560,6 +560,28 @@ describe("a joined workspace", () => {
     ).toBeTruthy();
   });
 
+  // The ended band says what the copy still allows, so the lowered level no longer applies.
+  it("takes back the lowered level's toast and row once the membership ends", async () => {
+    const bridge = makeShareBridge();
+    bridge.checkSharedViewAccess.mockResolvedValueOnce({
+      status: "current",
+      access: "view",
+      role: "member",
+      levelChanged: true,
+      levelChangedBy: "Ana",
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const { rerender } = render(shell(bridge, JOINED));
+    const toasts = () => screen.queryByTestId("notice-toasts")?.textContent ?? "";
+    await waitFor(() => expect(toasts()).toContain("Ana now lets members view only."));
+    rerender(shell(bridge, ENDED));
+    await waitFor(() => expect(toasts()).not.toContain("Ana now lets members view only."));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(
+      within(screen.getByTestId("notice-center")).queryByText("Ana now lets members view only."),
+    ).toBeNull();
+  });
+
   it("says nothing when the check finds the level it already had", async () => {
     const bridge = withGroup("comment", { status: "current", access: "comment", role: "member" });
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalled());
