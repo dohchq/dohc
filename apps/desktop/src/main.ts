@@ -104,6 +104,12 @@ import {
 import { liveStopHostCopy, liveStopRelayError } from "./ipc/liveEditingStop";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { onNetworkShare } from "./workspaces/networkShare";
+import {
+  confirmCloudSyncFolder,
+  createCloudSyncConfirmationTracker,
+  detectCloudSyncFolder,
+  matchesRegisteredWorkspaceRoot,
+} from "./workspaces/cloudSyncFolder";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
 import { registerWorkspaceFolderNameIpc } from "./ipc/workspaceFolderNameIpc";
@@ -3206,6 +3212,19 @@ function testNetworkShare(): boolean {
   );
 }
 
+// Test-only cloud-sync-folder seam: every workspace reads as inside a cloud-
+// synced folder, so its notice can be seen on any computer.
+function testCloudSyncFolder(): { service: string | null } | null {
+  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return null;
+  const raw = process.env.DOHC_TEST_CLOUD_SYNC_FOLDER?.trim();
+  if (!raw) return null;
+  return { service: raw === "1" ? null : raw };
+}
+
+const cloudSyncConfirmations = createCloudSyncConfirmationTracker({
+  filePath: () => join(stateDir(), "confirmed-cloud-sync-folders.json"),
+});
+
 function testCaptureSeams(): {
   capture: { settleDebounceMs?: number; openSettleGate?: () => Promise<void> };
   beforeTypingImport?: () => Promise<void>;
@@ -3609,6 +3628,14 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   },
   onNetworkShare: (rootPath) =>
     testNetworkShare() ? Promise.resolve(true) : onNetworkShare(rootPath),
+  cloudSyncFolder: async (rootPath) => {
+    const match = testCloudSyncFolder() ?? (await detectCloudSyncFolder(rootPath));
+    if (!match) return null;
+    const acknowledged = await cloudSyncConfirmations.isConfirmed(rootPath);
+    return acknowledged
+      ? { service: match.service, acknowledged: true }
+      : { service: match.service };
+  },
   // The engine capture gate (engineCaptureGate.ts) owns the shared-view rule:
   // main only states whether the workspace is one, and the decision
   // carries the cause.
@@ -8510,14 +8537,18 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
     folderIdentity: (path) => folderIdentitySync(path),
     folderNames: (path) => folderNamesSync(path),
   },
-  confirm: (folder, window) => {
+  confirm: async (folder, window) => {
     const parent = window ?? liveWorkspaceWindow();
-    return confirmOpenPathWorkspace(
+    const cloudSync = await detectCloudSyncFolder(folder.rootPath).catch(() => null);
+    const confirmed = await confirmOpenPathWorkspace(
       {
         showMessageBox: (options) => showMessageBox(options, parent),
       },
       folder,
+      cloudSync,
     );
+    if (confirmed && cloudSync) await cloudSyncConfirmations.confirm(folder.rootPath);
+    return confirmed;
   },
   register: async (rootPath) => {
     const created = await createWorkspaceFolder({
@@ -8951,11 +8982,55 @@ function registerIpcHandlers(): void {
   windowIpc.registerReload();
 
   const { usableRoot } = workspaceRootApproval;
+  const confirmNewWorkspaceFolder = async (
+    rootPath: string,
+    event?: IpcMainInvokeEvent,
+  ): Promise<boolean> => {
+    if (
+      await matchesRegisteredWorkspaceRoot(
+        rootPath,
+        workspaceSummaries().map((entry) => entry.rootPath),
+      )
+    ) {
+      return true;
+    }
+    if (await cloudSyncConfirmations.isConfirmed(rootPath)) return true;
+    const cloudSync = await detectCloudSyncFolder(rootPath).catch(() => null);
+    if (!cloudSync) return true;
+    const parent =
+      (event ? BrowserWindow.fromWebContents(event.sender) : null) ?? liveWorkspaceWindow();
+    const confirmed = await confirmCloudSyncFolder(
+      { showMessageBox: (options) => showMessageBox(options, parent) },
+      cloudSync,
+    );
+    if (confirmed) await cloudSyncConfirmations.confirm(rootPath);
+    return confirmed;
+  };
   registerWorkspaceRegistryIpcHandlers<IpcMainInvokeEvent>({
     registerHandler: handleIpc,
     assertTrustedSender,
     app,
     dialog,
+    confirmPickedFolder: async (picked, event) => {
+      if (
+        await matchesRegisteredWorkspaceRoot(
+          picked,
+          workspaceSummaries().map((entry) => entry.rootPath),
+        )
+      ) {
+        return true;
+      }
+      const cloudSync = await detectCloudSyncFolder(picked).catch(() => null);
+      if (!cloudSync) return true;
+      const parent = BrowserWindow.fromWebContents(event.sender) ?? liveWorkspaceWindow();
+      const confirmed = await confirmCloudSyncFolder(
+        { showMessageBox: (options) => showMessageBox(options, parent) },
+        cloudSync,
+      );
+      if (confirmed) await cloudSyncConfirmations.confirm(picked);
+      return confirmed;
+    },
+    confirmNewWorkspaceFolder,
     roots: workspaceRootApproval,
     effectiveHome,
     stateDir,
@@ -9295,6 +9370,7 @@ function registerIpcHandlers(): void {
       void chatWakes.runnersChanged();
     },
     usableRoot,
+    confirmNewWorkspaceFolder,
     readdir,
     mkdir,
     probeRelayWorkspace,
@@ -10611,6 +10687,7 @@ function registerIpcHandlers(): void {
     fetchShareViewAccess,
     probeShareViewLog,
     usableRoot,
+    confirmNewWorkspaceFolder,
     readdir,
     mkdir,
     createJoinedWorkspace,

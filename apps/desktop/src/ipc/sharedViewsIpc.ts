@@ -47,6 +47,7 @@ import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry, ShareViewIdentity } from "../workspaces/registryStore";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
+import { cloudSyncFolderCancelledError } from "../workspaces/cloudSyncFolder";
 import type { createJoinedWorkspaceRunner } from "../workspaces/createJoinedWorkspace";
 import type { WorkspaceAuthorityBinding } from "../workspaces/workspaceAuthorityOwner";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
@@ -84,6 +85,7 @@ export function registerSharedViewsIpcHandlers<
   fetchShareViewAccess: typeof fetchShareViewAccess;
   probeShareViewLog: typeof probeShareViewLog;
   usableRoot(path: string): string;
+  confirmNewWorkspaceFolder?(rootPath: string, event?: Event): Promise<boolean>;
   readdir(path: string): Promise<string[]>;
   mkdir(path: string, options: { recursive: true }): Promise<unknown>;
   createJoinedWorkspace: ReturnType<typeof createJoinedWorkspaceRunner>;
@@ -127,6 +129,7 @@ export function registerSharedViewsIpcHandlers<
     engineDaemonStartup,
     fetchShareViewInfo,
     usableRoot,
+    confirmNewWorkspaceFolder,
     readdir,
     mkdir,
     createJoinedWorkspace,
@@ -254,7 +257,7 @@ export function registerSharedViewsIpcHandlers<
   // Mirrors the join flow's ordering guarantees: everything is validated
   // before local state exists, the token only ever goes to the signed-in
   // relay, and a failed first pull rolls the whole thing back.
-  async function openSharedView(input: OpenSharedViewPayload) {
+  async function openSharedView(input: OpenSharedViewPayload, context?: { event: Event }) {
     const parsed = parseShareCode(input.shareCode);
     if (!parsed) {
       throw new Error("That doesn't look like a share code. Copy it again and retry.");
@@ -310,6 +313,9 @@ export function registerSharedViewsIpcHandlers<
     });
     if (existingEntries.length > 0) {
       throw new Error("Choose an empty folder — the shared files will be placed inside it.");
+    }
+    if (confirmNewWorkspaceFolder && !(await confirmNewWorkspaceFolder(rootPath, context?.event))) {
+      throw cloudSyncFolderCancelledError();
     }
     // Opening reaches the engine's sessions, and it can start before the
     // daemon handshake now that the window loads during it.

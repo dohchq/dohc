@@ -1,6 +1,7 @@
 import { useMouseBackButton } from "./useMouseBackButton";
 import { isComposingKey } from "./ui/keys";
 import { useRequestSequence } from "./useRequestSequence";
+import { isCloudSyncFolderCancelled } from "../ipc/errorWords";
 import { ipcErrorMessage } from "./ipcError";
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
@@ -150,6 +151,7 @@ export function JoinSyncedWorkspace(
       props.onWorkspaceReady(result.workspace);
     } catch (cause) {
       if (!actionRequests.isCurrent(actionRequest)) return;
+      if (isCloudSyncFolderCancelled(cause)) return;
       const message = ipcErrorMessage(cause, "Couldn't join the workspace.");
       const required = /passphrase required to unlock synced secrets/i.test(message);
       const wrong = /^Passphrase could not\b/u.test(message);
