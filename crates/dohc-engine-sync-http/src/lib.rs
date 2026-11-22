@@ -1568,6 +1568,7 @@ define_server_error_codes! {
     "host-moved" => |_| RelayError::Conflict,
     "host-start-failed" => |_| RelayError::Conflict,
     "host-not-loaded" => |_| RelayError::Conflict,
+    "proposal-file-live" => |_| RelayError::Conflict,
     "dependents_changed" => |_| RelayError::Conflict,
     "discussion_limit_reached" => |_| RelayError::QuotaExceeded,
     "discussion_rate_limited" => |_| RelayError::DiscussionRateLimited,

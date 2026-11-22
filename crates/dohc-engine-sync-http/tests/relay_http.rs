@@ -924,6 +924,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "host-moved"
         | "host-start-failed"
         | "host-not-loaded"
+        | "proposal-file-live"
         | "stale" => RelayError::Conflict,
         "collection_write_rate_limited" | "held_read_busy" => RelayError::HttpStatus(429),
         "discussion_limit_reached" => RelayError::QuotaExceeded,
