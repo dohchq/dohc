@@ -3688,6 +3688,150 @@ fn received_rename_mismatch_replays_as_write_delete(case: &str) {
 fn received_rename_falls_back_after_unsubmitted_edit() {
     received_rename_mismatch_replays_as_write_delete("edited");
 }
+
+/// The relay can serve a write that names an object this copy holds at another
+/// path, with no rename between them: a file renamed while its folder was
+/// hidden from the member arrives at its new path once the folder opens. The
+/// replay moves the object there, as a rename followed by that write would.
+#[test]
+fn received_write_of_a_held_object_at_a_new_path_moves_it() {
+    for (case, binary) in [
+        ("same", false),
+        ("changed", false),
+        ("edited", false),
+        ("same", true),
+        ("changed", true),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        let token = format!("share-object:v1:{}", "d".repeat(64));
+        let body = b"held content".to_vec();
+        let sha = dohc_engine_storage::hex_sha256(&body);
+        let arrived = if case == "changed" {
+            b"changed while hidden".to_vec()
+        } else {
+            body.clone()
+        };
+        let arrived_sha = dohc_engine_storage::hex_sha256(&arrived);
+        let write = |seq, path, sha: &str| {
+            let mut op = if binary {
+                share_view_binary_write_op(seq, path, sha)
+            } else {
+                share_view_write_op(seq, path, sha)
+            };
+            op.payload["objectId"] = json!(token);
+            op
+        };
+        let page = |cursor, ops, next_cursor| {
+            (
+                cursor,
+                ShareViewResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
+                    reference_has_more: false,
+                    ops,
+                    next_cursor,
+                    has_more: false,
+                },
+            )
+        };
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new(
+                [],
+                [
+                    page(0, vec![write(0, "HR/a.md", &sha)], 1),
+                    page(1, vec![write(1, "HR/b.md", &arrived_sha)], 2),
+                    page(2, vec![], 2),
+                ],
+            )
+            .with_view_blobs([(sha.clone(), body), (arrived_sha.clone(), arrived)]),
+        );
+        let grant = tracked_grant(["HR"]);
+        let first = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap();
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
+            .unwrap();
+        if case == "edited" {
+            VersionedTextStore::new(&mut engine)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: token.clone(),
+                        path: "HR/a.md".into(),
+                        text: "unsent member edit".into(),
+                        moment_id: "local-edit".into(),
+                        request_id: None,
+                        metadata_origin: "user".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        let label = format!("case={case}, binary={binary}");
+        let pull = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+        assert_eq!(pull.skipped, 0, "{label}");
+        assert_eq!(pull.applied, 1, "{label}");
+        let mut changed: Vec<(&str, &str)> = pull
+            .changed_paths
+            .iter()
+            .map(|change| (change.path.as_str(), change.operation))
+            .collect();
+        changed.sort_unstable();
+        assert_eq!(
+            changed,
+            [("HR/a.md", "delete"), ("HR/b.md", "write")],
+            "{label}"
+        );
+        engine
+            .read_with(|conn| {
+                let head: (String, String) = conn.query_row(
+                    "SELECT a.object_id,CASE s.content_kind WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END
+                     FROM path_aliases a JOIN snapshots s USING(workspace_id,version_id,object_id)
+                     WHERE a.workspace_id='ws' AND a.version_id='main' AND a.path='HR/b.md'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(head, (token.clone(), arrived_sha.clone()), "{label}");
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM path_aliases WHERE workspace_id='ws' AND path='HR/a.md'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                    0,
+                    "{label}"
+                );
+                // The member's unsent edit stays in history, as a received
+                // rename leaves it.
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND moment_id='local-edit'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                    i64::from(case == "edited"),
+                    "{label}"
+                );
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        let retry = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap();
+        assert_eq!(retry.applied, 0, "{label}");
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &retry.pending_cursor, &NoFaults)
+            .unwrap();
+    }
+}
 fn received_rename_retry_preserves_recreated_source(fallback: bool, quit: bool) {
     for binary in [false, true] {
         let (_scratch, database, mut engine) = open_store();
