@@ -51,22 +51,14 @@ async function openNote(page: Page, path = PATH): Promise<void> {
   await expect(editor(page)).toBeVisible();
 }
 
-async function typeAfter(
-  page: Page,
-  text: string,
-  expectedState: "saved" | "pending-share" = "saved",
-): Promise<void> {
+async function typeAfter(page: Page, text: string): Promise<void> {
   await editor(page).getByText(ANCHOR).click();
   await page.keyboard.press(process.platform === "darwin" ? "Meta+ArrowRight" : "End");
   await page.keyboard.type(` ${text}`);
   await expect(editor(page)).toContainText(text);
-  await expect(saveState(page)).toHaveAttribute(
-    "data-state",
-    expectedState === "pending-share" ? expectedState : /^(saved|saved-to-host)$/,
-    { timeout: 60_000 },
-  );
-  if (expectedState === "pending-share")
-    await expect(saveState(page)).toHaveText("Saved locally · pending share");
+  await expect(saveState(page)).toHaveAttribute("data-state", /^(saved|saved-to-host)$/, {
+    timeout: 60_000,
+  });
 }
 
 test("@restore-set-aside-typing History refuses to restore a live shared note, and its creation too", async ({

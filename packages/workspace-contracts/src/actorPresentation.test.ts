@@ -1,10 +1,5 @@
 import { expect, it } from "vitest";
-import {
-  ACTOR_HUES,
-  actorHueSlot,
-  isConnectedAgentId,
-  shownAgentName,
-} from "./actorPresentation";
+import { ACTOR_HUES, actorHueSlot, isConnectedAgentId, shownAgentName } from "./actorPresentation";
 it.each([
   ["", 2],
   ["alice", 6],

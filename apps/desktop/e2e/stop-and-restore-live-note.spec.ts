@@ -194,6 +194,10 @@ test("@stop-and-restore-live Stop and restore ends one Edit link of a live note 
         },
       )
       .toBe(true);
+    const before = await ownerFile();
+    const settled = [endedTypist.words, keptTypist.words].map((words) =>
+      words.find((word) => before.includes(word))!,
+    );
 
     let outcome: Awaited<ReturnType<Api["stopAndRestore"]>> | undefined;
     await expect
@@ -232,7 +236,9 @@ test("@stop-and-restore-live Stop and restore ends one Edit link of a live note 
       links.links.find((link) => link.grantId === grantId)?.status;
     expect(linkStatus(first.grantId), "the restored link has ended").toBe("revoked");
     expect(linkStatus(second.grantId), "the other link stays").toBe("active");
-    expect(await ownerFile(), "the owner's own words stay").toContain(body);
+    const after = await ownerFile();
+    expect(after, "the owner's own words stay").toContain(body);
+    for (const word of settled) expect(after, "live typing already saved stays").toContain(word);
 
     const paused = await status();
     console.log(`[stop-and-restore-live] the note after Stop and restore: ${paused}`);
