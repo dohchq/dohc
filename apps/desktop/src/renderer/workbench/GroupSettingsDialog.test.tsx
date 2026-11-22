@@ -77,7 +77,7 @@ describe("GroupSettingsDialog", () => {
     await waitFor(() => expect(checked("View only")).toBe(true));
     fireEvent.click(radio("No access"));
     expect(screen.getByTestId("chats-group-access-hiding").textContent).toBe(
-      "Members will no longer see Announcements. People who read it may keep a copy.",
+      "Members will no longer see the Announcements Group. People who read it may keep a copy.",
     );
     fireEvent.click(screen.getByTestId("chats-group-access-follow"));
     expect(checked("Can post")).toBe(true);
@@ -120,7 +120,7 @@ describe("GroupSettingsDialog", () => {
     expect(checked("No access")).toBe(true);
   });
 
-  it("says a hidden Group's folder keeps its files as they are, and closes to show it", async () => {
+  it("says members keep their access to a hidden Group's folder, and closes to show it", async () => {
     const onOpenFolder = vi.fn();
     const { onClose } = open({ level: null, memberLevel: "comment" }, undefined, {
       folderPath: "Team/Plans",
@@ -130,7 +130,7 @@ describe("GroupSettingsDialog", () => {
     expect(screen.queryByTestId("chats-group-access-folder")).toBeNull();
     fireEvent.click(radio("No access"));
     expect(screen.getByTestId("chats-group-access-hiding").textContent).toBe(
-      "Members will no longer see Announcements. Files in Plans stay as they are.",
+      "Members will no longer see the Announcements Group. Their access to files in Plans stays the same.",
     );
     fireEvent.click(screen.getByTestId("chats-group-access-folder"));
     expect(onOpenFolder).toHaveBeenCalledWith("Team/Plans");

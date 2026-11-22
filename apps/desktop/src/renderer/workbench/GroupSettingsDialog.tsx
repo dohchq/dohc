@@ -255,10 +255,10 @@ export function GroupSettingsDialog(props: {
                 >
                   <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-warning" />
                   <span>
-                    Members will no longer see {props.groupName}.{" "}
+                    Members will no longer see the {props.groupName} Group.{" "}
                     {folderName && props.folderPath ? (
                       <>
-                        Files in{" "}
+                        Their access to files in{" "}
                         {props.onOpenFolder ? (
                           <button
                             type="button"
@@ -268,14 +268,14 @@ export function GroupSettingsDialog(props: {
                               props.onOpenFolder?.(props.folderPath!);
                               props.onClose();
                             }}
-                            className="cursor-pointer text-ink underline decoration-line underline-offset-2 hover:decoration-ink"
+                            className="cursor-pointer text-accent underline underline-offset-2 disabled:cursor-default"
                           >
                             {folderName}
                           </button>
                         ) : (
                           <span className="text-ink">{folderName}</span>
                         )}{" "}
-                        stay as they are.
+                        stays the same.
                       </>
                     ) : (
                       "People who read it may keep a copy."
