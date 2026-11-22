@@ -117,7 +117,8 @@ function useListFailureReport(state: DirectListState, store: DirectStore, report
   const report = useRef(reporting);
   report.current = reporting;
   useEffect(() => {
-    if (failure && !serverNamed) {
+    // One outage, one notice: a failed send that says the same already names it, with its own Try again.
+    if (failure && !serverNamed && failure !== store.sendFailure()) {
       report.current.onError(failure, undefined, () => void store.refresh(), undefined, {
         identity: LIST_IDENTITY,
       });
@@ -575,14 +576,20 @@ function ConversationForAccount(props: ConversationProps) {
           reporting.current.onClearError?.(sendIdentity);
           return;
         }
+        const message = ipcErrorMessage(cause, "dohc could not send your message.");
         reportDirect(
           reporting.current,
-          ipcErrorMessage(cause, "dohc could not send your message."),
+          message,
           cause,
           () => void send(sender, body, messageId, to),
           undefined,
           { identity: sendIdentity, title: `Your message to ${to} wasn't sent` },
         );
+        // One outage, one notice: this one takes the place of a failed list read's that says the same.
+        store.sendFailed(message);
+        const list = store.snapshot();
+        if (list.status === "ready" && list.failure === message)
+          reporting.current.onClearError?.(LIST_IDENTITY);
       } finally {
         sendingRef.current = false;
         setSending(false);
