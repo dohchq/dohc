@@ -20,7 +20,9 @@ import {
 import {
   activeWorkspace,
   createTempWorkspace,
+  explorerRow,
   openWorkspaceFromFirstRun,
+  revealExplorerPath,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -125,6 +127,11 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
     await expect(page.getByTestId("cloud-sync-code")).toBeVisible();
     await page.keyboard.press("Escape");
     await waitForWorkspaceFile(page, workspaceId, PATH);
+    await revealExplorerPath(page, PATH);
+    await explorerRow(page, PATH).click();
+    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 30_000 });
+    await page.keyboard.press("ControlOrMeta+w");
+    await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
 
     const ownerFile = () => readFile(join(ownerTemp.rootPath, PATH), "utf8").catch(() => "");
     const status = async () =>
