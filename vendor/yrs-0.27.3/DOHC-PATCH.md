@@ -25,7 +25,22 @@ formatting items on both sides of it, and a letter someone else typed plain
 after that element at the same moment came out marked. The scan now stops at
 any live countable item. It still stops at a deleted string or embed, where
 Yjs scans on, which leaves a redundant formatting item and changes no text.
+The change applies to every text, also the paragraph text of a note stored
+under `body`: a local delete before an element embedded in it now keeps the
+formatting items around that element, as Yjs does.
 Tests live in `crates/yrs-interop/tests/body_sequence.rs`.
+
+`src/types/text.rs` adds `Text::try_visit_items` and `TextItem`. It visits
+every live item of a text in stored order and delivers a formatting item as
+it is stored, where `try_visit_diff` folds every formatting key into a map of
+its own. The engine reads a note body sequence with it, so each stored item
+spends from the projection budget and a formatting key that is no mark name
+keeps no state. `src/branch.rs` adds `Branch::holds_unkeyed_item` and
+`Branch::holds_keyed_item`, which say whether a shared type holds an item of
+that kind, live or deleted. An update does not carry a root's kind, so the
+engine checks with them that a format-2 note keeps nothing under `body`, no
+keyed item under `sequence` and no unkeyed item under `containers`. Tests for
+both live in `crates/yrs-interop/tests/body_sequence.rs`.
 
 Visitor regression tests live in `crates/yrs-interop/tests/text_diff_visitor.rs`;
 projection budget tests live in `crates/dohc-engine-collab/src/ydoc.rs`.

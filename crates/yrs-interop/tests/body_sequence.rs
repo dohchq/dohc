@@ -2,7 +2,8 @@ use base64::Engine as _;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use yrs::branch::{Branch, BranchID};
-use yrs::types::text::{Diff, TextDiffChunk, YChange};
+use yrs::types::text::{Diff, TextDiffChunk, TextItem, YChange};
+use yrs::types::xml::{XmlFragment, XmlOut, XmlTextPrelim, XmlTextRef};
 use yrs::types::Attrs;
 use yrs::updates::decoder::Decode;
 use yrs::{
@@ -346,6 +347,119 @@ fn removing_the_letter_before_an_element_keeps_the_formatting_items_around_it() 
             ],
         );
     }
+}
+
+fn paragraph_text(doc: &Doc) -> XmlTextRef {
+    let body = doc.get_or_insert_xml_fragment("body");
+    let txn = doc.transact();
+    let Some(XmlOut::Element(paragraph)) = body.get(&txn, 0) else {
+        panic!("the body starts with a paragraph");
+    };
+    let Some(XmlOut::Text(text)) = paragraph.get(&txn, 0) else {
+        panic!("the paragraph starts with its text");
+    };
+    text
+}
+
+fn written_with_bold(doc: &Doc, text: &impl Text) -> String {
+    let txn = doc.transact();
+    let mut written = Vec::new();
+    for chunk in text.diff(&txn, YChange::identity) {
+        let piece = match chunk.insert {
+            Out::Any(Any::String(letters)) => letters.to_string(),
+            Out::YXmlElement(element) => element.tag().to_string(),
+            other => panic!("unexpected item: {other:?}"),
+        };
+        let bold = chunk.attributes.is_some_and(|attrs| attrs.contains_key("bold"));
+        let marker = if bold { "**" } else { "" };
+        written.push(format!("{marker}{piece}{marker}"));
+    }
+    written.join(" ")
+}
+
+#[test]
+fn removing_the_letter_before_an_unmarked_element_keeps_its_formatting_in_a_paragraph_text() {
+    let doc = engine_doc();
+    let body = doc.get_or_insert_xml_fragment("body");
+    {
+        let mut txn = doc.transact_mut();
+        let paragraph = body.insert(&mut txn, 0, XmlElementPrelim::empty("paragraph"));
+        let text = paragraph.insert(&mut txn, 0, XmlTextPrelim::new(""));
+        let image = XmlElementPrelim::empty("image");
+        text.insert_with_attributes(&mut txn, 0, "ab", bold());
+        text.insert_embed_with_attributes(&mut txn, 2, image, Attrs::new());
+        text.insert_with_attributes(&mut txn, 3, "cd", bold());
+    }
+    let text = paragraph_text(&doc);
+    assert_eq!(written_with_bold(&doc, &text), "**ab** image **cd**");
+    let other = engine_doc();
+    apply(&other, &encode(&doc));
+
+    text.remove_range(&mut doc.transact_mut(), 1, 1);
+    assert_eq!(written_with_bold(&doc, &text), "**a** image **cd**");
+
+    let typed = paragraph_text(&other);
+    typed.insert_with_attributes(&mut other.transact_mut(), 3, "x", Attrs::new());
+    apply(&doc, &encode(&other));
+    apply(&other, &encode(&doc));
+    assert_eq!(written_with_bold(&doc, &text), "**a** image x **cd**");
+    assert_eq!(written_with_bold(&other, &typed), "**a** image x **cd**");
+}
+
+#[test]
+fn visits_each_live_item_as_it_is_stored_and_stops_at_the_first_error() {
+    let doc = engine_doc();
+    apply_yjs(&doc, "seed");
+    apply_yjs(&doc, "join");
+    let body = doc.get_or_insert_text(ROOT);
+    let txn = doc.transact();
+    let (mut letters, mut elements, mut formatting) = (String::new(), Vec::new(), Vec::new());
+    body.try_visit_items(&txn, |item| -> Result<(), Infallible> {
+        match item {
+            TextItem::Letters(run) => letters.push_str(run),
+            TextItem::Format(key, Any::Null) => formatting.push(format!("{key} off")),
+            TextItem::Format(key, _) => formatting.push(format!("{key} on")),
+            TextItem::Embed(Out::YXmlElement(stored)) => elements.push(stored.tag().to_string()),
+            TextItem::Embed(_) | TextItem::Other => panic!("the seed holds no other item"),
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(letters, "OneTwox");
+    assert_eq!(elements, ["block", "image"]);
+    assert_eq!(formatting[..3], ["bold on", "bold off", "link on"]);
+
+    let mut visited = 0;
+    let stopped = body.try_visit_items(&txn, |_| {
+        visited += 1;
+        Err("stop")
+    });
+    assert_eq!(stopped, Err("stop"));
+    assert_eq!(visited, 1);
+}
+
+fn stored_under(root: &impl AsRef<Branch>) -> (bool, bool) {
+    let root = root.as_ref();
+    (root.holds_unkeyed_item(), root.holds_keyed_item())
+}
+
+#[test]
+fn tells_which_kinds_of_item_a_root_holds_also_once_they_are_deleted() {
+    let doc = engine_doc();
+    let text = doc.get_or_insert_text(ROOT);
+    let records = doc.get_or_insert_map("containers");
+    assert_eq!(stored_under(&text), (false, false));
+    assert_eq!(stored_under(&records), (false, false));
+
+    text.insert(&mut doc.transact_mut(), 0, "x");
+    records.insert(&mut doc.transact_mut(), "key", "value");
+    assert_eq!(stored_under(&text), (true, false));
+    assert_eq!(stored_under(&records), (false, true));
+
+    text.remove_range(&mut doc.transact_mut(), 0, 1);
+    records.remove(&mut doc.transact_mut(), "key");
+    assert_eq!(stored_under(&text), (true, false));
+    assert_eq!(stored_under(&records), (false, true));
 }
 
 #[test]

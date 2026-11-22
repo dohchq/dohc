@@ -291,6 +291,16 @@ impl Branch {
         &self.type_ref
     }
 
+    /// Whether this branch's indexed sequence holds any item, live or deleted.
+    pub fn holds_unkeyed_item(&self) -> bool {
+        self.start.is_some()
+    }
+
+    /// Whether any key of this branch holds an item, live or deleted.
+    pub fn holds_keyed_item(&self) -> bool {
+        !self.map.is_empty()
+    }
+
     pub(crate) fn repair_type_ref(&mut self, type_ref: TypeRef) {
         if self.type_ref == TypeRef::Undefined {
             self.type_ref = type_ref;
