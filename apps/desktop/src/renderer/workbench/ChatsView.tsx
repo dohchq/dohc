@@ -1603,6 +1603,14 @@ export function ChatsView(props: {
     seenGroupAccessRevision.current = props.groupAccessRevision;
     if (createsGroups) void retryGroupRules();
   }, [props.groupAccessRevision, retryGroupRules, createsGroups]);
+  // The owner or another admin can change a rule on another computer, and
+  // nothing tells this one, so coming back to the window reads the rules again.
+  useEffect(() => {
+    if (!createsGroups) return;
+    const reread = () => void retryGroupRules();
+    window.addEventListener("focus", reread);
+    return () => window.removeEventListener("focus", reread);
+  }, [retryGroupRules, createsGroups]);
   const groupAccessMark = (channel: ChatChannelRecord, size?: number) => {
     const view = groupRules.error ? null : groupRules.value;
     if (!view || channel.kind !== "channel" || !channel.wireId) return null;
