@@ -1322,45 +1322,45 @@ if (namedLiveConfig) {
     storage.readLiveAuthority.bind(storage),
   );
   const bounds = namedLiveConfig.host;
-  // Off unless DOHC_RELAY_LIVE_ROOMS=1 while the room is built and tested in stages.
-  const rooms =
-    process.env.DOHC_RELAY_LIVE_ROOMS === "1"
-      ? createLiveRooms({
-          storage,
-          maxUpdateBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
-          maxNoteBytes: bounds.maxAdmissionBytes,
-          maxAppliedBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
-          // A room saves as the workspace's owner, whoever is connected.
-          async openSaver(document, signal) {
-            const ownerUserId = workspaceOwner(storage as StorageContext, document.workspaceId);
-            if (!ownerUserId) throw new Error("The workspace has no owner.");
-            const current = storage.resolveCurrentLiveDocumentBinding({
-              document,
-              actor: { kind: "owner", userId: ownerUserId },
-            });
-            // A moved, deleted or replaced file, or an ended lineage, doesn't come back by itself.
-            if (current.kind !== "current")
-              throw current.reason === "stale-document"
-                ? new LiveRoomBindingEndedError()
-                : new Error("The owner's binding is not current.");
-            return captureOwnerLiveFrameHost({
-              authenticatedUserId: ownerUserId,
-              storage,
-              native: await captureNative(current.binding, signal),
-              bounds,
-              validate: namedLiveConfig.validate,
-            });
-          },
-        })
-      : undefined;
+  const everyRoom = createLiveRooms({
+    storage,
+    maxUpdateBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
+    maxNoteBytes: bounds.maxAdmissionBytes,
+    maxAppliedBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
+    // A room saves as the workspace's owner, whoever is connected.
+    async openSaver(document, signal) {
+      const ownerUserId = workspaceOwner(storage as StorageContext, document.workspaceId);
+      if (!ownerUserId) throw new Error("The workspace has no owner.");
+      const current = storage.resolveCurrentLiveDocumentBinding({
+        document,
+        actor: { kind: "owner", userId: ownerUserId },
+      });
+      // A moved, deleted or replaced file, or an ended lineage, doesn't come back by itself.
+      if (current.kind !== "current")
+        throw current.reason === "stale-document"
+          ? new LiveRoomBindingEndedError()
+          : new Error("The owner's binding is not current.");
+      return captureOwnerLiveFrameHost({
+        authenticatedUserId: ownerUserId,
+        storage,
+        native: await captureNative(current.binding, signal),
+        bounds,
+        validate: namedLiveConfig.validate,
+      });
+    },
+  });
+  // A desktop that hosts its own notes takes each edit itself, so only a session service's notes edit in a room.
+  const rooms: LiveRooms = {
+    ...everyRoom,
+    join: (host, options) =>
+      storage.getLiveHostControl()?.configuredMode === "service"
+        ? everyRoom.join(host, options)
+        : host,
+  };
   liveRooms = rooms;
   // A paused note is refused to editors as a held one is: only its owner can start it again.
-  const editorsBlocked = rooms
-    ? (document: { workspaceId: string; objectId: string }) =>
-        liveRoomPaused(storage as StorageContext, document)
-          ? "held"
-          : sessionHostBlocked?.(document)
-    : sessionHostBlocked;
+  const editorsBlocked = (document: { workspaceId: string; objectId: string }) =>
+    liveRoomPaused(storage as StorageContext, document) ? "held" : sessionHostBlocked?.(document);
   namedLive = createNamedLiveRoutes({
     rooms,
     kind: "named",
@@ -1486,8 +1486,7 @@ if (namedLiveConfig) {
     process.once("SIGTERM", desktopLive.close);
   }
   ownerLive = createOwnerLiveRoutes({
-    // Off unless DOHC_RELAY_LIVE_ROOM_OWNER=1 too, until the desktop that reads room rows ships.
-    ...(rooms && process.env.DOHC_RELAY_LIVE_ROOM_OWNER === "1" ? { rooms } : {}),
+    rooms,
     storage,
     // The Bearer sign-in, a phone's included. A phone also needs a ticket, which only an uncached sign-in read admits.
     resolveAccountSession: resolvePhoneCapableAccountSession!,
