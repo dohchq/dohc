@@ -10106,6 +10106,7 @@ export function DesktopWorkspaceShell(props: {
                               {...(shareView?.membersWorkspaceId
                                 ? { membersWorkspaceId: shareView.membersWorkspaceId }
                                 : {})}
+                              membershipEnded={!!shareView?.membership && shareViewEnded}
                               sharedView={!!shareView}
                               // Main's own decision, not the renderer's settings read:
                               // only main knows whether a recorder exists for this session, and
