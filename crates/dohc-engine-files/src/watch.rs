@@ -197,6 +197,7 @@ struct WatchState {
     unavailable: AtomicBool,
     hard_deadline_flushes: AtomicU64,
     settle_flushes: AtomicU64,
+    timed_reads: AtomicU64,
 }
 
 impl WatchState {
@@ -424,6 +425,12 @@ impl NativeWatcher {
     /// Shutdown flushes are excluded from both deadline counters.
     pub fn settle_flush_count(&self) -> u64 {
         self.state.settle_flushes.load(Ordering::Relaxed)
+    }
+
+    /// Number of times the folder was read again on the timer, with no
+    /// event, because other computers write to it.
+    pub fn timed_read_count(&self) -> u64 {
+        self.state.timed_reads.load(Ordering::Relaxed)
     }
 
     /// Whether the OS watch is genuinely, permanently lost: either the
@@ -762,6 +769,7 @@ fn watcher_thread(
                     if let (Some(interval), Some(at)) = (timed_read, next_timed_read)
                         && Instant::now() >= at
                     {
+                        state.timed_reads.fetch_add(1, Ordering::Relaxed);
                         dirty();
                         next_timed_read = Some(Instant::now() + interval);
                     }
@@ -1339,7 +1347,7 @@ mod tests {
         let (started, reads) =
             start_counting(root.path().to_owned(), Some(Duration::from_millis(50)));
         let mut watcher = started.await.unwrap();
-        for _ in 0..3 {
+        while watcher.timed_read_count() < 3 {
             reads
                 .recv_timeout(Duration::from_secs(5))
                 .expect("the folder is read again on the timer");
@@ -1353,11 +1361,16 @@ mod tests {
         assert_eq!(timed_read_interval(root.path()), None);
         let (started, reads) = start_counting(root.path().to_owned(), None);
         let mut watcher = started.await.unwrap();
-        assert!(
-            reads
-                .recv_timeout(WATCH_ROOT_HEALTH_POLL_INTERVAL * 2)
-                .is_err()
-        );
+        std::fs::write(root.path().join("notes.md"), b"notes").unwrap();
+        reads
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the change is read");
+        let quiet_until = Instant::now() + WATCH_ROOT_HEALTH_POLL_INTERVAL * 2;
+        while reads
+            .recv_timeout(quiet_until.saturating_duration_since(Instant::now()))
+            .is_ok()
+        {}
         watcher.stop().unwrap();
+        assert_eq!(watcher.timed_read_count(), 0);
     }
 }
