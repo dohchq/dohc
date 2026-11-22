@@ -737,24 +737,26 @@ it("publishes Unicode HTML, script and percent-encoded asset paths", async () =>
 });
 
 describe("extensionless relative imports", () => {
-  it("resolves unambiguous .tsx, .TSX, .ts, .jsx, .js, dotted stems, and index files", async () => {
+  it("resolves unambiguous .tsx, .TSX, .ts, .jsx, .js, dotted stems, trailing-slash, and index files", async () => {
     const result = await compileClosedApp({
       entryPath: "app/main.tsx",
       bounds,
       inputs: [
         file(
           "app/main.tsx",
-          'import { Badge } from "./Badge";\nimport { sum } from "./date.utils";\nimport { Card } from "./cards";\nconsole.log(Badge, sum(1, 2), Card);',
+          'import { Badge } from "./Badge";\nimport { sum } from "./date.utils";\nimport { Card } from "./cards/";\nimport { Root } from "./";\nconsole.log(Badge, sum(1, 2), Card, Root);',
         ),
         file("app/Badge.TSX", 'export const Badge = "ok";'),
         file("app/date.utils.ts", "export const sum = (a: number, b: number) => a + b;"),
         file("app/cards/index.tsx", 'export const Card = "card";'),
+        file("app/index.ts", 'export const Root = "root";'),
       ],
     });
     expect(result.dependencyLock.map((item) => item.path)).toEqual([
       "app/Badge.TSX",
       "app/cards/index.tsx",
       "app/date.utils.ts",
+      "app/index.ts",
       "app/main.tsx",
     ]);
   });

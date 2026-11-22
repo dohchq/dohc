@@ -835,7 +835,7 @@ function normalizeV2Definition(
         return matched.fieldId;
       });
     } else if (hasFieldIds) {
-      fieldIds = boundedArray(opRow.fieldIds, DATASET_MAX_FIELDS).map(uuid);
+      fieldIds = boundedArray(opRow.fieldIds, DATASET_MAX_FIELDS).map((entry) => uuid(entry));
     } else {
       fieldIds = [];
     }
