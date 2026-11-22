@@ -31,8 +31,8 @@ export type BodyLine = {
   boundary: Y.XmlElement | null;
   /** Where the line's text starts in the sequence. Its boundary stands one place before. */
   start: number;
-  /** How many letters and inline items the line holds. */
-  length: number;
+  /** The line's letters in UTF-16 units, with U+FFFC for each inline item. */
+  text: string;
   /** The boundary's attributes as stored, `path` among them. */
   attrs: SequenceAttrs;
   /** The containers the line is in, outermost first. */
@@ -47,8 +47,12 @@ export type BodyWrites = {
   attributes: Map<Y.XmlElement, SequenceAttrs>;
   /** Where a boundary is deleted. */
   removed?: number;
-  /** A boundary to insert, and where. */
-  added?: { index: number; attrs: SequenceAttrs };
+  /** Boundaries to insert, in this order, each at its index once the ones before it stand. */
+  added?: { index: number; attrs: SequenceAttrs }[];
+  /** Letters to insert, and where. */
+  typed?: { index: number; letters: string };
+  /** Letters and inline items to delete. */
+  erased?: { index: number; length: number };
 };
 
 const ITEM_OF_LIST: Record<string, string> = {
@@ -59,7 +63,38 @@ const ITEM_OF_LIST: Record<string, string> = {
 const isList = (type: string | undefined) =>
   type !== undefined && Object.hasOwn(ITEM_OF_LIST, type);
 const isItem = (type: string | undefined) => type === "listItem" || type === "taskItem";
-const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+
+const whole = (value: unknown) =>
+  typeof value === "bigint" &&
+  value >= BigInt(Number.MIN_SAFE_INTEGER) &&
+  value <= BigInt(Number.MAX_SAFE_INTEGER)
+    ? Number(value)
+    : value;
+
+function same(left: unknown, right: unknown): boolean {
+  const one = whole(left);
+  const other = whole(right);
+  if (one === other) return true;
+  if (typeof one !== "object" || typeof other !== "object" || one === null || other === null)
+    return false;
+  if (Array.isArray(one) !== Array.isArray(other)) return false;
+  if (Array.isArray(one) && one.length !== (other as unknown[]).length) return false;
+  const keys = Object.keys(one);
+  return (
+    keys.length === Object.keys(other).length &&
+    keys.every(
+      (key) =>
+        Object.hasOwn(other, key) &&
+        same((one as SequenceAttrs)[key], (other as SequenceAttrs)[key]),
+    )
+  );
+}
+
+const HIGH_HALF = /[\uD800-\uDBFF]/;
+const LOW_HALF = /[\uDC00-\uDFFF]/;
+const LONE_HALF = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const splitsALetter = (text: string, offset: number) =>
+  HIGH_HALF.test(text.charAt(offset - 1)) && LOW_HALF.test(text.charAt(offset));
 
 function attributesOf(element: Y.XmlElement): SequenceAttrs {
   const entries: [string, unknown][] = [];
@@ -69,7 +104,22 @@ function attributesOf(element: Y.XmlElement): SequenceAttrs {
   return Object.fromEntries(entries);
 }
 
-/** The lines of a note's body, in order, for a writer to change. */
+function kindOf(schema: Schema, stored: SequenceAttrs, asked: SequenceAttrs): SequenceAttrs {
+  const held = typeof stored.type === "string" ? stored.type : "paragraph";
+  const type = typeof asked.type === "string" ? asked.type : held;
+  const kind: SequenceAttrs = { type };
+  for (const [key, spec] of Object.entries(schema.nodes[type]?.spec.attrs ?? {})) {
+    const unset = (spec as { default?: unknown }).default ?? null;
+    const kept = type === held && Object.hasOwn(stored, key);
+    kind[key] = Object.hasOwn(asked, key) ? asked[key] : kept ? stored[key] : unset;
+  }
+  return kind;
+}
+
+/**
+ * The lines of a note's body, in order, for a writer to change. A body that holds nothing is one
+ * empty line with no boundary, as it reads.
+ */
 export function readBody(schema: Schema, doc: Y.Doc): BodyLine[] {
   const records = doc.getMap(BODY_CONTAINERS_FIELD);
   const lines: BodyLine[] = [];
@@ -87,12 +137,17 @@ export function readBody(schema: Schema, doc: Y.Doc): BodyLine[] {
         return shared ? above[depth]! : { id: frame.id, type: frame.type, changes: new Map() };
       });
       const ids = frames.map((frame) => frame.id);
-      lines.push({ boundary: element, start: at + 1, length: 0, attrs, path, ids });
-    } else if (lines.length > 0) lines.at(-1)!.length += item.length;
-    else
-      lines.push({ boundary: null, start: 0, length: item.length, attrs: {}, path: [], ids: [] });
+      lines.push({ boundary: element, start: at + 1, text: "", attrs, path, ids });
+    } else {
+      if (lines.length === 0)
+        lines.push({ boundary: null, start: 0, text: "", attrs: {}, path: [], ids: [] });
+      const letters = item.content instanceof Y.ContentString ? item.content.str : null;
+      lines.at(-1)!.text += letters ?? "\uFFFC".repeat(item.length);
+    }
     at += item.length;
   }
+  if (lines.length === 0)
+    lines.push({ boundary: null, start: 0, text: "", attrs: {}, path: [], ids: [] });
   return lines;
 }
 
@@ -138,24 +193,30 @@ function writesOf(
   for (const container of held) {
     const { id, type, starts, copies, changes } = container;
     if (starts || copies)
-      for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: starts ?? {} })) {
-        const kept = copies ? stored.get(copies + key.slice(id.length)) : undefined;
-        records.set(key, kept === undefined ? value : kept);
-      }
+      for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: starts ?? {} }))
+        records.set(key, value);
+    if (copies)
+      stored.forEach((value, key) => {
+        if (key === copies || key.startsWith(`${copies}.`))
+          records.set(id + key.slice(copies.length), value);
+      });
     for (const [name, value] of changes) records.set(name === "" ? id : `${id}.${name}`, value);
   }
 
   const attributes = new Map<Y.XmlElement, SequenceAttrs>();
+  const inserted: { index: number; attrs: SequenceAttrs }[] = [];
   for (const line of lines) {
     const ids = line.path.map((container) => container.id);
     if (line !== added && same(ids, line.ids)) continue;
     if (ids.length > MAX_SEQUENCE_DEPTH || new Set(ids).size < ids.length) return null;
     if (line.boundary) attributes.set(line.boundary, { path: ids });
-    else if (line !== added && ids.length > 0) return null;
+    else
+      inserted.push({
+        index: line === added ? line.start + inserted.length : 0,
+        attrs: { type: "paragraph", ...line.attrs, path: ids },
+      });
   }
-  if (!added) return { records, attributes };
-  const path = added.path.map((container) => container.id);
-  return { records, attributes, added: { index: added.start, attrs: { ...added.attrs, path } } };
+  return inserted.length > 0 ? { records, attributes, added: inserted } : { records, attributes };
 }
 
 function blocksAround(lines: BodyLine[], at: number, depth: number) {
@@ -179,9 +240,42 @@ function blocksAround(lines: BodyLine[], at: number, depth: number) {
 }
 
 /**
- * Split a line at an offset. The new line gets the line's kind and path, or a new item when the
- * line is the first block of a list item; the item's later blocks go with the text after the caret.
- * At offset 0 of a line that holds text, the new boundary goes before the line's own.
+ * Type letters into a line. Refused between the two units of a surrogate pair, and for letters
+ * that hold half of one.
+ */
+export function typeLetters(
+  schema: Schema,
+  doc: Y.Doc,
+  at: number,
+  offset: number,
+  letters: string,
+): BodyWrites | null {
+  const line = readBody(schema, doc)[at];
+  if (!line || letters === "" || LONE_HALF.test(letters)) return null;
+  if (offset < 0 || offset > line.text.length || splitsALetter(line.text, offset)) return null;
+  const typed = { index: line.start + offset, letters };
+  return { records: new Map(), attributes: new Map(), typed };
+}
+
+/** Delete letters and inline items of one line. Refused where it would cut a surrogate pair. */
+export function deleteLetters(
+  schema: Schema,
+  doc: Y.Doc,
+  at: number,
+  offset: number,
+  length: number,
+): BodyWrites | null {
+  const line = readBody(schema, doc)[at];
+  if (!line || length <= 0 || offset < 0 || offset + length > line.text.length) return null;
+  if (splitsALetter(line.text, offset) || splitsALetter(line.text, offset + length)) return null;
+  const erased = { index: line.start + offset, length };
+  return { records: new Map(), attributes: new Map(), erased };
+}
+
+/**
+ * Split a line at an offset, as section 4 of the format says: the new line gets the line's kind
+ * and path, a split of a list item's first block starts a new item, and at offset 0 of a line
+ * that holds text the new boundary goes before the line's own. Refused inside a surrogate pair.
  */
 export function splitLine(
   schema: Schema,
@@ -192,26 +286,29 @@ export function splitLine(
 ): BodyWrites | null {
   const lines = readBody(schema, doc);
   const line = lines[at];
-  if (!line || offset < 0 || offset > line.length) return null;
-  const above = offset === 0 && line.length > 0;
-  if (above && !line.boundary) return null;
+  if (!line || offset < 0 || offset > line.text.length) return null;
+  if (splitsALetter(line.text, offset)) return null;
+  const kind = kindOf(schema, line.attrs, {});
+  if (offset === 0 && !line.boundary) {
+    const boundary = { index: 0, attrs: { ...kind, path: [] } };
+    return { records: new Map(), attributes: new Map(), added: [boundary, boundary] };
+  }
+  const above = offset === 0 && line.text.length > 0;
   const depth = line.path.length - 1;
   const item = line.path[depth];
   const added: BodyLine = {
     boundary: null,
     start: above ? line.start - 1 : line.start + offset,
-    length: 0,
-    attrs: { type: "paragraph", ...line.attrs },
+    text: "",
+    attrs: kind,
     path: [...line.path],
     ids: [],
   };
-  if (item && isItem(item.type)) {
+  if (item && isItem(item.type) && lines[at - 1]?.path[depth] !== item) {
     const next = { id: freshId(), type: item.type, starts: {}, changes: new Map() };
-    if (!above) {
-      added.path[depth] = next;
-      for (let later = at + 1; lines[later]?.path[depth] === item; later++)
-        lines[later]!.path[depth] = next;
-    } else if (lines[at - 1]?.path[depth] !== item) added.path[depth] = next;
+    added.path[depth] = next;
+    for (let later = at + 1; !above && lines[later]?.path[depth] === item; later++)
+      lines[later]!.path[depth] = next;
   }
   lines.splice(above ? at : at + 1, 0, added);
   return writesOf(schema, doc, lines, freshId, added);
@@ -226,21 +323,32 @@ export function joinLine(schema: Schema, doc: Y.Doc, at: number): BodyWrites | n
   const lower = lines[at];
   const upper = lines[at - 1];
   if (!lower?.boundary || !upper) return null;
-  const gone = upper.boundary && upper.length === 0 ? upper : lower;
+  const gone = upper.boundary && upper.text === "" ? upper : lower;
   return { records: new Map(), attributes: new Map(), removed: gone.start - 1 };
 }
 
-/** Change a line's kind: its `type`, and the attributes of that kind, on the same boundary. */
+/**
+ * Change a line's kind on the same boundary: its `type`, and every attribute that kind has, with
+ * the default for one neither asked for nor stored.
+ */
 export function setLineKind(
   schema: Schema,
   doc: Y.Doc,
   at: number,
-  kind: SequenceAttrs,
+  asked: SequenceAttrs,
 ): BodyWrites | null {
   const line = readBody(schema, doc)[at];
-  if (!line?.boundary) return null;
-  const changed = Object.entries(kind).filter(([key, value]) => !same(line.attrs[key], value));
+  if (!line) return null;
+  const stored = line.boundary ? line.attrs : { type: "paragraph" };
+  const kind = kindOf(schema, stored, asked);
+  const changed = Object.entries(kind).filter(
+    ([key, value]) => !Object.hasOwn(stored, key) || !same(stored[key], value),
+  );
   if (changed.length === 0) return null;
+  if (!line.boundary) {
+    const added = [{ index: 0, attrs: { ...kind, path: [] } }];
+    return { records: new Map(), attributes: new Map(), added };
+  }
   return {
     records: new Map(),
     attributes: new Map([[line.boundary, Object.fromEntries(changed)]]),
@@ -283,7 +391,7 @@ export function wrapBlocks(
 /**
  * Lift `count` neighbouring blocks, starting with the one that holds line `at` at `depth`, out of
  * the quote or callout around them, or out of their list when the blocks are its items. What the
- * container holds after them goes to a container with a fresh id and the same records.
+ * container holds after them goes to a container with a fresh id and a copy of its records.
  */
 export function liftBlocks(
   schema: Schema,
@@ -424,24 +532,29 @@ export function writeBody(doc: Y.Doc, writes: BodyWrites): void {
     for (const [key, value] of Object.entries(attrs))
       boundary.setAttribute(key, value as unknown as string);
   if (writes.removed !== undefined) sequence.delete(writes.removed, 1);
-  if (!writes.added) return;
-  const boundary = new Y.XmlElement(BLOCK_ELEMENT);
-  for (const [key, value] of Object.entries(writes.added.attrs))
-    boundary.setAttribute(key, value as unknown as string);
-  const { index } = writes.added;
-  sequence.insertEmbed(index, boundary, formattingAt(sequence, index));
+  for (const { index, attrs } of writes.added ?? []) {
+    const boundary = new Y.XmlElement(BLOCK_ELEMENT);
+    for (const [key, value] of Object.entries(attrs))
+      boundary.setAttribute(key, value as unknown as string);
+    sequence.insertEmbed(index, boundary, formattingAt(sequence, index));
+  }
+  if (writes.typed) sequence.insert(writes.typed.index, writes.typed.letters);
+  if (writes.erased) sequence.delete(writes.erased.index, writes.erased.length);
 }
 
 /**
- * The undo history of one writer of a note's body. It follows `origin` only, puts an earlier
- * value back over someone else's later one, and never deletes a container record.
+ * The undo history of one writer of a note's body. It follows `origin` only and puts an earlier
+ * value back over someone else's later one. It never deletes a container record, and never an
+ * attribute of a boundary or an inline item that still stands: two people's undos could otherwise
+ * leave a heading without its level.
  */
 export function bodyHistory(doc: Y.Doc, origin: unknown, captureTimeout?: number): Y.UndoManager {
   const records = doc.getMap(BODY_CONTAINERS_FIELD);
   return new Y.UndoManager([doc.getText(BODY_SEQUENCE_FIELD), records], {
     trackedOrigins: new Set([origin]),
     ignoreRemoteMapChanges: true,
-    deleteFilter: (item) => item.parent !== records,
+    deleteFilter: (item) =>
+      item.parent !== records && !(item.parentSub !== null && item.parent instanceof Y.XmlElement),
     ...(captureTimeout === undefined ? {} : { captureTimeout }),
   });
 }
