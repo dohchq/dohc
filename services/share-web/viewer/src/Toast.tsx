@@ -47,15 +47,15 @@ export function Toast({
     >
       {tone === "success" ? (
         <span className="tile">
-          <Icon name="check" />
+          <Icon name="check" size={14} />
         </span>
       ) : tone ? (
         <span className="tile warn">
-          <Icon name="triangle-alert" />
+          <Icon name="triangle-alert" size={14} />
         </span>
       ) : (
         <span className="tile bad">
-          <Icon name="alert" />
+          <Icon name="alert" size={14} />
         </span>
       )}
       <div>
