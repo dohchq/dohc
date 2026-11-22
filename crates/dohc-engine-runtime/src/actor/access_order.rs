@@ -1112,24 +1112,27 @@ fn rule_changes(committed: Option<&Committed>, disk: &OnDisk) -> Vec<(String, Op
 /// whose entry list changed when it went.
 fn settled(root: &Path, folder: &str, disk: &OnDisk) -> bool {
     let modified = |path: &Path| std::fs::symlink_metadata(path).and_then(|m| m.modified());
+    // Future timestamps cannot measure quiet time. Ignore them before
+    // choosing the latest local change.
+    let now = SystemTime::now();
     let mut newest = disk
         .keys()
         .filter_map(|path| modified(&root.join(path)).ok())
+        .filter(|time| *time <= now)
         .max();
     let mut candidate = Some(folder);
     while let Some(dir) = candidate {
         if let Ok(time) = modified(&root.join(dir)) {
-            newest = newest.max(Some(time));
+            if time <= now {
+                newest = newest.max(Some(time));
+            }
             break;
         }
         candidate = (!dir.is_empty()).then(|| access_rule_folder(dir));
     }
     newest.is_none_or(|time| {
-        // A future timestamp cannot measure quiet time. Do not wait for
-        // another computer's clock before committing a narrowing.
-        SystemTime::now()
-            .duration_since(time)
-            .map_or(true, |quiet| quiet >= ACCESS_RULE_SETTLE)
+        now.duration_since(time)
+            .is_ok_and(|quiet| quiet >= ACCESS_RULE_SETTLE)
     })
 }
 

@@ -1328,15 +1328,15 @@ function workspaceChatSide(
 export function boundaryMove(
   files: ShareSelector,
   record: Record<string, unknown>,
-  sees: (path: string) => boolean,
+  sees: (path: string, side: "before" | "after") => boolean,
   chat?: ChatShareThreadResolver,
 ): { departs: boolean; decision: ShareOpDecision } | null {
   const before = record.payloadBeforePath,
     after = record.payloadAfterPath;
   if (record.operation !== "rename" || typeof before !== "string" || typeof after !== "string")
     return null;
-  const departs = sees(before);
-  if (departs === sees(after)) return null;
+  const departs = sees(before, "before");
+  if (departs === sees(after, "after")) return null;
   const half = departs
     ? {
         operation: "delete",
@@ -1389,24 +1389,25 @@ export function filterOpForShare(
     selector.reach &&
     opKind === "moment.append"
   ) {
+    const reach = selector.reach;
     const files = { ...selector, reach: undefined };
     const record = asRecord(payload);
     if (!record || record.versionId !== "main" || !hasValidShareMomentShape(record))
       return { allowed: false };
-    const moved = boundaryMove(files, record, (path) => pathVisibleThroughShare(files, path), chat);
+    const moved = boundaryMove(
+      files,
+      record,
+      (path, side) =>
+        pathVisibleThroughShare(files, path) &&
+        // A later rule removal can make a folder the member never saw look visible now.
+        (side === "after" ||
+          (typeof record.objectId === "string" &&
+            typeof record.momentId === "string" &&
+            reach.pathVisibleBeforeMoment(record.objectId, record.momentId, path))),
+      chat,
+    );
     // A member never learns what a file held after it left their reach.
     if (moved?.departs) {
-      // A later rule removal can make a folder the member never saw look visible now.
-      if (
-        typeof record.objectId !== "string" ||
-        typeof record.momentId !== "string" ||
-        !selector.reach.pathVisibleBeforeMoment(
-          record.objectId,
-          record.momentId,
-          record.payloadBeforePath as string,
-        )
-      )
-        return { allowed: false };
       if (!moved.decision.allowed) return moved.decision;
       (moved.decision.payload as Record<string, unknown>).payloadBeforeBlobSha256 = null;
       return { ...moved.decision, reachMove: "departure" };
@@ -1447,9 +1448,12 @@ export function filterOpForShare(
       );
     }
     if (!side) return { allowed: false };
-    // A Group's folder path is served only when the share reaches that folder.
+    // A Group keeps its folder path after a rename. Its old rules may be gone.
     const folderPath = asRecord(payload)?.folderPath;
-    const servesFolder = typeof folderPath === "string" && coversLink(files, folderPath);
+    const servesFolder =
+      typeof folderPath === "string" &&
+      coversLink(files, folderPath) &&
+      (selector.role === "admin" || selector.reach.pathExists(folderPath));
     return withheldLinks(
       filterChatOpForChannelShare(side, opKind, payload, chat, servesFolder),
       opKind,
