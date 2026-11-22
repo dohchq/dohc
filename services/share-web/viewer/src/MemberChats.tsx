@@ -53,8 +53,9 @@ export function useMemberListing(
       (error: unknown) => {
         if (controller.signal.aborted) return;
         const reason = ended(error);
+        // The page checks whether the membership ended. If it didn't, the Groups keep their Try again.
         if (reason) onEndedRef.current(reason);
-        else setFound("failed");
+        setFound("failed");
       },
     );
     return () => {

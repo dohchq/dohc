@@ -302,6 +302,51 @@ describe("a member reads the workspace through the link read routes", () => {
     ]);
   });
 
+  // A browser offers the editor and the composer by the file's own level, and reads its files again when its reach changes.
+  it("names each listed file's own level and a reach that changes with the folder rules", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    await setLevel(h, "comment");
+    await ownerWrite(h, "open/access.yaml", "members: edit\n");
+    await ownerWrite(h, "open/a.md", "open");
+    await ownerWrite(h, "view/access.yaml", "members: view\n");
+    await ownerWrite(h, "view/b.md", "view");
+    const read = async () => {
+      const current = await json(await memberRead(h, "/sync/link/current", ana.grantId, "ana"));
+      const share = await json(await memberRead(h, "/sync/link/share", ana.grantId, "ana"));
+      expect(typeof current.reach).toBe("string");
+      expect(share.reach).toBe(current.reach);
+      return {
+        reach: current.reach as string,
+        levels: Object.fromEntries(
+          (current.files as Array<{ path: string; access: string }>).map((file) => [
+            file.path,
+            file.access,
+          ]),
+        ),
+      };
+    };
+    const before = await read();
+    expect(before.levels).toEqual({
+      "docs/plan.md": "comment",
+      "open/a.md": "edit",
+      "view/b.md": "view",
+    });
+    await ownerWrite(h, "open/access.yaml", "members: view\n", "members: edit\n");
+    const after = await read();
+    expect(after.levels).toMatchObject({ "open/a.md": "view" });
+    expect(after.reach).not.toBe(before.reach);
+    // An admin reads rule files, but edits none, as live editing judges.
+    const role = await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, {
+      role: "admin",
+    });
+    expect(role.status, await role.clone().text()).toBe(200);
+    expect((await read()).levels).toMatchObject({
+      "open/a.md": "edit",
+      "open/access.yaml": "comment",
+    });
+  });
+
   it("refuses a removed member, an ended membership, a fenced owner and a forged person with the bytes of an unknown grant", async () => {
     const { h, storage } = await seed();
     const ana = await member(h, storage, "ana");
