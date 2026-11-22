@@ -206,12 +206,6 @@ async function typeAfter(page: Page, anchor: string, text: string): Promise<void
   await page.keyboard.type(text);
 }
 
-/**
- * A recipient's ended share: the banner says so without a Refresh, and the
- * document stays readable and nothing in it is editable. With no edit set
- * aside it shows the last live document; with one, it shows the saved file.
- * `text` must show, so a missing or empty document cannot pass.
- */
 async function shareForEdit(
   page: Page,
   workspaceId: string,
