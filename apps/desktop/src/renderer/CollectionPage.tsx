@@ -29,6 +29,8 @@ import type {
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
+import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "./workspace/workspaceSession";
 import { SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { TextNotSavedError } from "./shell/copyDetails";
@@ -351,29 +353,17 @@ export function CollectionPage({
   // The people a person field can name: the ones main lists for this
   // Collection. A person cell then opens a picker and shows names. Without
   // the list, as on a received share, the cell keeps the typed id.
-  const [people, setPeople] = useState<ReadonlyArray<{ id: string; name: string }> | undefined>(
-    undefined,
-  );
-  const peopleRequests = useRequestSequence([workspaceId, collectionPath]);
   const hasPersonField = details?.schema.fields.some((field) => field.type === "person") ?? false;
-  useEffect(() => {
-    setPeople(undefined);
-    if (!hasPersonField) return;
-    const request = peopleRequests.next();
-    void bridge()
-      .listAutomationPeople({ workspaceId, collectionPath })
-      .then((result) => {
-        if (
-          !peopleRequests.isCurrent(request) ||
-          result.status !== "listed" ||
-          result.people.length === 0
-        )
-          return;
-        setPeople(result.people.map((person) => ({ id: person.userId, name: person.name })));
-      })
-      // A failed read leaves the typed id, which still works.
-      .catch(() => undefined);
-  }, [workspaceId, collectionPath, hasPersonField]);
+  const peopleRead = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([workspaceId, collectionPath, hasPersonField]),
+    manual: !hasPersonField,
+    load: () => bridge().listAutomationPeople({ workspaceId, collectionPath }),
+  });
+  const people = useMemo(() => {
+    const listed = peopleRead.value;
+    if (listed?.status !== "listed" || listed.people.length === 0) return undefined;
+    return listed.people.map((person) => ({ id: person.userId, name: person.name }));
+  }, [peopleRead.value]);
   const personLabel = useMemo(() => {
     if (!people) return undefined;
     const names = new Map(people.map((person) => [person.id, person.name]));
