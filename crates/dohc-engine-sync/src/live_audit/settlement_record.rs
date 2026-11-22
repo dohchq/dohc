@@ -418,7 +418,7 @@ fn publication_source_before_in_tx(
     // while stopped moves the file past it.
     let skipped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id AND u.settlement_id=s.settlement_id WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor>?6 AND s.terminal_cursor<?7)",params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,record.terminal_cursor],|r|r.get(0)).map_err(SyncError::corrupt)?;
     if record.previous_cursor > 0
-        && let Some(before) = tx.query_row(concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest AND (?7 OR (?9 AND s.markdown_digest IS NOT (SELECT payload_before_blob_sha256 FROM moments WHERE workspace_id=?1 AND moment_id=?8)))"),params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,skipped,record.moment_id,settlement_proof],portable_before_from_row).optional().map_err(SyncError::corrupt)?
+        && let Some(before) = tx.query_row(concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest AND (?7 OR (?9 AND s.binding_json=?10 AND s.markdown_digest IS NOT (SELECT payload_before_blob_sha256 FROM moments WHERE workspace_id=?1 AND moment_id=?8)))"),params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,skipped,record.moment_id,settlement_proof,serde_json::to_string(b).map_err(SyncError::corrupt)?],portable_before_from_row).optional().map_err(SyncError::corrupt)?
     {
         return Ok(Some(before));
     }
@@ -902,6 +902,24 @@ mod tests {
                     assert_eq!(payload["payloadBeforeBlobSha256"], accepted);
                 }
             }
+            let renamed = LiveObjectBinding {
+                current_path: "renamed.md".into(),
+                selector_paths: vec!["renamed.md".into()],
+                ..binding.clone()
+            };
+            let record: SettlementRecord = serde_json::from_value(serde_json::json!({
+                "settlementId": "next", "relayDatabaseNamespace": "relay", "binding": renamed,
+                "hostCoordinate": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+                "previousCursor":3,"terminalCursor":4,"previousYdocSequence":2,"localYdocSequence":3,
+                "applicationCount":1,"nativeIntervalDigest":"","acceptedEventCount":1,
+                "acceptedIntervalDigest":"","momentId":"resumed","markdownDigest":"",
+                "sourceStateVectorDigest":"","acceptedStateBlobSha256":"","recordedAtMs":30,
+                "restoreOperationId":null
+            })).unwrap();
+            assert!(
+                publication_source_before_in_tx(tx, &record, true)?.is_none(),
+                "a renamed note keeps its own preimage"
+            );
             Ok::<_, SyncError>(())
         }).unwrap();
     }
