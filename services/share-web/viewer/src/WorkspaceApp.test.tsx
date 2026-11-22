@@ -9,7 +9,7 @@ import WorkspaceApp from "./WorkspaceApp";
 import { memberDocument, memberPageReady, openMemberPage } from "./memberLive";
 import "./MemberLivePage";
 import { jsonResponse, setControlValue, settle } from "./testing";
-import { writeDraft } from "./drafts";
+import { readDraft, writeDraft } from "./drafts";
 import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 
 // A workspace member's page in a browser: the workspace's files, a page, and
@@ -1460,7 +1460,7 @@ it("keeps each account's drafts and unsent edits from another account signed in 
   expect(composer().value).toBe("Half a thought");
 });
 
-it("shows no account's kept edits on a fresh load before sign-in, then only the signed-in account's, still after its session ends", async () => {
+it("shows kept edits only while their account is signed in: none before sign-in or after sign-out, and only that account's", async () => {
   writeDraft(
     "unsent-edits",
     JSON.stringify([
@@ -1486,14 +1486,12 @@ it("shows no account's kept edits on a fresh load before sign-in, then only the 
       (node) => node.textContent,
     ),
   ).toEqual(["Unsent edits to to-pack.md"]);
-  // Signed out on the same page, the person still sees their own kept text, and only theirs.
+  // Signed out, the sign-in form may be filled by someone else, so it shows no kept text. The tab still keeps it.
   await click("Sign out");
   await settle(() => Boolean(container.querySelector('input[name="email"]')));
-  expect(
-    [...container.querySelectorAll('[aria-label="Unsent edits"] summary')].map(
-      (node) => node.textContent,
-    ),
-  ).toEqual(["Unsent edits to to-pack.md"]);
+  expect(recovery()).toBeNull();
+  expect(container.innerHTML).not.toContain("Socks.");
+  expect(JSON.parse(readDraft("unsent-edits"))).toHaveLength(2);
 });
 
 it("stops editing when the person loses Edit, and keeps the unsent text to copy, download or discard with Undo", async () => {
@@ -2057,6 +2055,10 @@ it("keeps an Edit workspace open when the read that catches its files up fails w
 });
 
 it("says another account signed in, not that the membership ended, when another tab switches accounts", async () => {
+  writeDraft(
+    "unsent-edits",
+    JSON.stringify([{ id: 1, accountId: "sam", path: "trip/plan.md", text: "Bring the tickets." }]),
+  );
   const options: { level: Level; memberOf: string; user?: string } = {
     level: "comment",
     memberOf: "sam",
@@ -2064,6 +2066,7 @@ it("says another account signed in, not that the membership ended, when another 
   server(options);
   await render();
   await opened();
+  expect(recovery()!.querySelector("textarea")?.value).toBe("Bring the tickets.");
   // Another tab signed this browser in as Lee. Sam's grant now refuses every read.
   options.user = "lee";
   await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
@@ -2073,8 +2076,23 @@ it("says another account signed in, not that the membership ended, when another 
   );
   expect(text()).not.toContain("membership");
   expect(text()).not.toContain("Leave at nine.");
+  // Lee sees none of Sam's kept edits, here or on the sign-in form.
+  expect(recovery()).toBeNull();
+  expect(container.innerHTML).not.toContain("Bring the tickets.");
   await click("Switch account");
   await settle(() => text().includes("Sign in to open this workspace"));
+  expect(recovery()).toBeNull();
+  expect(container.innerHTML).not.toContain("Bring the tickets.");
+  // Sam's edits are still kept, and come back once Sam signs in again.
+  options.user = "sam";
+  held = [];
+  await act(async () => {
+    setControlValue(container.querySelector('input[name="email"]')!, "sam@dohc.test");
+    setControlValue(container.querySelector('input[name="password"]')!, "secret");
+  });
+  await click("Sign in");
+  await opened();
+  expect(recovery()!.querySelector("textarea")?.value).toBe("Bring the tickets.");
 });
 
 it("offers Try again, not an ended membership, when it cannot check the account after a refusal", async () => {

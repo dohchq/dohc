@@ -258,9 +258,9 @@ export default function WorkspaceApp({ grantId }: { grantId: string | null }) {
   const [unsent, setUnsent] = useState<Unsent[]>(readUnsent);
   const unsentId = useRef(Math.max(0, ...unsent.map((item) => item.id)));
   const [toastSlot, setToastSlot] = useState<HTMLElement | null>(null);
-  // The account last signed in on this page. Signed out, its kept edits still show, so an ended session keeps them in view.
-  // Before any account signs in, as after a reload, none show: the tab may hold another person's text.
-  const [lastAccount, setLastAccount] = useState<string | null>(null);
+  // The account confirmed signed in on this page. Kept edits show only while their own account is, so nobody at the
+  // sign-in form or after a switch of account sees them. The tab keeps them until that account signs in again.
+  const [signedIn, setSignedIn] = useState<string | null>(null);
   const keep = useCallback(
     (accountId: string, path: string, text: string, discarded?: boolean) =>
       setUnsent((list) => [
@@ -285,7 +285,7 @@ export default function WorkspaceApp({ grantId }: { grantId: string | null }) {
             : { id: item.id, accountId: item.accountId, path: item.path, text: item.text },
       ),
     );
-  const shown = unsent.filter((item) => item.accountId === lastAccount);
+  const shown = unsent.filter((item) => item.accountId === signedIn);
   useEffect(() => writeUnsent(unsent), [unsent]);
   // Closing the tab loses the kept text, so the browser asks first while any remains.
   const holding = unsent.some((item) => !item.discarded);
@@ -311,7 +311,7 @@ export default function WorkspaceApp({ grantId }: { grantId: string | null }) {
       <MemberEntry
         grantId={grantId}
         onUnsent={keep}
-        onAccount={setLastAccount}
+        onAccount={setSignedIn}
         toastSlot={toastSlot}
         kept={kept}
         nameFor={(path) => shownPath(path, shown)}
@@ -335,14 +335,14 @@ function MemberEntry({
 }: {
   grantId: string | null;
   onUnsent(accountId: string, path: string, text: string, discarded?: boolean): void;
-  onAccount(id: string): void;
+  onAccount(id: string | null): void;
   toastSlot: HTMLElement | null;
   kept: ReactNode;
   nameFor(path: string): string;
 }) {
   const [account, setAccount] = useState<Account | null | undefined>(undefined);
   useEffect(() => {
-    if (account) onAccount(account.id);
+    if (account !== undefined) onAccount(account?.id ?? null);
   }, [account, onAccount]);
   const [pending, setPending] = useState<"account" | "sign-in" | "sign-out" | null>(
     grantId ? "account" : null,
@@ -419,7 +419,6 @@ function MemberEntry({
     return (
       <StatePage icon="unlink" title="This workspace link isn't valid.">
         <p>Open the workspace again from your invitation.</p>
-        {kept}
       </StatePage>
     );
   if (account === undefined) return <WorkspaceOpening />;
@@ -454,7 +453,6 @@ function MemberEntry({
                 </button>
               </p>
             )}
-            {kept}
           </div>
         </main>
       </div>
@@ -848,8 +846,8 @@ function MemberWorkspace({
         >
           {signingOut ? "Signing out…" : "Switch account"}
         </button>
+        {/* The browser now names another account, so it shows none of this one's kept edits. */}
         {signOutError && <LaunchFailure role="alert" message={SWITCH_FAILED} />}
-        {kept}
       </StatePage>
     );
   if (view.status === "too-large")
