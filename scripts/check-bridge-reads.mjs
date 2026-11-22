@@ -12,7 +12,7 @@ const repoRoot = resolve(import.meta.dirname, "..");
 const inventoryPath = "scripts/bridge-reads.json";
 // The number of reads scripts/bridge-reads.json lists. Lower it when a read moves to useWorkspaceQuery.
 // Raise it only with a new entry for a read that cannot use the query: see `unowned` below.
-const ceiling = 236;
+const ceiling = 231;
 const queryModule = "apps/desktop/src/renderer/workspace/useWorkspaceQuery";
 const { parse } = createRequire(join(repoRoot, "package.json"))("@babel/parser");
 const fix =
@@ -65,7 +65,6 @@ const readActions = {
     /^(?:describe|list|query|read|inspect|migrationPreviewPage|deletePreview|history|status|exportPreview|permissions|lifecycle|pendingAttempts)|^file$/u.test(
       action,
     ),
-  ownerRestore: (action) => ["options", "status", "unfinished"].includes(action),
   heldNoteChange: (action) => action === "review",
 };
 
