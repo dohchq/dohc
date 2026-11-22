@@ -688,6 +688,38 @@ describe.each(["bare", "hosted"] as const)("undo and redo on a %s page", (shape)
     b.expectMirror();
   });
 
+  it("removes an image's title that had no value before it was set, and keeps the text typed before", () => {
+    const a = person(
+      noteOf(({ sequence }) => {
+        sequence.insertEmbed(0, boundary(), {});
+        sequence.insert(1, "One", {});
+        sequence.insertEmbed(4, element("image", { src: "/a.png", alt: "A" }), {});
+      }),
+      10,
+      shape,
+    );
+    const title = () => a.view.state.doc.child(0).lastChild!.attrs.title as unknown;
+    a.typeAt(0, 3, "x");
+    a.view.dispatch(
+      a.view.state.tr.setNodeMarkup(5, null, { src: "/a.png", alt: "A", title: "Shown" }),
+    );
+    expect(title()).toBe("Shown");
+    expect(elementsOf(a.sequence, "item")[0]!.attrs).toContain('["title","Shown"]');
+    expect(a.undo()).toBe(true);
+    expect(a.lines()).toEqual(["Onex"]);
+    expect(title()).toBe(null);
+    expect(elementsOf(a.sequence, "item")[0]!.attrs).toBe('[["alt","A"],["src","/a.png"]]');
+    a.expectMirror();
+    expect(a.undo()).toBe(true);
+    expect(a.lines()).toEqual(["One"]);
+    expect(a.undo()).toBe(false);
+    expect(a.redo()).toBe(true);
+    expect(a.redo()).toBe(true);
+    expect(a.lines()).toEqual(["Onex"]);
+    expect(title()).toBe("Shown");
+    a.expectMirror();
+  });
+
   it("leaves a heading's level on the boundary when the change to a heading is undone", () => {
     const a = person(note(...LINES), 10, shape);
     a.select([1, 0]);
@@ -1337,34 +1369,61 @@ describe("a paragraph the reader added in front of a list item's content", () =>
   });
 });
 
-describe("two containers that share an id", () => {
-  it("reads as one once the only line between them is deleted, and the editor shows that", () => {
-    const a = person(
-      noteOf(({ sequence, containers }) => {
-        for (const [id, type] of [
-          ["L", "bulletList"],
-          ["I", "listItem"],
-          ["J", "listItem"],
-        ] as const)
-          for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
-            containers.set(key, value);
-        const line = (path: string[], text: string) => {
-          sequence.insertEmbed(sequence.length, boundary({ path }), {});
-          sequence.insert(sequence.length, text, {});
-        };
-        line(["L", "I"], "one");
-        line([], "");
-        line(["L", "J"], "two");
-      }),
-      10,
-    );
+describe("two lists with a line between them", () => {
+  const twoLists = (lowerList: string, ...between: string[]) =>
+    noteOf(({ sequence, containers }) => {
+      for (const [id, type] of [
+        ["L", "bulletList"],
+        ["M", "bulletList"],
+        ["I", "listItem"],
+        ["J", "listItem"],
+      ] as const)
+        for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
+          containers.set(key, value);
+      const line = (path: string[], text: string) => {
+        sequence.insertEmbed(sequence.length, boundary({ path }), {});
+        sequence.insert(sequence.length, text, {});
+      };
+      line(["L", "I"], "one");
+      for (const text of between) line([], text);
+      line([lowerList, "J"], "two");
+    });
+
+  it("refuses to remove the last line between two that share an id, so they never read as one", () => {
+    const a = person(twoLists("L", ""), 10);
+    const before = a.view.state.doc;
+    const between = before.child(0).nodeSize;
+    a.view.dispatch(a.view.state.tr.delete(between, between + 2));
+    a.select([1, 0]);
+    a.press("Backspace");
+    a.press("Delete");
+    expect(a.view.state.doc).toBe(before);
     expect(a.view.state.doc.childCount).toBe(3);
+    expect(a.sent).toEqual([]);
+    a.expectMirror();
+
+    const b = person(twoLists("L", "", "x"), 20);
+    const both = b.view.state.tr.delete(between, between + 2).delete(between, between + 3);
+    expect(both.doc.childCount).toBe(2);
+    b.view.dispatch(both);
+    expect(b.view.state.doc.childCount).toBe(4);
+    expect(b.sent).toEqual([]);
+    const one = b.effects(() => b.view.dispatch(b.view.state.tr.delete(between, between + 2)));
+    expect(one.gone).toEqual(BOUNDARY);
+    expect(b.view.state.doc.toString()).toBe(
+      'doc(bulletList(listItem(paragraph("one"))), paragraph("x"), bulletList(listItem(paragraph("two"))))',
+    );
+    b.expectMirror();
+  });
+
+  it("removes the line between two that have their own ids", () => {
+    const a = person(twoLists("M", ""), 10);
     const between = a.view.state.doc.child(0).nodeSize;
     const effects = a.effects(() => a.view.dispatch(a.view.state.tr.delete(between, between + 2)));
     expect(effects.gone).toEqual(BOUNDARY);
     expect(effects.made).toEqual(quiet());
     expect(a.view.state.doc.toString()).toBe(
-      'doc(bulletList(listItem(paragraph("one")), listItem(paragraph("two"))))',
+      'doc(bulletList(listItem(paragraph("one"))), bulletList(listItem(paragraph("two"))))',
     );
     a.expectMirror();
   });
@@ -1854,8 +1913,9 @@ describe.each([
         }
         stopEveryone();
       }
+      expect(reshaped).toEqual([]);
       console.log(
-        `${String(SEEDS)} runs of ${String(STEPS)} changes: after ${String(corrected)} of ${String(actions)} editor actions the editor was changed to show the sequence; after ${String(reshaped.length)} it then differed from what the action made in more than marks (${reshaped.join(", ")})`,
+        `${String(SEEDS)} runs of ${String(STEPS)} changes: after ${String(corrected)} of ${String(actions)} editor actions the editor was changed to show the sequence, each time in marks alone`,
       );
     },
     600_000,

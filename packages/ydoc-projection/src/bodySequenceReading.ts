@@ -217,6 +217,21 @@ export function positionAt(reading: BodyReading, index: number): number {
   return boundaryAt(reading, 0) >= 0 ? reading.starts[0]! : reading.starts[0]! + 1;
 }
 
+/**
+ * Whether the container that ends at one document position and the one that starts at another,
+ * both children of one parent, share an id.
+ */
+export function shareAContainerId(
+  reading: BodyReading,
+  endOfUpper: number,
+  startOfLower: number,
+): boolean {
+  const depth = reading.doc.resolve(startOfLower).depth;
+  const upper = reading.paths[countBelow(reading.starts, endOfUpper) - 1]?.[depth];
+  const lower = reading.paths[countBelow(reading.starts, startOfLower)]?.[depth];
+  return upper !== undefined && upper === lower;
+}
+
 const NO_PATH: readonly string[] = [];
 
 /** The ids of the containers around a document position, outermost first. */

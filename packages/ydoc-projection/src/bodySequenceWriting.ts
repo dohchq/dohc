@@ -55,16 +55,29 @@ function replaces(map: StepMap): boolean {
  * none, and removes one only whole. The sequence takes such a step with no change to a path or to
  * a container record. Any other step is refused until container changes are written here, by the
  * container writer's operations.
+ *
+ * A step that removes the last line between two containers is one of those when the two share an
+ * id: they would read as one. The container writer first gives the later one a fresh id, and
+ * that write goes here too. `shareAnId` says whether the container that ends at one place of
+ * `before` and the one that starts at another share an id.
  */
 export function keepsContainers(
   step: Step,
   before: ProseMirrorNode,
   after: ProseMirrorNode,
+  shareAnId: (endOfUpper: number, startOfLower: number) => boolean,
 ): boolean {
   let kept = true;
   let replaced = false;
   step.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
     replaced = true;
+    if (newStart === newEnd) {
+      const $joint = after.resolve(newStart);
+      const upper = $joint.nodeBefore;
+      const lower = $joint.nodeAfter;
+      if (upper && lower && holdsBlocks(upper) && holdsBlocks(lower) && shareAnId(oldStart, oldEnd))
+        kept = false;
+    }
     before.nodesBetween(oldStart, oldEnd, (node, pos) => {
       if (holdsBlocks(node) && pos >= oldStart !== pos + node.nodeSize <= oldEnd) kept = false;
       return kept && !node.isTextblock;

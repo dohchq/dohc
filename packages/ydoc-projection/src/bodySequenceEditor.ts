@@ -12,7 +12,11 @@ import {
 } from "@tiptap/pm/state";
 import { ReplaceStep } from "@tiptap/pm/transform";
 import * as Y from "yjs";
-import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
+import {
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+} from "./bodySequenceGrammar.js";
 import {
   blockHolding,
   changes,
@@ -20,6 +24,7 @@ import {
   indexAt,
   positionAt,
   positionOf,
+  shareAContainerId,
   tokenBefore,
   tokenFrom,
   type BodyReader,
@@ -67,7 +72,8 @@ export function isBodySequenceChange(transaction: Transaction): boolean {
  * Apply other people's changes with any other origin, or with none.
  *
  * An undo puts an earlier value back over someone else's later one. It never deletes a container
- * record, and never an attribute of a boundary or an inline item that still stands.
+ * record, and never an attribute of a boundary that still stands. An inline item's attribute is
+ * not kept that way: it may have had no value before a person first set it, and undo removes it.
  */
 export function createBodySequenceHistory(
   doc: Y.Doc,
@@ -82,7 +88,11 @@ export function createBodySequenceHistory(
     ignoreRemoteMapChanges: true,
     deleteFilter: (item) =>
       item.parent !== containers &&
-      !(item.parentSub !== null && item.parent instanceof Y.XmlElement),
+      !(
+        item.parent instanceof Y.XmlElement &&
+        item.parent.nodeName === BLOCK_ELEMENT &&
+        item.parentSub !== null
+      ),
     ...(options.captureTimeout === undefined ? {} : { captureTimeout: options.captureTimeout }),
   });
   return history;
@@ -226,8 +236,9 @@ function holdSelection(
  * shown as one transaction that replaces what differs, keeps the nodes of the blocks it does not
  * touch, and keeps the selection around its letters. Such a transaction is never written back.
  *
- * A transaction that would start, change or cut a list, quote, callout or table is refused, and
- * so is one that would write between the two units of a surrogate pair.
+ * A transaction that would start, change or cut a list, quote, callout or table is refused, also
+ * one that would remove the last line between two of them that share an id. So is one that would
+ * write between the two units of a surrogate pair.
  */
 export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonly Transaction[]> {
   const { sequence, containers } = options;
@@ -244,14 +255,34 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           ? pending
           : [...(pending === flushed ? NONE : pending), transaction],
     },
-    filterTransaction: (transaction) =>
-      !transaction.docChanged ||
-      isBodySequenceChange(transaction) ||
-      transaction.steps.every(
+    filterTransaction(transaction, state) {
+      if (!transaction.docChanged || isBodySequenceChange(transaction)) return true;
+      let reading: BodyReading | null | undefined;
+      const shareAnId = (at: number) => (endOfUpper: number, startOfLower: number) => {
+        if (reading === undefined) {
+          const read = bound?.reader.reading();
+          reading = read && (read.doc === state.doc || read.doc.eq(state.doc)) ? read : null;
+        }
+        if (!reading) return bound !== null;
+        const atStart = (pos: number, side: -1 | 1) => {
+          let mapped = pos;
+          for (let step = at - 1; step >= 0; step--)
+            mapped = transaction.mapping.maps[step]!.invert().map(mapped, side);
+          return mapped;
+        };
+        return shareAContainerId(reading, atStart(endOfUpper, -1), atStart(startOfLower, 1));
+      };
+      return transaction.steps.every(
         (step, at) =>
           keepsPairs(step, transaction.docs[at]!) &&
-          keepsContainers(step, transaction.docs[at]!, transaction.docs[at + 1] ?? transaction.doc),
-      ),
+          keepsContainers(
+            step,
+            transaction.docs[at]!,
+            transaction.docs[at + 1] ?? transaction.doc,
+            shareAnId(at),
+          ),
+      );
+    },
     props: {
       handleKeyDown: keydownHandler({
         "Mod-z": undoBodySequence,
