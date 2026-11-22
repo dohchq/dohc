@@ -173,6 +173,8 @@ function server(
     catchUpFails?: boolean;
     // The workspace holds more files than a browser lists.
     tooLarge?: boolean;
+    // The relay refuses the file list, as it does past its scan cap, while the grant still opens.
+    currentRefused?: boolean;
     // The account's session cannot be checked.
     sessionFails?: boolean;
     // How many reads of the Groups wait for the test to answer them.
@@ -267,6 +269,8 @@ function server(
         return hold("current", url, signal);
       if (url.pathname === "/api/view/current" && options.tooLarge)
         return jsonResponse(linkRefusalBody("link_too_many_files"), 413);
+      if (url.pathname === "/api/view/current" && options.currentRefused)
+        return jsonResponse({ ok: false, error: "not found" }, 404);
       if (url.pathname === "/api/view/current")
         return jsonResponse({ ...meta(), files: files(), nextCursor: 7, epochLogFloor: 0 });
       if (url.pathname === "/api/view/meta") return jsonResponse(meta());
@@ -2147,6 +2151,29 @@ it("says the workspace grew too large for a browser, not that the membership end
   expect(text()).not.toContain("membership");
 });
 
+it("stops offering the old level's controls when the level changes and the files cannot read again", async () => {
+  const options: { level: Level; currentRefused?: boolean } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await click("Comments");
+  await settle(() => commentBox() !== null);
+  // The owner lowered the members to View, and the relay refuses the fresh file list while the grant still opens.
+  options.level = "view";
+  options.currentRefused = true;
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(() => text().includes("dohc could not open this workspace."));
+  expect(container.querySelector('textarea[name="body"]')).toBeNull();
+  expect(text()).not.toContain("Can comment");
+  expect(text()).not.toContain("membership");
+  // Try again opens the workspace at its new level once the files read.
+  options.currentRefused = false;
+  await click("Try again");
+  await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+});
+
 it("opens a replaced file's own Comments, not its predecessor's", async () => {
   const options: { level: Level; files?: typeof FILES } = { level: "comment" };
   server(options);
@@ -2180,6 +2207,27 @@ it("opens a replaced file's own Comments, not its predecessor's", async () => {
   await act(async () => following("comments")[0]!.answer({ ok: false, error: "not found" }, 404));
   await settle(() => commentsPanel().textContent?.includes("Nine is early") === true);
   await settle(() => box().value === "Meant for the old plan");
+});
+
+it("keeps each file's comment draft apart when the relay lists files without their identity", async () => {
+  // A development relay without a link key lists files with no object identity.
+  server({
+    level: "comment",
+    files: FILES.map(({ objectId: _, ...file }) => file) as typeof FILES,
+  });
+  await render();
+  await settle(() => text().includes("Leave at nine."));
+  await click("Comments");
+  const box = () => commentsPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+  await settle(() => box() !== null);
+  setControlValue(box()!, "About the plan");
+  await act(async () =>
+    [...container.querySelectorAll<HTMLElement>(".file")]
+      .find((node) => node.textContent === "to-pack.md")!
+      .click(),
+  );
+  await settle(() => text().includes("Fuel and food.") && box() !== null);
+  expect(box()!.value).toBe("");
 });
 
 it("follows a file's Comments again once the files read again still list it", async () => {
