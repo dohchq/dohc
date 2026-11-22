@@ -891,3 +891,60 @@ it("rechecks an unchanged publication anchor at commit", async () => {
     f.close();
   }
 });
+
+it.each([
+  ["the owner's save since the last settlement", "owner-laptop", true],
+  ["the host's own save", "service-host:host", false],
+  ["no save", null, false],
+] as const)("starts the first settlement after a Stop from %s", async (_case, saver, accepted) => {
+  const f = registered({ deployment: true });
+  try {
+    const first = publication(f, "first");
+    await prepare(f, [first.op]);
+    append(f, [first.op]);
+    const path = first.record.binding.currentPath,
+      saved = new TextEncoder().encode("# Saved while stopped\n"),
+      savedSha = hash(saved);
+    f.storage.putBlob({
+      workspaceId: "workspace",
+      sha256: savedSha,
+      content: saved,
+      createdAtMs: 1,
+    });
+    if (saver)
+      f.storage.appendLogBatch({
+        workspaceId: "workspace",
+        originId: saver,
+        ops: [
+          {
+            originSeq: 0,
+            opKind: "moment.append",
+            recordedAtMs: 2,
+            payloadJson: stableJsonStringify({
+              momentId: "saved-while-stopped",
+              objectId: first.record.binding.objectId,
+              versionId: "main",
+              path,
+              operation: "write",
+              payloadBeforePath: path,
+              payloadAfterPath: path,
+              payloadBeforeContentKind: "text",
+              payloadBeforeBlobSha256: first.markdownSha,
+              payloadAfterBlobSha256: savedSha,
+              payloadAfterByteLength: saved.length,
+              payloadAfterContentKind: "text",
+              recordedAtMs: 2,
+            }),
+          },
+        ],
+      });
+    const next = publication(f, "after-resume", first.receipt.journalCursor, savedSha, 1);
+    await prepare(f, [next.op]);
+    expect(append(f, [next.op]).settlementRefusals).toEqual(
+      accepted ? undefined : [expect.objectContaining({ momentId: "after-resume" })],
+    );
+    expect(refusedChecks()).toEqual(accepted ? [] : ["prepare predecessor-markdown"]);
+  } finally {
+    f.close();
+  }
+});
