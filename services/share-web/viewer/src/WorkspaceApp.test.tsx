@@ -1700,6 +1700,10 @@ it("says the membership ended and shows none of the workspace once the member is
   expect(container.querySelector('nav[aria-label="Workspace files"]')).toBeNull();
   expect(text()).not.toContain("Leave at nine.");
   expect(text()).not.toContain("Plans start here");
+  // The browser is still signed in, so it names the account and offers Sign out.
+  expect(text()).toContain("Signed in as Sam Rivera · Sign out");
+  await click("Sign out");
+  await settle(() => text().includes("Sign in to open this workspace"));
 });
 
 it("refuses an account that is not a member, names it, and offers Switch account", async () => {
@@ -2043,9 +2047,9 @@ it("says another account signed in, not that the membership ended, when another 
   // Another tab signed this browser in as Lee. Sam's grant now refuses every read.
   options.user = "lee";
   await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
-  await settle(() => text().includes("This browser is signed in as another account."));
+  await settle(() => text().includes("This browser is now signed in as Lee Park."));
   expect(container.querySelector(".state-message p")?.textContent).toBe(
-    "It is now signed in as Lee Park. Sign in as Sam Rivera to keep working in Trip.",
+    "Sign in as Sam Rivera to keep working in Trip.",
   );
   expect(text()).not.toContain("membership");
   expect(text()).not.toContain("Leave at nine.");

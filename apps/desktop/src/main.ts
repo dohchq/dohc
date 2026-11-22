@@ -7079,6 +7079,7 @@ const workspaceMembers = createWorkspaceMembersActions<RegistryEntry, CloudSessi
     invalidateHistoryLabels(workspaceId);
     shareRosters.sharesChanged(workspaceId);
   },
+  serverAnswered: () => activity.retryFailingCloudSyncs(),
 });
 // The desktop window and the CLI delete the account through this one client.
 // Afterwards this computer forgets every session of the deleted account, even

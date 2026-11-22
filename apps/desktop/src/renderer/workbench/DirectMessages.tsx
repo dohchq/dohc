@@ -53,6 +53,7 @@ import {
   type DirectStore,
   type DirectViewer,
 } from "./directConversations";
+import { useToastsAbove } from "./toastClearance";
 
 // Direct messages in Chats: the People section, one conversation, and New
 // message. Each conversation is between two people and lives on the account's
@@ -133,7 +134,8 @@ export function DirectPeopleSection(
   props: Reporting & {
     selectedConversationId: string | null;
     onOpen: (conversationId: string, title: string) => void;
-    onNew: () => void;
+    /** Absent where no one can be picked, such as a copy whose membership ended. */
+    onNew?: () => void;
   },
 ) {
   const { state, store } = useDirectConversations();
@@ -155,9 +157,15 @@ export function DirectPeopleSection(
         <SectionLabel as="p" className="min-w-0 flex-1">
           People
         </SectionLabel>
-        <SectionActionButton testId="chats-new-dm-action" label="New message" onClick={props.onNew}>
-          <Plus size={12} aria-hidden />
-        </SectionActionButton>
+        {props.onNew ? (
+          <SectionActionButton
+            testId="chats-new-dm-action"
+            label="New message"
+            onClick={props.onNew}
+          >
+            <Plus size={12} aria-hidden />
+          </SectionActionButton>
+        ) : null}
       </div>
       {state.status === "loading" ? (
         <SkeletonRows
@@ -211,15 +219,12 @@ export function DirectPeopleSection(
           })}
         </ul>
       ) : (
-        <NavRow
-          testId="chats-new-dm"
-          onClick={props.onNew}
-          icon={
-            <PenSquare size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
-          }
-          label="New message"
-          muted
-        />
+        <p
+          data-testid="chats-dms-empty"
+          className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted"
+        >
+          No direct messages yet.
+        </p>
       )}
       {menu && menuConversation && ready ? (
         <Menu
@@ -560,7 +565,10 @@ function ConversationForAccount(props: ConversationProps) {
             seq: result.seq,
             messageId,
             authorId: sender.viewerId,
-            authorName: null,
+            // Named as the server named this account's earlier messages, until the next read names it.
+            authorName:
+              current.messages.findLast((message) => message.authorId === sender.viewerId)
+                ?.authorName ?? null,
             body,
             createdAtMs: Date.now(),
           };
@@ -800,8 +808,12 @@ function DirectComposerLine(props: {
   children: string;
   action: { label: string; run: () => void };
 }) {
+  // It sits where the composer would, so toasts stay above it and its action stays in reach.
+  const ref = useRef<HTMLDivElement | null>(null);
+  useToastsAbove(ref);
   return (
     <div
+      ref={ref}
       data-testid={props.testId}
       role="status"
       className="flex shrink-0 items-center gap-2 border-t border-line px-3 py-2"
@@ -955,6 +967,8 @@ function NewMessageForAccount(props: NewMessageProps) {
       ? members.members.filter((member) => member.name.toLocaleLowerCase().includes(words))
       : members.members;
   }, [members, query]);
+  // With someone picked, the list closes until the person types another name or removes the pick.
+  const listShown = pick === null || query !== "";
   const activeIndex = Math.min(highlight, matches.length - 1);
   const active = activeIndex >= 0 ? matches[activeIndex]! : null;
   const choose = (memberId: string | null) => {
@@ -962,14 +976,8 @@ function NewMessageForAccount(props: NewMessageProps) {
     setPickError(false);
     setPicked(memberId);
     setQuery("");
-    // The cleared query lists everyone again: the active row is the pick, so the two never differ.
-    const all = members.status === "ready" ? members.members : [];
-    setHighlight(
-      Math.max(
-        0,
-        all.findIndex((member) => member.memberId === memberId),
-      ),
-    );
+    // A pick closes the list. The next list opens with its first row active.
+    setHighlight(0);
     inputRef.current?.focus();
   };
   // Focus stays in the To field, so the list scrolls to keep the active member in view.
@@ -984,6 +992,8 @@ function NewMessageForAccount(props: NewMessageProps) {
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     // Enter, the arrows and Backspace work an IME's candidates while it composes.
     if (isComposingKey(event)) return;
+    // A closed list takes no arrows or Enter. Backspace still removes the pick.
+    if (!listShown && event.key !== "Backspace") return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
       moveTo(Math.min(activeIndex + 1, matches.length - 1));
@@ -1196,6 +1206,9 @@ function NewMessageForAccount(props: NewMessageProps) {
         />
       </EmptyState>
     );
+  } else if (!listShown) {
+    // The composer stays at the bottom, where it was while the list showed.
+    content = <div className="min-h-0 flex-1" />;
   } else {
     content = (
       <ul
@@ -1296,18 +1309,14 @@ function NewMessageForAccount(props: NewMessageProps) {
                 id={`${listId}-input`}
                 data-testid="chats-dm-recipients"
                 role="combobox"
-                aria-expanded="true"
-                aria-controls={listId}
-                aria-activedescendant={active ? `${listId}-${active.memberId}` : undefined}
+                aria-expanded={listShown}
+                aria-controls={listShown ? listId : undefined}
+                aria-activedescendant={
+                  listShown && active ? `${listId}-${active.memberId}` : undefined
+                }
                 aria-invalid={pickError || undefined}
                 aria-describedby={pickError ? errorId : undefined}
                 autoFocus={pick === null}
-                // An example: the first member's first name, which Enter would pick.
-                placeholder={
-                  pick === null && members.status === "ready"
-                    ? members.members[0]?.name.split(" ")[0]
-                    : undefined
-                }
                 value={query}
                 onChange={(event) => {
                   goStraight.current = false;
@@ -1331,7 +1340,7 @@ function NewMessageForAccount(props: NewMessageProps) {
             data-testid="chats-dm-new-existing"
             className="flex shrink-0 items-center gap-2 border-t border-line px-3 py-2 text-[12px] text-muted"
           >
-            <span className="min-w-0 flex-1 truncate">{`You already have a conversation with ${title}.`}</span>
+            <span className="min-w-0 flex-1">{`You already have a conversation with ${title}. Sending adds your message to it.`}</span>
             <SecondaryButton
               size="compact"
               data-testid="chats-dm-new-open-existing"
