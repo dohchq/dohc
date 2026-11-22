@@ -294,17 +294,20 @@ function LoadFailed({ onRetry }: { onRetry(): void }) {
 /**
  * A file's Comments beside it: the threads on the file that the owner's dohc and every member read.
  * At View there is nothing to write in, only the note.
+ * The relay keeps Comments on the file's object, so a new object at the same path opens its own.
  */
 export function MemberComments({
   found,
   onRetry,
   path,
+  objectId,
   access,
   onEnded,
 }: {
   found: MemberListing;
   onRetry(): void;
   path: string;
+  objectId: string;
   access: NamedChatAccess;
   onEnded(reason: Ended): void;
 }) {
@@ -333,7 +336,7 @@ export function MemberComments({
       </div>
       {client && opened ? (
         <ChannelView
-          key={`${opened.shareId}\n${path}\n${access}`}
+          key={`${opened.shareId}\n${path}\n${objectId}\n${access}`}
           client={client}
           name={`Comments on ${name}`}
           onEnded={onEnded}

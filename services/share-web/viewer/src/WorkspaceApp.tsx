@@ -39,6 +39,7 @@ import {
   loadMeta,
   MAX_LOG_PAGES,
   StatePage,
+  TooManyFilesError,
   useNarrow,
   VersionMismatchError,
   VIEW_LOG_HOLD_MS,
@@ -64,7 +65,11 @@ type Files = {
 type View =
   | { status: "loading" }
   | { status: "ready"; files: Files }
-  | { status: "refused" | "ended" | "load-failed" | "version-mismatch" };
+  // Another account signed in on this browser, as in another tab.
+  | { status: "other-account"; name: string }
+  | { status: "refused" | "ended" | "too-large" | "load-failed" | "version-mismatch" };
+// What the grant's own read and the account's session say after a refusal of the files.
+type Confirmed = "open" | "ended" | "signed-out" | "failed" | { other: string };
 type Tab = "files" | "page" | "comments" | "chats";
 type Side = "comments" | "chats";
 const TABS: { id: Tab; label: string; panel: string }[] = [
@@ -475,9 +480,15 @@ function MemberEntry({
  * The workspace's files from the view routes, kept current by one held log read at a time.
  * `failures` counts the reads in a row that failed since the files last caught up, and `retry` reads again at once.
  * `recheck` reads the current files again at once, as when a file or Group the page shows has gone.
- * A refusal ends the membership only once a fresh read of the files and the account's session confirm it.
+ * A refused read of the files ends the membership only once the grant's own read is refused too,
+ * and the account's session still names `accountId`.
  */
-function useMemberFiles(session: string, attempt: number, onSignedOut: () => void) {
+function useMemberFiles(
+  session: string,
+  accountId: string,
+  attempt: number,
+  onSignedOut: () => void,
+) {
   const [view, setView] = useState<View>({ status: "loading" });
   const [failures, setFailures] = useState(0);
   const signedOut = useRef(onSignedOut);
@@ -491,15 +502,30 @@ function useMemberFiles(session: string, attempt: number, onSignedOut: () => voi
       const loaded = await loadCurrentState(session, step);
       return { ...loaded, files: filesFromAccumulator(loaded.fileAccumulator) };
     };
-    // A refused account may only have signed out, which has its own page.
-    const refused = async (status: "refused" | "ended") => {
-      const signedIn = await namedRequest("/api/account/session", signal).then(
-        (value) => accountUser(value) !== null,
-        () => true,
-      );
-      if (signal.aborted) return;
-      if (signedIn) setView({ status });
-      else signedOut.current();
+    // The file list can fail while the grant still opens, as when a rule change lands between two reads.
+    // A refused grant may only mean that the account signed out, or that another account signed in.
+    const confirm = async (): Promise<Confirmed> => {
+      try {
+        await loadMeta(session, signal);
+        return "open";
+      } catch (error) {
+        if (!refusedStatus(error)) return "failed";
+      }
+      try {
+        const user = accountUser(await namedRequest("/api/account/session", signal));
+        if (user === null) return "signed-out";
+        return user.id === accountId ? "ended" : { other: user.name };
+      } catch {
+        return "failed";
+      }
+    };
+    // Shows what a confirmed refusal says, and returns false when the files may still open.
+    const refused = (confirmed: Confirmed, status: "refused" | "ended") => {
+      if (confirmed === "open" || confirmed === "failed") return false;
+      if (confirmed === "signed-out") signedOut.current();
+      else if (confirmed === "ended") setView({ status });
+      else setView({ status: "other-account", name: confirmed.other });
+      return true;
     };
     setView({ status: "loading" });
     setFailures(0);
@@ -509,11 +535,13 @@ function useMemberFiles(session: string, attempt: number, onSignedOut: () => voi
         files = await current(signal);
       } catch (error) {
         if (signal.aborted) return;
-        if (refusedStatus(error)) void refused("refused");
-        else
-          setView({
-            status: error instanceof VersionMismatchError ? "version-mismatch" : "load-failed",
-          });
+        if (error instanceof TooManyFilesError) setView({ status: "too-large" });
+        else if (error instanceof VersionMismatchError) setView({ status: "version-mismatch" });
+        else if (!refusedStatus(error)) setView({ status: "load-failed" });
+        else {
+          const confirmed = await confirm();
+          if (!signal.aborted && !refused(confirmed, "refused")) setView({ status: "load-failed" });
+        }
         return;
       }
       if (signal.aborted) return;
@@ -576,6 +604,10 @@ function useMemberFiles(session: string, attempt: number, onSignedOut: () => voi
             setView({ status: "version-mismatch" });
             return;
           }
+          if (error instanceof TooManyFilesError) {
+            setView({ status: "too-large" });
+            return;
+          }
           // A new epoch starts again from the current files. So does a refusal: a rule change refuses a held read
           // as a lost membership does, and only a refused read of the current files ends the membership.
           if (!reading && (error instanceof EpochFloorChangedError || refusedStatus(error))) {
@@ -583,8 +615,8 @@ function useMemberFiles(session: string, attempt: number, onSignedOut: () => voi
             continue;
           }
           if (reading && refusedStatus(error)) {
-            void refused("ended");
-            return;
+            const confirmed = await confirm();
+            if (signal.aborted || refused(confirmed, "ended")) return;
           }
           reload = reading;
           setFailures((count) => count + 1);
@@ -597,7 +629,7 @@ function useMemberFiles(session: string, attempt: number, onSignedOut: () => voi
       }
     })();
     return () => controller.abort();
-  }, [session, attempt]);
+  }, [session, accountId, attempt]);
   return {
     view,
     failures,
@@ -685,7 +717,7 @@ function MemberWorkspace({
     failures,
     retry: retryFiles,
     recheck: recheckFiles,
-  } = useMemberFiles(session, attempt, onSessionEnded);
+  } = useMemberFiles(session, account.id, attempt, onSessionEnded);
   // A toast closed while the reads still fail stays closed until the files catch up.
   const [behindDismissed, setBehindDismissed] = useState(false);
   useEffect(() => {
@@ -729,6 +761,14 @@ function MemberWorkspace({
     recheckFiles();
     refreshListing();
   };
+  // A file's Comments that went away open again once the files read again still list the file.
+  const commentsGone = useRef(false),
+    [commentsRead, setCommentsRead] = useState(0);
+  useEffect(() => {
+    if (!files || !commentsGone.current) return;
+    commentsGone.current = false;
+    setCommentsRead((count) => count + 1);
+  }, [files]);
   // The held read of the files returns at least once per hold. Each return reads the Groups again once they are that old,
   // so a new Group appears even when the workspace had none, or the new one has no messages yet.
   useEffect(() => {
@@ -781,6 +821,32 @@ function MemberWorkspace({
         }
       >
         <p>Ask the owner to invite you again to keep working in it.</p>
+        {kept}
+      </StatePage>
+    );
+  if (view.status === "other-account")
+    return (
+      <StatePage icon="users" title="This browser is signed in as another account.">
+        <p>
+          It is now signed in as {view.name}. Sign in as {account.name} to keep working in{" "}
+          {lastName.current ?? "this workspace"}.
+        </p>
+        <button
+          className="handoff-button secondary"
+          type="button"
+          disabled={signingOut}
+          onClick={onSignOut}
+        >
+          {signingOut ? "Signing out…" : "Switch account"}
+        </button>
+        {signOutError && <LaunchFailure role="alert" message={SWITCH_FAILED} />}
+        {kept}
+      </StatePage>
+    );
+  if (view.status === "too-large")
+    return (
+      <StatePage icon="info" title="This workspace is too large to open in a browser.">
+        <p>Open it in the dohc desktop app.</p>
         {kept}
       </StatePage>
     );
@@ -1047,11 +1113,16 @@ function MemberWorkspace({
             {showing === "comments" &&
               (selected ? (
                 <MemberComments
+                  key={commentsRead}
                   found={listing.found}
                   onRetry={listing.retry}
                   path={selected.path}
+                  objectId={selected.objectId ?? ""}
                   access={level === "view" ? "read-only" : "read-write"}
-                  onEnded={placeGone}
+                  onEnded={(reason) => {
+                    commentsGone.current = true;
+                    placeGone(reason);
+                  }}
                 />
               ) : (
                 <p className="chat-state">No files in this workspace yet.</p>
