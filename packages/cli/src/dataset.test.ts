@@ -611,4 +611,20 @@ it("accepts formatVersion 2 Collection definitions in dataset create and mints d
     expect(parsed.definition.operations[0]?.access).toBe("owner");
     expect(parsed.definition.operations[0]?.readOnly).toBe(true);
   }
+
+  // Refuses v2 create without explicit schemaPath and operationsPath so it cannot dump files at workspace root.
+  expect(() =>
+    DatasetRequest.parse({
+      action: "create",
+      workspaceId: "workspace",
+      definition: {
+        formatVersion: 2,
+        name: "Expenses",
+        tables: [
+          { sqlName: "expenses", primaryKey: "id", fields: [{ sqlColumn: "id", type: "text" }] },
+        ],
+        operations: [{ name: "listExpenses", table: "expenses", kind: "read", fields: ["id"] }],
+      },
+    }),
+  ).toThrow(/explicit schemaPath and operationsPath/);
 });

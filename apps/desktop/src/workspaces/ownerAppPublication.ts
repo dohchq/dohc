@@ -72,8 +72,8 @@ function discoverAppInputs(
     if (extraExcluded?.has(path)) return true;
     if (autoManifestExcludedNames.has(posix.basename(path))) return true;
     if (path.startsWith(prefix)) {
-      const relParts = path.slice(prefix.length).split("/");
-      if (relParts.some((part) => part === "changes" || part === "revisions")) return true;
+      const firstSegment = path.slice(prefix.length).split("/", 1)[0];
+      if (firstSegment === "changes" || firstSegment === "revisions") return true;
     }
     for (const sub of collectionSubfolders) {
       if (path === sub || path.startsWith(`${sub}/`)) return true;
@@ -200,12 +200,17 @@ export function parseAppPublicationDeclaration(
     if (!inputs.includes(entryPath))
       throw new Error(`${manifestPath} must list its entryPath ${entryPath} among its inputs.`);
   } else {
+    if (!discovery) {
+      throw new Error(
+        `${manifestPath} omits inputs; folder discovery is required to resolve its files.`,
+      );
+    }
     inputs = discoverAppInputs(
       appRoot,
       entryPath,
-      discovery?.folder ?? [],
+      discovery.folder,
       entries.map(([, path]) => path),
-      discovery?.extraExcluded,
+      discovery.extraExcluded,
     );
     if (inputs.length >= inputBounds.maxInputFiles)
       throw new Error(
@@ -423,31 +428,48 @@ async function selectAppSources(
   const manifest = first && (await adapter.hydrateCapturedSources(first, signal))[0]!;
   assertCurrent();
   let extraExcluded: Set<string> | undefined;
+  let colocatedDescriptorSha256: string | undefined;
+  let autoDiscovered = false;
   const colocatedDescriptor = `${input.appRoot}/dataset.json`;
-  if (manifest && folder.includes(colocatedDescriptor) && allowed(colocatedDescriptor)) {
+  if (manifest) {
+    let parsedManifest: unknown;
     try {
-      const parsedManifest: unknown = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(manifest.bytes),
-      );
-      if (
-        parsedManifest &&
-        typeof parsedManifest === "object" &&
-        !Array.isArray(parsedManifest) &&
-        !Object.hasOwn(parsedManifest, "inputs")
-      ) {
-        const descriptorMeta = await capture([colocatedDescriptor], 256 * 1024);
-        const descriptorFile = (await adapter.hydrateCapturedSources(descriptorMeta, signal))[0];
-        assertCurrent();
-        if (descriptorFile) {
-          const def = parseDatasetDefinition(
-            JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(descriptorFile.bytes)),
-            { descriptorPath: colocatedDescriptor },
-          );
-          extraExcluded = new Set([def.operationsPath, def.schemaPath]);
-        }
-      }
+      parsedManifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(manifest.bytes));
     } catch {
-      /* If manifest or descriptor is malformed, parseAppPublicationDeclaration or dataset prep reports it. */
+      parsedManifest = null;
+    }
+    autoDiscovered =
+      parsedManifest !== null &&
+      typeof parsedManifest === "object" &&
+      !Array.isArray(parsedManifest) &&
+      !Object.hasOwn(parsedManifest, "inputs");
+    if (autoDiscovered && folder.includes(colocatedDescriptor)) {
+      if (!allowed(colocatedDescriptor)) {
+        throw new Error(
+          `${colocatedDescriptor} is outside this link's shared files. List explicit inputs in ${manifestPath}.`,
+        );
+      }
+      const descriptorMeta = await capture([colocatedDescriptor], 256 * 1024);
+      const descriptorFile = (await adapter.hydrateCapturedSources(descriptorMeta, signal))[0];
+      assertCurrent();
+      signal.throwIfAborted();
+      if (!descriptorFile) {
+        throw new Error(
+          `${colocatedDescriptor} changed while dohc prepared the app. Prepare the app again.`,
+        );
+      }
+      colocatedDescriptorSha256 = descriptorFile.sha256;
+      try {
+        const def = parseDatasetDefinition(
+          JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(descriptorFile.bytes)),
+          { descriptorPath: colocatedDescriptor },
+        );
+        extraExcluded = new Set([def.operationsPath, def.schemaPath]);
+      } catch {
+        throw new Error(
+          `dohc could not read ${colocatedDescriptor} while selecting files for ${input.appRoot}. Fix ${colocatedDescriptor} or list explicit inputs in ${manifestPath}.`,
+        );
+      }
     }
   }
   const declared = manifest
@@ -476,6 +498,40 @@ async function selectAppSources(
     metadata.files.find((file) => file.path === manifestPath)?.sha256 !== manifest.sha256
   )
     throw new Error("The app declaration changed. Prepare the app again.");
+  if (autoDiscovered) {
+    const afterList = await adapter.listTextFileMetadata({
+      workspaceId: input.workspaceId,
+      versionId,
+      under: input.appRoot,
+    });
+    assertCurrent();
+    signal.throwIfAborted();
+    const afterDescriptor = afterList.find((file) => file.path === colocatedDescriptor);
+    if (
+      (colocatedDescriptorSha256 !== undefined &&
+        afterDescriptor?.sha256 !== colocatedDescriptorSha256) ||
+      (colocatedDescriptorSha256 === undefined && afterDescriptor !== undefined)
+    ) {
+      throw new Error(
+        `${colocatedDescriptor} changed while dohc prepared the app. Prepare the app again.`,
+      );
+    }
+    const afterInputs = discoverAppInputs(
+      input.appRoot,
+      declared.entryPath,
+      afterList.map((file) => file.path),
+      Object.values(declared.packageMap),
+      extraExcluded,
+    );
+    if (
+      afterInputs.length !== declared.inputs.length ||
+      afterInputs.some((path, index) => path !== declared.inputs[index])
+    ) {
+      throw new Error(
+        `The files in ${input.appRoot} changed while dohc prepared the app. Prepare the app again.`,
+      );
+    }
+  }
   return { declared, schemaPath, metadata };
 }
 

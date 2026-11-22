@@ -1336,10 +1336,18 @@ it("normalizes formatVersion 2 slug-based dataset definitions deterministically"
   );
   expect(canonicalRenamed.operations[0]!.operationId).toBe(canonical.operations[0]!.operationId);
 
-  // Refuses traversal, wildcards, missing datasetId, and mixed table/fields selectors.
+  // Refuses traversal, nested schema folder, wildcards, missing datasetId, and mixed table/fields selectors.
+  expect(
+    parseDatasetDefinition(
+      { ...v2, schemaPath: `revisions/2-${id(99)}/schema.sql` },
+      { descriptorPath: "budget/expenses/dataset.json" },
+    ).schemaPath,
+  ).toBe(`budget/expenses/revisions/2-${id(99)}/schema.sql`);
+
   for (const broken of [
     { ...v2, datasetId: undefined },
     { ...v2, schemaPath: "../escape.sql" },
+    { ...v2, schemaPath: "sql/schema.sql" },
     { ...v2, operationsPath: "/abs.js" },
     {
       ...v2,
@@ -1375,6 +1383,30 @@ it("normalizes formatVersion 2 slug-based dataset definitions deterministically"
       parseDatasetDefinition(broken, { descriptorPath: "budget/expenses/dataset.json" }),
     ).toThrow();
   }
+
+  // Enforces the canonical 256 KB metadata budget even when the compact v2 input is smaller.
+  const manyFields = Array.from({ length: 120 }, (_, i) => ({
+    sqlColumn: `c_${i}`,
+    type: "text",
+  }));
+  const bloatedV2 = {
+    formatVersion: 2,
+    datasetId: id(1),
+    name: "Large",
+    tables: [{ sqlName: "t", primaryKey: "c_0", fields: manyFields }],
+    operations: Array.from({ length: 80 }, (_, i) => ({
+      name: `read_${i}`,
+      table: "t",
+      kind: "read",
+      fields: manyFields.map((f) => f.sqlColumn),
+    })),
+  };
+  expect(Buffer.byteLength(JSON.stringify(bloatedV2), "utf8")).toBeLessThan(
+    DATASET_METADATA_MAX_BYTES,
+  );
+  expect(() => parseDatasetDefinition(bloatedV2, { descriptorPath: "large/dataset.json" })).toThrow(
+    /exceeding the 262144 byte limit/,
+  );
 });
 
 it("resolves named operations and auto-pinned revisions from app.publish.json dataset references", () => {
@@ -1395,7 +1427,7 @@ it("resolves named operations and auto-pinned revisions from app.publish.json da
     createFields: [{ operationId: id(5), fieldIds: [id(4)] }],
   });
 
-  // Unknown operation or field names produce clear errors.
+  // Unknown operation or field names and ambiguous field names produce clear errors.
   expect(() =>
     resolveAppDatasetReferenceBinding(
       parseAppDatasetReference({
@@ -1407,6 +1439,25 @@ it("resolves named operations and auto-pinned revisions from app.publish.json da
       approved,
     ),
   ).toThrow(/has no operation named "doesNotExist"/);
+
+  const ambiguousApproved = structuredClone(approved);
+  column(ambiguousApproved.definition.tables[0]!.fields[0]).name = "name";
+  ambiguousApproved.definitionSha256 = hash(
+    datasetDefinitionDigestContent(ambiguousApproved.definition),
+  );
+  ambiguousApproved.revisionSha256 = hash(datasetRevisionDigestContent(ambiguousApproved));
+  expect(() =>
+    resolveAppDatasetReferenceBinding(
+      parseAppDatasetReference({
+        kind: "dataset",
+        datasetPath: "budget/dataset.json",
+        operations: ["submit"],
+        createFields: [{ operation: "submit", fields: ["name"] }],
+      }),
+      ambiguousApproved.datasetId,
+      ambiguousApproved,
+    ),
+  ).toThrow(/ambiguous field name "name"/);
 
   // Invalid combinations are refused at parse time.
   for (const invalid of [

@@ -87,13 +87,22 @@ const definition = z.unknown().transform((value, context) => {
       value &&
       typeof value === "object" &&
       !Array.isArray(value) &&
-      (value as Record<string, unknown>).formatVersion === 2 &&
-      !Object.hasOwn(value, "datasetId")
+      (value as Record<string, unknown>).formatVersion === 2
     ) {
-      return parseDatasetDefinition({
-        ...(value as Record<string, unknown>),
-        datasetId: globalThis.crypto.randomUUID(),
-      });
+      const row = value as Record<string, unknown>;
+      if (!Object.hasOwn(row, "schemaPath") || !Object.hasOwn(row, "operationsPath")) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "For formatVersion 2 in dataset create, provide explicit schemaPath and operationsPath (for example expenses/schema.sql and expenses/operations.js).",
+        });
+        return z.NEVER;
+      }
+      return parseDatasetDefinition(
+        Object.hasOwn(row, "datasetId")
+          ? row
+          : { ...row, datasetId: globalThis.crypto.randomUUID() },
+      );
     }
     return parseDatasetDefinition(value);
   } catch (error) {

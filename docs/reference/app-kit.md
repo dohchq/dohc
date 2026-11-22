@@ -73,7 +73,7 @@ createRoot(document.getElementById("root")!).render(
 
 ## Minimal `app.publish.json`
 
-`inputs` and `packageMap` are optional. When `inputs` is omitted, dohc includes the supported source files in the app folder and leaves out `app.publish.json`, `dataset.json`, Collection schemas and operations, `changes/`, `revisions/`, `collection.yaml`, `automations.yaml`, build config, and `node_modules`. Relative imports without extensions (for example `./Summary`) resolve unambiguously across `.tsx`, `.ts`, `.jsx`, `.js`, and `index.*`.
+`inputs` and `packageMap` are optional. When `inputs` is omitted, dohc includes the supported source files in the app folder and leaves out `app.publish.json`, `dataset.json`, co-located Collection schemas and operations, strict Collection subfolders, top-level `changes/` and `revisions/`, `collection.yaml`, `automations.yaml`, `package.json`, `dohc.json`, `tsconfig*.json`, dotfiles, and `node_modules`. Relative script imports without extensions (for example `./Summary` or `./date.utils`) resolve unambiguously across `.tsx`, `.ts`, `.jsx`, `.js`, and `index.*`.
 
 A Collection binding can name operations directly and omit `revision` and `revisionSha256`; dohc pins them to the Collection's currently approved revision when preparing the app:
 
@@ -91,7 +91,7 @@ A Collection binding can name operations directly and omit `revision` and `revis
 
 ## Slug-based `dataset.json` (`formatVersion: 2`)
 
-Collection definitions can use `formatVersion: 2` to declare tables, fields, and operations by SQL name instead of hand-writing UUIDs. `schemaPath` and `operationsPath` resolve relative to the `dataset.json` folder (defaulting to `schema.sql` and `operations.js`), and operation `access` defaults to `"owner"`. dohc derives stable RFC 4122 UUIDv5 identifiers from `datasetId` and validates the normalized definition under the same rules as `formatVersion: 1`.
+Collection definitions can use `formatVersion: 2` to declare tables, fields, and operations by SQL name instead of hand-writing UUIDs. `schemaPath` and `operationsPath` resolve relative to the `dataset.json` folder (defaulting to `schema.sql` and `operations.js`), and `schemaPath` must stay in that folder or a generated `revisions/` subfolder. Operation `access` defaults to `"owner"`. dohc derives stable RFC 4122 UUIDv5 identifiers from `datasetId` and the SQL names (or button display names) and validates the normalized definition under the same rules and 256 KB limit as `formatVersion: 1`. Before renaming a table, column, button, or operation on an existing Collection, set its explicit `tableId`, `fieldId`, or `operationId` so existing automations and app bindings stay intact. When passing a `formatVersion: 2` definition to `dohc dataset create`, include explicit workspace-relative `schemaPath` and `operationsPath`.
 
 ```json
 {

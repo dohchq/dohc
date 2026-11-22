@@ -737,25 +737,25 @@ it("publishes Unicode HTML, script and percent-encoded asset paths", async () =>
 });
 
 describe("extensionless relative imports", () => {
-  it("resolves unambiguous .tsx, .ts, .jsx, .js, and index files", async () => {
+  it("resolves unambiguous .tsx, .TSX, .ts, .jsx, .js, dotted stems, and index files", async () => {
     const result = await compileClosedApp({
       entryPath: "app/main.tsx",
       bounds,
       inputs: [
         file(
           "app/main.tsx",
-          'import { Badge } from "./Badge";\nimport { sum } from "./math";\nimport { Card } from "./cards";\nconsole.log(Badge, sum(1, 2), Card);',
+          'import { Badge } from "./Badge";\nimport { sum } from "./date.utils";\nimport { Card } from "./cards";\nconsole.log(Badge, sum(1, 2), Card);',
         ),
-        file("app/Badge.tsx", 'export const Badge = "ok";'),
-        file("app/math.ts", "export const sum = (a: number, b: number) => a + b;"),
+        file("app/Badge.TSX", 'export const Badge = "ok";'),
+        file("app/date.utils.ts", "export const sum = (a: number, b: number) => a + b;"),
         file("app/cards/index.tsx", 'export const Card = "card";'),
       ],
     });
     expect(result.dependencyLock.map((item) => item.path)).toEqual([
-      "app/Badge.tsx",
+      "app/Badge.TSX",
       "app/cards/index.tsx",
+      "app/date.utils.ts",
       "app/main.tsx",
-      "app/math.ts",
     ]);
   });
 
@@ -767,10 +767,10 @@ describe("extensionless relative imports", () => {
         inputs: [
           file("app/main.tsx", 'import { x } from "./util"; console.log(x);'),
           file("app/util.ts", "export const x = 1;"),
-          file("app/util.tsx", "export const x = 2;"),
+          file("app/util.TSX", "export const x = 2;"),
         ],
       }),
-    ).rejects.toThrow(/matches multiple files \(app\/util\.tsx, app\/util\.ts\)/);
+    ).rejects.toThrow(/matches multiple files \(app\/util\.TSX, app\/util\.ts\)/);
 
     await expect(
       compileClosedApp({

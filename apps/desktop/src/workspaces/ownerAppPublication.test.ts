@@ -646,6 +646,7 @@ describe("owner dataset publication", () => {
     h.sources.clear();
     h.sources.set("app/main.tsx", 'import { helper } from "./helper"; console.log(helper);');
     h.sources.set("app/helper.ts", "export const helper = 1;");
+    h.sources.set("app/src/changes/view.tsx", "export const View = () => null;");
     h.sources.set("app/style.css", "body { margin: 0; }");
     // Co-located Collection files and nested Collection subfolder must stay out of browser app inputs.
     h.sources.set(
@@ -705,6 +706,7 @@ describe("owner dataset publication", () => {
       "app/app.publish.json",
       "app/helper.ts",
       "app/main.tsx",
+      "app/src/changes/view.tsx",
       "app/style.css",
     ]);
     expect(candidate.sourceRevision).toBe(localSource.sourceRevision);
@@ -732,6 +734,50 @@ describe("owner dataset publication", () => {
     });
     await expect(h.prepare()).rejects.toThrow(/has no operation named "nonexistentOp"/);
     expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a co-located dataset.json is malformed or changes mid-capture", async () => {
+    const h = harness(async () => approved);
+    h.sources.clear();
+    h.sources.set("app/main.tsx", "console.log(1);");
+    h.sources.set("app/operations.js", "export const operations = {};");
+    h.sources.set("app/dataset.json", "{ broken json");
+    h.setDeclaration({ version: 1, entryPath: "main.tsx" });
+    await expect(h.prepare()).rejects.toThrow(/could not read app\/dataset\.json/);
+    expect(h.compile).not.toHaveBeenCalled();
+
+    // Direct parse without discovery refuses omitted inputs instead of silently dropping sibling files.
+    expect(() =>
+      parseAppPublicationDeclaration(
+        new TextEncoder().encode(JSON.stringify({ version: 1, entryPath: "main.tsx" })),
+        "app",
+      ),
+    ).toThrow(/folder discovery is required/);
+
+    // Mid-capture change to co-located dataset.json fails closed instead of using stale exclusions.
+    const h2 = harness(async () => approved);
+    h2.sources.clear();
+    h2.sources.set("app/main.tsx", "console.log(1);");
+    h2.sources.set("app/backend.ts", "export const operations = {};");
+    h2.sources.set(
+      "app/dataset.json",
+      JSON.stringify({
+        formatVersion: 2,
+        datasetId: approved.datasetId,
+        name: "Events",
+        operationsPath: "backend.ts",
+        tables: [
+          { sqlName: "events", primaryKey: "id", fields: [{ sqlColumn: "id", type: "text" }] },
+        ],
+        operations: [{ name: "submit", table: "events", kind: "create", fields: ["id"] }],
+      }),
+    );
+    h2.setDeclaration({ version: 1, entryPath: "main.tsx" });
+    h2.hooks.onCapture = () => {
+      h2.sources.set("app/dataset.json", `${h2.sources.get("app/dataset.json")!} `);
+    };
+    await expect(h2.prepare()).rejects.toThrow(/app\/dataset\.json changed while dohc prepared/);
+    expect(h2.compile).not.toHaveBeenCalled();
   });
 });
 

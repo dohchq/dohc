@@ -683,6 +683,12 @@ function normalizeV2Definition(
     Object.hasOwn(top, "schemaPath") ? top.schemaPath : "schema.sql",
     baseDir,
   );
+  if (
+    options?.descriptorPath !== undefined &&
+    datasetBaseFolder({ schemaPath }) !== (baseDir || ".")
+  ) {
+    fail();
+  }
   const operationsPath = relativeDatasetPath(
     Object.hasOwn(top, "operationsPath") ? top.operationsPath : "operations.js",
     baseDir,
@@ -853,7 +859,7 @@ function normalizeV2Definition(
     return normalized;
   });
 
-  return definition({
+  const canonical = definition({
     formatVersion: 1,
     datasetId,
     name: text(top.name),
@@ -862,6 +868,13 @@ function normalizeV2Definition(
     tables,
     operations,
   });
+  const canonicalBytes = encoder.encode(JSON.stringify(canonical)).byteLength;
+  if (canonicalBytes > DATASET_METADATA_MAX_BYTES) {
+    throw new Error(
+      `Normalized Collection definition is ${canonicalBytes} bytes, exceeding the ${DATASET_METADATA_MAX_BYTES} byte limit.`,
+    );
+  }
+  return canonical;
 }
 
 export function parseDatasetDefinition(
@@ -1281,10 +1294,13 @@ export function resolveAppDatasetReferenceBinding(
     if (!opTable) fail();
     const columns = datasetColumnFields(opTable);
     const fieldIds = entry.fields.map((token) => {
-      const bySql = columns.find((col) => col.sqlColumn === token);
-      if (bySql) return bySql.fieldId;
-      const byDisplay = columns.filter((col) => col.name === token);
-      if (byDisplay.length === 1) return byDisplay[0]!.fieldId;
+      const matched = columns.filter((col) => col.sqlColumn === token || col.name === token);
+      if (matched.length === 1) return matched[0]!.fieldId;
+      if (matched.length > 1) {
+        throw new Error(
+          `Collection "${approved.definition.name}" table "${opTable.name}" has an ambiguous field name "${token}".`,
+        );
+      }
       throw new Error(
         `Collection "${approved.definition.name}" table "${opTable.name}" has no field named "${token}".`,
       );
