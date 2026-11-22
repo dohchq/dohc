@@ -18,7 +18,7 @@
 .join-form input:disabled { color: var(--viewer-subtle); }
 .join-forgot { align-self: center; font-size: 12px; }
 .join-page a { color: var(--viewer-link); text-underline-offset: 3px; }
-.join-page .state p.join-aside { color: var(--viewer-subtle); font-size: 12px; }
+.state-page .state p.join-aside { color: var(--viewer-subtle); font-size: 12px; }
 .join-page .state p.join-error { color: var(--viewer-danger); }
 .join-name { color: var(--viewer-ink); }
 .join-link { border: 0; padding: 0; background: none; color: var(--viewer-link); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
