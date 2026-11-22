@@ -235,13 +235,8 @@ export function accessRuleDecidedWords(
         ? canDo(resolve(only.before, level), hold.folder)
         : undefined;
     const now = can ? ` ${whoOf(only!.who)} can ${can}.` : "";
-    const keptCopy =
-      kept.length > 1
-        ? ` dohc kept the files from outside dohc as copies in Notices. Save copy puts each beside its original: ${kept.join(", ")}.`
-        : kept[0]
-          ? ` dohc kept the rule from outside dohc in Notices, where Save copy puts it beside ${kept[0]}.`
-          : "";
-    return `Restored ${ruleOfLower(hold.folder)}.${now}${keptCopy}`;
+    // Each kept copy has its own unread row with Save copy.
+    return `Restored ${ruleOfLower(hold.folder)}.${now}`;
   }
   if (hold.reason === "removed")
     return `Removed ${ruleOfLower(hold.folder)}. ${changedReach(hold, level)}`;

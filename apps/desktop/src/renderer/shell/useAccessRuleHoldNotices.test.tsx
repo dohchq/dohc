@@ -329,7 +329,7 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.openHistory).toHaveBeenCalledOnce();
   });
 
-  it("names one entry's new reach, and where Restore kept the rule from outside dohc", async () => {
+  it("names one entry's new reach, and leaves the kept rule to its own row", async () => {
     const h = harness([{ ...WIDENED, changes: [WIDENED.changes[0]!] }, REMOVED]);
     await waitFor(() => expect(h.errors().shellErrors).toHaveLength(2));
     const success = () => h.errors().shellErrors.filter((error) => error.tone === "success");
@@ -348,8 +348,7 @@ describe("useAccessRuleHoldNotices", () => {
     act(() => h.errors().runShellErrorAction(h.row("team/sub")!.id));
     await waitFor(() =>
       expect(success().at(-1)).toMatchObject({
-        message:
-          "Restored the access rule for team/sub. Members can view team/sub. dohc kept the rule from outside dohc in Notices, where Save copy puts it beside team/sub/access.yaml.",
+        message: "Restored the access rule for team/sub. Members can view team/sub.",
       }),
     );
     expect(success().at(-1)!.action).toBeUndefined();
@@ -379,7 +378,8 @@ describe("useAccessRuleHoldNotices", () => {
     );
   });
 
-  it("names every saved copy when Restore puts back a recorded rule", async () => {
+  // Each kept copy names itself on its own row, so the outcome names none.
+  it("says only what Restore put back when it kept several copies", async () => {
     const h = harness([
       { ...WIDENED, observedSha256: null, changes: [], unreadable: "several-files" },
     ]);
@@ -391,8 +391,7 @@ describe("useAccessRuleHoldNotices", () => {
     act(() => h.errors().runShellErrorAction(h.row("team")!.id));
     await waitFor(() =>
       expect(h.errors().shellErrors.find((error) => error.tone === "success")).toMatchObject({
-        message:
-          "Restored the access rule for team. dohc kept the files from outside dohc as copies in Notices. Save copy puts each beside its original: team/access.yaml, team/\uFF41ccess.yaml.",
+        message: "Restored the access rule for team.",
       }),
     );
   });

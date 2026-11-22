@@ -6,9 +6,9 @@ import { useRequestSequence } from "../useRequestSequence";
 import type { KeptCopyNotice } from "./useShellError";
 
 export function keptCopyMessage(path: string): string {
-  // The path leads, so a clamped row still tells one copy from another.
+  // What happened leads and the path ends it, so a clamp cuts only the path.
   if (isAccessRulePath(path)) {
-    return `${path}: dohc kept the file from outside dohc when you chose Restore rule.`;
+    return `dohc kept the rule from outside dohc for ${path}.`;
   }
   return `Another program changed ${path} while dohc was saving it. dohc kept both copies.`;
 }
