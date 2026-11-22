@@ -2384,6 +2384,11 @@ describe("workspaceEngineCapture batch capture", () => {
       await vi.advanceTimersByTimeAsync(1);
       await engine.flush();
       expect(watcherStatus).toHaveBeenCalledTimes(4);
+      // A decision read the rule while a program held it, so the poll looks again in a second.
+      engine.noteHeldAccessRules([{ ...REMOVED_TEAM, unreadable: "locked" }]);
+      await vi.advanceTimersByTimeAsync(LOCKED_ACCESS_RULE_POLL_MS);
+      await engine.flush();
+      expect(watcherStatus).toHaveBeenCalledTimes(5);
     } finally {
       await engine.stop();
       await liveStore.close();
