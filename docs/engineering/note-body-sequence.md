@@ -9,7 +9,7 @@ The reader is `packages/ydoc-projection/src/bodySequenceGrammar.ts`, read from Y
 ## 1. Where it lives
 
 - A note in this format has `meta.schemaVersion = 2` and four roots: `sequence` (Y.Text), `containers` (Y.Map), `frontmatter` (Y.Map), `meta` (Y.Map). Nothing is under `body`.
-- A note with `schemaVersion = 1`, or with no `schemaVersion`, is today's format and is unchanged.
+- A note is in this format only when `meta.schemaVersion` is the number 2. With 1, or with no `schemaVersion`, it is today's format and is unchanged; any other value is not this format, and today's checks decide what happens to it.
 - `meta.schemaVersion` is written when the note is made or converted, by the engine only. No page changes or deletes it.
 - An editor declares `sequence` as Y.Text and `containers` as Y.Map before applying an update. A late declaration leaves Yjs's formatting flags unset for editing.
 - A new note's format is chosen where the note is made. Neither setting exists yet; the work that turns the format on adds them: one in the engine for the format of new notes, which also tells a client that seeds a note which format to write, and one in the relay to admit format-2 notes. Both are off unless set.
@@ -71,13 +71,15 @@ The schema has no other attribute; a test pins the list and the defaults.
 - An array holds a value at every position: one with a hole or `undefined` in it breaks the rule for `colwidth`.
 - A mark is ON for a letter when the nearest earlier `ContentFormat` with that key holds a plain object (the mark's attributes; `{}` for none), and OFF when it holds anything else, an array included, or there is none. Keys that are not exactly a mark name are ignored (no hashed names).
 - When `code` is on, every other mark is ignored for that letter.
+- A letter's marks are listed in the schema's order: `link`, `highlight`, `bold`, `italic`, `strike`, `underline`; `code` stands alone. Neighbouring letters of one block with the same marks, attributes included after repair, are one text run, also when a skipped item or a formatting item stands between them.
+- A BigInt outside the safe integer range, `undefined`, and a shared type stored as a value (a Y.Map, Y.Text or Y.Array) break every rule. A container's type record that is a shared type is not a string.
 - Marks apply to letters only. Formatting around a boundary or an inline item means nothing and is not read.
 
 ## 3. Reading (total: every sequence and every set of records reads as one valid document)
 
 Implemented by `leavesOfSequence` then `readBodyLeaves`.
 
-0. Skip every item that is not a non-empty letter run (`ContentString`), a `block` element, or an element named after an inline node the schema knows. Skipped items take no part in what follows. An embedded value that is not such an element is skipped also when it is a string, so a reader reads the stored items and not Yjs's delta, which shows such a string as text.
+0. The sequence is its live items, in order. A deleted item of any kind is not read, also a deleted `ContentFormat`. Skip every item that is not a non-empty letter run (`ContentString`), a `block` element, or an element named after an inline node the schema knows. Skipped items take no part in what follows. An embedded value that is not such an element is skipped also when it is a string, so a reader reads the stored items and not Yjs's delta, which shows such a string as text.
 1. Cut the sequence at each boundary. Letters and inline items before the first boundary are a `paragraph` leaf with no path; with none before it, there is no such leaf.
 2. A leaf's path: walk its `path` array from the start, for at most 64 entries, keeping a current parent that starts as the top level. Stop at the first entry that is not a string matching the id pattern, or was already used in this path, or has no string under key `<id>`. Otherwise the entry's type is:
    - the one type the parent may hold, when the parent may hold only one (table 3.1: under `bulletList` or `orderedList` it is `listItem`, under `taskList` it is `taskItem`, under `table` it is `tableRow`), whatever the record says;
@@ -90,7 +92,7 @@ Implemented by `leavesOfSequence` then `readBodyLeaves`.
 6. A leaf's content is the letters and inline items up to the next boundary, in order:
    - a `paragraph` or `heading` holds letters with their marks, and inline items;
    - a `codeBlock` holds letters, without marks;
-   - the first item the leaf cannot hold (any inline item in a `codeBlock`; anything at all after a `horizontalRule`, `mathBlock` or `rawBlock`), and everything after it up to the next boundary, forms one `paragraph` straight after the leaf, in the same container.
+   - the first item the leaf cannot hold (any inline item in a `codeBlock`; anything at all after a `horizontalRule`, `mathBlock` or `rawBlock`), and everything after it up to the next boundary, forms one `paragraph` straight after the leaf, in the same container. Its letters keep their marks, as in any paragraph, also when the leaf was a `codeBlock`.
    So no letter and no known inline item is ever left out.
 7. A table's rows are read as stored: rows may hold different numbers of cells, and the reader adds none.
 8. No leaves at all read as one empty `paragraph`.
