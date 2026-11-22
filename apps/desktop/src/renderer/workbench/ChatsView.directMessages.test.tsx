@@ -719,6 +719,43 @@ describe("ChatsView direct messages", () => {
     },
   );
 
+  it("files one notice for one outage: a send that fails as the list's read did takes that notice's place", async () => {
+    let changed: () => void = () => {};
+    bridgeMock.onDirectChanged.mockImplementation((listener: () => void) => {
+      changed = listener;
+      return () => undefined;
+    });
+    const user = userEvent.setup();
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    const onError = vi.fn();
+    const onClearError = vi.fn();
+    const listReports = () =>
+      onError.mock.calls.filter(
+        (call) => (call[4] as { identity?: string } | undefined)?.identity === "direct-list",
+      );
+    renderView(vi.fn(), onError, { variant: "panel", onClearError });
+    await openSam();
+    // The list's read fails first and files its notice.
+    bridgeMock.directConversations.mockRejectedValue(UNREACHABLE("direct-conversations"));
+    await act(async () => changed());
+    await waitFor(() => expect(listReports()).toHaveLength(1));
+    // The send fails the same way. Its notice keeps the words and says the rest.
+    onClearError.mockClear();
+    bridgeMock.directSend.mockRejectedValueOnce(UNREACHABLE("direct-send"));
+    await user.type(await screen.findByTestId("chats-dm-composer"), "On my way{Enter}");
+    await waitFor(() => expect(onClearError).toHaveBeenCalledWith("direct-list"));
+    expect(onError.mock.calls.at(-1)![4]).toMatchObject({
+      title: "Your message to Sam Rivera wasn't sent",
+    });
+    // While the message stays unsent, a list read that fails again files nothing.
+    signedIn([conversation()]);
+    await act(async () => changed());
+    bridgeMock.directConversations.mockRejectedValue(UNREACHABLE("direct-conversations"));
+    await act(async () => changed());
+    expect(listReports()).toHaveLength(1);
+  });
+
   it("keeps the words of a send that failed, and Try again resends them with the same message id", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);
