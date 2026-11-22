@@ -127,7 +127,7 @@ class Granter {
     expect(response.status, await response.clone().text()).toBe(200);
   }
 
-  async log(): Promise<
+  async log(identity = ""): Promise<
     Array<{
       originId: string;
       originSeq: number;
@@ -135,7 +135,9 @@ class Granter {
       payload: Record<string, unknown>;
     }>
   > {
-    const response = await this.h(request(GRANTER, `/sync/${WORKSPACE}/log?since=0&limit=500`));
+    const response = await this.h(
+      request(GRANTER, `/sync/${WORKSPACE}/log?since=0&limit=500${identity}`),
+    );
     expect(response.status).toBe(200);
     const body = await json(response);
     return body.ops as Array<{
@@ -148,8 +150,8 @@ class Granter {
 
   // Only what a share put there. The granter's own ops are noise for every
   // assertion about what a recipient's change became.
-  async sharedMoments(shareId: string): Promise<Array<Record<string, unknown>>> {
-    return (await this.log())
+  async sharedMoments(shareId: string, identity = ""): Promise<Array<Record<string, unknown>>> {
+    return (await this.log(identity))
       .filter((op) => op.originId.startsWith(`share:${shareId}:`) && op.opKind === "moment.append")
       .map((op) => op.payload);
   }
@@ -743,7 +745,10 @@ describe("a proposal on a note being edited live", () => {
       error:
         "dohc could not accept these changes because docs/in.md is being edited live. Stop live editing for it in Live documents, then accept them.",
     });
-    expect(await granter.sharedMoments(shareId), "nothing reaches the owner's log").toEqual([]);
+    expect(
+      await granter.sharedMoments(shareId, LIVE_IDENTITY),
+      "nothing reaches the owner's log",
+    ).toEqual([]);
     expect((await reviewRows(h)).map((row) => row.proposalId)).toEqual([proposalId]);
 
     hosting.retireRequested();
@@ -754,9 +759,37 @@ describe("a proposal on a note being edited live", () => {
 
     hosting.retired();
     expect((await settle(h, proposalId, "accept")).status).toBe(200);
-    expect((await granter.sharedMoments(shareId)).map((moment) => moment.objectId)).toEqual([
-      "object-in",
-    ]);
+    expect(
+      (await granter.sharedMoments(shareId, LIVE_IDENTITY)).map((moment) => moment.objectId),
+    ).toEqual(["object-in"]);
+  });
+
+  it("is accepted once the workspace's identity has moved on from the live editing", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    const head = await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    await uploadShareBlob(h, shareId, "recipient two");
+    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
+    const proposalId = (await json(submitted)).proposalId as string;
+    hostForLiveEditing(storage, "object-in", "docs/in.md");
+    expect((await settle(h, proposalId, "accept")).status).toBe(409);
+
+    expect(
+      storage.rotateWorkspaceIdentity({
+        workspaceId: WORKSPACE,
+        ownerUserId: GRANTER,
+        replicationEpoch: "epoch-rotated",
+        streamIdentity: "stream-rotated",
+        rotatedAtMs: 10,
+      }),
+    ).toBe("rotated");
+    expect(
+      (await settle(h, proposalId, "accept")).status,
+      "Stop can't reach live editing from an earlier identity, so it must not hold the accept",
+    ).toBe(200);
   });
 
   it("names how many files are being edited live", async () => {
@@ -940,10 +973,21 @@ describe("who may do what", () => {
 // gates must read the current access rather than the request's starting value.
 // The rows the server keeps while it hosts a note for live editing: the note's live lineage and
 // the activation that hosts it. A Stop first asks the activation to retire, then retires it.
+const LIVE_EPOCH = "epoch-1";
+const LIVE_STREAM = "stream-1";
+const LIVE_IDENTITY = `&replicationEpoch=${LIVE_EPOCH}&streamIdentity=${LIVE_STREAM}`;
+
 function hostForLiveEditing(storage: SyncRelayStorage, objectId: string, path: string) {
   const db = (
     storage as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }
   ).db;
+  storage.rotateWorkspaceIdentity({
+    workspaceId: WORKSPACE,
+    ownerUserId: GRANTER,
+    replicationEpoch: LIVE_EPOCH,
+    streamIdentity: LIVE_STREAM,
+    rotatedAtMs: 1,
+  });
   const lineageClaimId = sha256(`lineage ${objectId}`);
   const activationId = `activation-${objectId}`;
   db.prepare(
@@ -955,6 +999,10 @@ function hostForLiveEditing(storage: SyncRelayStorage, objectId: string, path: s
     `INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
       source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes) VALUES ('test',?,?,'main',?,?,'{}','{}',?,x'0000',?,'{}',1)`,
   ).run(activationId, WORKSPACE, objectId, lineageClaimId, lineageClaimId, GRANTER);
+  db.prepare(
+    `INSERT INTO sync_relay_service_host_enrollments(workspace_id,object_id,path,owner_user_id,replication_epoch,stream_identity,enabled,created_at_ms,updated_at_ms,accounted_bytes)
+      SELECT workspace_id,?,?,owner_user_id,replication_epoch,stream_identity,1,0,0,1 FROM sync_relay_workspaces WHERE workspace_id=?`,
+  ).run(objectId, path, WORKSPACE);
   return {
     retireRequested() {
       db.prepare(

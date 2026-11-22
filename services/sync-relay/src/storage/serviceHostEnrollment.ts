@@ -586,7 +586,9 @@ export function isHostedForLiveEditing(
   return (
     storage.db
       .prepare(
-        `SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND retired_at_ms IS NULL`,
+        `SELECT 1 FROM ${SERVICE_ACTIVATIONS} a JOIN ${SERVICE_HOST_ENROLLMENTS} e USING(workspace_id,object_id) JOIN sync_relay_workspaces w USING(workspace_id)
+          WHERE a.workspace_id=? AND a.main_version_id='main' AND a.object_id=? AND a.retired_at_ms IS NULL
+            AND e.owner_user_id=w.owner_user_id AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity`,
       )
       .get(workspaceId, objectId) !== undefined
   );
