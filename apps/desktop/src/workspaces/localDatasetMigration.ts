@@ -181,7 +181,9 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
           return { metadata, files };
         };
         const first = await capture([input.descriptorPath]);
-        const definition = parseDatasetDefinition(JSON.parse(decode(first.files[0]!.bytes)));
+        const definition = parseDatasetDefinition(JSON.parse(decode(first.files[0]!.bytes)), {
+          descriptorPath: input.descriptorPath,
+        });
         if (definition.datasetId !== input.datasetId)
           throw new Error(
             "These sources belong to another Collection. Choose the matching sources.",

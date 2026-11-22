@@ -639,6 +639,100 @@ describe("owner dataset publication", () => {
     await expect(h.prepare()).rejects.toMatchObject({ name: "AbortError" });
     expect(h.compile).not.toHaveBeenCalled();
   });
+
+  it("auto-discovers inputs, excludes co-located Collection files, and auto-pins named operations", async () => {
+    const resolve = vi.fn(async () => approved);
+    const h = harness(resolve);
+    h.sources.clear();
+    h.sources.set("app/main.tsx", 'import { helper } from "./helper"; console.log(helper);');
+    h.sources.set("app/helper.ts", "export const helper = 1;");
+    h.sources.set("app/style.css", "body { margin: 0; }");
+    // Co-located Collection files and nested Collection subfolder must stay out of browser app inputs.
+    h.sources.set(
+      "app/dataset.json",
+      JSON.stringify({
+        formatVersion: 2,
+        datasetId: approved.datasetId,
+        name: "Events",
+        schemaPath: "schema.sql",
+        operationsPath: "backend.ts",
+        tables: [
+          { sqlName: "events", primaryKey: "id", fields: [{ sqlColumn: "id", type: "text" }] },
+        ],
+        operations: [{ name: "submit", table: "events", kind: "create", fields: ["id"] }],
+      }),
+    );
+    h.sources.set("app/schema.sql", "CREATE TABLE events (id TEXT PRIMARY KEY);");
+    h.sources.set("app/backend.ts", "export const operations = {};");
+    h.sources.set("app/changes/c1.json", "{}");
+    h.sources.set("app/revisions/1/schema.sql", "SELECT 1;");
+    h.sources.set("app/nested-col/dataset.json", "{}");
+    h.sources.set("app/nested-col/operations.js", "export const operations = {};");
+    h.sources.set("app/automations.yaml", "automations: []");
+
+    h.setDeclaration({
+      version: 1,
+      entryPath: "main.tsx",
+      dataset: {
+        kind: "dataset",
+        datasetPath: "app/dataset.json",
+        operations: ["submit"],
+      },
+    });
+
+    const localSource = await readLocalAppSource(
+      { workspaceId: "w", appRoot: "app" },
+      {
+        adapter: h.adapter,
+        signal: h.controller.signal,
+        assertCurrent() {},
+        deferredWrites: [],
+      },
+    );
+    const { candidate } = await prepareLocalAppPublication(
+      { workspaceId: "w", appRoot: "app" },
+      {
+        adapter: h.adapter,
+        signal: h.controller.signal,
+        assertCurrent() {},
+        compile: h.compile,
+        deferredWrites: [],
+        resolveDatasetRevision: resolve,
+      },
+    );
+
+    expect(localSource.sourcePaths.sort()).toEqual([
+      "app/app.publish.json",
+      "app/helper.ts",
+      "app/main.tsx",
+      "app/style.css",
+    ]);
+    expect(candidate.sourceRevision).toBe(localSource.sourceRevision);
+    expect(resolve).toHaveBeenCalledWith({ datasetId: approved.datasetId });
+    expect(candidate.capabilities).toEqual([
+      {
+        ...binding,
+        name: approved.definition.name,
+        operations: [{ operationId: id(4), name: "submit", access: "link", readOnly: false }],
+      },
+    ]);
+  });
+
+  it("refuses unknown operation names before compiling", async () => {
+    const h = harness(async () => approved);
+    h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
+    h.setDeclaration({
+      version: 1,
+      entryPath: "main.ts",
+      dataset: {
+        kind: "dataset",
+        datasetPath: "private/dataset.json",
+        operations: ["nonexistentOp"],
+      },
+    });
+    await expect(h.prepare()).rejects.toThrow(/has no operation named "nonexistentOp"/);
+    expect(h.compile).not.toHaveBeenCalled();
+  });
 });
 
 it.each(["会议", "Cafe\u0301"])(

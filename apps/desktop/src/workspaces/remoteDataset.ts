@@ -19,7 +19,7 @@ import type { ResolvedDatasetRequest as DatasetRequest } from "./datasetAddress"
 import {
   parseDatasetDescription,
   parseDatasetRevision,
-  type AppDatasetBinding,
+  type AppDatasetRevisionLookup,
   type DatasetDescription,
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
@@ -813,13 +813,14 @@ export function createRemoteDatasetTransferTarget(input: {
 
 export async function resolveRemoteDatasetArtifacts(
   data: Pick<OwnerDatasetData, "approvedArtifacts">,
-  binding: AppDatasetBinding,
+  binding: AppDatasetRevisionLookup,
 ): Promise<{ revision: DatasetRevision; schemaSql: string }> {
   const approved = await data.approvedArtifacts(binding.datasetId);
   if (
     !approved.active ||
-    approved.revision.revision !== binding.revision ||
-    approved.revision.revisionSha256 !== binding.revisionSha256
+    (binding.revision !== undefined && approved.revision.revision !== binding.revision) ||
+    (binding.revisionSha256 !== undefined &&
+      approved.revision.revisionSha256 !== binding.revisionSha256)
   ) {
     throw new Error("Collection rules changed. Reload the Collection and prepare the app again.");
   }
@@ -828,7 +829,7 @@ export async function resolveRemoteDatasetArtifacts(
 
 export async function resolveRemoteDatasetRevision(
   data: Pick<OwnerDatasetData, "approvedArtifacts">,
-  binding: AppDatasetBinding,
+  binding: AppDatasetRevisionLookup,
 ): Promise<DatasetRevision> {
   return (await resolveRemoteDatasetArtifacts(data, binding)).revision;
 }

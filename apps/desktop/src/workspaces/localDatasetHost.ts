@@ -833,7 +833,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           return { metadata, files };
         }
         const first = await capture([input.descriptorPath]);
-        const definition = parseDatasetDefinition(JSON.parse(decode(first.files[0]!.bytes)));
+        const definition = parseDatasetDefinition(JSON.parse(decode(first.files[0]!.bytes)), {
+          descriptorPath: input.descriptorPath,
+        });
         const paths = [input.descriptorPath, definition.schemaPath, definition.operationsPath];
         if (new Set(paths).size !== 3 || paths.some((path) => !allowed(path)))
           throw new Error("Collection source paths must stay inside this workspace.");

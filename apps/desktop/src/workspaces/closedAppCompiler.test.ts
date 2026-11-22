@@ -735,3 +735,75 @@ it("publishes Unicode HTML, script and percent-encoded asset paths", async () =>
   expect(result.dependencyLock.map((file) => file.path)).toContain("会议/图片.png");
   expect(result.files.map((file) => file.path)).toContain("page.json");
 });
+
+describe("extensionless relative imports", () => {
+  it("resolves unambiguous .tsx, .ts, .jsx, .js, and index files", async () => {
+    const result = await compileClosedApp({
+      entryPath: "app/main.tsx",
+      bounds,
+      inputs: [
+        file(
+          "app/main.tsx",
+          'import { Badge } from "./Badge";\nimport { sum } from "./math";\nimport { Card } from "./cards";\nconsole.log(Badge, sum(1, 2), Card);',
+        ),
+        file("app/Badge.tsx", 'export const Badge = "ok";'),
+        file("app/math.ts", "export const sum = (a: number, b: number) => a + b;"),
+        file("app/cards/index.tsx", 'export const Card = "card";'),
+      ],
+    });
+    expect(result.dependencyLock.map((item) => item.path)).toEqual([
+      "app/Badge.tsx",
+      "app/cards/index.tsx",
+      "app/main.tsx",
+      "app/math.ts",
+    ]);
+  });
+
+  it("refuses ambiguous extensionless relative imports and names conflicting files", async () => {
+    await expect(
+      compileClosedApp({
+        entryPath: "app/main.tsx",
+        bounds,
+        inputs: [
+          file("app/main.tsx", 'import { x } from "./util"; console.log(x);'),
+          file("app/util.ts", "export const x = 1;"),
+          file("app/util.tsx", "export const x = 2;"),
+        ],
+      }),
+    ).rejects.toThrow(/matches multiple files \(app\/util\.tsx, app\/util\.ts\)/);
+
+    await expect(
+      compileClosedApp({
+        entryPath: "app/main.tsx",
+        bounds,
+        inputs: [
+          file("app/main.tsx", 'import { x } from "./util"; console.log(x);'),
+          file("app/util.ts", "export const x = 1;"),
+          file("app/util/index.ts", "export const x = 2;"),
+        ],
+      }),
+    ).rejects.toThrow(/matches multiple files \(app\/util\.ts, app\/util\/index\.ts\)/);
+  });
+
+  it("reports missing extensionless imports cleanly and keeps CSS imports explicit", async () => {
+    await expect(
+      compileClosedApp({
+        entryPath: "app/main.tsx",
+        bounds,
+        inputs: [file("app/main.tsx", 'import { x } from "./missing"; console.log(x);')],
+      }),
+    ).rejects.toThrow(/not in the app/);
+
+    await expect(
+      compileClosedApp({
+        entryPath: "app/main.tsx",
+        bounds,
+        inputs: [
+          file("app/main.tsx", 'import "./style.css";'),
+          file("app/style.css", '@import "./theme";'),
+          file("app/theme.css", "body { color: red; }"),
+        ],
+      }),
+    ).rejects.toThrow(/files without a type/);
+  });
+});

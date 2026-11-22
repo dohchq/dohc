@@ -29,7 +29,7 @@ import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "../workspaces/closedAppCompiler";
 import {
   datasetColumnFields,
-  type AppDatasetBinding,
+  type AppDatasetRevisionLookup,
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
 import {
@@ -104,12 +104,12 @@ export function createOwnerAppPublicationHandler<
   /** Reads a Collection's approved rules from whoever answers for it, in place of the server alone. */
   resolveDatasetRevision?(
     workspace: Workspace,
-    binding: AppDatasetBinding,
+    binding: AppDatasetRevisionLookup,
     signal: AbortSignal,
   ): Promise<DatasetRevision>;
   resolveDatasetArtifacts?(
     workspace: Workspace,
-    binding: AppDatasetBinding,
+    binding: AppDatasetRevisionLookup,
     signal: AbortSignal,
   ): Promise<{ revision: DatasetRevision; schemaSql: string }>;
 }) {
@@ -176,7 +176,7 @@ export function createOwnerAppPublicationHandler<
         assertCurrent: () => operation.assertCurrent(),
         relayJson: dependencies.relayJson,
       });
-      const resolveDatasetArtifacts = (binding: AppDatasetBinding) =>
+      const resolveDatasetArtifacts = (binding: AppDatasetRevisionLookup) =>
         session.run(async (): Promise<{ revision: DatasetRevision; schemaSql?: string }> => {
           if (dependencies.resolveDatasetArtifacts) {
             return await dependencies.resolveDatasetArtifacts(
@@ -196,7 +196,7 @@ export function createOwnerAppPublicationHandler<
           }
           return await resolveRemoteDatasetArtifacts(remoteData, binding);
         });
-      const resolveDatasetRevision = (binding: AppDatasetBinding) =>
+      const resolveDatasetRevision = (binding: AppDatasetRevisionLookup) =>
         session.run(() =>
           dependencies.resolveDatasetRevision
             ? dependencies.resolveDatasetRevision(operation.workspace, binding, operation.signal)

@@ -1,6 +1,7 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import { parseAppBackendJson, type AppBackendJson } from "./appBackend";
+import { uuidv5 } from "./uuidv5";
 
 export const DATASET_DESCRIPTOR_FILENAME = "dataset.json";
 export const DATASET_METADATA_MAX_BYTES = 256 * 1024;
@@ -639,8 +640,244 @@ function relationTarget(
     );
 }
 
-export function parseDatasetDefinition(value: unknown): DatasetDefinition {
-  return definition(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES));
+export interface DatasetDefinitionOptions {
+  /** Workspace-relative path of the dataset.json or revision.json file being read. */
+  readonly descriptorPath?: string;
+}
+
+function relativeDatasetPath(value: unknown, baseDir: string): string {
+  const raw = text(value, 1024);
+  if (raw.startsWith("/") || raw.includes("\\")) fail();
+  const segments = raw.split("/");
+  if (segments.some((part) => part === "" || part === "." || part === "..")) fail();
+  return baseDir ? `${baseDir}/${raw}` : raw;
+}
+
+function descriptorBaseDir(descriptorPath: string | undefined): string {
+  if (descriptorPath === undefined) return "";
+  if (descriptorPath.startsWith("/") || descriptorPath.includes("\\")) fail();
+  const segments = descriptorPath.split("/");
+  if (segments.some((part) => part === "" || part === "." || part === "..")) fail();
+  return segments.slice(0, -1).join("/");
+}
+
+function validOperationName(value: unknown): string {
+  const name = text(value, 64);
+  if (!operationNames.test(name) || name.split(".").some((part) => forbidden.has(part))) fail();
+  return name;
+}
+
+function normalizeV2Definition(
+  row: Record<string, unknown>,
+  options?: DatasetDefinitionOptions,
+): DatasetDefinition {
+  const top = record(
+    row,
+    ["formatVersion", "datasetId", "name", "tables", "operations"],
+    ["schemaPath", "operationsPath"],
+  );
+  if (top.formatVersion !== 2) fail();
+  const datasetId = uuid(top.datasetId);
+  const baseDir = descriptorBaseDir(options?.descriptorPath);
+  const schemaPath = relativeDatasetPath(
+    Object.hasOwn(top, "schemaPath") ? top.schemaPath : "schema.sql",
+    baseDir,
+  );
+  const operationsPath = relativeDatasetPath(
+    Object.hasOwn(top, "operationsPath") ? top.operationsPath : "operations.js",
+    baseDir,
+  );
+
+  interface PendingRelation {
+    readonly tableIndex: number;
+    readonly fieldIndex: number;
+    readonly raw: unknown;
+  }
+  const pendingRelations: PendingRelation[] = [];
+  const rawTables = boundedArray(top.tables, DATASET_MAX_TABLES, 1);
+  const tables: DatasetTable[] = rawTables.map((entry, tableIndex) => {
+    const tableRow = record(entry, ["sqlName", "primaryKey", "fields"], ["tableId", "name"]);
+    const tableSqlName = sqlName(tableRow.sqlName);
+    const tableKey = tableSqlName.toLowerCase();
+    const tableId = Object.hasOwn(tableRow, "tableId")
+      ? uuid(tableRow.tableId)
+      : uuidv5(datasetId, `table:${tableKey}`);
+    const primaryKey = sqlName(tableRow.primaryKey);
+    const tableName = Object.hasOwn(tableRow, "name") ? text(tableRow.name) : tableSqlName;
+    const rawFields = boundedArray(tableRow.fields, DATASET_MAX_FIELDS, 1);
+    const fields: DatasetField[] = rawFields.map((fieldEntry, fieldIndex) => {
+      if (isButtonRow(fieldEntry)) {
+        const btn = record(fieldEntry, ["name", "type"], ["fieldId"]);
+        if (btn.type !== "button") fail();
+        const buttonName = text(btn.name);
+        return {
+          fieldId: Object.hasOwn(btn, "fieldId")
+            ? uuid(btn.fieldId)
+            : uuidv5(datasetId, `button:${tableKey}:${buttonName}`),
+          name: buttonName,
+          type: "button",
+        };
+      }
+      const col = record(
+        fieldEntry,
+        ["sqlColumn", "type"],
+        ["fieldId", "name", "required", "unique", "default", "options", "relation", "generated"],
+      );
+      if (!fieldTypes.has(col.type as DatasetColumnFieldType)) fail();
+      const columnName = sqlName(col.sqlColumn);
+      const isPk = columnName === primaryKey;
+      const normalized: DatasetColumnField = {
+        fieldId: Object.hasOwn(col, "fieldId")
+          ? uuid(col.fieldId)
+          : uuidv5(datasetId, `field:${tableKey}:${columnName.toLowerCase()}`),
+        name: Object.hasOwn(col, "name") ? text(col.name) : columnName,
+        sqlColumn: columnName,
+        type: col.type as DatasetColumnFieldType,
+        required: Object.hasOwn(col, "required") ? boolean(col.required) : isPk,
+        unique: Object.hasOwn(col, "unique") ? boolean(col.unique) : isPk,
+      };
+      if (Object.hasOwn(col, "generated")) normalized.generated = col.generated as "record-id";
+      if (Object.hasOwn(col, "options")) normalized.options = col.options as string[];
+      if (Object.hasOwn(col, "default")) normalized.default = col.default as AppBackendJson;
+      if (Object.hasOwn(col, "relation")) {
+        pendingRelations.push({ tableIndex, fieldIndex, raw: col.relation });
+      }
+      return normalized;
+    });
+    return {
+      tableId,
+      name: tableName,
+      sqlName: tableSqlName,
+      primaryKey,
+      fields,
+    };
+  });
+
+  const tablesBySql = new Map<string, DatasetTable>();
+  for (const entry of tables) {
+    if (tablesBySql.has(entry.sqlName)) fail();
+    tablesBySql.set(entry.sqlName, entry);
+  }
+  const tablesById = new Map<string, DatasetTable>(tables.map((entry) => [entry.tableId, entry]));
+
+  for (const pending of pendingRelations) {
+    const field = tables[pending.tableIndex]!.fields[pending.fieldIndex]!;
+    if (field.type === "button") fail();
+    if (
+      pending.raw !== null &&
+      typeof pending.raw === "object" &&
+      !Array.isArray(pending.raw) &&
+      Object.hasOwn(pending.raw, "table")
+    ) {
+      const rel = record(pending.raw, ["table", "field"], ["many"]);
+      const targetTable = tablesBySql.get(sqlName(rel.table));
+      if (!targetTable) fail();
+      const targetCol = sqlName(rel.field);
+      const targetField = datasetColumnFields(targetTable).find(
+        (candidate) => candidate.sqlColumn === targetCol,
+      );
+      if (!targetField) fail();
+      field.relation = {
+        datasetId,
+        tableId: targetTable.tableId,
+        fieldId: targetField.fieldId,
+        many: Object.hasOwn(rel, "many") ? boolean(rel.many) : false,
+      };
+    } else {
+      field.relation = pending.raw as DatasetRelation;
+    }
+  }
+
+  const rawOperations = boundedArray(top.operations, DATASET_MAX_OPERATIONS, 1);
+  const operations: DatasetOperation[] = rawOperations.map((entry) => {
+    const opRow = record(
+      entry,
+      ["name", "kind"],
+      [
+        "operationId",
+        "label",
+        "table",
+        "tableId",
+        "access",
+        "readOnly",
+        "fields",
+        "fieldIds",
+        "reversible",
+        "reversedBy",
+      ],
+    );
+    const hasTable = Object.hasOwn(opRow, "table");
+    const hasTableId = Object.hasOwn(opRow, "tableId");
+    if (hasTable === hasTableId) fail();
+    const hasFields = Object.hasOwn(opRow, "fields");
+    const hasFieldIds = Object.hasOwn(opRow, "fieldIds");
+    if (hasFields && hasFieldIds) fail();
+
+    const opName = validOperationName(opRow.name);
+    const resolvedTable = hasTable
+      ? tablesBySql.get(sqlName(opRow.table))
+      : tablesById.get(uuid(opRow.tableId));
+    if (!resolvedTable) fail();
+
+    let fieldIds: string[];
+    if (hasFields) {
+      const cols = datasetColumnFields(resolvedTable);
+      fieldIds = boundedArray(opRow.fields, DATASET_MAX_FIELDS).map((token) => {
+        const colName = sqlName(token);
+        const matched = cols.find((candidate) => candidate.sqlColumn === colName);
+        if (!matched) fail();
+        return matched.fieldId;
+      });
+    } else if (hasFieldIds) {
+      fieldIds = boundedArray(opRow.fieldIds, DATASET_MAX_FIELDS).map(uuid);
+    } else {
+      fieldIds = [];
+    }
+
+    const normalized: DatasetOperation = {
+      operationId: Object.hasOwn(opRow, "operationId")
+        ? uuid(opRow.operationId)
+        : uuidv5(datasetId, `op:${opName}`),
+      name: opName,
+      label: Object.hasOwn(opRow, "label") ? text(opRow.label) : opName,
+      tableId: resolvedTable.tableId,
+      kind: opRow.kind as DatasetOperationKind,
+      access: Object.hasOwn(opRow, "access")
+        ? (opRow.access as DatasetOperation["access"])
+        : "owner",
+      readOnly: Object.hasOwn(opRow, "readOnly") ? boolean(opRow.readOnly) : opRow.kind === "read",
+      fieldIds,
+    };
+    if (Object.hasOwn(opRow, "reversible")) normalized.reversible = opRow.reversible as true;
+    if (Object.hasOwn(opRow, "reversedBy")) normalized.reversedBy = opRow.reversedBy as string;
+    return normalized;
+  });
+
+  return definition({
+    formatVersion: 1,
+    datasetId,
+    name: text(top.name),
+    schemaPath,
+    operationsPath,
+    tables,
+    operations,
+  });
+}
+
+export function parseDatasetDefinition(
+  value: unknown,
+  options?: DatasetDefinitionOptions,
+): DatasetDefinition {
+  const bounded = parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES);
+  if (
+    bounded !== null &&
+    typeof bounded === "object" &&
+    !Array.isArray(bounded) &&
+    (bounded as Record<string, unknown>).formatVersion === 2
+  ) {
+    return normalizeV2Definition(bounded as Record<string, unknown>, options);
+  }
+  return definition(bounded);
 }
 
 export function parseDatasetDescription(value: unknown): DatasetDescription {
@@ -875,16 +1112,250 @@ export function parseDatasetBindingReference(value: unknown): AppDatasetBinding 
   return { ...parseBindingFields(row), datasetId: uuid(row.datasetId, "dataset.datasetId") };
 }
 
-export type AppDatasetReference = Omit<AppDatasetBinding, "datasetId"> & { datasetPath: string };
+export interface AppDatasetNamedCreateFields {
+  operation: string;
+  fields: string[];
+}
+export type AppDatasetReference =
+  | {
+      kind: "dataset";
+      datasetPath: string;
+      revision?: number;
+      revisionSha256?: string;
+      operationIds: string[];
+      createFields?: Array<{ operationId: string; fieldIds: string[] }>;
+      linkReads?: Array<{ operationId: string; fieldIds: string[] }>;
+    }
+  | {
+      kind: "dataset";
+      datasetPath: string;
+      revision?: number;
+      revisionSha256?: string;
+      operations: string[];
+      createFields?: AppDatasetNamedCreateFields[];
+    };
+export type AppDatasetRevisionLookup = Pick<AppDatasetBinding, "datasetId"> &
+  Partial<Omit<AppDatasetBinding, "datasetId">>;
+
 export function parseAppDatasetReference(value: unknown): AppDatasetReference {
   const row = record(
     parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES),
-    ["kind", "datasetPath", "revision", "revisionSha256", "operationIds"],
-    ["createFields", "linkReads"],
+    ["kind", "datasetPath"],
+    ["revision", "revisionSha256", "operationIds", "operations", "createFields", "linkReads"],
     "dataset",
   );
   if (row.kind !== "dataset") fail('dataset.kind must be "dataset".');
-  return { ...parseBindingFields(row), datasetPath: parseDatasetPath(row.datasetPath) };
+  const datasetPath = parseDatasetPath(row.datasetPath);
+  const hasRev = Object.hasOwn(row, "revision");
+  const hasSha = Object.hasOwn(row, "revisionSha256");
+  if (hasRev !== hasSha)
+    fail("dataset.revision and dataset.revisionSha256 must be provided together.");
+  const pin = hasRev
+    ? {
+        revision: revision(row.revision, "dataset.revision"),
+        revisionSha256: digest(row.revisionSha256, "dataset.revisionSha256"),
+      }
+    : {};
+  const hasIds = Object.hasOwn(row, "operationIds");
+  const hasNames = Object.hasOwn(row, "operations");
+  if (hasIds === hasNames) fail("dataset must specify either operationIds or operations.");
+
+  if (hasIds) {
+    const operationIds = boundedArray(
+      row.operationIds,
+      DATASET_MAX_OPERATIONS,
+      1,
+      "dataset.operationIds",
+    ).map((entry, index) => uuid(entry, `dataset.operationIds[${index}]`));
+    unique(operationIds, "dataset.operationIds", "operationIds");
+    const result: Extract<AppDatasetReference, { operationIds: string[] }> = {
+      kind: "dataset",
+      datasetPath,
+      ...pin,
+      operationIds,
+    };
+    if (Object.hasOwn(row, "linkReads")) {
+      result.linkReads = parseLinkReads(row.linkReads, operationIds);
+    }
+    if (Object.hasOwn(row, "createFields")) {
+      result.createFields = parseCreateFieldsById(row.createFields, operationIds);
+    }
+    return result;
+  }
+
+  if (Object.hasOwn(row, "linkReads"))
+    fail("dataset.linkReads requires operationIds rather than named operations.");
+  const operations = boundedArray(
+    row.operations,
+    DATASET_MAX_OPERATIONS,
+    1,
+    "dataset.operations",
+  ).map(validOperationName);
+  unique(operations, "dataset.operations", "operations");
+  const result: Extract<AppDatasetReference, { operations: string[] }> = {
+    kind: "dataset",
+    datasetPath,
+    ...pin,
+    operations,
+  };
+  if (Object.hasOwn(row, "createFields")) {
+    const createFields = boundedArray(
+      row.createFields,
+      DATASET_MAX_OPERATIONS,
+      1,
+      "dataset.createFields",
+    )
+      .map((entry, index) => {
+        const entryPath = `dataset.createFields[${index}]`;
+        const item = record(entry, ["operation", "fields"], [], entryPath);
+        const operation = validOperationName(item.operation);
+        if (!operations.includes(operation))
+          fail(`${entryPath}.operation must also be listed in dataset.operations.`);
+        const fields = boundedArray(item.fields, DATASET_MAX_FIELDS, 0, `${entryPath}.fields`)
+          .map((fieldName, fieldIndex) => {
+            const val = text(fieldName, 128, `${entryPath}.fields[${fieldIndex}]`);
+            if (val === "*") fail(`${entryPath}.fields cannot use "*".`);
+            return val;
+          })
+          .sort();
+        unique(fields, `${entryPath}.fields`, "fields");
+        return { operation, fields };
+      })
+      .sort((a, b) => (a.operation < b.operation ? -1 : a.operation > b.operation ? 1 : 0));
+    unique(
+      createFields.map((entry) => entry.operation),
+      "dataset.createFields",
+      "operations",
+    );
+    result.createFields = createFields;
+  }
+  return result;
+}
+
+/** Resolves an app.publish.json dataset declaration into a canonical, pinned AppDatasetBinding. */
+export function resolveAppDatasetReferenceBinding(
+  reference: AppDatasetReference,
+  datasetId: string,
+  approvedRevision: DatasetRevision,
+): AppDatasetBinding {
+  const approved = parseDatasetRevision(approvedRevision);
+  if (uuid(datasetId, "datasetId") !== approved.datasetId)
+    fail("datasetId does not match the approved revision.");
+  if (
+    reference.revision !== undefined &&
+    (approved.revision !== reference.revision ||
+      approved.revisionSha256 !== reference.revisionSha256)
+  ) {
+    throw new Error("Collection rules changed. Reload the Collection and prepare the app again.");
+  }
+
+  if ("operationIds" in reference) {
+    return parseDatasetBindingReference({
+      kind: "dataset",
+      datasetId,
+      revision: approved.revision,
+      revisionSha256: approved.revisionSha256,
+      operationIds: reference.operationIds,
+      ...(reference.createFields ? { createFields: reference.createFields } : {}),
+      ...(reference.linkReads ? { linkReads: reference.linkReads } : {}),
+    });
+  }
+
+  const byName = new Map(approved.definition.operations.map((op) => [op.name, op]));
+  const operationIds = reference.operations.map((name) => {
+    const matched = byName.get(name);
+    if (!matched) {
+      throw new Error(`Collection "${approved.definition.name}" has no operation named "${name}".`);
+    }
+    return matched.operationId;
+  });
+
+  const createFields = reference.createFields?.map((entry) => {
+    const op = byName.get(entry.operation);
+    if (!op) {
+      throw new Error(
+        `Collection "${approved.definition.name}" has no operation named "${entry.operation}".`,
+      );
+    }
+    const opTable = approved.definition.tables.find((table) => table.tableId === op.tableId);
+    if (!opTable) fail();
+    const columns = datasetColumnFields(opTable);
+    const fieldIds = entry.fields.map((token) => {
+      const bySql = columns.find((col) => col.sqlColumn === token);
+      if (bySql) return bySql.fieldId;
+      const byDisplay = columns.filter((col) => col.name === token);
+      if (byDisplay.length === 1) return byDisplay[0]!.fieldId;
+      throw new Error(
+        `Collection "${approved.definition.name}" table "${opTable.name}" has no field named "${token}".`,
+      );
+    });
+    return { operationId: op.operationId, fieldIds };
+  });
+
+  return parseDatasetBindingReference({
+    kind: "dataset",
+    datasetId,
+    revision: approved.revision,
+    revisionSha256: approved.revisionSha256,
+    operationIds,
+    ...(createFields ? { createFields } : {}),
+  });
+}
+
+function parseLinkReads(
+  raw: unknown,
+  operationIds: readonly string[],
+): Array<{ operationId: string; fieldIds: string[] }> {
+  const linkReads = boundedArray(raw, DATASET_MAX_OPERATIONS, 0, "dataset.linkReads")
+    .map((entry, index) => {
+      const entryPath = `dataset.linkReads[${index}]`;
+      const item = record(entry, ["operationId", "fieldIds"], [], entryPath);
+      const read = {
+        operationId: uuid(item.operationId, `${entryPath}.operationId`),
+        fieldIds: boundedArray(item.fieldIds, DATASET_MAX_FIELDS, 0, `${entryPath}.fieldIds`)
+          .map((fieldId, fieldIndex) => uuid(fieldId, `${entryPath}.fieldIds[${fieldIndex}]`))
+          .sort(),
+      };
+      if (!operationIds.includes(read.operationId))
+        fail(`${entryPath}.operationId must also be listed in dataset.operationIds.`);
+      unique(read.fieldIds, `${entryPath}.fieldIds`, "fieldIds");
+      return read;
+    })
+    .sort((a, b) => a.operationId.localeCompare(b.operationId));
+  unique(
+    linkReads.map((read) => read.operationId),
+    "dataset.linkReads",
+    "operationIds",
+  );
+  return linkReads;
+}
+
+function parseCreateFieldsById(
+  raw: unknown,
+  operationIds: readonly string[],
+): Array<{ operationId: string; fieldIds: string[] }> {
+  const createFields = boundedArray(raw, DATASET_MAX_OPERATIONS, 1, "dataset.createFields")
+    .map((entry, index) => {
+      const entryPath = `dataset.createFields[${index}]`;
+      const item = record(entry, ["operationId", "fieldIds"], [], entryPath);
+      const restriction = {
+        operationId: uuid(item.operationId, `${entryPath}.operationId`),
+        fieldIds: boundedArray(item.fieldIds, DATASET_MAX_FIELDS, 0, `${entryPath}.fieldIds`)
+          .map((fieldId, fieldIndex) => uuid(fieldId, `${entryPath}.fieldIds[${fieldIndex}]`))
+          .sort(),
+      };
+      if (!operationIds.includes(restriction.operationId))
+        fail(`${entryPath}.operationId must also be listed in dataset.operationIds.`);
+      unique(restriction.fieldIds, `${entryPath}.fieldIds`, "fieldIds");
+      return restriction;
+    })
+    .sort((a, b) => (a.operationId < b.operationId ? -1 : a.operationId > b.operationId ? 1 : 0));
+  unique(
+    createFields.map((entry) => entry.operationId),
+    "dataset.createFields",
+    "operationIds",
+  );
+  return createFields;
 }
 
 function parseBindingFields(row: Record<string, unknown>): Omit<AppDatasetBinding, "datasetId"> {
@@ -901,55 +1372,10 @@ function parseBindingFields(row: Record<string, unknown>): Omit<AppDatasetBindin
   };
   unique(result.operationIds, "dataset.operationIds", "operationIds");
   if (Object.hasOwn(row, "linkReads")) {
-    result.linkReads = boundedArray(row.linkReads, DATASET_MAX_OPERATIONS, 0, "dataset.linkReads")
-      .map((entry, index) => {
-        const entryPath = `dataset.linkReads[${index}]`;
-        const item = record(entry, ["operationId", "fieldIds"], [], entryPath);
-        const read = {
-          operationId: uuid(item.operationId, `${entryPath}.operationId`),
-          fieldIds: boundedArray(item.fieldIds, DATASET_MAX_FIELDS, 0, `${entryPath}.fieldIds`)
-            .map((fieldId, fieldIndex) => uuid(fieldId, `${entryPath}.fieldIds[${fieldIndex}]`))
-            .sort(),
-        };
-        if (!result.operationIds.includes(read.operationId))
-          fail(`${entryPath}.operationId must also be listed in dataset.operationIds.`);
-        unique(read.fieldIds, `${entryPath}.fieldIds`, "fieldIds");
-        return read;
-      })
-      .sort((a, b) => a.operationId.localeCompare(b.operationId));
-    unique(
-      result.linkReads.map((read) => read.operationId),
-      "dataset.linkReads",
-      "operationIds",
-    );
+    result.linkReads = parseLinkReads(row.linkReads, result.operationIds);
   }
   if (Object.hasOwn(row, "createFields")) {
-    result.createFields = boundedArray(
-      row.createFields,
-      DATASET_MAX_OPERATIONS,
-      1,
-      "dataset.createFields",
-    )
-      .map((entry, index) => {
-        const entryPath = `dataset.createFields[${index}]`;
-        const item = record(entry, ["operationId", "fieldIds"], [], entryPath);
-        const restriction = {
-          operationId: uuid(item.operationId, `${entryPath}.operationId`),
-          fieldIds: boundedArray(item.fieldIds, DATASET_MAX_FIELDS, 0, `${entryPath}.fieldIds`)
-            .map((fieldId, fieldIndex) => uuid(fieldId, `${entryPath}.fieldIds[${fieldIndex}]`))
-            .sort(),
-        };
-        if (!result.operationIds.includes(restriction.operationId))
-          fail(`${entryPath}.operationId must also be listed in dataset.operationIds.`);
-        unique(restriction.fieldIds, `${entryPath}.fieldIds`, "fieldIds");
-        return restriction;
-      })
-      .sort((a, b) => (a.operationId < b.operationId ? -1 : a.operationId > b.operationId ? 1 : 0));
-    unique(
-      result.createFields.map((entry) => entry.operationId),
-      "dataset.createFields",
-      "operationIds",
-    );
+    result.createFields = parseCreateFieldsById(row.createFields, result.operationIds);
   }
   return result;
 }

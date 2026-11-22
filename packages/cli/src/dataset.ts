@@ -83,6 +83,18 @@ const json = z.unknown().transform((value, context) => {
 });
 const definition = z.unknown().transform((value, context) => {
   try {
+    if (
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      (value as Record<string, unknown>).formatVersion === 2 &&
+      !Object.hasOwn(value, "datasetId")
+    ) {
+      return parseDatasetDefinition({
+        ...(value as Record<string, unknown>),
+        datasetId: globalThis.crypto.randomUUID(),
+      });
+    }
     return parseDatasetDefinition(value);
   } catch (error) {
     context.addIssue({

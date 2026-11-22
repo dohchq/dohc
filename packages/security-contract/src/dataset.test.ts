@@ -11,6 +11,8 @@ import {
   parseDatasetDescription,
   parseDatasetRevision,
   parseDatasetBindingReference,
+  parseAppDatasetReference,
+  resolveAppDatasetReferenceBinding,
   parseAppDatasetCapability,
   datasetColumnFields,
   describeApprovedDataset,
@@ -20,6 +22,7 @@ import {
   type DatasetField,
   type DatasetRevision,
 } from "./dataset";
+import { uuidv5 } from "./uuidv5";
 import {
   displayAppDatasetCapability,
   effectiveDatasetOperations,
@@ -1234,4 +1237,205 @@ describe("self-remedying dataset validation errors", () => {
       parseDatasetBinding({ ...binding(approved), operationIds: [id(99)] }, approved),
     ).toThrow(/operationId that is not in the approved revision/);
   });
+});
+
+it("computes RFC 4122 UUIDv5 deterministically in pure TypeScript", () => {
+  const DNS_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+  expect(uuidv5(DNS_NAMESPACE, "www.widgets.com")).toBe("21f7f8de-8051-5b89-8680-0195ef798b6a");
+  expect(uuidv5(DNS_NAMESPACE, "python.org")).toBe("886313e1-3b8a-5372-9b90-0c9aee199e5d");
+  expect(() => uuidv5("not-a-uuid", "x")).toThrow();
+});
+
+it("normalizes formatVersion 2 slug-based dataset definitions deterministically", () => {
+  const v2 = {
+    formatVersion: 2,
+    datasetId: id(1),
+    name: "Expenses",
+    tables: [
+      {
+        sqlName: "categories",
+        primaryKey: "id",
+        fields: [
+          { sqlColumn: "id", type: "text" },
+          { sqlColumn: "title", name: "Title", type: "text", required: true },
+        ],
+      },
+      {
+        name: "Expense rows",
+        sqlName: "expenses",
+        primaryKey: "id",
+        fields: [
+          { sqlColumn: "id", type: "text" },
+          { sqlColumn: "amount", name: "Amount", type: "number", required: true },
+          {
+            sqlColumn: "category_id",
+            type: "relation",
+            relation: { table: "categories", field: "id" },
+          },
+          { name: "Approve", type: "button" },
+        ],
+      },
+    ],
+    operations: [
+      {
+        name: "listExpenses",
+        table: "expenses",
+        kind: "read",
+        fields: ["id", "amount", "category_id"],
+      },
+      {
+        name: "addExpense",
+        label: "Add expense",
+        table: "expenses",
+        kind: "create",
+        access: "link",
+        fields: ["id", "amount"],
+      },
+      { name: "deleteExpense", table: "expenses", kind: "delete" },
+    ],
+  };
+
+  const canonical = parseDatasetDefinition(v2, { descriptorPath: "budget/expenses/dataset.json" });
+  expect(canonical.formatVersion).toBe(1);
+  expect(canonical.schemaPath).toBe("budget/expenses/schema.sql");
+  expect(canonical.operationsPath).toBe("budget/expenses/operations.js");
+  expect(canonical.tables[0]!.tableId).toBe(uuidv5(id(1), "table:categories"));
+  expect(canonical.tables[1]!.fields[0]).toMatchObject({
+    fieldId: uuidv5(id(1), "field:expenses:id"),
+    required: true,
+    unique: true,
+  });
+  expect(column(canonical.tables[1]!.fields[2]).relation).toEqual({
+    datasetId: id(1),
+    tableId: uuidv5(id(1), "table:categories"),
+    fieldId: uuidv5(id(1), "field:categories:id"),
+    many: false,
+  });
+  expect(canonical.operations[0]).toMatchObject({
+    operationId: uuidv5(id(1), "op:listExpenses"),
+    access: "owner",
+    readOnly: true,
+    label: "listExpenses",
+  });
+  expect(canonical.operations[1]).toMatchObject({
+    access: "link",
+    readOnly: false,
+    label: "Add expense",
+  });
+  expect(canonical.operations[2]!.fieldIds).toEqual([]);
+
+  // Display-name edits and field reordering preserve stable derived UUIDv5 IDs.
+  const renamed = structuredClone(v2);
+  renamed.tables[1]!.fields[1]!.name = "Total USD";
+  renamed.tables[1]!.fields.push({ sqlColumn: "note", type: "text" } as never);
+  const canonicalRenamed = parseDatasetDefinition(renamed, {
+    descriptorPath: "budget/expenses/dataset.json",
+  });
+  expect(canonicalRenamed.tables[1]!.fields[1]!.fieldId).toBe(
+    canonical.tables[1]!.fields[1]!.fieldId,
+  );
+  expect(canonicalRenamed.operations[0]!.operationId).toBe(canonical.operations[0]!.operationId);
+
+  // Refuses traversal, wildcards, missing datasetId, and mixed table/fields selectors.
+  for (const broken of [
+    { ...v2, datasetId: undefined },
+    { ...v2, schemaPath: "../escape.sql" },
+    { ...v2, operationsPath: "/abs.js" },
+    {
+      ...v2,
+      operations: [{ name: "bad", table: "expenses", kind: "read", fields: ["*"] }],
+    },
+    {
+      ...v2,
+      operations: [{ name: "bad", table: "missing", kind: "read", fields: ["id"] }],
+    },
+    {
+      ...v2,
+      operations: [{ name: "bad", table: "expenses", kind: "read", fields: ["Approve"] }],
+    },
+    {
+      ...v2,
+      operations: [
+        { name: "bad", table: "expenses", tableId: id(9), kind: "read", fields: ["id"] },
+      ],
+    },
+    {
+      ...v2,
+      tables: [
+        {
+          sqlName: "t",
+          primaryKey: "id",
+          fields: [{ sqlColumn: "id", type: "text", required: false }],
+        },
+      ],
+      operations: [{ name: "r", table: "t", kind: "read", fields: ["id"] }],
+    },
+  ]) {
+    expect(() =>
+      parseDatasetDefinition(broken, { descriptorPath: "budget/expenses/dataset.json" }),
+    ).toThrow();
+  }
+});
+
+it("resolves named operations and auto-pinned revisions from app.publish.json dataset references", () => {
+  const approved = revision();
+  const ref = parseAppDatasetReference({
+    kind: "dataset",
+    datasetPath: "budget/dataset.json",
+    operations: ["submit", "list"],
+    createFields: [{ operation: "submit", fields: ["name"] }],
+  });
+  const pinned = resolveAppDatasetReferenceBinding(ref, approved.datasetId, approved);
+  expect(pinned).toEqual({
+    kind: "dataset",
+    datasetId: approved.datasetId,
+    revision: approved.revision,
+    revisionSha256: approved.revisionSha256,
+    operationIds: [id(5), id(6)],
+    createFields: [{ operationId: id(5), fieldIds: [id(4)] }],
+  });
+
+  // Unknown operation or field names produce clear errors.
+  expect(() =>
+    resolveAppDatasetReferenceBinding(
+      parseAppDatasetReference({
+        kind: "dataset",
+        datasetPath: "budget/dataset.json",
+        operations: ["doesNotExist"],
+      }),
+      approved.datasetId,
+      approved,
+    ),
+  ).toThrow(/has no operation named "doesNotExist"/);
+
+  // Invalid combinations are refused at parse time.
+  for (const invalid of [
+    { kind: "dataset", datasetPath: "budget/dataset.json", revision: 1, operations: ["submit"] },
+    {
+      kind: "dataset",
+      datasetPath: "budget/dataset.json",
+      revisionSha256: approved.revisionSha256,
+      operations: ["submit"],
+    },
+    {
+      kind: "dataset",
+      datasetPath: "budget/dataset.json",
+      operations: ["submit"],
+      operationIds: [id(5)],
+    },
+    {
+      kind: "dataset",
+      datasetPath: "budget/dataset.json",
+      operations: ["submit"],
+      linkReads: [{ operationId: id(6), fieldIds: [id(3)] }],
+    },
+    {
+      kind: "dataset",
+      datasetPath: "budget/dataset.json",
+      operations: ["submit"],
+      createFields: [{ operation: "submit", fields: ["*"] }],
+    },
+  ]) {
+    expect(() => parseAppDatasetReference(invalid)).toThrow();
+  }
 });

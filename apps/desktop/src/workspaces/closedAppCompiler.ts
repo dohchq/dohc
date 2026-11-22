@@ -461,6 +461,42 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
                 });
                 if (path === ".." || path.startsWith("../"))
                   return refuse(", which is outside the workspace.");
+                if (!css && !inputs.has(path) && extension(path) === "") {
+                  const candidates = [
+                    ".tsx",
+                    ".ts",
+                    ".jsx",
+                    ".js",
+                    "/index.tsx",
+                    "/index.ts",
+                    "/index.jsx",
+                    "/index.js",
+                  ]
+                    .map((suffix) =>
+                      path === "." && suffix.startsWith("/")
+                        ? suffix.slice(1)
+                        : posix.normalize(`${path}${suffix}`),
+                    )
+                    .filter(
+                      (candidate) =>
+                        candidate !== ".." &&
+                        !candidate.startsWith("../") &&
+                        isPortableNamePath(candidate) &&
+                        inputs.has(candidate),
+                    );
+                  if (candidates.length === 1) return { path: candidates[0]!, namespace };
+                  if (candidates.length > 1) {
+                    return refuse(
+                      `, which matches multiple files (${candidates.join(", ")}). Add the file extension to choose one.`,
+                    );
+                  }
+                  if (path !== "." && !isPortableNamePath(path)) {
+                    return refuse(`. ${appSourceNameAdvice(path)}`);
+                  }
+                  return refuse(
+                    ", which is not in the app. Add the file, or list it in app.publish.json.",
+                  );
+                }
                 if (!isPortableNamePath(path)) return refuse(`. ${appSourceNameAdvice(path)}`);
                 if (!acceptedTypes.has(extension(path)))
                   return refuse(
