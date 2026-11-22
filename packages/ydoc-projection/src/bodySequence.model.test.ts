@@ -4,6 +4,14 @@ import * as Y from "yjs";
 const REMOTE = Symbol("remote");
 const LOCAL = Symbol("local");
 const FIELD = "sequence";
+const BLOCK = "block";
+
+function boundary(attrs: Record<string, unknown>) {
+  const element = new Y.XmlElement(BLOCK);
+  for (const [key, value] of Object.entries(attrs))
+    element.setAttribute(key, value as unknown as string);
+  return element;
+}
 
 type Id = string;
 const idOf = (client: number, clock: number): Id => `${String(client)}:${String(clock)}`;
@@ -30,8 +38,8 @@ function read(text: Y.Text): Token[] {
           text: content.str[at]!,
           marks: on,
         });
-    } else if (content instanceof Y.ContentType) {
-      const attrs = (content.type as Y.Map<unknown>).toJSON() as Record<string, unknown>;
+    } else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
+      const attrs = content.type.getAttributes() as Record<string, unknown>;
       tokens.push({
         kind: "boundary",
         id: idOf(item.id.client, item.id.clock),
@@ -276,14 +284,9 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
       return local(() => text.delete(index, length), { chars: -length });
     },
     splitAt(index: number, attrs: Record<string, unknown> = { type: "paragraph" }) {
-      return local(
-        () => {
-          const boundary = new Y.Map<unknown>();
-          for (const [key, value] of Object.entries(attrs)) boundary.set(key, value);
-          text.insertEmbed(index, boundary, attrsAt(index));
-        },
-        { boundaries: 1 },
-      );
+      return local(() => text.insertEmbed(index, boundary(attrs), attrsAt(index)), {
+        boundaries: 1,
+      });
     },
     joinAt(index: number) {
       if (tokens()[index]?.kind !== "boundary") throw new Error("not a boundary");
@@ -297,8 +300,9 @@ function person(baseline: Uint8Array, clientID: number, oracle: Oracle, gc = tru
         for (let item = text._start; item !== null; item = item.right) {
           if (item.deleted || !item.countable) continue;
           if (at === index && item.content instanceof Y.ContentType) {
-            const map = item.content.type as Y.Map<unknown>;
-            for (const [key, value] of Object.entries(attrs)) map.set(key, value);
+            const element = item.content.type as Y.XmlElement;
+            for (const [key, value] of Object.entries(attrs))
+              element.setAttribute(key, value as unknown as string);
             return;
           }
           at += item.length;
@@ -336,9 +340,7 @@ function note(...lines: string[]): Uint8Array {
   doc.clientID = 1;
   const text = doc.getText(FIELD);
   for (const line of lines) {
-    const boundary = new Y.Map<unknown>();
-    boundary.set("type", "paragraph");
-    text.insertEmbed(text.length, boundary, {});
+    text.insertEmbed(text.length, boundary({ type: "paragraph" }), {});
     text.insert(text.length, line, {});
   }
   const baseline = Y.encodeStateAsUpdate(doc);
