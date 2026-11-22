@@ -467,28 +467,101 @@ it("saves a shared editor's taken edit under the access they typed with, after i
   expect(principals(f)).toEqual([["named", "reader", "grant", 4]]);
 });
 
-it("saves one sender's run under one access, and never joins two senders or two accesses", () => {
-  const edit = (sender: LiveAuthorSnapshot, authority: LiveRoomAuthority = owner, size = 1) => ({
-    sender,
-    authority,
-    bytes: new Uint8Array(size),
-  });
+it("saves one sender's edits under one access, and never joins two senders or two accesses", () => {
+  const pages = new Map<string, Y.Doc>();
+  let key = 0;
+  const edit = (sender: LiveAuthorSnapshot, authority: LiveRoomAuthority = owner, size = 1) => {
+    const page = pages.get(JSON.stringify(sender)) ?? new Y.Doc();
+    pages.set(JSON.stringify(sender), page);
+    const before = Y.encodeStateVector(page);
+    page.getMap("frontmatter").set(`k${(key += 1)}`, "v".repeat(size));
+    return { sender, authority, bytes: Y.encodeStateAsUpdate(page, before) };
+  };
   const pair: LiveAuthorSnapshot = [
     ...ben,
     { kind: "agent", agentId: "helper", agentName: "Helper", onBehalfOf: "ben" },
   ] as LiveAuthorSnapshot;
-  expect(nextSave([edit(pair), edit(pair)], 100)).toBe(2);
-  expect(nextSave([edit(pair), edit(ana)], 100)).toBe(1);
-  expect(nextSave([edit(ana), edit(ana, readerAccess)], 100)).toBe(1);
+  expect(nextSave([edit(pair), edit(pair)], 100)).toEqual([0, 1]);
+  expect(nextSave([edit(pair), edit(ana)], 100)).toEqual([0]);
+  expect(nextSave([edit(ana), edit(ana, readerAccess)], 100)).toEqual([0]);
+  expect(nextSave([edit(ana), edit(ana, readerAccess), edit(ana)], 100)).toEqual([0]);
   expect(
     nextSave([edit(ana, readerAccess), edit(ana, { ...readerAccess, grantGeneration: 5 })], 100),
-  ).toBe(1);
+  ).toEqual([0]);
   const nobody: LiveAuthorSnapshot = [{ kind: "unattributed" }];
-  expect(nextSave([edit(ana), edit(nobody), edit(ana)], 100)).toBe(1);
-  expect(nextSave([edit(nobody), edit(nobody)], 100)).toBe(2);
+  expect(nextSave([edit(ana), edit(nobody), edit(ana)], 100)).toEqual([0, 2]);
+  expect(nextSave([edit(nobody), edit(nobody)], 100)).toEqual([0, 1]);
   // A save stays under the largest update the engine passes on, whatever its first edit.
-  expect(nextSave([edit(ana, undefined, 60), edit(ana, undefined, 60)], 100)).toBe(1);
-  expect(nextSave([edit(ana, undefined, 160)], 100)).toBe(1);
+  expect(nextSave([edit(ana, undefined, 60), edit(ana, undefined, 60)], 100)).toEqual([0]);
+  expect(nextSave([edit(ana, undefined, 160)], 100)).toEqual([0]);
+});
+
+it("saves each person's edits together while two people type side by side, and tells the owner every row through which all are saved", async () => {
+  const f = note();
+  const engine: Engine = {};
+  const room = rooms(f, { saveEveryMs: 20 }, engine);
+  const owner = ownerDesktop(f, room),
+    a = editor(f, room, ana),
+    b = editor(f, room, ben);
+  await owner.open();
+  await a.open();
+  await b.open();
+  // Taken one after the other with nothing between, as two pages typing at once.
+  const rows = (
+    await Promise.all(
+      ["0", "1", "2"].flatMap((n) => [
+        a.submit(a.change(`ana${n}`, n)),
+        b.submit(b.change(`ben${n}`, n)),
+      ]),
+    )
+  ).map(position);
+  const frames = [];
+  for (let index = 0; index < rows.length + 2; index += 1) frames.push(await owner.next());
+  expect(frames.slice(0, rows.length)).toEqual(
+    rows.map((journalCursor) => ({ journalCursor, roomRow: true })),
+  );
+  // Ana's save holds rows 1, 3 and 5, so every row is saved only through her first.
+  expect(frames.slice(rows.length).map((frame) => frame.rowsThrough)).toEqual([
+    rows[0],
+    rows.at(-1),
+  ]);
+  expect(engine.saves).toBe(2);
+  expect(savedAuthors(f)).toEqual([ana, ben]);
+  expect(unsaved(f)).toEqual([]);
+  expect(owner.doc.getMap("frontmatter").toJSON()).toEqual({
+    ana0: "0",
+    ben0: "0",
+    ana1: "1",
+    ben1: "1",
+    ana2: "2",
+    ben2: "2",
+  });
+});
+
+it("leaves a person's edit that builds on someone else's unsaved edit for a save after theirs", async () => {
+  const f = note();
+  const room = rooms(f);
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben),
+    // Ana's second page, which sees Ben's edit before she types over it.
+    again = editor(f, room, ana);
+  await a.open();
+  await b.open();
+  await again.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await b.next();
+  await again.next();
+  expect((await b.submit(b.change("title", "Porto"))).result).toBe("success");
+  await again.next();
+  expect((await again.submit(again.change("title", "Faro"))).result).toBe("success");
+  for (const page of [a, b, again]) page.session.close();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(savedAuthors(f)).toEqual([ana, ben, ana]);
+  expect(pauses(f)).toEqual([]);
+  const saved = new Y.Doc();
+  Y.applyUpdate(saved, Y.encodeStateAsUpdate(f.doc));
+  for (const row of f.journalRows().journal) Y.applyUpdate(saved, rowBytes(row));
+  expect(saved.getMap("frontmatter").get("title")).toBe("Faro");
 });
 
 it("counts a committed save whose engine answer never comes, and goes on saving", async () => {

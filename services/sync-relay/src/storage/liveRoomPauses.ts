@@ -9,7 +9,7 @@ import {
   type LiveUpdateRefusal,
 } from "@dohc/live-session-contract/live-update-admission";
 import type { StorageContext } from "./context";
-import { deleteSavedLiveRoomEdits, initializeRoomMigration } from "./liveRoomEdits";
+import { deleteLiveRoomEdits, initializeRoomMigration } from "./liveRoomEdits";
 import { documentParams } from "./liveUpdateJournal";
 import type { SqliteDb } from "./types";
 
@@ -89,7 +89,7 @@ export function pauseLiveRoom(
   const named = JSON.stringify(input.named);
   const pauseId = randomUUID();
   storage.tx(() => {
-    deleteSavedLiveRoomEdits(storage, document, Number.MAX_SAFE_INTEGER);
+    deleteLiveRoomEdits(storage, document);
     const saved = storage.db
       .prepare(
         "SELECT COALESCE(MAX(journal_cursor),0) AS cursor FROM sync_relay_live_update_journal WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?",

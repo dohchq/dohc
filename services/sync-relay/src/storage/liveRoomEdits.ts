@@ -65,8 +65,8 @@ export function initializeRoomMigration(
     Date.now(),
   );
 }
-// Each room save's journal row, with the last room position it holds. An owner who catches up on
-// the journal after its room closed reads it, to let go of the room edits the save holds.
+// Each room save's journal row, with the room position through which every edit is saved. An owner
+// who catches up on the journal after its room closed reads it, to let go of those room edits.
 export const LIVE_ROOM_SAVES = "sync_relay_live_room_saves";
 const saves = {
   [LIVE_ROOM_SAVES]: `CREATE TABLE ${LIVE_ROOM_SAVES} (
@@ -220,15 +220,24 @@ export function liveRoomEdits(storage: StorageContext, document: LiveDocumentKey
     }));
 }
 
+/** Deletes every edit a note's room took. Runs inside the transaction that pauses the note. */
+export function deleteLiveRoomEdits(storage: StorageContext, document: LiveDocumentKey): void {
+  storage.db
+    .prepare(`DELETE FROM ${LIVE_ROOM_EDITS} WHERE ${DOCUMENT}`)
+    .run(...documentParams(document));
+}
+
 /** Deletes a note's saved edits. Runs inside the journal transaction that commits their save. */
 export function deleteSavedLiveRoomEdits(
   storage: StorageContext,
   document: LiveDocumentKey,
-  throughPosition: number,
+  positions: readonly number[],
 ): void {
   storage.db
-    .prepare(`DELETE FROM ${LIVE_ROOM_EDITS} WHERE ${DOCUMENT} AND position<=?`)
-    .run(...documentParams(document), throughPosition);
+    .prepare(
+      `DELETE FROM ${LIVE_ROOM_EDITS} WHERE ${DOCUMENT} AND position IN (SELECT value FROM json_each(?))`,
+    )
+    .run(...documentParams(document), JSON.stringify(positions));
 }
 
 /** Records a room save's journal row. Runs inside the journal transaction that commits it. */
