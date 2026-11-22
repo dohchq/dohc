@@ -256,6 +256,8 @@ function moveRefusal(error: unknown, path: string, folder: boolean): Error | nul
 }
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
+// No file event says a program let go of a rule file, so while one holds it the poll comes sooner.
+export const LOCKED_ACCESS_RULE_POLL_MS = 1_000;
 
 export async function probeEngineStoreRefusal(
   workspace: AttachedEngineWorkspace,
@@ -5134,14 +5136,19 @@ export function createWorkspaceEngineCapture(
     }
   }
 
-  function pollDaemonCaptureHealth(): void {
-    if (stopped || daemonCaptureHealthTimer !== null) return;
+  function scheduleDaemonCaptureHealth(ms: number): void {
+    if (daemonCaptureHealthTimer !== null) clearTimeout(daemonCaptureHealthTimer);
     const timer = setTimeout(() => {
       if (daemonCaptureHealthTimer === timer) daemonCaptureHealthTimer = null;
       pollDaemonCaptureHealth();
-    }, DAEMON_CAPTURE_HEALTH_POLL_MS);
+    }, ms);
     daemonCaptureHealthTimer = timer;
     daemonCaptureHealthTimer.unref?.();
+  }
+
+  function pollDaemonCaptureHealth(): void {
+    if (stopped || daemonCaptureHealthTimer !== null) return;
+    scheduleDaemonCaptureHealth(DAEMON_CAPTURE_HEALTH_POLL_MS);
     if (daemonCaptureHealthQueued) return;
     daemonCaptureHealthQueued = true;
     enqueue("daemon capture health", () =>
@@ -5161,6 +5168,8 @@ export function createWorkspaceEngineCapture(
           options.onHeldFiles?.(status.heldFiles);
           options.onOutsideChanges?.(outsideChangesOf(status));
           options.onHeldAccessRules?.(status.heldAccessRules);
+          if (!stopped && status.heldAccessRules?.some((hold) => hold.unreadable === "locked"))
+            scheduleDaemonCaptureHealth(LOCKED_ACCESS_RULE_POLL_MS);
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
         const healthy = captureWorks(status);
