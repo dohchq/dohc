@@ -1,7 +1,9 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
+import { prosemirrorJSONToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
+import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import {
   BLOCK_ELEMENT,
   BODY_CONTAINERS_FIELD,
@@ -9,12 +11,19 @@ import {
   recordsOfContainer,
 } from "./bodySequenceGrammar.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
-import { getDohcProseMirrorSchema } from "./import-export.js";
+import { getDohcProseMirrorSchema, yDocToMarkdown } from "./import-export.js";
 
 const schema = getDohcProseMirrorSchema();
 const FILE = fileURLToPath(new URL("./fixtures/body-sequence.json", import.meta.url));
+const UPDATES_FILE = fileURLToPath(
+  new URL("./fixtures/body-sequence-updates.json", import.meta.url),
+);
+const WRITE_FIXTURES = process.env.BODY_SEQUENCE_WRITE_FIXTURES === "1";
 
-type Fixture = { name: string; update: string; document: unknown };
+type Fixture = { name: string; update: string; document: unknown; markdown: string };
+
+const base64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
+const named = (key: string, value: unknown) => Object.fromEntries([[key, value]]);
 
 function note(clientID: number, from?: Uint8Array) {
   const doc = new Y.Doc({ gc: false });
@@ -39,8 +48,27 @@ function note(clientID: number, from?: Uint8Array) {
     text(text: string, marks: Record<string, unknown> = {}) {
       sequence.insert(sequence.length, text, marks);
     },
-    item(name: string, attrs: Record<string, unknown>) {
-      sequence.insertEmbed(sequence.length, element(name, attrs), {});
+    item(name: string, attrs: Record<string, unknown>, marks: Record<string, unknown> = {}) {
+      sequence.insertEmbed(sequence.length, element(name, attrs), marks);
+    },
+    embedded(value: unknown) {
+      doc.transact((transaction) => {
+        let last = sequence._start;
+        while (last?.right) last = last.right;
+        new Y.Item(
+          Y.createID(doc.clientID, Y.getState(doc.store, doc.clientID)),
+          last,
+          last && last.lastId,
+          null,
+          null,
+          sequence,
+          null,
+          new Y.ContentEmbed(value as object),
+        ).integrate(transaction, 0);
+      });
+    },
+    label(text: string) {
+      this.line({ type: "paragraph", path: [] }, text);
     },
     container(id: string, type: string, attrs: Record<string, unknown> = {}) {
       for (const [key, value] of recordsOfContainer(schema, { id, type, attrs }))
@@ -111,6 +139,539 @@ function built(): Record<string, Y.Doc> {
   odd.text("on", { bold: {} });
   odd.text("off", { bold: true, italic: null, "bold--abcdefgh": {} });
 
+  const astral = note(7);
+  astral.text("😀");
+  astral.line({ type: "paragraph", path: [] }, "𝒳");
+  astral.item("hardBreak", {});
+  astral.text("𝒴");
+  astral.item("wikilink", { target: "𝒵", label: "😀" });
+  astral.text("👩‍👩‍👧");
+  astral.item("mathInline", { tex: "𝔼" });
+  astral.line({ type: "heading", level: 3, path: [] }, "🧪");
+  astral.item("image", { src: "a.png", alt: "🖼" });
+  astral.text("🧪");
+  astral.line({ type: "codeBlock", language: "ts", path: [] }, "𝓍 = '😀'");
+  astral.line({ type: "paragraph", path: [] }, "a ");
+  astral.text("😀", { bold: {} });
+  astral.text(" b");
+  astral.line({ type: "paragraph", path: [] }, "😀");
+
+  const marks = note(8);
+  marks.line({ type: "paragraph", path: [] }, "each:");
+  for (const name of ["bold", "italic", "strike", "underline", "highlight", "code"]) {
+    marks.text(" ");
+    marks.text(name, { [name]: {} });
+  }
+  marks.line({ type: "paragraph", path: [] });
+  marks.text("a link", {
+    link: {
+      href: "https://example.com/a",
+      target: "_self",
+      rel: "author",
+      class: "external",
+      title: "A title",
+    },
+  });
+  marks.text(", ");
+  marks.text("a link with no address", { link: {} });
+  marks.text(", ");
+  marks.text("a link a reader repairs", {
+    link: { href: 3, target: null, rel: null, class: 4, title: ["t"], more: "x" },
+  });
+  marks.text(", ");
+  marks.text("a link whose values are no text", {
+    link: { href: [], target: 1, rel: 2.5, class: true, title: {} },
+  });
+  marks.line({ type: "paragraph", path: [] });
+  marks.text("bold and italic", { bold: {}, italic: {} });
+  marks.text(", ");
+  marks.text("a struck link", { strike: {}, link: { href: "https://example.com/b" } });
+  marks.text(", ");
+  marks.text("code alone", {
+    code: {},
+    bold: {},
+    italic: {},
+    strike: {},
+    underline: {},
+    highlight: {},
+    link: { href: "https://example.com/c" },
+  });
+  marks.text(", ");
+  marks.text("all but code", {
+    bold: {},
+    italic: {},
+    strike: {},
+    underline: {},
+    highlight: {},
+    link: { href: "https://example.com/d" },
+  });
+  marks.line({ type: "heading", level: 2, path: [] }, "A heading with ");
+  marks.text("marks", { italic: {} });
+  marks.line({ type: "codeBlock", language: null, path: [] }, "no marks in code", {
+    bold: {},
+    link: { href: "https://example.com/e" },
+  });
+  marks.line({ type: "paragraph", path: [] }, "on for an object: ");
+  marks.text("with a key no mark has", { bold: { weight: 900 } });
+  marks.text(", off for anything else: ");
+  for (const [at, value] of [true, 1, "yes", [], [{}], 0, false].entries())
+    marks.text(String(at), { bold: value });
+  marks.text(", off for a name that is no mark: ");
+  marks.text("hashed", { "bold--abcdefgh": {} });
+  marks.text(" ");
+  marks.text("other names", { strong: {}, em: {}, strikethrough: {}, Bold: {} });
+  marks.text(" ");
+  marks.text("a key named __proto__", named("__proto__", { bold: {} }));
+  marks.text(" ");
+  marks.text("link", named("link", named("__proto__", { href: "https://example.com/f" })));
+  marks.line({ type: "paragraph", path: [] }, "a mark runs ");
+  const markedFrom = marks.sequence.length;
+  marks.text("over a break");
+  marks.item("hardBreak", {});
+  marks.text("to the end of this line");
+  marks.line({ type: "paragraph", path: [] }, "and on into the next");
+  marks.sequence.format(markedFrom, marks.sequence.length - markedFrom, { italic: {} });
+  marks.text(", then stops");
+  marks.item(BLOCK_ELEMENT, { type: "paragraph", path: [] }, { bold: {} });
+  marks.text("plain after a boundary stored with a mark, and beside an item stored with one: ");
+  marks.item("wikilink", { target: "Page" }, { bold: {}, link: { href: "https://example.com/g" } });
+
+  const inline = note(10);
+  inline.line({ type: "paragraph", path: [] }, "a break");
+  inline.item("hardBreak", {});
+  inline.text("an image ");
+  inline.item("image", { src: "https://example.com/a.png", alt: "An image", title: "Its title" });
+  inline.text(", an escape ");
+  inline.item("escapedPunctuation", { value: "*" });
+  inline.text(", a wikilink ");
+  inline.item("wikilink", { target: "Page", label: "Label" });
+  inline.text(", an atom ");
+  inline.item("inlineAtom", { atomId: "date", params: "", source: "" });
+  inline.text(", an atom with its source ");
+  inline.item("inlineAtom", { atomId: "date", params: "short", source: "atom:date short" });
+  inline.text(", math ");
+  inline.item("mathInline", { tex: "x^2" });
+  inline.text(" and raw ");
+  inline.item("rawInline", { source: "<kbd>K</kbd>" });
+  inline.text(".");
+  inline.line({ type: "heading", level: 2, path: [] }, "In a heading: ");
+  inline.item("wikilink", { target: "Page" });
+  inline.text(" ");
+  inline.item("mathInline", { tex: "y" });
+  inline.text(" ");
+  inline.item("image", { src: "b.png", alt: "b" });
+  inline.text(" ");
+  inline.item("escapedPunctuation", { value: "#" });
+  inline.text(" ");
+  inline.item("inlineAtom", { atomId: "x" });
+  inline.text(" ");
+  inline.item("rawInline", { source: "<b>" });
+  inline.line({ type: "paragraph", path: [] });
+  inline.item("wikilink", { target: "First in its line" });
+  inline.item("wikilink", { target: "Next to another" });
+
+  const leaves = note(11);
+  leaves.line({ type: "paragraph", path: [] }, "a paragraph");
+  for (const level of [1, 2, 3, 4, 5, 6])
+    leaves.line({ type: "heading", level, path: [] }, `a heading at level ${String(level)}`);
+  leaves.line({ type: "codeBlock", language: "rust", path: [] }, "fn main() {}\n\nlet x = 1;");
+  leaves.line({ type: "codeBlock", language: null, path: [] });
+  leaves.line({ type: "horizontalRule", path: [] });
+  leaves.line({ type: "mathBlock", tex: "\\frac{a}{b}", path: [] });
+  leaves.line({ type: "rawBlock", source: "<div>raw</div>", path: [] });
+  leaves.line({ type: "paragraph", path: [] });
+  leaves.line({ type: "heading", level: 2, path: [] });
+  leaves.line({ type: "paragraph", path: [] }, "a last paragraph");
+
+  const HOLDERS: Record<string, string[]> = {
+    blockquote: ["blockquote"],
+    callout: ["callout"],
+    listItem: ["bulletList", "listItem"],
+    taskItem: ["taskList", "taskItem"],
+    tableCell: ["table", "tableRow", "tableCell"],
+    tableHeader: ["table", "tableRow", "tableHeader"],
+  };
+  const HELD: Record<string, string[]> = {
+    blockquote: ["blockquote"],
+    callout: ["callout"],
+    bulletList: ["bulletList", "listItem"],
+    orderedList: ["orderedList", "listItem"],
+    taskList: ["taskList", "taskItem"],
+    table: ["table", "tableRow", "tableCell"],
+  };
+  const holding = Object.entries(HOLDERS).map(([holder, outer], client) => {
+    const made = note(12 + client);
+    for (const [held, inner] of Object.entries(HELD)) {
+      made.label(`${held} in ${holder}:`);
+      const path = [...outer, ...inner].map((type, depth) => {
+        const id = `${holder}-${held}-${String(depth)}`;
+        made.container(id, type);
+        return id;
+      });
+      made.line({ type: "paragraph", path: path.slice(0, outer.length) }, `the ${holder}`);
+      made.line({ type: "paragraph", path }, `the ${held} in it`);
+      made.line({ type: "paragraph", path: path.slice(0, outer.length) }, `the ${holder} again`);
+    }
+    return [`what a ${holder} holds`, made.doc] as const;
+  });
+
+  const values = note(18);
+  const stored = (value: unknown) =>
+    typeof value === "bigint"
+      ? `BigInt ${String(value)}`
+      : typeof value === "string"
+        ? `the string ${JSON.stringify(value)}`
+        : Array.isArray(value)
+          ? `an array of ${String(value.length)}`
+          : typeof value === "object" && value !== null
+            ? "an object"
+            : String(value);
+  for (const level of [
+    1,
+    6,
+    2n,
+    0,
+    7,
+    2.5,
+    -1,
+    "2",
+    true,
+    null,
+    undefined,
+    [2],
+    { level: 2 },
+    2n ** 60n,
+    -(2n ** 60n),
+    -3n,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])
+    values.line({ type: "heading", level, path: [] }, `level stored as ${stored(level)}`);
+  for (const [at, start] of [
+    0,
+    7,
+    999_999_999,
+    3n,
+    1_000_000_000,
+    -1,
+    1.5,
+    "3",
+    null,
+    2n ** 60n,
+  ].entries()) {
+    const list = `start-${String(at)}`;
+    values.label(`a list whose start is stored as ${stored(start)}:`);
+    values.container(list, "orderedList");
+    values.records.set(`${list}.start`, start);
+    for (const item of ["a", "b"]) {
+      values.container(`${list}-${item}`, "listItem");
+      values.line({ type: "paragraph", path: [list, `${list}-${item}`] }, `item ${item}`);
+    }
+  }
+  for (const [at, loose] of [true, false, "yes", 1, null].entries())
+    for (const kind of ["bulletList", "orderedList", "taskList"]) {
+      const list = `loose-${kind}-${String(at)}`;
+      values.label(`a ${kind} whose loose is stored as ${stored(loose)}:`);
+      values.container(list, kind);
+      values.records.set(`${list}.loose`, loose);
+      values.records.set(`${list}.type`, at === 0 ? "a" : at);
+      for (const item of ["a", "b"]) {
+        values.container(`${list}-${item}`, "listItem");
+        values.line({ type: "paragraph", path: [list, `${list}-${item}`] }, `item ${item}`);
+      }
+    }
+  values.label("to-dos whose tick is stored as different values:");
+  values.container("ticks", "taskList");
+  for (const [at, checked] of [true, false, "true", 1, null, undefined, 1n].entries()) {
+    const item = `tick-${String(at)}`;
+    values.records.set(item, "taskItem");
+    values.records.set(`${item}.checked`, checked);
+    values.line({ type: "paragraph", path: ["ticks", item] }, `stored as ${stored(checked)}`);
+  }
+  for (const [at, [calloutType, title, fold]] of (
+    [
+      ["tip", "A title", "+"],
+      ["warning", "", "-"],
+      [3, 7, "x"],
+      [null, null, null],
+      ["", "kept", ""],
+      [undefined, undefined, 1],
+    ] as const
+  ).entries()) {
+    const callout = `callout-${String(at)}`;
+    values.label(
+      `a callout stored with ${stored(calloutType)}, ${stored(title)} and ${stored(fold)}:`,
+    );
+    values.records.set(callout, "callout");
+    values.records.set(`${callout}.calloutType`, calloutType);
+    values.records.set(`${callout}.title`, title);
+    values.records.set(`${callout}.fold`, fold);
+    values.line({ type: "paragraph", path: [callout] }, "inside it");
+  }
+  values.label("a table whose cells and rows are stored with different values:");
+  values.container("grid", "table");
+  const cells: [string, unknown][][] = [
+    [
+      ["colspan", 2],
+      ["rowspan", 1000],
+      ["colwidth", [120, 0, 20.5]],
+      ["align", "left"],
+    ],
+    [
+      ["colspan", 2n],
+      ["rowspan", 3n],
+      ["colwidth", [100n, 20]],
+      ["align", "right"],
+    ],
+    [
+      ["colspan", 0],
+      ["rowspan", 1001],
+      ["colwidth", []],
+      ["align", "center"],
+    ],
+    [
+      ["colspan", 1.5],
+      ["rowspan", "2"],
+      ["colwidth", [-1]],
+      ["align", "justify"],
+    ],
+    [
+      ["colspan", null],
+      ["rowspan", -2n],
+      ["colwidth", [1, undefined]],
+      ["align", 1],
+    ],
+    [
+      ["colspan", 2n ** 60n],
+      ["rowspan", true],
+      ["colwidth", [1, "2"]],
+      ["align", null],
+    ],
+    [
+      ["colwidth", [Number.POSITIVE_INFINITY]],
+      ["align", ""],
+    ],
+    [["colwidth", [Number.NaN]]],
+    [["colwidth", Array.from({ length: 1000 }, () => 1)]],
+    [["colwidth", Array.from({ length: 1001 }, () => 1)]],
+    [["colwidth", "wide"]],
+    [["colwidth", [2n ** 60n]]],
+    [["colwidth", [[1]]]],
+    [["colwidth", 120]],
+  ];
+  for (const [at, height] of [40, 1_000_000, 40n, null, 0, 1_000_001, 1.5, "40", -1].entries()) {
+    const row = `row-${String(at)}`;
+    values.records.set(row, "tableRow");
+    values.records.set(`${row}.height`, height);
+    for (const kind of ["tableHeader", "tableCell"]) {
+      const records = cells[(at * 2 + (kind === "tableCell" ? 1 : 0)) % cells.length]!;
+      const cell = `${row}-${kind}`;
+      values.records.set(cell, kind);
+      for (const [key, value] of records) values.records.set(`${cell}.${key}`, value);
+      values.line(
+        { type: "paragraph", path: ["grid", row, cell] },
+        `${String(at)} ${kind === "tableCell" ? "cell" : "header"}`,
+      );
+    }
+  }
+  values.label("text a reader repairs:");
+  values.line({ type: "codeBlock", language: 3, path: [] }, "a language stored as 3");
+  values.line({ type: "codeBlock", language: "", path: [] }, "a language stored as nothing");
+  values.line({ type: "mathBlock", tex: 5, path: [] });
+  values.line({ type: "mathBlock", tex: null, path: [] });
+  values.line({ type: "rawBlock", source: null, path: [] });
+  values.line({ type: "rawBlock", source: ["<p>"], path: [] });
+  values.line({ type: "paragraph", path: [] }, "items: ");
+  for (const [name, attrs] of [
+    ["image", { src: 1, alt: null, title: 2 }],
+    ["image", { src: "c.png", alt: "c", title: "" }],
+    ["wikilink", { target: null, label: 3 }],
+    ["wikilink", { target: "Page", label: "" }],
+    ["escapedPunctuation", { value: 4 }],
+    ["inlineAtom", { atomId: 5, params: null, source: {} }],
+    ["mathInline", { tex: ["x"] }],
+    ["rawInline", { source: 6 }],
+  ] as const) {
+    values.item(name, attrs);
+    values.text(" ");
+  }
+  values.text("end");
+  values.label("a name the type does not have is not read:");
+  values.line({ type: "heading", language: "ts", tex: "x", source: "y", path: [] }, "a heading");
+  values.line({ type: "paragraph", level: 3, language: "ts", path: [] }, "a paragraph");
+  values.line({ type: "codeBlock", level: 3, path: [] }, "a code block");
+  values.line(
+    Object.fromEntries([
+      ["__proto__", { type: "heading", level: 5 }],
+      ["path", []],
+    ]),
+    "a boundary with a key named __proto__",
+  );
+  values.records.set("unnamed", "blockquote");
+  values.records.set("unnamed.title", "a record no path names");
+
+  const paths = note(19);
+  for (const [id, type] of [
+    ["q", "blockquote"],
+    ["q2", "blockquote"],
+    ["L", "bulletList"],
+    ["i", "listItem"],
+    ["i2", "listItem"],
+    ["N", "taskList"],
+    ["t", "taskItem"],
+    ["O", "orderedList"],
+    ["T", "table"],
+    ["r", "tableRow"],
+    ["d", "tableCell"],
+    ["c", "callout"],
+    ["Az09_-", "blockquote"],
+    ["x".repeat(32), "blockquote"],
+    ["x".repeat(33), "blockquote"],
+    ["has space", "blockquote"],
+    ["dot.ted", "blockquote"],
+    ["", "blockquote"],
+    ["é", "blockquote"],
+    ["line\n", "blockquote"],
+  ] as const)
+    paths.container(id, type);
+  paths.records.set("number", 3);
+  paths.records.set("null", null);
+  paths.records.set("leaf", "paragraph");
+  paths.records.set("top", "doc");
+  paths.records.set("letters", "text");
+  paths.records.set("unknown", "nonsense");
+  paths.records.set("row", "tableRow");
+  paths.records.set("item", "listItem");
+  paths.records.set("todo", "taskItem");
+  paths.records.set("cell", "tableCell");
+  paths.records.set("quote", "blockquote");
+  const repaired: [string, unknown][] = [
+    ["an id of every kind of allowed letter", ["Az09_-"]],
+    ["an id of 32 letters", ["x".repeat(32)]],
+    ["an id of 33 letters", ["q", "x".repeat(33), "q2"]],
+    ["an id with a space", ["q", "has space", "q2"]],
+    ["an id with a dot", ["q", "dot.ted", "q2"]],
+    ["an empty id", ["q", "", "q2"]],
+    ["an id outside ASCII", ["q", "é", "q2"]],
+    ["an id that ends with a line break", ["q", "line\n", "q2"]],
+    ["an id that is a number", ["q", 3, "q2"]],
+    ["an id that is null", ["q", null, "q2"]],
+    ["an id that is an array", ["q", ["q2"], "q2"]],
+    ["an id used twice", ["q", "q2", "q", "c"]],
+    ["an id with no record", ["q", "missing", "q2"]],
+    ["a record that is a number", ["q", "number", "q2"]],
+    ["a record that is null", ["q", "null", "q2"]],
+    ["a record that names a block with no blocks inside", ["q", "leaf", "q2"]],
+    ["a record that names the document", ["q", "top", "q2"]],
+    ["a record that names text", ["q", "letters", "q2"]],
+    ["a record that names nothing", ["q", "unknown", "q2"]],
+    ["a row outside a table", ["q", "row", "d"]],
+    ["an item outside a list", ["q", "item"]],
+    ["a to-do outside a list", ["todo"]],
+    ["a cell recorded where a table holds a row", ["T", "cell"]],
+    ["a quote recorded as an item of a list", ["L", "quote"]],
+    ["a to-do recorded as an item of a bullet list", ["L", "todo"]],
+    ["an item recorded as an item of a to-do list", ["N", "item"]],
+    ["a quote recorded as a row of a table", ["T", "quote", "d"]],
+    ["a number recorded as an item of a list", ["L", "number"]],
+    ["a quote recorded as a cell of a row", ["T", "r", "quote"]],
+    ["a path that ends at a list", ["q", "L"]],
+    ["a path that ends at a to-do list", ["N"]],
+    ["a path that ends at a table", ["q", "T"]],
+    ["a path that ends at a row", ["q", "T", "r"]],
+    ["a path that is a string", "q"],
+    ["a path that is a number", 3],
+    ["a path that is null", null],
+    ["a path that is an object", { 0: "q", length: 1 }],
+    ["a path that is missing", undefined],
+  ];
+  for (const [text, path] of repaired) {
+    paths.label(`${text}:`);
+    paths.line(path === undefined ? { type: "paragraph" } : { type: "paragraph", path }, text);
+  }
+  paths.label("a path of 70 quotes keeps 64:");
+  const deep = Array.from({ length: 70 }, (_, depth) => `deep-${String(depth)}`);
+  for (const id of deep) paths.records.set(id, "blockquote");
+  paths.line({ type: "paragraph", path: deep }, "64 deep");
+  paths.label("lines that name one id share its container while they are neighbours:");
+  paths.line({ type: "paragraph", path: ["q", "L", "i"] }, "first");
+  paths.line({ type: "paragraph", path: ["q", "L", "i"] }, "the same item");
+  paths.line({ type: "paragraph", path: ["q", "L", "i2"] }, "the same list");
+  paths.line({ type: "paragraph", path: ["q"] }, "the same quote");
+  paths.line({ type: "paragraph", path: [] }, "no longer a neighbour");
+  paths.line({ type: "paragraph", path: ["q", "L", "i"] }, "the same ids, a second quote");
+  paths.line({ type: "paragraph", path: ["L", "i"] }, "the same list id at another depth");
+  paths.line({ type: "paragraph", path: ["c", "L", "i"] }, "and under another parent");
+  paths.label("an item starts with a paragraph:");
+  paths.line({ type: "heading", level: 2, path: ["L", "i"] }, "a heading first");
+  paths.line({ type: "codeBlock", language: null, path: ["L", "i2"] }, "code first");
+  paths.label("also when a list comes first in it:");
+  paths.line({ type: "paragraph", path: ["O", "i", "N", "t"] }, "a to-do in an item");
+  paths.line({ type: "horizontalRule", path: ["O", "i2"] });
+  paths.line(
+    { type: "paragraph", path: ["O", "i2", "q", "L", "i"] },
+    "a list in a quote in an item",
+  );
+
+  const spills = note(20);
+  spills.container("L", "bulletList");
+  spills.container("i", "listItem");
+  spills.container("c", "callout");
+  spills.line({ type: "horizontalRule", path: [] }, "letters after a rule");
+  spills.line({ type: "mathBlock", tex: "x", path: [] });
+  spills.item("wikilink", { target: "An item after math" });
+  spills.text(" and letters ");
+  spills.text("with a mark", { bold: {} });
+  spills.line({ type: "rawBlock", source: "<hr>", path: [] }, "letters after a raw block", {
+    italic: {},
+  });
+  spills.item("hardBreak", {});
+  spills.text("and a second line");
+  spills.line({ type: "codeBlock", language: "ts", path: [] }, "code");
+  spills.item("nonsense", {});
+  spills.text(" goes on past\nan element a reader skips");
+  spills.item("image", { src: "d.png", alt: "an image ends the code" });
+  spills.text(" and takes the rest with it, ");
+  spills.text("marks and all", { strike: {} });
+  spills.item("mathInline", { tex: "z" });
+  spills.line({ type: "horizontalRule", path: ["L", "i"] }, "letters after a rule in an item");
+  spills.line({ type: "mathBlock", tex: "y", path: ["c"] }, "letters after math in a callout");
+  spills.line({ type: "paragraph", path: ["c"] }, "the next line of the callout");
+  spills.line({ type: "horizontalRule", path: [] });
+  spills.item("nonsense", {});
+  spills.line({ type: "paragraph", path: [] }, "nothing followed that rule");
+
+  const skipped = note(21);
+  skipped.embedded("an embedded string");
+  skipped.embedded({ an: "embedded object" });
+  skipped.embedded(7);
+  skipped.sequence.insertEmbed(skipped.sequence.length, new Y.Map([["a", "map"]]), {});
+  skipped.sequence.insertEmbed(skipped.sequence.length, new Y.XmlText("xml text"), {});
+  skipped.sequence.insertEmbed(skipped.sequence.length, new Y.Array(), {});
+  for (const name of ["nonsense", "paragraph", "text", "doc", "blockquote", "Block", "__proto__"])
+    skipped.item(name, { type: "heading", path: [] });
+  skipped.text("letters before any boundary");
+  skipped.embedded("a second embedded string");
+  skipped.item("wikilink", { target: "Page" });
+  skipped.line({ type: "heading", level: 2, path: [] });
+  skipped.embedded("a third");
+  skipped.item("nonsense", {});
+  skipped.text("a heading");
+  skipped.embedded({});
+  skipped.text(" in one piece", { bold: true });
+  skipped.line({ type: "codeBlock", language: null, path: [] }, "code");
+  skipped.embedded("a fourth");
+  skipped.item("paragraph", {});
+  skipped.text(" in one piece");
+
+  const nothing = note(22);
+
+  const onlySkipped = note(23);
+  onlySkipped.embedded("an embedded string");
+  onlySkipped.item("nonsense", {});
+  onlySkipped.sequence.insertEmbed(onlySkipped.sequence.length, new Y.Map(), {});
+  onlySkipped.container("q", "blockquote");
+
   const base = note(4);
   base.line({ type: "paragraph", path: [] }, "One one");
   base.line({ type: "paragraph", path: [] }, "Two two two");
@@ -133,6 +694,17 @@ function built(): Record<string, Y.Doc> {
     "letters, marks, inline items and blocks that hold no blocks": plain.doc,
     "lists, a to-do, a callout and an uneven table": nested.doc,
     "values and paths a reader must repair": odd.doc,
+    "letters outside the basic plane beside boundaries and inline items": astral.doc,
+    "every mark, alone, together and where it means nothing": marks.doc,
+    "every inline item": inline.doc,
+    "every block that holds no blocks": leaves.doc,
+    ...Object.fromEntries(holding),
+    "every attribute as numbers, as BigInt and as values a reader repairs": values.doc,
+    "every path a reader repairs, and which lines share a container": paths.doc,
+    "what a block cannot hold goes to a paragraph after it": spills.doc,
+    "items a reader skips": skipped.doc,
+    "a note with nothing in its sequence": nothing.doc,
+    "a note with only items a reader skips": onlySkipped.doc,
     "both joined one line, one typed, one undid": second.doc,
   };
 }
@@ -143,14 +715,28 @@ const shown = (doc: Y.Doc) => {
   return node.toJSON() as unknown;
 };
 
-it("reads each stored note as the document recorded beside it", () => {
-  const made = Object.entries(built()).map(([name, doc]): Fixture => ({
-    name,
-    update: Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64"),
-    document: shown(doc),
-  }));
-  if (process.env.BODY_SEQUENCE_WRITE_FIXTURES === "1")
-    writeFileSync(FILE, `${JSON.stringify(made, null, 2)}\n`);
+function writtenAsMarkdown(document: unknown): string {
+  const sameDocumentUnderBody = new Y.Doc();
+  sameDocumentUnderBody.getMap("meta").set("schemaVersion", 1);
+  const body = getDohcYDocBodyFragment(sameDocumentUnderBody);
+  prosemirrorJSONToYXmlFragment(schema, document, body);
+  expect(yXmlFragmentToProseMirrorRootNode(body, schema).toJSON()).toEqual(document);
+  const markdown = yDocToMarkdown(sameDocumentUnderBody);
+  sameDocumentUnderBody.destroy();
+  return markdown;
+}
+
+it("reads each stored note as the document, and writes it as the Markdown, recorded beside it", () => {
+  const made = Object.entries(built()).map(([name, doc]): Fixture => {
+    const document = shown(doc);
+    return {
+      name,
+      update: base64(Y.encodeStateAsUpdate(doc)),
+      document,
+      markdown: writtenAsMarkdown(document),
+    };
+  });
+  if (WRITE_FIXTURES) writeFileSync(FILE, `${JSON.stringify(made, null, 2)}\n`);
   const stored = JSON.parse(readFileSync(FILE, "utf8")) as Fixture[];
   expect(stored.map((fixture) => fixture.name)).toEqual(made.map((fixture) => fixture.name));
   for (const fixture of stored) {
@@ -159,14 +745,82 @@ it("reads each stored note as the document recorded beside it", () => {
     doc.getMap(BODY_CONTAINERS_FIELD);
     Y.applyUpdate(doc, Buffer.from(fixture.update, "base64"));
     expect(shown(doc), fixture.name).toEqual(fixture.document);
+    expect(writtenAsMarkdown(shown(doc)), fixture.name).toBe(fixture.markdown);
     doc.destroy();
   }
   expect(stored).toEqual(made);
 });
 
+function updatesBuilt(): Record<string, string> {
+  const person = (clientID: number, from?: Uint8Array) => {
+    const doc = new Y.Doc({ gc: false });
+    doc.clientID = clientID;
+    const sequence = doc.getText(BODY_SEQUENCE_FIELD);
+    if (from) Y.applyUpdate(doc, from);
+    return { doc, sequence };
+  };
+  const element = (name: string, attrs: Record<string, string | number>) => {
+    const made = new Y.XmlElement(name);
+    for (const [key, value] of Object.entries(attrs)) made.setAttribute(key, value as string);
+    return made;
+  };
+  const changeOf = (doc: Y.Doc, change: () => void) => {
+    const updates: Uint8Array[] = [];
+    const keep = (update: Uint8Array) => updates.push(update);
+    doc.on("update", keep);
+    change();
+    doc.off("update", keep);
+    expect(updates).toHaveLength(1);
+    return updates[0]!;
+  };
+
+  const { doc, sequence } = person(1);
+  doc.transact(() => {
+    sequence.insertEmbed(0, element(BLOCK_ELEMENT, { type: "paragraph" }));
+    sequence.insert(1, "One");
+    sequence.insertEmbed(4, element(BLOCK_ELEMENT, { type: "heading", level: 2 }));
+    sequence.insert(5, "Two");
+    sequence.insertEmbed(8, element("image", { src: "a.png" }));
+    sequence.insert(9, "x", { link: { href: "https://example.com", title: "Example" } });
+    sequence.format(2, 5, { bold: true });
+  });
+  const seed = Y.encodeStateAsUpdate(doc);
+
+  const joiner = person(2, seed);
+  const history = new Y.UndoManager(joiner.sequence);
+  const join = changeOf(joiner.doc, () => joiner.sequence.delete(4, 1));
+  const undoJoin = changeOf(joiner.doc, () => history.undo());
+  history.destroy();
+
+  const changer = person(3, seed);
+  const boundary = (changer.sequence.toDelta() as { insert: unknown }[])[3]!.insert;
+  if (!(boundary instanceof Y.XmlElement)) throw new Error("the fourth piece is the heading");
+  const changeType = changeOf(changer.doc, () => boundary.setAttribute("type", "codeBlock"));
+
+  const remover = person(4, seed);
+  const deleteBoundary = changeOf(remover.doc, () => remover.sequence.delete(4, 1));
+
+  sequence.insertEmbed(10, new Y.Map([["label", "metadata"]]));
+  return Object.fromEntries(
+    Object.entries({
+      seed,
+      join,
+      undo_join: undoJoin,
+      change_type: changeType,
+      delete_boundary: deleteBoundary,
+      with_map: Y.encodeStateAsUpdate(doc),
+    }).map(([name, update]) => [name, base64(update)]),
+  );
+}
+
+it("gives the engine's Yjs library the same updates each time they are rebuilt", () => {
+  const made = updatesBuilt();
+  if (WRITE_FIXTURES) writeFileSync(UPDATES_FILE, `${JSON.stringify(made, null, 2)}\n`);
+  expect(JSON.parse(readFileSync(UPDATES_FILE, "utf8"))).toEqual(made);
+});
+
 it("reads what is stored, not what a key named __proto__ or an embedded string makes Yjs show", () => {
   const made = note(9);
-  const named = (key: string, value: unknown) => Object.fromEntries([[key, value]]);
   made.doc.transact((transaction) => {
     new Y.Item(
       Y.createID(made.doc.clientID, Y.getState(made.doc.store, made.doc.clientID)),
