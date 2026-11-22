@@ -2,15 +2,20 @@ import { writeFileSync } from "node:fs";
 import { afterEach, expect, it, vi } from "vitest";
 import { createLinkLiveBrowserResolver } from "./linkLiveBrowserAuth";
 import { validateLinkCapability } from "./linkSecurity";
-import { fixture } from "./testing/replicaLink";
+import { DiscussionActivityHub } from "./discussionActivity";
+import { hashLinkBearer } from "./linkSecurity";
 import {
   closeTestStorages,
   json,
   jsonBody,
   LINK_KEY,
+  moment,
   request,
+  seedLinkGrant,
   sha256,
   testHandler,
+  testStorage,
+  type HandlerOverrides,
 } from "./testing";
 
 afterEach(async () => {
@@ -92,7 +97,6 @@ it.each(["view", "comment", "edit", "read-only", "read-write"] as const)(
       const saved = testHandler(f.storage, {
         ...f.options,
         publicEditRelease: undefined,
-        developmentReplicaReads: undefined,
       });
       try {
         expect
@@ -214,47 +218,122 @@ it.each([
   }
 });
 
-it.each(["read-only", "read-write"] as const)(
-  "projects %s Group files through replica inventory, feed and blobs",
-  async (access) => {
-    const f = await fixture(access);
-    try {
-      f.publish();
-      const current = await json(await f.send("/sync/link/current"));
-      expect(current.files).toEqual([
-        expect.objectContaining({ path: "docs/a.md", blobSha256: sha256("live") }),
-      ]);
-      const cursor = await json(await f.send("/sync/link/log?current=true&since=0"));
-      f.publish("changed");
-      const feed = await json(
-        await f.send(`/sync/link/log?current=true&since=${cursor.nextCursor}`),
-      );
-      expect(feed.ops).toContainEqual(
-        expect.objectContaining({
-          payload: expect.objectContaining({
-            file: expect.objectContaining({ path: "docs/a.md", blobSha256: sha256("changed") }),
+async function fixture(access: "view" | "comment" | "edit" | "read-only" | "read-write" = "view") {
+  const storage = await testStorage();
+  storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner@dohc.test", createdAtMs: 1 });
+  storage.claimWorkspaceIdentity({
+    workspaceId: "w",
+    replicationEpoch: "epoch",
+    streamIdentity: "stream",
+  });
+  const group = access === "read-only" || access === "read-write";
+  if (group)
+    storage.appendLogBatch({
+      workspaceId: "w",
+      originId: "owner",
+      ops: [
+        {
+          originSeq: 0,
+          opKind: "chat.channel.create",
+          recordedAtMs: 1,
+          payloadJson: JSON.stringify({
+            wireId: "channel",
+            channelId: "channel",
+            kind: "channel",
+            name: "Group",
+            slug: "group",
+            createdAtMs: 1,
           }),
-        }),
-      );
-      expect(await (await f.send(`/sync/link/blobs/${sha256("changed")}`)).text()).toBe("changed");
-      expect(JSON.stringify([current, feed])).not.toContain("private/");
-      f.publish("outside", "private/outside.md");
-      expect((await f.send(`/sync/link/blobs/${sha256("outside")}`)).status).toBe(404);
-      expect((await json(await f.send("/sync/link/current"))).files).toEqual([]);
-      f.publish();
-      f.db
-        .prepare(
-          "UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.kind','dm') WHERE op_kind='chat.channel.create'",
-        )
-        .run();
-      for (const path of [
-        "/sync/link/current",
-        "/sync/link/log?current=true&since=0",
-        `/sync/link/blobs/${sha256("live")}`,
-      ])
-        expect((await f.send(path)).status).toBe(404);
-    } finally {
-      f.dispose();
-    }
-  },
-);
+        },
+      ],
+    });
+  storage.createShare({
+    share: {
+      shareId: "s",
+      workspaceId: "w",
+      granterUserId: "owner@dohc.test",
+      selectorJson: JSON.stringify(
+        group
+          ? { kind: "group", channelWireId: "channel", paths: ["private/docs"], versionId: null }
+          : { paths: ["docs"], versionId: null },
+      ),
+      createdAtMs: 1,
+    },
+    grant: {
+      grantId: "named",
+      shareId: "s",
+      principalKind: "user",
+      principalUserId: "reader@dohc.test",
+      principalEmail: null,
+      access: group ? "read-write" : "edit",
+      generation: 1,
+      status: "active",
+      createdAtMs: 1,
+      revokedAtMs: null,
+      parentGrantId: null,
+    },
+  });
+  const secret = "a".repeat(43);
+  seedLinkGrant(storage, {
+    shareId: "s",
+    grantId: "link",
+    secretHash: hashLinkBearer(secret, LINK_KEY),
+    access,
+    createdAtMs: 1,
+  });
+  const options = {
+    discussionActivity: new DiscussionActivityHub(),
+    publicEditRelease: { version: 1 },
+    shareWebOrigin: "https://viewer.dohc.test",
+    relayExchangeKey: "e".repeat(64),
+    namedBrowserSessionLimits: {
+      maxSessions: 8,
+      retentionMs: 60_000,
+      maxPendingRequests: 4,
+      maxRequestBytes: 8192,
+      maxResponseBytes: 16384,
+      timeoutMs: 1000,
+    },
+  } as HandlerOverrides;
+  const h = testHandler(storage, options);
+  const exchanged = await json(
+    await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": "e".repeat(64),
+        },
+      }),
+    ),
+  );
+  expect(exchanged.capabilityToken).toBeTypeOf("string");
+  const capabilityToken = String(exchanged.capabilityToken);
+  let originSeq = 0;
+  return {
+    storage,
+    options,
+    secret,
+    capabilityToken,
+    send: (path: string) =>
+      h(request(null, path, { headers: { authorization: `LinkCapability ${capabilityToken}` } })),
+    publish(text = "live") {
+      const content = new TextEncoder().encode(text);
+      storage.putBlob({ workspaceId: "w", sha256: sha256(content), content, createdAtMs: 1 });
+      const op = moment(group ? "private/docs/a.md" : "docs/a.md", text, { originSeq });
+      storage.appendLogBatch({
+        workspaceId: "w",
+        originId: "files",
+        ops: [
+          {
+            originSeq: originSeq++,
+            opKind: op.opKind,
+            recordedAtMs: op.recordedAtMs,
+            payloadJson: JSON.stringify(op.payload),
+          },
+        ],
+      });
+    },
+    dispose: () => h.dispose(),
+  };
+}

@@ -10,7 +10,6 @@ import {
 } from "./liveTickets.test-helper";
 import { authorizeServiceHostReplication, deriveServiceHostBearer } from "./serviceHostCredential";
 import { createServiceHostReplication } from "./serviceHostReplication";
-import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
 import { hostedRowDecision, hostedWriteAllowed } from "./serviceHostFeed";
 import { parseLogOp, SERVICE_HOST_ORIGIN_PREFIX, type LogAuthorNameLookup } from "./relayLogInputs";
 import { referencedBlobShas } from "./storage/blobReferences";
@@ -1495,43 +1494,6 @@ it("keeps the hosted credential alive for an undrained Stop and then drops it, n
     }),
   ).toBe("rotated");
   expect(hosted()).toBeNull();
-});
-
-it("keeps the read replica's routes and guards apart from the session host's", async () => {
-  const f = await fixture();
-  const principal = createReplicaReadPrincipal(f.storage);
-  const get = (handle: (request: Request) => Promise<Response>, bearer: string, suffix: string) =>
-    handle(
-      new Request(`https://relay.test/sync/${ws}/${suffix}`, {
-        headers: { authorization: `Bearer ${bearer}` },
-      }),
-    );
-  const first = principal.issue(ws, "first");
-  expect((await get(principal.handle, first.bearer, `log?${identity}`)).status).toBe(200);
-  expect((await get(principal.handle, first.bearer, "live-journal")).status).toBe(200);
-  expect((await get(principal.handle, first.bearer, `hosted/log?${identity}`)).status).toBe(404);
-  expect((await get(f.handle, first.bearer, `hosted/log?${identity}`)).status).toBe(404);
-  expect((await get(f.handle, f.bearer, "live-journal")).status).toBe(404);
-  expect((await get(principal.handle, f.bearer, `log?${identity}`)).status).toBe(404);
-  principal.revoke(first);
-  expect((await get(principal.handle, first.bearer, "live-journal")).status).toBe(404);
-  expect((await get(f.handle, f.bearer, `hosted/log?${identity}`)).status).toBe(200);
-  const second = principal.issue(ws, "second");
-  f.storage.setServiceHostEnrollmentEnabled({
-    workspaceId: ws,
-    path: "docs/a.md",
-    ownerUserId: "owner-1",
-    enabled: false,
-    nowMs: 30,
-    guard() {},
-  });
-  f.storage.releaseServiceHostEnrollment({
-    workspaceId: ws,
-    objectId: binding.objectId,
-    nowMs: 31,
-  });
-  expect((await get(f.handle, f.bearer, `hosted/log?${identity}`)).status).toBe(404);
-  expect((await get(principal.handle, second.bearer, "live-journal")).status).toBe(200);
 });
 
 it("admits the engine's own settlement batch for its hosted document, both ways", () => {

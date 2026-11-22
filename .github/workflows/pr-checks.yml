@@ -394,7 +394,7 @@ jobs:
           tool: cargo-nextest@0.9.143
       - name: Build compiler confinement tests
         run: cargo nextest run --locked --package dohc-compiler-owner --no-run
-      - name: Compiler and relay confinement
+      - name: Compiler confinement
         run: |
           set -euo pipefail
           mkdir -p .agent-artifacts/confinement
@@ -407,51 +407,19 @@ jobs:
             grep -qx '# skipped 0' "$report" && grep -qx '# todo 0' "$report" && ! grep -qx '# pass 0' "$report" ||
               { grep '^# ' "$report"; echo "::error::Some app compiler tests did not run."; return 1; }
           }
-          relay() {
-            node_root="$(dirname "$(dirname "$(command -v node)")")"
-            report="$PWD/.agent-artifacts/confinement/relay.json"
-            docker run --rm --init --security-opt no-new-privileges:true --cap-drop ALL \
-              --user "$(id -u):$(id -g)" --env HOME=/tmp --env CI --env PATH="$node_root/bin:/usr/bin:/bin" \
-              --env DOHC_CONFINEMENT_SUITES=only --env DOHC_REQUIRE_ENGINE_E2E=1 \
-              --env DOHC_TEST_ENGINE_BINARY="$PWD/target/debug/dohc-workspace-engine" \
-              --volume "$node_root:$node_root:ro" --volume "$PWD:$PWD" --workdir "$PWD/services/sync-relay" \
-              ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 \
-              sh -c 'grep -x "Seccomp:[[:space:]]*2" /proc/self/status &&
-                exec node node_modules/vitest/vitest.mjs run --reporter=default --reporter=json --outputFile="$0"' "$report"
-            node -e '
-              const r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-              if (!r.numTotalTests || r.numPendingTests || r.numTodoTests) throw new Error((r.numPendingTests + r.numTodoTests) + " of " + r.numTotalTests + " replica tests did not run.");
-              console.log(r.numPassedTests + " replica tests passed under the default seccomp profile.");' "$report"
-          }
-          relay > .agent-artifacts/confinement/relay.log 2>&1 &
-          relay_pid=$!
           compiler_status=0
           (compiler) > .agent-artifacts/confinement/compiler.log 2>&1 &
           compiler_pid=$!
           wait "$compiler_pid" || compiler_status=$?
-          relay_status=0
-          wait "$relay_pid" || relay_status=$?
           echo '::group::Compiler confinement'
           cat .agent-artifacts/confinement/compiler.log
           echo '::endgroup::'
-          echo '::group::Relay confinement'
-          cat .agent-artifacts/confinement/relay.log
-          echo '::endgroup::'
-          test "$compiler_status" -eq 0 && test "$relay_status" -eq 0
+          test "$compiler_status" -eq 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: verification-confinement-compiler-${{ github.run_attempt }}
           path: .agent-artifacts/confinement/compiler.*
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: verification-confinement-relay-${{ github.run_attempt }}
-          path: .agent-artifacts/confinement/relay.*
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

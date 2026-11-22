@@ -805,18 +805,17 @@ test("shared preparation runs confinement after publishing worker artifacts", ()
     prepare.steps.find((step) => step.name === "Pack prepared artifacts").run,
     /packages\/app-backend-runtime\/dist/u,
   );
-  const confinement = prepare.steps.findIndex(
-    (step) => step.name === "Compiler and relay confinement",
-  );
+  const confinement = prepare.steps.findIndex((step) => step.name === "Compiler confinement");
   assert.ok(confinement > build);
-  for (const kind of ["compiler", "relay"]) {
-    const upload = prepare.steps.findIndex(
-      (step) => step.with?.name === `verification-confinement-${kind}-\${{ github.run_attempt }}`,
-    );
-    assert.ok(upload > confinement);
-    assert.equal(prepare.steps[upload].if, "always()");
-    assert.equal(prepare.steps[upload].with.path, `.agent-artifacts/confinement/${kind}.*`);
-  }
+  const upload = prepare.steps.findIndex(
+    (step) => step.with?.name === "verification-confinement-compiler-${{ github.run_attempt }}",
+  );
+  assert.ok(upload > confinement);
+  assert.equal(prepare.steps[upload].if, "always()");
+  assert.equal(prepare.steps[upload].with.path, ".agent-artifacts/confinement/compiler.*");
+  assert.ok(
+    !prepare.steps.some((step) => step.with?.name?.startsWith("verification-confinement-relay-")),
+  );
   const compiler = prepare.steps[confinement].run;
   assert.match(
     compiler,
@@ -829,15 +828,9 @@ test("shared preparation runs confinement after publishing worker artifacts", ()
   for (const pattern of [/grep -qx '# skipped 0'/, /grep -qx '# todo 0'/, /! grep -qx '# pass 0'/])
     assert.match(compiler, pattern);
   assert.match(compiler, /DOHC_CONFINEMENT_SUITES=only pnpm/);
-  assert.match(compiler, /--env DOHC_CONFINEMENT_SUITES=only/);
-  assert.match(compiler, /relay > .*relay\.log 2>&1 &/);
   assert.match(compiler, /\(compiler\) > .*compiler\.log 2>&1 &/);
   assert.match(compiler, /wait "\$compiler_pid" \|\| compiler_status=\$\?/);
-  assert.match(compiler, /wait "\$relay_pid" \|\| relay_status=\$\?/);
-  assert.match(compiler, /test "\$compiler_status" -eq 0 && test "\$relay_status" -eq 0/);
-  assert.match(compiler, /numPendingTests \|\| r\.numTodoTests/);
-  assert.match(compiler, /--security-opt no-new-privileges:true --cap-drop ALL/);
-  assert.match(compiler, /Seccomp:/);
+  assert.match(compiler, /test "\$compiler_status" -eq 0/);
 });
 
 test("prepared artifact consumers share preparation's fingerprint environment", () => {

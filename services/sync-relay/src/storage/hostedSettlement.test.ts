@@ -9,7 +9,6 @@ import {
   settlementRecordDigest,
 } from "./hostedSettlement.js";
 import type { StorageContext } from "./context.js";
-import { replicaHistoryReplacement } from "./replicaHistoryPositions.js";
 import nativeAuthoredSettlement from "../testing/fixtures/nativeAuthoredSettlement.json";
 const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
 afterEach(() => logged.mockClear());
@@ -824,34 +823,6 @@ it("accepts an owner engine's own spelling of the proven state and continues fro
         .all()
         .map((row) => row.markdown_sha256),
     ).toEqual([first.markdownSha, next.markdownSha]);
-    // A replica whose file is the engine's file of the last settled cut finds that state unreplaced.
-    const at = f.raw
-      .prepare(
-        "SELECT object_id,current_path,lineage_claim_id,restore_fence_generation FROM sync_relay_live_update_journal WHERE journal_cursor=?",
-      )
-      .get(next.receipt.journalCursor)!;
-    expect(
-      replicaHistoryReplacement(
-        f.storage as StorageContext,
-        "workspace",
-        "main",
-        String(at.object_id),
-        0,
-        0,
-        0,
-        next.receipt.journalCursor,
-        {
-          versionId: "main",
-          objectId: String(at.object_id),
-          path: String(at.current_path),
-          contentKind: "text",
-          sha256: next.markdownSha,
-          byteLength: 1,
-          lineageClaimId: String(at.lineage_claim_id),
-          restoreGeneration: Number(at.restore_fence_generation),
-        },
-      ),
-    ).toEqual([null, null]);
   } finally {
     f.close();
   }

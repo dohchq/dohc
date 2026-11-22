@@ -66,9 +66,7 @@ export async function archiveDeployment(options, config, run) {
     await save(name, await readFile(source));
     files.at(-1).source = source;
   }
-  const volumes = Object.entries(config.volumes ?? {}).filter(
-    ([, volume]) => volume.labels?.["dohc.backup"] !== "skip",
-  );
+  const volumes = Object.entries(config.volumes ?? {});
   // Inspect before docker run: mounting a missing name must never fabricate a replacement volume.
   if (volumes.length) run(["volume", "inspect", ...volumes.map(([, volume]) => volume.name)]);
   for (const [index, [key, volume]] of volumes.entries()) {

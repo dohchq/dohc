@@ -18,7 +18,6 @@ import type {
   StopRestorePlanInput,
 } from "./liveRestoreOperation";
 import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
-import type { ReplicaLiveJournalRead, ReplicaLiveJournalPage } from "./liveUpdateJournal";
 import type {
   AdmittedLiveUpdate,
   AdmittedLiveUpdateMetadata,
@@ -1324,7 +1323,6 @@ export interface SyncRelayStorage {
     document: LiveDocumentKey;
     journalCursor: number;
   }): CommittedLiveUpdateResult;
-  readReplicaLiveJournal(input: ReplicaLiveJournalRead): Promise<ReplicaLiveJournalPage>;
 
   close(): void;
   invalidate(): void;
@@ -1450,73 +1448,6 @@ export interface SyncRelayStorage {
   }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
   workspaceOwner(workspaceId: string): string | null;
-  discardReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
-  releaseReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
-  bindReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
-  replicaCurrentViewSelectors(
-    workspaceId: string,
-  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentViewSelector[];
-  stageReplicaCurrentView(
-    lease: import("../replicaReadPrincipal").ReplicaReadLease,
-    view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
-    observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[],
-  ): import("./replicaCurrentViews").StagedCurrentView;
-  flipReplicaCurrentView(
-    lease: import("../replicaReadPrincipal").ReplicaReadLease,
-    staged: import("./replicaCurrentViews").StagedCurrentView,
-  ): void;
-  /** Supervisor only. The caller must prove that the stored files and omissions equal this view. */
-  advanceReplicaCurrentView(
-    lease: import("../replicaReadPrincipal").ReplicaReadLease,
-    view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
-    previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
-  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
-  storeReplicaCurrentView(
-    lease: import("../replicaReadPrincipal").ReplicaReadLease,
-    view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
-    observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[],
-  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
-  nextReplicaHistoryPinAt(workspaceId: string): number | null;
-  sampleReplicaHistory(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
-  createReplicaLinkReadService(
-    source: import("../replicaLinkReadService").DevelopmentReplicaReads,
-    watches: Pick<import("../replicaWatches").ReplicaWatches, "holdReader">,
-    activity: Pick<import("../discussionActivity").DiscussionActivityHub, "wakeLog">,
-    freshness: ReturnType<
-      typeof import("../shareReadQueries").createShareReadQueries
-    >["newestFilteredOpFreshness"],
-    key?: string | Uint8Array,
-  ): ReturnType<typeof import("../replicaLinkReadService").createReplicaLinkReadService>;
-  listReplicaHistoryPins(
-    input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput,
-    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
-  ): import("../replicaHistoryReads").ReplicaHistoryList;
-  readReplicaHistoryPin(
-    input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & { pinId: string },
-    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
-  ): import("../replicaHistoryReads").ReplicaHistoryRead;
-  readReplicaCurrentView(
-    workspaceId: string,
-  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView | null;
-  currentViewFilesAtFences(
-    workspaceId: string,
-    files: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"],
-    previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"],
-    omitted: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["omitted"],
-  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"];
-  readReplicaCurrentViewText(workspaceId: string, sha: string): string | null;
-  readReplicaStanding(
-    workspaceId: string,
-    shareGrantBindings?: string,
-  ): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
-  listReplicaCurrentViewFiles(
-    input: Parameters<typeof import("../replicaCurrentViewReads").listReplicaCurrentViewFiles>[1],
-    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
-  ): import("../replicaCurrentViewReads").ReplicaCurrentViewList;
-  readReplicaCurrentViewFile(
-    input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & { path: string },
-    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
-  ): import("../replicaCurrentViewReads").ReplicaCurrentViewRead;
   putBlob(input: {
     workspaceId: string;
     sha256: string;

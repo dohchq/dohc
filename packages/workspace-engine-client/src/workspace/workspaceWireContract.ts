@@ -1791,20 +1791,3 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
   }
   return decoded;
 }
-
-export type ReplicaCurrentViewPage = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.replicaCut];
-export type ReplicaCurrentView = Omit<
-  ReplicaCurrentViewPage,
-  "moved" | "nextCursor" | "refusedFiles" | "delta" | "removed"
-> & { omitted: ReplicaCurrentViewPage["refusedFiles"] };
-export type ReplicaCurrentViewPosition = Pick<
-  ReplicaCurrentView,
-  "revision" | "logCursor" | "journalCursor"
->;
-export type ReplicaCurrentViewCursor = NonNullable<ReplicaCurrentViewPage["nextCursor"]>;
-export type ReplicaCurrentViewSelector =
-  WorkspaceMethodParamsMap[typeof WORKSPACE_METHOD.replicaCut]["selectors"][number];
-
-export function decodeReplicaCurrentView(value: unknown): ReplicaCurrentViewPage {
-  return decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut, value as JsonValue);
-}
