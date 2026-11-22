@@ -543,7 +543,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                     <p className="break-all text-[11px] text-muted">
                       {source.path}
                       <br />
-                      {source.sha256}
+                      <span className="font-mono">{source.sha256}</span>
                     </p>
                     <pre className="max-h-60 overflow-auto rounded-md border border-line bg-bg p-2 text-[12px] text-ink">
                       {source.source}

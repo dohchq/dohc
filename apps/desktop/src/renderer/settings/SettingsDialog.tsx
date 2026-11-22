@@ -1089,7 +1089,9 @@ export function SettingsDialog(props: {
                       copyTestId="settings-file-path-copy"
                       getText={() => settingsFilePath}
                     >
-                      <code title={settingsFilePath}>{settingsFilePath}</code>
+                      <code title={settingsFilePath} className="font-sans">
+                        {settingsFilePath}
+                      </code>
                     </CopyField>
                   </div>
                 ) : null}

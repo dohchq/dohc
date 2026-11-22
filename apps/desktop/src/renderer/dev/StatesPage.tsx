@@ -4312,9 +4312,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="Dismiss asks first, at the row's height">
           <div className="flex w-[440px] items-center justify-between gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[11px]">
-            <span className="min-w-0 flex-1 truncate font-mono text-muted">
-              {SET_ASIDE_ROWS[0]!.path}
-            </span>
+            <span className="min-w-0 flex-1 truncate text-muted">{SET_ASIDE_ROWS[0]!.path}</span>
             <div className="flex shrink-0 items-center gap-2">
               <CopyButton testId={`states-recovery-copy-${theme}`} getText={() => null} />
               <DismissConfirm dismissing={false} onDismiss={noop} onKeep={noop} />
@@ -4861,7 +4859,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           <Specimen key={specimen.label} label={specimen.label}>
             <div className="w-[520px] rounded-lg border border-line bg-bg">
               <div className="flex h-9 items-center gap-2 border-b border-line px-4 text-[12px]">
-                <span className="min-w-0 flex-1 truncate font-mono text-ink">{specimen.path}</span>
+                <span className="min-w-0 flex-1 truncate text-ink">{specimen.path}</span>
                 {specimen.diff.counts ? <DiffCounts counts={specimen.diff.counts} /> : null}
               </div>
               <UnifiedDiffLines lines={buildUnifiedDiffLines(specimen.diff)} />

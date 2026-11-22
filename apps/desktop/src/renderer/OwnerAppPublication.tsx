@@ -2135,7 +2135,9 @@ function PublicationDialog(
                 ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished."
                 : "You can review this stored revision and publish it again."}
           </p>
-          <p className="break-all font-mono text-[12px]">
+          <p
+            className={`break-all text-[12px] ${pendingWithdraw.manifestUnavailable ? "font-mono" : ""}`}
+          >
             {pendingWithdraw.manifestUnavailable
               ? pendingWithdraw.publicationId
               : pendingWithdraw.appRoot}

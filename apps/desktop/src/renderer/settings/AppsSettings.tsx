@@ -314,7 +314,7 @@ function AppPage(props: {
     app.scripts.start;
   const buildScript = app.configuredScripts.build ?? app.scripts.build;
   const output = preferredBuildOutput(app);
-  const details: Array<[string, string]> = [
+  const details: Array<[label: string, value: string, command?: true]> = [
     ["Folder", app.root],
     ...(app.entryPath ? [["Opens", app.entryPath] as [string, string]] : []),
     ...(app.configPath ? [["Settings file", app.configPath] as [string, string]] : []),
@@ -326,8 +326,8 @@ function AppPage(props: {
           ] as [string, string],
         ]
       : []),
-    ...(devScript ? [["Dev script", devScript] as [string, string]] : []),
-    ...(buildScript ? [["Build script", buildScript] as [string, string]] : []),
+    ...(devScript ? [["Dev script", devScript, true] as [string, string, true]] : []),
+    ...(buildScript ? [["Build script", buildScript, true] as [string, string, true]] : []),
     ...(output ? [["Build output", output] as [string, string]] : []),
   ];
   return (
@@ -408,13 +408,15 @@ function AppPage(props: {
 
       <SettingsSection title="Details">
         <dl data-testid="settings-app-details" className="m-0">
-          {details.map(([label, value]) => (
+          {details.map(([label, value, command]) => (
             <div
               key={label}
               className="flex items-baseline gap-4 border-b border-line py-2.5 last:border-b-0"
             >
               <dt className="w-28 shrink-0 text-[13px] text-muted">{label}</dt>
-              <dd className="m-0 min-w-0 select-text break-all font-mono text-[12px] text-ink">
+              <dd
+                className={`m-0 min-w-0 select-text break-all text-ink ${command ? "font-mono text-[12px]" : "text-[13px]"}`}
+              >
                 {value}
               </dd>
             </div>

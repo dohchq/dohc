@@ -393,7 +393,7 @@ function RunRow(props: {
       {open ? (
         <ul className="m-0 mt-1.5 list-none space-y-0.5 pl-5">
           {run.writes.map((write, index) => (
-            <li key={index} className="break-words text-[11px] leading-snug text-muted">
+            <li key={index} className="break-words font-mono text-[11px] leading-snug text-muted">
               {writeText(write)}
               {write.unconfirmed && run.state !== "running" && run.state !== "pending"
                 ? " · May not be saved"
@@ -406,7 +406,7 @@ function RunRow(props: {
           {run.reversals?.map((write) => (
             <li
               key={JSON.stringify([write.recordId, write.field])}
-              className="break-words text-[11px] leading-snug text-muted"
+              className="break-words font-mono text-[11px] leading-snug text-muted"
             >
               Undo · {recordName(write.path)} · {write.field}
               {settlementText(write.state) ? ` · ${settlementText(write.state)}` : null}

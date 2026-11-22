@@ -370,7 +370,7 @@ export function TextControl(props: {
       aria-describedby={props.describedBy}
       data-testid={props.testId}
       onChange={(event) => props.onChange(event.target.value)}
-      className="h-8 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[12px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"
+      className="h-8 w-40 rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"
     />
   );
 }

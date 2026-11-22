@@ -3214,7 +3214,7 @@ export function AutomationBuilder(props: {
                       step: { ...step, file: event.target.value },
                     }))
                   }
-                  className={`${inputClass} font-mono text-[12px]`}
+                  className={inputClass}
                   {...invalid(problem(`step-${key}/source`))}
                 />
                 <SecondaryButton
