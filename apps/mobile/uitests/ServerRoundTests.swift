@@ -373,7 +373,8 @@ final class ServerRoundTests: XCTestCase {
   private func edit(_ app: XCUIApplication, _ field: XCUIElement, typing typed: String = "", deleting: Int = 0) {
     field.tap()
     let input = app.textViews.firstMatch
-    XCTAssertTrue(input.waitForExistence(timeout: 10), "The field should open its editor")
+    if !input.waitForExistence(timeout: 10) { say("SERVER ROUND SCREEN \(app.debugDescription)") }
+    XCTAssertTrue(input.exists, "The field should open its editor")
     XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "The editor should raise the keyboard")
     // The editor opens with the cursor after the field's text.
     app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: deleting))
@@ -482,8 +483,8 @@ final class ServerRoundTests: XCTestCase {
     new.tap()
 
     // The new record opens on its own screen; its first field names it.
-    let first = recordFields(app).firstMatch
-    XCTAssertTrue(first.waitForExistence(timeout: 60), "The new record should open within 60 s")
+    let first = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Name, ")).firstMatch
+    XCTAssertTrue(first.waitForExistence(timeout: 60), "The new record should open within 60 s, its Name ready for a change")
     edit(app, first, typing: added)
     let named = fieldShowing(app, added)
     XCTAssertTrue(named.waitForExistence(timeout: 10), "The field should show \(added) as it saves")
