@@ -1391,7 +1391,8 @@ function makeReaderParity() {
     try {
       read(markdown);
       return true;
-    } catch {
+    } catch (error) {
+      if (!String(error?.message).includes("not representable by the live document contract")) throw error;
       return false;
     }
   };
