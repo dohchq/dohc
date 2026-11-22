@@ -9,7 +9,8 @@
     "ios": "expo run:ios",
     "typecheck": "node scripts/build-editor.mjs && tsc --noEmit -p tsconfig.json",
     "build:editor": "node scripts/build-editor.mjs",
-    "test": "vitest run src"
+    "test": "vitest run src",
+    "eas-build-post-install": "node scripts/build-editor.mjs"
   },
   "dependencies": {
     "@dohc/brand": "workspace:*",
