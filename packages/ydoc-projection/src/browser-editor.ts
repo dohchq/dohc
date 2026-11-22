@@ -452,7 +452,11 @@ function buildMarkdownInputRules(schema: Schema, canEdit: () => boolean) {
   return inputRules({ rules });
 }
 
-/** An editor on the existing body fragment. Admission remains the session owner's responsibility. */
+/**
+ * An editor on the existing body fragment. Admission remains the session owner's responsibility.
+ * `edit` runs `change` and nothing else: a transaction it opens around `change` is recorded whole
+ * as this editor's undo step.
+ */
 export function mountLiveBodyEditor(
   element: HTMLElement,
   input: {
@@ -464,6 +468,7 @@ export function mountLiveBodyEditor(
   },
 ) {
   const schema = getDohcProseMirrorSchema();
+  const thisEditor = Symbol("this editor's change");
   const listeners = new Set<(state: LiveEditorToolbarState) => void>();
   let lastToolbar: LiveEditorToolbarState | null = null;
 
@@ -523,7 +528,7 @@ export function mountLiveBodyEditor(
             deleteFilter: (item) => defaultDeleteFilter(item, defaultProtectedNodes),
             captureTransaction: (transaction) =>
               transaction.meta.get("addToHistory") !== false &&
-              (transaction.origin !== null || transaction.meta.get(EDITOR_CHANGE) === true),
+              (transaction.origin !== null || transaction.meta.get(EDITOR_CHANGE) === thisEditor),
             ignoreRemoteMapChanges: true,
           }),
         }),
@@ -564,7 +569,7 @@ export function mountLiveBodyEditor(
       const fromDocument = transaction.getMeta(ySyncPluginKey)?.isChangeOrigin === true;
       if (transaction.docChanged && !fromDocument)
         input.edit(() => {
-          input.body.doc?.transact((hosts) => hosts.meta.set(EDITOR_CHANGE, true));
+          input.body.doc?.transact((hosts) => hosts.meta.set(EDITOR_CHANGE, thisEditor));
           apply();
         });
       else apply();

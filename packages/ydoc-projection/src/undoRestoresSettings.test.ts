@@ -32,6 +32,10 @@ function person(baseline: Uint8Array, host: Host) {
   doc.on("update", (update: Uint8Array, origin: unknown) => {
     if (origin !== REMOTE) sent.push(update);
   });
+  return { ...editorOn(doc, host), sent };
+}
+
+function editorOn(doc: Y.Doc, host: Host) {
   const mount = window.document.createElement("div");
   window.document.body.append(mount);
   let view: EditorView | undefined;
@@ -56,7 +60,7 @@ function person(baseline: Uint8Array, host: Host) {
     mount.remove();
     doc.destroy();
   });
-  return { doc, editor, view: view!, sent };
+  return { doc, editor, view: view! };
 }
 
 function twoPeople(host: Host) {
@@ -190,4 +194,31 @@ describe.each(HOSTS)("on the %s", (host) => {
     expect(a.editor.undo()).toBe(false);
     expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\n### title\n\nlast\n"));
   });
+
+  it("keeps a change marked as outside history out of undo", () => {
+    const [a, b] = twoPeople(host);
+    a.view.dispatch(
+      a.view.state.tr
+        .setNodeMarkup(heading(a).at, undefined, { level: 3 })
+        .setMeta("addToHistory", false),
+    );
+    exchange(a, b);
+    expect(a.editor.undo()).toBe(false);
+    expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\n### title\n\nlast\n"));
+  });
+
+  it.runIf(host === "share page")(
+    "keeps one editor's change out of the undo of another editor on the same document",
+    () => {
+      const [a, b] = twoPeople(host);
+      const second = editorOn(a.doc, host);
+      setLevel(a, 3);
+      exchange(a, b);
+      expect(second.editor.undo()).toBe(false);
+      expect(everyoneReads(a, b)).toEqual(everyoneReading("first\n\n### title\n\nlast\n"));
+      expect(a.editor.undo()).toBe(true);
+      exchange(a, b);
+      expect(everyoneReads(a, b)).toEqual(everyoneReading(NOTE));
+    },
+  );
 });
