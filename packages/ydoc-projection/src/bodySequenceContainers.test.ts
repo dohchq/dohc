@@ -24,7 +24,8 @@ const isBoundary = (value: unknown): value is Y.XmlElement =>
 
 function pieces(text: Y.Text): SequencePiece[] {
   return (text.toDelta() as Change[]).flatMap(({ insert, attributes }): SequencePiece[] => {
-    if (isBoundary(insert)) return [{ boundary: insert.getAttributes() as Record<string, unknown> }];
+    if (isBoundary(insert))
+      return [{ boundary: insert.getAttributes() as Record<string, unknown> }];
     if (insert instanceof Y.XmlElement)
       return [{ atom: insert.nodeName, attrs: insert.getAttributes() as Record<string, unknown> }];
     return typeof insert === "string" ? [{ text: insert, marks: attributes ?? {} }] : [];
@@ -223,10 +224,25 @@ it("takes one person's whole path when one indents and another outdents a to-do"
     const outdenter = person(twoTodos(), outer);
     indentSecondUnderFirst(indenter);
     outdenter.change(() => outdenter.line(1).setAttribute("path", [] as unknown as string));
-    const text = JSON.stringify(settle(indenter, outdenter));
-    const nested = text.includes('"taskList","content":[{"type":"taskItem","attrs":{"checked":false},"content":[{"type":"paragraph","content":[{"type":"text","text":"one"}]},{"type":"taskList"');
-    const lifted = text.endsWith('{"type":"paragraph","content":[{"type":"text","text":"two"}]}]}');
-    expect(nested !== lifted, text).toBe(true);
+    const top = (settle(indenter, outdenter) as { content: { type: string }[] }).content;
+    const nested = {
+      content: [
+        {
+          type: "taskList",
+          content: [
+            todo(false, paragraph("one"), {
+              type: "taskList",
+              content: [todo(false, paragraph("two"))],
+            }),
+          ],
+        },
+      ],
+    };
+    const lifted = {
+      content: [{ type: "taskList", content: [todo(false, paragraph("one"))] }, paragraph("two")],
+    };
+    expect({ content: top }).toMatchObject(top.length === 1 ? nested : lifted);
+    expect(top.length === 1 ? 1 : top.length).toBeLessThanOrEqual(2);
   }
 });
 

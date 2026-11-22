@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Fragment, type Node as ProseMirrorNode, type NodeType } from "@tiptap/pm/model";
 import { getDohcProseMirrorSchema, parseRichdocMarkdown } from "./import-export.js";
 import {
+  allowedChildren,
   flattenBody,
   leavesOfSequence,
   readBodyLeaves,
@@ -437,5 +438,124 @@ describe("writing a document and reading it back", () => {
     const merged = roundTrip(doc, () => "same");
     expect(merged.childCount).toBe(1);
     expect(merged.firstChild!.childCount).toBe(2);
+  });
+});
+
+describe("the schema the format is written against", () => {
+  const BLOCKS = [
+    "blockquote",
+    "bulletList",
+    "callout",
+    "codeBlock",
+    "heading",
+    "horizontalRule",
+    "mathBlock",
+    "orderedList",
+    "paragraph",
+    "rawBlock",
+    "table",
+    "taskList",
+  ];
+  const INLINE = [
+    "escapedPunctuation",
+    "hardBreak",
+    "image",
+    "inlineAtom",
+    "mathInline",
+    "rawInline",
+    "text",
+    "wikilink",
+  ];
+
+  it("allows the children the format's table lists", () => {
+    expect(allowedChildren(schema)).toEqual({
+      blockquote: BLOCKS,
+      bulletList: ["listItem"],
+      callout: BLOCKS,
+      codeBlock: ["text"],
+      doc: BLOCKS,
+      heading: INLINE,
+      listItem: BLOCKS,
+      orderedList: ["listItem"],
+      paragraph: INLINE,
+      table: ["tableRow"],
+      tableCell: BLOCKS,
+      tableHeader: BLOCKS,
+      tableRow: ["tableCell", "tableHeader"],
+      taskItem: BLOCKS,
+      taskList: ["taskItem"],
+    });
+  });
+
+  it("has the attribute defaults the format's table lists", () => {
+    const defaults: Record<string, unknown> = {};
+    for (const type of [...Object.values(schema.nodes), ...Object.values(schema.marks)])
+      for (const [key, spec] of Object.entries(type.spec.attrs ?? {}))
+        defaults[`${type.name}.${key}`] = (spec as { default?: unknown }).default ?? null;
+    expect(defaults).toEqual({
+      "wikilink.target": "",
+      "wikilink.label": null,
+      "inlineAtom.atomId": "",
+      "inlineAtom.params": "",
+      "inlineAtom.source": "",
+      "mathInline.tex": "",
+      "rawInline.source": "",
+      "callout.calloutType": "note",
+      "callout.title": "",
+      "callout.fold": "",
+      "mathBlock.tex": "",
+      "rawBlock.source": "",
+      "image.src": "",
+      "image.alt": "",
+      "image.title": null,
+      "escapedPunctuation.value": "",
+      "codeBlock.language": null,
+      "heading.level": 1,
+      "bulletList.loose": null,
+      "orderedList.start": 1,
+      "orderedList.type": null,
+      "orderedList.loose": null,
+      "taskList.loose": null,
+      "taskItem.checked": false,
+      "tableCell.colspan": 1,
+      "tableCell.rowspan": 1,
+      "tableCell.colwidth": null,
+      "tableCell.align": null,
+      "tableHeader.colspan": 1,
+      "tableHeader.rowspan": 1,
+      "tableHeader.colwidth": null,
+      "tableHeader.align": null,
+      "tableRow.height": null,
+      "link.href": null,
+      "link.target": "_blank",
+      "link.rel": "noopener noreferrer nofollow",
+      "link.class": null,
+      "link.title": null,
+    });
+  });
+
+  it("has code as the one mark that excludes the others", () => {
+    expect(
+      Object.entries(schema.marks)
+        .filter(([, type]) => type.spec.excludes !== undefined)
+        .map(([name, type]) => [name, type.spec.excludes]),
+    ).toEqual([["code", "_"]]);
+  });
+
+  it("needs a first paragraph only in a list item or a to-do", () => {
+    const needing: string[] = [];
+    for (const type of Object.values(schema.nodes)) {
+      if (!type.isBlock || type.isTextblock || type.isLeaf) continue;
+      for (const child of BLOCKS.map((name) => schema.nodes[name]!)) {
+        if (type.contentMatch.matchType(child) !== null) continue;
+        const front = type.contentMatch.fillBefore(Fragment.from(child.createAndFill()), false);
+        if (front && front.childCount > 0)
+          needing.push(`${type.name} before ${child.name}: ${front.firstChild!.type.name}`);
+      }
+    }
+    expect(new Set(needing.map((line) => line.split(" ")[0]))).toEqual(
+      new Set(["listItem", "taskItem"]),
+    );
+    expect(new Set(needing.map((line) => line.split(": ")[1]))).toEqual(new Set(["paragraph"]));
   });
 });
