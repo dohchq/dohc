@@ -277,10 +277,11 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
       await quickOpen.getByRole("option", { name: "Plan.md", exact: true }).click();
       const editor = page.getByTestId("markdown-editor");
       await expect(editor).toBeVisible();
-      await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", {
-        timeout: 60_000,
-      });
-      if (!((await editor.textContent()) ?? "").includes(sentence)) {
+      // A file changed outside dohc opens with an error state until the next edit, which the repair makes.
+      const saveState = page.getByTestId("markdown-save-state");
+      await expect(saveState).toHaveAttribute("data-state", /^(saved|error)$/, { timeout: 60_000 });
+      const failed = (await saveState.getAttribute("data-state")) === "error";
+      if (failed || !((await editor.textContent()) ?? "").includes(sentence)) {
         await editor.click();
         await page.keyboard.press("ControlOrMeta+a");
         await page.keyboard.type(sentence);
