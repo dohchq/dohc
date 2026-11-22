@@ -334,6 +334,35 @@ describe("reading any sequence", () => {
     expect(read({ atom: "hardBreak", attrs: {} })).toEqual(["paragraph", "heading"]);
   });
 
+  it("reads a language, a callout's kind and its title as the default when they hold a line break", () => {
+    const code = (language: unknown) =>
+      readBodyLeaves(schema, [{ type: "codeBlock", attrs: { language }, path: [], inline: [] }])
+        .firstChild!.attrs.language as unknown;
+    expect(code("ts")).toBe("ts");
+    expect(code("ts
+break")).toBeNull();
+    expect(code("tsbreak")).toBeNull();
+    const callout = (attrs: Record<string, unknown>) =>
+      readBodyLeaves(schema, [
+        {
+          type: "paragraph",
+          attrs: {},
+          path: [{ type: "callout", id: "c", attrs }],
+          inline: [],
+        },
+      ]).firstChild!.attrs;
+    expect(callout({ calloutType: "warning", title: "Careful" })).toMatchObject({
+      calloutType: "warning",
+      title: "Careful",
+    });
+    expect(callout({ calloutType: "warning
+> x", title: "Care
+ful" })).toMatchObject({
+      calloutType: "note",
+      title: "",
+    });
+  });
+
   it("turns a mark on only for an object, and reads code alone when code is on", () => {
     const marksOn = (given: Record<string, unknown>) =>
       readBodyLeaves(schema, [

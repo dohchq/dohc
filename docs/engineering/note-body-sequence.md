@@ -53,10 +53,13 @@ The reader is `packages/ydoc-projection/src/bodySequenceGrammar.ts`, read from Y
 | `bulletList.loose`, `orderedList.loose`, `taskList.loose` | boolean | null |
 | `orderedList.start` | whole number 0 to 999,999,999 | 1 |
 | `tableCell.colspan`, `tableCell.rowspan`, `tableHeader.colspan`, `tableHeader.rowspan` | whole number 1 to 1,000 | 1 |
-| `orderedList.type`, `codeBlock.language`, `wikilink.label`, `image.title` | string or null | null |
+| `orderedList.type`, `wikilink.label`, `image.title` | string or null | null |
+| `codeBlock.language` | null, or a string with no line break (`
+` or ``) | null |
 | `callout.fold` | `""`, `"+"` or `"-"` | `""` |
-| `callout.calloutType` | string | `"note"` |
-| `callout.title`, `mathBlock.tex`, `mathInline.tex`, `rawBlock.source`, `rawInline.source`, `image.src`, `image.alt`, `wikilink.target`, `escapedPunctuation.value`, `inlineAtom.atomId`, `inlineAtom.params`, `inlineAtom.source` | string | `""` |
+| `callout.calloutType` | string with no line break | `"note"` |
+| `callout.title` | string with no line break | `""` |
+| `mathBlock.tex`, `mathInline.tex`, `rawBlock.source`, `rawInline.source`, `image.src`, `image.alt`, `wikilink.target`, `escapedPunctuation.value`, `inlineAtom.atomId`, `inlineAtom.params`, `inlineAtom.source` | string | `""` |
 | `tableCell.colwidth`, `tableHeader.colwidth` | null, or an array of at most 1,000 finite numbers each 0 or more (a BigInt in the safe range counts as its number) | null |
 | `tableCell.align`, `tableHeader.align` | null, `"left"`, `"right"`, `"center"` | null |
 | `tableRow.height` | null or a whole number 1 to 1,000,000 | null |

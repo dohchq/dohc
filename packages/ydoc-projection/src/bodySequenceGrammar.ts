@@ -53,6 +53,8 @@ const MAX_ROW_HEIGHT = 1_000_000;
 
 const text = (value: unknown) => typeof value === "string";
 const textOrNone = (value: unknown) => value === null || typeof value === "string";
+const oneLine = (value: unknown) => typeof value === "string" && !/[
+]/.test(value);
 const yesOrNo = (value: unknown) => typeof value === "boolean";
 const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value);
 const integerIn = (least: number, most: number) => (value: unknown) =>
@@ -76,8 +78,8 @@ const VALUE_RULES: Record<string, (value: unknown) => boolean> = {
   "inlineAtom.atomId": text,
   "inlineAtom.params": text,
   "inlineAtom.source": text,
-  "callout.calloutType": text,
-  "callout.title": text,
+  "callout.calloutType": oneLine,
+  "callout.title": oneLine,
   "mathInline.tex": text,
   "mathBlock.tex": text,
   "image.src": text,
@@ -91,7 +93,7 @@ const VALUE_RULES: Record<string, (value: unknown) => boolean> = {
   "taskItem.checked": yesOrNo,
   "wikilink.label": textOrNone,
   "image.title": textOrNone,
-  "codeBlock.language": textOrNone,
+  "codeBlock.language": (value) => value === null || oneLine(value),
   "orderedList.type": textOrNone,
   "callout.fold": (value) => value === "" || value === "+" || value === "-",
   "heading.level": integerIn(1, 6),
