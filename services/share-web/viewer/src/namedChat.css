@@ -60,6 +60,10 @@
 .chat-delete-error .icon { flex: none; margin-top: 3px; }
 .chat-delete-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .link-page dialog .chat-delete-actions .handoff-button { margin: 0; }
+/* Cancel is the desktop's outlined secondary: no fill of its own, so it never reads as a second confirm. */
+.link-page dialog .chat-delete-actions .handoff-button.secondary { border-color: var(--viewer-line); background: transparent; color: var(--viewer-muted); }
+.link-page dialog .chat-delete-actions .handoff-button.secondary:enabled:hover { background: var(--viewer-hover); color: var(--viewer-ink); }
+.link-page dialog .chat-delete-actions .handoff-button.secondary:disabled { color: var(--viewer-subtle); }
 
 .chat-jump { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--viewer-paper); }
 .handoff-button.secondary.chat-jump:hover { background: var(--viewer-panel); }
