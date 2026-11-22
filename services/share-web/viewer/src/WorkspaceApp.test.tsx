@@ -2154,7 +2154,11 @@ it("opens a replaced file's own Comments, not its predecessor's", async () => {
   await opened();
   await showComments();
   expect(commentsPanel().textContent).toContain("Nine is early");
+  const box = () => commentsPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!;
+  await settle(() => commentBox() !== null);
+  setControlValue(box(), "Meant for the old plan");
   // The owner put a different file at the same path. The old file's follow ends.
+  const before = options.files;
   options.files = FILES.map((file) =>
     file.path === "trip/plan.md"
       ? { ...file, objectId: `share-object:v1:${"4".repeat(64)}`, blobSha256: "c".repeat(64) }
@@ -2169,6 +2173,13 @@ it("opens a replaced file's own Comments, not its predecessor's", async () => {
   );
   expect(commentsPanel().textContent).not.toContain("Nine is early");
   expect(text()).not.toContain("membership");
+  // The draft typed on the old file stays with it, so Send cannot post it to the new one.
+  expect(box().value).toBe("");
+  // The old file coming back brings its draft back.
+  options.files = before;
+  await act(async () => following("comments")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => commentsPanel().textContent?.includes("Nine is early") === true);
+  await settle(() => box().value === "Meant for the old plan");
 });
 
 it("follows a file's Comments again once the files read again still list it", async () => {
