@@ -407,7 +407,7 @@ describe("LinkedChatsPanel live thread", () => {
     expect(chat.textContent).toContain("Plant beans in May?");
   });
 
-  it("reads an untitled thread's heading again when its opening comment is deleted", async () => {
+  it("names an untitled thread for its file once its opening comment is deleted", async () => {
     const opened = { ...searchThread, title: "Plant beans in May?" };
     bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [opened] });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, sam] });
@@ -424,7 +424,8 @@ describe("LinkedChatsPanel live thread", () => {
     expect(screen.getByTestId("linked-chat-title").textContent).toBe("Plant beans in May?");
 
     // The engine titles an untitled thread by its opening message, and "New
-    // chat" once that message is deleted.
+    // chat" once that message is deleted. The heading names the file instead,
+    // as a Group's post is named for its Group.
     bridgeMock.listFileChats.mockResolvedValue({
       fileObjectId: "object-1",
       threads: [{ ...opened, title: "New chat", path: "notes/plan.md" }],
@@ -435,7 +436,7 @@ describe("LinkedChatsPanel live thread", () => {
     workspaceChanged();
 
     await waitFor(() =>
-      expect(screen.getByTestId("linked-chat-title").textContent).toBe("New chat"),
+      expect(screen.getByTestId("linked-chat-title").textContent).toBe("Comment on plan.md"),
     );
     expect(chat.textContent).not.toContain("Plant beans in May?");
   });
@@ -457,11 +458,11 @@ describe("LinkedChatsPanel live thread", () => {
         messages: [{ ...maya, body: "", deletedAtMs: 1_700_000_120_000 }, sam],
       });
     };
-    const expectNewChatOpen = async () => {
+    const expectFileCommentOpen = async () => {
       const chat = await screen.findByTestId("linked-chat-thread");
       await within(chat).findByText("Spam from Sam");
       await waitFor(() =>
-        expect(screen.getByTestId("linked-chat-title").textContent).toBe("New chat"),
+        expect(screen.getByTestId("linked-chat-title").textContent).toBe("Comment on plan.md"),
       );
       expect(document.body.textContent).not.toContain("Plant beans in May?");
     };
@@ -471,13 +472,13 @@ describe("LinkedChatsPanel live thread", () => {
       workspaceChanged();
       await waitFor(() => expect(screen.queryByText("Plant beans in May?")).toBeNull());
       fireEvent.click(screen.getByText("New chat"));
-      await expectNewChatOpen();
+      await expectFileCommentOpen();
     });
 
     it("heads the chat with the engine's title when it opens before any activity", async () => {
       await listPanel();
       fireEvent.click(screen.getByText("Plant beans in May?"));
-      await expectNewChatOpen();
+      await expectFileCommentOpen();
     });
 
     it("reads the list again when the delete's activity lands during the first read", async () => {
