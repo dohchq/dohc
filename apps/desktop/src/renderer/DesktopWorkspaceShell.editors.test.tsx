@@ -871,7 +871,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
 
     const panel = screen.getByTestId("side-panel");
-    expect(panel.style.width).toBe("240px");
+    expect(panel.style.width).toBe("320px");
     const handle = screen.getByTestId("sidebar-resize");
     fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
     fireEvent.pointerMove(handle, { buttons: 1, clientX: 300, pointerId: 1 });

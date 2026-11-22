@@ -584,7 +584,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       for (const button of spilled)
         failures.push(`a button's label (${theme}) runs past its border in ${button}`);
     }
-    // At the sidebar's default width, a Collection change cuts who made it
+    // In a narrow sidebar, a Collection change cuts who made it
     // and what changed before its Collection's name, even a long name, and
     // no part runs past its line. A part counts as cut when its words are
     // wider than its box by any fraction of a pixel, since that draws an

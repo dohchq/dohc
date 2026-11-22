@@ -924,7 +924,7 @@ describe("rail widths", () => {
 
   it("setSidebarWidth stores the clamped width and no-ops on no change", () => {
     const state = defaultWorkbenchState();
-    expect(setSidebarWidth(state, 320).sidebarWidth).toBe(320);
+    expect(setSidebarWidth(state, 400).sidebarWidth).toBe(400);
     expect(setSidebarWidth(state, SIDEBAR_DEFAULT_WIDTH)).toBe(state);
   });
 
