@@ -504,7 +504,9 @@ function useMemberFiles(session: string, attempt: number) {
       }
       if (signal.aborted) return;
       setView({ status: "ready", files });
-      let delay = RETRY_INITIAL_MS;
+      let delay = RETRY_INITIAL_MS,
+        // After a failure the server answers at once, so the files show they caught up as soon as they do.
+        held = true;
       while (!signal.aborted) {
         const started = Date.now(),
           previous = files.nextCursor;
@@ -516,7 +518,7 @@ function useMemberFiles(session: string, attempt: number) {
             MAX_LOG_PAGES,
             signal,
             files.epochLogFloor,
-            VIEW_LOG_HOLD_MS,
+            held ? VIEW_LOG_HOLD_MS : undefined,
             files.meta.access !== "edit",
           );
           const meta = await loadMeta(session, signal);
@@ -525,8 +527,10 @@ function useMemberFiles(session: string, attempt: number) {
           setView({ status: "ready", files });
           setFailures(0);
           delay = RETRY_INITIAL_MS;
-          const elapsed = Date.now() - started;
-          if (log.nextCursor === previous && elapsed < VIEW_LOG_HOLD_MS)
+          const elapsed = Date.now() - started,
+            waited = held;
+          held = true;
+          if (waited && log.nextCursor === previous && elapsed < VIEW_LOG_HOLD_MS)
             await waitForRetry(VIEW_LOG_HOLD_MS - elapsed, signal);
         } catch (caught) {
           let error = caught;
@@ -555,6 +559,7 @@ function useMemberFiles(session: string, attempt: number) {
             return;
           }
           setFailures((count) => count + 1);
+          held = false;
           // Try again ends the wait at once.
           const pause = new AbortController(),
             stop = () => pause.abort();

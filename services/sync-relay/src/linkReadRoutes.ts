@@ -146,6 +146,11 @@ export function createLinkReadRoutes(
     }
 
     if (route.route === "link-current") {
+      // The page reads the files again after a level change, so this answer names who made it too.
+      const changed =
+        capability.credential.kind === "member"
+          ? await levelChangedBy(share.workspaceId, capability.credential.userId)
+          : {};
       if (replica) {
         const body = replica.inventory(
           { grantId: capability.grantId, generation: capability.generation },
@@ -155,7 +160,7 @@ export function createLinkReadRoutes(
         if (body.files.length > linkCurrentFileLimit) throw notFound();
         return linkJsonResponse(
           capability,
-          { ...body, ...linkChannel(capability.grantId) },
+          { ...changed, ...body, ...linkChannel(capability.grantId) },
           request.signal,
         );
       }
@@ -224,6 +229,7 @@ export function createLinkReadRoutes(
       return linkJsonResponse(
         fresh,
         {
+          ...changed,
           ok: true,
           effectiveSelector: presentation.selector,
           access: fresh.access,
