@@ -94,6 +94,18 @@ describe("GroupSettingsDialog", () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith(null));
   });
 
+  it("offers only Close while no one else is in the workspace", async () => {
+    const { save, onClose } = open("no-members");
+    expect((await screen.findByTestId("chats-group-access-alone")).textContent).toContain(
+      "Only you are in this workspace.",
+    );
+    expect(screen.queryByTestId("chats-group-settings-save")).toBeNull();
+    expect(screen.queryByTestId("chats-group-settings-cancel")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it("keeps Save off while access loads, and offers Try again when the read fails", async () => {
     let fail = true;
     const load = vi.fn(async (): Promise<GroupAccess> => {

@@ -266,21 +266,30 @@ export function GroupSettingsDialog(props: {
               {failure}
             </p>
           ) : null}
+          {/* With no one else in the workspace there is nothing to save. */}
           <div className="flex justify-end gap-2">
-            <SecondaryButton
-              data-testid="chats-group-settings-cancel"
-              disabled={busy}
-              onClick={props.onClose}
-            >
-              Cancel
-            </SecondaryButton>
-            <PrimaryButton
-              type="submit"
-              data-testid="chats-group-settings-save"
-              disabled={ready === null || busy}
-            >
-              {busy ? "Saving…" : "Save"}
-            </PrimaryButton>
+            {access === "no-members" ? (
+              <SecondaryButton data-testid="chats-group-settings-close" onClick={props.onClose}>
+                Close
+              </SecondaryButton>
+            ) : (
+              <>
+                <SecondaryButton
+                  data-testid="chats-group-settings-cancel"
+                  disabled={busy}
+                  onClick={props.onClose}
+                >
+                  Cancel
+                </SecondaryButton>
+                <PrimaryButton
+                  type="submit"
+                  data-testid="chats-group-settings-save"
+                  disabled={ready === null || busy}
+                >
+                  {busy ? "Saving…" : "Save"}
+                </PrimaryButton>
+              </>
+            )}
           </div>
         </div>
       </form>
