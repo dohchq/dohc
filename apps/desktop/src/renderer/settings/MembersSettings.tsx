@@ -110,7 +110,8 @@ export function membersGate(cloud: CloudSettings | undefined): MembersGate {
 type Load =
   | { status: "loading" }
   | { status: "ready"; view: WorkspaceMembersView }
-  | { status: "failed"; message: string }
+  // The line says what failed; the toast and Notices row say why.
+  | { status: "failed" }
   | { status: "refused" }
   | { status: "left"; workspaceName: string };
 
@@ -228,10 +229,9 @@ export function MembersSettings(props: {
         },
         (cause: unknown) => {
           if (!scope.isCurrent(token)) return;
-          const message = ipcErrorMessage(cause, FALLBACK.list);
-          setLoad({ key: scopeKey, load: { status: "failed", message } });
+          setLoad({ key: scopeKey, load: { status: "failed" } });
           fileFailure(
-            message,
+            ipcErrorMessage(cause, FALLBACK.list),
             cause,
             async () => setAttempt((count) => count + 1),
             undefined,
@@ -420,7 +420,7 @@ function MembersLoadState(props: Parameters<typeof MembersLoadView>[0]) {
           className="rounded-lg border border-line bg-panel p-1"
         >
           <RetryRow testId="settings-members-retry" onRetry={props.onRetry}>
-            {load.message}
+            {FALLBACK.list}
           </RetryRow>
         </div>
       );

@@ -577,9 +577,11 @@ describe("Members page", () => {
     );
     const { props } = renderMembers();
     const failed = await screen.findByTestId("settings-members-failed");
-    expect(failed.textContent).toContain("dohc could not reach your server.");
+    // The line says what failed; the cause is the notice's.
+    expect(within(failed).getByText("dohc could not load Members.")).toBeTruthy();
+    expect(failed.textContent).not.toContain("reach");
     expect(props.onError).toHaveBeenCalledWith(
-      expect.stringContaining("could not reach"),
+      "dohc could not reach your server. Check your connection.",
       expect.any(Error),
       expect.any(Function),
       undefined,
@@ -597,6 +599,7 @@ describe("Members page", () => {
     );
     const { props } = renderMembers({ serverNamed: true });
     const failed = await screen.findByTestId("settings-members-failed");
+    expect(failed.textContent).toContain("dohc could not load Members.");
     expect(within(failed).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(props.onError).not.toHaveBeenCalled();
   });
