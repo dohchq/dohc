@@ -250,9 +250,10 @@ final class ServerRoundTests: XCTestCase {
     let page = app.webViews.firstMatch
     let text = containing(page, try need("DOHC_SERVER_SENTENCE"))
     XCTAssertTrue(text.waitForExistence(timeout: 10), "Plan should show its sentence")
-    // At the page's end, so the next round still finds the sentence whole.
-    text.tap()
-    app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: .command)
+    // On the right of the page's last line, below the seed's sentence, so the next round still finds it whole. The
+    // simulator's software keyboard ignores Command-Down.
+    let last = page.staticTexts.allElementsBoundByIndex.last ?? text
+    last.coordinate(withNormalizedOffset: CGVector(dx: 0.99, dy: 0.5)).tap()
     typeSlowly(app, sentence)
     let start = Date()
     XCTAssertTrue(mark("Saving").waitForExistence(timeout: 10) || saved.exists, "Typing should show Saving")
