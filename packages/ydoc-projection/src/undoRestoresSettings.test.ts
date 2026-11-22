@@ -23,7 +23,6 @@ afterEach(() => {
 
 type Person = ReturnType<typeof person>;
 
-/** A phone's editor on its own copy of the note: the editor's transactions reach Yjs as they are. */
 function person(baseline: Uint8Array) {
   const doc = new Y.Doc();
   Y.applyUpdate(doc, baseline, REMOTE);
@@ -91,7 +90,6 @@ function shown({ view }: Person) {
 `;
 }
 
-/** The note as each editor shows it, as each document saves it, and as the first person's document reads when opened again. */
 function everyoneReads(a: Person, b: Person) {
   const reopened = new Y.Doc();
   Y.applyUpdate(reopened, Y.encodeStateAsUpdate(a.doc));

@@ -146,7 +146,6 @@ it("leaves the keyboard's Undo and Redo to the editor's keys, which raise no bef
   }
 });
 
-/** The desktop's Markdown editor on the engine's document, with the history the note's views share. */
 async function desktop(baseline: Uint8Array) {
   const shipped: Uint8Array[] = [];
   let remote: ((update: Uint8Array, generation: number) => void) | null = null;
