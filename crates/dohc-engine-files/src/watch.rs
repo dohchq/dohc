@@ -1355,8 +1355,6 @@ mod tests {
         watcher.stop().unwrap();
     }
 
-    /// A change in the folder still reads it, through its event. Across two
-    /// health polls after that, nothing reads it on the timer.
     #[tokio::test]
     async fn a_folder_only_this_computer_writes_is_never_read_on_a_timer() {
         let root = dohc_test_scratch::ScratchDir::new().unwrap();
