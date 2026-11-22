@@ -810,6 +810,36 @@ it("shows a reply count at View only where a post has replies, and still opens t
   expect(groupPanel().querySelector('textarea[name="body"]')).toBeNull();
 });
 
+it("reopens a post's thread at View while it holds an unsent first reply, so the person can copy it", async () => {
+  const options: Parameters<typeof server>[0] = {
+    level: "comment",
+    groups: [{ wire: "wire-plans", name: "plans", type: "posts" }],
+    history: { "wire-plans": [chat(6, "Train or car?", "ana", { threadId: "t-ride" })] },
+  };
+  server(options);
+  await render();
+  await settle(() => listed().includes("Train or car?"));
+  await click("Reply");
+  setControlValue(composer(), "Car, I think");
+  // The member is lowered to View, and the page opens again, as Try again opens it after a failed read.
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  held = [];
+  options.level = "view";
+  await render();
+  await settle(() => listed().includes("Train or car?"));
+  await click("Unsent reply");
+  await settle(
+    () =>
+      groupPanel().querySelector<HTMLTextAreaElement>('textarea[aria-label="Your unsent message"]')
+        ?.value === "Car, I think",
+  );
+  expect(groupPanel().querySelector('textarea[name="body"]')).toBeNull();
+  await click("Discard");
+  await click("Back to posts");
+  expect(button("Unsent reply")).toBeUndefined();
+});
+
 // History arrives a page at a time, newest first, so a post's replies can arrive a page before the message that starts it.
 it("shows a post only once the message that starts it loads, with all its replies", async () => {
   server({
