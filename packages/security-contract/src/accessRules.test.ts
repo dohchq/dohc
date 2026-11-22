@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  ACCESS_RULE_MAX_BYTES,
+  ACCESS_RULE_MAX_PEOPLE,
   type AccessRule,
   type AccessRuleSet,
   type ReachViewer,
@@ -10,6 +12,7 @@ import {
   isAccessRulePath,
   isAccessRuleRelatedPath,
   parseAccessRule,
+  parseFormattedAccessRule,
 } from "./accessRules";
 import vectors from "./accessRules.vectors.json";
 
@@ -118,6 +121,21 @@ describe("parseAccessRule", () => {
       .filter((r): r is AccessRule => r !== null)) {
       expect(parseAccessRule(formatAccessRule(text)!)).toEqual(text);
     }
+  });
+
+  it("formats a rule under the cap whose formatted text runs past it", () => {
+    // 1,000 people at one-space indents fit under the cap. The formatted text
+    // indents with two and ends in a newline, which takes it past.
+    const lines = ["people:"];
+    for (let i = 0; i < ACCESS_RULE_MAX_PEOPLE; i++)
+      lines.push(` p${String(i).padStart(4, "0")}${"x".repeat(40)}@example.com: edit`);
+    const text = lines.join("\n");
+    expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(ACCESS_RULE_MAX_BYTES);
+    const parsed = parseAccessRule(text);
+    expect(parsed).not.toBeNull();
+    const formatted = formatAccessRule(parsed!);
+    expect(new TextEncoder().encode(formatted!).length).toBeGreaterThan(ACCESS_RULE_MAX_BYTES);
+    expect(parseFormattedAccessRule(formatted!)).toEqual(parsed);
   });
 
   it("formats nothing for a rule no text can hold", () => {
