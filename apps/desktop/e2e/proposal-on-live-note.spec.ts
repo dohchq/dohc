@@ -288,7 +288,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       expect(await status()).toBe("ready");
     });
 
-    await test.step("with an Edit link typing live, Accept waits for the Stop, then the change and the link's words reach the owner's file", async () => {
+    await test.step("with an Edit link typing live, Accept waits for the Stop, then the change and the link's words reach the owner's file, and the change reaches the link", async () => {
       const linkEditor = await shared!.browser.newPage();
       linkEditor.on("pageerror", (error) => shared!.failures.push(error.message));
       await linkEditor.goto(`${sharedDatasetViewerOrigin}/s${new URL(edit.url).hash}`);
@@ -300,7 +300,7 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
         .click({ timeout: 15_000 });
       const box = linkEditor.getByRole("textbox", { name: "Shared file editor", exact: true });
       await expect(box).toBeEditable({ timeout: 120_000 });
-      await box.getByText("The first line.", { exact: false }).click({ timeout: 15_000 });
+      await box.getByText("Trip plan", { exact: false }).click({ timeout: 15_000 });
       await linkEditor.keyboard.press("End");
       for (let index = 0; index < 20; index += 1) {
         words.push(`link${index}`);
@@ -323,18 +323,16 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
           timeout: 60_000,
         })
         .toContain(words.at(-1)!);
-      const conflicts = async () =>
-        (await call(page, "listWorkspaceVersionConflicts", { workspaceId })).conflicts.length;
       await expect
-        .poll(async () => (await ownerFile()).includes(FIRST) || (await conflicts()) > 0, {
-          message:
-            "the accepted change is in the owner's file, or a conflict asks the owner to choose",
+        .poll(ownerFile, { message: "the owner's file has the change", timeout: 60_000 })
+        .toContain(FIRST);
+      await expect
+        .poll(() => linkText(view.url).catch(() => ""), {
+          message: "the link shows the change",
           timeout: 60_000,
+          intervals: [1000],
         })
-        .toBe(true);
-      console.log(
-        `[proposal-on-live-note] after the Stop: owner's file has the change=${(await ownerFile()).includes(FIRST)}, conflicts=${await conflicts()}`,
-      );
+        .toContain(FIRST);
       expect(liveRefusals()).toEqual([]);
     });
 
