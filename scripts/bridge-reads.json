@@ -150,7 +150,6 @@
     "apps/desktop/src/renderer/shell/useMergeRemovalNotices.ts | getCaptureRecoveryStatus",
     "apps/desktop/src/renderer/shell/useMergeRemovalNotices.ts | readEngineMoment",
     "apps/desktop/src/renderer/shell/useMergeRemovalNotices.ts | readEngineMoment #2",
-    "apps/desktop/src/renderer/shell/useReportsNotice.ts | readReportsNotice",
     "apps/desktop/src/renderer/shell/useRetainedCopiesNotice.tsx | listRetainedCopies",
     "apps/desktop/src/renderer/shell/useSavedTabsReread.ts | getWorkspaceUiState",
     "apps/desktop/src/renderer/shell/useScheduleHostNotice.ts | readScheduleHost",
