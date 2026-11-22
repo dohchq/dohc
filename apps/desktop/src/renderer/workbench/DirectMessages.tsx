@@ -53,6 +53,7 @@ import {
   type DirectStore,
   type DirectViewer,
 } from "./directConversations";
+import { useToastsAbove } from "./toastClearance";
 
 // Direct messages in Chats: the People section, one conversation, and New
 // message. Each conversation is between two people and lives on the account's
@@ -800,8 +801,12 @@ function DirectComposerLine(props: {
   children: string;
   action: { label: string; run: () => void };
 }) {
+  // It sits where the composer would, so toasts stay above it and its action stays in reach.
+  const ref = useRef<HTMLDivElement | null>(null);
+  useToastsAbove(ref);
   return (
     <div
+      ref={ref}
       data-testid={props.testId}
       role="status"
       className="flex shrink-0 items-center gap-2 border-t border-line px-3 py-2"

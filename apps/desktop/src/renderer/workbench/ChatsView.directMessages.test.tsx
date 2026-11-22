@@ -145,6 +145,25 @@ describe("ChatsView direct messages", () => {
     expect(screen.getAllByRole("button", { name: "New message" })).toHaveLength(1);
   });
 
+  it("keeps toasts above the blocked line, so Unblock stays in reach", async () => {
+    signedIn([conversation({ person: { ...sam, blocked: true } })]);
+    history([sent(2, "sam", "See you at nine")]);
+    const rect = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: Element,
+    ) {
+      return this.getAttribute("data-testid") === "chats-dm-blocked-line"
+        ? new DOMRect(0, window.innerHeight - 40, 600, 40)
+        : new DOMRect();
+    });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "direct", conversationId: "conversation-sam" },
+    });
+    await screen.findByTestId("chats-dm-blocked-line");
+    expect(document.documentElement.style.getPropertyValue("--dohc-composer-room")).toBe("40px");
+    rect.mockRestore();
+  });
+
   it("lists each conversation by the other person's name, with unread, preview, and blocked marks, and no email", async () => {
     signedIn([
       conversation({ unread: 2 }),
