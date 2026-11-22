@@ -1,5 +1,5 @@
 import "./tokens.css";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 
 const SERIES_COLORS = [
   "var(--kit-chart-1)",
@@ -17,24 +17,26 @@ const finiteOrNull = (value: number | undefined): number | null =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
 
 function useContainerWidth(fallback = 560) {
-  const ref = useRef<HTMLDivElement | null>(null);
+  const [node, setNode] = useState<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(fallback);
 
   useEffect(() => {
-    const node = ref.current;
     if (!node) return;
-    const measure = () => {
-      const next = Math.round(node.getBoundingClientRect().width);
+    const updateWidth = (raw: number) => {
+      const next = Math.round(raw);
       if (next > 0) setWidth(next);
     };
-    measure();
+    updateWidth(node.getBoundingClientRect().width);
     if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
+    const observer = new ResizeObserver((entries) => {
+      const entryWidth = entries[0]?.contentRect.width ?? 0;
+      updateWidth(entryWidth > 0 ? entryWidth : node.getBoundingClientRect().width);
+    });
     observer.observe(node);
     return () => observer.disconnect();
-  }, []);
+  }, [node]);
 
-  return { ref, width };
+  return { ref: setNode, width };
 }
 
 function niceScale(minValue: number, maxValue: number, ticks = 4) {
@@ -118,10 +120,13 @@ export function LineChart({
 }: LineChartProps) {
   const { ref, width } = useContainerWidth(560);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [keyboardFocused, setKeyboardFocused] = useState(false);
 
   const labels = rawLabels ?? data?.map((item) => item.label) ?? [];
   const series: readonly ChartSeries[] =
     rawSeries ?? (data ? [{ name: "Value", values: data.map((item) => item.value) }] : []);
+  const selected =
+    activeIndex !== null && activeIndex >= 0 && activeIndex < labels.length ? activeIndex : null;
 
   const validGoal = goal && Number.isFinite(goal.value) ? goal : undefined;
   const finiteValues = [
@@ -156,11 +161,11 @@ export function LineChart({
   const labelStep = Math.max(1, Math.ceil(labels.length / maxLabels));
 
   const readout =
-    activeIndex === null
+    !keyboardFocused || selected === null
       ? ""
-      : `${labels[activeIndex]}: ${series
+      : `${labels[selected]}: ${series
           .map((entry) => {
-            const val = finiteOrNull(entry.values[activeIndex]);
+            const val = finiteOrNull(entry.values[selected]);
             return `${entry.name} ${val === null ? "no data" : formatValue(val)}`;
           })
           .join(", ")}`;
@@ -172,9 +177,20 @@ export function LineChart({
       role="group"
       aria-label={ariaLabel}
       tabIndex={0}
-      onFocus={() => setActiveIndex((current) => current ?? 0)}
-      onBlur={() => setActiveIndex(null)}
-      onKeyDown={(event) => stepIndex(event, labels.length, activeIndex, setActiveIndex)}
+      onFocus={() => {
+        setKeyboardFocused(true);
+        setActiveIndex((current) =>
+          current !== null && current >= 0 && current < labels.length ? current : 0,
+        );
+      }}
+      onBlur={() => {
+        setKeyboardFocused(false);
+        setActiveIndex(null);
+      }}
+      onKeyDown={(event) => {
+        setKeyboardFocused(true);
+        stepIndex(event, labels.length, selected, setActiveIndex);
+      }}
     >
       <span className="kit-sr-only" aria-live="polite">
         {readout}
@@ -279,7 +295,7 @@ export function LineChart({
                     key={`${seriesIndex}-pt-${index}`}
                     cx={xOf(index)}
                     cy={yOf(value)}
-                    r={activeIndex === index ? 4.5 : 2.5}
+                    r={selected === index ? 4.5 : 2.5}
                     fill={stroke}
                   />
                 );
@@ -288,11 +304,11 @@ export function LineChart({
           );
         })}
 
-        {activeIndex !== null ? (
+        {selected !== null ? (
           <line
-            x1={xOf(activeIndex)}
+            x1={xOf(selected)}
             y1={pad.top}
-            x2={xOf(activeIndex)}
+            x2={xOf(selected)}
             y2={pad.top + plotH}
             stroke="var(--kit-subtle)"
             strokeDasharray="2 3"
@@ -316,21 +332,24 @@ export function LineChart({
                 width={Math.min(sliceW, plotW)}
                 height={plotH}
                 fill="transparent"
-                onMouseEnter={() => setActiveIndex(index)}
+                onMouseEnter={() => {
+                  setKeyboardFocused(false);
+                  setActiveIndex(index);
+                }}
               />
             </g>
           );
         })}
       </svg>
 
-      {activeIndex !== null ? (
+      {selected !== null ? (
         <div
           className="kit-chart-tooltip"
-          style={{ left: tooltipLeft(xOf(activeIndex), width), top: 8 }}
+          style={{ left: tooltipLeft(xOf(selected), width), top: 8 }}
         >
-          <strong>{labels[activeIndex]}</strong>
+          <strong>{labels[selected]}</strong>
           {series.map((entry, seriesIndex) => {
-            const val = finiteOrNull(entry.values[activeIndex]);
+            const val = finiteOrNull(entry.values[selected]);
             return (
               <div key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
                 <span
@@ -387,10 +406,13 @@ export function BarChart({
 }: BarChartProps) {
   const { ref, width } = useContainerWidth(560);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [keyboardFocused, setKeyboardFocused] = useState(false);
 
   const labels = rawLabels ?? data?.map((item) => item.label) ?? [];
   const series: readonly ChartSeries[] =
     rawSeries ?? (data ? [{ name: "Value", values: data.map((item) => item.value) }] : []);
+  const selected =
+    activeIndex !== null && activeIndex >= 0 && activeIndex < labels.length ? activeIndex : null;
 
   const cleanValues = series.map((entry) =>
     labels.map((_, index) => finiteOrNull(entry.values[index]) ?? 0),
@@ -432,10 +454,10 @@ export function BarChart({
   const scale = niceScale(domainMin, domainMax, 4);
 
   const readout =
-    activeIndex === null
+    !keyboardFocused || selected === null
       ? ""
-      : `${labels[activeIndex]}: ${series
-          .map((entry, s) => `${entry.name} ${formatValue(cleanValues[s]![activeIndex]!)}`)
+      : `${labels[selected]}: ${series
+          .map((entry, s) => `${entry.name} ${formatValue(cleanValues[s]![selected]!)}`)
           .join(", ")}`;
 
   if (orientation === "horizontal") {
@@ -456,9 +478,17 @@ export function BarChart({
         role="group"
         aria-label={ariaLabel}
         tabIndex={0}
-        onFocus={() => setActiveIndex((current) => current ?? 0)}
-        onBlur={() => setActiveIndex(null)}
-        onKeyDown={(event) => stepIndex(event, labels.length, activeIndex, setActiveIndex)}
+        onFocus={() => {
+          setKeyboardFocused(true);
+          setActiveIndex((current) =>
+            current !== null && current >= 0 && current < labels.length ? current : 0,
+          );
+        }}
+        onBlur={() => {
+          setKeyboardFocused(false);
+          setActiveIndex(null);
+        }}
+        onKeyDown={(event) => stepIndex(event, labels.length, selected, setActiveIndex)}
       >
         <span className="kit-sr-only" aria-live="polite">
           {readout}
@@ -533,7 +563,7 @@ export function BarChart({
                       height={barH}
                       rx={3}
                       fill={fill}
-                      opacity={activeIndex === null || activeIndex === index ? 1 : 0.45}
+                      opacity={selected === null || selected === index ? 1 : 0.45}
                     />
                   );
                 })}
@@ -552,12 +582,12 @@ export function BarChart({
           })}
         </svg>
 
-        {activeIndex !== null ? (
+        {selected !== null ? (
           <div
             className="kit-chart-tooltip"
             style={{ left: tooltipLeft(pad.left + plotW / 2, width), top: 8 }}
           >
-            <strong>{labels[activeIndex]}</strong>
+            <strong>{labels[selected]}</strong>
             {series.map((entry, seriesIndex) => (
               <div key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
                 <span
@@ -566,7 +596,7 @@ export function BarChart({
                 />
                 <span>
                   {series.length > 1 ? `${entry.name}: ` : ""}
-                  {formatValue(cleanValues[seriesIndex]![activeIndex]!)}
+                  {formatValue(cleanValues[seriesIndex]![selected]!)}
                 </span>
               </div>
             ))}
@@ -594,6 +624,9 @@ export function BarChart({
   const plotW = Math.max(120, width - pad.left - pad.right);
   const plotH = Math.max(80, height - pad.top - pad.bottom);
   const groupW = plotW / labels.length;
+  const maxLabels = Math.max(2, Math.floor(plotW / 52));
+  const labelStep = Math.max(1, Math.ceil(labels.length / maxLabels));
+  const lastRegularLabel = Math.floor((labels.length - 1) / labelStep) * labelStep;
   const yOf = (value: number) =>
     pad.top + plotH - ((value - scale.min) / (scale.max - scale.min || 1)) * plotH;
   const zeroY = yOf(0);
@@ -605,9 +638,17 @@ export function BarChart({
       role="group"
       aria-label={ariaLabel}
       tabIndex={0}
-      onFocus={() => setActiveIndex((current) => current ?? 0)}
-      onBlur={() => setActiveIndex(null)}
-      onKeyDown={(event) => stepIndex(event, labels.length, activeIndex, setActiveIndex)}
+      onFocus={() => {
+        setKeyboardFocused(true);
+        setActiveIndex((current) =>
+          current !== null && current >= 0 && current < labels.length ? current : 0,
+        );
+      }}
+      onBlur={() => {
+        setKeyboardFocused(false);
+        setActiveIndex(null);
+      }}
+      onKeyDown={(event) => stepIndex(event, labels.length, selected, setActiveIndex)}
     >
       <span className="kit-sr-only" aria-live="polite">
         {readout}
@@ -641,6 +682,9 @@ export function BarChart({
           const groupX = pad.left + index * groupW;
           const innerPad = Math.min(10, groupW * 0.16);
           const usableW = Math.max(8, groupW - innerPad * 2);
+          const showLabel =
+            index % labelStep === 0 ||
+            (index === labels.length - 1 && index - lastRegularLabel >= Math.ceil(labelStep * 0.6));
           let posCursor = 0;
           let negCursor = 0;
 
@@ -687,32 +731,34 @@ export function BarChart({
                         ? data[index]!.color
                         : colorAt(seriesIndex, entry.color)
                     }
-                    opacity={activeIndex === null || activeIndex === index ? 1 : 0.5}
+                    opacity={selected === null || selected === index ? 1 : 0.5}
                   />
                 );
               })}
-              <text
-                x={groupX + groupW / 2}
-                y={height - 6}
-                textAnchor="middle"
-                className="kit-chart-axis"
-              >
-                {label}
-              </text>
+              {showLabel ? (
+                <text
+                  x={groupX + groupW / 2}
+                  y={height - 6}
+                  textAnchor="middle"
+                  className="kit-chart-axis"
+                >
+                  {label}
+                </text>
+              ) : null}
             </g>
           );
         })}
       </svg>
 
-      {activeIndex !== null ? (
+      {selected !== null ? (
         <div
           className="kit-chart-tooltip"
           style={{
-            left: tooltipLeft(pad.left + activeIndex * groupW + groupW / 2, width),
+            left: tooltipLeft(pad.left + selected * groupW + groupW / 2, width),
             top: 8,
           }}
         >
-          <strong>{labels[activeIndex]}</strong>
+          <strong>{labels[selected]}</strong>
           {series.map((entry, seriesIndex) => (
             <div key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
               <span
@@ -721,7 +767,7 @@ export function BarChart({
               />
               <span>
                 {series.length > 1 ? `${entry.name}: ` : ""}
-                {formatValue(cleanValues[seriesIndex]![activeIndex]!)}
+                {formatValue(cleanValues[seriesIndex]![selected]!)}
               </span>
             </div>
           ))}
@@ -763,8 +809,11 @@ export function DonutChart({
   ariaLabel = "Breakdown chart",
 }: DonutChartProps) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [keyboardFocused, setKeyboardFocused] = useState(false);
   const items = data.filter((item) => Number.isFinite(item.value) && item.value > 0);
   const total = items.reduce((sum, item) => sum + item.value, 0);
+  const selected =
+    activeIndex !== null && activeIndex >= 0 && activeIndex < items.length ? activeIndex : null;
 
   if (items.length === 0 || total <= 0) {
     return (
@@ -777,10 +826,11 @@ export function DonutChart({
   const radius = size / 2 - 14;
   const circumference = 2 * Math.PI * radius;
   let consumed = 0;
-  const focused = activeIndex !== null ? items[activeIndex] : null;
-  const readout = focused
-    ? `${focused.label}: ${formatValue(focused.value)} (${Math.round((focused.value / total) * 100)}%)`
-    : "";
+  const focused = selected !== null ? items[selected]! : null;
+  const readout =
+    keyboardFocused && focused
+      ? `${focused.label}: ${formatValue(focused.value)} (${Math.round((focused.value / total) * 100)}%)`
+      : "";
 
   return (
     <div
@@ -788,9 +838,17 @@ export function DonutChart({
       role="group"
       aria-label={ariaLabel}
       tabIndex={0}
-      onFocus={() => setActiveIndex((current) => current ?? 0)}
-      onBlur={() => setActiveIndex(null)}
-      onKeyDown={(event) => stepIndex(event, items.length, activeIndex, setActiveIndex)}
+      onFocus={() => {
+        setKeyboardFocused(true);
+        setActiveIndex((current) =>
+          current !== null && current >= 0 && current < items.length ? current : 0,
+        );
+      }}
+      onBlur={() => {
+        setKeyboardFocused(false);
+        setActiveIndex(null);
+      }}
+      onKeyDown={(event) => stepIndex(event, items.length, selected, setActiveIndex)}
     >
       <span className="kit-sr-only" aria-live="polite">
         {readout}
@@ -824,7 +882,7 @@ export function DonutChart({
               r={radius}
               fill="none"
               stroke={colorAt(index, item.color)}
-              strokeWidth={activeIndex === index ? 22 : 18}
+              strokeWidth={selected === index ? 22 : 18}
               strokeDasharray={`${Math.max(0, length - 1.5)} ${circumference}`}
               strokeDashoffset={offset}
               transform={`rotate(-90 ${size / 2} ${size / 2})`}
@@ -855,7 +913,7 @@ export function DonutChart({
             <div
               key={`${item.label}-${index}`}
               className={
-                activeIndex === index ? "kit-donut-row kit-donut-row-active" : "kit-donut-row"
+                selected === index ? "kit-donut-row kit-donut-row-active" : "kit-donut-row"
               }
               onMouseEnter={() => setActiveIndex(index)}
               onMouseLeave={() => setActiveIndex(null)}
@@ -926,14 +984,22 @@ export function Sparkline({
   const max = Math.max(...finite);
   const span = max - min || 1;
   const pad = 2;
+  const denom = Math.max(1, values.length - 1);
 
-  const coords = finite.map((value, index) => {
-    const x = pad + (index / (finite.length - 1)) * (width - pad * 2);
-    const y = pad + (1 - (value - min) / span) * (height - pad * 2);
-    return `${x},${y}`;
-  });
-  const linePath = `M ${coords.join(" L ")}`;
-  const areaPath = `${linePath} L ${width - pad},${height - pad} L ${pad},${height - pad} Z`;
+  const segments: Array<Array<{ readonly x: number; readonly y: number }>> = [];
+  let current: Array<{ readonly x: number; readonly y: number }> = [];
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index]!;
+    if (Number.isFinite(value)) {
+      const x = pad + (index / denom) * (width - pad * 2);
+      const y = pad + (1 - (value - min) / span) * (height - pad * 2);
+      current.push({ x, y });
+    } else if (current.length > 0) {
+      segments.push(current);
+      current = [];
+    }
+  }
+  if (current.length > 0) segments.push(current);
 
   return (
     <svg
@@ -944,15 +1010,36 @@ export function Sparkline({
       aria-label={ariaLabel}
       style={{ display: "block", width, height }}
     >
-      {area ? <path d={areaPath} fill={stroke} fillOpacity={0.14} /> : null}
-      <path
-        d={linePath}
-        fill="none"
-        stroke={stroke}
-        strokeWidth={1.75}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+      {segments.map((segment, segmentIndex) => {
+        if (segment.length === 1) {
+          return (
+            <circle
+              key={`dot-${segmentIndex}`}
+              cx={segment[0]!.x}
+              cy={segment[0]!.y}
+              r={2}
+              fill={stroke}
+            />
+          );
+        }
+        const linePath = `M ${segment.map((pt) => `${pt.x},${pt.y}`).join(" L ")}`;
+        const first = segment[0]!;
+        const last = segment[segment.length - 1]!;
+        const areaPath = `${linePath} L ${last.x},${height - pad} L ${first.x},${height - pad} Z`;
+        return (
+          <g key={`seg-${segmentIndex}`}>
+            {area ? <path d={areaPath} fill={stroke} fillOpacity={0.14} /> : null}
+            <path
+              d={linePath}
+              fill="none"
+              stroke={stroke}
+              strokeWidth={1.75}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </g>
+        );
+      })}
     </svg>
   );
 }

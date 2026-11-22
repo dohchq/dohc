@@ -225,7 +225,7 @@ type Pending = {
   timer?: ReturnType<typeof setTimeout>;
 };
 
-export function createAppClient(options: AppClientOptions = {}): AppClient {
+function createManagedClient(options: AppClientOptions, shared: boolean): AppClient {
   const invokeTimeoutMs = options.invokeTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
   const transferTimeoutMs = options.transferTimeoutMs ?? DEFAULT_TRANSFER_TIMEOUT_MS;
   const maxInFlight = options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
@@ -370,7 +370,8 @@ export function createAppClient(options: AppClientOptions = {}): AppClient {
       ) as Promise<AttemptResult>;
     },
     close() {
-      if (closed) return;
+      // The shared host port belongs to the iframe lifetime; only explicit ports close on demand.
+      if (shared || closed) return;
       closed = true;
       hostPortWaiters.delete(bindPort);
       port?.close();
@@ -386,23 +387,31 @@ export function createAppClient(options: AppClientOptions = {}): AppClient {
 let sharedHostClient: AppClient | null = null;
 let sharedPageHideWired = false;
 
-function getSharedAppClient(): AppClient {
+function getSharedAppClient(options: AppClientOptions = {}): AppClient {
   if (!sharedHostClient) {
-    sharedHostClient = createAppClient();
+    sharedHostClient = createManagedClient(options, true);
     if (!sharedPageHideWired && typeof window !== "undefined") {
       sharedPageHideWired = true;
       window.addEventListener(
         "pagehide",
         () => {
-          sharedHostClient?.close();
+          const closing = sharedHostClient;
           sharedHostClient = null;
           sharedPageHideWired = false;
+          if (closing && capturedHostPort) {
+            capturedHostPort.close();
+          }
         },
         { once: true },
       );
     }
   }
   return sharedHostClient;
+}
+
+export function createAppClient(options: AppClientOptions = {}): AppClient {
+  if (options.port) return createManagedClient(options, false);
+  return getSharedAppClient(options);
 }
 
 const AppClientContext = createContext<AppClient | null>(null);
@@ -463,7 +472,7 @@ export function useDatasetQuery<T = unknown>(
 ): DatasetQueryState<T> {
   const client = useApp();
   const enabled = options?.enabled ?? true;
-  const serializedInput = JSON.stringify(input ?? {});
+  const serializedInput = input === undefined ? "{}" : JSON.stringify(input);
   const scope = `${clientIdOf(client)}:${operation}:${serializedInput}`;
 
   const [state, setState] = useState<ScopedQueryResult<T>>(() => ({
@@ -553,7 +562,7 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   const client = useApp();
   const [inFlightCount, setInFlightCount] = useState(0);
   const [error, setError] = useState<AppBackendError | null>(null);
-  const [retained, setRetained] = useState<RetainedSubmission | null>(null);
+  const [retained, setRetained] = useState<readonly RetainedSubmission[]>([]);
   const nextAttemptId = useRef(1);
   const mounted = useRef(true);
 
@@ -566,9 +575,16 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
 
   const execute = useCallback(
     async (submission: RetainedSubmission): Promise<InvokeReply<TResult>> => {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(submission.payloadJson);
+      } catch {
+        const badInput = new AppBackendError(400);
+        if (mounted.current) setError(badInput);
+        throw badInput;
+      }
       setInFlightCount((count) => count + 1);
       setError(null);
-      const payload: unknown = JSON.parse(submission.payloadJson);
       try {
         const reply = await submission.client.invoke<TResult>(
           submission.operation,
@@ -576,7 +592,7 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
           submission.key,
         );
         if (mounted.current) {
-          setRetained((current) => (current?.id === submission.id ? null : current));
+          setRetained((current) => current.filter((item) => item.id !== submission.id));
         }
         return reply;
       } catch (caught) {
@@ -584,9 +600,13 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
         if (mounted.current) {
           setError(backendError);
           if (backendError.uncertain) {
-            setRetained(submission);
+            setRetained((current) =>
+              current.some((item) => item.id === submission.id)
+                ? current
+                : [...current, submission],
+            );
           } else {
-            setRetained((current) => (current?.id === submission.id ? null : current));
+            setRetained((current) => current.filter((item) => item.id !== submission.id));
           }
         }
         throw backendError;
@@ -600,13 +620,24 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   );
 
   const mutate = useCallback(
-    (input: TInput, idempotencyKey?: string) => {
+    async (input: TInput, idempotencyKey?: string) => {
+      let payloadJson: string | undefined;
+      try {
+        payloadJson = input === undefined ? "{}" : JSON.stringify(input);
+      } catch {
+        payloadJson = undefined;
+      }
+      if (payloadJson === undefined) {
+        const badInput = new AppBackendError(400);
+        if (mounted.current) setError(badInput);
+        throw badInput;
+      }
       const submission: RetainedSubmission = {
         id: nextAttemptId.current++,
         client,
         operation,
         key: idempotencyKey ?? mutationKey(operation),
-        payloadJson: JSON.stringify(input ?? {}),
+        payloadJson,
       };
       return execute(submission);
     },
@@ -614,12 +645,13 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   );
 
   const retry = useCallback(async () => {
-    if (!retained) return null;
-    return execute(retained);
+    const next = retained[0];
+    if (!next) return null;
+    return execute(next);
   }, [execute, retained]);
 
   const discardPending = useCallback(() => {
-    setRetained(null);
+    setRetained([]);
     setError(null);
   }, []);
 
@@ -628,7 +660,7 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
     retry,
     discardPending,
     pending: inFlightCount > 0,
-    uncertain: retained !== null,
+    uncertain: retained.length > 0,
     error,
   };
 }

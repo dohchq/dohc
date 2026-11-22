@@ -345,14 +345,14 @@ export async function loadClosedAppBuiltins(
   }
   if (!cachedDevBuiltins) {
     const desktopRoot = resolve(dirname(selfPath), "../..");
-    const pending = (async () => {
+    const tracked = (async () => {
       const bundler = esbuild ?? (await import("esbuild"));
       return buildClosedAppBuiltins(bundler, desktopRoot);
-    })();
-    cachedDevBuiltins = pending.catch((error) => {
-      if (cachedDevBuiltins === pending) cachedDevBuiltins = undefined;
+    })().catch((error) => {
+      if (cachedDevBuiltins === tracked) cachedDevBuiltins = undefined;
       throw error;
     });
+    cachedDevBuiltins = tracked;
   }
   return cachedDevBuiltins;
 }

@@ -442,7 +442,23 @@ export function Checkbox({ label, className, id, ...props }: CheckboxProps) {
 }
 
 const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function isVisibleFocusable(element: HTMLElement): boolean {
+  if (element.tabIndex < 0) return false;
+  if (element.closest('[hidden],[inert],[aria-hidden="true"]')) return false;
+  if (getComputedStyle(element).visibility === "hidden") return false;
+  for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+    if (
+      current.hidden ||
+      current.style.display === "none" ||
+      getComputedStyle(current).display === "none"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
 
 export interface ModalProps {
   readonly open: boolean;
@@ -474,7 +490,7 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
       }
       if (event.key !== "Tab" || !dialog) return;
       const focusables = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
-        (element) => element.tabIndex >= 0,
+        isVisibleFocusable,
       );
       if (focusables.length === 0) {
         event.preventDefault();
@@ -498,7 +514,9 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
     const onFocusIn = (event: FocusEvent) => {
       if (!dialog) return;
       if (event.target instanceof Node && !dialog.contains(event.target)) {
-        const focusables = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+        const focusables = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
+          isVisibleFocusable,
+        );
         (focusables[0] ?? dialog).focus();
       }
     };

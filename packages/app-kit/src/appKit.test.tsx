@@ -162,6 +162,28 @@ describe("dohc/app", () => {
       value: { result: { ok: true }, revision: 2, replayed: false },
     });
     await waitFor(() => expect(screen.getByText("connected")).toBeTruthy());
+
+    // Two port-less createAppClient() calls share the host channel without clobbering or closing it.
+    const implicitA = createAppClient();
+    const implicitB = createAppClient();
+    expect(implicitA).toBe(implicitB);
+    const countBeforeImplicit = fake.sent.length;
+    const reqA = implicitA.read<{ a: number }>("opA");
+    const reqB = implicitB.read<{ b: number }>("opB");
+    implicitB.close();
+    expect(fake.isClosed()).toBe(false);
+    fake.reply({
+      id: fake.sent[countBeforeImplicit]!.id,
+      ok: true,
+      value: { result: { a: 1 }, revision: 3, replayed: false },
+    });
+    fake.reply({
+      id: fake.sent[countBeforeImplicit + 1]!.id,
+      ok: true,
+      value: { result: { b: 2 }, revision: 3, replayed: false },
+    });
+    expect(await reqA).toEqual({ a: 1 });
+    expect(await reqB).toEqual({ b: 2 });
   });
 
   it("clears query data on scope change and guards late replies without refetch loops", async () => {
@@ -193,7 +215,6 @@ describe("dohc/app", () => {
     });
     await waitFor(() => expect(screen.getByText("data:October")).toBeTruthy());
 
-    // Same value inline object must not refetch.
     rerender(
       <AppProvider client={client}>
         <View op="summary" month="Oct" />
@@ -201,7 +222,14 @@ describe("dohc/app", () => {
     );
     expect(fake.sent).toHaveLength(1);
 
-    // Changing operation immediately clears old data/revision even when the new query fails with 404.
+    rerender(
+      <AppProvider client={client}>
+        <View op="summary" month="Nov" />
+      </AppProvider>,
+    );
+    expect(fake.sent).toHaveLength(2);
+    const novId = fake.sent[1]!.id;
+
     rerender(
       <AppProvider client={client}>
         <View op="missingOp" month="Oct" />
@@ -209,24 +237,32 @@ describe("dohc/app", () => {
     );
     expect(screen.getByText("data:none")).toBeTruthy();
     expect(screen.getByText("rev:none")).toBeTruthy();
-    expect(fake.sent).toHaveLength(2);
+    expect(fake.sent).toHaveLength(3);
 
-    fake.reply({ id: fake.sent[1]!.id, ok: false, status: 404 });
+    // Late reply for the superseded November scope must be ignored.
+    fake.reply({
+      id: novId,
+      ok: true,
+      value: { result: { label: "StaleNov" }, revision: 8, replayed: false },
+    });
+    fake.reply({ id: fake.sent[2]!.id, ok: false, status: 404 });
     await waitFor(() => expect(screen.getByText("err:404")).toBeTruthy());
     expect(screen.getByText("data:none")).toBeTruthy();
     expect(screen.getByText("rev:none")).toBeTruthy();
     client.close();
   });
 
-  it("snapshots original operation and immutable payload across uncertain mutation retries", async () => {
+  it("snapshots original operation and preserves overlapping uncertain mutation retry keys", async () => {
     const fake = makeFakePort();
     const client = createAppClient({ port: fake.port });
     const mutablePayload = { amount: 10 };
 
     function Form({ operation }: { operation: string }) {
-      const save = useDatasetMutation<{ amount: number }, { saved: boolean }>(operation);
+      const save = useDatasetMutation<unknown, { saved: boolean }>(operation);
       return (
         <div>
+          <span>pending:{String(save.pending)}</span>
+          <span>uncertain:{String(save.uncertain)}</span>
           <button
             type="button"
             onClick={() => {
@@ -234,6 +270,30 @@ describe("dohc/app", () => {
             }}
           >
             Save
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void save.mutate({ amount: 20 }).catch(() => {});
+            }}
+          >
+            SaveB
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void save.mutate(null).catch(() => {});
+            }}
+          >
+            SaveNull
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void save.mutate(() => {}).catch(() => {});
+            }}
+          >
+            SaveBad
           </button>
           {save.uncertain ? (
             <button
@@ -254,14 +314,35 @@ describe("dohc/app", () => {
         <Form operation="opA" />
       </AppProvider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // Unserializable input rejects cleanly and never sticks pending.
+    fireEvent.click(screen.getByRole("button", { name: "SaveBad" }));
+    await waitFor(() => expect(screen.getByText("pending:false")).toBeTruthy());
+    expect(fake.sent).toHaveLength(0);
+
+    // Null input is preserved instead of coerced to {}.
+    fireEvent.click(screen.getByRole("button", { name: "SaveNull" }));
     expect(fake.sent).toHaveLength(1);
-    const firstKey = fake.sent[0]!.idempotencyKey;
-    fake.reply({ id: fake.sent[0]!.id, ok: false, status: 503 });
+    expect(fake.sent[0]!.input).toBeNull();
+    fake.reply({
+      id: fake.sent[0]!.id,
+      ok: true,
+      value: { result: { saved: true }, revision: 1, replayed: false },
+    });
+    await waitFor(() => expect(screen.getByText("pending:false")).toBeTruthy());
+
+    // Overlapping writes A and B both fail with 503 out of order (B then A).
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: "SaveB" }));
+    expect(fake.sent).toHaveLength(3);
+    const keyA = fake.sent[1]!.idempotencyKey;
+    const keyB = fake.sent[2]!.idempotencyKey;
+    fake.reply({ id: fake.sent[2]!.id, ok: false, status: 503 });
+    fake.reply({ id: fake.sent[1]!.id, ok: false, status: 503 });
 
     const retryButton = await screen.findByRole("button", { name: "Retry" });
 
-    // Mutate the original object and switch component operation prop before retrying.
+    // Mutate payload A and switch operation prop before retrying.
     mutablePayload.amount = 999;
     rerender(
       <AppProvider client={client}>
@@ -269,17 +350,33 @@ describe("dohc/app", () => {
       </AppProvider>,
     );
 
+    // First retry replays B (first retained uncertain write), keeping A retained!
     fireEvent.click(retryButton);
-    expect(fake.sent).toHaveLength(2);
-    expect(fake.sent[1]!.operation).toBe("opA");
-    expect(fake.sent[1]!.input).toEqual({ amount: 10 });
-    expect(fake.sent[1]!.idempotencyKey).toBe(firstKey);
+    expect(fake.sent).toHaveLength(4);
+    expect(fake.sent[3]!.operation).toBe("opA");
+    expect(fake.sent[3]!.input).toEqual({ amount: 20 });
+    expect(fake.sent[3]!.idempotencyKey).toBe(keyB);
     fake.reply({
-      id: fake.sent[1]!.id,
+      id: fake.sent[3]!.id,
       ok: true,
       value: { result: { saved: true }, revision: 4, replayed: true },
     });
+    await waitFor(() => expect(screen.getByText("pending:false")).toBeTruthy());
+    expect(screen.getByText("uncertain:true")).toBeTruthy();
+
+    // Second retry replays A with its snapshotted immutable payload and original key.
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(fake.sent).toHaveLength(5);
+    expect(fake.sent[4]!.operation).toBe("opA");
+    expect(fake.sent[4]!.input).toEqual({ amount: 10 });
+    expect(fake.sent[4]!.idempotencyKey).toBe(keyA);
+    fake.reply({
+      id: fake.sent[4]!.id,
+      ok: true,
+      value: { result: { saved: true }, revision: 5, replayed: true },
+    });
     await waitFor(() => expect(screen.queryByRole("button", { name: "Retry" })).toBeNull());
+    expect(screen.getByText("uncertain:false")).toBeTruthy();
     client.close();
   });
 });
@@ -296,6 +393,7 @@ describe("dohc/ui and dohc/charts", () => {
         <div>
           <Button onClick={() => setOpen(true)}>Outside</Button>
           <Modal open={open} title="Edit item" onClose={() => setOpen(false)}>
+            <input type="hidden" value="secret" />
             <Field label="Merchant" htmlFor="modal-merchant">
               <Input
                 id="modal-merchant"
@@ -304,6 +402,9 @@ describe("dohc/ui and dohc/charts", () => {
               />
             </Field>
             <Button variant="primary">Save</Button>
+            <div style={{ display: "none" }}>
+              <button type="button">HiddenAction</button>
+            </div>
           </Modal>
         </div>
       );
@@ -386,11 +487,14 @@ describe("dohc/ui and dohc/charts", () => {
     fireEvent.change(modalInput, { target: { value: "Blue" } });
     expect(document.activeElement).toBe(modalInput);
 
-    // Tabbing from last modal focusable wraps to first modal focusable (Close button), not Outside.
+    // Tabbing from last visible modal focusable wraps to Close; Shift+Tab from Close skips hidden elements and lands on Save.
+    const closeBtn = screen.getByRole("button", { name: "Close" });
     const saveBtn = screen.getByRole("button", { name: "Save" });
     saveBtn.focus();
     fireEvent.keyDown(window, { key: "Tab" });
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" }));
+    expect(document.activeElement).toBe(closeBtn);
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(saveBtn);
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -469,5 +573,77 @@ describe("dohc/ui and dohc/charts", () => {
     const donutGroup = screen.getByRole("group", { name: "Monthly breakdown" });
     fireEvent.focus(donutGroup);
     expect(donutGroup.textContent).toContain("Housing: 1,800 (75%)");
+  });
+
+  it("survives shrinking chart data while focused, preserves sparkline gaps, and attaches ResizeObserver after empty mount", () => {
+    const observed: Element[] = [];
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class FakeResizeObserver {
+      private readonly cb: ResizeObserverCallback;
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb;
+      }
+      observe(el: Element) {
+        observed.push(el);
+        this.cb(
+          [{ contentRect: { width: 720 } } as ResizeObserverEntry],
+          this as unknown as ResizeObserver,
+        );
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
+
+    try {
+      function DynamicCharts({ shrunk, loaded }: { shrunk: boolean; loaded: boolean }) {
+        return (
+          <div>
+            <BarChart
+              data={
+                shrunk
+                  ? [{ label: "A", value: 10 }]
+                  : [
+                      { label: "A", value: 10 },
+                      { label: "B", value: 20 },
+                      { label: "C", value: 30 },
+                    ]
+              }
+              formatValue={(v) => v.toFixed(2)}
+              ariaLabel="Dynamic bars"
+            />
+            <LineChart
+              labels={loaded ? ["W1", "W2"] : []}
+              series={loaded ? [{ name: "Trend", values: [1, 2] }] : []}
+              ariaLabel="Late line"
+            />
+            <Sparkline values={[10, 20, Number.NaN, 30, 40]} ariaLabel="Gapped spark" />
+          </div>
+        );
+      }
+
+      const { rerender, container } = render(<DynamicCharts shrunk={false} loaded={false} />);
+      const barGroup = screen.getByRole("group", { name: "Dynamic bars" });
+      fireEvent.focus(barGroup);
+      fireEvent.keyDown(barGroup, { key: "End" });
+      expect(barGroup.textContent).toContain("C: Value 30.00");
+
+      const observedBefore = observed.length;
+      rerender(<DynamicCharts shrunk={true} loaded={true} />);
+      expect(observed.length).toBeGreaterThan(observedBefore);
+      expect(
+        screen
+          .getByRole("group", { name: "Late line" })
+          .querySelector("svg")
+          ?.getAttribute("width"),
+      ).toBe("720");
+
+      // Gapped sparkline renders two separate stroke paths (plus optional area fills) with zero NaN.
+      const spark = screen.getByRole("img", { name: "Gapped spark" });
+      expect(spark.querySelectorAll('path[fill="none"]')).toHaveLength(2);
+      expect(container.innerHTML).not.toContain("NaN");
+    } finally {
+      globalThis.ResizeObserver = OriginalResizeObserver;
+    }
   });
 });
