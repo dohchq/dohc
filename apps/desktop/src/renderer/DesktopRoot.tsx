@@ -18,7 +18,7 @@ import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 import { Titlebar, workspaceName } from "./Titlebar";
-import { ChevronDown, ChevronRight, LockKeyhole } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, LockKeyhole } from "lucide-react";
 import { SecondaryButton } from "./ui/controls";
 import { readError, refusalCode } from "../ipc/errorWords";
 import {
@@ -184,7 +184,17 @@ function UpdatingAccess(props: { workspace: Workspace }) {
       )}
       {stopped ? (
         <div className="flex max-w-md items-start gap-2">
-          <div className="m-0 select-text text-[13px] leading-relaxed text-ink">
+          {ended ? null : (
+            <CircleAlert
+              size={14}
+              strokeWidth={1.9}
+              aria-hidden
+              className="mt-[3px] shrink-0 text-danger"
+            />
+          )}
+          <div
+            className={`m-0 select-text text-[13px] leading-relaxed text-ink${ended ? "" : " text-left"}`}
+          >
             {stopped.title ? <p className="m-0 font-medium">{stopped.title}</p> : null}
             <p className="m-0">{stopped.detail}</p>
           </div>
