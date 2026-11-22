@@ -279,7 +279,9 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
       await expect(editor).toBeVisible();
       // A file changed outside dohc opens with an error state until the next edit, which the repair makes.
       const saveState = page.getByTestId("markdown-save-state");
-      await expect(saveState).toHaveAttribute("data-state", /^(saved|error)$/, { timeout: 60_000 });
+      await expect(saveState).toHaveAttribute("data-state", /^(saved|saved-to-host|error)$/, {
+        timeout: 60_000,
+      });
       const failed = (await saveState.getAttribute("data-state")) === "error";
       if (failed || !((await editor.textContent()) ?? "").includes(sentence)) {
         await editor.click();
@@ -292,10 +294,7 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
             timeout: 30_000,
           })
           .toContain(sentence);
-        await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
-          "data-state",
-          "saved",
-        );
+        await expect(saveState).toHaveAttribute("data-state", /^saved(-to-host)?$/);
       }
       await page.keyboard.press("Escape");
     }
