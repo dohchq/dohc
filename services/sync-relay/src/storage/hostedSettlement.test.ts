@@ -893,58 +893,66 @@ it("rechecks an unchanged publication anchor at commit", async () => {
 });
 
 it.each([
-  ["the owner's save since the last settlement", "owner-laptop", true],
-  ["the host's own save", "service-host:host", false],
-  ["no save", null, false],
-] as const)("starts the first settlement after a Stop from %s", async (_case, saver, accepted) => {
-  const f = registered({ deployment: true });
-  try {
-    const first = publication(f, "first");
-    await prepare(f, [first.op]);
-    append(f, [first.op]);
-    const path = first.record.binding.currentPath,
-      saved = new TextEncoder().encode("# Saved while stopped\n"),
-      savedSha = hash(saved);
-    f.storage.putBlob({
-      workspaceId: "workspace",
-      sha256: savedSha,
-      content: saved,
-      createdAtMs: 1,
-    });
-    if (saver)
-      f.storage.appendLogBatch({
+  ["the owner's save since the last settlement", "owner-laptop", true, false, true],
+  ["the owner's save the interval does not read as", "owner-laptop", false, false, false],
+  ["the owner's save with a save earlier in its push", "owner-laptop", true, true, false],
+  ["the host's own save", "service-host:host", true, false, false],
+  ["no save", null, true, false, false],
+] as const)(
+  "starts the first settlement after a Stop from %s",
+  async (_case, saver, intervalReadsAsSave, earlierInPush, accepted) => {
+    const f = registered({ deployment: true });
+    try {
+      const first = publication(f, "first");
+      await prepare(f, [first.op]);
+      append(f, [first.op]);
+      const next = publication(f, "after-resume", first.receipt.journalCursor, "", 1);
+      const other = new TextEncoder().encode("# Saved while stopped\n");
+      f.storage.putBlob({
         workspaceId: "workspace",
-        originId: saver,
-        ops: [
-          {
-            originSeq: 0,
-            opKind: "moment.append",
-            recordedAtMs: 2,
-            payloadJson: stableJsonStringify({
-              momentId: "saved-while-stopped",
-              objectId: first.record.binding.objectId,
-              versionId: "main",
-              path,
-              operation: "write",
-              payloadBeforePath: path,
-              payloadAfterPath: path,
-              payloadBeforeContentKind: "text",
-              payloadBeforeBlobSha256: first.markdownSha,
-              payloadAfterBlobSha256: savedSha,
-              payloadAfterByteLength: saved.length,
-              payloadAfterContentKind: "text",
-              recordedAtMs: 2,
-            }),
-          },
-        ],
+        sha256: hash(other),
+        content: other,
+        createdAtMs: 1,
       });
-    const next = publication(f, "after-resume", first.receipt.journalCursor, savedSha, 1);
-    await prepare(f, [next.op]);
-    expect(append(f, [next.op]).settlementRefusals).toEqual(
-      accepted ? undefined : [expect.objectContaining({ momentId: "after-resume" })],
-    );
-    expect(refusedChecks()).toEqual(accepted ? [] : ["prepare predecessor-markdown"]);
-  } finally {
-    f.close();
-  }
-});
+      const savedSha = intervalReadsAsSave ? next.markdownSha : hash(other);
+      next.payload.payloadBeforeBlobSha256 = savedSha;
+      next.op.payloadJson = stableJsonStringify(next.payload);
+      const path = first.record.binding.currentPath;
+      const save = (originSeq: number, before: string, after: string) => ({
+        originSeq,
+        opKind: "moment.append",
+        recordedAtMs: 2,
+        payloadJson: stableJsonStringify({
+          momentId: `save-${originSeq}-${after.slice(0, 6)}`,
+          objectId: first.record.binding.objectId,
+          versionId: "main",
+          path,
+          operation: "write",
+          payloadBeforePath: path,
+          payloadAfterPath: path,
+          payloadBeforeContentKind: "text",
+          payloadBeforeBlobSha256: before,
+          payloadAfterBlobSha256: after,
+          payloadAfterByteLength: 1,
+          payloadAfterContentKind: "text",
+          recordedAtMs: 2,
+        }),
+      });
+      if (saver)
+        f.storage.appendLogBatch({
+          workspaceId: "workspace",
+          originId: saver,
+          ops: [save(0, first.markdownSha, savedSha)],
+        });
+      next.op.originSeq = earlierInPush ? 2 : 1;
+      const ops = earlierInPush ? [save(1, savedSha, hash(other)), next.op] : [next.op];
+      await prepare(f, ops);
+      expect(append(f, ops).settlementRefusals).toEqual(
+        accepted ? undefined : [expect.objectContaining({ momentId: "after-resume" })],
+      );
+      expect(refusedChecks()).toEqual(accepted ? [] : ["prepare predecessor-markdown"]);
+    } finally {
+      f.close();
+    }
+  },
+);

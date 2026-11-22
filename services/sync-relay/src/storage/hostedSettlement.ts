@@ -234,6 +234,7 @@ type Prepared = {
   markdown: string;
   terminalDigest: string;
   before: string;
+  pushMovedFile: boolean;
 };
 const prepared = new WeakMap<SyncRelayLogInput, Prepared>();
 /** What a verified settlement record proves: its binding and accepted interval. */
@@ -626,6 +627,8 @@ function ownerSavedSince(
     )
     .get(settled.originId, settled.originSeq, p.binding.workspaceId, p.binding.currentPath);
   return (
+    !p.pushMovedFile &&
+    p.before === p.markdown &&
     stored?.blob_sha256 === p.before &&
     stored.object_id === p.binding.objectId &&
     typeof stored.origin_id === "string" &&
@@ -727,7 +730,7 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
     restoreFenceGeneration: base.restore_fence_generation,
   }) === p.baseBindingJson, "base-binding");
 }
-type ProvedSettlement = Omit<Prepared, "before"> & {
+type ProvedSettlement = Omit<Prepared, "before" | "pushMovedFile"> & {
   events: ReturnType<typeof readAcceptedHistoryInterval>;
 };
 /**
@@ -907,7 +910,7 @@ export async function prepareHostedSettlements(
   signal?: AbortSignal,
 ) {
   const provisional = new Map<string, Prepared>();
-  for (const op of input.ops) {
+  for (const [index, op] of input.ops.entries()) {
     if (op.opKind !== "moment.append") continue;
     const payload = bag(JSON.parse(op.payloadJson), "payload-object");
     if (!Object.hasOwn(payload, "settlementReference")) {
@@ -972,7 +975,17 @@ export async function prepareHostedSettlements(
       if (!after) throw relayError("blob_missing");
       require(payload.payloadAfterByteLength ===
         integer(after.byte_length, "markdown-length"), "markdown-length");
-      const p: Prepared = { ...proved, before: String(payload.payloadBeforeBlobSha256) };
+      const p: Prepared = {
+        ...proved,
+        before: String(payload.payloadBeforeBlobSha256),
+        pushMovedFile: input.ops
+          .slice(0, index)
+          .some(
+            (earlier) =>
+              earlier.opKind === "moment.append" &&
+              JSON.parse(earlier.payloadJson).path === proved.binding.currentPath,
+          ),
+      };
       const document = p.binding;
       const key = JSON.stringify(documentParams(document)),
         prior = provisional.get(key);
