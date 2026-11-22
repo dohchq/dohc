@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
+import {
+  act,
+  cleanup,
+  render as renderBare,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -32,6 +40,12 @@ import { AutomationRuns } from "./AutomationRuns";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
 import type { AutomationDatasetTable, AutomationTable } from "./automationDraft";
 import { START_OVER_SENTENCE } from "./useAutomationRetry";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
+
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="ws-1">{children}</WorkspaceSessionProvider>;
+}
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: Session });
 
 const HASH = "a".repeat(64);
 const FIELDS: FieldDefinition[] = [

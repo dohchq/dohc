@@ -25,6 +25,8 @@ import {
   SectionLabel,
 } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { RUN_TIME, Sentence, StatusLine } from "./AutomationParts";
 import {
   automationTableOf,
@@ -1422,7 +1424,15 @@ export function AutomationBuilder(props: {
   const [attempted, setAttempted] = useState(false);
   const [checking, setChecking] = useState(false);
   const [saveChosen, setSaveChosen] = useState(false);
-  const [targets, setTargets] = useState<Target[] | null>(null);
+  // The Collections a step can reach, for both kinds of Collection. A new workspace or Collection starts over.
+  const listed = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([workspaceId, collectionPath]),
+    load: async (): Promise<Target[] | null> => {
+      const result = await bridge().listAutomationTargets({ workspaceId, collectionPath });
+      return "collections" in result ? result.collections : null;
+    },
+  });
+  const targets = listed.value ?? null;
   // Each other dataset a step names, as dohc describes it, or "failed" when it could not.
   const [datasetTables, setDatasetTables] = useState(
     () => new Map<string, AutomationTable | "failed">(),
@@ -1909,24 +1919,21 @@ export function AutomationBuilder(props: {
     };
   }, [workspaceId, collectionPath, choosesPeople]);
 
-  // The Collections a step can reach, for both kinds of Collection. A new
-  // workspace or Collection starts over, so nothing it knew stays.
+  // A new workspace or Collection starts over, so nothing it knew stays.
   useEffect(() => {
-    setTargets(null);
     setDatasetTables(new Map());
     setSchemas(new Map([[collectionPath, props.fields.filter(holdsValue)]]));
     requested.current = new Set();
-    const epoch = scope.current();
-    void bridge()
-      .listAutomationTargets({ workspaceId, collectionPath })
-      .then((result) => {
-        if (scope.isCurrent(epoch) && "collections" in result) setTargets(result.collections);
-      })
-      .catch((error: unknown) => {
-        if (scope.isCurrent(epoch))
-          onError("dohc could not list the Collections an automation can change.", error);
-      });
   }, [workspaceId, collectionPath]);
+  const reportTargets = useRef(onError);
+  reportTargets.current = onError;
+  useEffect(() => {
+    if (listed.error !== null)
+      reportTargets.current(
+        "dohc could not list the Collections an automation can change.",
+        listed.error,
+      );
+  }, [listed.error]);
 
   // A Find in another Collection gets its condition once dohc knows that Collection's kind.
   useEffect(() => {
