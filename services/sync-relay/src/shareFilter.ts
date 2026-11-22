@@ -1462,6 +1462,17 @@ function shareReadDecision(
     const moved = boundaryMove(files, record, (path) => pathVisibleThroughShare(files, path), chat);
     // A member never learns what a file held after it left their reach.
     if (moved?.departs) {
+      // A later rule removal can make a folder the member never saw look visible now.
+      if (
+        typeof record.objectId !== "string" ||
+        typeof record.momentId !== "string" ||
+        !selector.reach.pathVisibleBeforeMoment(
+          record.objectId,
+          record.momentId,
+          record.payloadBeforePath as string,
+        )
+      )
+        return { allowed: false };
       if (!moved.decision.allowed) return moved.decision;
       (moved.decision.payload as Record<string, unknown>).payloadBeforeBlobSha256 = null;
       return { ...moved.decision, reachMove: "departure" };
@@ -1504,8 +1515,7 @@ function shareReadDecision(
     if (!side) return { allowed: false };
     // A Group's folder path is served only when the share reaches that folder.
     const folderPath = asRecord(payload)?.folderPath;
-    const servesFolder =
-      typeof folderPath === "string" && visibleSharePath(files, folderPath) === folderPath;
+    const servesFolder = typeof folderPath === "string" && coversLink(files, folderPath);
     return withheldLinks(
       filterChatOpForChannelShare(side, opKind, payload, chat, servesFolder),
       opKind,

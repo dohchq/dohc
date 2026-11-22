@@ -685,13 +685,38 @@ async fn an_unsent_copy_of_a_held_file_in_a_hidden_folder_is_saved() {
 /// disk knows it: it is the member's own and goes to the recovery folder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_file_the_engine_never_recorded_in_a_hidden_folder_is_saved() {
-    let copy = closed_copy_with("rpc-rebuild-unrecorded", true, false, |_, _, scratch| {
+    a_hidden_new_file_is_saved(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_new_file_in_a_hidden_folder_under_an_edit_root_is_saved() {
+    a_hidden_new_file_is_saved(true).await;
+}
+
+async fn a_hidden_new_file_is_saved(record: bool) {
+    let copy = closed_copy_with("rpc-rebuild-unrecorded", true, false, move |transport, handle, scratch| {
         Box::pin(async move {
+            if record {
+                let mut id = 50;
+                call(
+                    transport,
+                    handle,
+                    &mut id,
+                    "versionedText.write",
+                    json!({
+                        "versionId": "main", "objectId": "my-ideas", "path": "hidden/ideas.md",
+                        "text": "a rain barrel", "momentId": "my-ideas", "origin": "api", "nowMs": 3_000,
+                    }),
+                )
+                .await;
+            }
             std::fs::write(scratch.path().join("hidden/ideas.md"), "a rain barrel").expect("ideas");
         })
     })
     .await;
-    let result = rebuild(&copy).await;
+    let mut granted = edit_in(&[]);
+    granted["reach"]["rootLevel"] = json!("edit");
+    let result = rebuild_under(&copy, &granted).await;
     assert_eq!(result["state"], "rebuilt", "{result}");
     let root = copy.scratch.path();
     assert!(!root.join("hidden/ideas.md").exists());

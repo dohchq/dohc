@@ -1224,6 +1224,7 @@ fn plan(
     // Each path the new store writes, file or folder, by what a disk that
     // ignores case or Unicode form takes it for.
     let mut written: HashMap<String, Vec<(&str, bool)>> = HashMap::new();
+    let mut visible_folders = HashSet::new();
     for head in &new.heads {
         let mut at = head.path.as_str();
         let mut file = true;
@@ -1236,6 +1237,7 @@ fn plan(
                 break;
             };
             (at, file) = (parent, false);
+            visible_folders.insert(parent);
         }
     }
     // The member's new file stays where the new reach lets them edit, for
@@ -1245,6 +1247,15 @@ fn plan(
     // above it.
     let grant = share_grant(parse(params.granted_selector.clone())?)?;
     let keeps = |path: &str| {
+        let folder = path.rsplit_once('/').map_or("", |(folder, _)| folder);
+        // Hidden folders are absent from reach. Inheritance alone cannot
+        // prove that an unlisted folder still belongs in this copy.
+        let visible = folder.is_empty()
+            || visible_folders.contains(folder)
+            || grant
+                .reach
+                .as_ref()
+                .is_some_and(|reach| reach.folders.contains_key(folder));
         let mut at = path;
         let mut clear = !written.contains_key(&dohc_engine_files::floor::path_collision_key(at));
         while let Some((parent, _)) = at.rsplit_once('/') {
@@ -1254,6 +1265,7 @@ fn plan(
             at = parent;
         }
         clear
+            && visible
             && grant.level_at(path) == Some(dohc_engine_sync::ShareAccess::Edit)
             && old_heads
                 .get(path)

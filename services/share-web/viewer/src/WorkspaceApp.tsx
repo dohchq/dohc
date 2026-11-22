@@ -58,6 +58,8 @@ type Files = {
   files: SharedFile[];
   nextCursor: number;
   epochLogFloor: number;
+  // The member's level on each file, from the last read of the current files. A folder rule can change it.
+  levels: ReadonlyMap<string, ShareAccess>;
 };
 type View =
   | { status: "loading" }
@@ -472,104 +474,136 @@ function MemberEntry({
 /**
  * The workspace's files from the view routes, kept current by one held log read at a time.
  * `failures` counts the reads in a row that failed since the files last caught up, and `retry` reads again at once.
+ * `recheck` reads the current files again at once, as when a file or Group the page shows has gone.
+ * A refusal ends the membership only once a fresh read of the files and the account's session confirm it.
  */
-function useMemberFiles(session: string, attempt: number) {
+function useMemberFiles(session: string, attempt: number, onSignedOut: () => void) {
   const [view, setView] = useState<View>({ status: "loading" });
   const [failures, setFailures] = useState(0);
-  const wake = useRef<(() => void) | null>(null);
+  const signedOut = useRef(onSignedOut);
+  signedOut.current = onSignedOut;
+  // Ends the current read or wait. With `reload`, the next step reads the current files.
+  const interrupt = useRef<((reload: boolean) => void) | null>(null);
   useEffect(() => {
     const controller = new AbortController(),
       { signal } = controller;
-    const ready = (loaded: Omit<Files, "files">): Files => ({
-      ...loaded,
-      files: filesFromAccumulator(loaded.fileAccumulator),
-    });
+    const current = async (step: AbortSignal): Promise<Files> => {
+      const loaded = await loadCurrentState(session, step);
+      return { ...loaded, files: filesFromAccumulator(loaded.fileAccumulator) };
+    };
+    // A refused account may only have signed out, which has its own page.
+    const refused = async (status: "refused" | "ended") => {
+      const signedIn = await namedRequest("/api/account/session", signal).then(
+        (value) => accountUser(value) !== null,
+        () => true,
+      );
+      if (signal.aborted) return;
+      if (signedIn) setView({ status });
+      else signedOut.current();
+    };
     setView({ status: "loading" });
     setFailures(0);
     void (async () => {
       let files: Files;
       try {
-        files = ready(await loadCurrentState(session, signal));
+        files = await current(signal);
       } catch (error) {
         if (signal.aborted) return;
-        setView({
-          status:
-            error instanceof VersionMismatchError
-              ? "version-mismatch"
-              : refusedStatus(error)
-                ? "refused"
-                : "load-failed",
-        });
+        if (refusedStatus(error)) void refused("refused");
+        else
+          setView({
+            status: error instanceof VersionMismatchError ? "version-mismatch" : "load-failed",
+          });
         return;
       }
       if (signal.aborted) return;
       setView({ status: "ready", files });
-      let delay = RETRY_INITIAL_MS;
+      let delay = RETRY_INITIAL_MS,
+        reload = false;
       while (!signal.aborted) {
+        const step = new AbortController(),
+          stepSignal = AbortSignal.any([signal, step.signal]);
+        const stop = (again: boolean) => {
+          reload ||= again;
+          step.abort();
+        };
+        interrupt.current = stop;
+        const reading: boolean = reload;
+        reload = false;
         const started = Date.now(),
           previous = files.nextCursor;
         try {
-          const log = await loadLog(
-            session,
-            files.nextCursor,
-            new Map(files.fileAccumulator),
-            MAX_LOG_PAGES,
-            signal,
-            files.epochLogFloor,
-            VIEW_LOG_HOLD_MS,
-            files.meta.access !== "edit",
-          );
-          const meta = await loadMeta(session, signal);
-          if (signal.aborted) return;
-          files = ready({ ...log, meta });
+          if (reading) files = await current(stepSignal);
+          else {
+            const log = await loadLog(
+              session,
+              files.nextCursor,
+              new Map(files.fileAccumulator),
+              MAX_LOG_PAGES,
+              stepSignal,
+              files.epochLogFloor,
+              VIEW_LOG_HOLD_MS,
+              files.meta.access !== "edit",
+            );
+            const meta = await loadMeta(session, stepSignal);
+            const next = {
+              ...files,
+              ...log,
+              meta,
+              files: filesFromAccumulator(log.fileAccumulator),
+            };
+            // A rule changed since the files were read, so the log's cursor may skip files that just became visible.
+            // A file at a new path has no level yet. Either way the current files say.
+            if (
+              meta.reach !== files.meta.reach ||
+              next.files.some((file) => !files.levels.has(file.path))
+            ) {
+              reload = true;
+              continue;
+            }
+            files = next;
+          }
           setView({ status: "ready", files });
           setFailures(0);
           delay = RETRY_INITIAL_MS;
           const elapsed = Date.now() - started;
-          if (log.nextCursor === previous && elapsed < VIEW_LOG_HOLD_MS)
-            await waitForRetry(VIEW_LOG_HOLD_MS - elapsed, signal);
-        } catch (caught) {
-          let error = caught;
+          if (!reading && files.nextCursor === previous && elapsed < VIEW_LOG_HOLD_MS)
+            await waitForRetry(VIEW_LOG_HOLD_MS - elapsed, stepSignal).catch(() => {});
+        } catch (error) {
           if (signal.aborted) return;
+          if (step.signal.aborted) continue;
           if (error instanceof VersionMismatchError) {
             setView({ status: "version-mismatch" });
             return;
           }
-          // A new epoch, or a level that no longer reads the whole log, starts again from the current files.
-          if (
-            error instanceof EpochFloorChangedError ||
-            (refusedStatus(error) && files.meta.access === "edit")
-          ) {
-            try {
-              files = ready(await loadCurrentState(session, signal));
-              setView({ status: "ready", files });
-              setFailures(0);
-              continue;
-            } catch (reload) {
-              error = reload;
-            }
+          // A new epoch starts again from the current files. So does a refusal: a rule change refuses a held read
+          // as a lost membership does, and only a refused read of the current files ends the membership.
+          if (!reading && (error instanceof EpochFloorChangedError || refusedStatus(error))) {
+            reload = true;
+            continue;
           }
-          if (signal.aborted) return;
-          if (refusedStatus(error)) {
-            setView({ status: "ended" });
+          if (reading && refusedStatus(error)) {
+            void refused("ended");
             return;
           }
+          reload = reading;
           setFailures((count) => count + 1);
           // Try again ends the wait at once.
-          const pause = new AbortController(),
-            stop = () => pause.abort();
-          signal.addEventListener("abort", stop, { once: true });
-          wake.current = stop;
-          await waitForRetry(delay, pause.signal).catch(() => {});
-          signal.removeEventListener("abort", stop);
-          if (wake.current === stop) wake.current = null;
+          await waitForRetry(delay, stepSignal).catch(() => {});
           delay = Math.min(delay * 2, RETRY_MAX_MS);
+        } finally {
+          if (interrupt.current === stop) interrupt.current = null;
         }
       }
     })();
     return () => controller.abort();
   }, [session, attempt]);
-  return { view, failures, retry: useCallback(() => wake.current?.(), []) };
+  return {
+    view,
+    failures,
+    retry: useCallback(() => interrupt.current?.(false), []),
+    recheck: useCallback(() => interrupt.current?.(true), []),
+  };
 }
 
 // The workspace's shape while it loads: its files, the page and the side panel, or on a phone the page's header, the page and the tabs.
@@ -646,13 +680,17 @@ function MemberWorkspace({
 }) {
   const session = memberSession(grantId);
   const [attempt, setAttempt] = useState(0);
-  const { view, failures, retry: retryFiles } = useMemberFiles(session, attempt);
+  const {
+    view,
+    failures,
+    retry: retryFiles,
+    recheck: recheckFiles,
+  } = useMemberFiles(session, attempt, onSessionEnded);
   // A toast closed while the reads still fail stays closed until the files catch up.
   const [behindDismissed, setBehindDismissed] = useState(false);
   useEffect(() => {
     if (failures === 0) setBehindDismissed(false);
   }, [failures]);
-  const [ended, setEnded] = useState(false);
   const [selectedPath, setSelectedPath] = useState("");
   const [tab, setTab] = useState<Tab>("page"),
     [side, setSide] = useState<Side>("chats"),
@@ -680,24 +718,30 @@ function MemberWorkspace({
       files.files.some((file) => file.path === path) ? path : (files.files[0]?.path ?? ""),
     );
   }, [files]);
-  const groupsEnded = useCallback(
-    (reason: Ended) => {
-      if (reason === "signed-out") onSessionEnded();
-      else setEnded(true);
-    },
-    [onSessionEnded],
-  );
-  const listing = useMemberListing(
-      view.status === "ready" ? grantId : null,
-      account.id,
-      groupsEnded,
+  const listing = useMemberListing(view.status === "ready" ? grantId : null, account.id, (reason) =>
+      placeGone(reason),
     ),
     { refresh: refreshListing } = listing;
+  // The relay answers 404 for one file or Group the member no longer reaches, as for a lost membership.
+  // Reading the files and Groups again tells the two apart: only a refused read of the files ends the membership.
+  const placeGone = (reason: Ended) => {
+    if (reason === "signed-out") return onSessionEnded();
+    recheckFiles();
+    refreshListing();
+  };
   // The held read of the files returns at least once per hold. Each return reads the Groups again once they are that old,
   // so a new Group appears even when the workspace had none, or the new one has no messages yet.
   useEffect(() => {
     if (view.status === "ready") refreshListing(VIEW_LOG_HOLD_MS);
   }, [view, refreshListing]);
+  // A changed reach can change a Group's level or hide it, so it reads the Groups again at once.
+  const reach = files?.meta.reach,
+    readReach = useRef(reach);
+  useEffect(() => {
+    if (readReach.current === reach) return;
+    readReach.current = reach;
+    refreshListing();
+  }, [reach, refreshListing]);
   // Groups and Comments share one read, so one toast reports it. Each failure raises it again.
   const [listingDismissed, setListingDismissed] = useState(false);
   useEffect(() => {
@@ -734,7 +778,7 @@ function MemberWorkspace({
     });
   }, [access]);
 
-  if (ended || view.status === "ended")
+  if (view.status === "ended")
     return (
       <StatePage
         icon="unlink"
@@ -751,7 +795,10 @@ function MemberWorkspace({
   if (view.status === "refused")
     return (
       <StatePage icon="unlink" title="dohc could not open this workspace with this account.">
-        <p>This browser is signed in as {account.name}, not the account the owner invited.</p>
+        <p>
+          This browser is signed in as {account.name}. Ask the owner to invite this account, or
+          switch to another.
+        </p>
         <button
           className="handoff-button secondary"
           type="button"
@@ -797,8 +844,10 @@ function MemberWorkspace({
   const selected = files.files.find((file) => file.path === selectedPath) ?? files.files[0];
   const tree = fileTree(files.files);
   const segments = selected?.path.split("/") ?? [];
+  // The open file's own level. A file whose level hasn't arrived offers nothing the relay might refuse.
+  const level = selected ? (files.levels.get(selected.path) ?? "view") : files.meta.access;
   const live =
-    access === "edit" &&
+    level === "edit" &&
     selected !== undefined &&
     selected.contentKind === "text" &&
     isMarkdown(selected.path);
@@ -924,7 +973,7 @@ function MemberWorkspace({
                 {DATED}
               </span>
             )}
-            <span className="badge">{BADGE[files.meta.access]}</span>
+            <span className="badge">{BADGE[level]}</span>
           </div>
         </header>
         <div className="page-band" ref={setBandSlot} />
@@ -1009,8 +1058,8 @@ function MemberWorkspace({
                   found={listing.found}
                   onRetry={listing.retry}
                   path={selected.path}
-                  access={access === "view" ? "read-only" : "read-write"}
-                  onEnded={groupsEnded}
+                  access={level === "view" ? "read-only" : "read-write"}
+                  onEnded={placeGone}
                 />
               ) : (
                 <p className="chat-state">No files in this workspace yet.</p>
@@ -1021,9 +1070,8 @@ function MemberWorkspace({
               found={listing.found}
               onRetry={listing.retry}
               onUnlisted={refreshListing}
-              access={access === "view" ? "read-only" : "read-write"}
               shown={showing === "chats"}
-              onEnded={groupsEnded}
+              onEnded={placeGone}
               onUnread={setUnread}
             />
           </div>
