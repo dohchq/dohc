@@ -509,13 +509,18 @@ impl Ydoc {
         self
     }
 
-    fn is_body_sequence_note(&self) -> bool {
+    fn body_sequence_roots(&self) -> Option<(yrs::TextRef, MapRef)> {
         if !self.reads_body_sequence {
-            return false;
+            return None;
         }
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let version = meta.get(&self.doc.transact(), "schemaVersion");
-        matches!(version, Some(Out::Any(Any::Number(2.0))))
+        if !matches!(version, Some(Out::Any(Any::Number(2.0)))) {
+            return None;
+        }
+        let sequence = self.doc.get_or_insert_text(ROOT_SEQUENCE);
+        let containers = self.doc.get_or_insert_map(ROOT_CONTAINERS);
+        Some((sequence, containers))
     }
 
     /// Validate an update without mutating any doc: decode the whole v1 update.
@@ -822,13 +827,16 @@ impl Ydoc {
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        let sequence_note = self.is_body_sequence_note();
+        let sequence_roots = self.body_sequence_roots();
+        let sequence_note = sequence_roots.is_some();
         let txn = self.doc.transact();
         let invalid = || CollabError::MalformedUpdate {
             reason: "invalid public baseline schema".into(),
         };
-        if sequence_note && body.len(&txn) != 0 {
-            return Err(invalid());
+        if let Some((sequence, containers)) = &sequence_roots {
+            if !body_sequence::roots_hold_only_their_own_items(&body, sequence, containers) {
+                return Err(invalid());
+            }
         }
         for (name, root) in txn.root_refs() {
             match name {
@@ -1288,11 +1296,7 @@ impl Ydoc {
         let frontmatter = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        let sequence = self.is_body_sequence_note().then(|| {
-            let sequence = self.doc.get_or_insert_text(ROOT_SEQUENCE);
-            let containers = self.doc.get_or_insert_map(ROOT_CONTAINERS);
-            (sequence, containers)
-        });
+        let sequence = self.body_sequence_roots();
         let txn = self.doc.transact();
         let uses_crlf = matches!(
             meta.get(&txn, MARKDOWN_CRLF_META_KEY),

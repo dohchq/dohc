@@ -5,7 +5,9 @@
 //! to the TypeScript one.
 
 use super::*;
-use yrs::types::Attrs;
+use std::sync::Arc;
+use yrs::branch::Branch;
+use yrs::types::text::TextItem;
 
 const TOP: &str = "doc";
 const BOUNDARY: &str = "block";
@@ -14,10 +16,13 @@ const MAX_PATH_ENTRIES: usize = 64;
 const MAX_ID_BYTES: usize = 32;
 const MAX_COLUMN_WIDTHS: usize = 1000;
 const SAFE_INTEGER: u64 = (1 << 53) - 1;
+const WHOLE_NUMBERS_END: f64 = (1_u64 << 63) as f64;
 
 type Attributes = BTreeMap<String, Value>;
 type Held = ProjectionResult<Option<Value>>;
 type Path = Vec<(String, &'static str)>;
+type Marks = Vec<MarkdownMark>;
+type MarkAttributes = Arc<HashMap<String, Any>>;
 
 const LEAVES: [&str; 6] = [
     PARAGRAPH,
@@ -65,6 +70,8 @@ const MARKS: [(MarkKind, &str); 6] = [
 enum Holds {
     Text,
     TextOrNull,
+    Line,
+    LineOrNull,
     Bool,
     Whole(f64, f64),
     WholeOrNull(f64, f64),
@@ -75,10 +82,8 @@ enum Holds {
 
 impl Holds {
     fn null(self) -> bool {
-        matches!(
-            self,
-            Holds::TextOrNull | Holds::WholeOrNull(..) | Holds::Side | Holds::Widths
-        )
+        let text = matches!(self, Holds::TextOrNull | Holds::LineOrNull);
+        text || matches!(self, Holds::WholeOrNull(..) | Holds::Side | Holds::Widths)
     }
 }
 
@@ -131,7 +136,7 @@ const REL: &str = "noopener noreferrer nofollow";
 const ROW_HEIGHT: Holds = Holds::WholeOrNull(1.0, 1_000_000.0);
 
 const HEADING: &[Attribute] = &[whole("level", 1.0, 6.0, 1)];
-const CODE_BLOCK: &[Attribute] = &[text_or_null("language")];
+const CODE_BLOCK: &[Attribute] = &[attribute("language", Holds::LineOrNull, Missing::Null)];
 const TEX: &[Attribute] = &[text("tex")];
 const SOURCE: &[Attribute] = &[text("source")];
 const IMAGE: &[Attribute] = &[text("src"), text("alt"), text_or_null("title")];
@@ -139,8 +144,8 @@ const WIKILINK: &[Attribute] = &[text("target"), text_or_null("label")];
 const ESCAPED_PUNCTUATION: &[Attribute] = &[text("value")];
 const INLINE_ATOM: &[Attribute] = &[text("atomId"), text("params"), text("source")];
 const CALLOUT: &[Attribute] = &[
-    attribute("calloutType", Holds::Text, Missing::Text("note")),
-    text("title"),
+    attribute("calloutType", Holds::Line, Missing::Text("note")),
+    attribute("title", Holds::Line, Missing::Text("")),
     attribute("fold", Holds::Fold, Missing::Text("")),
 ];
 const LOOSE: &[Attribute] = &[attribute("loose", Holds::Bool, Missing::Null)];
@@ -225,6 +230,10 @@ fn container_id(id: &str) -> bool {
     (1..=MAX_ID_BYTES).contains(&id.len()) && id.bytes().all(letter)
 }
 
+fn is_one_line(text: &str) -> bool {
+    !text.contains(['\n', '\r'])
+}
+
 fn is_fold(text: &str) -> bool {
     matches!(text, "" | "+" | "-")
 }
@@ -256,10 +265,14 @@ fn whole_in(stored: &Any, least: f64, most: f64) -> Option<Value> {
 
 fn width(stored: &Any) -> Option<Value> {
     let width = number(stored).filter(|width| width.is_finite() && *width >= 0.0)?;
-    if width.fract() == 0.0 && width <= SAFE_INTEGER as f64 {
-        Some(json!(width as i64))
+    Some(whole_when_it_is(width))
+}
+
+fn whole_when_it_is(number: f64) -> Value {
+    if number.fract() == 0.0 && number.abs() < WHOLE_NUMBERS_END {
+        json!(number as i64)
     } else {
-        Some(json!(width))
+        json!(number)
     }
 }
 
@@ -275,7 +288,7 @@ fn starts_with_paragraph(content: &[MarkdownNode]) -> bool {
     content.first().and_then(element_tag) == Some(PARAGRAPH)
 }
 
-fn push_letters(place: &mut Vec<MarkdownNode>, text: &str, marks: Vec<MarkdownMark>) {
+fn push_letters(place: &mut Vec<MarkdownNode>, text: &str, marks: &[MarkdownMark]) {
     if !matches!(place.last(), Some(MarkdownNode::Text(_))) {
         place.push(MarkdownNode::Text(Vec::new()));
     }
@@ -283,23 +296,36 @@ fn push_letters(place: &mut Vec<MarkdownNode>, text: &str, marks: Vec<MarkdownMa
         return;
     };
     match runs.last_mut() {
-        Some(run) if run.marks == marks => run.text.push_str(text),
+        Some(run) if run.marks.as_slice() == marks => run.text.push_str(text),
         _ => runs.push(TextRun {
             text: text.to_owned(),
-            marks,
+            marks: marks.to_vec(),
         }),
     }
 }
 
-fn continue_letters(place: &mut [MarkdownNode], text: &str) -> bool {
-    let Some(MarkdownNode::Text(runs)) = place.last_mut() else {
-        return false;
-    };
-    let Some(run) = runs.last_mut() else {
-        return false;
-    };
-    run.text.push_str(text);
-    true
+#[derive(Default)]
+struct Formatting {
+    code: Option<MarkAttributes>,
+    others: [Option<MarkAttributes>; MARKS.len()],
+    read: Option<Marks>,
+}
+
+impl Formatting {
+    fn store(&mut self, key: &str, value: &Any) {
+        let mark = match key {
+            "code" => &mut self.code,
+            _ => match MARKS.iter().position(|(_, name)| *name == key) {
+                Some(at) => &mut self.others[at],
+                None => return,
+            },
+        };
+        *mark = match value {
+            Any::Map(attributes) => Some(attributes.clone()),
+            _ => None,
+        };
+        self.read = None;
+    }
 }
 
 struct Budget<'a> {
@@ -338,6 +364,9 @@ impl Budget<'_> {
         match (holds, stored) {
             (_, Any::Null) => Ok(holds.null().then_some(Value::Null)),
             (Holds::Text | Holds::TextOrNull, Any::String(text)) => self.string(text),
+            (Holds::Line | Holds::LineOrNull, Any::String(text)) if is_one_line(text) => {
+                self.string(text)
+            }
             (Holds::Fold, Any::String(text)) if is_fold(text) => self.string(text),
             (Holds::Side, Any::String(text)) if is_side(text) => self.string(text),
             (Holds::Bool, Any::Bool(value)) => Ok(Some(json!(value))),
@@ -387,14 +416,14 @@ impl Budget<'_> {
         })
     }
 
-    fn marks(&mut self, stored: &Attrs, depth: usize) -> ProjectionResult<Vec<MarkdownMark>> {
-        if let Some(Any::Map(stored)) = stored.get("code") {
+    fn marks(&mut self, stored: &Formatting, depth: usize) -> ProjectionResult<Marks> {
+        if let Some(stored) = &stored.code {
             return Ok(vec![self.mark(MarkKind::Code, "code", stored, depth)?]);
         }
-        let mut marks = Vec::new();
-        for (kind, name) in MARKS {
-            if let Some(Any::Map(stored)) = stored.get(name) {
-                marks.push(self.mark(kind, name, stored, depth)?);
+        let mut marks = Marks::new();
+        for ((kind, name), stored) in MARKS.iter().zip(&stored.others) {
+            if let Some(stored) = stored {
+                marks.push(self.mark(*kind, name, stored, depth)?);
             }
         }
         Ok(marks)
@@ -425,10 +454,6 @@ impl Leaf {
         }
     }
 
-    fn before_any_boundary() -> Self {
-        Leaf::new(PARAGRAPH, Attributes::new())
-    }
-
     fn holds_letters(&self) -> bool {
         self.after.is_empty() && matches!(self.tag, PARAGRAPH | "heading" | "codeBlock")
     }
@@ -436,36 +461,75 @@ impl Leaf {
     fn holds_inline_items(&self) -> bool {
         self.after.is_empty() && matches!(self.tag, PARAGRAPH | "heading")
     }
+
+    fn holds_letters_without_marks(&self) -> bool {
+        self.tag == "codeBlock" && self.holds_letters()
+    }
+}
+
+fn inline_place<'leaf>(
+    leaf: &'leaf mut Option<Leaf>,
+    budget: &mut Budget<'_>,
+    holds: fn(&Leaf) -> bool,
+    depth: usize,
+) -> ProjectionResult<&'leaf mut Vec<MarkdownNode>> {
+    if leaf.is_none() {
+        budget.node(depth)?;
+    }
+    let leaf = leaf.get_or_insert_with(|| Leaf::new(PARAGRAPH, Attributes::new()));
+    if holds(leaf) {
+        return Ok(&mut leaf.held);
+    }
+    if leaf.after.is_empty() {
+        budget.node(depth)?;
+    }
+    Ok(&mut leaf.after)
 }
 
 struct Reader<'a, T> {
     txn: &'a T,
     containers: &'a MapRef,
     budget: Budget<'a>,
+    formatting: Formatting,
     top: Vec<MarkdownNode>,
     open: Vec<Open>,
     leaf: Option<Leaf>,
 }
 
 impl<T: ReadTxn> Reader<'_, T> {
-    fn letters(&mut self, text: &str, stored: &Attrs, continues: bool) -> ProjectionResult<()> {
-        let depth = self.open.len() + 1;
-        self.budget.bytes(text.len())?;
-        let leaf = self.leaf.get_or_insert_with(Leaf::before_any_boundary);
-        let (place, marked) = if leaf.holds_letters() {
-            (&mut leaf.held, leaf.tag != "codeBlock")
-        } else {
-            (&mut leaf.after, true)
-        };
-        if continues && continue_letters(place, text) {
+    fn item(&mut self, stored: TextItem<'_>) -> ProjectionResult<()> {
+        self.budget.node(self.open.len())?;
+        match stored {
+            TextItem::Letters(text) => self.letters(text),
+            TextItem::Format(key, value) => {
+                self.formatting.store(key, value);
+                Ok(())
+            }
+            TextItem::Embed(Out::YXmlElement(stored)) => self.element(&stored),
+            TextItem::Embed(_) | TextItem::Other => Ok(()),
+        }
+    }
+
+    fn letters(&mut self, text: &str) -> ProjectionResult<()> {
+        if text.is_empty() {
             return Ok(());
         }
-        self.budget.node(depth)?;
-        let marks = if marked {
-            self.budget.marks(stored, depth)?
-        } else {
-            Vec::new()
+        let depth = self.open.len() + 1;
+        self.budget.bytes(text.len())?;
+        let unmarked = match &self.leaf {
+            Some(leaf) => leaf.holds_letters_without_marks(),
+            None => false,
         };
+        if !unmarked && self.formatting.read.is_none() {
+            let read = self.budget.marks(&self.formatting, depth)?;
+            self.formatting.read = Some(read);
+        }
+        let marks: &[MarkdownMark] = match &self.formatting.read {
+            Some(marks) if !unmarked => marks,
+            _ => &[],
+        };
+        let holds = Leaf::holds_letters;
+        let place = inline_place(&mut self.leaf, &mut self.budget, holds, depth)?;
         push_letters(place, text, marks);
         Ok(())
     }
@@ -479,16 +543,11 @@ impl<T: ReadTxn> Reader<'_, T> {
         };
         let txn = self.txn;
         let depth = self.open.len() + 1;
-        self.budget.node(depth)?;
         self.budget.bytes(tag.len())?;
         let held = |name: &str| plain(stored.get_attribute(txn, name));
         let attrs = self.budget.attributes(tag, depth, held)?;
-        let leaf = self.leaf.get_or_insert_with(Leaf::before_any_boundary);
-        let place = if leaf.holds_inline_items() {
-            &mut leaf.held
-        } else {
-            &mut leaf.after
-        };
+        let holds = Leaf::holds_inline_items;
+        let place = inline_place(&mut self.leaf, &mut self.budget, holds, depth)?;
         place.push(element(tag, attrs, Vec::new()));
         Ok(())
     }
@@ -512,7 +571,7 @@ impl<T: ReadTxn> Reader<'_, T> {
             .zip(&path)
             .take_while(|(open, (id, kind))| open.id == *id && open.tag == *kind)
             .count();
-        self.close_to(shared);
+        self.close_to(shared)?;
         for (id, kind) in path.into_iter().skip(shared) {
             let depth = self.open.len();
             self.budget.node(depth)?;
@@ -527,7 +586,6 @@ impl<T: ReadTxn> Reader<'_, T> {
             });
         }
         let depth = self.open.len();
-        self.budget.node(depth)?;
         self.budget.bytes(tag.len())?;
         let attrs = self.budget.attributes(tag, depth, held)?;
         self.leaf = Some(Leaf::new(tag, attrs));
@@ -580,30 +638,45 @@ impl<T: ReadTxn> Reader<'_, T> {
         }
     }
 
-    fn close_to(&mut self, depth: usize) {
+    fn close_to(&mut self, depth: usize) -> ProjectionResult<()> {
         while self.open.len() > depth {
             let Some(mut closed) = self.open.pop() else {
-                return;
+                return Ok(());
             };
             let item = matches!(closed.tag, "listItem" | "taskItem");
             if item && !starts_with_paragraph(&closed.content) {
+                self.budget.node(self.open.len())?;
                 let paragraph = element(PARAGRAPH, Attributes::new(), Vec::new());
                 closed.content.insert(0, paragraph);
             }
             let node = element(closed.tag, closed.attrs, closed.content);
             self.place().push(node);
         }
+        Ok(())
     }
 
-    fn finish(mut self) -> Vec<MarkdownNode> {
+    fn finish(mut self) -> ProjectionResult<Vec<MarkdownNode>> {
         self.close_leaf();
-        self.close_to(0);
+        self.close_to(0)?;
         if self.top.is_empty() {
+            self.budget.node(0)?;
             let paragraph = element(PARAGRAPH, Attributes::new(), Vec::new());
             self.top.push(paragraph);
         }
-        self.top
+        Ok(self.top)
     }
+}
+
+pub(super) fn roots_hold_only_their_own_items(
+    body: &impl AsRef<Branch>,
+    sequence: &impl AsRef<Branch>,
+    containers: &impl AsRef<Branch>,
+) -> bool {
+    let (body, sequence, containers) = (body.as_ref(), sequence.as_ref(), containers.as_ref());
+    !body.holds_unkeyed_item()
+        && !body.holds_keyed_item()
+        && !sequence.holds_keyed_item()
+        && !containers.holds_unkeyed_item()
 }
 
 pub(super) fn blocks<T: ReadTxn>(
@@ -620,23 +693,13 @@ pub(super) fn blocks<T: ReadTxn>(
             nodes: remaining_nodes,
             bytes: source_text_bytes,
         },
+        formatting: Formatting::default(),
         top: Vec::new(),
         open: Vec::new(),
         leaf: None,
     };
-    sequence.try_visit_diff(txn, |chunk| match chunk {
-        TextDiffChunk::Text {
-            text,
-            attributes,
-            continues_previous,
-        } => reader.letters(text, attributes, continues_previous),
-        TextDiffChunk::Embed {
-            insert: Out::YXmlElement(stored),
-            ..
-        } => reader.element(&stored),
-        TextDiffChunk::Embed { .. } => Ok(()),
-    })?;
-    Ok(reader.finish())
+    sequence.try_visit_items(txn, |stored| reader.item(stored))?;
+    reader.finish()
 }
 
 #[cfg(test)]
@@ -646,13 +709,18 @@ mod tests {
 
     const NOTES: &str =
         include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence.json");
+    const DELETES_FIRST_UNIT: [u8; 6] = [0, 1, 5, 1, 0, 1];
+    const TYPES_BETWEEN_UNITS: [u8; 12] = [1, 1, 6, 0, 0xc4, 5, 0, 5, 1, 1, b'y', 0];
+    const TWO_TO_THE_53: f64 = 9_007_199_254_740_992.0;
 
     #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct Note {
         name: String,
         update: String,
         document: Value,
-        markdown: String,
+        markdown: Option<String>,
+        markdown_not_compared: Option<String>,
     }
 
     fn notes() -> Vec<Note> {
@@ -671,14 +739,106 @@ mod tests {
         doc
     }
 
-    fn document(doc: &Ydoc) -> ProjectionResult<Value> {
+    fn note_of(write: impl FnOnce(&mut yrs::TransactionMut<'_>, &yrs::TextRef)) -> Ydoc {
+        let doc = Ydoc::with_client_id(5).reading_body_sequence();
+        let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        {
+            let mut txn = doc.doc.transact_mut();
+            write(&mut txn, &sequence);
+            meta.insert(&mut txn, "schemaVersion", Any::Number(2.0));
+        }
+        doc
+    }
+
+    fn empty_note() -> Ydoc {
+        note_of(|_, _| {})
+    }
+
+    fn insert_boundary(
+        txn: &mut yrs::TransactionMut<'_>,
+        sequence: &yrs::TextRef,
+        kind: &str,
+        path: &[&str],
+    ) {
+        let at = sequence.len(txn);
+        let stored = sequence.insert_embed(txn, at, XmlElementPrelim::empty(BOUNDARY));
+        let path: Vec<Any> = path.iter().map(|id| Any::from(*id)).collect();
+        stored.insert_attribute(txn, "type", Any::from(kind));
+        stored.insert_attribute(txn, "path", Any::from(path));
+    }
+
+    fn written_elsewhere(write: impl FnOnce(&Doc)) -> Vec<u8> {
+        let elsewhere = Ydoc::wire();
+        write(&elsewhere.doc);
+        elsewhere.encode_full_state()
+    }
+
+    fn var_uint(bytes: &mut Vec<u8>, mut value: usize) {
+        while value > 0x7f {
+            bytes.push(0x80 | (value & 0x7f) as u8);
+            value >>= 7;
+        }
+        bytes.push(value as u8);
+    }
+
+    fn var_string(bytes: &mut Vec<u8>, text: &str) {
+        var_uint(bytes, text.len());
+        bytes.extend_from_slice(text.as_bytes());
+    }
+
+    fn formatting_items_under_keys_that_are_no_marks(count: usize) -> Vec<u8> {
+        const CLIENT: usize = 9;
+        const FORMAT: u8 = 6;
+        const HAS_ORIGIN: u8 = 0x80;
+        let mut update = Vec::new();
+        var_uint(&mut update, 1);
+        var_uint(&mut update, count);
+        var_uint(&mut update, CLIENT);
+        var_uint(&mut update, 0);
+        for clock in 0..count {
+            if clock == 0 {
+                update.push(FORMAT);
+                var_uint(&mut update, 1);
+                var_string(&mut update, ROOT_SEQUENCE);
+            } else {
+                update.push(HAS_ORIGIN | FORMAT);
+                var_uint(&mut update, CLIENT);
+                var_uint(&mut update, clock - 1);
+            }
+            var_string(&mut update, &format!("key{clock}"));
+            var_string(&mut update, "true");
+        }
+        var_uint(&mut update, 0);
+        update
+    }
+
+    fn read(doc: &Ydoc, nodes: &mut usize) -> ProjectionResult<Vec<MarkdownNode>> {
         let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
         let containers = doc.doc.get_or_insert_map(ROOT_CONTAINERS);
         let txn = doc.doc.transact();
-        let mut nodes = MAX_PROJECTION_NODES;
         let mut bytes = 0;
-        let read = blocks(&txn, &sequence, &containers, &mut nodes, &mut bytes)?;
-        Ok(json!({ "type": TOP, "content": shown(&read) }))
+        blocks(&txn, &sequence, &containers, nodes, &mut bytes)
+    }
+
+    fn document(doc: &Ydoc) -> ProjectionResult<Value> {
+        let mut nodes = MAX_PROJECTION_NODES;
+        let blocks = read(doc, &mut nodes)?;
+        Ok(json!({ "type": TOP, "content": shown(&blocks) }))
+    }
+
+    fn nodes_spent(doc: &Ydoc) -> usize {
+        let mut nodes = MAX_PROJECTION_NODES;
+        read(doc, &mut nodes).expect("the note reads");
+        MAX_PROJECTION_NODES - nodes
+    }
+
+    fn admitted(doc: &Ydoc) -> Result<(), CollabError> {
+        doc.validate_public_baseline(&doc.encode_full_state())
+    }
+
+    fn too_complex<T>(read: Result<T, CollabError>) -> bool {
+        matches!(read, Err(CollabError::ProjectionTooComplex { .. }))
     }
 
     fn shown(nodes: &[MarkdownNode]) -> Vec<Value> {
@@ -732,56 +892,103 @@ mod tests {
         }
     }
 
-    fn top_blocks(document: &Value) -> Vec<String> {
-        let blocks = document["content"].as_array().into_iter().flatten();
-        blocks.map(Value::to_string).collect()
+    fn same_document(recorded: &Value, here: &Value) -> bool {
+        match (recorded, here) {
+            (Value::Number(recorded), Value::Number(here)) => recorded.as_f64() == here.as_f64(),
+            (Value::Array(recorded), Value::Array(here)) => {
+                let same = |(recorded, here): (&Value, &Value)| same_document(recorded, here);
+                recorded.len() == here.len() && recorded.iter().zip(here).all(same)
+            }
+            (Value::Object(recorded), Value::Object(here)) => {
+                let same = |(key, recorded): (&String, &Value)| match here.get(key) {
+                    Some(here) => same_document(recorded, here),
+                    None => false,
+                };
+                recorded.len() == here.len() && recorded.iter().all(same)
+            }
+            _ => recorded == here,
+        }
+    }
+
+    fn top_blocks(document: &Value) -> Vec<Value> {
+        match &document["content"] {
+            Value::Array(blocks) => blocks.clone(),
+            _ => Vec::new(),
+        }
     }
 
     fn lines(markdown: &str) -> Vec<String> {
         markdown.split('\n').map(str::to_owned).collect()
     }
 
-    fn differing(recorded: &[String], here: &[String]) -> String {
+    fn differing<T: ToString>(recorded: &[T], here: &[T], same: fn(&T, &T) -> bool) -> String {
         let mut differing = Vec::new();
         for at in 0..recorded.len().max(here.len()) {
-            if recorded.get(at) != here.get(at) {
+            let (recorded, here) = (recorded.get(at), here.get(at));
+            let alike = match (recorded, here) {
+                (Some(recorded), Some(here)) => same(recorded, here),
+                _ => false,
+            };
+            if !alike {
                 differing.push(format!(
                     "  {at} recorded: {:?}\n  {at} here:     {:?}",
-                    recorded.get(at),
-                    here.get(at)
+                    recorded.map(ToString::to_string),
+                    here.map(ToString::to_string)
                 ));
             }
         }
         differing.join("\n")
     }
 
+    fn difference(note: &Note, what: &str, differing: &str) -> String {
+        format!("{}: these {what} differ\n{differing}", note.name)
+    }
+
     #[test]
     fn reads_every_shared_note_as_its_document_and_writes_its_markdown_byte_for_byte() {
         let notes = notes();
         assert!(notes.len() >= 20, "the shared notes are all there");
+        let same_line = |recorded: &String, here: &String| recorded == here;
         let mut differences = Vec::new();
         for note in &notes {
             let doc = stored(note);
             match document(&doc) {
-                Ok(read) if read == note.document => {}
-                Ok(read) => differences.push(format!(
-                    "{}: these blocks of the document differ\n{}",
-                    note.name,
-                    differing(&top_blocks(&note.document), &top_blocks(&read))
-                )),
+                Ok(read) if same_document(&note.document, &read) => {}
+                Ok(read) => {
+                    let (recorded, here) = (top_blocks(&note.document), top_blocks(&read));
+                    let blocks = differing(&recorded, &here, same_document);
+                    differences.push(difference(note, "blocks of the document", &blocks));
+                }
                 Err(error) => differences.push(format!("{}: {error}", note.name)),
             }
-            match doc.project(ContentKind::Richdoc) {
-                Ok(written) if written.content == note.markdown => {}
-                Ok(written) => differences.push(format!(
-                    "{}: these lines of the Markdown differ\n{}",
-                    note.name,
-                    differing(&lines(&note.markdown), &lines(&written.content))
+            let written = doc.project(ContentKind::Richdoc);
+            match (&note.markdown, &note.markdown_not_compared, written) {
+                (Some(recorded), None, Ok(written)) if written.content == *recorded => {}
+                (Some(recorded), None, Ok(written)) => {
+                    let (recorded, here) = (lines(recorded), lines(&written.content));
+                    let lines = differing(&recorded, &here, same_line);
+                    differences.push(difference(note, "lines of the Markdown", &lines));
+                }
+                (None, Some(_), Ok(_)) => {}
+                (_, _, Err(error)) => differences.push(format!("{}: {error}", note.name)),
+                _ => differences.push(format!(
+                    "{}: records its Markdown or why it is not compared, never both",
+                    note.name
                 )),
-                Err(error) => differences.push(format!("{}: {error}", note.name)),
             }
         }
         assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+    }
+
+    #[test]
+    fn writes_a_whole_number_whole_and_compares_a_recorded_number_by_its_value() {
+        assert_eq!(whole_when_it_is(-0.0), json!(0));
+        assert_eq!(whole_when_it_is(TWO_TO_THE_53), json!(1_i64 << 53));
+        assert!(same_document(&json!(1e21), &whole_when_it_is(1e21)));
+        assert!(same_document(&json!(20.5), &whole_when_it_is(20.5)));
+        assert!(same_document(&json!([2]), &json!([2.0])));
+        assert!(!same_document(&json!([1]), &json!([2])));
+        assert!(!same_document(&json!([1]), &json!([1, 1])));
     }
 
     #[test]
@@ -816,13 +1023,46 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_sequence_note_that_holds_blocks_under_body() {
-        let doc = stored(&notes()[0]);
-        doc.richdoc_append_paragraph("under body");
-        assert!(matches!(
-            doc.validate_public_baseline(&doc.encode_full_state()),
-            Err(CollabError::MalformedUpdate { .. })
-        ));
+    fn refuses_a_sequence_note_that_holds_any_item_under_body() {
+        let note = empty_note();
+        assert!(admitted(&note).is_ok());
+        note.richdoc_append_paragraph("under body");
+        assert!(admitted(&note).is_err());
+
+        let note = empty_note();
+        note.richdoc_append_paragraph("under body");
+        note.richdoc_remove_block(0);
+        assert!(admitted(&note).is_err());
+
+        let note = empty_note();
+        let keyed = written_elsewhere(|doc| {
+            let body = doc.get_or_insert_map(ROOT_BODY);
+            body.insert(&mut doc.transact_mut(), "key", Any::from("value"));
+        });
+        note.apply(&keyed).expect("the item applies");
+        assert!(admitted(&note).is_err());
+    }
+
+    #[test]
+    fn refuses_a_sequence_that_holds_a_keyed_item() {
+        let note = empty_note();
+        let keyed = written_elsewhere(|doc| {
+            let sequence = doc.get_or_insert_map(ROOT_SEQUENCE);
+            sequence.insert(&mut doc.transact_mut(), "key", Any::from("value"));
+        });
+        note.apply(&keyed).expect("the item applies");
+        assert!(admitted(&note).is_err());
+    }
+
+    #[test]
+    fn refuses_containers_that_hold_an_unkeyed_item() {
+        let note = empty_note();
+        let unkeyed = written_elsewhere(|doc| {
+            let containers = doc.get_or_insert_array(ROOT_CONTAINERS);
+            containers.push_back(&mut doc.transact_mut(), Any::from("value"));
+        });
+        note.apply(&unkeyed).expect("the item applies");
+        assert!(admitted(&note).is_err());
     }
 
     #[test]
@@ -835,36 +1075,109 @@ mod tests {
             "schemaVersion",
             Any::Number(1.0),
         );
-        doc.validate_public_baseline(&doc.encode_full_state())
-            .expect("a note whose body is under body is admitted as before");
+        admitted(&doc).expect("a note whose body is under body is admitted as before");
         let written = doc.project(ContentKind::Richdoc).expect("it writes");
         assert_eq!(written.content, "under body\n");
 
         let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
         sequence.insert(&mut doc.doc.transact_mut(), 0, "letters");
-        let refused = doc.validate_public_baseline(&doc.encode_full_state());
-        assert!(refused.is_err());
+        assert!(admitted(&doc).is_err());
+    }
+
+    #[test]
+    fn refuses_a_change_or_a_baseline_that_splits_a_letter_of_two_units() {
+        let splits_a_letter = |base: &Ydoc, change: &[u8]| {
+            let refused = crate::validate_replay_parity(base, change);
+            matches!(refused, Err(CollabError::ReplayParityViolation { .. }))
+        };
+        let note = note_of(|txn, sequence| sequence.insert(txn, 0, "\u{1f600}X"));
+        assert!(admitted(&note).is_ok());
+        assert!(splits_a_letter(&note, &DELETES_FIRST_UNIT));
+        assert!(splits_a_letter(&note, &TYPES_BETWEEN_UNITS));
+
+        let letter_and_delete = [note.encode_full_state(), DELETES_FIRST_UNIT.to_vec()];
+        let baseline = merge_updates(&letter_and_delete).expect("they merge");
+        let empty = Ydoc::wire().reading_body_sequence();
+        assert!(splits_a_letter(&empty, &baseline));
     }
 
     #[test]
     fn writes_frontmatter_above_a_sequence_body() {
         let note = &notes()[0];
+        let markdown = note.markdown.as_deref().expect("it is recorded");
         let doc = stored(note);
         let frontmatter = doc.doc.get_or_insert_map(ROOT_FRONTMATTER);
         frontmatter.insert(&mut doc.doc.transact_mut(), "title", "Plan");
         let written = doc.project(ContentKind::Richdoc).expect("it writes");
-        let expected = format!("---\ntitle: Plan\n---\n\n{}", note.markdown);
+        let expected = format!("---\ntitle: Plan\n---\n\n{markdown}");
         assert_eq!(written.content, expected);
     }
 
     #[test]
     fn stops_at_the_node_budget() {
         let doc = stored(&notes()[0]);
-        assert!(matches!(
-            doc.project_richdoc_with_node_budget(8),
-            Err(CollabError::ProjectionTooComplex { .. })
-        ));
-        let within = doc.project_richdoc_with_node_budget(MAX_PROJECTION_NODES);
-        assert!(within.is_ok());
+        let spent = nodes_spent(&doc);
+        assert!(too_complex(doc.project_richdoc_with_node_budget(spent - 1)));
+        assert!(doc.project_richdoc_with_node_budget(spent).is_ok());
+    }
+
+    #[test]
+    fn spends_a_node_for_a_stored_item_it_skips() {
+        let note = note_of(|txn, sequence| {
+            sequence.insert_embed(txn, 0, Any::from("an embedded string"));
+            sequence.insert_embed(txn, 1, XmlElementPrelim::empty("nonsense"));
+        });
+        assert_eq!(nodes_spent(&note), 3);
+    }
+
+    #[test]
+    fn spends_a_node_for_a_formatting_item_under_a_key_that_is_no_mark() {
+        let note = empty_note();
+        let items = formatting_items_under_keys_that_are_no_marks(1_000);
+        note.apply(&items).expect("the items apply");
+        assert_eq!(nodes_spent(&note), 1_001);
+        assert!(too_complex(note.project_richdoc_with_node_budget(1_000)));
+        let written = note.project_richdoc_with_node_budget(1_001);
+        assert_eq!(written.expect("it writes"), "");
+    }
+
+    #[test]
+    fn refuses_a_note_of_more_formatting_items_than_the_node_budget() {
+        let note = empty_note();
+        let items = formatting_items_under_keys_that_are_no_marks(MAX_PROJECTION_NODES + 1);
+        note.apply(&items).expect("the items apply");
+        assert!(too_complex(note.project(ContentKind::Richdoc)));
+    }
+
+    #[test]
+    fn spends_a_node_for_each_paragraph_it_adds() {
+        assert_eq!(nodes_spent(&empty_note()), 1);
+
+        let before_any_boundary = note_of(|txn, sequence| sequence.insert(txn, 0, "x"));
+        assert_eq!(nodes_spent(&before_any_boundary), 2);
+
+        let rule = note_of(|txn, sequence| {
+            insert_boundary(txn, sequence, "horizontalRule", &[]);
+        });
+        let letters_after_a_rule = note_of(|txn, sequence| {
+            insert_boundary(txn, sequence, "horizontalRule", &[]);
+            sequence.insert(txn, 1, "x");
+        });
+        assert_eq!(nodes_spent(&letters_after_a_rule), nodes_spent(&rule) + 2);
+
+        let first_in_an_item = |kind: &'static str| {
+            let note = note_of(|txn, sequence| {
+                insert_boundary(txn, sequence, kind, &["L", "i"]);
+            });
+            let containers = note.doc.get_or_insert_map(ROOT_CONTAINERS);
+            {
+                let mut txn = note.doc.transact_mut();
+                containers.insert(&mut txn, "L", Any::from("bulletList"));
+                containers.insert(&mut txn, "i", Any::from("listItem"));
+            }
+            nodes_spent(&note)
+        };
+        let heading_first = first_in_an_item("heading");
+        assert_eq!(heading_first, first_in_an_item("paragraph") + 1);
     }
 }

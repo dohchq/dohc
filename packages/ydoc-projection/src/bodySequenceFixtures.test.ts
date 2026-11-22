@@ -20,7 +20,17 @@ const UPDATES_FILE = fileURLToPath(
 );
 const WRITE_FIXTURES = process.env.BODY_SEQUENCE_WRITE_FIXTURES === "1";
 
-type Fixture = { name: string; update: string; document: unknown; markdown: string };
+type Fixture = { name: string; update: string; document: unknown } & (
+  | { markdown: string }
+  | { markdownNotCompared: string }
+);
+
+const MARKDOWN_NOT_COMPARED: Record<string, string> = Object.fromEntries(
+  ["tableCell", "tableHeader"].map((cell) => [
+    `a ${cell} that holds several blocks`,
+    "Where a table cell holds several blocks, TypeScript writes a quote, a callout or an ordered list among them without its marker and leaves a table out. The engine writes each block as it does anywhere else.",
+  ]),
+);
 
 const base64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
 const named = (key: string, value: unknown) => Object.fromEntries([[key, value]]);
@@ -51,7 +61,7 @@ function note(clientID: number, from?: Uint8Array) {
     item(name: string, attrs: Record<string, unknown>, marks: Record<string, unknown> = {}) {
       sequence.insertEmbed(sequence.length, element(name, attrs), marks);
     },
-    embedded(value: unknown) {
+    stored(content: Y.ContentEmbed | Y.ContentFormat) {
       doc.transact((transaction) => {
         let last = sequence._start;
         while (last?.right) last = last.right;
@@ -63,9 +73,12 @@ function note(clientID: number, from?: Uint8Array) {
           null,
           sequence,
           null,
-          new Y.ContentEmbed(value as object),
+          content,
         ).integrate(transaction, 0);
       });
+    },
+    embedded(value: unknown) {
+      this.stored(new Y.ContentEmbed(value as object));
     },
     label(text: string) {
       this.line({ type: "paragraph", path: [] }, text);
@@ -299,13 +312,10 @@ function built(): Record<string, Y.Doc> {
     taskList: ["taskList", "taskItem"],
     table: ["table", "tableRow", "tableCell"],
   };
-  const CELLS = new Set(["tableCell", "tableHeader"]);
-  const BOTH_WRITERS_WRITE_ALIKE_BESIDE_OTHER_BLOCKS_IN_A_CELL = new Set([
-    "bulletList",
-    "taskList",
-  ]);
-  const holding = Object.entries(HOLDERS).map(([holder, outer], client) => {
-    const made = note(12 + client);
+  const CELLS = ["tableCell", "tableHeader"];
+  const holds = (holder: string, client: number, besideOtherBlocks: boolean) => {
+    const made = note(client);
+    const outer = HOLDERS[holder]!;
     for (const [held, inner] of Object.entries(HELD)) {
       made.label(`${held} in ${holder}:`);
       const path = [...outer, ...inner].map((type, depth) => {
@@ -313,27 +323,34 @@ function built(): Record<string, Y.Doc> {
         made.container(id, type);
         return id;
       });
-      const alone =
-        CELLS.has(holder) && !BOTH_WRITERS_WRITE_ALIKE_BESIDE_OTHER_BLOCKS_IN_A_CELL.has(held);
       const inHolder = { type: "paragraph", path: path.slice(0, outer.length) };
-      if (!alone) made.line(inHolder, `the ${holder}`);
+      if (besideOtherBlocks) made.line(inHolder, `the ${holder}`);
       made.line({ type: "paragraph", path }, `the ${held} in it`);
-      if (!alone) made.line(inHolder, `the ${holder} again`);
+      if (besideOtherBlocks) made.line(inHolder, `the ${holder} again`);
     }
-    return [`what a ${holder} holds`, made.doc] as const;
-  });
+    return made.doc;
+  };
+  const holding = Object.keys(HOLDERS).map(
+    (holder, at) =>
+      [`what a ${holder} holds`, holds(holder, 12 + at, !CELLS.includes(holder))] as const,
+  );
+  const severalBlocksInACell = CELLS.map(
+    (cell, at) => [`a ${cell} that holds several blocks`, holds(cell, 25 + at, true)] as const,
+  );
 
   const values = note(18);
   const stored = (value: unknown) =>
-    typeof value === "bigint"
-      ? `BigInt ${String(value)}`
-      : typeof value === "string"
-        ? `the string ${JSON.stringify(value)}`
-        : Array.isArray(value)
-          ? `an array of ${String(value.length)}`
-          : typeof value === "object" && value !== null
-            ? "an object"
-            : String(value);
+    Object.is(value, -0)
+      ? "negative zero"
+      : typeof value === "bigint"
+        ? `BigInt ${String(value)}`
+        : typeof value === "string"
+          ? `the string ${JSON.stringify(value)}`
+          : Array.isArray(value)
+            ? `an array of ${String(value.length)}`
+            : typeof value === "object" && value !== null
+              ? "an object"
+              : String(value);
   for (const level of [
     1,
     6,
@@ -353,6 +370,8 @@ function built(): Record<string, Y.Doc> {
     -3n,
     Number.NaN,
     Number.POSITIVE_INFINITY,
+    -0,
+    2 ** 53,
   ])
     values.line({ type: "heading", level, path: [] }, `level stored as ${stored(level)}`);
   values.line({ type: "heading", level: new Y.Map(), path: [] }, "level stored as a shared map");
@@ -368,6 +387,8 @@ function built(): Record<string, Y.Doc> {
     "3",
     null,
     2n ** 60n,
+    -0,
+    2 ** 53,
   ].entries()) {
     const list = `start-${String(at)}`;
     values.label(`a list whose start is stored as ${stored(start)}:`);
@@ -402,6 +423,8 @@ function built(): Record<string, Y.Doc> {
     [
       ["tip", "A title", "+"],
       ["warning", "", "-"],
+      ["tip\nwith a line break", "A title", ""],
+      ["tip", "A title\rwith a line break", "+"],
       [3, 7, "x"],
       [null, null, null],
       ["", "kept", ""],
@@ -468,8 +491,14 @@ function built(): Record<string, Y.Doc> {
     [["colwidth", [2n ** 60n]]],
     [["colwidth", [[1]]]],
     [["colwidth", 120]],
+    [
+      ["colspan", -0],
+      ["rowspan", 2 ** 53],
+      ["colwidth", [-0, 2 ** 53, 1e21]],
+    ],
   ];
-  for (const [at, height] of [40, 1_000_000, 40n, null, 0, 1_000_001, 1.5, "40", -1].entries()) {
+  const heights = [40, 1_000_000, 40n, null, 0, 1_000_001, 1.5, "40", -1, -0, 2 ** 53];
+  for (const [at, height] of heights.entries()) {
     const row = `row-${String(at)}`;
     values.records.set(row, "tableRow");
     values.records.set(`${row}.height`, height);
@@ -487,6 +516,11 @@ function built(): Record<string, Y.Doc> {
   values.label("text a reader repairs:");
   values.line({ type: "codeBlock", language: 3, path: [] }, "a language stored as 3");
   values.line({ type: "codeBlock", language: "", path: [] }, "a language stored as nothing");
+  for (const language of ["ts\nwith a line break", "ts\rwith a line break"])
+    values.line(
+      { type: "codeBlock", language, path: [] },
+      `a language stored as ${stored(language)}`,
+    );
   values.line({ type: "mathBlock", tex: 5, path: [] });
   values.line({ type: "mathBlock", tex: null, path: [] });
   values.line({ type: "rawBlock", source: null, path: [] });
@@ -686,6 +720,16 @@ function built(): Record<string, Y.Doc> {
   onlySkipped.sequence.insertEmbed(onlySkipped.sequence.length, new Y.Map(), {});
   onlySkipped.container("q", "blockquote");
 
+  const onlyFormatting = note(24);
+  for (const [key, value] of [
+    ["nonsense", true],
+    ["bold--abcdefgh", {}],
+    ["__proto__", { bold: {} }],
+    ["bold", {}],
+    ["link", { href: "https://example.com" }],
+  ] as const)
+    onlyFormatting.stored(new Y.ContentFormat(key, value));
+
   const base = note(4);
   base.line({ type: "paragraph", path: [] }, "One one");
   base.line({ type: "paragraph", path: [] }, "Two two two");
@@ -695,7 +739,7 @@ function built(): Record<string, Y.Doc> {
   const second = note(6, start);
   const history = new Y.UndoManager([first.sequence, first.records], {
     ignoreRemoteMapChanges: true,
-    deleteFilter: (item) => item.parent !== first.records,
+    deleteFilter: (item) => item.parentSub === null,
   });
   first.sequence.delete(8, 1);
   second.sequence.delete(8, 1);
@@ -713,12 +757,14 @@ function built(): Record<string, Y.Doc> {
     "every inline item": inline.doc,
     "every block that holds no blocks": leaves.doc,
     ...Object.fromEntries(holding),
+    ...Object.fromEntries(severalBlocksInACell),
     "every attribute as numbers, as BigInt and as values a reader repairs": values.doc,
     "every path a reader repairs, and which lines share a container": paths.doc,
     "what a block cannot hold goes to a paragraph after it": spills.doc,
     "items a reader skips": skipped.doc,
     "a note with nothing in its sequence": nothing.doc,
     "a note with only items a reader skips": onlySkipped.doc,
+    "a note with only formatting items": onlyFormatting.doc,
     "both joined one line, one typed, one undid": second.doc,
   };
 }
@@ -743,11 +789,14 @@ function writtenAsMarkdown(document: unknown): string {
 it("reads each stored note as the document, and writes it as the Markdown, recorded beside it", () => {
   const made = Object.entries(built()).map(([name, doc]): Fixture => {
     const document = shown(doc);
+    const markdownNotCompared = MARKDOWN_NOT_COMPARED[name];
     return {
       name,
       update: base64(Y.encodeStateAsUpdate(doc)),
       document,
-      markdown: writtenAsMarkdown(document),
+      ...(markdownNotCompared === undefined
+        ? { markdown: writtenAsMarkdown(document) }
+        : { markdownNotCompared }),
     };
   });
   if (WRITE_FIXTURES) writeFileSync(FILE, `${JSON.stringify(made, null, 2)}\n`);
@@ -759,7 +808,8 @@ it("reads each stored note as the document, and writes it as the Markdown, recor
     doc.getMap(BODY_CONTAINERS_FIELD);
     Y.applyUpdate(doc, Buffer.from(fixture.update, "base64"));
     expect(shown(doc), fixture.name).toEqual(fixture.document);
-    expect(writtenAsMarkdown(shown(doc)), fixture.name).toBe(fixture.markdown);
+    if ("markdown" in fixture)
+      expect(writtenAsMarkdown(shown(doc)), fixture.name).toBe(fixture.markdown);
     doc.destroy();
   }
   expect(stored).toEqual(made);
