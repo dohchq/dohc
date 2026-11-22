@@ -28,6 +28,7 @@ import { fileVersionError } from "@dohc/workspace-contracts/file-version";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { DaemonRefusalError, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "./closedAppCompiler";
+import { isReservedAppPackage } from "./closedAppBuiltins";
 
 export const APP_PUBLICATION_LIMITS = {
   maxFiles: APP_PUBLICATION_MAX_FILES,
@@ -147,6 +148,10 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
   if (entries.length > inputBounds.maxInputFiles)
     throw new Error(`${manifestPath} maps more than ${inputBounds.maxInputFiles} packages.`);
   for (const [name, path] of entries) {
+    if (isReservedAppPackage(name))
+      throw new Error(
+        `${manifestPath} maps built-in package ${name}. Remove it from packageMap; dohc provides it automatically.`,
+      );
     if (name.length > 256)
       throw new Error(`${manifestPath} maps a package name longer than 256 characters.`);
     if (!inputs.includes(path))

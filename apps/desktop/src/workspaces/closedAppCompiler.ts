@@ -15,6 +15,14 @@ import {
   pageInput,
   pageNamespace,
 } from "./closedAppPage.ts";
+import {
+  BUILTIN_NAMESPACE,
+  isReservedAppPackage,
+  loadClosedAppBuiltins,
+  resolveBuiltinImport,
+  type BuiltinFileName,
+  type ClosedAppBuiltins,
+} from "./closedAppBuiltins.ts";
 
 export interface ClosedAppInput {
   path: string;
@@ -43,7 +51,7 @@ export interface ClosedAppBuild {
   sourceDigest: string;
   dependencyLock: ClosedAppFileIdentity[];
   dependencyLockDigest: string;
-  compiler: { recipe: "dohc-closed-app-v3"; version: string; binarySha256: string };
+  compiler: { recipe: "dohc-closed-app-v4"; version: string; binarySha256: string };
   files: Array<ClosedAppFileIdentity & { bytes: Uint8Array; contentType: string }>;
   bundleDigest: string;
   buildDigest: string;
@@ -209,7 +217,7 @@ function buildFailure(error: unknown, entry: string): unknown {
   return new Error(path ? `${path}:${first.location!.line}: ${first.text}` : first.text);
 }
 
-async function compilerIdentity(): Promise<ClosedAppBuild["compiler"]> {
+async function compilerIdentity(builtins: ClosedAppBuiltins): Promise<ClosedAppBuild["compiler"]> {
   // Match esbuild 0.28.1's installed native-package resolution; refuse override/fallback binaries.
   if (
     binaryOverrideAtImport ||
@@ -224,8 +232,8 @@ async function compilerIdentity(): Promise<ClosedAppBuild["compiler"]> {
     `@esbuild/${process.platform}-${process.arch}/${process.platform === "win32" ? "esbuild.exe" : "bin/esbuild"}`,
   );
   return {
-    recipe: "dohc-closed-app-v3",
-    version: esbuild.version,
+    recipe: "dohc-closed-app-v4",
+    version: `${esbuild.version}+kit-${builtins.digest}`,
     binarySha256: sha256(await readFile(binary)),
   };
 }
@@ -259,6 +267,11 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
   )
     throw new Error("Invalid app package map.");
   for (const [specifier, mapped] of Object.entries(request.packageMap ?? {})) {
+    if (isReservedAppPackage(specifier)) {
+      throw new Error(
+        `App package map cannot override built-in package ${specifier}. Remove it from packageMap.`,
+      );
+    }
     if (
       !/^(?:@[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)?[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9_.-]+)*$/.test(
         specifier,
@@ -305,7 +318,8 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
     files: inventory,
     packages: [...packages].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   });
-  const compiler = await compilerIdentity();
+  const builtins = await loadClosedAppBuiltins(import.meta.url, esbuild);
+  const compiler = await compilerIdentity(builtins);
   const directory = await mkdtemp(join(tmpdir(), "dohc-app-compiler-"));
   try {
     const result = await esbuild
@@ -364,6 +378,19 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
                   inputs.has(args.path.slice(pageInput.length))
                 )
                   return { path: args.path.slice(pageInput.length), namespace };
+                if (args.namespace === BUILTIN_NAMESPACE) {
+                  const target = resolveBuiltinImport(args.path, true);
+                  if (target && builtins.files.has(target)) {
+                    return { path: target, namespace: BUILTIN_NAMESPACE };
+                  }
+                  return {
+                    errors: [
+                      {
+                        text: `Built-in kit module ${args.importer} imports unsupported target ${args.path}.`,
+                      },
+                    ],
+                  };
+                }
                 if (args.namespace !== namespace && !inPage)
                   return {
                     errors: [
@@ -393,6 +420,12 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
                   specifier.startsWith(".") ||
                   (css && !/^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/)/.test(specifier));
                 if (!relative) {
+                  if (!css) {
+                    const builtinTarget = resolveBuiltinImport(specifier, false);
+                    if (builtinTarget && builtins.files.has(builtinTarget)) {
+                      return { path: builtinTarget, namespace: BUILTIN_NAMESPACE };
+                    }
+                  }
                   const path = css ? undefined : packages.get(specifier);
                   if (path && inputs.has(path)) return { path, namespace };
                   return {
@@ -446,6 +479,16 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
                   await assertScript(inline.contents, "js", `A module script in ${entry}`);
                 return inline;
               });
+              build.onLoad({ filter: /.*/, namespace: BUILTIN_NAMESPACE }, (args) => {
+                const asset = builtins.files.get(args.path as BuiltinFileName);
+                if (!asset || sha256(asset.bytes) !== asset.sha256) {
+                  return { errors: [{ text: "Built-in app kit integrity check failed." }] };
+                }
+                return {
+                  contents: asset.bytes,
+                  loader: args.path.endsWith(".css") ? "css" : "js",
+                };
+              });
             },
           },
         ],
@@ -453,13 +496,15 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
       .catch((error) => {
         throw buildFailure(error, entry);
       });
-    // Inline page modules derive from the entry, which the lock already names.
+    // Inline page modules derive from the entry, and pinned built-in modules derive from compilerIdentity.
     const known = (key: string) =>
       key.startsWith(namespace + ":")
         ? inputs.has(key.slice(namespace.length + 1))
-        : !!page &&
-          key.startsWith(pageNamespace + ":") &&
-          page.inline.has(key.slice(pageNamespace.length + 1));
+        : key.startsWith(BUILTIN_NAMESPACE + ":")
+          ? builtins.files.has(key.slice(BUILTIN_NAMESPACE.length + 1) as BuiltinFileName)
+          : !!page &&
+            key.startsWith(pageNamespace + ":") &&
+            page.inline.has(key.slice(pageNamespace.length + 1));
     const locked = new Set(page?.used.keys());
     for (const [key, input] of Object.entries(result.metafile.inputs)) {
       if (!known(key)) throw new Error("App compiler used an undeclared input.");

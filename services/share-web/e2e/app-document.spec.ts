@@ -1,8 +1,5 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
 import { createAppDocument } from "@dohc/app-browser/document";
@@ -41,41 +38,10 @@ test("approved React bundle runs under inherited CSP in an opaque child", async 
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Missing test address");
     const origin = `http://127.0.0.1:${address.port}`;
-    const require = createRequire(import.meta.url);
-    const reactRoot = dirname(require.resolve("react/package.json"));
-    const domRoot = dirname(require.resolve("react-dom/package.json"));
-    const schedulerRoot = dirname(
-      createRequire(join(domRoot, "package.json")).resolve("scheduler/package.json"),
-    );
-    const captured = await Promise.all(
-      [
-        [reactRoot, "react", "index.js"],
-        [reactRoot, "react", "cjs/react.production.js"],
-        [reactRoot, "react", "jsx-runtime.js"],
-        [reactRoot, "react", "cjs/react-jsx-runtime.production.js"],
-        [domRoot, "react-dom", "index.js"],
-        [domRoot, "react-dom", "cjs/react-dom.production.js"],
-        [domRoot, "react-dom", "client.js"],
-        [domRoot, "react-dom", "cjs/react-dom-client.production.js"],
-        [schedulerRoot, "scheduler", "index.js"],
-        [schedulerRoot, "scheduler", "cjs/scheduler.production.js"],
-      ].map(async ([root, name, path]) => {
-        const bytes = await readFile(join(root!, path!));
-        return { path: `deps/${name}/${path}`, bytes, sha256: hash(bytes) };
-      }),
-    );
     const build = await compileClosedApp({
       entryPath: "main.tsx",
       bounds: { maxInputFiles: 32, maxInputBytes: 5_000_000, maxOutputBytes: 5_000_000 },
-      packageMap: {
-        react: "deps/react/index.js",
-        "react/jsx-runtime": "deps/react/jsx-runtime.js",
-        "react-dom": "deps/react-dom/index.js",
-        "react-dom/client": "deps/react-dom/client.js",
-        scheduler: "deps/scheduler/index.js",
-      },
       inputs: [
-        ...captured,
         input(
           "main.tsx",
           `import {useState} from 'react';import {createRoot} from 'react-dom/client';import './style.css';

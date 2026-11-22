@@ -228,6 +228,25 @@ describe("app.publish.json paths", () => {
       parseAppPublicationDeclaration(new TextEncoder().encode("{bad json"), "apps/shop"),
     ).toThrow(/apps\/shop\/app\.publish\.json is not valid JSON \(at .+\)\. Check its syntax\./);
   });
+
+  it.each(["react", "react/jsx-runtime", "react-dom/client", "scheduler", "dohc/ui"])(
+    "refuses packageMap override for built-in package %s",
+    (specifier) => {
+      expect(() =>
+        parseAppPublicationDeclaration(
+          new TextEncoder().encode(
+            JSON.stringify({
+              version: 1,
+              entryPath: "main.tsx",
+              inputs: ["main.tsx", "fake.js"],
+              packageMap: { [specifier]: "fake.js" },
+            }),
+          ),
+          "app",
+        ),
+      ).toThrow(/maps built-in package/);
+    },
+  );
   const manifest = {
     entryPath: "main.ts",
     inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"],
