@@ -1649,6 +1649,33 @@ describe("SettingsDialog", () => {
   });
 });
 
+it("says a joined workspace's ended copy uses default settings, not that it is still opening", async () => {
+  bridge.getWorkspaceSettings.mockResolvedValue({
+    settings: DEFAULT_WORKSPACE_SETTINGS,
+    source: "recovered",
+    warning:
+      "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
+    notOpened: true,
+  });
+  render(
+    <SettingsDialog
+      workspaceIsReady
+      sharedView
+      membership
+      membershipEnded
+      workspaceId="ws-1"
+      workspacePath="/shared/trip"
+      workspaceName="Trip"
+      onClose={() => {}}
+    />,
+  );
+  await waitFor(() =>
+    expect(screen.getAllByTestId("settings-warning").map((node) => node.textContent)).toEqual([
+      "Your membership ended. This copy uses default settings and saves no changes to them.",
+    ]),
+  );
+});
+
 it("shows Members in a joined workspace, which lists the owner's people", async () => {
   render(
     <SettingsDialog
