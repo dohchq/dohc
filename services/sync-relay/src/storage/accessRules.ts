@@ -5,6 +5,7 @@ import {
   accessRuleSet,
   formatAccessRule,
   parseAccessRule,
+  parseFormattedAccessRule,
   type AccessRule,
   type AccessRuleSet,
 } from "@dohc/security-contract/access-rules";
@@ -180,7 +181,10 @@ export function currentAccessRuleSet(db: SqliteDb, workspaceId: string): AccessR
   return accessRuleSet(
     rows.map((row) => {
       const text = row.rule_text;
-      return [String(row.folder), typeof text === "string" ? parseAccessRule(text) : null] as const;
+      return [
+        String(row.folder),
+        typeof text === "string" ? parseFormattedAccessRule(text) : null,
+      ] as const;
     }),
   );
 }
@@ -200,7 +204,7 @@ export function accessRuleSetBefore(
     WHERE workspace_id = ? AND from_seq < ? AND (to_seq IS NULL OR to_seq >= ?)`)
     .all(workspaceId, seq, seq);
   const parse = (text: string) => {
-    if (!parsed.has(text)) parsed.set(text, parseAccessRule(text));
+    if (!parsed.has(text)) parsed.set(text, parseFormattedAccessRule(text));
     return parsed.get(text)!;
   };
   return accessRuleSet(
