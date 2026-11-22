@@ -212,6 +212,15 @@ test("@restore-set-aside-typing History refuses to restore a live shared note, a
           shown.getByRole("button", { name: "Open Live documents", exact: true }),
         ).toBeVisible();
       };
+      await openHistoryView(page);
+      // R1's row, not the note's creation: History can list the creation
+      // before the live edits arrive, and restoring it deletes the note.
+      const moment = page
+        .locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`)
+        .filter({ hasText: recipientAccount.name })
+        .first();
+      await expect(moment).toBeVisible({ timeout: 60_000 });
+      await moment.click();
       await page.getByTestId("engine-diff-restore-file").click();
       const refusal = page.getByTestId("workspace-shell-error");
       await expect(refusal).toContainText(title, { timeout: 30_000 });
