@@ -107,9 +107,7 @@ export async function readGoogleDriveRootsFromSqlite(
   } finally {
     try {
       db?.close();
-    } catch {
-      // Ignore close failures on external read-only databases.
-    }
+    } catch {}
   }
 }
 
@@ -200,9 +198,7 @@ async function resolveExistingPath(
         const resolvedParent = await resolveReal(current);
         const suffix = win32.relative(current, targetPath);
         return suffix ? win32.join(resolvedParent, suffix) : resolvedParent;
-      } catch {
-        // Keep walking up until an existing ancestor resolves.
-      }
+      } catch {}
     }
   }
 }

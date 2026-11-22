@@ -3212,8 +3212,6 @@ function testNetworkShare(): boolean {
   );
 }
 
-// Test-only cloud-sync-folder seam: every workspace reads as inside a cloud-
-// synced folder, so its notice can be seen on any computer.
 function testCloudSyncFolder(): { service: string | null } | null {
   if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return null;
   const raw = process.env.DOHC_TEST_CLOUD_SYNC_FOLDER?.trim();
