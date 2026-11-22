@@ -177,6 +177,8 @@ function server(
     currentRefused?: boolean;
     // The file list fails to arrive, as on a lost connection.
     currentUnreachable?: boolean;
+    // The grant answers this many more reads, then loses its connection.
+    metaAnswers?: number;
     // The account's session cannot be checked.
     sessionFails?: boolean;
     // How many reads of the Groups wait for the test to answer them.
@@ -277,7 +279,11 @@ function server(
         throw new TypeError("Failed to fetch");
       if (url.pathname === "/api/view/current")
         return jsonResponse({ ...meta(), files: files(), nextCursor: 7, epochLogFloor: 0 });
-      if (url.pathname === "/api/view/meta") return jsonResponse(meta());
+      if (url.pathname === "/api/view/meta") {
+        if (options.metaAnswers !== undefined && options.metaAnswers-- <= 0)
+          throw new TypeError("Failed to fetch");
+        return jsonResponse(meta());
+      }
       if (url.pathname === "/api/view/log")
         return url.searchParams.has("hold")
           ? hold("log", url, signal)
@@ -2238,6 +2244,28 @@ it.each(["currentRefused", "currentUnreachable"] as const)(
     await settle(() => text().includes("Leave at nine.") && badge() === "View only");
   },
 );
+
+it("goes by the grant's first answer when a later read of it fails after a level change", async () => {
+  const options: { level: Level; currentRefused?: boolean; metaAnswers?: number } = {
+    level: "comment",
+  };
+  server(options);
+  await render();
+  await opened();
+  await click("Comments");
+  await settle(() => commentBox() !== null);
+  // The grant answers once, at View, and its next read fails.
+  options.level = "view";
+  options.currentRefused = true;
+  options.metaAnswers = 1;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => text().includes("dohc could not open this workspace."));
+  expect(container.querySelector('textarea[name="body"]')).toBeNull();
+  options.currentRefused = false;
+  options.metaAnswers = undefined;
+  await click("Try again");
+  await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+});
 
 it("keeps each file's comment draft apart when the relay lists files without their identity", async () => {
   // A development relay without a link key lists files with no object identity.
