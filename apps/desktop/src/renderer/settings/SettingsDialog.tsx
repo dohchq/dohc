@@ -165,8 +165,6 @@ export function SettingsDialog(props: {
   membership?: boolean;
   // A joined workspace's id on the relay, which its agent link names.
   membersWorkspaceId?: string;
-  /** The joined workspace's membership ended. Its copy never opens, so its settings stay the defaults. */
-  membershipEnded?: boolean;
   sessionRecorderOn?: boolean;
   initialSection?: SettingsSectionId;
   // The part a Customize… command opened Settings for: its row is marked and
@@ -636,13 +634,10 @@ export function SettingsDialog(props: {
   );
   const shortcutPlatform = window.dohcDesktop?.platform;
 
-  // "Try again when it opens" would wait for an open an ended copy never gets.
-  const endedCopy = props.membershipEnded && workspaceResult?.notOpened;
   const warnings = [
     userResult?.warning,
-    ...(endedCopy
-      ? ["Your membership ended. This copy uses default settings and saves no changes to them."]
-      : [workspaceResult?.warning, workspaceResult?.refusal]),
+    workspaceResult?.warning,
+    workspaceResult?.refusal,
     error ? `Settings error: ${error}` : null,
   ].filter((message): message is string => Boolean(message));
 
