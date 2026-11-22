@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { datasetColumnFields, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { DatasetSchemaChange, type DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { Overlay } from "./Overlay";
@@ -7,7 +8,13 @@ import {
   type CollectionMigrationReviewDialogProps,
 } from "./CollectionMigrationReviewDialog";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
-import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
+import {
+  FieldError,
+  IconButton,
+  PrimaryButton,
+  SecondaryButton,
+  SectionLabel,
+} from "./ui/controls";
 import { inputClass, selectClass, parseOptionsText } from "./collections/FieldForm";
 
 export interface CollectionFieldsDialogProps {
@@ -229,11 +236,16 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
           event.preventDefault();
           prepare();
         }}
-        className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(480px,calc(100vw-32px))] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5"
+        className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-[min(480px,calc(100vw-32px))] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5"
       >
-        <h2 id="collection-fields-title" className="m-0 text-base font-semibold text-ink">
-          Fields and names
-        </h2>
+        <div className="flex items-center gap-2">
+          <h2 id="collection-fields-title" className="m-0 flex-1 text-base font-semibold text-ink">
+            Fields and names
+          </h2>
+          <IconButton aria-label="Close" title="Close" disabled={pending} onClick={props.onClose}>
+            <X size={14} aria-hidden />
+          </IconButton>
+        </div>
         <label className="text-[12px] text-muted">
           Change
           <select
@@ -480,11 +492,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
             ))}
           </section>
         ) : null}
-        {invalid && (
-          <p role="alert" className="m-0 text-[12px] text-danger">
-            {invalid}
-          </p>
-        )}
+        {invalid ? <FieldError id="collection-fields-invalid">{invalid}</FieldError> : null}
         <div className="flex flex-wrap items-center justify-end gap-2">
           <SecondaryButton type="button" disabled={pending} onClick={props.onReviewSource}>
             Review source change

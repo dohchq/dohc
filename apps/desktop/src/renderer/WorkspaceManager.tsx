@@ -1,6 +1,15 @@
 import { DohcMark } from "@dohc/brand";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
-import { FolderOpen, Laptop, Link, MoreHorizontal, type LucideIcon } from "lucide-react";
+import {
+  ArrowLeft,
+  Folder,
+  FolderOpen,
+  Laptop,
+  Link,
+  Link2,
+  MoreHorizontal,
+  type LucideIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
@@ -128,15 +137,22 @@ function WorkspaceRow(props: {
         type="button"
         title={displayPath(props.workspace.rootPath)}
         onClick={props.onOpen}
-        className="flex min-w-0 flex-1 flex-col text-left"
+        className="flex min-w-0 flex-1 items-center gap-2 text-left"
       >
-        <span className="truncate text-[13px] font-medium leading-5 text-ink">
-          {workspaceName(props.workspace)}
+        {props.workspace.kind === "shared" || props.workspace.shareView ? (
+          <Link2 size={14} aria-hidden className="shrink-0 text-subtle" />
+        ) : (
+          <Folder size={14} aria-hidden className="shrink-0 text-subtle" />
+        )}
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate text-[13px] font-medium leading-5 text-ink">
+            {workspaceName(props.workspace)}
+          </span>
+          <PathLine
+            path={displayPath(props.workspace.rootPath)}
+            className="text-[12px] leading-4 text-subtle"
+          />
         </span>
-        <PathLine
-          path={displayPath(props.workspace.rootPath)}
-          className="text-[12px] leading-4 text-subtle"
-        />
       </button>
       {/* One slot at the end: when it was last opened at rest, the row menu
           on hover, focus, or while open. Nothing else moves. */}
@@ -241,6 +257,30 @@ export function WorkspaceManager(props: {
     setJoining(false);
     setOpeningShare(false);
   }, [handoffStatus.status]);
+
+  const currentWorkspace = props.current;
+  const openCurrentRef = useRef<() => void>(() => undefined);
+  openCurrentRef.current = () => {
+    if (currentWorkspace) void open(currentWorkspace);
+  };
+  useEffect(() => {
+    if (
+      !currentWorkspace ||
+      joining ||
+      openingShare ||
+      handoffStatus.status !== "idle" ||
+      removing !== null
+    )
+      return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (document.documentElement.dataset.menuOpen !== undefined) return;
+      event.preventDefault();
+      openCurrentRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [currentWorkspace, handoffStatus.status, joining, openingShare, removing]);
 
   // A failed row action is a toast and a Notices row with Try again: the list
   // stays as it was, so the row is still there to act on. Each failure has an
@@ -451,8 +491,18 @@ export function WorkspaceManager(props: {
             className="relative flex shrink-0 flex-col border-r border-line bg-panel"
             style={{ width }}
           >
-            <div className="flex h-11 items-center px-4">
+            <div className="flex h-11 items-center gap-2 px-4">
               <span className="text-[13px] font-semibold text-ink">Workspaces</span>
+              {props.current ? (
+                <GhostButton
+                  data-testid="workspace-manager-back"
+                  onClick={() => void open(props.current!)}
+                  className="ml-auto"
+                >
+                  <ArrowLeft size={14} aria-hidden />
+                  Back
+                </GhostButton>
+              ) : null}
             </div>
             <ul className="m-0 flex list-none flex-col gap-0.5 overflow-y-auto px-2 pb-2">
               {workspaces.map((workspace) => (
@@ -508,6 +558,10 @@ export function WorkspaceManager(props: {
               onPointerUp={(event) => resize.commit(event.pointerId)}
               onPointerCancel={(event) => resize.commit(event.pointerId)}
               onLostPointerCapture={(event) => resize.commit(event.pointerId)}
+              onDoubleClick={() => {
+                setListWidth(LIST_DEFAULT_WIDTH);
+                writeListWidth(LIST_DEFAULT_WIDTH);
+              }}
               className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 keyboard:focus-visible:bg-focus"
             />
           </aside>

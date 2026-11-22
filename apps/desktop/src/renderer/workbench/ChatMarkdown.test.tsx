@@ -175,7 +175,11 @@ describe("ChatMarkdown", () => {
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     const view = renderBody("Try:\n\n```ts\nconst a = 1;\nconst b = `two`;\n```");
     const copy = view.getByRole("button", { name: "Copy code" });
-    expect(copy.parentElement?.className).toContain("right-px top-px");
+    expect(copy.parentElement?.hasAttribute("data-chat-control")).toBe(true);
+    expect(copy.parentElement?.textContent).toContain("ts");
+    const code = view.container.querySelector("pre code");
+    expect(code?.className).toContain("dohc-code-syntax");
+    expect(code?.querySelector(".hljs-keyword")?.textContent).toBe("const");
     await act(async () => copy.click());
     expect(writeText).toHaveBeenCalledWith("const a = 1;\nconst b = `two`;");
   });

@@ -81,6 +81,8 @@ export function useAppView(options: {
   const [state, setState] = useState<ViewState>({ status: "checking" });
   const [loading, setLoading] = useState(false);
   const [painted, setPainted] = useState(false);
+  const [canGoBack, setCanGoBack] = useState(false);
+  const [canGoForward, setCanGoForward] = useState(false);
   const [publicationId, setPublicationId] = useState<string | null>(null);
   const theme = useColorScheme();
   const webview = useRef<Electron.WebviewTag | null>(null);
@@ -134,6 +136,8 @@ export function useAppView(options: {
     setState({ status: "checking" });
     setLoading(false);
     setPainted(false);
+    setCanGoBack(false);
+    setCanGoForward(false);
     try {
       const result = await bridge().appView({
         action: "open",
@@ -371,10 +375,15 @@ export function useAppView(options: {
     (element: Electron.WebviewTag | null) => {
       if (!element) return;
       webview.current = element;
+      const syncHistory = () => {
+        setCanGoBack(Boolean(element.canGoBack?.()));
+        setCanGoForward(Boolean(element.canGoForward?.()));
+      };
       const started = () => setLoading(true);
       const stopped = () => {
         setLoading(false);
         setPainted(true);
+        syncHistory();
       };
       const failed = (event: Event) => {
         const { isMainFrame, errorCode, errorDescription } = event as Electron.DidFailLoadEvent;
@@ -390,12 +399,16 @@ export function useAppView(options: {
         );
       element.addEventListener("did-start-loading", started);
       element.addEventListener("did-stop-loading", stopped);
+      element.addEventListener("did-navigate", syncHistory);
+      element.addEventListener("did-navigate-in-page", syncHistory);
       element.addEventListener("did-fail-load", failed);
       element.addEventListener("render-process-gone", gone);
       tryFocus();
       return () => {
         element.removeEventListener("did-start-loading", started);
         element.removeEventListener("did-stop-loading", stopped);
+        element.removeEventListener("did-navigate", syncHistory);
+        element.removeEventListener("did-navigate-in-page", syncHistory);
         element.removeEventListener("did-fail-load", failed);
         element.removeEventListener("render-process-gone", gone);
         if (webview.current === element) webview.current = null;
@@ -410,6 +423,8 @@ export function useAppView(options: {
     painted,
     attach,
     toolbarStart,
+    canGoBack: state.status === "open" && canGoBack,
+    canGoForward: state.status === "open" && canGoForward,
     canReload: state.status === "open" || state.status === "failed",
     canOpenInBrowser:
       publicationId !== null && (state.status === "open" || state.status === "failed"),
@@ -426,7 +441,17 @@ export function AppViewBody(props: { view: AppView; onReview: () => void }) {
   const { view } = props;
   const { state } = view;
   if (state.status === "checking")
-    return <div data-testid="app-view-checking" className="flex-1 bg-bg" />;
+    return (
+      <div data-testid="app-view-checking" className="relative flex-1 bg-bg">
+        <div
+          role="progressbar"
+          aria-label="Opening app"
+          className="dohc-reveal-if-slow pointer-events-none absolute inset-x-0 top-0 h-0.5 overflow-hidden"
+        >
+          <div className="dohc-progress-slide h-full bg-accent" />
+        </div>
+      </div>
+    );
   if (state.status === "failed") {
     return (
       <div className="flex flex-1 items-center justify-center px-6">

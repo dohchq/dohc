@@ -180,9 +180,9 @@ it.each([401, 403])("explains sign-in refusal %s with the shared form", async (s
       ? "Choose a password from an emailed link before you sign in. Use Forgot your password? to get a link."
       : "dohc could not sign you in. Check your email and password, then retry.",
   );
-  expect(Boolean(container.querySelector('a[href="/account/forgot-password"]'))).toBe(
-    status === 403,
-  );
+  expect(
+    Boolean(container.querySelector('[role="alert"] a[href="/account/forgot-password"]')),
+  ).toBe(status === 403);
 });
 
 it("signs in with the shared form, reads the channel oldest first, and posts as the signed-in account", async () => {

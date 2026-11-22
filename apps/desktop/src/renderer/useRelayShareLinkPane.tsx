@@ -1875,6 +1875,13 @@ export function useRelayShareLinkPane(props: {
     return (
       <div
         data-testid="share-link-confirmation"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (mutationBusy === null) setConfirmation(null);
+          }
+        }}
         className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3"
       >
         <p className="m-0 text-[13px] leading-relaxed text-ink">
@@ -1940,7 +1947,11 @@ export function useRelayShareLinkPane(props: {
           )}
         </p>
         <div className="flex justify-end gap-2">
-          <SecondaryButton disabled={mutationBusy !== null} onClick={() => setConfirmation(null)}>
+          <SecondaryButton
+            autoFocus
+            disabled={mutationBusy !== null}
+            onClick={() => setConfirmation(null)}
+          >
             Cancel
           </SecondaryButton>
           <LinkConfirm
@@ -2277,6 +2288,13 @@ export function useRelayShareLinkPane(props: {
     return (
       <div
         data-testid="owner-comments-confirmation"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (ownerMutationBusy === null) setOwnerConfirmation(null);
+          }
+        }}
         className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3"
       >
         <p className="m-0 text-[13px] leading-relaxed text-ink">
@@ -2290,6 +2308,7 @@ export function useRelayShareLinkPane(props: {
         </p>
         <div className="flex justify-end gap-2">
           <SecondaryButton
+            autoFocus
             disabled={ownerMutationBusy !== null}
             onClick={() => setOwnerConfirmation(null)}
           >

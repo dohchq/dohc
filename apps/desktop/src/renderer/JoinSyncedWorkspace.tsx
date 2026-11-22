@@ -58,6 +58,8 @@ export function JoinSyncedWorkspace(
   const [usedFolder, setUsedFolder] = useState<string | null>(null);
   const [passphrase, setPassphrase] = useState("");
   const [joining, setJoining] = useState(false);
+  const [codeTouched, setCodeTouched] = useState(false);
+  const [passphraseTouched, setPassphraseTouched] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [error, setError] = useState<string | null>(null);
   useMouseBackButton(joining ? undefined : props.onBack);
@@ -126,6 +128,8 @@ export function JoinSyncedWorkspace(
 
   async function join() {
     if (joining) return;
+    setCodeTouched(true);
+    if (needsPassphrase) setPassphraseTouched(true);
     const found: FieldErrors = {
       code: code.trim() ? undefined : CODE_ERROR,
       folder: folder ? undefined : FOLDER_ERROR,
@@ -243,14 +247,19 @@ export function JoinSyncedWorkspace(
             data-testid="join-sync-code"
             value={code}
             onChange={(event) => {
+              setCodeTouched(true);
               setCode(event.currentTarget.value);
               setNeedsPassphrase(false);
               setUsedFolder(null);
               setPassphrase("");
+              setPassphraseTouched(false);
               setFieldErrors(({ folder: folderError }) => ({ folder: folderError }));
               setError(null);
             }}
-            onBlur={() => setFieldError("code", code.trim() ? undefined : CODE_ERROR)}
+            onBlur={() => {
+              if (!codeTouched && code.trim() === "") return;
+              setFieldError("code", code.trim() ? undefined : CODE_ERROR);
+            }}
             aria-invalid={fieldErrors.code ? true : undefined}
             aria-describedby={fieldErrors.code ? "join-sync-code-error" : undefined}
             placeholder="dohc-sync:…"
@@ -277,11 +286,13 @@ export function JoinSyncedWorkspace(
                 spellCheck={false}
                 readOnly={joining}
                 onChange={(event) => {
+                  setPassphraseTouched(true);
                   setPassphrase(event.currentTarget.value);
                   setFieldError("passphrase", undefined);
                 }}
                 // Adds only the empty error: one that failed to unlock stays until edited.
                 onBlur={() => {
+                  if (!passphraseTouched && !passphrase) return;
                   if (!passphrase) setFieldError("passphrase", PASSPHRASE_ERROR);
                 }}
                 aria-invalid={fieldErrors.passphrase ? true : undefined}

@@ -818,7 +818,7 @@ function FileView(props: {
     if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
-    if (previewText === null) return <p className="muted">Loading file</p>;
+    if (previewText === null) return <FileLoading />;
     return (
       <MarkdownContent
         markdown={previewText}
@@ -833,7 +833,7 @@ function FileView(props: {
     if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
-    if (previewText === null) return <p className="muted">Loading file</p>;
+    if (previewText === null) return <FileLoading />;
     const scene = parsePublicExcalidrawScene(previewText);
     if (!scene) return <DownloadCard file={props.file} session={props.session} />;
     return (
@@ -841,7 +841,7 @@ function FileView(props: {
         key={props.file.blobSha256}
         fallback={<DownloadCard file={props.file} session={props.session} />}
       >
-        <Suspense fallback={<p className="muted">Loading file</p>}>
+        <Suspense fallback={<FileLoading />}>
           <ExcalidrawView scene={scene} />
         </Suspense>
       </ExcalidrawRenderBoundary>
@@ -851,7 +851,7 @@ function FileView(props: {
     if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
-    if (previewText === null) return <p className="muted">Loading file</p>;
+    if (previewText === null) return <FileLoading />;
     return (
       <pre className="source-text">
         <code>{previewText}</code>
@@ -986,6 +986,20 @@ function Unavailable() {
         works only in that browser.
       </p>
     </StatePage>
+  );
+}
+
+function FileLoading() {
+  return (
+    <div className="file-loading" aria-busy="true">
+      <p className="sr-only">Loading file</p>
+      <div className="skeleton" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+        <i />
+      </div>
+    </div>
   );
 }
 
@@ -1231,7 +1245,24 @@ export function App() {
   const [filesToggled, setFilesToggled] = useState(false);
   const [comments, setComments] = useState({ count: 0, more: false });
   const [apps, setApps] = useState<AppsState>("none");
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const narrow = useNarrow();
+  useEffect(() => {
+    if (scrollerRef.current) scrollerRef.current.scrollTop = 0;
+  }, [selectedPath]);
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const syncHeight = () => {
+      document.documentElement.style.setProperty("--viewer-vh", `${Math.round(viewport.height)}px`);
+    };
+    syncHeight();
+    viewport.addEventListener("resize", syncHeight);
+    return () => {
+      viewport.removeEventListener("resize", syncHeight);
+      document.documentElement.style.removeProperty("--viewer-vh");
+    };
+  }, []);
   const countComments = useCallback((count: number, more: boolean) => {
     setComments((current) =>
       current.count === count && current.more === more ? current : { count, more },
@@ -1502,9 +1533,19 @@ export function App() {
   const ready = state.status === "ready" ? state : null;
   const meta = ready?.meta ?? null;
   const files = ready?.files ?? [];
+  const fileMap = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
   const selected = editing
     ? files.find((file) => file.path === editing.path)
     : (files.find((file) => file.path === selectedPath) ?? files[0]);
+  useEffect(() => {
+    if (selected) {
+      document.title = `${fileTitle(selected.path)} · dohc`;
+    } else if (meta?.subjectName) {
+      document.title = `${meta.subjectName} · dohc`;
+    } else {
+      document.title = "Shared with dohc";
+    }
+  }, [selected, meta?.subjectName]);
   // A note an Edit link can change: the page fetches its state while it shows it, so a press soon after can type at
   // once. Pressing Edit keeps the same note, so the press can take that state.
   const shownNote =
@@ -1613,6 +1654,11 @@ export function App() {
         onClose={stopEditing}
         barSlot={barSlot}
         onOpenChange={setEditorOpen}
+        resolveImage={
+          ready
+            ? (href) => resolveSharedImage(href, editing.path, fileMap, ready.session)
+            : undefined
+        }
         otherWay={ready ? <OpenInDohc key={ready.session} session={ready.session} /> : undefined}
       />
     );
@@ -1698,7 +1744,28 @@ export function App() {
             ) : null}
           </div>
           {editing ? (
-            <div className="header-actions" ref={setBarSlot} />
+            <div className="header-actions">
+              {ready ? (
+                <button
+                  className={surface === "comments" ? "icon-button on" : "icon-button"}
+                  type="button"
+                  aria-label={discussion}
+                  title={discussion}
+                  aria-expanded={surface === "comments"}
+                  aria-controls="link-discussion"
+                  onClick={toggle("comments")}
+                >
+                  <Icon name="message" />
+                  {!meta?.channel && comments.count > 0 ? (
+                    <span>
+                      {comments.count}
+                      {comments.more ? "+" : ""}
+                    </span>
+                  ) : null}
+                </button>
+              ) : null}
+              <div className="editor-bar-slot" ref={setBarSlot} />
+            </div>
           ) : (
             <div className="header-actions">
               <span className="freshness">{updated}</span>
@@ -1791,7 +1858,7 @@ export function App() {
           )}
         </header>
         <div className="layout">
-          <div className="scroller">
+          <div className="scroller" ref={scrollerRef}>
             <div className="column">
               {appToOpen !== null && ready && !editing ? (
                 <OpenSharedApp
@@ -1823,7 +1890,7 @@ export function App() {
               </main>
             </div>
           </div>
-          {ready && !editing ? (
+          {ready && (!editing || surface === "comments") ? (
             <div
               className="side-panel"
               id="link-discussion"
@@ -1856,6 +1923,9 @@ export function App() {
             </div>
           ) : null}
         </div>
+        {ready && editing && surface === "comments" ? (
+          <div className="backdrop narrow-only" onClick={closeSurface} />
+        ) : null}
         {ready && !editing ? (
           <>
             {surface !== null ? (

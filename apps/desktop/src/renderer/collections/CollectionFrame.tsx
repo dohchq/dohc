@@ -13,6 +13,7 @@ import {
 import {
   CalendarDays,
   ChevronDown,
+  Copy,
   Database,
   Pencil,
   Plus,
@@ -21,6 +22,7 @@ import {
   SquareKanban,
   Table2,
   Trash2,
+  X,
   Zap,
 } from "lucide-react";
 import {
@@ -81,6 +83,8 @@ export interface CollectionFrameViews {
   /** Saves a new view and opens it. Answers what went wrong as a sentence, or null. */
   create: (view: NewCollectionView) => Promise<string | null>;
   rename: (id: string, name: string) => Promise<string | null>;
+  /** Duplicates a saved view and opens the copy. */
+  duplicate?: (id: string) => void;
   /** Deletes a view. The page reports a failure, and offers Undo where it has one. */
   remove: (id: string) => void;
   /** Delete asks a second time in the menu, for a page whose deletion has no Undo. */
@@ -126,6 +130,17 @@ export interface CollectionFrameAction {
   disabled?: boolean;
 }
 
+export interface CollectionFrameQueryChip {
+  id: string;
+  label: string;
+  onRemove?: () => void;
+}
+
+export interface CollectionFrameActiveQuery {
+  items: readonly CollectionFrameQueryChip[];
+  onClearAll?: () => void;
+}
+
 export interface CollectionFrameProps extends Omit<HTMLAttributes<HTMLElement>, "children"> {
   name: string;
   /** How many records, in the page's own true words, such as "7 records" or "50 records on this page". */
@@ -139,6 +154,7 @@ export interface CollectionFrameProps extends Omit<HTMLAttributes<HTMLElement>, 
   tabsDisabled?: boolean;
   views?: CollectionFrameViews;
   viewField?: CollectionFrameViewField;
+  activeQuery?: CollectionFrameActiveQuery;
   search?: {
     value: string;
     onChange: (value: string) => void;
@@ -167,6 +183,7 @@ export function CollectionFrame({
   tabsDisabled = false,
   views,
   viewField,
+  activeQuery,
   search,
   actions,
   automations,
@@ -269,6 +286,41 @@ export function CollectionFrame({
           ) : null}
         </div>
       </div>
+      {activeQuery && activeQuery.items.length > 0 ? (
+        <div
+          data-testid="collection-active-query"
+          className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line bg-panel/40 px-5 py-1.5"
+        >
+          {activeQuery.items.map((item) => (
+            <span
+              key={item.id}
+              className="inline-flex h-6 items-center gap-1 rounded-md border border-line bg-bg px-2 text-[12px] text-ink"
+            >
+              <span className="max-w-48 truncate">{item.label}</span>
+              {item.onRemove ? (
+                <button
+                  type="button"
+                  aria-label={`Remove ${item.label}`}
+                  title={`Remove ${item.label}`}
+                  onClick={item.onRemove}
+                  className="-mr-0.5 grid size-4 place-items-center rounded text-subtle transition-colors duration-75 hover:bg-hover hover:text-ink"
+                >
+                  <X size={12} strokeWidth={2} aria-hidden />
+                </button>
+              ) : null}
+            </span>
+          ))}
+          {activeQuery.onClearAll ? (
+            <button
+              type="button"
+              onClick={activeQuery.onClearAll}
+              className="rounded px-1.5 py-0.5 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+            >
+              Clear
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {/* The row places a panel that lies over the view, where the page is too narrow for both. */}
       <div className="relative flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</div>
@@ -279,12 +331,24 @@ export function CollectionFrame({
 }
 
 function SearchBox({ search }: { search: NonNullable<CollectionFrameProps["search"]> }) {
+  const timer = useRef<number | null>(null);
+  const submitRef = useRef(search.onSubmit);
+  submitRef.current = search.onSubmit;
+  const cancel = () => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+      timer.current = null;
+    }
+  };
+  useEffect(() => cancel, []);
+  const hasValue = search.value.length > 0;
   return (
     <form
       role="search"
       className="relative flex shrink-0 items-center"
       onSubmit={(event) => {
         event.preventDefault();
+        cancel();
         search.onSubmit();
       }}
     >
@@ -295,8 +359,15 @@ function SearchBox({ search }: { search: NonNullable<CollectionFrameProps["searc
         maxLength={200}
         disabled={search.disabled}
         value={search.value}
-        onChange={(event) => search.onChange(event.target.value)}
-        className={`${inputClass.replace("w-full", "h-8 w-44").replace("px-2.5", "pl-8 pr-2")}`}
+        onChange={(event) => {
+          search.onChange(event.target.value);
+          cancel();
+          timer.current = window.setTimeout(() => {
+            timer.current = null;
+            submitRef.current();
+          }, 200);
+        }}
+        className={`${inputClass.replace("w-full", "h-8 w-44").replace("px-2.5", hasValue ? "pl-8 pr-7" : "pl-8 pr-2")}`}
       />
       <IconButton
         type="submit"
@@ -307,6 +378,21 @@ function SearchBox({ search }: { search: NonNullable<CollectionFrameProps["searc
       >
         <Search size={14} strokeWidth={1.9} aria-hidden />
       </IconButton>
+      {hasValue && !search.disabled ? (
+        <IconButton
+          type="button"
+          aria-label="Clear search"
+          title="Clear search"
+          onClick={() => {
+            cancel();
+            search.onChange("");
+            search.onSubmit();
+          }}
+          className="absolute right-1"
+        >
+          <X size={12} strokeWidth={1.9} aria-hidden />
+        </IconButton>
+      ) : null}
     </form>
   );
 }
@@ -381,6 +467,7 @@ function ViewFieldControl({
         // The two parts read as one name. The tooltip says what the choice is for.
         <GhostButton
           {...trigger}
+          size="toolbar"
           aria-label={`${field.prefix} ${chosen}`}
           title={field.label}
           disabled={held}
@@ -406,8 +493,27 @@ function ViewTabs(props: {
 }) {
   const { tabs, activeId, views, disabled } = props;
   const tabButtons = useRef(new Map<string, HTMLButtonElement>());
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const [overflow, setOverflow] = useState({ left: false, right: false });
   const addButton = useRef<HTMLButtonElement | null>(null);
   const renameAnchor = useRef<HTMLButtonElement | null>(null);
+  const syncOverflow = () => {
+    const strip = stripRef.current;
+    if (!strip) return;
+    const left = strip.scrollLeft > 1;
+    const right = strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1;
+    setOverflow((current) =>
+      current.left === left && current.right === right ? current : { left, right },
+    );
+  };
+  useLayoutEffect(() => {
+    syncOverflow();
+    const strip = stripRef.current;
+    if (!strip || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(syncOverflow);
+    observer.observe(strip);
+    return () => observer.disconnect();
+  }, [tabs]);
   const [adding, setAdding] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<TabMenu | null>(null);
@@ -484,6 +590,17 @@ function ViewTabs(props: {
           onEdit(tab.id);
         },
       });
+    const duplicate = views.duplicate;
+    if (duplicate)
+      items.push({
+        id: "duplicate",
+        label: "Duplicate",
+        icon: <Copy size={14} strokeWidth={1.9} aria-hidden />,
+        onSelect: () => {
+          picked(tab);
+          duplicate(tab.id);
+        },
+      });
     items.push({
       id: "delete",
       label: armed ? "Confirm delete" : "Delete",
@@ -536,78 +653,94 @@ function ViewTabs(props: {
 
   return (
     <>
-      <div
-        role="toolbar"
-        aria-label="Views"
-        data-testid="collection-view-switcher"
-        onKeyDown={onStripKeyDown}
-        className="dohc-tab-strip flex min-w-0 items-center self-stretch overflow-x-auto overflow-y-hidden"
-      >
-        {tabs.map((tab, index) => {
-          const Icon = kindOf(tab.kind).icon;
-          const active = tab.id === activeId;
-          const items = menuItems(tab);
-          return (
-            // Keyed by place, so a tab whose view is renamed keeps its button, and the focus on it.
-            <span
-              key={index}
-              className={`flex h-10 shrink-0 items-center border-b-2 ${active ? "border-ink" : "border-transparent"}`}
-            >
-              <button
-                ref={(element) => {
-                  if (element) tabButtons.current.set(tab.id, element);
-                  else tabButtons.current.delete(tab.id);
-                }}
-                type="button"
-                aria-pressed={active}
-                tabIndex={tab.id === stop ? 0 : -1}
-                disabled={disabled}
-                onClick={() => {
-                  if (!held) setRenaming(null);
-                  props.onSelect(tab.id);
-                }}
-                onContextMenu={(event) => {
-                  if (disabled || items.length === 0) return;
-                  event.preventDefault();
-                  setMenu({
-                    id: tab.id,
-                    at: { x: event.clientX, y: event.clientY },
-                    keyboard: false,
-                  });
-                }}
-                className={`flex h-8 items-center gap-2 rounded-md px-2 text-[13px] font-medium transition-colors duration-75 disabled:text-subtle ${
-                  active ? "text-ink" : "text-muted enabled:hover:text-ink"
-                }`}
+      <div className="relative flex min-w-0 items-stretch self-stretch">
+        <div
+          ref={stripRef}
+          role="toolbar"
+          aria-label="Views"
+          data-testid="collection-view-switcher"
+          data-overflow-left={overflow.left ? "" : undefined}
+          data-overflow-right={overflow.right ? "" : undefined}
+          onKeyDown={onStripKeyDown}
+          onScroll={syncOverflow}
+          onWheel={(event) => {
+            const strip = stripRef.current;
+            if (!strip || strip.scrollWidth <= strip.clientWidth) return;
+            if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+              strip.scrollLeft += event.deltaY;
+              syncOverflow();
+            }
+          }}
+          className="dohc-tab-strip flex min-w-0 items-center self-stretch overflow-x-auto overflow-y-hidden"
+        >
+          {tabs.map((tab, index) => {
+            const Icon = kindOf(tab.kind).icon;
+            const active = tab.id === activeId;
+            const items = menuItems(tab);
+            return (
+              // Keyed by place, so a tab whose view is renamed keeps its button, and the focus on it.
+              <span
+                key={index}
+                className={`flex h-10 shrink-0 items-center border-b-2 ${active ? "border-ink" : "border-transparent"}`}
               >
-                <Icon size={14} strokeWidth={1.9} aria-hidden className="shrink-0" />
-                <span className="max-w-48 truncate">{tab.name}</span>
-              </button>
-              {active && items.length > 0 ? (
-                <Menu
-                  label="View actions"
-                  open={menu?.id === tab.id && menu.at === undefined}
-                  onOpenChange={(open) =>
-                    open ? setMenu({ id: tab.id, keyboard: false }) : closeMenu()
-                  }
-                  closeOnPick={false}
-                  align="start"
-                  items={items}
-                  trigger={(trigger) => (
-                    <IconButton
-                      {...trigger}
-                      aria-label="View actions"
-                      title="View actions"
-                      disabled={disabled}
-                      className="shrink-0"
-                    >
-                      <ChevronDown size={12} strokeWidth={1.9} aria-hidden />
-                    </IconButton>
-                  )}
-                />
-              ) : null}
-            </span>
-          );
-        })}
+                <button
+                  ref={(element) => {
+                    if (element) tabButtons.current.set(tab.id, element);
+                    else tabButtons.current.delete(tab.id);
+                  }}
+                  type="button"
+                  aria-pressed={active}
+                  tabIndex={tab.id === stop ? 0 : -1}
+                  disabled={disabled}
+                  onClick={() => {
+                    if (!held) setRenaming(null);
+                    props.onSelect(tab.id);
+                  }}
+                  onContextMenu={(event) => {
+                    if (disabled || items.length === 0) return;
+                    event.preventDefault();
+                    setMenu({
+                      id: tab.id,
+                      at: { x: event.clientX, y: event.clientY },
+                      keyboard: false,
+                    });
+                  }}
+                  className={`flex h-8 items-center gap-2 rounded-md px-2 text-[13px] font-medium transition-colors duration-75 disabled:text-subtle ${
+                    active ? "text-ink" : "text-muted enabled:hover:text-ink"
+                  }`}
+                >
+                  <Icon size={14} strokeWidth={1.9} aria-hidden className="shrink-0" />
+                  <span className="max-w-48 truncate">{tab.name}</span>
+                </button>
+                {active && items.length > 0 ? (
+                  <Menu
+                    label="View actions"
+                    open={menu?.id === tab.id && menu.at === undefined}
+                    onOpenChange={(open) =>
+                      open ? setMenu({ id: tab.id, keyboard: false }) : closeMenu()
+                    }
+                    closeOnPick={false}
+                    align="start"
+                    items={items}
+                    trigger={(trigger) => (
+                      <IconButton
+                        {...trigger}
+                        aria-label="View actions"
+                        title="View actions"
+                        disabled={disabled}
+                        className="shrink-0"
+                      >
+                        <ChevronDown size={12} strokeWidth={1.9} aria-hidden />
+                      </IconButton>
+                    )}
+                  />
+                ) : null}
+              </span>
+            );
+          })}
+        </div>
+        <div data-strip-fade="left" aria-hidden="true" />
+        <div data-strip-fade="right" aria-hidden="true" />
       </div>
       {views ? (
         <IconButton

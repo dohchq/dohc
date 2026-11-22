@@ -25,6 +25,11 @@ interface Shell {
   main: string;
 }
 
+const DOHC_MARK =
+  '<svg class="brand-mark" width="18" height="20" viewBox="0 0 96 104" aria-hidden="true">' +
+  '<path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="8"/>' +
+  '<circle cx="38" cy="58" r="9" fill="currentColor"/></svg>';
+
 function shell({ title, page, data = {}, main }: Shell): string {
   const attributes = Object.entries({ page, ...data })
     .filter(([, value]) => value !== undefined)
@@ -41,7 +46,7 @@ function shell({ title, page, data = {}, main }: Shell): string {
 </head>
 <body${attributes}>
 <main>
-<p class="brand">dohc</p>
+<p class="brand">${DOHC_MARK}<span>dohc</span></p>
 <p class="server">This account belongs to <span id="server-host">this server</span>.</p>
 ${main}
 </main>
@@ -190,8 +195,8 @@ export function devicePage(state: DeviceState): string {
 <p>Connect the ${device} showing this code as <span class="meta">${escapeHtml(state.email)}</span>. ${phone ? "It can read the workspaces you show on your phone, write in their chats, and sign out your other devices and agents." : "It can read and change your workspaces."}</p>
 <p>Only approve this if you just started signing in on your ${device}.</p>
 <div class="actions" id="actions">
-<button type="button" id="approve">Approve</button>
 <button type="button" id="deny" class="secondary">Deny</button>
+<button type="button" id="approve">Approve</button>
 </div>
 ${STATUS}`,
     });

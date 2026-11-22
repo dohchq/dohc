@@ -695,6 +695,7 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     await sidebarEnd.focus();
     for (const control of [
       leftGroup.getByTestId(appTab),
+      leftGroup.getByTestId("editor-tabs-new-page"),
       allTabs,
       page.getByTestId("app-view-reload"),
       page.getByTestId("site-preview-show-source"),

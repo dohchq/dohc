@@ -14,7 +14,8 @@ import {
   type AgentHue,
   type IdentityHue,
 } from "@dohc/workspace-contracts/agent-hues";
-import { palette } from "../tokens";
+import { identityHues, palette } from "../tokens";
+import { useColorScheme } from "../useColorScheme";
 import { useRadioGroup } from "../ui/SegmentedControl";
 
 export function SettingRow(props: {
@@ -27,6 +28,7 @@ export function SettingRow(props: {
   testId?: string;
   // The row a Customize… command opened Settings for. Settings focuses it.
   highlighted?: boolean;
+  searchMatch?: boolean;
   aside?: ReactNode;
   lead?: ReactNode;
   detail?: ReactNode;
@@ -55,15 +57,17 @@ export function SettingRow(props: {
       {props.aside ? <div className="mt-2">{props.aside}</div> : null}
     </div>
   );
+  const emphasized = props.highlighted || props.searchMatch;
   return (
     <div
       data-testid={props.testId}
+      data-search-match={props.searchMatch ? "true" : undefined}
       {...(props.highlighted
         ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
         : {})}
       className={`relative flex flex-wrap ${props.top ? "items-start" : "items-center"} gap-x-2 gap-y-2 border-b border-line last:border-b-0 ${
         props.compact ? "py-2" : "py-4"
-      } ${props.highlighted ? "-mx-2 rounded-md bg-selected px-2" : ""}`}
+      } ${emphasized ? "-mx-2 rounded-md bg-selected px-2" : ""}`}
     >
       {/* A changed row is marked by a bar on the card's left edge, outside
           the text, so marking it moves nothing in the row. */}
@@ -71,7 +75,7 @@ export function SettingRow(props: {
         <span
           title="Modified"
           className={`absolute w-0.5 rounded-full bg-accent ${props.compact ? "inset-y-2" : "inset-y-3"} ${
-            props.highlighted ? "-left-3" : "-left-5"
+            emphasized ? "-left-3" : "-left-5"
           }`}
         >
           <span className="sr-only">Modified</span>
@@ -85,15 +89,8 @@ export function SettingRow(props: {
       ) : (
         text
       )}
-      {/* A row that can reset keeps Reset's place left of the controls, so
-          they never move or wrap when it appears. The place is its own item:
-          when the controls wrap under the text, it stays at the end of the
-          text's line and the controls start at the text's left edge. */}
-      {props.onReset ? (
-        <ResetButton
-          onReset={props.modified ? props.onReset : undefined}
-          className={props.top ? "mt-1" : ""}
-        />
+      {props.modified && props.onReset ? (
+        <ResetButton onReset={props.onReset} className={props.top ? "mt-1" : ""} />
       ) : null}
       {props.children ? (
         <div
@@ -106,32 +103,18 @@ export function SettingRow(props: {
   );
 }
 
-/**
- * Reset, labeled. Without `onReset` it keeps its place, drawn invisible, so
- * the controls beside it never move when it appears.
- */
+/** Reset, labeled. Renders only when an action is provided. */
 export function ResetButton(props: { onReset?: () => void; className?: string }) {
+  if (!props.onReset) return null;
   const place = `flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[12px] ${props.className ?? ""}`;
-  const face = (
-    <>
-      <RotateCcw size={12} strokeWidth={2} aria-hidden />
-      Reset
-    </>
-  );
-  if (!props.onReset) {
-    return (
-      <span aria-hidden className={`invisible ${place}`}>
-        {face}
-      </span>
-    );
-  }
   return (
     <button
       type="button"
       onClick={props.onReset}
       className={`text-muted transition-colors hover:bg-hover hover:text-ink ${place}`}
     >
-      {face}
+      <RotateCcw size={12} strokeWidth={2} aria-hidden />
+      Reset
     </button>
   );
 }
@@ -527,15 +510,19 @@ export function HueControl(
   );
 }
 
+const ACCENT_PRESET_HUES = ["teal", "blue", "rust", "indigo", "plum"] as const;
+
 /**
- * The system color picker. It saves when the picker closes, on the input's
- * native change event: React's onChange fires on every step of a drag.
+ * Curated accent swatches plus the system color picker. The color input saves
+ * when the picker closes, on its native change event: React's onChange fires
+ * on every step of a drag.
  */
 export function ColorControl(props: {
   label: string;
   value: string;
   onChange: (value: string) => void;
 }) {
+  const colorScheme = useColorScheme();
   const inputRef = useRef<HTMLInputElement>(null);
   const onChange = useRef(props.onChange);
   onChange.current = props.onChange;
@@ -549,16 +536,45 @@ export function ColorControl(props: {
   useEffect(() => {
     if (inputRef.current) inputRef.current.value = props.value;
   }, [props.value]);
+  const presets = [
+    { name: "Default", hex: palette[colorScheme].accent },
+    ...ACCENT_PRESET_HUES.map((hue) => ({
+      name: hue[0]!.toUpperCase() + hue.slice(1),
+      hex: identityHues[colorScheme][hue],
+    })),
+  ];
+  const current = props.value.toLowerCase();
   return (
-    <label className="flex items-center gap-2">
-      <input
-        ref={inputRef}
-        type="color"
-        aria-label={props.label}
-        defaultValue={props.value}
-        className="h-6 w-8 cursor-pointer rounded-md border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] bg-bg p-0.5"
-      />
-      <span className="font-mono text-[11px] text-muted">{props.value}</span>
-    </label>
+    <div className="flex flex-wrap items-center gap-2">
+      <div role="group" aria-label={`${props.label} presets`} className="flex items-center gap-1.5">
+        {presets.map((preset) => {
+          const active = current === preset.hex.toLowerCase();
+          return (
+            <button
+              key={preset.name}
+              type="button"
+              aria-label={preset.name}
+              aria-pressed={active}
+              title={preset.name}
+              onClick={() => props.onChange(preset.hex)}
+              style={{ backgroundColor: preset.hex }}
+              className="grid size-5 place-items-center rounded-full text-bg transition-opacity hover:opacity-80"
+            >
+              {active ? <Check size={12} strokeWidth={2.5} aria-hidden /> : null}
+            </button>
+          );
+        })}
+      </div>
+      <label className="flex items-center gap-2">
+        <input
+          ref={inputRef}
+          type="color"
+          aria-label={props.label}
+          defaultValue={props.value}
+          className="h-6 w-8 cursor-pointer rounded-md border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] bg-bg p-0.5"
+        />
+        <span className="font-mono text-[11px] text-muted">{props.value}</span>
+      </label>
+    </div>
   );
 }

@@ -296,4 +296,32 @@ describe("WikilinkPicker on the Menu part's recipe", () => {
     expect(list.getAttribute("aria-activedescendant")).toBe(second.id);
     editor.destroy();
   });
+
+  it("ranks title prefix matches first and commits on Tab", () => {
+    const editor = makeEditor("@road");
+    const onDismiss = vi.fn();
+    render(
+      createElement(WikilinkPicker, {
+        state: { open: true, from: 1, query: "road" },
+        files: [
+          { path: "notes/broad.md", title: "Broad" },
+          { path: "notes/2026-plan.md", title: "Roadmap" },
+        ],
+        view: editor.view,
+        insertMode: "node",
+        onDismiss,
+      }),
+    );
+
+    const options = screen.getAllByRole("option");
+    expect(options[0]?.getAttribute("aria-label")).toBe("Roadmap notes/2026-plan");
+
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    expect(firstWikilinkNode(editor.getJSON())?.attrs).toMatchObject({
+      target: "notes/2026-plan",
+      label: "Roadmap",
+    });
+    editor.destroy();
+  });
 });

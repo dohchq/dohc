@@ -297,24 +297,47 @@ export interface TableViewProps {
    * New record row, and `onNewRecord` is not called.
    */
   newRecord?: TableNewRecord;
+  /** Opens the host's add-field affordance from the trailing `+` column header. */
+  onAddField?: () => void;
 }
 
 const TABLE_FEATURES = tableFeatures({});
-const COLUMN_WIDTH = 180;
 /** The first field names the record, so it gets room to read. */
 const TITLE_COLUMN_WIDTH = 260;
+const MIN_COLUMN_WIDTH = 72;
+const MAX_COLUMN_WIDTH = 640;
 /** The gutter left of the fields that holds each row's Open control. */
 const OPEN_COLUMN_WIDTH = 36;
+const ADD_FIELD_COLUMN_WIDTH = 36;
 const ROW_HEIGHT = 32;
 const HEADER_HEIGHT = 32;
 /** How close to the end of the loaded rows `onNearEnd` starts firing. */
 const NEAR_END_ROWS = 20;
 const helper = createColumnHelper<typeof TABLE_FEATURES, CollectionRecord>();
 
-const columnWidth = (index: number) => (index === 0 ? TITLE_COLUMN_WIDTH : COLUMN_WIDTH);
-/** A field column's left edge, measured from the first field's. */
-const columnLeft = (index: number) =>
-  index === 0 ? 0 : TITLE_COLUMN_WIDTH + (index - 1) * COLUMN_WIDTH;
+function defaultColumnWidth(field: FieldDefinition, index: number): number {
+  if (index === 0) return TITLE_COLUMN_WIDTH;
+  switch (field.type) {
+    case "text":
+    case "url":
+    case "relation":
+    case "multi-select":
+      return 200;
+    case "select":
+    case "person":
+      return 150;
+    case "date":
+    case "button":
+      return 128;
+    case "number":
+      return 112;
+    case "checkbox":
+      return 88;
+  }
+}
+
+const clampWidth = (width: number) =>
+  Math.round(Math.max(MIN_COLUMN_WIDTH, Math.min(MAX_COLUMN_WIDTH, width)));
 
 // Relation editing needs query access to the related collection; without an
 // executor the cell stays read-only. Checkboxes commit through onChange and
@@ -379,7 +402,11 @@ function NewRecordRow(props: {
   return (
     <div role="row" className="flex shrink-0">
       {props.openColumn ? (
-        <div role="gridcell" className="shrink-0" style={{ width: OPEN_COLUMN_WIDTH }} />
+        <div
+          role="gridcell"
+          className="sticky left-0 z-10 shrink-0 border-b border-line bg-bg"
+          style={{ width: OPEN_COLUMN_WIDTH }}
+        />
       ) : null}
       <div role="gridcell" className="shrink-0 border-b border-line" style={{ width: props.width }}>
         <button
@@ -761,23 +788,80 @@ interface EditingCell extends TableCell {
   left: number;
 }
 
+function ResizeHandle(props: {
+  name: string;
+  width: number;
+  onResize: (width: number) => void;
+  onReset: () => void;
+}) {
+  const drag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={`Resize ${props.name}`}
+      className="absolute -right-[3px] top-0 z-10 h-full w-1.5 cursor-col-resize bg-transparent transition-colors duration-75 hover:bg-accent/40"
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        props.onReset();
+      }}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.stopPropagation();
+        drag.current = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startWidth: props.width,
+        };
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        if (!drag.current || drag.current.pointerId !== event.pointerId) return;
+        const delta = event.clientX - drag.current.startX;
+        props.onResize(clampWidth(drag.current.startWidth + delta));
+      }}
+      onPointerUp={(event) => {
+        if (drag.current?.pointerId === event.pointerId) drag.current = null;
+      }}
+      onPointerCancel={(event) => {
+        if (drag.current?.pointerId === event.pointerId) drag.current = null;
+      }}
+    />
+  );
+}
+
 function FieldHeader(props: {
   name: string;
   type: FieldDefinition["type"];
   width: number;
+  stickyLeft: number | null;
   sorted: "asc" | "desc" | null;
   mark: TableFieldMark | undefined;
   /** Absent, the header is a label: a button field, or one the host cannot sort by. */
   onSort: (() => void) | undefined;
+  onResize: (width: number) => void;
+  onResetWidth: () => void;
 }) {
-  const { mark, sorted } = props;
+  const { mark, sorted, stickyLeft } = props;
   const tooltip = useTooltip();
+  const stickyClass = stickyLeft !== null ? "sticky z-30 bg-bg" : "relative";
+  const style =
+    stickyLeft !== null ? { width: props.width, left: stickyLeft } : { width: props.width };
+  const handle = (
+    <ResizeHandle
+      name={props.name}
+      width={props.width}
+      onResize={props.onResize}
+      onReset={props.onResetWidth}
+    />
+  );
   if (!props.onSort) {
     return (
       <div
         role="columnheader"
-        className="relative flex h-8 shrink-0 items-center gap-2 border-b border-r border-line px-2 text-[12px] text-muted last:border-r-0"
-        style={{ width: props.width }}
+        className={`${stickyClass} flex h-8 shrink-0 items-center gap-2 border-b border-r border-line px-2 text-[12px] text-muted last:border-r-0`}
+        style={style}
         {...(mark ? tooltip.hoverProps : {})}
       >
         <FieldTypeIcon type={props.type} className="shrink-0 text-subtle" />
@@ -796,6 +880,7 @@ function FieldHeader(props: {
           </span>
         ) : null}
         {mark ? <Tooltip {...tooltip.tooltipProps}>{mark.label}</Tooltip> : null}
+        {handle}
       </div>
     );
   }
@@ -803,8 +888,8 @@ function FieldHeader(props: {
     <div
       role="columnheader"
       aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : undefined}
-      className="relative shrink-0 border-b border-r border-line last:border-r-0"
-      style={{ width: props.width }}
+      className={`${stickyClass} shrink-0 border-b border-r border-line last:border-r-0`}
+      style={style}
       {...(mark ? tooltip.hoverProps : {})}
     >
       <button
@@ -831,6 +916,7 @@ function FieldHeader(props: {
         ) : null}
       </button>
       {mark ? <Tooltip {...tooltip.tooltipProps}>{mark.label}</Tooltip> : null}
+      {handle}
     </div>
   );
 }
@@ -866,9 +952,23 @@ export function TableView({
   onNearEnd,
   onNewRecord,
   newRecord,
+  onAddField,
 }: TableViewProps) {
   const fields = useMemo(() => deriveColumns(schema, visibleFields), [schema, visibleFields]);
-  const rowWidth = fields.reduce((total, _field, index) => total + columnWidth(index), 0);
+  const [resizedWidths, setResizedWidths] = useState<Record<string, number>>({});
+  const widths = useMemo(
+    () =>
+      fields.map((field, index) => resizedWidths[field.name] ?? defaultColumnWidth(field, index)),
+    [fields, resizedWidths],
+  );
+  const columnWidth = (index: number) => widths[index] ?? TITLE_COLUMN_WIDTH;
+  const columnLeft = (index: number) => {
+    let left = 0;
+    for (let i = 0; i < index && i < widths.length; i += 1) left += widths[i]!;
+    return left;
+  };
+  const rowWidth =
+    widths.reduce((total, width) => total + width, 0) + (onAddField ? ADD_FIELD_COLUMN_WIDTH : 0);
 
   const [selected, setSelected] = useState<TableCell | null>(null);
   const [editing, setEditing] = useState<EditingCell | null>(null);
@@ -1598,7 +1698,11 @@ export function TableView({
       <div className="w-max min-w-full pb-6 pr-5">
         <div role="row" className="sticky top-0 z-20 flex bg-bg" style={{ height: HEADER_HEIGHT }}>
           {openColumn ? (
-            <div role="columnheader" className="shrink-0" style={{ width: OPEN_COLUMN_WIDTH }} />
+            <div
+              role="columnheader"
+              className="sticky left-0 z-30 shrink-0 border-b border-line bg-bg"
+              style={{ width: OPEN_COLUMN_WIDTH }}
+            />
           ) : null}
           {fields.map((field, index) => {
             const label = fieldLabel?.(field.name) ?? field.name;
@@ -1610,12 +1714,37 @@ export function TableView({
                 name={label}
                 type={field.type}
                 width={columnWidth(index)}
+                stickyLeft={index === 0 ? gutter : null}
                 sorted={sorts && primarySort?.field === field.name ? primarySort.direction : null}
                 mark={field.type === "button" ? undefined : fieldMarks?.get(field.name)}
                 onSort={sorts ? () => toggleSort(field.name) : undefined}
+                onResize={(width) =>
+                  setResizedWidths((current) => ({ ...current, [field.name]: width }))
+                }
+                onResetWidth={() =>
+                  setResizedWidths((current) => {
+                    if (!(field.name in current)) return current;
+                    const { [field.name]: _removed, ...rest } = current;
+                    return rest;
+                  })
+                }
               />
             );
           })}
+          {onAddField ? (
+            <div className="flex h-8 w-9 shrink-0 items-center justify-center border-b border-line">
+              <button
+                type="button"
+                disabled={editingDisabled}
+                aria-label="Add field"
+                title="Add field"
+                onClick={onAddField}
+                className="grid size-6 place-items-center rounded-md text-subtle transition-colors duration-75 hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40"
+              >
+                <Plus size={14} strokeWidth={1.9} aria-hidden />
+              </button>
+            </div>
+          ) : null}
         </div>
         {records.length === 0 && (emptyText !== undefined || !adds) ? (
           <div
@@ -1638,7 +1767,7 @@ export function TableView({
                       role="row"
                       data-index={item.index}
                       aria-current={row.id === openRecordId ? "true" : undefined}
-                      className="group absolute left-0 top-0 flex aria-[current=true]:bg-selected"
+                      className="group absolute left-0 top-0 flex bg-bg hover:bg-hover aria-[current=true]:bg-selected"
                       style={{
                         height: ROW_HEIGHT,
                         transform: `translateY(${item.start - HEADER_HEIGHT}px)`,
@@ -1647,7 +1776,7 @@ export function TableView({
                       {onOpenRecord ? (
                         <div
                           role="gridcell"
-                          className="flex shrink-0 items-center justify-center"
+                          className="sticky left-0 z-10 flex shrink-0 items-center justify-center border-b border-line bg-bg before:pointer-events-none before:absolute before:inset-0 group-hover:before:bg-hover group-aria-[current=true]:before:bg-selected"
                           style={{ width: OPEN_COLUMN_WIDTH }}
                         >
                           <button
@@ -1657,7 +1786,7 @@ export function TableView({
                             tabIndex={-1}
                             aria-label={`Open ${recordName?.(row.original) ?? recordLabel(row.original)}`}
                             title="Open"
-                            className="grid size-6 place-items-center rounded-md text-subtle opacity-0 transition-opacity duration-75 hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+                            className="relative z-10 grid size-6 place-items-center rounded-md text-subtle opacity-0 transition-opacity duration-75 hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
                             onClick={() => onOpenRecord(row.original)}
                           >
                             <Maximize2 size={13} strokeWidth={1.9} aria-hidden />
@@ -1666,6 +1795,7 @@ export function TableView({
                       ) : null}
                       {row.getAllCells().map((cell, index) => {
                         const isSelected = at?.row === item.index && at.column === index;
+                        const isPinned = index === 0;
                         return (
                           <div
                             key={cell.id}
@@ -1674,9 +1804,15 @@ export function TableView({
                             aria-selected={isSelected || undefined}
                             aria-describedby={isSelected && note ? noteId : undefined}
                             className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
-                              index === 0 ? "font-medium" : ""
+                              isPinned
+                                ? "sticky z-10 bg-bg font-medium before:pointer-events-none before:absolute before:inset-0 group-hover:before:bg-hover group-aria-[current=true]:before:bg-selected"
+                                : ""
                             } ${isSelected ? "ring-2 ring-inset ring-accent" : ""}`}
-                            style={{ width: columnWidth(index) }}
+                            style={
+                              isPinned
+                                ? { width: columnWidth(index), left: gutter }
+                                : { width: columnWidth(index) }
+                            }
                             onClick={(event) => {
                               // A dialog the host's button opens is the cell's
                               // child in React, not on the page.
@@ -1688,6 +1824,9 @@ export function TableView({
                           </div>
                         );
                       })}
+                      {onAddField ? (
+                        <div aria-hidden className="w-9 shrink-0 border-b border-line" />
+                      ) : null}
                     </div>
                   );
                 })}
@@ -1699,13 +1838,13 @@ export function TableView({
                 role="row"
                 data-new-record=""
                 aria-describedby={rowNote ? newRowNoteId : undefined}
-                className="flex"
+                className="flex bg-bg"
                 style={{ height: ROW_HEIGHT }}
               >
                 {openColumn ? (
                   <div
                     role="gridcell"
-                    className="flex shrink-0 items-center justify-center"
+                    className="sticky left-0 z-10 flex shrink-0 items-center justify-center border-b border-line bg-bg"
                     style={{ width: OPEN_COLUMN_WIDTH }}
                   >
                     {newRowLead}
@@ -1713,6 +1852,7 @@ export function TableView({
                 ) : null}
                 {fields.map((field, index) => {
                   const isSelected = at?.row === newRowIndex && at.column === index;
+                  const isPinned = index === 0;
                   return (
                     <div
                       key={field.name}
@@ -1725,9 +1865,13 @@ export function TableView({
                       }
                       aria-describedby={isSelected && invalid ? noteId : undefined}
                       className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
-                        index === 0 ? "font-medium" : ""
+                        isPinned ? "sticky z-10 bg-bg font-medium" : ""
                       } ${isSelected ? "ring-2 ring-inset ring-accent" : ""}`}
-                      style={{ width: columnWidth(index) }}
+                      style={
+                        isPinned
+                          ? { width: columnWidth(index), left: gutter }
+                          : { width: columnWidth(index) }
+                      }
                       onClick={(event) => {
                         if (event.currentTarget.contains(event.target as Node))
                           clickCell(newRowIndex, index);
@@ -1748,6 +1892,9 @@ export function TableView({
                     </div>
                   );
                 })}
+                {onAddField ? (
+                  <div aria-hidden className="w-9 shrink-0 border-b border-line" />
+                ) : null}
               </div>
             ) : null}
             {hasDraft && rowNote ? (
@@ -1771,6 +1918,7 @@ export function TableView({
                 key={`${draft.id}:${editing.field}`}
                 ref={editorRef}
                 data-cell-editor=""
+                data-grid-cell={editingPickerWidth === null ? "" : undefined}
                 disabled={editingDisabled}
                 onChangeCapture={() => {
                   typedInEditor.current = true;
@@ -1783,7 +1931,7 @@ export function TableView({
                 }}
                 className={
                   editingPickerWidth === null
-                    ? "dohc-popover absolute z-10 m-0 min-w-0 rounded-md border border-line bg-bg p-1 font-normal"
+                    ? "absolute z-10 m-0 min-w-0 border-0 bg-bg p-0 font-normal ring-2 ring-inset ring-accent"
                     : "dohc-popover dohc-pop-in absolute z-10 m-0 min-w-0 rounded-lg border border-line bg-bg p-0 font-normal"
                 }
                 style={{
@@ -1831,7 +1979,7 @@ export function TableView({
                 id={noteId}
                 role="note"
                 data-cell-note="invalid"
-                className="dohc-popover absolute z-10 flex max-w-80 items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal text-danger"
+                className="dohc-popover absolute z-20 flex max-w-80 items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal text-danger"
                 style={{
                   top: (at.row + 1) * ROW_HEIGHT,
                   left: gutter + columnLeft(at.column),
@@ -1856,6 +2004,7 @@ export function TableView({
                 key={`${editing.recordId}:${editing.field}`}
                 ref={editorRef}
                 data-cell-editor=""
+                data-grid-cell={editingPickerWidth === null ? "" : undefined}
                 disabled={editingDisabled}
                 onBlurCapture={(event) => {
                   if (editingDisabled) event.stopPropagation();
@@ -1866,7 +2015,7 @@ export function TableView({
                 }}
                 className={
                   editingPickerWidth === null
-                    ? "dohc-popover absolute z-10 m-0 min-w-0 rounded-md border border-line bg-bg p-1 font-normal"
+                    ? "absolute z-10 m-0 min-w-0 border-0 bg-bg p-0 font-normal ring-2 ring-inset ring-accent"
                     : "dohc-popover dohc-pop-in absolute z-10 m-0 min-w-0 rounded-lg border border-line bg-bg p-0 font-normal"
                 }
                 style={{
@@ -1951,7 +2100,7 @@ export function TableView({
                 id={noteId}
                 role="note"
                 data-cell-note={note.state}
-                className="dohc-popover absolute z-10 flex max-w-80 flex-col items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal"
+                className="dohc-popover absolute z-20 flex max-w-80 flex-col items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal"
                 style={{
                   top: (at.row + 1) * ROW_HEIGHT,
                   left: gutter + columnLeft(at.column),

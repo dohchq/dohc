@@ -17,6 +17,8 @@ import { toJsxRuntime, type Components, type ExtraProps } from "hast-util-to-jsx
 import { scanChatLinks, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatAttachmentRecord } from "../../ipc/bridgeContract";
 import { activateReadOnlyLinkHref } from "../linkActivation";
+import { highlightSpans } from "../editor/codeHighlight";
+import { normalizeLanguage } from "../editor/pmHelpers";
 import { stripMarkdown } from "../markdown/stripMarkdown";
 import { CopyButton } from "../ui/CopyButton";
 import { Ref } from "../ui/Ref";
@@ -104,26 +106,103 @@ function ChatLink(props: { href?: string; children?: ReactNode }) {
   );
 }
 
-type HastNode = { type: string; value?: string; children?: HastNode[] };
+type HastNode = {
+  type: string;
+  tagName?: string;
+  value?: string;
+  properties?: { className?: unknown };
+  children?: HastNode[];
+};
 function hastText(node: HastNode | undefined): string {
   if (!node) return "";
   if (node.type === "text") return node.value ?? "";
   return (node.children ?? []).map(hastText).join("");
 }
 
+const CODE_HIGHLIGHT_ALIASES: Readonly<Record<string, string>> = {
+  ts: "typescript",
+  js: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  py: "python",
+  sh: "bash",
+  shell: "bash",
+  zsh: "bash",
+  yml: "yaml",
+  rs: "rust",
+  md: "markdown",
+  xml: "html",
+};
+
+const MAX_CHAT_HIGHLIGHT_CHARS = 20_000;
+
+function codeBlockLanguage(node: HastNode | undefined): string {
+  const codeNode = node?.children?.find(
+    (child) => child.type === "element" && child.tagName === "code",
+  );
+  const classNames = codeNode?.properties?.className;
+  if (!Array.isArray(classNames)) return "";
+  for (const name of classNames) {
+    if (typeof name === "string" && name.startsWith("language-")) {
+      return name.slice("language-".length).trim();
+    }
+  }
+  return "";
+}
+
+function renderHighlightedCode(code: string, language: string): ReactNode {
+  if (!language || code.length === 0 || code.length > MAX_CHAT_HIGHLIGHT_CHARS) return code;
+  const normalized = normalizeLanguage(language);
+  const grammar = CODE_HIGHLIGHT_ALIASES[normalized] ?? normalized;
+  const spans = highlightSpans(grammar, code);
+  if (spans.length === 0) return code;
+  const points = new Set<number>([0, code.length]);
+  for (const span of spans) {
+    if (span.end > span.start) {
+      points.add(Math.max(0, Math.min(code.length, span.start)));
+      points.add(Math.max(0, Math.min(code.length, span.end)));
+    }
+  }
+  const sorted = [...points].sort((a, b) => a - b);
+  const pieces: ReactNode[] = [];
+  for (let index = 0; index < sorted.length - 1; index += 1) {
+    const start = sorted[index]!;
+    const end = sorted[index + 1]!;
+    if (end <= start) continue;
+    const slice = code.slice(start, end);
+    const active: string[] = [];
+    for (const span of spans) {
+      if (span.start <= start && span.end >= end) active.push(span.className);
+    }
+    if (active.length === 0) pieces.push(slice);
+    else {
+      pieces.push(
+        <span key={start} className={active.join(" ")}>
+          {slice}
+        </span>,
+      );
+    }
+  }
+  return pieces;
+}
+
 function CodeBlock(props: ExtraProps) {
-  const code = hastText(props.node).replace(/\n$/u, "");
+  const node = props.node as HastNode | undefined;
+  const code = hastText(node).replace(/\n$/u, "");
+  const language = codeBlockLanguage(node);
+  const highlighted = renderHighlightedCode(code, language);
   return (
-    <div className="group/code relative mt-1.5 first:mt-0">
-      <pre className="m-0 overflow-x-auto whitespace-pre rounded-md border border-line bg-panel-2 px-3 py-2.5 font-mono text-[12.5px] leading-5 text-ink">
-        <code>{code}</code>
-      </pre>
+    <div className="mt-1.5 overflow-hidden rounded-md border border-line bg-panel-2 first:mt-0">
       <div
         data-chat-control
-        className="absolute right-px top-px rounded-md bg-panel-2 opacity-0 transition-opacity duration-75 focus-within:opacity-100 group-hover/code:opacity-100"
+        className="flex h-7 items-center justify-between border-b border-line bg-panel px-3"
       >
+        <span className="truncate font-mono text-[11px] text-subtle">{language}</span>
         <CopyButton iconOnly label="Copy code" getText={() => code} />
       </div>
+      <pre className="m-0 overflow-x-auto whitespace-pre px-3 py-2.5 font-mono text-[12.5px] leading-5 text-ink">
+        <code className="dohc-code-syntax">{highlighted}</code>
+      </pre>
     </div>
   );
 }
@@ -184,17 +263,22 @@ const COMPONENTS = {
     <ChatLink href={props.src}>{props.alt || props.src}</ChatLink>
   ),
   table: (props: Children) => (
-    <div className={`${BLOCK} overflow-x-auto`}>
-      <table className="border-collapse text-[13px] leading-5">{props.children}</table>
+    <div className={`${BLOCK} overflow-hidden rounded-lg border border-line`}>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-[13px] leading-5">{props.children}</table>
+      </div>
     </div>
   ),
   th: (props: Children & { style?: CSSProperties }) => (
-    <th style={props.style} className="border border-line px-2 py-1 text-left font-semibold">
+    <th
+      style={props.style}
+      className="border-b border-r border-line bg-panel px-2.5 py-1.5 text-left font-semibold last:border-r-0"
+    >
       {props.children}
     </th>
   ),
   td: (props: Children & { style?: CSSProperties }) => (
-    <td style={props.style} className="border border-line px-2 py-1">
+    <td style={props.style} className="border-r border-t border-line px-2.5 py-1.5 last:border-r-0">
       {props.children}
     </td>
   ),

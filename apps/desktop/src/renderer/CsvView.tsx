@@ -5,6 +5,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -272,12 +273,34 @@ const CELL_INPUT = "dohc-csv-cell w-full bg-transparent outline-none [text-align
 const DELETE_BUTTON =
   "grid size-5 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-danger";
 
-// Enter ends a cell's edit and keeps focus there, as leaving the cell does.
-// An Enter that finishes composing a character is the input method's.
-const endEditOnEnter =
-  (onEndEdit: (cellIndex: number) => void, cellIndex: number) =>
+// Enter/Shift+Enter and ArrowUp/ArrowDown step vertically between rows in the
+// same column. Pressing Enter on the last row appends a new row when editable.
+const handleCellKeyDown =
+  (
+    rowIndex: number,
+    cellIndex: number,
+    onEndEdit: (cellIndex: number) => void,
+    onStepRow: (rowIndex: number, cellIndex: number, delta: -1 | 1, addIfLast: boolean) => void,
+  ) =>
   (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter" && !isComposingKey(event)) onEndEdit(cellIndex);
+    if (isComposingKey(event)) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      onEndEdit(cellIndex);
+      onStepRow(rowIndex, cellIndex, event.shiftKey ? -1 : 1, !event.shiftKey);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      onEndEdit(cellIndex);
+      onStepRow(rowIndex, cellIndex, 1, false);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      onEndEdit(cellIndex);
+      onStepRow(rowIndex, cellIndex, -1, false);
+    }
   };
 
 const CsvTableHeader = memo(function CsvTableHeader({
@@ -287,6 +310,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
   truncated,
   onUpdateCell,
   onEndEdit,
+  onStepRow,
   onDeleteColumn,
   onAddColumn,
 }: {
@@ -296,6 +320,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
   truncated?: boolean;
   onUpdateCell: (rowIndex: number, cellIndex: number, value: string) => void;
   onEndEdit: (cellIndex: number) => void;
+  onStepRow: (rowIndex: number, cellIndex: number, delta: -1 | 1, addIfLast: boolean) => void;
   onDeleteColumn: (cellIndex: number) => void;
   onAddColumn: () => void;
 }) {
@@ -312,12 +337,14 @@ const CsvTableHeader = memo(function CsvTableHeader({
             >
               <input
                 data-testid="csv-cell"
+                data-csv-row={0}
+                data-csv-col={index}
                 aria-label={`Header column ${index + 1}`}
                 size={1}
                 value={header[index] ?? ""}
                 readOnly={truncated}
                 onChange={(event) => onUpdateCell(0, index, event.target.value)}
-                onKeyDown={endEditOnEnter(onEndEdit, index)}
+                onKeyDown={handleCellKeyDown(0, index, onEndEdit, onStepRow)}
                 onBlur={() => onEndEdit(index)}
                 className={CELL_INPUT}
               />
@@ -363,6 +390,7 @@ const CsvTableRow = memo(function CsvTableRow({
   truncated,
   onUpdateCell,
   onEndEdit,
+  onStepRow,
   onDeleteRow,
 }: {
   row: string[];
@@ -371,6 +399,7 @@ const CsvTableRow = memo(function CsvTableRow({
   truncated?: boolean;
   onUpdateCell: (rowIndex: number, cellIndex: number, value: string) => void;
   onEndEdit: (cellIndex: number) => void;
+  onStepRow: (rowIndex: number, cellIndex: number, delta: -1 | 1, addIfLast: boolean) => void;
   onDeleteRow: (rowIndex: number) => void;
 }) {
   return (
@@ -396,12 +425,14 @@ const CsvTableRow = memo(function CsvTableRow({
         <DataGridCell key={cellIndex} column={cellIndex}>
           <input
             data-testid="csv-cell"
+            data-csv-row={rowIndex}
+            data-csv-col={cellIndex}
             aria-label={`Row ${rowIndex} column ${cellIndex + 1}`}
             size={1}
             value={row[cellIndex] ?? ""}
             readOnly={truncated}
             onChange={(event) => onUpdateCell(rowIndex, cellIndex, event.target.value)}
-            onKeyDown={endEditOnEnter(onEndEdit, cellIndex)}
+            onKeyDown={handleCellKeyDown(rowIndex, cellIndex, onEndEdit, onStepRow)}
             onBlur={() => onEndEdit(cellIndex)}
             className={`${CELL_INPUT} text-ink`}
           />
@@ -413,25 +444,35 @@ const CsvTableRow = memo(function CsvTableRow({
   );
 });
 
-// The table's quiet last row: Add row in the gutter, under the row numbers.
-// Its 20px button sits 4px from the edge, so its 12px + ends where the
-// numbers do, 8px in.
+// The table's quiet last row: clicking anywhere on the row adds a new row and
+// focuses its first cell.
 function CsvAddRow(props: { columnCount: number; onAddRow: () => void }) {
   return (
-    <tr>
+    <tr
+      onClick={props.onAddRow}
+      className="cursor-pointer transition-colors duration-75 hover:bg-hover"
+    >
       <td className="h-7 border-t border-line pr-1 text-right">
         <button
           type="button"
           data-testid="csv-add-row"
           aria-label="Add row"
           title="Add row"
-          onClick={props.onAddRow}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onAddRow();
+          }}
           className="ml-auto grid size-5 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink"
         >
           <Plus size={12} aria-hidden />
         </button>
       </td>
-      <td colSpan={props.columnCount + 1} className="border-t border-line" />
+      <td
+        colSpan={props.columnCount + 1}
+        className="border-t border-line px-2 text-[12px] text-subtle"
+      >
+        New row
+      </td>
     </tr>
   );
 }
@@ -673,22 +714,30 @@ export function CsvView({
 
   const deleteRow = useCallback(
     (rowIndex: number) => {
-      const next = rowsRef.current.filter((_, index) => index !== rowIndex);
+      const previous = rowsRef.current;
+      const next = previous.filter((_, index) => index !== rowIndex);
       setRows(next);
+      onNotice?.(`Deleted row ${rowIndex}.`, () => setRows(previous));
     },
-    [setRows],
+    [onNotice, setRows],
   );
 
   const deleteColumn = useCallback(
     (cellIndex: number) => {
-      const next = rowsRef.current.map((row) => row.filter((_, index) => index !== cellIndex));
+      const previous = rowsRef.current;
+      const headerName = previous[0]?.[cellIndex]?.trim();
+      const next = previous.map((row) => row.filter((_, index) => index !== cellIndex));
       if (next.every((row) => row.length === 0)) {
         setRows([]);
-        return;
+      } else {
+        setRows(next);
       }
-      setRows(next);
+      onNotice?.(
+        headerName ? `Deleted column "${headerName}".` : `Deleted column ${cellIndex + 1}.`,
+        () => setRows(previous),
+      );
     },
-    [setRows],
+    [onNotice, setRows],
   );
 
   const chooseMode = useCallback(
@@ -783,6 +832,51 @@ export function CsvTable(props: {
   onImport?: () => void;
 }) {
   const { rows, columns, locked } = props;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const pendingFocus = useRef<{ row: number; col: number } | null>(null);
+  const previewRows = rows.slice(1, MAX_CSV_PREVIEW_ROWS + 1);
+  const dataRowCount = Math.max(0, rows.length - 1);
+  const columnCount = columnCountFor(rows);
+  const focusCell = useCallback((row: number, col: number) => {
+    const input = containerRef.current?.querySelector<HTMLInputElement>(
+      `input[data-csv-row="${row}"][data-csv-col="${col}"]`,
+    );
+    if (input) {
+      input.focus();
+      return true;
+    }
+    return false;
+  }, []);
+  useLayoutEffect(() => {
+    const target = pendingFocus.current;
+    if (!target) return;
+    if (focusCell(target.row, target.col)) pendingFocus.current = null;
+  }, [rows, focusCell]);
+  const addRowAndFocus = useCallback(
+    (col = 0) => {
+      pendingFocus.current = { row: Math.max(1, rows.length), col };
+      props.onAddRow();
+    },
+    [props.onAddRow, rows.length],
+  );
+  const addColumnAndFocus = useCallback(() => {
+    pendingFocus.current = { row: 0, col: columnCount };
+    props.onAddColumn();
+  }, [columnCount, props.onAddColumn]);
+  const stepRow = useCallback(
+    (rowIndex: number, cellIndex: number, delta: -1 | 1, addIfLast: boolean) => {
+      const nextRow = rowIndex + delta;
+      if (nextRow < 0) return;
+      if (nextRow <= previewRows.length) {
+        focusCell(nextRow, cellIndex);
+        return;
+      }
+      if (addIfLast && !locked && dataRowCount < MAX_CSV_PREVIEW_ROWS) {
+        addRowAndFocus(cellIndex);
+      }
+    },
+    [addRowAndFocus, dataRowCount, focusCell, locked, previewRows.length],
+  );
   const header = rows[0];
   if (!header) {
     return (
@@ -795,7 +889,7 @@ export function CsvTable(props: {
           <>
             <SecondaryButton
               size="compact"
-              onClick={props.onAddRow}
+              onClick={() => addRowAndFocus(0)}
               className="inline-flex items-center gap-1.5"
               data-testid="csv-empty-add-row"
             >
@@ -804,7 +898,7 @@ export function CsvTable(props: {
             </SecondaryButton>
             <SecondaryButton
               size="compact"
-              onClick={props.onAddColumn}
+              onClick={addColumnAndFocus}
               className="inline-flex items-center gap-1.5"
               data-testid="csv-empty-add-column"
             >
@@ -816,15 +910,8 @@ export function CsvTable(props: {
       </EmptyState>
     );
   }
-  // Bounded preview: an unbounded <table> over 10,000+ rows
-  // freezes the renderer for tens of seconds. The first rows are enough to
-  // inspect and edit common CSVs; working with all of them is what Import to
-  // SQLite or raw mode is for.
-  const previewRows = rows.slice(1, MAX_CSV_PREVIEW_ROWS + 1);
-  const dataRowCount = rows.length - 1;
-  const columnCount = columnCountFor(rows);
   return (
-    <div className="min-h-0 flex-1 overflow-auto p-4">
+    <div ref={containerRef} className="min-h-0 flex-1 overflow-auto p-4">
       {/* Room for Delete column: its 20px button and a 4px gap. */}
       <DataGrid columns={columns} headerRoom={locked ? 0 : 24} trailing={!locked}>
         <CsvTableHeader
@@ -834,8 +921,9 @@ export function CsvTable(props: {
           truncated={locked}
           onUpdateCell={props.onUpdateCell}
           onEndEdit={props.onEndEdit}
+          onStepRow={stepRow}
           onDeleteColumn={props.onDeleteColumn}
-          onAddColumn={props.onAddColumn}
+          onAddColumn={addColumnAndFocus}
         />
         <tbody>
           {previewRows.map((row, r) => (
@@ -847,10 +935,13 @@ export function CsvTable(props: {
               truncated={locked}
               onUpdateCell={props.onUpdateCell}
               onEndEdit={props.onEndEdit}
+              onStepRow={stepRow}
               onDeleteRow={props.onDeleteRow}
             />
           ))}
-          {!locked ? <CsvAddRow columnCount={columnCount} onAddRow={props.onAddRow} /> : null}
+          {!locked ? (
+            <CsvAddRow columnCount={columnCount} onAddRow={() => addRowAndFocus(0)} />
+          ) : null}
         </tbody>
       </DataGrid>
       {dataRowCount > previewRows.length ? (

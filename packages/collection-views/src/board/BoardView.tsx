@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
-import { DragDropProvider, useDraggable, useDroppable } from "@dnd-kit/react";
+import { DragDropProvider, DragOverlay, useDraggable, useDroppable } from "@dnd-kit/react";
 import type { DragEndEvent, DragStartEvent } from "@dnd-kit/react";
 import {
   CalendarDays,
@@ -141,18 +141,39 @@ function CardProperty({
   label,
   indexed,
   personLabel,
+  onToggle,
 }: {
   field: FieldDefinition;
   label: string;
   indexed: CollectionIndexedValue | undefined;
   personLabel?: PersonLabel;
+  onToggle?: (next: boolean) => void;
 }) {
   const value = indexed?.value ?? null;
   if (field.type === "checkbox") {
-    const Icon = value === true ? CheckSquare : Square;
+    const checked = value === true;
+    const Icon = checked ? CheckSquare : Square;
+    if (onToggle) {
+      return (
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={checked}
+          className={`-mx-1 inline-flex items-center gap-1 rounded px-1 py-0.5 text-[12px] transition-colors duration-75 hover:bg-hover ${checked ? "text-ink" : "text-subtle"}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggle(!checked);
+          }}
+        >
+          <Icon size={13} strokeWidth={1.9} aria-hidden />
+          {label}
+        </button>
+      );
+    }
     return (
       <span
-        className={`inline-flex items-center gap-1 text-[12px] ${value === true ? "text-ink" : "text-subtle"}`}
+        className={`inline-flex items-center gap-1 text-[12px] ${checked ? "text-ink" : "text-subtle"}`}
       >
         <Icon size={13} strokeWidth={1.9} aria-hidden />
         {label}
@@ -200,6 +221,7 @@ interface BoardCardProps {
   record: CollectionRecord;
   fields: FieldDefinition[];
   onOpen?: (record: CollectionRecord) => void;
+  onCellChange?: (change: CollectionCellChange) => void;
   personLabel?: PersonLabel;
   fieldLabel?: FieldLabel;
   recordName?: RecordName;
@@ -208,24 +230,25 @@ interface BoardCardProps {
   open: boolean;
 }
 
-function BoardCard({
+function BoardCardBody({
   record,
   fields,
   onOpen,
+  onCellChange,
   personLabel,
   fieldLabel,
   recordName,
-  canDrag,
-  open,
-}: BoardCardProps) {
-  const { ref, isDragging } = useDraggable({ id: record.id, disabled: !canDrag });
-  // Click opens the record. Enter belongs to the keyboard drag sensor (it
-  // lifts the card), so it must not also open; keyboard users open through
-  // the card's Open button. The ref swallows the click that can trail a
-  // pointer drag: every pointer press resets it, a drag sets it before any
-  // click.
-  const dragged = useRef(false);
-  if (isDragging) dragged.current = true;
+  interactive,
+}: {
+  record: CollectionRecord;
+  fields: FieldDefinition[];
+  onOpen?: (record: CollectionRecord) => void;
+  onCellChange?: (change: CollectionCellChange) => void;
+  personLabel?: PersonLabel;
+  fieldLabel?: FieldLabel;
+  recordName?: RecordName;
+  interactive: boolean;
+}) {
   const [titleField, ...rest] = fields;
   const title = titleField
     ? fieldDisplayText(
@@ -244,33 +267,8 @@ function BoardCard({
   const lines = shown.filter(({ field }) => field.type === "text");
   const chips = shown.filter(({ field }) => field.type !== "text");
   const label = recordName?.(record) ?? recordLabel(record);
-  const name = title || label;
   return (
-    <div
-      ref={ref}
-      role="listitem"
-      tabIndex={0}
-      aria-label={name}
-      aria-current={open ? "true" : undefined}
-      data-dragging={isDragging ? "" : undefined}
-      className={`group/card relative flex cursor-pointer flex-col gap-2 rounded-lg border border-line bg-bg p-3 transition-colors duration-75 hover:bg-panel aria-[current=true]:border-ink dark:bg-panel dark:hover:bg-panel-2 ${
-        isDragging ? "opacity-50" : ""
-      }`}
-      onPointerDown={
-        onOpen
-          ? () => {
-              dragged.current = false;
-            }
-          : undefined
-      }
-      onClick={
-        onOpen
-          ? () => {
-              if (!dragged.current) onOpen(record);
-            }
-          : undefined
-      }
-    >
+    <>
       <div className="flex items-start gap-2 pr-6">
         {isFlagged(record) ? (
           <span className="flex h-5 shrink-0 items-center">
@@ -288,7 +286,7 @@ function BoardCard({
           {title || "Untitled"}
         </span>
       </div>
-      {onOpen ? (
+      {interactive && onOpen ? (
         <button
           type="button"
           aria-label={`Open ${label}`}
@@ -320,10 +318,90 @@ function BoardCard({
               label={fieldLabel?.(field.name) ?? field.name}
               indexed={indexed}
               personLabel={personLabel}
+              onToggle={
+                interactive && onCellChange && field.type === "checkbox"
+                  ? (next) =>
+                      onCellChange({
+                        recordId: record.id,
+                        recordPath: record.path,
+                        field: field.name,
+                        value: next,
+                      })
+                  : undefined
+              }
             />
           ))}
         </div>
       ) : null}
+    </>
+  );
+}
+
+function BoardCard({
+  record,
+  fields,
+  onOpen,
+  onCellChange,
+  personLabel,
+  fieldLabel,
+  recordName,
+  canDrag,
+  open,
+}: BoardCardProps) {
+  const { ref, isDragging } = useDraggable({ id: record.id, disabled: !canDrag });
+  // Click opens the record. Enter belongs to the keyboard drag sensor (it
+  // lifts the card), so it must not also open; keyboard users open through
+  // the card's Open button. The ref swallows the click that can trail a
+  // pointer drag: every pointer press resets it, a drag sets it before any
+  // click.
+  const dragged = useRef(false);
+  if (isDragging) dragged.current = true;
+  const [titleField] = fields;
+  const title = titleField
+    ? fieldDisplayText(
+        titleField,
+        record.values.find((entry) => entry.field === titleField.name),
+        personLabel,
+      )
+    : "";
+  const label = recordName?.(record) ?? recordLabel(record);
+  const name = title || label;
+  return (
+    <div
+      ref={ref}
+      role="listitem"
+      tabIndex={0}
+      aria-label={name}
+      aria-current={open ? "true" : undefined}
+      data-dragging={isDragging ? "" : undefined}
+      className={`group/card relative flex cursor-pointer flex-col gap-2 rounded-lg border border-line bg-bg p-3 transition-colors duration-75 hover:border-subtle aria-[current=true]:border-ink dark:bg-panel dark:hover:border-subtle ${
+        isDragging ? "opacity-50" : ""
+      }`}
+      onPointerDown={
+        onOpen
+          ? () => {
+              dragged.current = false;
+            }
+          : undefined
+      }
+      onClick={
+        onOpen
+          ? () => {
+              if (!dragged.current) onOpen(record);
+            }
+          : undefined
+      }
+    >
+      <BoardCardBody
+        record={record}
+        fields={fields}
+        onOpen={onOpen}
+        onCellChange={onCellChange}
+        personLabel={personLabel}
+        fieldLabel={fieldLabel}
+        recordName={recordName}
+        interactive
+      />
     </div>
   );
 }
@@ -411,6 +489,7 @@ interface BoardColumnProps {
   /** The record being dragged, so its source column keeps it mounted. */
   draggingId: string | null;
   onOpen?: (record: CollectionRecord) => void;
+  onCellChange?: (change: CollectionCellChange) => void;
   openRecordId: string | null | undefined;
   onNew?: () => void;
   onColor?: (color: OptionColor) => void;
@@ -434,6 +513,7 @@ function BoardColumn({
   fields,
   draggingId,
   onOpen,
+  onCellChange,
   openRecordId,
   onNew,
   onColor,
@@ -477,7 +557,7 @@ function BoardColumn({
     <section
       ref={ref}
       aria-label={label}
-      className={`group/column flex max-h-full w-[272px] shrink-0 flex-col rounded-xl px-2 pb-2 ${tint} ${
+      className={`group/column flex min-h-[240px] max-h-full w-[272px] shrink-0 flex-col rounded-xl px-2 pb-2 ${tint} ${
         isDropTarget ? "ring-2 ring-inset ring-accent" : ""
       }`}
     >
@@ -529,6 +609,7 @@ function BoardColumn({
                   record={record}
                   fields={fields}
                   onOpen={onOpen}
+                  onCellChange={onCellChange}
                   personLabel={personLabel}
                   fieldLabel={fieldLabel}
                   recordName={recordName}
@@ -644,6 +725,7 @@ export function BoardView({
               fields={fields}
               draggingId={draggingId}
               onOpen={onOpenRecord}
+              onCellChange={onCellChange}
               openRecordId={openRecordId}
               onNew={
                 onNewRecord && (option !== null || column.value === null)
@@ -673,6 +755,27 @@ export function BoardView({
           );
         })}
       </div>
+      <DragOverlay>
+        {(source) => {
+          const entry = typeof source.id === "string" ? cardIndex.get(source.id) : undefined;
+          if (!entry) return null;
+          return (
+            <div
+              data-drag-overlay=""
+              className="dohc-elevated relative flex w-[256px] cursor-grabbing flex-col gap-2 rounded-lg border border-ink/20 bg-bg p-3 dark:bg-panel"
+            >
+              <BoardCardBody
+                record={entry.record}
+                fields={fields}
+                personLabel={personLabel}
+                fieldLabel={fieldLabel}
+                recordName={recordName}
+                interactive={false}
+              />
+            </div>
+          );
+        }}
+      </DragOverlay>
     </DragDropProvider>
   );
 }

@@ -373,6 +373,17 @@ it.each([200, 401, 403])(
     } else {
       expect(container.textContent).not.toContain("Alice");
       expect(error).toContain("Check your email and password");
+      expect(container.querySelector<HTMLInputElement>('input[name="email"]')?.value).toBe(
+        "alice@example.test",
+      );
+      const passwordInput = container.querySelector<HTMLInputElement>('input[name="password"]')!;
+      expect(passwordInput.type).toBe("password");
+      const toggle = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Show password"]',
+      )!;
+      await act(async () => toggle.click());
+      expect(passwordInput.type).toBe("text");
+      expect(toggle.getAttribute("aria-label")).toBe("Hide password");
     }
   },
 );

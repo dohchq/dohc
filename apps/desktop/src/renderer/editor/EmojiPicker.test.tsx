@@ -10,6 +10,8 @@ import { desktopMarkdownExtensions } from "./extensions";
 import { applyEmojiPick, EmojiPicker, rankEmoji, type EmojiPickerState } from "./EmojiPicker";
 import { EMOJI_DATA } from "./emojiData";
 import { makeEmojiPlugin } from "./emojiTrigger";
+import { dismissTrigger } from "./triggerPlugin";
+import type { AutocompleteState } from "./wikilinkPlugin";
 import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 
 // Same ResizeObserver / Range stubs WikilinkPicker.test.tsx uses — needed
@@ -141,6 +143,40 @@ describe("makeEmojiPlugin — typing the closing colon inserts immediately", () 
 
     expect(editor.getText()).toBe("hi :notarealshortcode:");
     editor.destroy();
+  });
+
+  it("stays dismissed while typing in the same trigger after dismissTrigger", () => {
+    let latest: AutocompleteState = { active: false };
+    const ext = Extension.create({
+      name: "testEmojiDismiss",
+      addProseMirrorPlugins() {
+        return [
+          makeEmojiPlugin((state) => {
+            latest = state;
+          }),
+        ];
+      },
+    });
+    const editor = new Editor({
+      element: document.createElement("div"),
+      extensions: [StarterKit.configure({ trailingNode: false }), ext],
+      content: "<p></p>",
+    });
+    try {
+      editor.commands.insertContent(":sm");
+      expect(latest).toMatchObject({ active: true, from: 1, query: "sm" });
+
+      dismissTrigger(editor.view, 1);
+      expect(latest).toEqual({ active: false });
+
+      editor.commands.insertContent("i");
+      expect(latest).toEqual({ active: false });
+
+      editor.commands.insertContent(" :ro");
+      expect(latest).toMatchObject({ active: true, query: "ro" });
+    } finally {
+      editor.destroy();
+    }
   });
 });
 

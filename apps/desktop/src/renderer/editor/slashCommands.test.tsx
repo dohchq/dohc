@@ -10,6 +10,7 @@ import * as yTiptap from "@tiptap/y-tiptap";
 import * as Y from "yjs";
 import {
   CLOSED_SLASH_COMMAND_STATE,
+  filterSlashCommands,
   makeSlashCommandPlugin,
   SlashCommandMenu,
   type SlashCommandId,
@@ -418,5 +419,73 @@ describe("SlashCommandMenu on the Menu part's recipe", () => {
     expect(onHover).not.toHaveBeenCalled();
     fireEvent.mouseMove(second, { movementX: 0, movementY: 3 });
     expect(onHover).toHaveBeenCalledWith(1);
+  });
+
+  it("shows section headers when query is empty and hides them when filtering", () => {
+    const { rerender } = render(
+      createElement(SlashCommandMenu, {
+        state: { ...OPEN_STATE_BASE, query: "" },
+        onSelect: () => {},
+        onHover: () => {},
+      }),
+    );
+    expect(screen.getByText("Basic blocks")).toBeTruthy();
+    expect(screen.getByText("Lists")).toBeTruthy();
+    expect(screen.getByText("Blocks")).toBeTruthy();
+    expect(screen.getByText("Media & links")).toBeTruthy();
+
+    rerender(
+      createElement(SlashCommandMenu, {
+        state: { ...OPEN_STATE_BASE, query: "head" },
+        onSelect: () => {},
+        onHover: () => {},
+      }),
+    );
+    expect(screen.queryByText("Basic blocks")).toBeNull();
+  });
+
+  it("dismisses on outside mousedown", () => {
+    const onDismiss = vi.fn();
+    render(
+      createElement(SlashCommandMenu, {
+        state: { ...OPEN_STATE_BASE },
+        onSelect: () => {},
+        onHover: () => {},
+        onDismiss,
+      }),
+    );
+    fireEvent.mouseDown(screen.getByRole("listbox", { name: "slash commands" }));
+    expect(onDismiss).not.toHaveBeenCalled();
+    fireEvent.mouseDown(document.body);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("filterSlashCommands tiered scoring & code suppression", () => {
+  it("ranks label prefixes ahead of alias matches", () => {
+    expect(
+      filterSlashCommands("t")
+        .slice(0, 3)
+        .map((c) => c.id),
+    ).toEqual(["task-list", "toggle", "table"]);
+    expect(filterSlashCommands("d")[0]?.id).toBe("divider");
+    expect(filterSlashCommands("i")[0]?.id).toBe("image");
+    expect(
+      filterSlashCommands("m")
+        .slice(0, 2)
+        .map((c) => c.id),
+    ).toEqual(["math", "mermaid"]);
+  });
+
+  it("does not trigger inside code blocks or inline code marks", () => {
+    const { editor, stateRef } = makeSlashEditor();
+    editor.commands.setContent("<pre><code>/he</code></pre>");
+    editor.commands.setTextSelection(4);
+    expect(stateRef.current.open).toBe(false);
+
+    editor.commands.setContent("<p><code>/he</code></p>");
+    editor.commands.setTextSelection(4);
+    expect(stateRef.current.open).toBe(false);
+    editor.destroy();
   });
 });

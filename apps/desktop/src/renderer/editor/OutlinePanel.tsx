@@ -516,7 +516,16 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
   if (!editor || headings.length < 2) return null;
 
   return (
-    <nav className="dohc-outline" aria-label="Document outline">
+    <nav
+      className="dohc-outline"
+      aria-label="Document outline"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        editor.commands.focus();
+      }}
+    >
       <div className="dohc-outline-rail" aria-hidden="true">
         {headings.map((h, index) => (
           <span

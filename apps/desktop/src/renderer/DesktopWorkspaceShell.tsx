@@ -14,7 +14,13 @@ import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
 import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
-import { matchShellShortcut, matchShellShortcutChord } from "../shortcuts/shortcutRegistry";
+import {
+  SHORTCUTS,
+  matchShellShortcut,
+  matchShellShortcutChord,
+  shortcutTitle,
+  type ShortcutId,
+} from "../shortcuts/shortcutRegistry";
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
@@ -203,7 +209,7 @@ import { knownPersonalAgents, usePersonalAgents } from "./usePersonalAgents";
 import { setPersonalAgents } from "./workbench/chosenColors";
 import { MessageLinks, useMessageLinkMaker } from "./workbench/messageLinks";
 import { WorkReferences, useWorkReferenceLinks } from "./workbench/workReferences";
-import { CommandPalette, type Command } from "./CommandPalette";
+import { CommandPalette, renderCommandIcon, type Command } from "./CommandPalette";
 import {
   isCommandAvailable,
   paletteCommandRows,
@@ -3417,6 +3423,7 @@ function WorkspaceShell(props: {
   // every open conflict (two machines editing apart, or a merge left with
   // "Finish later") with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
+  const [noticeOpenRequest, setNoticeOpenRequest] = useState(0);
   const onVersionWorkspaceStateChanged = useCallback(
     (activeVersionId?: string, lineageChanged = true) => {
       if (lineageChanged) {
@@ -6508,11 +6515,20 @@ function WorkspaceShell(props: {
     },
     [commandHandlers],
   );
-  const commands = useMemo<Command[]>(
-    () =>
-      paletteCommandRows(commandContext).map((row) => ({ ...row, run: () => runCommand(row.id) })),
-    [commandContext, runCommand],
-  );
+  const commands = useMemo<Command[]>(() => {
+    const platform = bridge().platform;
+    return paletteCommandRows(commandContext).map((row) => ({
+      id: row.id,
+      label: row.label,
+      group: row.group,
+      keywords: row.keywords,
+      icon: renderCommandIcon(row.icon),
+      shortcut: Object.hasOwn(SHORTCUTS, row.id)
+        ? shortcutTitle(row.id as ShortcutId, platform)
+        : undefined,
+      run: () => runCommand(row.id),
+    }));
+  }, [commandContext, runCommand]);
   // The start surface's tiles: each kind's existing create action, where the
   // workspace allows it.
   const startActions = useMemo(
@@ -8166,6 +8182,11 @@ function WorkspaceShell(props: {
                           setQuickOpenOpen={setQuickOpenOpen}
                           syncStatus={syncStatus}
                           failedSaves={failedSaves}
+                          onOpenConflicts={() => setConflictReviewOpen(true)}
+                          onOpenSyncSettings={openSyncSettings}
+                          onConnectServer={cloudSettings.onConnect}
+                          onSignInAgain={signInAgain}
+                          onOpenNotices={() => setNoticeOpenRequest((n) => n + 1)}
                           showWorkbenchMenu={showWorkbenchMenu}
                           agentActive={agentActive}
                           restrictedMode={
@@ -8397,6 +8418,7 @@ function WorkspaceShell(props: {
                             notices={
                               <NoticeCenter
                                 workspaceId={workspaceId}
+                                openRequest={noticeOpenRequest}
                                 syncStatus={syncStatus}
                                 failedSaves={failedSaves}
                                 agentActive={agentActive}
@@ -8663,6 +8685,9 @@ function WorkspaceShell(props: {
                                             onMove={moveFileTab}
                                             onMoveToGroup={moveFileTabToGroup}
                                             onCreateGroupRight={openEditorGroupRight}
+                                            {...(isCommandAvailable("new-file", commandContext)
+                                              ? { onNewPage: () => openNewPage("") }
+                                              : {})}
                                             {...(wb.editorGroups.length > 1
                                               ? { onCloseGroup: closeGroupAfterFlush }
                                               : {})}
@@ -9252,6 +9277,15 @@ function WorkspaceShell(props: {
                                                             commandContext,
                                                           )
                                                             ? importDroppedFiles
+                                                            : undefined
+                                                        }
+                                                        onImportFiles={
+                                                          isCommandAvailable(
+                                                            "import-files",
+                                                            commandContext,
+                                                          )
+                                                            ? () =>
+                                                                void importFiles("start-surface")
                                                             : undefined
                                                         }
                                                       />

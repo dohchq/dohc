@@ -2,7 +2,11 @@ import { liveConnectionLimitMessage } from "@dohc/live-session-contract/live-con
 import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
+import {
+  mountLiveBodyEditor,
+  type LiveBodyEditorHandle,
+  type LiveEditorToolbarState,
+} from "@dohc/ydoc-projection/browser-editor";
 import {
   NAMED_LIVE_NO_AUTOMATIC_RETRY,
   namedLiveEditable,
@@ -216,25 +220,36 @@ export function NamedDocumentEditor({
   link = false,
   statusSlot,
   bodyHidden = false,
+  resolveImage,
 }: {
   session: NamedDocumentSession;
   path: string;
   link?: boolean;
   statusSlot?: HTMLElement | null;
   bodyHidden?: boolean;
+  resolveImage?: (src: string) => string | null;
   onState(state: NamedLiveBrowserState): void;
 }) {
   const element = useRef<HTMLDivElement>(null),
-    [state, setState] = useState(session.state());
+    editorRef = useRef<LiveBodyEditorHandle | null>(null),
+    resolveImageRef = useRef(resolveImage),
+    autoFocusedRef = useRef(false),
+    [state, setState] = useState(session.state()),
+    [toolbar, setToolbar] = useState<LiveEditorToolbarState | null>(null);
+  resolveImageRef.current = resolveImage;
   const frontmatter = useFrontmatterAsWritten(session.doc);
   useEffect(() => {
     if (!element.current) return;
+    autoFocusedRef.current = false;
     const editor = mountLiveBodyEditor(element.current, {
       body: session.body,
       label: "Shared file editor",
       canEdit: () => namedLiveEditable(session.state()),
       edit: session.edit,
+      resolveImage: (src) => resolveImageRef.current?.(src) ?? null,
     });
+    editorRef.current = editor;
+    const unsubscribeToolbar = editor.subscribeToolbar(setToolbar);
     const receive = (value: NamedLiveBrowserState) => {
       setState(value);
       editor.refresh();
@@ -244,9 +259,17 @@ export function NamedDocumentEditor({
     const unsubscribe = session.subscribe(receive);
     return () => {
       unsubscribe();
+      unsubscribeToolbar();
+      editorRef.current = null;
       editor.destroy();
     };
   }, [session, onState]);
+  const editable = namedLiveEditable(state);
+  useEffect(() => {
+    if (!link || !editable || bodyHidden || autoFocusedRef.current) return;
+    autoFocusedRef.current = true;
+    editorRef.current?.focus();
+  }, [link, editable, bodyHidden]);
   const working =
     state.status === "live" || (OPENING.includes(state.status) && !state.pendingUpdates);
   const status = (
@@ -257,6 +280,8 @@ export function NamedDocumentEditor({
       {statusText(state, link)}
     </p>
   );
+  const showToolbar = editable && !bodyHidden && toolbar !== null;
+  const keepSelection = (event: { preventDefault(): void }) => event.preventDefault();
   return (
     <section
       className={link ? "named-document" : "content named-document"}
@@ -275,6 +300,167 @@ export function NamedDocumentEditor({
         </button>
       )}
       <RemovedTextNotice session={session} />
+      {showToolbar && (
+        <div className="editor-toolbar" role="toolbar" aria-label="Formatting">
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Bold"
+            title="Bold (Ctrl+B)"
+            aria-pressed={toolbar.bold}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.toggleMark("bold")}
+          >
+            <Icon name="bold" size={15} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Italic"
+            title="Italic (Ctrl+I)"
+            aria-pressed={toolbar.italic}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.toggleMark("italic")}
+          >
+            <Icon name="italic" size={15} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Strikethrough"
+            title="Strikethrough (Ctrl+Shift+X)"
+            aria-pressed={toolbar.strike}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.toggleMark("strike")}
+          >
+            <Icon name="strikethrough" size={15} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Inline code"
+            title="Inline code (Ctrl+E)"
+            aria-pressed={toolbar.code}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.toggleMark("code")}
+          >
+            <Icon name="code" size={15} />
+          </button>
+          <span className="toolbar-sep" aria-hidden="true" />
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Heading 1"
+            title="Heading 1 (Ctrl+Alt+1)"
+            aria-pressed={toolbar.heading === 1}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.setHeading(1)}
+          >
+            <Icon name="heading-1" size={15} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Heading 2"
+            title="Heading 2 (Ctrl+Alt+2)"
+            aria-pressed={toolbar.heading === 2}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.setHeading(2)}
+          >
+            <Icon name="heading-2" size={15} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Heading 3"
+            title="Heading 3 (Ctrl+Alt+3)"
+            aria-pressed={toolbar.heading === 3}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.setHeading(3)}
+          >
+            <Icon name="heading-3" size={15} />
+          </button>
+          <span className="toolbar-sep" aria-hidden="true" />
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Bullet list"
+            title="Bullet list"
+            aria-pressed={toolbar.bulletList}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.toggleBulletList()}
+          >
+            <Icon name="list" size={15} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Numbered list"
+            title="Numbered list"
+            aria-pressed={toolbar.orderedList}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.toggleOrderedList()}
+          >
+            <Icon name="list-ordered" size={15} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="To-do list"
+            title="To-do list"
+            aria-pressed={toolbar.taskList}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.toggleTaskList()}
+          >
+            <Icon name="list-todo" size={15} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Quote"
+            title="Quote"
+            aria-pressed={toolbar.blockquote}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.toggleBlockquote()}
+          >
+            <Icon name="quote" size={15} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Code block"
+            title="Code block"
+            aria-pressed={toolbar.codeBlock}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.toggleCodeBlock()}
+          >
+            <Icon name="square-code" size={15} />
+          </button>
+          <span className="toolbar-sep" aria-hidden="true" />
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Undo"
+            title="Undo (Ctrl+Z)"
+            disabled={!toolbar.canUndo}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.undo()}
+          >
+            <Icon name="undo" size={15} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            aria-label="Redo"
+            title="Redo (Ctrl+Shift+Z)"
+            disabled={!toolbar.canRedo}
+            onMouseDown={keepSelection}
+            onClick={() => editorRef.current?.redo()}
+          >
+            <Icon name="redo" size={15} />
+          </button>
+        </div>
+      )}
       {!bodyHidden && <PropertiesAsWritten block={frontmatter} collapsed={link} />}
       <div className="named-body-editor" ref={element} hidden={bodyHidden} />
     </section>

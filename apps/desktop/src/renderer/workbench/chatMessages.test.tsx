@@ -992,6 +992,28 @@ describe("message reactions (WS-MU-C2)", () => {
     });
   });
 
+  it("navigates the reaction grid with 2D arrow keys and clears search with the clear button", async () => {
+    renderList([], "you@x");
+    const picker = openPicker();
+    const search = within(picker).getByLabelText("Search emoji or paste any emoji");
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    const choices = within(picker).getAllByTestId("test-chat-reaction-choice");
+    expect(document.activeElement).toBe(choices[0]);
+    fireEvent.keyDown(choices[0]!, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(choices[1]);
+    fireEvent.keyDown(choices[1]!, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(choices[9]);
+    fireEvent.keyDown(choices[9]!, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(choices[1]);
+    fireEvent.keyDown(choices[1]!, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(search);
+
+    await userEvent.type(search, "rocket");
+    fireEvent.click(within(picker).getByRole("button", { name: "Clear search", hidden: true }));
+    expect((search as HTMLInputElement).value).toBe("");
+    expect(document.activeElement).toBe(search);
+  });
+
   it("toggles a quick reaction from the row toolbar and marks the viewer's own", () => {
     const { onToggle } = renderList(
       [reaction({ emoji: "🙌", authorId: "you@x", authorDisplayName: "You" })],

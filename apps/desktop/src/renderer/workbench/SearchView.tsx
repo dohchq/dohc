@@ -1,8 +1,10 @@
-import { basenameOf } from "../path";
+import { basenameOf, dirnameOf } from "../path";
 import {
   CaseSensitive,
   ChevronDown,
   ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
   MessageSquare,
   Regex,
   Search,
@@ -15,7 +17,7 @@ import type { SearchResultsEventEntry } from "../../ipc/bridgeContract";
 import { rendererMarks } from "../../performance/rendererMarks";
 import { EmptyState, SecondaryButton, SectionLabel } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
-import { Ref } from "../ui/Ref";
+import { FileGlyph, listedFileKind } from "../ui/KindGlyph";
 import { EMPTY_ART } from "./EmptyArt";
 import {
   GROUP_WINDOW_STEP,
@@ -79,6 +81,7 @@ const FileGroup = memo(function FileGroup(props: {
   const visible = groupVisibleEntries(group, props.showAll);
   const hidden = group.entries.length - visible.length;
   const chatEntry = group.entries.find((entry) => entry.surface === "chat");
+  const folder = chatEntry ? "" : dirnameOf(group.path);
   return (
     <li
       data-testid="search-result-group"
@@ -93,7 +96,7 @@ const FileGroup = memo(function FileGroup(props: {
         data-testid="search-group-toggle"
         aria-expanded={!props.collapsed}
         onClick={() => props.onToggle(group.path)}
-        className="dohc-focus-row flex h-7 w-full items-center gap-1 rounded-md px-1.5 text-left text-[13px] text-ink transition-colors duration-75 hover:bg-hover"
+        className="dohc-focus-row flex h-7 w-full items-center gap-1.5 rounded-md px-1.5 text-left text-[13px] text-ink transition-colors duration-75 hover:bg-hover"
       >
         {props.collapsed ? (
           <ChevronRight size={12} aria-hidden className="shrink-0 text-subtle" />
@@ -106,16 +109,27 @@ const FileGroup = memo(function FileGroup(props: {
               <MessageSquare size={10} aria-hidden />
               Chat
             </span>
-            <span className="truncate font-medium">
+            <span className="min-w-0 truncate font-medium">
               {chatEntry.title ?? basenameOf(group.path)}
             </span>
           </>
         ) : (
-          <Ref path={group.path} folder />
+          <>
+            <FileGlyph
+              kind={listedFileKind(group.path, undefined)}
+              icon={undefined}
+              size={13}
+              className="text-subtle"
+            />
+            <span className="truncate font-medium text-ink">{basenameOf(group.path)}</span>
+            {folder ? (
+              <span className="min-w-0 truncate text-[12px] text-subtle">{folder}</span>
+            ) : null}
+          </>
         )}
         <span
           data-testid="search-group-count"
-          className="ml-auto rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted"
+          className="ml-auto shrink-0 text-[11px] tabular-nums text-subtle"
         >
           {group.entries.length}
         </span>
@@ -133,13 +147,20 @@ const FileGroup = memo(function FileGroup(props: {
                 onClick={() => props.onOpen(group.path, entry.line, entry.column, entry)}
                 // py-[4px] around the leading-5 preview = a 28px line box,
                 // matching the h-7 workbench row pitch.
-                className={`block w-full rounded-md py-[4px] pl-6 pr-2 text-left transition-colors duration-75 ${
+                className={`dohc-focus-row flex w-full items-center gap-2 rounded-md py-[4px] pl-6 pr-2 text-left transition-colors duration-75 ${
                   index === props.selectedEntryIndex
                     ? "bg-selected text-ink font-medium"
                     : "hover:bg-hover"
                 }`}
               >
-                <HighlightedPreview entry={entry} />
+                {entry.surface !== "chat" && entry.line > 0 ? (
+                  <span aria-hidden className="shrink-0 text-[11px] tabular-nums text-subtle">
+                    {entry.line}
+                  </span>
+                ) : null}
+                <span className="min-w-0 flex-1">
+                  <HighlightedPreview entry={entry} />
+                </span>
               </button>
             </li>
           ))}
@@ -165,6 +186,7 @@ function ToggleButton(props: {
   testId: string;
   label: string;
   pressed: boolean;
+  dot?: boolean;
   onToggle: () => void;
   Icon: typeof CaseSensitive;
 }) {
@@ -179,11 +201,18 @@ function ToggleButton(props: {
       // Pressed reads as the list-row "active" fill (bg-selected + ink), calm and
       // legible at a glance — not a loud tint. Color in Search is reserved for
       // the match highlight; a toggled-on filter earns weight, not hue.
-      className={`grid size-5.5 shrink-0 place-items-center rounded-md transition-colors duration-75 ${
+      className={`relative grid size-6 shrink-0 place-items-center rounded-md transition-colors duration-75 ${
         props.pressed ? "bg-selected text-ink" : "text-subtle hover:bg-hover hover:text-ink"
       }`}
     >
       <props.Icon size={13} aria-hidden />
+      {props.dot ? (
+        <span
+          aria-hidden
+          data-testid={`${props.testId}-dot`}
+          className="pointer-events-none absolute right-0.5 top-0.5 size-1.5 rounded-full bg-accent"
+        />
+      ) : null}
     </button>
   );
 }
@@ -347,7 +376,10 @@ export function SearchView(props: {
   }
 
   const fileCount = model.groups.length;
+  const hasGlobs = includeGlob.trim() !== "" || excludeGlob.trim() !== "";
   const narrowed = caseSensitive || wholeWord || regex || includeGlob !== "" || excludeGlob !== "";
+  const allCollapsed =
+    windowedGroups.length > 0 && windowedGroups.every((group) => collapsed.has(group.path));
 
   return (
     <div
@@ -357,10 +389,12 @@ export function SearchView(props: {
       className="flex min-h-0 flex-1 flex-col"
     >
       <div className="flex flex-col gap-1.5 border-b border-line px-2 py-2">
-        <div className="flex items-center gap-1 rounded-md border border-line bg-bg px-1.5 py-1 transition-colors focus-within:border-ink">
+        <div className="flex items-center gap-1.5 rounded-md border border-line bg-bg px-2 py-1 transition-colors focus-within:border-ink">
+          <Search size={13} aria-hidden className="shrink-0 text-subtle" />
           <input
             ref={inputRef}
             type="text"
+            data-framed-input=""
             data-testid="search-input"
             aria-label="Search workspace"
             placeholder="Search"
@@ -370,6 +404,22 @@ export function SearchView(props: {
             spellCheck={false}
             className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-subtle"
           />
+          {query.length > 0 ? (
+            <button
+              type="button"
+              aria-label="Clear search"
+              title="Clear search"
+              onClick={() => {
+                onQueryChange("");
+                inputRef.current?.focus();
+              }}
+              className="grid size-5 shrink-0 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink"
+            >
+              <X size={12} aria-hidden />
+            </button>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-1">
           <ToggleButton
             testId="search-toggle-case"
             label="Match case"
@@ -395,6 +445,7 @@ export function SearchView(props: {
             testId="search-filter-toggle"
             label="Toggle include/exclude filters"
             pressed={filtersOpen}
+            dot={!filtersOpen && hasGlobs}
             onToggle={() => setFiltersOpen((open) => !open)}
             Icon={SlidersHorizontal}
           />
@@ -431,20 +482,42 @@ export function SearchView(props: {
             </label>
           </div>
         ) : null}
-        <div role="status" className="flex items-center gap-1.5 px-0.5 text-[12px] text-subtle">
-          {model.status === "idle" ? null : model.status === "searching" ||
-            model.status === "updating" ? (
-            <span data-testid="search-spinner" className="flex items-center gap-1.5">
-              <span aria-hidden className="size-2 animate-pulse rounded-full bg-accent" />
-              {model.status === "updating" ? "Updating workspace…" : "Searching…"}
-            </span>
-          ) : (
-            <span data-testid="search-summary">
-              {model.totalMatches === 0
-                ? "No results"
-                : `${model.totalMatches} result${model.totalMatches === 1 ? "" : "s"} in ${fileCount} file${fileCount === 1 ? "" : "s"}`}
-            </span>
-          )}
+        <div className="flex items-center gap-1.5 px-0.5 text-[12px] text-subtle">
+          <div role="status" className="min-w-0 flex-1">
+            {model.status === "idle" ? null : model.status === "searching" ||
+              model.status === "updating" ? (
+              <span data-testid="search-spinner" className="flex items-center gap-1.5">
+                <span aria-hidden className="size-2 animate-pulse rounded-full bg-accent" />
+                {model.status === "updating" ? "Updating workspace…" : "Searching…"}
+              </span>
+            ) : (
+              <span data-testid="search-summary">
+                {model.totalMatches === 0
+                  ? "No results"
+                  : `${model.totalMatches} result${model.totalMatches === 1 ? "" : "s"} in ${fileCount} file${fileCount === 1 ? "" : "s"}`}
+              </span>
+            )}
+          </div>
+          {fileCount > 1 ? (
+            <button
+              type="button"
+              data-testid="search-collapse-all"
+              aria-label={allCollapsed ? "Expand all results" : "Collapse all results"}
+              title={allCollapsed ? "Expand all" : "Collapse all"}
+              onClick={() =>
+                setCollapsed(
+                  allCollapsed ? new Set() : new Set(windowedGroups.map((group) => group.path)),
+                )
+              }
+              className="grid size-5 shrink-0 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink"
+            >
+              {allCollapsed ? (
+                <ChevronsUpDown size={12} aria-hidden />
+              ) : (
+                <ChevronsDownUp size={12} aria-hidden />
+              )}
+            </button>
+          ) : null}
         </div>
       </div>
 

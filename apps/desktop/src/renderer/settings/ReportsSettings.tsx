@@ -3,11 +3,9 @@ import type { ReadDiagnosticsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_PRIVACY_SETTINGS, type PrivacySettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
+import { SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
 import { SettingRow, SwitchControl } from "./SettingRow";
-
-const BUTTON =
-  "h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink";
 
 /**
  * The report switches, which apply to this computer, and the diagnostics a
@@ -107,29 +105,22 @@ export function ReportsSettings(props: {
         description="Version, system, report settings, and recent problems. They stay on this computer until you copy or save them."
         testId="settings-row-diagnostics"
       >
-        <button
-          type="button"
+        <SecondaryButton
           aria-expanded={shown}
           aria-controls="settings-diagnostics-text"
           data-testid="diagnostics-show"
           onClick={() => setShown((value) => !value)}
-          className={BUTTON}
         >
           {shown ? "Hide" : "Show"}
-        </button>
+        </SecondaryButton>
         <CopyButton
           label="Copy diagnostics"
           testId="diagnostics-copy"
           getText={async () => (await bridge().readDiagnostics({})).text}
         />
-        <button
-          type="button"
-          data-testid="diagnostics-save"
-          onClick={() => void save()}
-          className={BUTTON}
-        >
+        <SecondaryButton data-testid="diagnostics-save" onClick={() => void save()}>
           Save…
-        </button>
+        </SecondaryButton>
       </SettingRow>
       {shown ? (
         <pre

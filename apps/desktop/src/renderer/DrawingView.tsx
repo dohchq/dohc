@@ -27,8 +27,8 @@ import {
   OpenExternallyButton,
   ViewActions,
 } from "./fileInspectorUi";
-import { TriangleAlert } from "lucide-react";
-import { EmptyState } from "./ui/controls";
+import { TriangleAlert, X } from "lucide-react";
+import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { StateMark } from "./ui/StateMark";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
@@ -309,10 +309,20 @@ export function DrawingView({
       ) : null}
       {assetRefused ? (
         <div
-          className="border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
+          className="flex items-center justify-between gap-3 border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
           data-testid="drawing-assets-refused"
         >
-          This image was not added. Collaborative drawings cannot add images yet.
+          <span className="flex min-w-0 items-center gap-2">
+            <TriangleAlert size={13} aria-hidden className="shrink-0" />
+            <span>This image was not added. Collaborative drawings cannot add images yet.</span>
+          </span>
+          <IconButton
+            aria-label="Dismiss notice"
+            title="Dismiss"
+            onClick={() => setAssetRefused(false)}
+          >
+            <X size={13} aria-hidden />
+          </IconButton>
         </div>
       ) : null}
       {assetHydrationFailures > 0 ? (
@@ -320,17 +330,20 @@ export function DrawingView({
           className="flex items-center justify-between gap-3 border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
           data-testid="drawing-asset-hydration-error"
         >
-          <span>
-            dohc could not load {assetHydrationFailures}{" "}
-            {assetHydrationFailures === 1 ? "image" : "images"}.
+          <span className="flex min-w-0 items-center gap-2">
+            <TriangleAlert size={13} aria-hidden className="shrink-0" />
+            <span>
+              dohc could not load {assetHydrationFailures}{" "}
+              {assetHydrationFailures === 1 ? "image" : "images"}.
+            </span>
           </span>
-          <button
-            type="button"
-            className="shrink-0 text-text underline underline-offset-2"
+          <SecondaryButton
+            size="row"
+            className="shrink-0"
             onClick={() => setAssetHydrationAttempt((attempt) => attempt + 1)}
           >
             Try again
-          </button>
+          </SecondaryButton>
         </div>
       ) : null}
       {engine.opening ? (

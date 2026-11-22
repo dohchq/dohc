@@ -3,6 +3,7 @@ import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import { EMOJI_DATA, type EmojiEntry } from "./emojiData";
 import { resolveFloatingMenuPosition } from "./floatingMenuPosition";
+import { dismissTrigger } from "./triggerPlugin";
 import {
   MENU_ACTIVE_OPTION,
   MENU_EMPTY,
@@ -108,6 +109,7 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
+        if (view && state.open) dismissTrigger(view, state.from);
         onDismiss();
         return;
       }
@@ -151,7 +153,7 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
   if (!state.open || !coords) return null;
   const position = resolveFloatingMenuPosition({
     cursorRect: coords,
-    menuWidth: 280,
+    menuWidth: 220,
     menuMaxHeight: 240,
     gap: 4,
   });
@@ -164,7 +166,9 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
       style={{
         position: "fixed",
         left: position.x,
-        top: position.y,
+        ...(position.placement === "above" && position.bottom !== undefined
+          ? { bottom: position.bottom }
+          : { top: position.y }),
         maxHeight: position.maxHeight,
         zIndex: 60,
         ...menuEnterFrom(position.placement),

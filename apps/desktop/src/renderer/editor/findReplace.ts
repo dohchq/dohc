@@ -12,6 +12,8 @@ type FindMatch = { from: number; to: number };
 export type FindReplaceState = {
   open: boolean;
   replaceOpen: boolean;
+  openNonce: number;
+  focusTarget: "find" | "replace";
   query: string;
   replacement: string;
   caseSensitive: boolean;
@@ -23,6 +25,8 @@ export type FindReplaceState = {
 export const CLOSED_FIND_REPLACE_STATE: FindReplaceState = {
   open: false,
   replaceOpen: false,
+  openNonce: 0,
+  focusTarget: "find",
   query: "",
   replacement: "",
   caseSensitive: false,
@@ -126,8 +130,17 @@ export function findReplaceReducer(
   switch (action.type) {
     case "open": {
       const query = action.query !== undefined ? action.query : state.query;
+      const focusTarget: "find" | "replace" =
+        action.replace && query.length > 0 ? "replace" : "find";
       return recomputeMatches(
-        { ...state, open: true, replaceOpen: state.replaceOpen || action.replace, query },
+        {
+          ...state,
+          open: true,
+          replaceOpen: state.replaceOpen || action.replace,
+          openNonce: state.openNonce + 1,
+          focusTarget,
+          query,
+        },
         doc,
       );
     }

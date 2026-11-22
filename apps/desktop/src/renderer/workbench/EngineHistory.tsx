@@ -951,7 +951,6 @@ export function HistoryRow(props: {
     return (
       <>
         <button {...shared} className={`${ONE_LINE} ${rowTone(selected)}`}>
-          <span aria-hidden className={MARK_BOX} />
           {nested === "pass" ? (
             <span className="flex min-w-0 flex-1 items-center gap-2">
               <span className="min-w-0 max-w-[70%] shrink-0 truncate text-ink">
@@ -1064,7 +1063,7 @@ function RunRow(props: {
         onOpen={props.onOpenMoment}
       />
       {props.expanded ? (
-        <div data-testid="engine-moment-run-earlier">
+        <div data-testid="engine-moment-run-earlier" className="ml-4 border-l border-line pl-1">
           {earlier.map((moment) => (
             <HistoryRow
               key={moment.id}
@@ -1148,7 +1147,7 @@ function GroupRow(props: {
       </button>
       {holdsOpen ? <HiddenWords id={holdsOpenId}>{HOLDS_OPEN}</HiddenWords> : null}
       {expanded ? (
-        <div data-testid="engine-moment-group-files">
+        <div data-testid="engine-moment-group-files" className="ml-4 border-l border-line pl-1">
           {group.moments.map((moment) => (
             <HistoryRow
               key={moment.id}
@@ -1537,7 +1536,7 @@ export function EngineHistoryView(props: {
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Search"
-          className="h-7 w-full min-w-0 rounded-md bg-transparent pl-[34px] pr-8 text-[13px] text-ink transition-colors duration-75 placeholder:text-subtle hover:bg-hover focus:bg-hover [&::-webkit-search-cancel-button]:hidden"
+          className="h-7 w-full min-w-0 rounded-md border border-line bg-bg pl-[34px] pr-8 text-[13px] text-ink transition-colors duration-75 placeholder:text-subtle focus:border-ink [&::-webkit-search-cancel-button]:hidden"
         />
         {query.length > 0 ? (
           <button
@@ -1555,129 +1554,153 @@ export function EngineHistoryView(props: {
       {props.paused ? (
         <HistoryPaused testId="history-paused" className="h-7 shrink-0 px-3" />
       ) : null}
-      <LegendList
-        role="list"
-        data-testid="engine-history-list"
-        // `isolate` keeps the sticky day headings' z-index inside History,
-        // under any overlay.
-        className="isolate m-0 min-h-0 flex-1 list-none p-0"
-        data={rows}
-        keyExtractor={(row) => row.key}
-        estimatedItemSize={48}
-        getItemType={(row) => (row.day ? "day" : row.item.kind)}
-        stickyHeaderIndices={stickyHeaderIndices}
-        recycleItems={false}
-        alwaysRender={{ keys: retainedKeys }}
-        onFocusCapture={(event) =>
-          setFocusedKey(
-            (event.target as HTMLElement).closest<HTMLElement>("[data-history-key]")?.dataset
-              .historyKey ?? null,
-          )
-        }
-        onBlurCapture={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null))
-            setFocusedKey(null);
-        }}
-        extraData={rowPresentation}
-        renderItem={({ item, index }) =>
-          item.day ? (
-            <li
-              role="listitem"
-              aria-posinset={headerItemCount + index + 1}
-              aria-setsize={listItemCount}
-              // The day's label sits over its first row, on the panel, so a
-              // stuck label covers the rows that scroll under it.
-              className="flex h-8 items-end bg-panel px-3 pb-1"
-            >
-              {item.day.dateTime === null ? (
-                <span data-testid="engine-history-day-heading" className="dohc-section-label">
-                  {item.day.label}
-                </span>
-              ) : (
-                <time
-                  data-testid="engine-history-day-heading"
-                  dateTime={item.day.dateTime}
-                  className="dohc-section-label"
-                >
-                  {item.day.label}
-                </time>
-              )}
-            </li>
-          ) : (
-            <li
-              role="listitem"
-              aria-posinset={headerItemCount + index + 1}
-              aria-setsize={listItemCount}
-              data-testid={
-                item.item.kind === "files"
-                  ? "engine-moment"
-                  : item.item.kind === "version"
-                    ? "history-version"
-                    : "history-collection-change"
-              }
-              data-history-key={item.key}
-              className="px-1"
-            >
-              {item.item.kind === "version" ? (
-                <VersionMarkerRow version={item.item.version} />
-              ) : item.item.kind === "collection" ? (
-                <CollectionChangeRow
-                  entry={item.item.entry}
-                  label={labelOf(item.item.entry)}
-                  openHistory={collections?.get(item.item.entry.datasetId)?.openHistory}
-                />
-              ) : item.item.group.moments.length > 1 ? (
-                item.item.group.run ? (
-                  <RunRow
-                    group={item.item.group}
-                    more={item.key === moreKey}
-                    expanded={expandedGroups.has(item.key)}
-                    onToggle={() => toggleGroup(item.key)}
-                    openMomentId={openMomentId}
-                    onOpenMoment={props.onOpenMoment}
-                  />
-                ) : (
-                  <GroupRow
-                    group={item.item.group}
-                    more={item.key === moreKey}
-                    expanded={expandedGroups.has(item.key)}
-                    onToggle={() => toggleGroup(item.key)}
-                    openMomentId={openMomentId}
-                    onOpenMoment={props.onOpenMoment}
-                  />
-                )
-              ) : (
-                <HistoryRow
-                  moment={item.item.group.moments[0]}
-                  context="workspace"
-                  selected={item.item.group.moments[0].id === openMomentId}
-                  onOpen={props.onOpenMoment}
-                />
-              )}
-            </li>
-          )
-        }
-        ListFooterComponent={
-          props.hasMore ? (
-            <li
-              role="listitem"
-              aria-posinset={listItemCount}
-              aria-setsize={listItemCount}
-              className="px-1 pb-1"
-            >
-              <button
-                type="button"
+      {normalizedQuery.length > 0 && filteredItems.length === 0 ? (
+        <EmptyState
+          data-testid="engine-history-empty-search"
+          icon={Search}
+          title={`No changes match "${query.trim()}".`}
+        >
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <SecondaryButton size="compact" onClick={() => setQuery("")}>
+              Clear search
+            </SecondaryButton>
+            {props.hasMore ? (
+              <SecondaryButton
+                size="compact"
                 data-testid="engine-history-load-more"
                 disabled={props.loadingMore}
                 onClick={props.onLoadMore}
-                className="dohc-focus-row block h-8 w-full cursor-pointer rounded-md px-2 text-center text-[12px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
               >
-                {props.loadingMore ? "Loading…" : "Show earlier changes"}
-              </button>
-            </li>
-          ) : null
-        }
-      />
+                {props.loadingMore ? "Loading…" : "Load older"}
+              </SecondaryButton>
+            ) : null}
+          </div>
+        </EmptyState>
+      ) : (
+        <LegendList
+          role="list"
+          data-testid="engine-history-list"
+          // `isolate` keeps the sticky day headings' z-index inside History,
+          // under any overlay.
+          className="isolate m-0 min-h-0 flex-1 list-none p-0"
+          data={rows}
+          keyExtractor={(row) => row.key}
+          estimatedItemSize={48}
+          getItemType={(row) => (row.day ? "day" : row.item.kind)}
+          stickyHeaderIndices={stickyHeaderIndices}
+          recycleItems={false}
+          alwaysRender={{ keys: retainedKeys }}
+          onFocusCapture={(event) =>
+            setFocusedKey(
+              (event.target as HTMLElement).closest<HTMLElement>("[data-history-key]")?.dataset
+                .historyKey ?? null,
+            )
+          }
+          onBlurCapture={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+              setFocusedKey(null);
+          }}
+          extraData={rowPresentation}
+          renderItem={({ item, index }) =>
+            item.day ? (
+              <li
+                role="listitem"
+                aria-posinset={headerItemCount + index + 1}
+                aria-setsize={listItemCount}
+                // The day's label sits over its first row, on the panel, so a
+                // stuck label covers the rows that scroll under it.
+                className="flex h-8 items-end bg-panel px-3 pb-1"
+              >
+                {item.day.dateTime === null ? (
+                  <span data-testid="engine-history-day-heading" className="dohc-section-label">
+                    {item.day.label}
+                  </span>
+                ) : (
+                  <time
+                    data-testid="engine-history-day-heading"
+                    dateTime={item.day.dateTime}
+                    className="dohc-section-label"
+                  >
+                    {item.day.label}
+                  </time>
+                )}
+              </li>
+            ) : (
+              <li
+                role="listitem"
+                aria-posinset={headerItemCount + index + 1}
+                aria-setsize={listItemCount}
+                data-testid={
+                  item.item.kind === "files"
+                    ? "engine-moment"
+                    : item.item.kind === "version"
+                      ? "history-version"
+                      : "history-collection-change"
+                }
+                data-history-key={item.key}
+                className="px-1"
+              >
+                {item.item.kind === "version" ? (
+                  <VersionMarkerRow version={item.item.version} />
+                ) : item.item.kind === "collection" ? (
+                  <CollectionChangeRow
+                    entry={item.item.entry}
+                    label={labelOf(item.item.entry)}
+                    openHistory={collections?.get(item.item.entry.datasetId)?.openHistory}
+                  />
+                ) : item.item.group.moments.length > 1 ? (
+                  item.item.group.run ? (
+                    <RunRow
+                      group={item.item.group}
+                      more={item.key === moreKey}
+                      expanded={expandedGroups.has(item.key)}
+                      onToggle={() => toggleGroup(item.key)}
+                      openMomentId={openMomentId}
+                      onOpenMoment={props.onOpenMoment}
+                    />
+                  ) : (
+                    <GroupRow
+                      group={item.item.group}
+                      more={item.key === moreKey}
+                      expanded={expandedGroups.has(item.key)}
+                      onToggle={() => toggleGroup(item.key)}
+                      openMomentId={openMomentId}
+                      onOpenMoment={props.onOpenMoment}
+                    />
+                  )
+                ) : (
+                  <HistoryRow
+                    moment={item.item.group.moments[0]}
+                    context="workspace"
+                    selected={item.item.group.moments[0].id === openMomentId}
+                    onOpen={props.onOpenMoment}
+                  />
+                )}
+              </li>
+            )
+          }
+          ListFooterComponent={
+            props.hasMore ? (
+              <li
+                role="listitem"
+                aria-posinset={listItemCount}
+                aria-setsize={listItemCount}
+                className="px-1 pb-1"
+              >
+                <button
+                  type="button"
+                  data-testid="engine-history-load-more"
+                  disabled={props.loadingMore}
+                  onClick={props.onLoadMore}
+                  className="dohc-focus-row block h-8 w-full cursor-pointer rounded-md px-2 text-center text-[12px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+                >
+                  {props.loadingMore ? "Loading…" : "Show earlier changes"}
+                </button>
+              </li>
+            ) : null
+          }
+        />
+      )}
     </>
   );
 }

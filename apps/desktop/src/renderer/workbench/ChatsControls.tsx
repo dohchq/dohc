@@ -1,4 +1,4 @@
-import { Archive, ArrowLeft, PowerOff, TriangleAlert } from "lucide-react";
+import { Archive, ArrowLeft, PowerOff, TriangleAlert, X } from "lucide-react";
 import type * as React from "react";
 import type { JoinedSharedChannelRow } from "../../ipc/bridgeContract";
 import type { AgentPresenceActivity } from "../../collab/agentPresence";
@@ -207,17 +207,18 @@ export function ComposerModeBar(props: {
   return (
     <div
       data-testid={props.testId}
-      className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 text-[12px] tabular-nums text-muted"
+      className="flex items-center gap-1.5 border-b border-line bg-panel-2 px-3 py-1.5 text-[12px] tabular-nums text-muted"
     >
       <span className="min-w-0 flex-1 truncate">{props.children}</span>
       <button
         type="button"
         data-testid={props.cancelTestId}
         aria-label={props.cancelLabel}
+        title={props.cancelLabel}
         onClick={props.onCancel}
-        className="rounded px-1 text-subtle hover:text-ink"
+        className="grid size-5 shrink-0 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink"
       >
-        ×
+        <X size={13} aria-hidden />
       </button>
     </div>
   );

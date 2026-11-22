@@ -1,8 +1,16 @@
 import { shortcutText } from "../shortcuts/shortcutRegistry";
 import { desktopPins } from "../testPins";
 import { DohcMark } from "@dohc/brand";
-import { Check, PanelLeft, PanelRight, Search } from "lucide-react";
-import { type ReactNode, useId, useRef, useState } from "react";
+import { Check, ChevronsUpDown, Layers, Link2, PanelLeft, PanelRight, Search } from "lucide-react";
+import {
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
 import { Pill } from "./ui/controls";
@@ -20,6 +28,14 @@ export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath" | "sh
       .split(/[\\/]/)
       .pop() || "workspace"
   );
+}
+
+function parentFolderName(rootPath: string): string | null {
+  const parts = rootPath
+    .replace(/[\\/]+$/, "")
+    .split(/[\\/]/)
+    .filter(Boolean);
+  return parts.length >= 2 ? parts[parts.length - 2]! : null;
 }
 
 type TitlebarPanelToggle = {
@@ -106,12 +122,55 @@ export function Titlebar(props: {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement | null>(null);
   const switcherTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const switcherListRef = useRef<HTMLUListElement | null>(null);
+  const focusSwitcherOnOpen = useRef(false);
   useDismiss({
     open: switcherOpen,
     container: switcherRef,
     trigger: switcherTriggerRef,
     onClose: () => setSwitcherOpen(false),
   });
+  const duplicateNames = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const candidate of props.workspaces ?? []) {
+      const name = workspaceName(candidate);
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([name]) => name));
+  }, [props.workspaces]);
+  useEffect(() => {
+    if (!switcherOpen || !focusSwitcherOnOpen.current) return;
+    focusSwitcherOnOpen.current = false;
+    const list = switcherListRef.current;
+    if (!list) return;
+    const target =
+      list.querySelector<HTMLButtonElement>('[aria-selected="true"] button') ??
+      list.querySelector<HTMLButtonElement>("button");
+    target?.focus();
+  }, [switcherOpen]);
+  const onSwitcherKeyDown = (event: KeyboardEvent<HTMLUListElement>) => {
+    const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button")];
+    if (buttons.length === 0) return;
+    const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      buttons[(current + 1) % buttons.length]?.focus();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      buttons[(current <= 0 ? buttons.length : current) - 1]?.focus();
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      buttons[0]?.focus();
+    } else if (event.key === "End") {
+      event.preventDefault();
+      buttons[buttons.length - 1]?.focus();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setSwitcherOpen(false);
+      switcherTriggerRef.current?.focus();
+    }
+  };
   // macOS draws traffic lights on the left and never populates the
   // titlebar-area-* env vars (WCO is only enabled on the non-darwin branch of
   // createMainWindow) — lay out around them with fixed insets there, and
@@ -181,15 +240,26 @@ export function Titlebar(props: {
               aria-haspopup="listbox"
               aria-expanded={switcherOpen}
               title={workspaceName(props.workspace)}
-              onClick={() => setSwitcherOpen((open) => !open)}
+              onClick={(event) => {
+                focusSwitcherOnOpen.current = event.detail === 0;
+                setSwitcherOpen((open) => !open);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown" && !switcherOpen) {
+                  event.preventDefault();
+                  focusSwitcherOnOpen.current = true;
+                  setSwitcherOpen(true);
+                }
+              }}
               // Each name keeps its padding and three letters with an
               // ellipsis, or all of it when shorter.
-              className="titlebar-no-drag flex h-7 min-w-[calc-size(max-content,min(size,4rem))] items-center rounded-md px-2 text-[13px] font-medium text-ink hover:bg-hover"
+              className="titlebar-no-drag flex h-7 min-w-[calc-size(max-content,min(size,4rem))] items-center gap-1 rounded-md px-2 text-[13px] font-medium text-ink hover:bg-hover"
             >
               {/* Truncate the name before the version and the saved dot. */}
               <span data-testid="status-workspace" className="min-w-0 max-w-48 truncate">
                 {workspaceName(props.workspace)}
               </span>
+              <ChevronsUpDown size={12} aria-hidden className="shrink-0 text-subtle" />
             </button>
             {/* The slash belongs to the version, so it shows only once the
                 picker has a version to name. Its floor holds the slash, the
@@ -208,38 +278,60 @@ export function Titlebar(props: {
             />
             {switcherOpen ? (
               <ul
+                ref={switcherListRef}
                 role="listbox"
                 aria-label="Workspaces"
+                onKeyDown={onSwitcherKeyDown}
                 className="dohc-popover dohc-pop-in absolute left-0 top-full z-20 mt-1 m-0 w-64 list-none rounded-lg border border-line bg-panel p-1"
               >
-                {props.workspaces.map((candidate) => (
-                  <li
-                    key={candidate.workspaceId}
-                    role="option"
-                    data-testid="workspace-switcher-option"
-                    data-workspace-id={candidate.workspaceId}
-                    aria-selected={candidate.workspaceId === props.workspace?.workspaceId}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSwitcherOpen(false);
-                        props.onSwitchWorkspace?.(candidate);
-                      }}
-                      className="dohc-focus-row titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
+                {props.workspaces.map((candidate) => {
+                  const active = candidate.workspaceId === props.workspace?.workspaceId;
+                  const name = workspaceName(candidate);
+                  const parent =
+                    duplicateNames.has(name) && !candidate.shareView
+                      ? parentFolderName(candidate.rootPath)
+                      : null;
+                  return (
+                    <li
+                      key={candidate.workspaceId}
+                      role="option"
+                      data-testid="workspace-switcher-option"
+                      data-workspace-id={candidate.workspaceId}
+                      aria-selected={active}
                     >
-                      {candidate.workspaceId === props.workspace?.workspaceId ? (
-                        <Check size={12} aria-hidden />
-                      ) : (
-                        <span className="w-3" aria-hidden />
-                      )}
-                      <span className="truncate">{workspaceName(candidate)}</span>
-                      {candidate.kind === "shared" ? (
-                        <span className="ml-auto text-[12px] text-subtle">Shared</span>
-                      ) : null}
-                    </button>
-                  </li>
-                ))}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSwitcherOpen(false);
+                          props.onSwitchWorkspace?.(candidate);
+                          switcherTriggerRef.current?.focus();
+                        }}
+                        className={`dohc-focus-row titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
+                          active
+                            ? "bg-selected font-medium text-ink"
+                            : "text-muted hover:bg-hover hover:text-ink"
+                        }`}
+                      >
+                        {active ? (
+                          <Check size={12} aria-hidden className="shrink-0 text-accent" />
+                        ) : (
+                          <span className="w-3 shrink-0" aria-hidden />
+                        )}
+                        <span className="min-w-0 truncate">{name}</span>
+                        {parent ? (
+                          <span className="min-w-0 truncate text-[12px] font-normal text-subtle">
+                            {parent}
+                          </span>
+                        ) : null}
+                        {candidate.kind === "shared" ? (
+                          <span className="ml-auto shrink-0 text-[12px] font-normal text-subtle">
+                            Shared
+                          </span>
+                        ) : null}
+                      </button>
+                    </li>
+                  );
+                })}
                 {props.onManageWorkspaces ? (
                   <li role="presentation" className="mt-1 border-t border-line pt-1">
                     <button
@@ -251,7 +343,7 @@ export function Titlebar(props: {
                       }}
                       className="dohc-focus-row titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
-                      <span className="w-3" aria-hidden />
+                      <Layers size={13} aria-hidden className="shrink-0 text-subtle" />
                       <span className="truncate">Manage workspaces…</span>
                     </button>
                   </li>
@@ -267,7 +359,7 @@ export function Titlebar(props: {
                       }}
                       className="dohc-focus-row titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
-                      <span className="w-3" aria-hidden />
+                      <Link2 size={13} aria-hidden className="shrink-0 text-subtle" />
                       <span className="truncate">Open a share…</span>
                     </button>
                   </li>

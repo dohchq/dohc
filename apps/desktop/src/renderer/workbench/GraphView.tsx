@@ -7,6 +7,7 @@ import {
   RefreshCw,
   Search,
   SlidersHorizontal,
+  X,
 } from "lucide-react";
 import {
   useCallback,
@@ -433,8 +434,20 @@ function GraphSearch(props: {
             }
           }
         }}
-        className="h-7 w-full rounded-md border border-line bg-bg pl-7 pr-2 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+        className="h-7 w-full rounded-md border border-line bg-bg pl-7 pr-7 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
       />
+      {props.value.length > 0 ? (
+        <button
+          type="button"
+          aria-label="Clear search"
+          title="Clear search"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => props.onChange("")}
+          className="absolute right-1 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink"
+        >
+          <X size={12} aria-hidden />
+        </button>
+      ) : null}
       {shown ? (
         <ul
           id="graph-search-results"
@@ -764,6 +777,7 @@ export function GraphView(props: {
     [settingsKey],
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   // The side panel is the open page's local graph; with no page open in the
@@ -932,6 +946,7 @@ export function GraphView(props: {
           <RefreshCw size={13} aria-hidden />
         </IconButton>
         <IconButton
+          ref={settingsTriggerRef}
           data-testid="graph-settings-toggle"
           aria-label="Graph settings"
           aria-pressed={settingsOpen}
@@ -988,6 +1003,7 @@ export function GraphView(props: {
               value={settings}
               counts={model.kindCounts}
               local={variant === "panel"}
+              triggerRef={settingsTriggerRef}
               onChange={setSettings}
               onClose={() => setSettingsOpen(false)}
             />

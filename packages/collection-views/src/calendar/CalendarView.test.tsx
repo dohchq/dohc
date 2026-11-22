@@ -251,7 +251,7 @@ describe("CalendarView", () => {
       />,
     );
     const marked = [...container.querySelectorAll(".rbc-event")].filter((entry) =>
-      entry.classList.contains("ring-ink"),
+      entry.classList.contains("ring-accent"),
     );
     expect(marked).toHaveLength(1);
     expect(marked[0]!.textContent).toBe("Book flights");

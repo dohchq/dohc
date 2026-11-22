@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, FileArchive, FileText, Lock } from "lucide-react";
+import { ChevronDown, ChevronUp, FileArchive, FileText, Lock, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import type {
@@ -29,7 +29,7 @@ import {
 import { formatChatTime } from "../time";
 import { parseTab } from "./workbenchState";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { IconButton, PrimaryButton, SecondaryButton } from "../ui/controls";
+import { EmptyState, IconButton, PrimaryButton, SecondaryButton } from "../ui/controls";
 
 function isEditableShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
@@ -437,9 +437,18 @@ export function EngineMomentDiffPage({
 
   if (!momentId || state.status === "error") {
     return (
-      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-danger">
-        Could not load this history diff.
-      </div>
+      <EmptyState
+        data-testid="engine-diff-error"
+        icon={TriangleAlert}
+        tone="danger"
+        title="Could not load this history diff."
+      >
+        {momentId ? (
+          <SecondaryButton data-testid="engine-diff-retry" onClick={readAgain}>
+            Try again
+          </SecondaryButton>
+        ) : null}
+      </EmptyState>
     );
   }
   if (state.status === "loading") {

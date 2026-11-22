@@ -1,5 +1,12 @@
-import { isEditableEditor } from "./pmHelpers";
-import { useLayoutEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
+import { isCodeBlock, isCodeMark, isEditableEditor } from "./pmHelpers";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  type Dispatch,
+  type RefObject,
+  type SetStateAction,
+} from "react";
 import {
   ChevronRight,
   Heading1,
@@ -28,6 +35,7 @@ import {
   MENU_ICON,
   MENU_ROW,
   MENU_ROW_TONE,
+  MENU_SECTION,
   MENU_TITLE,
   menuEnterFrom,
   movedPointer,
@@ -65,8 +73,11 @@ export type SlashCommandId =
   | "table"
   | "image";
 
+type SlashCommandSection = "Basic blocks" | "Lists" | "Blocks" | "Media & links";
+
 type SlashCommandItem = {
   id: SlashCommandId;
+  section: SlashCommandSection;
   label: string;
   hint: string;
   icon: LucideIcon;
@@ -111,14 +122,8 @@ export function slashCommandStatesEqual(
 
 const SLASH_COMMANDS: SlashCommandItem[] = [
   {
-    id: "wikilink",
-    label: "Link",
-    hint: "Link another page",
-    icon: Link,
-    aliases: ["link", "page", "wiki", "wikilink"],
-  },
-  {
     id: "heading-1",
+    section: "Basic blocks",
     label: "Heading 1",
     hint: "Large section heading",
     icon: Heading1,
@@ -126,6 +131,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: "heading-2",
+    section: "Basic blocks",
     label: "Heading 2",
     hint: "Medium section heading",
     icon: Heading2,
@@ -133,6 +139,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: "heading-3",
+    section: "Basic blocks",
     label: "Heading 3",
     hint: "Small section heading",
     icon: Heading3,
@@ -140,6 +147,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: "bulleted-list",
+    section: "Lists",
     label: "Bulleted list",
     hint: "Start a simple list",
     icon: List,
@@ -147,6 +155,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: "numbered-list",
+    section: "Lists",
     label: "Numbered list",
     hint: "Start an ordered list",
     icon: ListOrdered,
@@ -154,6 +163,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: "task-list",
+    section: "Lists",
     label: "Todo list",
     hint: "Track checkable work",
     icon: ListTodo,
@@ -161,6 +171,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: "quote",
+    section: "Blocks",
     label: "Quote",
     hint: "Call out a thought",
     icon: Quote,
@@ -168,6 +179,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: "callout",
+    section: "Blocks",
     label: "Callout",
     hint: "Highlighted info box",
     icon: Info,
@@ -175,6 +187,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: "toggle",
+    section: "Blocks",
     label: "Toggle",
     hint: "Collapsible callout",
     icon: ChevronRight,
@@ -182,57 +195,89 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: "code-block",
+    section: "Blocks",
     label: "Code block",
     hint: "Write code or raw text",
     icon: SquareCode,
     aliases: ["code", "fence", "pre"],
   },
   {
-    id: "mermaid",
-    label: "Mermaid diagram",
-    hint: "Flowchart, sequence & more",
-    icon: Workflow,
-    aliases: ["mermaid", "diagram", "flowchart", "chart", "graph"],
-  },
-  {
-    id: "math",
-    label: "Math block",
-    hint: "TeX equation with $$",
-    icon: Sigma,
-    aliases: ["math", "equation", "tex", "latex", "katex"],
-  },
-  {
-    id: "divider",
-    label: "Divider",
-    hint: "Separate sections",
-    icon: Minus,
-    aliases: ["divider", "line", "rule", "separator", "hr"],
-  },
-  {
     id: "table",
+    section: "Blocks",
     label: "Table",
     hint: "Insert a simple grid",
     icon: Table,
     aliases: ["table", "grid", "rows", "columns"],
   },
   {
+    id: "divider",
+    section: "Blocks",
+    label: "Divider",
+    hint: "Separate sections",
+    icon: Minus,
+    aliases: ["divider", "line", "rule", "separator", "hr"],
+  },
+  {
+    id: "math",
+    section: "Blocks",
+    label: "Math block",
+    hint: "TeX equation with $$",
+    icon: Sigma,
+    aliases: ["math", "equation", "tex", "latex", "katex"],
+  },
+  {
+    id: "mermaid",
+    section: "Blocks",
+    label: "Mermaid diagram",
+    hint: "Flowchart, sequence & more",
+    icon: Workflow,
+    aliases: ["mermaid", "diagram", "flowchart", "chart", "graph"],
+  },
+  {
     id: "image",
+    section: "Media & links",
     label: "Image",
     hint: "Upload a picture",
     icon: Image,
     aliases: ["image", "img", "picture", "photo", "upload"],
   },
+  {
+    id: "wikilink",
+    section: "Media & links",
+    label: "Link",
+    hint: "Link another page",
+    icon: Link,
+    aliases: ["link", "page", "wiki", "wikilink"],
+  },
 ];
 
 const slashCommandKey = new PluginKey<DismissedSlash | null>("dohc-slash-command");
 
+export function dismissSlashCommand(view: EditorView): void {
+  view.dispatch(view.state.tr.setMeta(slashCommandKey, true).setMeta("addToHistory", false));
+}
+
+function slashCommandScore(command: SlashCommandItem, normalized: string): number {
+  const label = command.label.toLowerCase();
+  if (label === normalized || command.aliases.some((alias) => alias === normalized)) return 0;
+  if (label.startsWith(normalized)) return 1;
+  if (command.aliases.some((alias) => alias.startsWith(normalized))) return 2;
+  if (label.includes(normalized)) return 3;
+  if (command.aliases.some((alias) => alias.includes(normalized))) return 4;
+  return -1;
+}
+
 export function filterSlashCommands(query: string): SlashCommandItem[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return SLASH_COMMANDS;
-  return SLASH_COMMANDS.filter((command) => {
-    if (command.label.toLowerCase().includes(normalized)) return true;
-    return command.aliases.some((alias) => alias.includes(normalized));
-  });
+  return SLASH_COMMANDS.map((command, index) => ({
+    command,
+    index,
+    score: slashCommandScore(command, normalized),
+  }))
+    .filter((entry) => entry.score >= 0)
+    .sort((left, right) => left.score - right.score || left.index - right.index)
+    .map((entry) => entry.command);
 }
 
 export function findSlashCommandMatch(
@@ -251,6 +296,8 @@ function findSlashTrigger(state: EditorState): { from: number; query: string } |
   if (!selection.empty) return null;
   const $from = selection.$from;
   if (!$from.parent.isTextblock) return null;
+  if (isCodeBlock($from.parent)) return null;
+  if ((state.storedMarks ?? $from.marks()).some(isCodeMark)) return null;
   // Each leaf counts as one character, its size, so offsets are positions.
   // A hard break starts a line, where a "/" opens the menu.
   const match = findSlashCommandMatch(
@@ -258,7 +305,10 @@ function findSlashTrigger(state: EditorState): { from: number; query: string } |
       leaf.type.name === "hardBreak" ? "\n" : "￼",
     ),
   );
-  return match ? { from: $from.start() + match.slashOffset, query: match.query } : null;
+  if (!match) return null;
+  const from = $from.start() + match.slashOffset;
+  if (state.doc.nodeAt(from)?.marks.some(isCodeMark)) return null;
+  return { from, query: match.query };
 }
 
 // The "/" whose menu Escape closed, with a Y.js anchor on it when the editor
@@ -439,10 +489,12 @@ export function SlashCommandMenu({
   state,
   onSelect,
   onHover,
+  onDismiss,
 }: {
   state: SlashCommandState;
   onSelect: (id: SlashCommandId) => void;
   onHover: (index: number) => void;
+  onDismiss?: () => void;
 }) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -453,8 +505,49 @@ export function SlashCommandMenu({
     if (list && selected >= 0) revealMenuRow(list, optionRefs.current[selected]);
   }, [selected, query]);
 
+  useEffect(() => {
+    if (!state.open || !onDismiss) return;
+    function onPointerDown(event: MouseEvent) {
+      if (listRef.current?.contains(event.target as Node)) return;
+      onDismiss?.();
+    }
+    window.addEventListener("mousedown", onPointerDown, true);
+    return () => window.removeEventListener("mousedown", onPointerDown, true);
+  }, [state.open, onDismiss]);
+
   if (!state.open) return null;
   const items = filterSlashCommands(state.query);
+  const showSections = state.query.trim() === "";
+
+  const renderOption = (item: SlashCommandItem, index: number) => {
+    const Icon = item.icon;
+    return (
+      <button
+        key={item.id}
+        ref={(element) => {
+          optionRefs.current[index] = element;
+        }}
+        type="button"
+        role="option"
+        tabIndex={-1}
+        aria-selected={index === state.selected}
+        data-active={index === state.selected || undefined}
+        className={`dohc-slash-menu__item ${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} data-active:text-ink`}
+        // Only a pointer that moves picks the active option, so a menu
+        // that opens or scrolls under a still pointer keeps the keys'.
+        onMouseMove={(event) => {
+          if (movedPointer(event) && index !== state.selected) onHover(index);
+        }}
+        onClick={() => onSelect(item.id)}
+      >
+        <span className={`${MENU_ICON} text-subtle`}>
+          <Icon size={14} aria-hidden />
+        </span>
+        <span className={MENU_TITLE}>{item.label}</span>
+        <span className={MENU_DETAIL}>{item.hint}</span>
+      </button>
+    );
+  };
 
   return (
     <div
@@ -475,40 +568,48 @@ export function SlashCommandMenu({
       onMouseDown={(event) => event.preventDefault()}
     >
       {items.length ? (
-        items.map((item, index) => {
-          const Icon = item.icon;
-          return (
-            <button
-              key={item.id}
-              ref={(element) => {
-                optionRefs.current[index] = element;
-              }}
-              type="button"
-              role="option"
-              tabIndex={-1}
-              aria-selected={index === state.selected}
-              data-active={index === state.selected || undefined}
-              className={`dohc-slash-menu__item ${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} data-active:text-ink`}
-              // Only a pointer that moves picks the active option, so a menu
-              // that opens or scrolls under a still pointer keeps the keys'.
-              onMouseMove={(event) => {
-                if (movedPointer(event) && index !== state.selected) onHover(index);
-              }}
-              onClick={() => onSelect(item.id)}
-            >
-              <span className={`${MENU_ICON} text-subtle`}>
-                <Icon size={14} aria-hidden />
-              </span>
-              <span className={MENU_TITLE}>{item.label}</span>
-              <span className={MENU_DETAIL}>{item.hint}</span>
-            </button>
-          );
-        })
+        showSections ? (
+          items.map((item, index) => {
+            const showHeader = index === 0 || items[index - 1]!.section !== item.section;
+            return (
+              <div key={item.id} className="contents">
+                {showHeader ? (
+                  <div className={`${MENU_SECTION}${index > 0 ? " mt-1" : ""}`}>{item.section}</div>
+                ) : null}
+                {renderOption(item, index)}
+              </div>
+            );
+          })
+        ) : (
+          items.map((item, index) => renderOption(item, index))
+        )
       ) : (
         <div className={MENU_EMPTY}>No commands</div>
       )}
     </div>
   );
+}
+
+function focusInsertedCalloutTitle(editor: Editor, near: number): void {
+  const focus = () => {
+    if (editor.isDestroyed) return false;
+    let target: number | null = null;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.type.name !== "callout") return;
+      if (node.attrs.fold !== "-" || String(node.attrs.title ?? "") !== "") return;
+      if (target === null || Math.abs(pos - near) < Math.abs(target - near)) {
+        target = pos;
+      }
+    });
+    if (target === null) return false;
+    const dom = editor.view.nodeDOM(target);
+    if (!(dom instanceof HTMLElement)) return false;
+    const input = dom.querySelector<HTMLInputElement>(".dohc-callout-title-input");
+    if (!input) return false;
+    input.focus();
+    return true;
+  };
+  if (!focus()) requestAnimationFrame(() => void focus());
 }
 
 // Select the empty `mathBlock` closest to the insertion point so its NodeView
@@ -612,6 +713,7 @@ export function runSlashCommand(
           content: [{ type: "paragraph" }],
         })
         .run();
+      focusInsertedCalloutTitle(editor, state.from);
       return;
     case "code-block":
       chain.setCodeBlock({ language: "" }).run();

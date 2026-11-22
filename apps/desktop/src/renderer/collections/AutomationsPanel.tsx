@@ -15,7 +15,16 @@ import {
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { nextDue } from "@dohc/workspace-contracts/automation-schedule";
 import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import type {
   ListCollectionAutomationsResult,
   ScheduleHostResult,
@@ -135,21 +144,44 @@ export function automationsFileMade(file: ListCollectionAutomationsResult | null
   return (file?.status === "shared" ? file.definitions.file.status : file?.status) !== "missing";
 }
 
+const AUTOMATIONS_PANEL_WIDTH = 320;
+const AUTOMATIONS_VIEW_MIN_WIDTH = 360;
+
+function useNarrowPanelOverlay(panel: RefObject<HTMLElement | null>): boolean {
+  const [room, setRoom] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const row = panel.current?.parentElement;
+    if (!row) return;
+    const measure = () => setRoom(row.clientWidth > 0 ? row.clientWidth : null);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(row);
+    return () => observer.disconnect();
+  }, [panel]);
+  return room !== null && room < AUTOMATIONS_PANEL_WIDTH + AUTOMATIONS_VIEW_MIN_WIDTH;
+}
+
 /**
  * The panel in place of the list when dohc has no automations file to show
  * for this Collection, with what says why and any way forward. Without
  * them it is still finding the file.
  */
 export function AutomationsNote(props: { children?: ReactNode; onClose: () => void }) {
+  const panel = useRef<HTMLElement | null>(null);
+  const over = useNarrowPanelOverlay(panel);
   return (
     <aside
+      ref={panel}
       data-testid="collection-automations-panel"
       aria-label="Automations"
       aria-busy={props.children === undefined}
-      className="flex w-80 shrink-0 flex-col border-l border-line bg-panel"
+      className={`flex w-80 shrink-0 flex-col border-l border-line bg-panel ${over ? "dohc-popover absolute inset-y-0 right-0 z-20" : "relative"}`}
     >
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-line px-2">
-        <span className="flex-1" />
+        <span className="min-w-0 flex-1 truncate px-1 text-sm font-semibold text-ink">
+          Automations
+        </span>
         <IconButton
           aria-label="Close automations"
           title="Close automations"
@@ -633,6 +665,8 @@ function OwnerAutomationsPanel(props: {
   onNotice: (message: string, undo?: () => void) => void;
 }) {
   const { workspaceId, collectionPath, table, onError, onNotice } = props;
+  const panel = useRef<HTMLElement | null>(null);
+  const over = useNarrowPanelOverlay(panel);
   const { file, holdsUnreadable, version, reload: load } = props.automations;
   const nextRuns = useNextRuns(file);
   const fileRef = useRef(file);
@@ -1131,7 +1165,9 @@ function OwnerAutomationsPanel(props: {
       </>
     ) : (
       <>
-        <span className="flex-1" />
+        <span className="min-w-0 flex-1 truncate px-1 text-sm font-semibold text-ink">
+          Automations
+        </span>
         {/* An empty list offers New automation in its own place. */}
         {editable !== null && shown.length > 0 && count < MAX_AUTOMATIONS ? (
           <IconButton aria-label="New automation" title="New automation" onClick={startNew}>
@@ -1143,9 +1179,10 @@ function OwnerAutomationsPanel(props: {
 
   return (
     <aside
+      ref={panel}
       data-testid="collection-automations-panel"
       aria-label="Automations"
-      className="flex w-80 shrink-0 flex-col border-l border-line bg-panel"
+      className={`flex w-80 shrink-0 flex-col border-l border-line bg-panel ${over ? "dohc-popover absolute inset-y-0 right-0 z-20" : "relative"}`}
     >
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-line px-2">
         {header}

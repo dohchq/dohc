@@ -1,11 +1,12 @@
 import {
   AlertTriangle,
-  Box,
+  ArrowLeft,
+  ArrowRight,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
   FolderCode,
   Globe2,
-  Hammer,
-  Play,
   RefreshCcw,
   Settings2,
   Share2,
@@ -14,9 +15,10 @@ import {
 } from "lucide-react";
 import { needsBuiltArtifact } from "@dohc/workspace-core";
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
-import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
+import { EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
+import { CopyButton } from "./ui/CopyButton";
+import { Menu, type MenuEntry } from "./ui/Menu";
 import { SkeletonRows } from "./ui/SkeletonRows";
-import { useDismiss } from "./ui/useDismiss";
 import {
   previewRunsAppCode,
   type SitePackageInfo,
@@ -153,8 +155,8 @@ export function SitePreviewPage(props: {
   const [previewLogs, setPreviewLogs] = useState<StartSitePreviewResult["logs"]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
-  const optionsRef = useRef<HTMLDetailsElement | null>(null);
-  const optionsTriggerRef = useRef<HTMLElement | null>(null);
+  const [frameLoaded, setFrameLoaded] = useState(false);
+  const lastModeRef = useRef<SitePreviewMode | null>(null);
   const [runningMode, setRunningMode] = useState<SitePreviewMode | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   // Why the preview isn't currently running, when it isn't: the dev server
@@ -290,12 +292,9 @@ export function SitePreviewPage(props: {
   );
   const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
 
-  useDismiss({
-    open: optionsOpen,
-    container: optionsRef,
-    trigger: optionsTriggerRef,
-    onClose: () => setOptionsOpen(false),
-  });
+  useEffect(() => {
+    setFrameLoaded(false);
+  }, [preview?.url]);
 
   const showPreview = useCallback((result: StartSitePreviewResult | null) => {
     logsRequestRef.current += 1;
@@ -307,6 +306,7 @@ export function SitePreviewPage(props: {
       setIdleReason("stopped");
       return;
     }
+    lastModeRef.current = result.mode;
     setPreviewLogs(result.logs);
     if (result.exited) {
       setPreview(null);
@@ -357,6 +357,7 @@ export function SitePreviewPage(props: {
       logsRequestRef.current += 1;
       setLogsOpen(false);
       setPreviewLogs([]);
+      lastModeRef.current = mode;
       setRunningMode(mode);
       setActionError(null);
       setIdleReason(null);
@@ -670,6 +671,23 @@ export function SitePreviewPage(props: {
     if (title !== undefined) onTitle?.(title);
   }, [onTitle, title]);
 
+  const restartMode =
+    (lastModeRef.current && modes.includes(lastModeRef.current) ? lastModeRef.current : null) ??
+    (site && load.status === "ready"
+      ? preferredMode(site, modes, props.workspaceId, load.defaultPreviewMode, props.sharedView)
+      : null) ??
+    modes[0] ??
+    null;
+
+  const chooseMode = (mode: SitePreviewMode) => {
+    if (trust.trusted !== true && !props.sharedView && site && previewRunsAppCode(site, mode)) {
+      setBlocked({ mode, share: false });
+      return;
+    }
+    setBlocked(null);
+    void start(mode, true);
+  };
+
   return (
     <div
       data-testid="site-preview-page"
@@ -686,17 +704,39 @@ export function SitePreviewPage(props: {
     >
       <header className="flex min-h-10 shrink-0 items-center gap-2 border-b border-line px-2 py-1.5">
         {needsPublication ? (
-          <IconButton
-            ref={appView.toolbarStart}
-            data-testid="app-view-reload"
-            aria-label={appView.loading ? "Stop loading" : "Reload app"}
-            title={appView.loading ? "Stop loading" : "Reload app"}
-            disabled={!appView.canReload}
-            onClick={appView.loading ? appView.stop : appView.reload}
-            className="size-7"
-          >
-            {appView.loading ? <X size={13} aria-hidden /> : <RefreshCcw size={13} aria-hidden />}
-          </IconButton>
+          <div className="flex shrink-0 items-center gap-0.5">
+            <IconButton
+              data-testid="app-view-back"
+              aria-label="Back"
+              title="Back"
+              disabled={!appView.canGoBack}
+              onClick={() => appView.navigate("back")}
+              className="size-7"
+            >
+              <ArrowLeft size={13} aria-hidden />
+            </IconButton>
+            <IconButton
+              data-testid="app-view-forward"
+              aria-label="Forward"
+              title="Forward"
+              disabled={!appView.canGoForward}
+              onClick={() => appView.navigate("forward")}
+              className="size-7"
+            >
+              <ArrowRight size={13} aria-hidden />
+            </IconButton>
+            <IconButton
+              ref={appView.toolbarStart}
+              data-testid="app-view-reload"
+              aria-label={appView.loading ? "Stop loading" : "Reload app"}
+              title={appView.loading ? "Stop loading" : "Reload app"}
+              disabled={!appView.canReload}
+              onClick={appView.loading ? appView.stop : appView.reload}
+              className="size-7"
+            >
+              {appView.loading ? <X size={13} aria-hidden /> : <RefreshCcw size={13} aria-hidden />}
+            </IconButton>
+          </div>
         ) : (
           <IconButton
             data-testid="site-preview-reload"
@@ -800,58 +840,35 @@ export function SitePreviewPage(props: {
             </span>
           ) : null}
           {modes.length > 0 ? (
-            <details
-              ref={optionsRef}
+            <Menu
+              label="Preview options"
               open={optionsOpen}
-              onToggle={(event) => setOptionsOpen(event.currentTarget.open)}
-              className="group relative"
-            >
-              <summary
-                ref={optionsTriggerRef}
-                data-testid="site-preview-options"
-                aria-label="Preview options"
-                title="Preview options"
-                className="grid size-7 cursor-pointer list-none place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink [&::-webkit-details-marker]:hidden"
-              >
-                <Settings2 size={13} aria-hidden />
-              </summary>
-              <div className="absolute right-0 top-8 z-20 w-40 rounded-lg border border-line bg-panel p-1 shadow-lg">
-                <div className="px-2 py-1 text-[12px] text-subtle">Run preview as</div>
-                {modes.map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    data-testid={`site-preview-${mode}`}
-                    disabled={runningMode !== null}
-                    onClick={() => {
-                      setOptionsOpen(false);
-                      optionsTriggerRef.current?.focus();
-                      if (
-                        trust.trusted !== true &&
-                        !props.sharedView &&
-                        site &&
-                        previewRunsAppCode(site, mode)
-                      ) {
-                        setBlocked({ mode, share: false });
-                        return;
-                      }
-                      setBlocked(null);
-                      void start(mode, true);
-                    }}
-                    className="dohc-focus-row flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
-                  >
-                    {mode === "build" ? (
-                      <Hammer size={12} aria-hidden />
-                    ) : mode === "dev" ? (
-                      <Play size={12} aria-hidden />
-                    ) : (
-                      <Box size={12} aria-hidden />
-                    )}
-                    {runningMode === mode ? "Starting" : modeLabel(mode)}
-                  </button>
-                ))}
-              </div>
-            </details>
+              onOpenChange={setOptionsOpen}
+              align="end"
+              width={176}
+              items={[
+                { section: "Run preview as" },
+                ...modes.map((mode): MenuEntry => ({
+                  id: mode,
+                  label: runningMode === mode ? "Starting" : modeLabel(mode),
+                  checked: preview?.mode === mode,
+                  disabled: runningMode !== null,
+                  testId: `site-preview-${mode}`,
+                  onSelect: () => chooseMode(mode),
+                })),
+              ]}
+              trigger={(trigger) => (
+                <IconButton
+                  {...trigger}
+                  data-testid="site-preview-options"
+                  aria-label="Preview options"
+                  title="Preview options"
+                  className="size-7"
+                >
+                  <Settings2 size={13} aria-hidden />
+                </IconButton>
+              )}
+            />
           ) : null}
           {preview ? (
             <IconButton
@@ -918,95 +935,162 @@ export function SitePreviewPage(props: {
             </div>
           ) : null}
 
-          {preview && previewUrlAllowed ? (
-            <div className="flex min-h-0 flex-1 flex-col">
-              {/* The frame can run normal site scripts but has no dohc bridge.
-                  Its source is restricted to a dohc-controlled loopback server,
-                  and the sandbox withholds popups, modals, and top navigation. */}
-              <iframe
-                key={preview.url}
-                data-testid="site-preview-frame"
-                title={site.title}
-                src={preview.url}
-                // oxlint-disable-next-line react/iframe-missing-sandbox -- deliberate; see the comment above this frame
-                sandbox="allow-forms allow-same-origin allow-scripts"
-                referrerPolicy="no-referrer"
-                style={{ colorScheme: "light", backgroundColor: "Canvas" }}
-                className="min-h-0 flex-1 border-0"
-              />
-              {preview.mode === "dev" || previewLogs.length > 0 ? (
-                <LogsDetails
-                  logs={previewLogs}
-                  open={logsOpen}
-                  onToggle={setLogsOpen}
-                  className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[12px]"
-                />
-              ) : null}
-            </div>
-          ) : null}
-
-          {needsPublication ? (
-            <AppViewBody view={appView} onReview={() => setReviewOpen(true)} />
-          ) : !preview && blocked && !runningMode ? (
-            <RestrictedModeState
-              variant="page"
-              asking={trust.asking}
-              onTrust={() => void trustWorkspace()}
-            />
-          ) : !preview ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-              <Globe2 size={24} aria-hidden className="text-subtle" />
-              <div className="max-w-sm text-sm text-muted">
-                {modes.length > 0
-                  ? idleReason === "exited"
-                    ? "Dev server exited. Use Preview options to run it again."
-                    : idleReason === "stopped"
-                      ? "Preview stopped. Use Preview options to run it again."
-                      : runningMode
-                        ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
-                        : // The start waits for main's answer about trust.
-                          !props.sharedView && trust.trusted === null && !trust.readFailed
-                          ? null
-                          : "This app did not start automatically. Choose another mode in Preview options."
-                  : "This app has no previewable entry, dev script, or build output yet."}
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            {runningMode !== null || (preview && previewUrlAllowed && !frameLoaded) ? (
+              <div
+                data-testid="site-preview-loading"
+                role="progressbar"
+                aria-label="Loading preview"
+                className="dohc-reveal-if-slow pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5 overflow-hidden"
+              >
+                <div className="dohc-progress-slide h-full bg-accent" />
               </div>
-              {idleReason === "exited" && previewLogs.length > 0 ? (
-                <LogsDetails
-                  logs={previewLogs}
-                  open={logsOpen}
-                  onToggle={setLogsOpen}
-                  className="max-h-36 w-full max-w-3xl overflow-auto border-t border-line bg-panel px-3 py-2 text-left text-[12px]"
+            ) : null}
+
+            {preview && previewUrlAllowed ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                {/* The frame can run normal site scripts but has no dohc bridge.
+                    Its source is restricted to a dohc-controlled loopback server,
+                    and the sandbox withholds popups, modals, and top navigation. */}
+                <iframe
+                  key={preview.url}
+                  data-testid="site-preview-frame"
+                  title={site.title}
+                  src={preview.url}
+                  onLoad={() => setFrameLoaded(true)}
+                  // oxlint-disable-next-line react/iframe-missing-sandbox -- deliberate; see the comment above this frame
+                  sandbox="allow-forms allow-same-origin allow-scripts"
+                  referrerPolicy="no-referrer"
+                  style={{ colorScheme: "light", backgroundColor: "Canvas" }}
+                  className="min-h-0 flex-1 border-0"
                 />
-              ) : null}
-            </div>
-          ) : null}
+                {preview.mode === "dev" || previewLogs.length > 0 ? (
+                  <LogsDetails
+                    logs={previewLogs}
+                    open={logsOpen}
+                    onToggle={setLogsOpen}
+                    className="shrink-0"
+                  />
+                ) : null}
+              </div>
+            ) : null}
+
+            {needsPublication ? (
+              <AppViewBody view={appView} onReview={() => setReviewOpen(true)} />
+            ) : !preview && blocked && !runningMode ? (
+              <RestrictedModeState
+                variant="page"
+                asking={trust.asking}
+                onTrust={() => void trustWorkspace()}
+              />
+            ) : !preview ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <EmptyState
+                  icon={Globe2}
+                  title={
+                    modes.length > 0
+                      ? idleReason === "exited"
+                        ? "Dev server exited."
+                        : idleReason === "stopped"
+                          ? "Preview stopped."
+                          : runningMode
+                            ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
+                            : // The start waits for main's answer about trust.
+                              !props.sharedView && trust.trusted === null && !trust.readFailed
+                              ? ""
+                              : "This app did not start automatically."
+                      : "This app has no previewable entry, dev script, or build output yet."
+                  }
+                >
+                  {restartMode &&
+                  !runningMode &&
+                  (props.sharedView || trust.trusted !== null || trust.readFailed) ? (
+                    <PrimaryButton
+                      data-testid="site-preview-restart"
+                      onClick={() => chooseMode(restartMode)}
+                    >
+                      {`Run ${modeLabel(restartMode).toLowerCase()} preview`}
+                    </PrimaryButton>
+                  ) : null}
+                </EmptyState>
+                {idleReason === "exited" && previewLogs.length > 0 ? (
+                  <LogsDetails
+                    logs={previewLogs}
+                    open={logsOpen}
+                    onToggle={setLogsOpen}
+                    className="shrink-0"
+                  />
+                ) : null}
+              </div>
+            ) : null}
+          </div>
         </>
       ) : null}
     </div>
   );
 }
 
-// The two places this page shows preview logs (beside a running dev-mode
-// frame, and under the idle empty state after the dev server exits) render
-// the identical collapsible <details> — only its placement in the
-// surrounding layout differs, via className.
 function LogsDetails(props: {
   logs: StartSitePreviewResult["logs"];
   open: boolean;
   onToggle: (open: boolean) => void;
   className: string;
 }) {
+  const preRef = useRef<HTMLPreElement | null>(null);
+  const pinnedToBottomRef = useRef(true);
+
+  useEffect(() => {
+    const node = preRef.current;
+    if (!props.open || !node || !pinnedToBottomRef.current) return;
+    node.scrollTop = node.scrollHeight;
+  }, [props.logs, props.open]);
+
   return (
-    <details
-      open={props.open}
-      onToggle={(event) => props.onToggle(event.currentTarget.open)}
-      className={props.className}
+    <div
+      data-testid="site-preview-logs"
+      className={`border-t border-line bg-panel ${props.className}`}
     >
-      <summary className="cursor-pointer text-muted">Logs</summary>
-      <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
-        {props.logs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
+      <div className="flex h-8 items-center justify-between gap-2 px-3">
+        <button
+          type="button"
+          aria-expanded={props.open}
+          onClick={() => props.onToggle(!props.open)}
+          className="inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-[12px] font-medium text-muted transition-colors hover:bg-hover hover:text-ink"
+        >
+          {props.open ? (
+            <ChevronDown size={13} aria-hidden />
+          ) : (
+            <ChevronRight size={13} aria-hidden />
+          )}
+          <span>Logs</span>
+          <Pill>{props.logs.length}</Pill>
+        </button>
+        <CopyButton
+          iconOnly
+          label="Copy logs"
+          disabled={props.logs.length === 0}
+          getText={() => props.logs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
+        />
+      </div>
+      <pre
+        ref={preRef}
+        hidden={!props.open}
+        onScroll={(event) => {
+          const node = event.currentTarget;
+          pinnedToBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 24;
+        }}
+        className="m-0 max-h-36 overflow-auto border-t border-line bg-bg px-3 py-2 font-mono text-[12px] leading-5 whitespace-pre-wrap"
+      >
+        {props.logs.map((log, index) => (
+          <span
+            key={`${log.at}:${index}`}
+            className={`block ${log.stream === "stderr" ? "text-danger" : "text-subtle"}`}
+          >
+            {`[${log.stream}] ${log.text}`}
+          </span>
+        ))}
       </pre>
-    </details>
+    </div>
   );
 }
 

@@ -19,6 +19,7 @@ import {
   type NamedDocumentSession,
 } from "./NamedDocumentEditor";
 import { DiscardDraft } from "./DiscardDraft";
+import { DohcMark, Icon, fileIcon } from "./icons";
 import { NamedSignIn, signInErrorMessage } from "./NamedSignIn";
 
 type Account = { id: string; name: string };
@@ -93,6 +94,20 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
       currentSelection.current = null;
     };
   }, [grantId]);
+  useEffect(() => {
+    if (selection) {
+      const name =
+        selection.path
+          .split("/")
+          .at(-1)
+          ?.replace(/\.(md|markdown)$/i, "") || selection.path;
+      document.title = `${name} · dohc`;
+    } else if (files?.subjectName) {
+      document.title = `${files.subjectName} · dohc`;
+    } else {
+      document.title = "Shared with dohc";
+    }
+  }, [selection, files?.subjectName]);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       const state = currentSelection.current?.session.state();
@@ -175,7 +190,10 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
     <div className="viewer named-recipient">
       <header>
         <div>
-          <p className="eyebrow">dohc</p>
+          <div className="named-brand">
+            <DohcMark size={18} />
+            <p className="eyebrow">dohc</p>
+          </div>
           <h1>{files?.subjectName ?? "Shared files"}</h1>
           {files && (
             <p>
@@ -210,7 +228,8 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
                 aria-current={selection?.objectId === file.objectId ? "page" : undefined}
                 onClick={() => open(file.objectId, file.path)}
               >
-                {file.path}
+                <Icon name={fileIcon(file.path)} size={15} />
+                <span>{file.path}</span>
               </button>
             ))}
             {files && !files.files.length && (

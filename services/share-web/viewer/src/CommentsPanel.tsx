@@ -259,16 +259,41 @@ function exactIntent(
   };
 }
 
-function CommentRow({ message }: { message: PublicDiscussionMessage }) {
+function formatCommentTime(createdAtMs: number, nowMs: number): string {
+  const diffMs = nowMs - createdAtMs;
+  if (diffMs >= 0 && diffMs < 60_000) return "just now";
+  if (diffMs >= 0 && diffMs < 3_600_000) return `${Math.floor(diffMs / 60_000)}m ago`;
+  if (diffMs >= 0 && diffMs < 86_400_000) return `${Math.floor(diffMs / 3_600_000)}h ago`;
+  if (diffMs >= 0 && diffMs < 7 * 86_400_000) return `${Math.floor(diffMs / 86_400_000)}d ago`;
+  const date = new Date(createdAtMs);
+  const sameYear = date.getFullYear() === new Date(nowMs).getFullYear();
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  }).format(date);
+}
+
+function CommentRow({ message, nowMs }: { message: PublicDiscussionMessage; nowMs: number }) {
   if (message.deleted) {
     return <li className="comment-row comment-deleted">Comment deleted by the owner</li>;
   }
+  const timestamp = new Date(message.createdAtMs);
   return (
     <li className="comment-row">
-      <p className="comment-author">
-        <span>{message.author.displayName}</span>
-        {message.author.kind === "link" ? <span className="unverified">Unverified</span> : null}
-      </p>
+      <div className="comment-header">
+        <p className="comment-author">
+          <span>{message.author.displayName}</span>
+          {message.author.kind === "link" ? <span className="unverified">Unverified</span> : null}
+        </p>
+        <time
+          className="comment-time"
+          dateTime={timestamp.toISOString()}
+          title={timestamp.toLocaleString()}
+        >
+          {formatCommentTime(message.createdAtMs, nowMs)}
+        </time>
+      </div>
       <p className="comment-body">{message.body}</p>
     </li>
   );
@@ -749,7 +774,7 @@ export function CommentsPanel(props: {
       ) : (
         <ol className="comment-list">
           {messages?.map((message) => (
-            <CommentRow key={message.messageId} message={message} />
+            <CommentRow key={message.messageId} message={message} nowMs={Date.now()} />
           ))}
         </ol>
       )}
@@ -799,6 +824,12 @@ export function CommentsPanel(props: {
             value={body}
             disabled={disabled}
             aria-describedby={SUBMIT_STATUS_ID}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
             onChange={(event) =>
               editDraft("body", event.currentTarget.value.replaceAll("\u0000", ""))
             }

@@ -135,6 +135,114 @@ Plain paragraph text.
     expect(MARKDOWN_SANITIZE_CONFIG.ALLOWED_TAGS).toContain("#text");
     expect(MARKDOWN_SANITIZE_CONFIG.KEEP_CONTENT).toBe(false);
   });
+
+  it("renders GFM task lists without input elements", () => {
+    const html = renderSafeMarkdown("- [ ] Open item\n- [x] Done item\n");
+    const template = document.createElement("template");
+    template.innerHTML = html;
+
+    expect(template.content.querySelector("input")).toBeNull();
+    expect(template.content.querySelector("ul.task-list")).not.toBeNull();
+    const items = template.content.querySelectorAll("li.task-item");
+    expect(items).toHaveLength(2);
+    expect(items[0]!.classList.contains("task-item-checked")).toBe(false);
+    expect(items[0]!.querySelector("span.task-check")).not.toBeNull();
+    expect(items[0]!.querySelector("span.task-check-checked")).toBeNull();
+    expect(items[1]!.classList.contains("task-item-checked")).toBe(true);
+    expect(items[1]!.querySelector("span.task-check.task-check-checked")).not.toBeNull();
+  });
+
+  it("renders highlights, Obsidian callouts, and wikilinks", () => {
+    const html = renderSafeMarkdown(
+      [
+        "A ==highlighted== phrase and literal a == b.",
+        "",
+        "> [!warning] Watch out",
+        "> Check the details.",
+        "",
+        "> [!custom]",
+        "> Unknown kind falls back to note.",
+        "",
+        "See [[docs/plan|The Plan]] and [[Missing Page]].",
+      ].join("\n"),
+      undefined,
+      (href) => (href === "docs/plan.md" ? "docs/plan.md" : null),
+    );
+    const template = document.createElement("template");
+    template.innerHTML = html;
+
+    expect(template.content.querySelector("mark")?.textContent).toBe("highlighted");
+    expect(html).toContain("a == b");
+
+    const callouts = template.content.querySelectorAll("div.dohc-callout");
+    expect(callouts).toHaveLength(2);
+    expect(callouts[0]!.classList.contains("callout-warning")).toBe(true);
+    expect(callouts[0]!.querySelector(".callout-title")?.textContent).toBe("Watch out");
+    expect(callouts[0]!.querySelector(".callout-body")?.textContent).toContain(
+      "Check the details.",
+    );
+    expect(callouts[1]!.classList.contains("callout-note")).toBe(true);
+    expect(callouts[1]!.querySelector(".callout-title")?.textContent).toBe("Custom");
+
+    const sharedLink = template.content.querySelector('a[href="/docs/plan.md"]');
+    expect(sharedLink?.textContent).toBe("The Plan");
+    expect(template.content.querySelector("span.dohc-wikilink-pill")?.textContent).toBe(
+      "Missing Page",
+    );
+  });
+
+  it("adds deterministic unique heading slugs, table wrappers, and safe external link attributes", () => {
+    const html = renderSafeMarkdown(
+      [
+        "# Getting Started",
+        "",
+        "## Getting Started",
+        "",
+        "| Name | Value |",
+        "| --- | --- |",
+        "| A | 1 |",
+        "",
+        "[External](https://example.com/docs)",
+        "",
+        "[Email](mailto:ada@example.com)",
+      ].join("\n"),
+    );
+    const template = document.createElement("template");
+    template.innerHTML = html;
+
+    expect(template.content.querySelector("h1")?.getAttribute("id")).toBe("h-getting-started");
+    expect(template.content.querySelector("h2")?.getAttribute("id")).toBe("h-getting-started-2");
+    expect(template.content.querySelector("div.table-wrap > table")).not.toBeNull();
+
+    const external = template.content.querySelector('a[href="https://example.com/docs"]');
+    expect(external?.getAttribute("target")).toBe("_blank");
+    expect(external?.getAttribute("rel")).toBe("noopener noreferrer");
+
+    const mailto = template.content.querySelector('a[href="mailto:ada@example.com"]');
+    expect(mailto?.getAttribute("target")).toBeNull();
+  });
+
+  it("strips hostile class, id, target, and rel attributes through DOMPurify", async () => {
+    const DOMPurify = (await import("dompurify")).default;
+    const dirty =
+      '<div class="evil task-item" id="clobber"><a href="javascript:alert(1)" target="_blank" rel="opener">x</a><a href="/local" target="_blank" rel="evil">y</a><h2 id="bad-id">t</h2><h2 id="h-safe-id">ok</h2></div>';
+    const clean = String(DOMPurify.sanitize(dirty, MARKDOWN_SANITIZE_CONFIG));
+    const template = document.createElement("template");
+    template.innerHTML = clean;
+
+    const div = template.content.querySelector("div")!;
+    expect(div.getAttribute("class")).toBe("task-item");
+    expect(div.getAttribute("id")).toBeNull();
+    const links = template.content.querySelectorAll("a");
+    expect(links[0]!.getAttribute("href")).toBeNull();
+    expect(links[0]!.getAttribute("target")).toBeNull();
+    expect(links[0]!.getAttribute("rel")).toBeNull();
+    expect(links[1]!.getAttribute("target")).toBeNull();
+    expect(links[1]!.getAttribute("rel")).toBeNull();
+    const headings = template.content.querySelectorAll("h2");
+    expect(headings[0]!.getAttribute("id")).toBeNull();
+    expect(headings[1]!.getAttribute("id")).toBe("h-safe-id");
+  });
 });
 
 describe("MarkdownContent link navigation", () => {
@@ -201,6 +309,26 @@ describe("MarkdownContent link navigation", () => {
 
     expect(followedUnresolvedLink).toBe(true);
     expect(navigatedPaths).toEqual(["docs/next.md"]);
+  });
+
+  it("scrolls to matching heading anchors on click", async () => {
+    await act(() => {
+      root?.render(
+        createElement(MarkdownContent, {
+          markdown: "[Jump](#getting-started)\n\n## Getting Started",
+        }),
+      );
+    });
+    const heading = container.querySelector("h2")!;
+    const scrollIntoView = vi.fn();
+    heading.scrollIntoView = scrollIntoView;
+    const link = container.querySelector('a[href="#getting-started"]')!;
+    let allowed = true;
+    act(() => {
+      allowed = link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(allowed).toBe(false);
+    expect(scrollIntoView).toHaveBeenCalledOnce();
   });
 });
 

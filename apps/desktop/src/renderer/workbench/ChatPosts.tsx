@@ -820,7 +820,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ) : null}
             {comment.work ? (
               <div className="mt-2">
-                <WorkStatus testIdPrefix="chats-comment" work={comment.work} />
+                <WorkStatus testIdPrefix="chats-comment" work={comment.work} className="mt-0" />
               </div>
             ) : null}
             {commentDecision ? (
@@ -907,7 +907,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           <ol
             data-testid="chats-replies"
             aria-label={`Replies to ${chatAuthorLabel(comment)}`}
-            className={`relative mt-3 list-none p-0 ${depth < 3 ? "" : "-ml-[38px]"}`}
+            className={`relative mt-3 list-none p-0 ${
+              depth < 3 ? "-ml-6 border-l border-line pl-6" : "-ml-[38px]"
+            }`}
           >
             {node.replies.map((reply, index) =>
               renderThreadComment(reply, depth + 1, comment, node.replies[index - 1]),
@@ -1026,7 +1028,11 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             {openingMessage.work || openingDecision || runRecords[openingMessage.id] ? (
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 {openingMessage.work ? (
-                  <WorkStatus testIdPrefix="chats-message" work={openingMessage.work} />
+                  <WorkStatus
+                    testIdPrefix="chats-message"
+                    work={openingMessage.work}
+                    className="mt-0"
+                  />
                 ) : null}
                 {openingDecision ? (
                   <DecisionStatus

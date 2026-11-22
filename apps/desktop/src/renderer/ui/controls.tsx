@@ -18,42 +18,42 @@ function cx(...parts: Array<string | false | undefined>): string {
 // confirm takes the line fill, and the label turns subtle, with no hover. An
 // icon button is subtle at rest, so it fades instead.
 const primaryButtonClass =
-  "h-fit min-h-8 rounded-lg py-1 bg-accent px-3 text-[13px] font-medium text-bg transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:bg-line disabled:text-subtle";
+  "h-fit min-h-8 rounded-lg py-1 bg-accent px-3 text-[13px] font-medium text-bg transition-opacity enabled:hover:opacity-90 enabled:active:opacity-80 disabled:cursor-not-allowed disabled:bg-line disabled:text-subtle";
 const secondaryButtonClass =
-  "h-fit min-h-8 rounded-lg py-1 border border-line bg-transparent px-3 text-[13px] text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle";
+  "h-fit min-h-8 rounded-lg py-1 border border-line bg-transparent px-3 text-[13px] text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink enabled:active:bg-selected disabled:text-subtle";
 const iconButtonClass =
-  "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
+  "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink enabled:active:bg-selected disabled:pointer-events-none disabled:opacity-40";
 const ghostButtonClass =
-  "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle";
+  "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink enabled:active:bg-selected disabled:text-subtle";
 // The ghost recipe at the default button height, for a page's toolbar beside
 // a PrimaryButton. Pressed, it takes the selected fill, as an active row does.
 const toolbarGhostButtonClass =
-  "inline-flex h-8 items-center gap-2 whitespace-nowrap rounded-md px-2 text-[13px] text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle aria-pressed:bg-selected aria-pressed:text-ink";
+  "inline-flex h-8 items-center gap-2 whitespace-nowrap rounded-md px-2 text-[13px] text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink enabled:active:bg-selected disabled:text-subtle aria-pressed:bg-selected aria-pressed:text-ink";
 
 type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
 type SecondaryButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 type DangerButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 const compactPrimaryButtonClass =
-  "h-fit min-h-7 cursor-pointer py-0.5 rounded-md bg-accent px-2.5 text-[12px] font-semibold text-bg enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
+  "h-fit min-h-7 cursor-pointer py-0.5 rounded-md bg-accent px-2.5 text-[12px] font-semibold text-bg enabled:hover:opacity-90 enabled:active:opacity-80 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
 // The secondary recipe at a table row's height, for a control inside a
 // cell. `aria-disabled` keeps a button that says why it cannot run in the
 // tab order, where `disabled` would drop it.
 const rowSecondaryButtonClass =
-  "inline-flex h-fit min-h-6 max-w-full py-0.5 items-center gap-1 rounded-md border border-line bg-transparent px-2 text-xs text-muted transition-colors enabled:not-aria-disabled:hover:bg-hover enabled:not-aria-disabled:hover:text-ink disabled:text-subtle aria-disabled:cursor-default aria-disabled:text-subtle";
+  "inline-flex h-fit min-h-6 max-w-full py-0.5 items-center gap-1 rounded-md border border-line bg-transparent px-2 text-xs text-muted transition-colors enabled:not-aria-disabled:hover:bg-hover enabled:not-aria-disabled:hover:text-ink enabled:not-aria-disabled:active:bg-selected disabled:text-subtle aria-disabled:cursor-default aria-disabled:text-subtle";
 const compactSecondaryButtonClass =
-  "h-fit min-h-7 cursor-pointer py-0.5 rounded-md border border-line px-2.5 text-[12px] text-muted enabled:hover:bg-hover enabled:hover:text-ink disabled:cursor-wait disabled:text-subtle";
+  "h-fit min-h-7 cursor-pointer py-0.5 rounded-md border border-line px-2.5 text-[12px] text-muted enabled:hover:bg-hover enabled:hover:text-ink enabled:active:bg-selected disabled:cursor-wait disabled:text-subtle";
 // The primary recipe on the danger fill, for the confirm of an action that
 // removes or revokes something. Its label clears AA at rest and on hover in
 // both themes (tokens.test.ts guards the pairs). Disabled, it looks like a
 // disabled primary, so it turns red only once pressing it will act.
 const dangerButtonClass =
-  "h-fit min-h-8 rounded-lg py-1 bg-danger-fill px-3 text-[13px] font-medium text-on-danger transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:bg-line disabled:text-subtle";
+  "h-fit min-h-8 rounded-lg py-1 bg-danger-fill px-3 text-[13px] font-medium text-on-danger transition-opacity enabled:hover:opacity-90 enabled:active:opacity-80 disabled:cursor-not-allowed disabled:bg-line disabled:text-subtle";
 const compactDangerButtonClass =
-  "h-fit min-h-7 cursor-pointer py-0.5 rounded-md bg-danger-fill px-2.5 text-[12px] font-semibold text-on-danger enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
+  "h-fit min-h-7 cursor-pointer py-0.5 rounded-md bg-danger-fill px-2.5 text-[12px] font-semibold text-on-danger enabled:hover:opacity-90 enabled:active:opacity-80 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
 // The danger confirm at the secondary row button's height, so a row's
 // confirm takes its place without the row growing.
 const rowDangerButtonClass =
-  "inline-flex h-fit min-h-6 cursor-pointer py-0.5 items-center rounded-md bg-danger-fill px-2 text-xs font-semibold text-on-danger enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
+  "inline-flex h-fit min-h-6 cursor-pointer py-0.5 items-center rounded-md bg-danger-fill px-2 text-xs font-semibold text-on-danger enabled:hover:opacity-90 enabled:active:opacity-80 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
 
 /** Filled brand-accent CTA — at most one per surface. */
 export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(

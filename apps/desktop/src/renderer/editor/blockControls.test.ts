@@ -21,6 +21,7 @@ import {
   deleteBlock,
   deleteSelectedTopLevelBlock,
   duplicateBlock,
+  insertBlockAfter,
   makeBlockControlsPlugin,
   resolveTurnIntoDropdown,
   serializeBlockToMarkdown,
@@ -28,6 +29,7 @@ import {
   TurnIntoMenu,
   turnBlockInto,
   turnIntoIdAt,
+  turnSelectionInto,
   TURN_INTO_ENTRIES,
 } from "./blockControls";
 
@@ -297,8 +299,8 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
       this: HTMLElement,
     ) {
       const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
-      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
-      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
+      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 10 ? 22 : 0);
+      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 306 : 4;
       return 0;
     });
     vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28);
@@ -326,8 +328,8 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
       this: HTMLElement,
     ) {
       const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
-      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
-      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
+      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 10 ? 22 : 0);
+      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 306 : 4;
       return 0;
     });
     vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28);
@@ -980,7 +982,65 @@ describe("blockControls turn-into dropdown (bubble menu) command path", () => {
       "Numbered list",
       "Todo list",
       "Quote",
+      "Code block",
+      "Callout",
     ]);
+  });
+
+  it("converts multi-block selections, supports code block and callout, and stays idempotent", () => {
+    const editor = track(makeEditor("First\n\nSecond"));
+    editor.commands.setTextSelection({ from: 2, to: 12 });
+    turnSelectionInto(editor, "heading-2");
+    expect(editor.getJSON().content?.map((n) => [n.type, n.attrs?.level])).toEqual([
+      ["heading", 2],
+      ["heading", 2],
+    ]);
+
+    // Idempotent: re-selecting Heading 2 keeps Heading 2.
+    turnSelectionInto(editor, "heading-2");
+    expect(editor.getJSON().content?.map((n) => [n.type, n.attrs?.level])).toEqual([
+      ["heading", 2],
+      ["heading", 2],
+    ]);
+
+    // Code block + idempotency.
+    editor.commands.setTextSelection(2);
+    turnSelectionInto(editor, "code-block");
+    expect(editor.getJSON().content?.[0]?.type).toBe("codeBlock");
+    expect(turnIntoIdAt(editor.state.selection.$from)).toBe("code-block");
+    turnSelectionInto(editor, "code-block");
+    expect(editor.getJSON().content?.[0]?.type).toBe("codeBlock");
+
+    // Turn back to paragraph, then wrap in callout, then lift out to paragraph.
+    turnSelectionInto(editor, "paragraph");
+    expect(editor.getJSON().content?.[0]?.type).toBe("paragraph");
+    turnSelectionInto(editor, "callout");
+    expect(editor.getJSON().content?.[0]?.type).toBe("callout");
+    expect(turnIntoIdAt(editor.state.selection.$from)).toBe("callout");
+    turnSelectionInto(editor, "callout");
+    expect(editor.getJSON().content?.[0]?.type).toBe("callout");
+    turnSelectionInto(editor, "paragraph");
+    expect(editor.getJSON().content?.[0]?.type).toBe("paragraph");
+  });
+
+  it("inserts '/' when gutter + adds a block so typing immediately filters slash commands", () => {
+    const editor = track(makeEditor("Hello"));
+    insertBlockAfter(editor, 0);
+    expect(topLevelBlocks(editor).map((b) => b.type)).toEqual(["paragraph", "paragraph"]);
+    expect(editor.state.doc.child(1).textContent).toBe("/");
+    expect(editor.state.selection.from).toBe(editor.state.doc.content.size - 1);
+  });
+
+  it("renders crisp SVG icons inside gutter + and drag handle buttons", () => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Item" }] }],
+      }),
+    );
+    const controls = blockControls(editor, 0);
+    expect(controls.querySelector(".dohc-block-plus svg")).not.toBeNull();
+    expect(controls.querySelector(".dohc-block-handle svg")).not.toBeNull();
   });
 });
 

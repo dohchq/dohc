@@ -28,6 +28,7 @@ import {
 } from "./markdown/frontmatter";
 import { type OpenExternallyTarget, ReadOnlyPropertiesFlag } from "./fileInspectorUi";
 import { PROPERTIES_LINE, PROPERTIES_PANEL, TOPMATTER_FLAG } from "./pageTopmatter";
+import { isComposingKey } from "./ui/keys";
 
 const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 const FRONTMATTER_FIELD = "frontmatter";
@@ -564,7 +565,25 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
           const duplicate = held !== undefined || duplicates.has(entry.key.trim().toLowerCase());
           const automations = props.fieldMarks?.get(entry.key.trim());
           return (
-            <div key={entry.id} data-testid="property-row" className={PILL}>
+            <div
+              key={entry.id}
+              data-testid="property-row"
+              className={PILL}
+              onBlur={(event) => {
+                const nextTarget = event.relatedTarget;
+                if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+                if (
+                  nextTarget === null &&
+                  event.currentTarget.ownerDocument.activeElement &&
+                  event.currentTarget.contains(event.currentTarget.ownerDocument.activeElement)
+                ) {
+                  return;
+                }
+                if (entry.sourceKey === undefined && !entry.key.trim() && !entry.value.trim()) {
+                  setEntries((current) => current.filter((row) => row.id !== entry.id));
+                }
+              }}
+            >
               <input
                 data-testid="property-key"
                 aria-label={`Property ${index + 1} name`}
@@ -573,10 +592,18 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 spellCheck={false}
                 readOnly={refused}
                 onChange={(event) => setKey(index, event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || isComposingKey(event)) return;
+                  event.preventDefault();
+                  commit(entries);
+                  const rowEl = event.currentTarget.closest('[data-testid="property-row"]');
+                  rowEl?.querySelector<HTMLInputElement>('[data-testid="property-value"]')?.focus();
+                }}
                 onBlur={() => commit(entries)}
                 className={`${PILL_FIELD} ${reserved || duplicate ? "text-danger" : "text-subtle"}`}
               />
               {automations ? <AutomationFieldMark automations={automations} /> : null}
+              <span aria-hidden className="h-3 w-px shrink-0 bg-line" />
               {reserved ? (
                 <span
                   data-testid="property-reserved"
@@ -617,6 +644,12 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   spellCheck={false}
                   readOnly={refused}
                   onChange={(event) => setValue(index, event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || isComposingKey(event)) return;
+                    event.preventDefault();
+                    commit(entries);
+                    event.currentTarget.blur();
+                  }}
                   // Leaving the list shows it as the document holds it. Switching
                   // to another window blurs the field without leaving it.
                   onBlur={

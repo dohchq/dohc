@@ -435,4 +435,21 @@ describe("an owner app in its tab", () => {
     expect(webview().getAttribute("src")).toBe(fresh);
     expect(toolbar().getByText("Preorders")).toBeTruthy();
   });
+
+  it("enables Back and Forward buttons from webview history state", async () => {
+    guest.canGoBack.mockReturnValue(false);
+    guest.canGoForward.mockReturnValue(false);
+    render(<Page />);
+    await openedView();
+    const back = screen.getByTestId("app-view-back") as HTMLButtonElement;
+    const forward = screen.getByTestId("app-view-forward") as HTMLButtonElement;
+    expect(back.disabled).toBe(true);
+    expect(forward.disabled).toBe(true);
+
+    guest.canGoBack.mockReturnValue(true);
+    fire("did-navigate");
+    expect(back.disabled).toBe(false);
+    await userEvent.setup().click(back);
+    expect(guest.goBack).toHaveBeenCalledOnce();
+  });
 });

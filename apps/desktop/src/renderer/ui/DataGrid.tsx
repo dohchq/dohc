@@ -68,7 +68,7 @@ export function DataGrid({
     <table
       {...props}
       style={{ ...numberColumns(columns), ...style }}
-      className={`border-separate border-spacing-0 overflow-clip rounded-lg border border-line text-[13px] ${className ?? ""}`}
+      className={`border-separate border-spacing-0 overflow-clip rounded-lg border border-line bg-bg text-[13px] ${className ?? ""}`}
     >
       {children}
       <ColumnWidths columns={columns} headerRoom={headerRoom ?? 0} trailing={trailing} />
@@ -90,7 +90,7 @@ export function DataGridGutterHeader({
   return (
     <th
       {...props}
-      className={`${STICKY_HEADER} ${wide ? "w-10" : "w-8"} bg-panel-2 p-0 ${className ?? ""}`}
+      className={`${STICKY_HEADER} left-0 z-20 ${wide ? "w-10" : "w-8"} bg-panel-2 p-0 ${className ?? ""}`}
     />
   );
 }
@@ -108,7 +108,7 @@ export function DataGridHeaderCell({
       {...props}
       data-grid-cell=""
       style={headerStyle(column)}
-      className={`group/column ${STICKY_HEADER} h-7 bg-panel-2 px-2.5 text-[12px] font-medium text-muted focus:outline-2 focus:-outline-offset-2 focus:outline-accent has-[input:focus]:outline-2 has-[input:focus]:-outline-offset-2 has-[input:focus]:outline-accent ${className ?? ""}`}
+      className={`group/column ${STICKY_HEADER} h-7 border-l border-line/60 bg-panel-2 px-2.5 text-[12px] font-medium text-muted focus:outline-2 focus:-outline-offset-2 focus:outline-accent has-[input:focus]:outline-2 has-[input:focus]:-outline-offset-2 has-[input:focus]:outline-accent ${className ?? ""}`}
     />
   );
 }
@@ -127,7 +127,7 @@ export function DataGridRow({ className, ...props }: ComponentPropsWithoutRef<"t
   return (
     <tr
       {...props}
-      className={`group/row transition-colors duration-75 hover:bg-panel-2 ${className ?? ""}`}
+      className={`group/row transition-colors duration-75 hover:bg-hover ${className ?? ""}`}
     />
   );
 }
@@ -148,7 +148,7 @@ export function DataGridGutter({
   return (
     <td
       {...props}
-      className={`h-7 ${wide ? "w-10" : "w-8"} border-t border-line py-0 pl-0 pr-2 text-right font-mono text-[11px] text-subtle ${className ?? ""}`}
+      className={`sticky left-0 z-[1] h-7 ${wide ? "w-10" : "w-8"} border-t border-line bg-bg py-0 pl-0 pr-2 text-right font-mono text-[11px] text-subtle transition-colors duration-75 group-hover/row:bg-[image:linear-gradient(var(--dohc-hover),var(--dohc-hover))] ${className ?? ""}`}
     >
       {action ? (
         <span className="inline-grid items-center justify-items-end align-middle">
@@ -180,7 +180,7 @@ export function DataGridCell({
       {...props}
       data-grid-cell=""
       style={cellStyle(column)}
-      className={`h-7 border-t border-line px-2.5 py-0 focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-accent ${className ?? ""}`}
+      className={`h-7 border-l border-t border-l-line/60 border-t-line px-2.5 py-0 focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-accent ${className ?? ""}`}
     />
   );
 }

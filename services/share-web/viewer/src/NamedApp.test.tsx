@@ -165,7 +165,7 @@ it.each([
   await fillSignIn();
   await click("Sign in");
   expect(container.querySelector('[role="alert"]')?.textContent).toBe(message);
-  const recovery = container.querySelector('a[href="/account/forgot-password"]');
+  const recovery = container.querySelector('[role="alert"] a[href="/account/forgot-password"]');
   if (status === 403) expect(recovery?.textContent).toBe("Forgot your password?");
   else expect(recovery).toBeNull();
   expect(container.textContent).not.toContain("upstream-secret");
