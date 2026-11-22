@@ -316,7 +316,9 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
       const linkEditor = await shared!.browser.newPage();
       linkEditor.on("pageerror", (error) => shared!.failures.push(error.message));
       await linkEditor.goto(`${sharedDatasetViewerOrigin}/s${new URL(edit.url).hash}`);
-      await linkEditor.getByRole("button", { name: PATH, exact: true }).click({ timeout: 15_000 });
+      await linkEditor
+        .getByRole("button", { name: "plan.md", exact: true })
+        .click({ timeout: 15_000 });
       await linkEditor
         .getByRole("button", { name: "Edit file", exact: true })
         .click({ timeout: 15_000 });
