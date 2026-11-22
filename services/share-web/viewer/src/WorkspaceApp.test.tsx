@@ -1984,7 +1984,7 @@ describe("deleting a Group message", () => {
     expect(dialog()!.querySelector("h2")?.textContent).toBe("Delete this message?");
     expect(dialog()!.querySelector(".chat-delete-quote")?.textContent).toBe("Mine to take back");
     expect(dialog()!.querySelector("#chat-delete-body")?.textContent).toContain(
-      "Everyone loses it, and you can't undo this. People who already read it may keep a copy.",
+      "This removes the message from this conversation for everyone. You can't undo it. People who already read it may keep a copy.",
     );
     // Delete takes focus, as on the desktop. A held Enter does nothing, and the arrows move between the buttons.
     expect(document.activeElement).toBe(inDialog("Delete"));
