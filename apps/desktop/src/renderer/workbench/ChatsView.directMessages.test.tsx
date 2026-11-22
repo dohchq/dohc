@@ -1201,7 +1201,9 @@ describe("ChatsView direct messages", () => {
     fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     await user.click(await screen.findByTestId("chats-dm-new-member"));
     const existing = await screen.findByTestId("chats-dm-new-existing");
-    expect(existing.textContent).toContain("You already have a conversation with Sam Rivera.");
+    expect(existing.textContent).toContain(
+      "You already have a conversation with Sam Rivera. Sending adds your message to it.",
+    );
     // The line sits under the list, so the rows don't move when it appears.
     expect(
       screen.getByTestId("chats-dm-new-members").compareDocumentPosition(existing) &
