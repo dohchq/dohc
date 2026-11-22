@@ -384,7 +384,7 @@ interface CleanupCounts {
   historiesWithACleanupRow: number;
   aReplayThatDeclaresDeletedUnnamedFormatting: number;
   aReplayThatNeverDeclaresDeletedUnnamedFormatting: number;
-  aCheckThatReadsByDeclaringThenAppliesMoreDeletedUnnamedFormatting: number;
+  aDocumentThatDeclaresLateThenTakesMoreDeletedUnnamedFormatting: number;
   aReaderThatCannotSendEndedWithOtherMarks: number;
   aReaderThatCannotSendEndedWithOtherLettersOrBlocks: number;
   aPersonReadOtherThanTheStoredNote: number;
@@ -400,7 +400,7 @@ const noCounts = (): CleanupCounts => ({
   historiesWithACleanupRow: 0,
   aReplayThatDeclaresDeletedUnnamedFormatting: 0,
   aReplayThatNeverDeclaresDeletedUnnamedFormatting: 0,
-  aCheckThatReadsByDeclaringThenAppliesMoreDeletedUnnamedFormatting: 0,
+  aDocumentThatDeclaresLateThenTakesMoreDeletedUnnamedFormatting: 0,
   aReaderThatCannotSendEndedWithOtherMarks: 0,
   aReaderThatCannotSendEndedWithOtherLettersOrBlocks: 0,
   aPersonReadOtherThanTheStoredNote: 0,
@@ -497,20 +497,20 @@ function honestHistory(
   declares.getText(BODY_SEQUENCE_FIELD);
   declares.getMap(BODY_CONTAINERS_FIELD);
   Y.applyUpdate(declares, baseline);
-  const readsByDeclaring = new Y.Doc({ gc: false });
-  Y.applyUpdate(readsByDeclaring, baseline);
+  const declaresLate = new Y.Doc({ gc: false });
+  Y.applyUpdate(declaresLate, baseline);
   const reader = openPerson(baseline, 9_000, { gc, yjsCleanup });
   let cleanupRows = 0;
   let declaredHit = false;
-  let readThenAppliedHit = false;
+  let declaredLateHit = false;
   const hub = relay(baseline, ({ change, taken, room, earlier }) => {
     counts.rows++;
     named.add(taken);
     Y.applyUpdate(declares, taken);
     if (formatting(unnamedDeletes(declares, named)) > 0) declaredHit = true;
-    Y.applyUpdate(readsByDeclaring, taken);
-    if (formatting(unnamedDeletes(readsByDeclaring, named)) > 0) readThenAppliedHit = true;
-    readBodySequence(schema, readsByDeclaring);
+    Y.applyUpdate(declaresLate, taken);
+    if (formatting(unnamedDeletes(declaresLate, named)) > 0) declaredLateHit = true;
+    declaresLate.getText(BODY_SEQUENCE_FIELD);
     if (change.kind !== "formatting cleanup") return;
     cleanupRows++;
     counts.cleanupRows++;
@@ -560,8 +560,7 @@ function honestHistory(
   if (declaredHit) counts.aReplayThatDeclaresDeletedUnnamedFormatting++;
   if (formatting(unnamedDeletes(hub.room, named)) > 0)
     counts.aReplayThatNeverDeclaresDeletedUnnamedFormatting++;
-  if (readThenAppliedHit)
-    counts.aCheckThatReadsByDeclaringThenAppliesMoreDeletedUnnamedFormatting++;
+  if (declaredLateHit) counts.aDocumentThatDeclaresLateThenTakesMoreDeletedUnnamedFormatting++;
   const stored = storedReading(hub.room);
   const shown = readBodySequence(schema, reader.doc).toJSON() as unknown;
   if (JSON.stringify(shown) !== JSON.stringify(stored)) {
@@ -573,7 +572,7 @@ function honestHistory(
     unnamedDeletes(hub.room, named).filter((entry) => entry.kind !== "left by a merge"),
     "what the room's own document deleted and no change named",
   ).toEqual([]);
-  for (const doc of [declares, readsByDeclaring, reader.doc, hub.room, ...team.map((p) => p.doc)])
+  for (const doc of [declares, declaresLate, reader.doc, hub.room, ...team.map((p) => p.doc)])
     doc.destroy();
 }
 
@@ -675,7 +674,7 @@ describe("formatting that Yjs deletes on its own when changes meet", () => {
     expect(pieceWithX(storedReading(hub.room))).toBe(PLAIN_X);
   });
 
-  it("a document that declares the sequence to read it, then takes more changes, deletes formatting no change names", () => {
+  it("a document that declares the sequence, then takes more changes, deletes formatting no change names, and one that only reads it does not", () => {
     const baseline = sequenceOfLines();
     const [first, second, third] = [20, 30, 40].map((clientID) =>
       openPerson(baseline, clientID),
@@ -700,8 +699,8 @@ describe("formatting that Yjs deletes on its own when changes meet", () => {
       check.destroy();
       return unnamed;
     };
-    expect(unnamedAfter((doc) => readBodySequence(schema, doc))).toBe(1);
-    expect(unnamedAfter((doc) => storedReading(doc))).toBe(0);
+    expect(unnamedAfter((doc) => doc.getText(BODY_SEQUENCE_FIELD))).toBe(1);
+    expect(unnamedAfter((doc) => readBodySequence(schema, doc))).toBe(0);
   });
 });
 

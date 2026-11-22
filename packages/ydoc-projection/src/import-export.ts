@@ -36,6 +36,7 @@ import { assertSupportedListMarkdown } from "./list-markdown.js";
 import { sanitizeImageSrc } from "./image-src.js";
 import { backtickFence, codeBlockFence } from "./markdown-fence.js";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
+import { holdsBodySequence, readBodySequence } from "./bodySequenceYjs.js";
 import {
   FRONTMATTER_SOURCE_META_KEY,
   frontmatterBlockFor,
@@ -1013,6 +1014,7 @@ function yDocBodyToMarkdown(doc: Y.Doc): string {
 }
 
 function yDocBodyToJSON(doc: Y.Doc): JSONContent {
+  if (holdsBodySequence(doc)) return readBodySequence(schema, doc).toJSON() as JSONContent;
   const bodyFragment = getDohcYDocBodyFragment(doc);
   return yXmlFragmentToProseMirrorRootNode(bodyFragment, schema).toJSON() as JSONContent;
 }

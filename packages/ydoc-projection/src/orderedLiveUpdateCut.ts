@@ -147,6 +147,21 @@ export interface JournalPrefixProjection {
   ) => OrderedLiveUpdateCutRefusalReason | undefined;
 }
 
+/** How a cut treats a note whose body is one sequence. Without it, no note is read as one. */
+export interface BodySequenceCut {
+  readonly holds: (document: Y.Doc) => boolean;
+  /** Applies the candidate to the note as it was before it, with `apply`, and says whether it fits. */
+  readonly candidateFits: (document: Y.Doc, candidate: Uint8Array, apply: () => void) => boolean;
+}
+
+/** One update as the cut reads it from the wire. */
+export interface LiveUpdateAsRead {
+  readonly structs: readonly (Y.Item | Y.GC | Y.Skip)[];
+  readonly deletes: readonly LiveUpdateStructRange[];
+  /** Per client, the clocks between the two units of a surrogate pair in a letter run it sends. */
+  readonly insidePairs: ReadonlyMap<number, readonly number[]>;
+}
+
 const POLICY_FIELDS = [
   "maxStructVisits",
   "maxValueNodeVisits",
@@ -3363,6 +3378,7 @@ function verifyStateVector(
 
 interface ProjectionTopologyCapture {
   value?: ProjectionTopology;
+  bodySequence?: boolean;
 }
 
 interface TopologyPlacement {
@@ -3373,13 +3389,17 @@ interface TopologyPlacement {
 interface TopologyScope {
   readonly active: boolean;
   readonly compatible: boolean;
+  readonly inBodySequence?: boolean;
 }
+
+const BODY_SEQUENCE_ROOTS: ReadonlySet<string> = new Set(["sequence", "containers"]);
 
 function proveProjectionTopology(
   decoded: ReturnType<typeof Y.decodeUpdateV2>,
   normalized: NormalizedInput,
   budget: ValidationBudget,
   stage: OrderedLiveUpdateCutFailureStage,
+  bodySequence: boolean,
 ): ProjectionTopology {
   const providers = new Map<number, ProviderInterval[]>();
   for (const node of stableSort(normalized.integrationNodes, rangeCompare, budget, stage)) {
@@ -3531,6 +3551,11 @@ function proveProjectionTopology(
       if (own.parent.kind === "root") {
         parent = own.parent.name;
         if (parent === "body") bodyHasActiveItem = true;
+        if (bodySequence && BODY_SEQUENCE_ROOTS.has(parent)) {
+          budget.visitIndexOperation(stage);
+          scopes.set(current, { active: true, compatible: true, inBodySequence: true });
+          continue;
+        }
       } else {
         const parentIndex = provider({ clientId: own.parent.client, clock: own.parent.clock });
         budget.visitIndexOperation(stage);
@@ -3544,6 +3569,11 @@ function proveProjectionTopology(
         if (!parentScope.compatible) {
           budget.visitIndexOperation(stage);
           scopes.set(current, incompatible);
+          continue;
+        }
+        if (parentScope.inBodySequence) {
+          budget.visitIndexOperation(stage);
+          scopes.set(current, parentScope);
           continue;
         }
         budget.visitIndexOperation(stage);
@@ -3566,6 +3596,7 @@ function proveProjectionTopology(
     budget.visitIndexOperation(stage);
     if (!scope(index).compatible) return Object.freeze({ kind: "incompatible" });
   }
+  if (bodySequence && bodyHasActiveItem) return Object.freeze({ kind: "incompatible" });
   return Object.freeze({
     kind: "compatible",
     bodyHasActiveItem,
@@ -3615,7 +3646,13 @@ function decodeCompleteState(
   const frontier = new ReplayFrontier();
   frontier.apply(normalized, budget, stage);
   if (topology !== undefined)
-    topology.value = proveProjectionTopology(decoded, normalized, budget, stage);
+    topology.value = proveProjectionTopology(
+      decoded,
+      normalized,
+      budget,
+      stage,
+      topology.bodySequence === true,
+    );
   return frontier;
 }
 
@@ -3808,8 +3845,16 @@ export function validateOrderedLiveUpdateCut(
 export function validateRegistrationCutForProjection(
   input: Extract<OwnedLiveUpdateCutInput, { mode: "registration" }>,
   policy: OrderedLiveUpdateCutPolicy,
+  bodySequence?: BodySequenceCut,
 ): RegistrationCutForProjectionResult {
-  return validateCut(input, policy, "registration") as RegistrationCutForProjectionResult;
+  return validateCut(
+    input,
+    policy,
+    "registration",
+    false,
+    undefined,
+    bodySequence,
+  ) as RegistrationCutForProjectionResult;
 }
 
 export function validateJournalCutForProjection(
@@ -3817,6 +3862,7 @@ export function validateJournalCutForProjection(
   policy: OrderedLiveUpdateCutPolicy,
   fatalUnexpectedErrors = false,
   prefixes?: JournalPrefixProjection,
+  bodySequence?: BodySequenceCut,
 ): JournalCutForProjectionResult {
   return validateCut(
     input,
@@ -3824,7 +3870,52 @@ export function validateJournalCutForProjection(
     "journal-candidate",
     fatalUnexpectedErrors,
     prefixes,
+    bodySequence,
   ) as JournalCutForProjectionResult;
+}
+
+/**
+ * One update read from the wire as the cut reads it, or undefined where the cut refuses its bytes
+ * or what it holds before any earlier update is looked at: bytes that don't decode, a value the
+ * decoder refuses, a struct or a delete that starts or ends inside a surrogate pair the update
+ * itself sends.
+ */
+export function readLiveUpdateAsTheCutDoes(
+  bytes: Uint8Array,
+  policy: OrderedLiveUpdateCutPolicy,
+): LiveUpdateAsRead | undefined {
+  try {
+    const budget = new ValidationBudget(snapshotPolicy(policy));
+    const stage = frozenStage({ kind: "input", role: "candidate" });
+    const view = localOwnedView(bytes, stage, budget);
+    const sink: DecoderEvidenceSink = {
+      anyFingerprints: [],
+      jsonFingerprints: [],
+      fingerprintOnlyUsage: zeroDecoderUsage(),
+    };
+    const decoded = Y.decodeUpdateV2(view, strictDecoderConstructor(budget, stage, true, sink));
+    if (sink.decoder === undefined || decoding.hasContent(sink.decoder)) return undefined;
+    const normalized = normalizeDecodedInput(
+      decoded,
+      sink,
+      zeroDecoderUsage(),
+      budget,
+      stage,
+      false,
+    );
+    for (const points of [normalized.structBoundaries, normalized.rawDeleteEndpoints])
+      for (const [clientId, clocks] of points) {
+        const inside = normalized.unsafePoints.get(clientId) ?? [];
+        if (clocks.some((clock) => pointPresent(inside, clock, budget, stage))) return undefined;
+      }
+    return {
+      structs: decoded.structs,
+      deletes: normalized.deleteRanges,
+      insidePairs: normalized.unsafePoints,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function validateCut(
@@ -3833,6 +3924,7 @@ function validateCut(
   projectionMode?: OwnedLiveUpdateCutInput["mode"],
   fatalUnexpectedErrors = false,
   prefixes?: JournalPrefixProjection,
+  bodySequence?: BodySequenceCut,
 ): OrderedLiveUpdateCutResult | RegistrationCutForProjectionResult | JournalCutForProjectionResult {
   const hostileInput: unknown = input;
   const hostilePolicy: unknown = policy;
@@ -3926,13 +4018,28 @@ function validateCut(
     // Each prefix's own frontier proves its document, which its projection
     // must leave unchanged. Every prefix shares this cut's work budget.
     const prefixFrontier = new ReplayFrontier();
+    const replayBudget = budget;
     for (let index = 0; index < snapshot.entries.length; index += 1) {
       const entry = snapshot.entries[index] as InputBytes;
-      applyOwnedInput(entry, applyForecasts[index] as DecoderUsage, document, budget);
+      const apply = () =>
+        applyOwnedInput(entry, applyForecasts[index] as DecoderUsage, document, replayBudget);
+      if (
+        bodySequence === undefined ||
+        snapshot.mode !== "journal-candidate" ||
+        index !== snapshot.entries.length - 1
+      )
+        apply();
+      else if (!bodySequence.holds(document)) {
+        apply();
+        if (bodySequence.holds(document)) fail("invalid-schema", entry.stage);
+      } else if (!bodySequence.candidateFits(document, entry.bytes, apply))
+        fail("invalid-schema", entry.stage);
       if (prefixes === undefined || index === snapshot.entries.length - 1) continue;
       prefixFrontier.apply(prefixInputs[index] as NormalizedInput, budget, entry.stage);
       if (index < prefixes.from) continue;
-      const prefixTopology: ProjectionTopologyCapture = {};
+      const prefixTopology: ProjectionTopologyCapture = {
+        bodySequence: bodySequence?.holds(document),
+      };
       completeProof(document, prefixFrontier, budget, entry.stage, prefixTopology);
       if (prefixTopology.value === undefined) fail("invalid-update", entry.stage);
       let mutated = false;
@@ -3957,7 +4064,7 @@ function validateCut(
     }
 
     const topology: ProjectionTopologyCapture | undefined =
-      projectionMode !== undefined ? {} : undefined;
+      projectionMode !== undefined ? { bodySequence: bodySequence?.holds(document) } : undefined;
     const initialProof = completeProof(document, frontier, budget, { kind: "final" }, topology);
     const dirtyLatch: DirtyLatch = { dirty: false };
     const beforeTransactionListener: BeforeTransactionListener = () => {

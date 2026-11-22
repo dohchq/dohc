@@ -1,13 +1,12 @@
+import * as encoding from "lib0/encoding";
 import * as Y from "yjs";
 import {
   BLOCK_ELEMENT,
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
-  leavesOfSequence,
-  readBodyLeaves,
   recordsOfContainer,
 } from "./bodySequenceGrammar.js";
-import { piecesOfSequence } from "./bodySequenceYjs.js";
+import { readBodySequence } from "./bodySequenceYjs.js";
 import { getDohcProseMirrorSchema } from "./import-export.js";
 
 export const REMOTE = Symbol("remote");
@@ -65,19 +64,9 @@ export function tokensOf(sequence: Y.Text): Token[] {
   return tokens;
 }
 
-/** What a note's Yjs document reads as, without declaring a root on it. */
+/** What a note's Yjs document reads as, checked against the schema. */
 export function storedReading(doc: Y.Doc): unknown {
-  const sequence = doc.share.get(BODY_SEQUENCE_FIELD) as Y.Text | undefined;
-  const records = doc.share.get(BODY_CONTAINERS_FIELD);
-  const node = readBodyLeaves(
-    schema,
-    leavesOfSequence(schema, sequence ? piecesOfSequence(sequence) : [], {
-      get(key) {
-        const item = records?._map.get(key);
-        return item && !item.deleted ? item.content.getContent()[item.length - 1] : undefined;
-      },
-    }),
-  );
+  const node = readBodySequence(schema, doc);
   node.check();
   return node.toJSON();
 }
@@ -521,4 +510,105 @@ export function deliver(
     const sent = from.waiting.shift()!;
     passOn(hub.take(sent), from.clientID);
   }
+}
+
+/** One struct as a client could send it, which no editor would. */
+export interface SentStruct {
+  readonly client: number;
+  readonly clock: number;
+  readonly origin?: Y.ID;
+  readonly rightOrigin?: Y.ID;
+  readonly parent?: string | Y.ID;
+  readonly key?: string;
+  readonly content: Y.Item["content"];
+}
+
+/** Content written to the wire as the bytes given, for values no Yjs client writes. */
+export function contentAsWritten(
+  ref: number,
+  countable: boolean,
+  write: (encoder: Y.UpdateEncoderV1) => void,
+): Y.Item["content"] {
+  return {
+    getRef: () => ref,
+    getLength: () => 1,
+    isCountable: () => countable,
+    write,
+  } as unknown as Y.Item["content"];
+}
+
+/** A value in Yjs's `any` encoding, given as its bytes. */
+export const anyAsWritten = (bytes: readonly number[]) =>
+  contentAsWritten(8, true, (encoder) => {
+    encoder.writeLen(1);
+    encoding.writeUint8Array(encoder.restEncoder, Uint8Array.from(bytes));
+  });
+
+/** A mark whose value is the JSON text given. */
+export const markAsWritten = (key: string, json: string) =>
+  contentAsWritten(6, false, (encoder) => {
+    encoder.writeKey(key);
+    encoding.writeVarString(encoder.restEncoder, json);
+  });
+
+/** An update holding exactly these structs and deletes. Each client's structs are in clock order. */
+export function updateOf(
+  structs: readonly SentStruct[],
+  deletes: readonly (readonly [client: number, clock: number, length: number])[] = [],
+): Uint8Array {
+  const encoder = new Y.UpdateEncoderV1();
+  const byClient = new Map<number, SentStruct[]>();
+  for (const struct of structs)
+    byClient.set(struct.client, [...(byClient.get(struct.client) ?? []), struct]);
+  encoding.writeVarUint(encoder.restEncoder, byClient.size);
+  for (const client of [...byClient.keys()].sort((a, b) => b - a)) {
+    const sent = byClient.get(client)!;
+    encoding.writeVarUint(encoder.restEncoder, sent.length);
+    encoder.writeClient(client);
+    encoding.writeVarUint(encoder.restEncoder, sent[0]!.clock);
+    for (const struct of sent)
+      new Y.Item(
+        Y.createID(client, struct.clock),
+        null,
+        struct.origin ?? null,
+        null,
+        struct.rightOrigin ?? null,
+        (struct.parent ?? null) as Y.ID | null,
+        struct.key ?? null,
+        struct.content,
+      ).write(encoder, 0);
+  }
+  const deletedBy = new Map<number, (readonly [number, number, number])[]>();
+  for (const range of deletes) deletedBy.set(range[0], [...(deletedBy.get(range[0]) ?? []), range]);
+  encoding.writeVarUint(encoder.restEncoder, deletedBy.size);
+  for (const [client, ranges] of deletedBy) {
+    encoder.resetDsCurVal();
+    encoding.writeVarUint(encoder.restEncoder, client);
+    encoding.writeVarUint(encoder.restEncoder, ranges.length);
+    for (const [, clock, length] of ranges) {
+      encoder.writeDsClock(clock);
+      encoder.writeDsLen(length);
+    }
+  }
+  return encoder.toUint8Array();
+}
+
+/** What one transaction on a page with this client id sends, or undefined if it changes nothing. */
+export function changeMadeBy(
+  note: Uint8Array,
+  client: number,
+  change: (page: { doc: Y.Doc; sequence: Y.Text; records: Y.Map<unknown> }) => void,
+): Uint8Array | undefined {
+  const doc = new Y.Doc({ gc: false });
+  doc.clientID = client;
+  const sequence = doc.getText(BODY_SEQUENCE_FIELD);
+  const records = doc.getMap<unknown>(BODY_CONTAINERS_FIELD);
+  Y.applyUpdate(doc, note);
+  let sent: Uint8Array | undefined;
+  doc.on("update", (bytes: Uint8Array) => {
+    sent = bytes;
+  });
+  doc.transact(() => change({ doc, sequence, records }));
+  doc.destroy();
+  return sent;
 }

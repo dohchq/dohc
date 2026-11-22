@@ -90,6 +90,8 @@ import { operatorSecretPath, operatorSocketPath } from "./appPublicationOperator
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { checkReaderConfig } from "./readerConfig";
+import { admitBodySequenceNotes } from "@dohc/ydoc-projection/live-journal-validation";
+import { BODY_SEQUENCE_SETTING, bodySequenceNotesAdmitted } from "./bodySequenceSetting";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots } from "./serviceLiveHost";
 import { startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
@@ -196,6 +198,11 @@ if (automationsSetting !== undefined && !["0", "1"].includes(automationsSetting)
   fatal("FATAL: DOHC_RELAY_AUTOMATIONS must be 0 or 1.");
 const automationsOn =
   automationsSetting === undefined ? selfHostedLive : automationsSetting === "1";
+try {
+  admitBodySequenceNotes(bodySequenceNotesAdmitted());
+} catch {
+  fatal(`FATAL: ${BODY_SEQUENCE_SETTING} must be 0 or 1.`);
+}
 // This server keeps copies of workspaces to run their automations and to answer their owners' phones.
 // A self-hosted server always keeps them; a development relay only while it runs automations.
 const copiesOn = automationsOn || selfHostedLive;
