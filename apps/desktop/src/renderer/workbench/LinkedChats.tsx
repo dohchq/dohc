@@ -598,10 +598,10 @@ export function LinkedChatsPanel(props: {
     };
   }, [activeThreadId, readMessages, workspaceId]);
 
-  // An untitled chat shows its opening message's first line, and "New chat"
-  // once that message is deleted. The list it was opened from, or a search,
-  // can predate its messages, so opening it reads the list again, and its
-  // heading takes the title the list holds.
+  // An untitled chat shows its opening message's first line, and the engine
+  // titles it "New chat" once that message is deleted. The list it was opened
+  // from, or a search, can predate its messages, so opening it reads the list
+  // again, and its heading takes the title the list holds.
   useEffect(() => {
     if (activeThreadId !== null) void rereadThreads();
   }, [activeThreadId, rereadThreads]);
@@ -609,6 +609,17 @@ export function LinkedChatsPanel(props: {
     threadsState.status === "ready" && threadsState.key === threadsKey
       ? threadsState.threads.find((thread) => thread.id === activeThreadId)?.title
       : undefined;
+  // A chat whose opening comment was deleted is named for its file, as a
+  // Group's post is named for its Group.
+  const opening = messages[0];
+  const shownTitle = listedTitle ?? activeThread?.title;
+  const heading =
+    shownTitle === "New chat" &&
+    filePath &&
+    opening?.threadId === activeThreadId &&
+    opening.deletedAtMs !== undefined
+      ? `Comment on ${basenameOf(filePath)}`
+      : shownTitle;
   const reactionControls = useMemo(
     () => ({
       reactions: threadReactions.reactions,
@@ -657,7 +668,7 @@ export function LinkedChatsPanel(props: {
             data-testid="linked-chat-title"
             className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink"
           >
-            {listedTitle ?? activeThread.title}
+            {heading}
           </span>
         </div>
         <ChatMessageList
