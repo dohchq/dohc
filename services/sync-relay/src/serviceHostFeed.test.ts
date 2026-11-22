@@ -1045,6 +1045,12 @@ it.each([
           lineageClaimId: binding.lineageClaimId,
         },
         sender: authors,
+        authority: {
+          principalKind: "owner",
+          principalId: "owner-1",
+          grantId: null,
+          grantGeneration: null,
+        },
         clients: [{ clientId: 42, inNote: true }],
         updateBytes: Yjs.encodeStateAsUpdate(doc, before),
         receivedAtMs: 30,

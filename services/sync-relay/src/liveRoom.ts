@@ -1,22 +1,22 @@
 // A live room: one shared note's live copy in memory, plus the edits taken and not yet saved.
 //
 // An edit is admitted, written down, applied, answered and passed on, in that order. The room
-// saves what it holds every few seconds as one write on the owner's capture, which names every
-// sender in it. The saved rows are deleted in the save's own journal transaction. Everything
-// else that changes the note reaches the room through that capture's feed of applied changes.
+// saves what it holds every few seconds on the owner's capture, one sender's run of edits per
+// save, each stored under the access the sender had when the room took it. The saved rows are
+// deleted in the save's own
+// journal transaction. Everything else that changes the note reaches the room through that
+// capture's feed of applied changes.
 //
 // The note's owner edits in the room too, but keeps the feed of its own capture: the owner's
 // computer holds the note as saved and, on top, the room's unsaved edits at their positions.
 // Each save tells it the last position the save holds, so it can let go of those.
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
 import { liveEditFitsCopy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import {
-  liveAuthorIdentity,
-  MAX_LIVE_AUTHOR_BYTES,
   MAX_LIVE_AUTHOR_IDENTITIES,
-  type LiveAuthorEntry,
   type LiveAuthorSnapshot,
 } from "@dohc/live-session-contract/live-authorship";
 import {
@@ -34,6 +34,7 @@ import type {
 } from "./namedLiveFrameSession.js";
 import type { SyncRelayStorage } from "./storage.js";
 import type { StorageContext } from "./storage/context.js";
+import type { LiveRoomAuthority } from "./storage/types.js";
 import { SyncRelayQuotaExceededError } from "./storage/errors.js";
 import {
   advanceLiveRoomPosition,
@@ -65,8 +66,6 @@ export interface LiveRoomsOptions {
   readonly maxNoteBytes: number;
   /** The largest update passed on, and the largest save. */
   readonly maxAppliedBytes: number;
-  /** Whether one save names every sender in it, which needs an engine that credits the list. */
-  readonly namesEverySender?: boolean;
   readonly saveEveryMs?: number;
   /** How long one save, or opening the owner's capture, may take before it is tried again. */
   readonly saveTimeoutMs?: number;
@@ -132,6 +131,7 @@ function accessBetweenEdits(host: NamedFrameRoomHost): () => void {
 interface Unsaved {
   readonly position: number;
   readonly sender: LiveAuthorSnapshot;
+  readonly authority: LiveRoomAuthority;
   readonly bytes: Uint8Array;
 }
 interface Room {
@@ -258,52 +258,33 @@ export function roomAdmissible(doc: Y.Doc, update: Uint8Array): { clients: numbe
   return { clients: [...clients] };
 }
 
-const sameSender = (a: LiveAuthorSnapshot, b: LiveAuthorSnapshot) =>
-  JSON.stringify(a) === JSON.stringify(b);
-// An automation commits outside the room, and an unattributed edit names nobody, so neither
-// shares a save with anyone else.
-const savesAlone = (sender: LiveAuthorSnapshot) =>
-  sender.some((author) => author.kind === "automation" || author.kind === "unattributed");
-
 /**
- * How many of the oldest unsaved edits one save holds, and who it names. With `everySender`
- * a save names everyone whose edits it holds, each once. Without it, a save holds one sender's
- * run of edits, as the engine credits only one person per save.
+ * How many of the oldest unsaved edits one save holds: one sender's run of edits, as that sender
+ * would have sent them, up to the largest update the engine passes on.
  */
 export function nextSave(
-  unsaved: readonly { readonly sender: LiveAuthorSnapshot; readonly bytes: Uint8Array }[],
-  everySender: boolean,
+  unsaved: readonly {
+    readonly sender: LiveAuthorSnapshot;
+    readonly authority: LiveRoomAuthority;
+    readonly bytes: Uint8Array;
+  }[],
   maxBytes: number,
-): { count: number; authors: LiveAuthorSnapshot } {
+): number {
   const first = unsaved[0];
-  if (!first) return { count: 0, authors: [] };
-  const named = new Map<string, LiveAuthorEntry>();
   let count = 0,
-    bytes = 0,
-    authorBytes = 2,
-    one = true;
+    bytes = 0;
   for (const edit of unsaved) {
-    const same = sameSender(edit.sender, first.sender);
-    if (count && !same && (!everySender || savesAlone(first.sender) || savesAlone(edit.sender)))
-      break;
-    const added = edit.sender.filter((author) => !named.has(liveAuthorIdentity(author)));
-    const addedBytes = added.reduce((sum, a) => sum + Buffer.byteLength(JSON.stringify(a)) + 1, 0);
     if (
       count &&
       (bytes + edit.bytes.byteLength > maxBytes ||
-        named.size + added.length > MAX_LIVE_AUTHOR_IDENTITIES ||
-        authorBytes + addedBytes > MAX_LIVE_AUTHOR_BYTES)
+        !isDeepStrictEqual(edit.sender, first!.sender) ||
+        !isDeepStrictEqual(edit.authority, first!.authority))
     )
       break;
-    for (const author of added) named.set(liveAuthorIdentity(author), author);
     bytes += edit.bytes.byteLength;
-    authorBytes += addedBytes;
-    one &&= same;
     count += 1;
   }
-  if (one) return { count, authors: first.sender };
-  const authors = [...named].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, a]) => a);
-  return { count, authors };
+  return count;
 }
 
 export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
@@ -311,7 +292,6 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
   const saveEveryMs = options.saveEveryMs ?? 5_000;
   const saveTimeoutMs = options.saveTimeoutMs ?? 30_000;
   const pauseAfterMs = options.pauseAfterMs ?? 10 * 60_000;
-  const everySender = options.namesEverySender === true;
   const write = options.log ?? ((line, detail) => console.error(`[live-room] ${line}`, detail));
   const log = (room: Room, line: string, detail: Record<string, unknown> = {}) =>
     write(line, { objectId: room.document.objectId, unsaved: room.unsaved.length, ...detail });
@@ -444,9 +424,10 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
 
   /** One save of the oldest unsaved edits. */
   async function saveOnce(room: Room): Promise<SaveOutcome> {
-    const { count, authors } = nextSave(room.unsaved, everySender, options.maxAppliedBytes);
+    const count = nextSave(room.unsaved, options.maxAppliedBytes);
     if (!count) return "saved";
     const batch = room.unsaved.slice(0, count);
+    const { sender: authors, authority } = batch[0]!;
     const merged = count === 1 ? batch[0]!.bytes : Y.mergeUpdates(batch.map((edit) => edit.bytes));
     const through = batch.at(-1)!.position;
     // The journal's commit makes the save durable. Waiting past it is only for the engine's
@@ -463,6 +444,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           updateBytes: merged,
           room: {
             authors,
+            authority,
             committed(journalCursor) {
               deleteSavedLiveRoomEdits(storage, room.document, through);
               recordLiveRoomSave(storage, room.document, journalCursor, through);
@@ -496,7 +478,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       log(room, "save not taken", { edits: count, answer });
       if (answer?.result !== "refused") return "retry";
       if (!STALE_CAPTURE.has(answer.reason))
-        return { refusal: answer.reason, named: senders(batch) };
+        return { refusal: answer.reason, named: senders(room.unsaved) };
       if (room.saver) dropSaver(room);
       return "retry";
     }
@@ -675,21 +657,23 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       // saved first, in the order they were taken. New edits follow them in the list.
       const left = liveRoomEdits(storage, document);
       for (const [index, edit] of left.entries()) {
-        if (!roomAdmissible(room.doc, edit.updateBytes)) {
-          // A taken edit is never skipped. The note pauses with every one left in its copy.
+        // A taken edit is never skipped. One that no longer applies, or that was taken before
+        // the room kept the access each edit came in under, pauses the note with every one left
+        // in its copy, for the owner to review.
+        if (!edit.authority || !roomAdmissible(room.doc, edit.updateBytes)) {
           const copy = Y.mergeUpdates([
             Y.encodeStateAsUpdate(room.doc),
             ...left.slice(index).map((row) => row.updateBytes),
           ]);
-          if (pause(room, "refused", "invalid-update", senders(left), copy)) return;
-          throw new Error(
-            "A taken edit no longer applies to its note, and the note did not pause.",
-          );
+          const refusal = edit.authority ? "invalid-update" : "authority-refused";
+          if (pause(room, "refused", refusal, senders(left), copy)) return;
+          throw new Error("A taken edit can't be saved, and the note did not pause.");
         }
         Y.applyUpdate(room.doc, edit.updateBytes, FEED);
         room.unsaved.push({
           position: edit.position,
           sender: edit.sender,
+          authority: edit.authority,
           bytes: edit.updateBytes,
         });
       }
@@ -983,8 +967,10 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
             return refused("capacity-refused");
           if (sha256(bytes) !== updateDigest) return refused("invalid-update");
           // From here to the answer nothing waits, so the room cannot change under the checks.
-          const sender = host.room.sender(input.authorContext);
+          const sender = host.room.sender(input.authorContext),
+            authority = host.room.authority();
           if (!sender) return refused("provenance-refused");
+          if (!authority) return refused("authority-refused");
           const vector = Y.encodeStateVector(held.doc),
             have = Y.decodeStateVector(vector);
           // The room keeps only the part the note doesn't hold yet, and checks those same bytes. The
@@ -1007,6 +993,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
             written = appendLiveRoomEdit(storage, {
               document: held.document,
               sender,
+              authority,
               clients: plan.clients.map((clientId) => ({
                 clientId,
                 inNote: (have.get(clientId) ?? 0) > 0,
@@ -1025,7 +1012,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           }
           Y.applyUpdate(held.doc, taken, subscriber);
           held.bytes += taken.byteLength;
-          held.unsaved.push({ position: written.position, sender, bytes: taken });
+          held.unsaved.push({ position: written.position, sender, authority, bytes: taken });
           passOn(
             held,
             { journalCursor: written.position, updateBytes: taken },
