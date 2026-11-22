@@ -340,6 +340,7 @@ describe("MarkdownContent link navigation", () => {
             "## Plan",
             "## Plan 2",
             "## 计划",
+            "## हिन्दी",
             "",
             "- [x] Shipped",
             "- [ ] Pending",
@@ -353,6 +354,7 @@ describe("MarkdownContent link navigation", () => {
     expect(headingIds[1]).toBe("h-plan-2");
     expect(headingIds[2]).not.toBe("h-plan-2");
     expect(headingIds[3]).toBe("h-计划");
+    expect(headingIds[4]).toBe("h-हिन्दी");
 
     const srLabels = [...container.querySelectorAll("li.task-item .sr-only")].map((el) =>
       el.textContent?.trim(),

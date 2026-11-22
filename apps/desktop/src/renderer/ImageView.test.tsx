@@ -66,8 +66,10 @@ describe("ImageView", () => {
     fireEvent.load(img);
 
     const toggle = screen.getByTestId("image-zoom-toggle");
-    const viewport = screen.getByTestId("image-backdrop-frame").parentElement!;
+    const viewport = screen.getByRole("region", { name: "Image preview: icon.png" });
     expect(viewport.className).not.toContain("items-center");
+    expect(viewport.className).not.toContain("outline-none");
+    expect(viewport.className).toContain("focus-visible:-outline-offset-2");
     expect(screen.getByTestId("image-backdrop-frame").className).toContain("m-auto");
 
     // Ctrl+= must not be intercepted by ImageView so Electron app zoom remains intact.
@@ -75,17 +77,17 @@ describe("ImageView", () => {
     fireEvent.keyDown(viewport, { key: "=", ctrlKey: true });
     expect(toggle.textContent).toBe("Fit");
 
-    // Plain + / - / 0 on the focused image viewport steps zoom cleanly.
+    // Plain + / - / 0 on the focused image viewport or zoom buttons steps zoom cleanly.
     fireEvent.keyDown(viewport, { key: "+" });
     expect(toggle.textContent).toBe("150%");
-    fireEvent.keyDown(viewport, { key: "-" });
+    fireEvent.keyDown(screen.getByTestId("image-zoom-in"), { key: "-" });
     expect(toggle.textContent).toBe("100%");
-    fireEvent.keyDown(viewport, { key: "0" });
+    fireEvent.keyDown(screen.getByTestId("image-zoom-out"), { key: "0" });
     expect(toggle.textContent).toBe("Fit");
   });
 
-  it("steps from actual fitted scale on large images instead of jumping up on Zoom Out", () => {
-    render(<ImageView url="blob:huge" path="assets/huge.png" />);
+  it("steps from actual fitted scale on wide and tall images instead of magnifying on Zoom Out", () => {
+    const first = render(<ImageView url="blob:huge" path="assets/huge.png" />);
     const img = screen.getByRole("img", { name: "huge.png" });
     Object.defineProperty(img, "naturalWidth", { configurable: true, value: 2000 });
     Object.defineProperty(img, "naturalHeight", { configurable: true, value: 1000 });
@@ -111,5 +113,28 @@ describe("ImageView", () => {
 
     fireEvent.click(zoomIn);
     expect(toggle.textContent).toBe("25%");
+    first.unmount();
+
+    // Tall image (400×4000) fitted into a 400×379 box: actual scale is 379/4000 (~9.5%), not 400/400 (100%).
+    render(<ImageView url="blob:tall" path="assets/tall.png" />);
+    const tallImg = screen.getByRole("img", { name: "tall.png" });
+    Object.defineProperty(tallImg, "naturalWidth", { configurable: true, value: 400 });
+    Object.defineProperty(tallImg, "naturalHeight", { configurable: true, value: 4000 });
+    tallImg.getBoundingClientRect = () => ({
+      width: 400,
+      height: 379,
+      top: 0,
+      left: 0,
+      right: 400,
+      bottom: 379,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+    fireEvent.load(tallImg);
+
+    expect((screen.getByTestId("image-zoom-out") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId("image-zoom-in"));
+    expect(screen.getByTestId("image-zoom-toggle").textContent).toBe("25%");
   });
 });

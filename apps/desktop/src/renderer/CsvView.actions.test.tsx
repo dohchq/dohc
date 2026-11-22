@@ -231,6 +231,37 @@ describe("CSV view actions", () => {
     expect((screen.getByLabelText("Row 2 column 2") as HTMLInputElement).value).toBe("2");
   });
 
+  it("restores deleted columns by row identity after another row is deleted and retires Undo across Raw edits", async () => {
+    const user = userEvent.setup();
+    const notices: Array<{ message: string; onUndo?: () => void }> = [];
+    render(
+      <CsvView
+        {...csvFile("ws-1", "cities.csv", "name,city\nAda,Paris\nGrace,Tokyo\nLin,Oslo")}
+        onNotice={(message, onUndo) => notices.push({ message, onUndo })}
+      />,
+    );
+
+    // Delete "city" column, then delete Ada's row, then undo the "city" deletion.
+    await user.click(screen.getByLabelText("Delete column 2"));
+    const undoCity = notices.at(-1)?.onUndo;
+    await user.click(screen.getByLabelText("Delete row 1"));
+
+    act(() => undoCity?.());
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Grace");
+    expect((screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value).toBe("Tokyo");
+    expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Lin");
+    expect((screen.getByLabelText("Row 2 column 2") as HTMLInputElement).value).toBe("Oslo");
+
+    // Switching to Raw mode and editing retires pending table Undo callbacks so they never overwrite Source edits.
+    await user.click(screen.getByLabelText("Delete row 1"));
+    const staleUndo = notices.at(-1)?.onUndo;
+    await user.click(mode("Raw"));
+    const rawEditor = screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement;
+    await user.type(rawEditor, "\nSam,Rome");
+    act(() => staleUndo?.());
+    expect(rawEditor.value).toContain("Sam,Rome");
+  });
+
   it("does not append duplicate empty rows when pressing Enter on an empty last row", async () => {
     const user = userEvent.setup();
     render(<CsvView {...csvFile("ws-1", "data.csv", "name,count\nAda,1")} />);

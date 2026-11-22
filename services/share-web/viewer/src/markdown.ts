@@ -7,7 +7,7 @@ const SAFE_LINK = /^(?:https?:\/\/|mailto:|\/[^/]|#|\.\.?\/)/iu;
 const HTTP_LINK = /^https?:\/\//iu;
 const MAILTO_LINK = /^mailto:/iu;
 const NON_FILE_LINK = /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/iu;
-const HEADING_ID = /^h-[\p{L}\p{N}-]+$/u;
+const HEADING_ID = /^h-[\p{L}\p{M}\p{N}-]+$/u;
 
 const ALLOWED_CLASS_TOKENS = new Set([
   "sr-only",
@@ -144,8 +144,9 @@ DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
 
 export function headingSlug(text: string): string {
   const cleaned = text
+    .normalize("NFC")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s-]/gu, "")
+    .replace(/[^\p{L}\p{M}\p{N}\s-]/gu, "")
     .trim()
     .replace(/[\s-]+/gu, "-")
     .replace(/^-+|-+$/gu, "");

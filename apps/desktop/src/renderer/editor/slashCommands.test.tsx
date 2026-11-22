@@ -13,6 +13,7 @@ import {
   dismissSlashCommand,
   filterSlashCommands,
   makeSlashCommandPlugin,
+  runSlashCommand,
   SlashCommandMenu,
   type SlashCommandId,
   type SlashCommandState,
@@ -495,39 +496,61 @@ describe("filterSlashCommands tiered scoring & code suppression", () => {
     editor.destroy();
   });
 
-  it("removes a gutter-inserted '/' and empty paragraph on Escape or dismiss, while keeping manually typed '/'", () => {
-    const { editor, stateRef, press } = makeSlashEditor();
+  it("keeps gutter '+' in pure UI state with zero Y.Doc mutation until typing or picking a block", () => {
+    const ydoc = new Y.Doc();
+    const peerDoc = new Y.Doc();
+    const syncUpdates: Uint8Array[] = [];
+    ydoc.on("update", (update: Uint8Array) => {
+      syncUpdates.push(update);
+      Y.applyUpdate(peerDoc, update);
+    });
+    const { editor, stateRef, press } = makeSlashEditor(ydoc);
     editor.commands.setContent("<p>Hello</p>");
+    syncUpdates.length = 0;
 
-    // Clicking gutter '+' inserts a new paragraph with '/' and opens the menu.
+    // Clicking gutter '+' opens the slash menu without touching the document or emitting any Y.Doc update.
     insertBlockAfter(editor, 0);
     expect(stateRef.current.open).toBe(true);
-    expect(editor.state.doc.childCount).toBe(2);
-
-    // Pressing Escape cancels cleanly with zero leftover '/' or blank paragraph.
-    press("Escape");
-    expect(stateRef.current.open).toBe(false);
     expect(editor.state.doc.childCount).toBe(1);
     expect(editor.state.doc.textContent).toBe("Hello");
+    expect(syncUpdates).toHaveLength(0);
 
-    // Same for outside-click dismiss via dismissSlashCommand.
+    // A remote peer edit while the gutter menu is open followed by Escape leaves zero stray '/'.
+    const peerBody = peerDoc.getXmlFragment("default");
+    const peerParagraph = peerBody.get(0) as Y.XmlElement;
+    (peerParagraph.get(0) as Y.XmlText).insert(5, " peer");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(peerDoc));
+    press("Escape");
+    expect(stateRef.current.open).toBe(false);
+    expect(editor.state.doc.textContent).toBe("Hello peer");
+    expect(editor.state.doc.textContent).not.toContain("/");
+
+    // Clicking gutter '+' and running a command inserts the new block cleanly after the target block.
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    runSlashCommand(editor, "heading-1", stateRef.current, (next) => {
+      stateRef.current = typeof next === "function" ? next(stateRef.current) : next;
+    });
+    expect(editor.state.doc.childCount).toBe(2);
+    expect(editor.state.doc.child(0).textContent).toBe("Hello peer");
+    expect(editor.state.doc.child(1).type.name).toBe("heading");
+    expect(editor.state.doc.child(1).attrs.level).toBe(1);
+
+    // Clicking gutter '+' then typing 'h' materializes '/h' so filtering works seamlessly.
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    press("h");
+    expect(stateRef.current).toMatchObject({ open: true, query: "h" });
+    expect(editor.state.doc.child(1).textContent).toBe("/h");
+
+    // Outside-click dismiss on a fresh gutter open leaves zero doc edit, while manually typed '/' stays on Escape.
+    editor.commands.setContent("<p></p>");
     insertBlockAfter(editor, 0);
     expect(stateRef.current.open).toBe(true);
     dismissSlashCommand(editor.view);
     expect(stateRef.current.open).toBe(false);
-    expect(editor.state.doc.childCount).toBe(1);
-    expect(editor.state.doc.textContent).toBe("Hello");
-
-    // Reusing an existing empty paragraph removes only the '/' and preserves the empty paragraph.
-    editor.commands.setContent("<p></p>");
-    insertBlockAfter(editor, 0);
-    expect(stateRef.current.open).toBe(true);
-    press("Escape");
-    expect(stateRef.current.open).toBe(false);
-    expect(editor.state.doc.childCount).toBe(1);
     expect(editor.state.doc.textContent).toBe("");
 
-    // Manually typed '/' is kept as text when Escape dismisses the menu.
     editor.commands.insertContent("/");
     expect(stateRef.current.open).toBe(true);
     press("Escape");
@@ -535,5 +558,7 @@ describe("filterSlashCommands tiered scoring & code suppression", () => {
     expect(editor.state.doc.textContent).toBe("/");
 
     editor.destroy();
+    ydoc.destroy();
+    peerDoc.destroy();
   });
 });

@@ -1920,266 +1920,369 @@ export function TableView({
                 <p className="m-0">{rowNote.reason}</p>
               </div>
             ) : null}
-            {editing && editingNew && editingField && draft ? (
-              <fieldset
-                // The table's editor, over a cell of the new row. It saves into the row, and the row saves the record.
-                key={`${draft.id}:${editing.field}`}
-                ref={editorRef}
-                data-cell-editor=""
-                data-grid-cell={editingPickerWidth === null ? "" : undefined}
-                disabled={editingDisabled}
-                onChangeCapture={() => {
-                  typedInEditor.current = true;
-                }}
-                onBlurCapture={(event) => {
-                  if (editingDisabled) event.stopPropagation();
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") event.stopPropagation();
-                }}
-                className={
-                  editingPickerWidth === null
-                    ? "absolute z-10 m-0 min-w-0 border-0 bg-bg p-0 font-normal ring-2 ring-inset ring-accent"
-                    : "dohc-popover dohc-pop-in absolute z-10 m-0 min-w-0 rounded-lg border border-line bg-bg p-0 font-normal"
-                }
-                style={{
-                  top: editingRowIndex * ROW_HEIGHT,
-                  left: editing.left,
-                  width: Math.max(columnWidth(editingColumn), editingPickerWidth ?? 0),
-                  minHeight: ROW_HEIGHT,
-                }}
-              >
-                <CellEditor
-                  field={editingField}
-                  label={fieldLabel?.(editingField.name) ?? editingField.name}
-                  typed={editing.typed}
-                  acknowledgedWriteId={newRowEdits.current}
-                  indexed={shownValue(
-                    editingField.name,
-                    undefined,
-                    blank(newRow.value(editingField.name))
-                      ? undefined
-                      : { state: "pending", value: newRow.value(editingField.name)! },
-                  )}
-                  emit={(value) => {
-                    newRow.set(editingField, value, typedInEditor.current);
-                    return ++newRowEdits.current;
-                  }}
-                  close={closeEditor}
-                  // Text still in the editor when the table closes is the row's. Text its field cannot take is kept as text,
-                  // so the row is handed to the host whole and not saved as if it were complete.
-                  abandon={(text, value) => {
-                    if (cancelled.current) return;
-                    if (value !== undefined) newRow.set(editingField, value);
-                    else newRow.unparsed = { field: editingField.name, text };
-                  }}
-                  onOptionColorChange={
-                    onOptionColorChange
-                      ? (option, color) => onOptionColorChange(editingField.name, option, color)
-                      : undefined
-                  }
-                  people={people}
-                />
-              </fieldset>
-            ) : null}
-            {invalid && at ? (
-              <div
-                id={noteId}
-                role="note"
-                data-cell-note="invalid"
-                className="dohc-popover absolute z-20 flex max-w-80 items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal text-danger"
-                style={{
-                  top: (at.row + 1) * ROW_HEIGHT,
-                  left:
-                    at.column === 0
-                      ? (scrollRef.current?.scrollLeft ?? 0) + gutter
-                      : gutter + columnLeft(at.column),
-                  minWidth: columnWidth(at.column),
-                }}
-              >
-                <span aria-hidden className="flex h-lh shrink-0 items-center">
-                  <CircleAlert {...MARK_ICON} />
-                </span>
-                {invalid.reason}
-              </div>
-            ) : null}
-            {editing && editingRow && editingField && onCellChange ? (
-              <fieldset
-                // One editor for every cell type, drawn in an overlay above
-                // the rows and anchored to the cell's top edge. Growing
-                // downward from there, a tall editor (a picker's option
-                // list) is never clipped by the fixed row height and never
-                // extends up under the column header, which would steal its
-                // clicks. Remounting on cell switch resets the editor's
-                // inputs to the next cell's value.
-                key={`${editing.recordId}:${editing.field}`}
-                ref={editorRef}
-                data-cell-editor=""
-                data-grid-cell={editingPickerWidth === null ? "" : undefined}
-                disabled={editingDisabled}
-                onBlurCapture={(event) => {
-                  if (editingDisabled) event.stopPropagation();
-                }}
-                // One Escape closes one surface: the editor took this one, so it is not the host's.
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") event.stopPropagation();
-                }}
-                className={
-                  editingPickerWidth === null
-                    ? "absolute z-10 m-0 min-w-0 border-0 bg-bg p-0 font-normal ring-2 ring-inset ring-accent"
-                    : "dohc-popover dohc-pop-in absolute z-10 m-0 min-w-0 rounded-lg border border-line bg-bg p-0 font-normal"
-                }
-                style={{
-                  top: editingRowIndex * ROW_HEIGHT,
-                  left: editing.left,
-                  // A picker covers its cell, so a press on the cell is a press on the picker.
-                  width: Math.max(columnWidth(editingColumn), editingPickerWidth ?? 0),
-                  minHeight: ROW_HEIGHT,
-                }}
-              >
-                {editingHost ? (
-                  editingHost.editor?.(editingRow.original, () => closeEditor())
-                ) : (
-                  <CellEditor
-                    field={editingField}
-                    label={fieldLabel?.(editingField.name) ?? editingField.name}
-                    typed={editing.typed}
-                    acknowledgedWriteId={
-                      acknowledgedWriteId?.(editingRow.original, editingField.name) ?? 0
-                    }
-                    subscribeToDiscardedWrites={subscribeToDiscardedWrites}
-                    carried={
-                      editingField.type === "multi-select" ? carriedSelection(editing) : undefined
-                    }
-                    // The edit starts from what was typed, so a refused value is not typed twice.
-                    indexed={shownValue(
-                      editingField.name,
-                      editingValue,
-                      statuses.get(editing.recordId, editing.field),
-                      true,
-                    )}
-                    emit={(value, previousValues) =>
-                      onCellChange({
-                        recordId: editingRow.original.id,
-                        recordPath: editingRow.original.path,
-                        field: editingField.name,
-                        value,
-                        ...(previousValues === undefined ? {} : { previousValues }),
-                      })
-                    }
-                    close={closeEditor}
-                    abandon={
-                      onDraftAbandoned
-                        ? (text, value) => {
-                            if (!cancelled.current)
-                              onDraftAbandoned({
-                                recordId: editing.recordId,
-                                field: editing.field,
-                                text,
-                                ...(value === undefined ? {} : { value }),
-                              });
+            {editing && editingNew && editingField && draft
+              ? (() => {
+                  const pinned = editingColumn === 0;
+                  const editorWidth = Math.max(columnWidth(editingColumn), editingPickerWidth ?? 0);
+                  const pinnedLeft =
+                    editingPickerWidth !== null && scrollRef.current
+                      ? Math.min(
+                          gutter,
+                          Math.max(0, scrollRef.current.clientWidth - editorWidth - PICKER_EDGE),
+                        )
+                      : gutter;
+                  const fieldset = (
+                    <fieldset
+                      // The table's editor, over a cell of the new row. It saves into the row, and the row saves the record.
+                      key={`${draft.id}:${editing.field}`}
+                      ref={editorRef}
+                      data-cell-editor=""
+                      data-grid-cell={editingPickerWidth === null ? "" : undefined}
+                      disabled={editingDisabled}
+                      onChangeCapture={() => {
+                        typedInEditor.current = true;
+                      }}
+                      onBlurCapture={(event) => {
+                        if (editingDisabled) event.stopPropagation();
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") event.stopPropagation();
+                      }}
+                      className={
+                        editingPickerWidth === null
+                          ? `${pinned ? "pointer-events-auto sticky" : "absolute"} z-10 m-0 min-w-0 border-0 bg-bg p-0 font-normal ring-2 ring-inset ring-accent`
+                          : `dohc-popover dohc-pop-in ${pinned ? "pointer-events-auto sticky" : "absolute"} z-10 m-0 min-w-0 rounded-lg border border-line bg-bg p-0 font-normal`
+                      }
+                      style={
+                        pinned
+                          ? {
+                              left: pinnedLeft,
+                              marginLeft: pinnedLeft,
+                              width: editorWidth,
+                              minHeight: ROW_HEIGHT,
+                            }
+                          : {
+                              top: editingRowIndex * ROW_HEIGHT,
+                              left: editing.left,
+                              width: editorWidth,
+                              minHeight: ROW_HEIGHT,
+                            }
+                      }
+                    >
+                      <CellEditor
+                        field={editingField}
+                        label={fieldLabel?.(editingField.name) ?? editingField.name}
+                        typed={editing.typed}
+                        acknowledgedWriteId={newRowEdits.current}
+                        indexed={shownValue(
+                          editingField.name,
+                          undefined,
+                          blank(newRow.value(editingField.name))
+                            ? undefined
+                            : { state: "pending", value: newRow.value(editingField.name)! },
+                        )}
+                        emit={(value) => {
+                          newRow.set(editingField, value, typedInEditor.current);
+                          return ++newRowEdits.current;
+                        }}
+                        close={closeEditor}
+                        // Text still in the editor when the table closes is the row's. Text its field cannot take is kept as text,
+                        // so the row is handed to the host whole and not saved as if it were complete.
+                        abandon={(text, value) => {
+                          if (cancelled.current) return;
+                          if (value !== undefined) newRow.set(editingField, value);
+                          else newRow.unparsed = { field: editingField.name, text };
+                        }}
+                        onOptionColorChange={
+                          onOptionColorChange
+                            ? (option, color) =>
+                                onOptionColorChange(editingField.name, option, color)
+                            : undefined
+                        }
+                        people={people}
+                      />
+                    </fieldset>
+                  );
+                  return pinned ? (
+                    <div
+                      className="pointer-events-none absolute inset-x-0 top-0"
+                      style={{ paddingTop: editingRowIndex * ROW_HEIGHT }}
+                    >
+                      {fieldset}
+                    </div>
+                  ) : (
+                    fieldset
+                  );
+                })()
+              : null}
+            {invalid && at
+              ? (() => {
+                  const pinned = at.column === 0;
+                  const noteEl = (
+                    <div
+                      id={noteId}
+                      role="note"
+                      data-cell-note="invalid"
+                      className={`dohc-popover ${pinned ? "pointer-events-auto sticky w-max" : "absolute"} z-20 flex max-w-80 items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal text-danger`}
+                      style={
+                        pinned
+                          ? { left: gutter, marginLeft: gutter, minWidth: columnWidth(0) }
+                          : {
+                              top: (at.row + 1) * ROW_HEIGHT,
+                              left: gutter + columnLeft(at.column),
+                              minWidth: columnWidth(at.column),
+                            }
+                      }
+                    >
+                      <span aria-hidden className="flex h-lh shrink-0 items-center">
+                        <CircleAlert {...MARK_ICON} />
+                      </span>
+                      {invalid.reason}
+                    </div>
+                  );
+                  return pinned ? (
+                    <div
+                      className="pointer-events-none absolute inset-x-0 top-0"
+                      style={{ paddingTop: (at.row + 1) * ROW_HEIGHT }}
+                    >
+                      {noteEl}
+                    </div>
+                  ) : (
+                    noteEl
+                  );
+                })()
+              : null}
+            {editing && editingRow && editingField && onCellChange
+              ? (() => {
+                  const pinned = editingColumn === 0;
+                  const editorWidth = Math.max(columnWidth(editingColumn), editingPickerWidth ?? 0);
+                  const pinnedLeft =
+                    editingPickerWidth !== null && scrollRef.current
+                      ? Math.min(
+                          gutter,
+                          Math.max(0, scrollRef.current.clientWidth - editorWidth - PICKER_EDGE),
+                        )
+                      : gutter;
+                  const fieldset = (
+                    <fieldset
+                      // One editor for every cell type, drawn in an overlay above
+                      // the rows and anchored to the cell's top edge. Growing
+                      // downward from there, a tall editor (a picker's option
+                      // list) is never clipped by the fixed row height and never
+                      // extends up under the column header, which would steal its
+                      // clicks. Remounting on cell switch resets the editor's
+                      // inputs to the next cell's value.
+                      key={`${editing.recordId}:${editing.field}`}
+                      ref={editorRef}
+                      data-cell-editor=""
+                      data-grid-cell={editingPickerWidth === null ? "" : undefined}
+                      disabled={editingDisabled}
+                      onBlurCapture={(event) => {
+                        if (editingDisabled) event.stopPropagation();
+                      }}
+                      // One Escape closes one surface: the editor took this one, so it is not the host's.
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") event.stopPropagation();
+                      }}
+                      className={
+                        editingPickerWidth === null
+                          ? `${pinned ? "pointer-events-auto sticky" : "absolute"} z-10 m-0 min-w-0 border-0 bg-bg p-0 font-normal ring-2 ring-inset ring-accent`
+                          : `dohc-popover dohc-pop-in ${pinned ? "pointer-events-auto sticky" : "absolute"} z-10 m-0 min-w-0 rounded-lg border border-line bg-bg p-0 font-normal`
+                      }
+                      style={
+                        pinned
+                          ? {
+                              left: pinnedLeft,
+                              marginLeft: pinnedLeft,
+                              width: editorWidth,
+                              minHeight: ROW_HEIGHT,
+                            }
+                          : {
+                              top: editingRowIndex * ROW_HEIGHT,
+                              left: editing.left,
+                              // A picker covers its cell, so a press on the cell is a press on the picker.
+                              width: editorWidth,
+                              minHeight: ROW_HEIGHT,
+                            }
+                      }
+                    >
+                      {editingHost ? (
+                        editingHost.editor?.(editingRow.original, () => closeEditor())
+                      ) : (
+                        <CellEditor
+                          field={editingField}
+                          label={fieldLabel?.(editingField.name) ?? editingField.name}
+                          typed={editing.typed}
+                          acknowledgedWriteId={
+                            acknowledgedWriteId?.(editingRow.original, editingField.name) ?? 0
                           }
-                        : undefined
-                    }
-                    onCreateOption={
-                      onCreateOption
-                        ? (option, value, previousValues) =>
-                            onCreateOption({
+                          subscribeToDiscardedWrites={subscribeToDiscardedWrites}
+                          carried={
+                            editingField.type === "multi-select"
+                              ? carriedSelection(editing)
+                              : undefined
+                          }
+                          // The edit starts from what was typed, so a refused value is not typed twice.
+                          indexed={shownValue(
+                            editingField.name,
+                            editingValue,
+                            statuses.get(editing.recordId, editing.field),
+                            true,
+                          )}
+                          emit={(value, previousValues) =>
+                            onCellChange({
                               recordId: editingRow.original.id,
                               recordPath: editingRow.original.path,
                               field: editingField.name,
-                              option,
                               value,
                               ...(previousValues === undefined ? {} : { previousValues }),
                             })
-                        : undefined
-                    }
-                    onOptionColorChange={
-                      onOptionColorChange
-                        ? (option, color) => onOptionColorChange(editingField.name, option, color)
-                        : undefined
-                    }
-                    people={people}
-                    relationExecutor={relationExecutor}
-                  />
-                )}
-              </fieldset>
-            ) : null}
-            {note && at ? (
-              <div
-                ref={noteRef}
-                id={noteId}
-                role="note"
-                data-cell-note={note.state}
-                className="dohc-popover absolute z-20 flex max-w-80 flex-col items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal"
-                style={{
-                  top: (at.row + 1) * ROW_HEIGHT,
-                  left:
-                    at.column === 0
-                      ? (scrollRef.current?.scrollLeft ?? 0) + gutter
-                      : gutter + columnLeft(at.column),
-                  minWidth: columnWidth(at.column),
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== "Escape" && event.key !== "Tab") return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  // Tab goes through the note's actions before it leaves.
-                  const actions = [...event.currentTarget.querySelectorAll<HTMLElement>("button")];
-                  const action =
-                    event.key === "Tab"
-                      ? actions[
-                          actions.indexOf(event.target as HTMLElement) + (event.shiftKey ? -1 : 1)
-                        ]
-                      : undefined;
-                  if (action) return action.focus();
-                  const to =
-                    event.key === "Tab" && !event.shiftKey
-                      ? beside(at.row, at.column, false)
-                      : null;
-                  if (to) select(...to);
-                  else leaveNote();
-                }}
-              >
-                <p
-                  className={`m-0 ${note.state === "waiting" ? "text-muted" : note.state === "unconfirmed" ? "text-warning" : "text-danger"}`}
-                >
-                  {note.reason}
-                </p>
-                <div className="flex gap-1 empty:hidden">
-                  {note.state === "unconfirmed" || note.state === "refused" ? (
-                    <button
-                      type="button"
-                      // Tab on the selected cell reaches it.
-                      tabIndex={-1}
-                      className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
-                      onClick={() => {
-                        // The words go once the action runs, so the grid takes the keys back first.
-                        leaveNote();
-                        if (note.state === "unconfirmed") note.retry();
-                        else note.dismiss();
+                          }
+                          close={closeEditor}
+                          abandon={
+                            onDraftAbandoned
+                              ? (text, value) => {
+                                  if (!cancelled.current)
+                                    onDraftAbandoned({
+                                      recordId: editing.recordId,
+                                      field: editing.field,
+                                      text,
+                                      ...(value === undefined ? {} : { value }),
+                                    });
+                                }
+                              : undefined
+                          }
+                          onCreateOption={
+                            onCreateOption
+                              ? (option, value, previousValues) =>
+                                  onCreateOption({
+                                    recordId: editingRow.original.id,
+                                    recordPath: editingRow.original.path,
+                                    field: editingField.name,
+                                    option,
+                                    value,
+                                    ...(previousValues === undefined ? {} : { previousValues }),
+                                  })
+                              : undefined
+                          }
+                          onOptionColorChange={
+                            onOptionColorChange
+                              ? (option, color) =>
+                                  onOptionColorChange(editingField.name, option, color)
+                              : undefined
+                          }
+                          people={people}
+                          relationExecutor={relationExecutor}
+                        />
+                      )}
+                    </fieldset>
+                  );
+                  return pinned ? (
+                    <div
+                      className="pointer-events-none absolute inset-x-0 top-0"
+                      style={{ paddingTop: editingRowIndex * ROW_HEIGHT }}
+                    >
+                      {fieldset}
+                    </div>
+                  ) : (
+                    fieldset
+                  );
+                })()
+              : null}
+            {note && at
+              ? (() => {
+                  const pinned = at.column === 0;
+                  const noteEl = (
+                    <div
+                      ref={noteRef}
+                      id={noteId}
+                      role="note"
+                      data-cell-note={note.state}
+                      className={`dohc-popover ${pinned ? "pointer-events-auto sticky w-max" : "absolute"} z-20 flex max-w-80 flex-col items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal`}
+                      style={
+                        pinned
+                          ? { left: gutter, marginLeft: gutter, minWidth: columnWidth(0) }
+                          : {
+                              top: (at.row + 1) * ROW_HEIGHT,
+                              left: gutter + columnLeft(at.column),
+                              minWidth: columnWidth(at.column),
+                            }
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key !== "Escape" && event.key !== "Tab") return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        // Tab goes through the note's actions before it leaves.
+                        const actions = [
+                          ...event.currentTarget.querySelectorAll<HTMLElement>("button"),
+                        ];
+                        const action =
+                          event.key === "Tab"
+                            ? actions[
+                                actions.indexOf(event.target as HTMLElement) +
+                                  (event.shiftKey ? -1 : 1)
+                              ]
+                            : undefined;
+                        if (action) return action.focus();
+                        const to =
+                          event.key === "Tab" && !event.shiftKey
+                            ? beside(at.row, at.column, false)
+                            : null;
+                        if (to) select(...to);
+                        else leaveNote();
                       }}
                     >
-                      {note.state === "unconfirmed" ? "Try again" : "Dismiss"}
-                    </button>
-                  ) : null}
-                  {note.state === "unconfirmed" && note.discard ? (
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      title={DISCARD_HINT}
-                      className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
-                      onClick={() => {
-                        leaveNote();
-                        note.discard?.();
-                      }}
+                      <p
+                        className={`m-0 ${note.state === "waiting" ? "text-muted" : note.state === "unconfirmed" ? "text-warning" : "text-danger"}`}
+                      >
+                        {note.reason}
+                      </p>
+                      <div className="flex gap-1 empty:hidden">
+                        {note.state === "unconfirmed" || note.state === "refused" ? (
+                          <button
+                            type="button"
+                            // Tab on the selected cell reaches it.
+                            tabIndex={-1}
+                            className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
+                            onClick={() => {
+                              // The words go once the action runs, so the grid takes the keys back first.
+                              leaveNote();
+                              if (note.state === "unconfirmed") note.retry();
+                              else note.dismiss();
+                            }}
+                          >
+                            {note.state === "unconfirmed" ? "Try again" : "Dismiss"}
+                          </button>
+                        ) : null}
+                        {note.state === "unconfirmed" && note.discard ? (
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            title={DISCARD_HINT}
+                            className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
+                            onClick={() => {
+                              leaveNote();
+                              note.discard?.();
+                            }}
+                          >
+                            Discard
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                  return pinned ? (
+                    <div
+                      className="pointer-events-none absolute inset-x-0 top-0"
+                      style={{ paddingTop: (at.row + 1) * ROW_HEIGHT }}
                     >
-                      Discard
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
+                      {noteEl}
+                    </div>
+                  ) : (
+                    noteEl
+                  );
+                })()
+              : null}
           </div>
         ) : null}
         {adds ? (

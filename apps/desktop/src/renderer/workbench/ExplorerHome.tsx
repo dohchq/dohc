@@ -817,7 +817,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                 className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
               >
                 <ChevronRight
-                  size={11}
+                  size={12}
                   aria-hidden
                   className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
                 />

@@ -47,18 +47,25 @@ export function ImageView({ url, path }: { url: string; path: string }) {
   }, [url]);
 
   const measureFit = useCallback(() => {
-    if (!dims || dims.w <= 0) return;
-    const width = imgRef.current?.getBoundingClientRect().width ?? 0;
-    setFitScale(width > 0 ? width / dims.w : null);
+    if (!dims || dims.w <= 0 || dims.h <= 0) return;
+    const rect = imgRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      setFitScale(null);
+      return;
+    }
+    const scale = Math.min(rect.width / dims.w, rect.height / dims.h, 1);
+    setFitScale(Number.isFinite(scale) && scale > 0 ? scale : null);
   }, [dims]);
 
   useEffect(() => {
     if (zoom !== "fit" || !dims) return;
     measureFit();
     const viewport = viewportRef.current;
-    if (!viewport || typeof ResizeObserver === "undefined") return;
+    const img = imgRef.current;
+    if ((!viewport && !img) || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measureFit);
-    observer.observe(viewport);
+    if (viewport) observer.observe(viewport);
+    if (img) observer.observe(img);
     return () => observer.disconnect();
   }, [zoom, dims, measureFit]);
 
@@ -94,33 +101,37 @@ export function ImageView({ url, path }: { url: string; path: string }) {
   const zoomLabel = zoom === "fit" ? "Fit" : `${Math.round(zoom * 100)}%`;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="view-image">
+    <div
+      className="flex min-h-0 flex-1 flex-col bg-bg"
+      data-testid="view-image"
+      onKeyDown={(event) => {
+        if (failed || event.ctrlKey || event.metaKey || event.altKey) return;
+        if (
+          event.target instanceof Element &&
+          event.target.closest(
+            'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+          )
+        ) {
+          return;
+        }
+        if (event.key === "=" || event.key === "+") {
+          event.preventDefault();
+          zoomIn();
+        } else if (event.key === "-") {
+          event.preventDefault();
+          zoomOut();
+        } else if (event.key === "0") {
+          event.preventDefault();
+          setZoom("fit");
+        }
+      }}
+    >
       <div
         ref={viewportRef}
+        role="region"
         tabIndex={0}
         aria-label={`Image preview: ${name}`}
-        className="flex min-h-0 flex-1 overflow-auto p-6 outline-none"
-        onKeyDown={(event) => {
-          if (failed || event.ctrlKey || event.metaKey || event.altKey) return;
-          if (
-            event.target instanceof Element &&
-            event.target.closest(
-              'button, input, textarea, select, [contenteditable]:not([contenteditable="false"])',
-            )
-          ) {
-            return;
-          }
-          if (event.key === "=" || event.key === "+") {
-            event.preventDefault();
-            zoomIn();
-          } else if (event.key === "-") {
-            event.preventDefault();
-            zoomOut();
-          } else if (event.key === "0") {
-            event.preventDefault();
-            setZoom("fit");
-          }
-        }}
+        className="flex min-h-0 flex-1 overflow-auto p-6 focus-visible:-outline-offset-2"
         onWheel={(event) => {
           if (failed || !(event.ctrlKey || event.metaKey)) return;
           event.preventDefault();
@@ -154,8 +165,12 @@ export function ImageView({ url, path }: { url: string; path: string }) {
                 const w = e.currentTarget.naturalWidth;
                 const h = e.currentTarget.naturalHeight;
                 setDims({ w, h });
-                const rendered = e.currentTarget.getBoundingClientRect().width;
-                setFitScale(w > 0 && rendered > 0 ? rendered / w : null);
+                const rect = e.currentTarget.getBoundingClientRect();
+                const scale =
+                  w > 0 && h > 0 && rect.width > 0 && rect.height > 0
+                    ? Math.min(rect.width / w, rect.height / h, 1)
+                    : null;
+                setFitScale(scale && Number.isFinite(scale) ? scale : null);
               }}
               onError={() => setFailed(true)}
             />

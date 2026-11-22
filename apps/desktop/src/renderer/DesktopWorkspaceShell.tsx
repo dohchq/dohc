@@ -8381,7 +8381,7 @@ function WorkspaceShell(props: {
                                   onClick={() => void sendShareChanges()}
                                   className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50"
                                 >
-                                  <Send size={11} aria-hidden />
+                                  <Send size={12} aria-hidden />
                                   {shareChangesSubmitting ? "Sending…" : "Send changes"}
                                 </button>
                               </>
@@ -8395,7 +8395,7 @@ function WorkspaceShell(props: {
                                 className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50"
                               >
                                 <RefreshCw
-                                  size={11}
+                                  size={12}
                                   aria-hidden
                                   className={shareRefreshing ? "animate-spin" : undefined}
                                 />

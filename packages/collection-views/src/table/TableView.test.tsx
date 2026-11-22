@@ -466,7 +466,7 @@ describe("selection and keys", () => {
     expect(selection()).toEqual([0, 0]);
   });
 
-  it("keeps frozen column 0 editors anchored at scrollLeft + gutter when horizontally scrolled", () => {
+  it("sticks pinned column 0 editors to the gutter throughout horizontal scrolling", () => {
     const { grid, cell, editorInput } = setup({ onOpenRecord: vi.fn() });
     Object.defineProperty(grid, "clientWidth", { configurable: true, value: 400 });
     grid.scrollLeft = 180;
@@ -474,8 +474,11 @@ describe("selection and keys", () => {
     fireEvent.click(cell(0, 0));
     const editor = editorInput()?.closest("fieldset") as HTMLElement | null;
     expect(editor).not.toBeNull();
-    // OPEN_COLUMN_WIDTH (36) + scrollLeft (180) = 216px, directly over the pinned first column.
-    expect(editor!.style.left).toBe("216px");
+    // Pinned column 0 editors stay sticky at OPEN_COLUMN_WIDTH (36px) across horizontal scroll.
+    expect(editor!.classList.contains("sticky")).toBe(true);
+    expect(editor!.classList.contains("z-10")).toBe(true);
+    expect(editor!.style.left).toBe("36px");
+    expect(editor!.parentElement?.style.paddingTop).toBe("0px");
   });
 
   it("starts an edit with Enter, cancels it with Escape, and keeps the cell selected", () => {

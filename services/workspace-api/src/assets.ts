@@ -289,13 +289,11 @@ for (const input of document.querySelectorAll('input[type="password"]')) {
   toggle.className = "password-toggle";
   toggle.textContent = "Show";
   toggle.setAttribute("aria-label", "Show password");
-  toggle.setAttribute("aria-pressed", "false");
   toggle.addEventListener("click", () => {
     const showing = input.type === "password";
     input.type = showing ? "text" : "password";
     toggle.textContent = showing ? "Hide" : "Show";
     toggle.setAttribute("aria-label", showing ? "Hide password" : "Show password");
-    toggle.setAttribute("aria-pressed", showing ? "true" : "false");
   });
   wrap.appendChild(toggle);
 }

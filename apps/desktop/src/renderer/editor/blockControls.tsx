@@ -1,5 +1,5 @@
 import { isCodeBlockNode, isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
-import { markGutterSlash } from "./slashCommands";
+import { openGutterSlashCommand } from "./slashCommands";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
@@ -486,13 +486,7 @@ export function insertBlockAfter(
 
   const canReuseEmptyParagraph = node.type.name === "paragraph" && node.textContent.length === 0;
   const selectionPos = canReuseEmptyParagraph ? pos + 1 : pos + node.nodeSize + 1;
-  const tr = canReuseEmptyParagraph
-    ? state.tr
-    : state.tr.insert(pos + node.nodeSize, paragraph.create());
-  tr.insertText("/", selectionPos);
-  tr.setSelection(TextSelection.create(tr.doc, selectionPos + 1)).scrollIntoView();
-  markGutterSlash(tr, { from: selectionPos, insertedParagraph: !canReuseEmptyParagraph });
-  view.dispatch(tr);
+  openGutterSlashCommand(view, { blockPos: pos, reuseEmpty: canReuseEmptyParagraph });
   view.focus();
   openSlashMenuAtPosition?.(selectionPos);
 }

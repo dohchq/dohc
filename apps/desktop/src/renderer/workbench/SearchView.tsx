@@ -129,7 +129,7 @@ const FileGroup = memo(function FileGroup(props: {
         )}
         <span
           data-testid="search-group-count"
-          className="ml-auto shrink-0 text-[11px] tabular-nums text-subtle"
+          className="ml-auto shrink-0 text-[12px] tabular-nums text-subtle"
         >
           {group.entries.length}
         </span>
@@ -154,7 +154,7 @@ const FileGroup = memo(function FileGroup(props: {
                 }`}
               >
                 {entry.surface !== "chat" && entry.line > 0 ? (
-                  <span aria-hidden className="shrink-0 text-[11px] tabular-nums text-subtle">
+                  <span aria-hidden className="shrink-0 text-[12px] tabular-nums text-subtle">
                     {entry.line}
                   </span>
                 ) : null}

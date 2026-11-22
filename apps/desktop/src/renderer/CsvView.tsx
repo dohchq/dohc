@@ -570,6 +570,23 @@ export function CsvView({
   });
   const rows = grid.rows;
   const rowsRef = useRef(rows);
+  const rawRef = useRef(raw);
+  rawRef.current = raw;
+  const nextIdRef = useRef(1);
+  const allocId = useCallback(() => `csv-${nextIdRef.current++}`, []);
+  const rowIdsRef = useRef<string[]>(rows.map(() => `csv-${nextIdRef.current++}`));
+  const colIdsRef = useRef<string[]>(
+    Array.from({ length: columnCountFor(rows) }, () => `csv-${nextIdRef.current++}`),
+  );
+  const tableSessionRef = useRef(1);
+  const resetRowColIds = useCallback(
+    (nextRows: string[][]) => {
+      tableSessionRef.current += 1;
+      rowIdsRef.current = nextRows.map(() => allocId());
+      colIdsRef.current = Array.from({ length: columnCountFor(nextRows) }, () => allocId());
+    },
+    [allocId],
+  );
   const showRows = useCallback((nextRows: string[][], editedColumn?: number) => {
     rowsRef.current = nextRows;
     setGrid((shown) => ({
@@ -618,8 +635,9 @@ export function CsvView({
     if (identity.text === text && identity.delimiter === delimiter) return;
     const nextRows = delimitedTextCodec.parse(text, delimiter);
     tableDraftIdentity.current = { text, delimiter };
+    resetRowColIds(nextRows);
     showRows(nextRows);
-  }, [delimiter, draft.draft, raw, showRows]);
+  }, [delimiter, draft.draft, raw, resetRowColIds, showRows]);
 
   // The import reads the file in main, not this preview, so the offer needs
   // only its count, its source, and a way to open the database.
@@ -673,7 +691,13 @@ export function CsvView({
   const updateCell = useCallback(
     (rowIndex: number, cellIndex: number, value: string) => {
       const nextRows = [...rowsRef.current];
-      while (nextRows.length <= rowIndex) nextRows.push([]);
+      while (nextRows.length <= rowIndex) {
+        nextRows.push([]);
+        rowIdsRef.current = [...rowIdsRef.current, allocId()];
+      }
+      while (colIdsRef.current.length <= cellIndex) {
+        colIdsRef.current = [...colIdsRef.current, allocId()];
+      }
       const nextRow = [...nextRows[rowIndex]!];
       // A sliced UTF-16 draft stays wide even after its last wide cell narrows.
       const narrowed =
@@ -683,26 +707,34 @@ export function CsvView({
       nextRows[rowIndex] = nextRow;
       setRows(nextRows, narrowed ? undefined : rowIndex, cellIndex);
     },
-    [setRows],
+    [allocId, setRows],
   );
 
   const addRow = useCallback(() => {
     const nextRows = rowsRef.current;
     if (nextRows.length === 0) {
+      rowIdsRef.current = [allocId(), allocId()];
+      colIdsRef.current = [allocId()];
       setRows([["column"], [""]]);
       return;
     }
     const width = Math.max(1, columnCountFor(nextRows));
+    while (colIdsRef.current.length < width) colIdsRef.current = [...colIdsRef.current, allocId()];
+    rowIdsRef.current = [...rowIdsRef.current, allocId()];
     setRows([...nextRows, Array.from({ length: width }, () => "")]);
-  }, [setRows]);
+  }, [allocId, setRows]);
 
   const addColumn = useCallback(() => {
     const nextRows = rowsRef.current;
     if (nextRows.length === 0) {
+      rowIdsRef.current = [allocId()];
+      colIdsRef.current = [allocId()];
       setRows([["column"]]);
       return;
     }
     const width = columnCountFor(nextRows);
+    while (colIdsRef.current.length < width) colIdsRef.current = [...colIdsRef.current, allocId()];
+    colIdsRef.current = [...colIdsRef.current, allocId()];
     const next = nextRows.map((row, index) => {
       const cells = [...row];
       while (cells.length < width) cells.push("");
@@ -710,77 +742,121 @@ export function CsvView({
       return cells;
     });
     setRows(next);
-  }, [columnName, setRows]);
+  }, [allocId, columnName, setRows]);
 
   const deleteRow = useCallback(
     (rowIndex: number) => {
       const previous = rowsRef.current;
       const removed = previous[rowIndex];
       if (!removed) return;
-      const savedRow = [...removed];
+      const session = tableSessionRef.current;
+      const colIds = colIdsRef.current;
+      const removedRowId = rowIdsRef.current[rowIndex] ?? allocId();
+      const savedByColId = new Map<string, string>();
+      for (let colIndex = 0; colIndex < removed.length; colIndex++) {
+        const colId = colIds[colIndex];
+        if (colId) savedByColId.set(colId, removed[colIndex] ?? "");
+      }
+      rowIdsRef.current = rowIdsRef.current.filter((_, index) => index !== rowIndex);
       const next = previous.filter((_, index) => index !== rowIndex);
       setRows(next);
+      let undone = false;
       onNotice?.(`Deleted row ${rowIndex}.`, () => {
+        if (undone || rawRef.current || tableSessionRef.current !== session) return;
+        undone = true;
         const current = rowsRef.current;
+        const currentColIds = colIdsRef.current;
         const insertAt = Math.min(rowIndex, current.length);
-        const width = Math.max(savedRow.length, columnCountFor(current));
-        const restored = [...savedRow];
-        while (restored.length < width) restored.push("");
-        const updated = [...current];
-        updated.splice(insertAt, 0, restored);
-        setRows(updated);
+        const width = Math.max(currentColIds.length, columnCountFor(current));
+        const restored = Array.from({ length: width }, (_, colIndex) => {
+          const colId = currentColIds[colIndex];
+          return colId ? (savedByColId.get(colId) ?? "") : "";
+        });
+        const updatedRows = [...current];
+        updatedRows.splice(insertAt, 0, restored);
+        const updatedRowIds = [...rowIdsRef.current];
+        while (updatedRowIds.length < insertAt) updatedRowIds.push(allocId());
+        updatedRowIds.splice(insertAt, 0, removedRowId);
+        rowIdsRef.current = updatedRowIds;
+        setRows(updatedRows);
       });
     },
-    [onNotice, setRows],
+    [allocId, onNotice, setRows],
   );
 
   const deleteColumn = useCallback(
     (cellIndex: number) => {
       const previous = rowsRef.current;
       const headerName = previous[0]?.[cellIndex]?.trim();
-      const savedValues = previous.map((row) => row[cellIndex] ?? "");
+      const session = tableSessionRef.current;
+      const removedColId = colIdsRef.current[cellIndex] ?? allocId();
+      const savedRowOrder = [...rowIdsRef.current];
+      const savedByRowId = new Map<string, string>();
+      for (let rIndex = 0; rIndex < previous.length; rIndex++) {
+        const rowId = savedRowOrder[rIndex];
+        if (rowId) savedByRowId.set(rowId, previous[rIndex]?.[cellIndex] ?? "");
+      }
+      colIdsRef.current = colIdsRef.current.filter((_, index) => index !== cellIndex);
       const next = previous.map((row) => row.filter((_, index) => index !== cellIndex));
       if (next.every((row) => row.length === 0)) {
+        rowIdsRef.current = [];
+        colIdsRef.current = [];
         setRows([]);
       } else {
         setRows(next);
       }
+      let undone = false;
       onNotice?.(
         headerName ? `Deleted column "${headerName}".` : `Deleted column ${cellIndex + 1}.`,
         () => {
+          if (undone || rawRef.current || tableSessionRef.current !== session) return;
+          undone = true;
           const current = rowsRef.current;
           if (current.length === 0) {
-            setRows(savedValues.map((value) => [value]));
+            rowIdsRef.current = [...savedRowOrder];
+            colIdsRef.current = [removedColId];
+            setRows(savedRowOrder.map((rowId) => [savedByRowId.get(rowId) ?? ""]));
             return;
           }
-          const insertAt = Math.min(cellIndex, columnCountFor(current));
+          const insertAt = Math.min(
+            cellIndex,
+            Math.max(colIdsRef.current.length, columnCountFor(current)),
+          );
+          const updatedColIds = [...colIdsRef.current];
+          while (updatedColIds.length < insertAt) updatedColIds.push(allocId());
+          updatedColIds.splice(insertAt, 0, removedColId);
+          colIdsRef.current = updatedColIds;
+          const currentRowIds = rowIdsRef.current;
           const updated = current.map((row, rIndex) => {
             const cells = [...row];
             while (cells.length < insertAt) cells.push("");
-            cells.splice(insertAt, 0, savedValues[rIndex] ?? "");
+            const rowId = currentRowIds[rIndex];
+            cells.splice(insertAt, 0, rowId ? (savedByRowId.get(rowId) ?? "") : "");
             return cells;
           });
           setRows(updated);
         },
       );
     },
-    [onNotice, setRows],
+    [allocId, onNotice, setRows],
   );
 
   const chooseMode = useCallback(
     (mode: CsvMode) => {
       if (mode === (raw ? "raw" : "table")) return;
       if (mode === "raw") {
+        tableSessionRef.current += 1;
         setRaw(true);
         return;
       }
       const text = draftRef.current.getDraft();
       const nextRows = delimitedTextCodec.parse(text, delimiter);
       tableDraftIdentity.current = { text, delimiter };
+      resetRowColIds(nextRows);
       showRows(nextRows);
       setRaw(false);
     },
-    [delimiter, raw, showRows],
+    [delimiter, raw, resetRowColIds, showRows],
   );
 
   // The tab row's Import and the preview bound's run this one import.

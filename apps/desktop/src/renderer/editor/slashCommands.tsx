@@ -47,13 +47,13 @@ import {
   NodeSelection,
   Plugin,
   PluginKey,
-  Selection,
+  TextSelection,
   type EditorState,
-  type Transaction,
 } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import type { ProsemirrorBinding } from "@tiptap/y-tiptap";
 import { compareRelativePositions, type RelativePosition, type XmlFragment } from "yjs";
+import { isComposingKey } from "../ui/keys";
 import {
   FLOATING_MENU_MAX_HEIGHT,
   resolveFloatingMenuPosition,
@@ -92,6 +92,11 @@ type SlashCommandItem = {
   aliases: string[];
 };
 
+export type GutterSlashTarget = {
+  blockPos: number;
+  reuseEmpty: boolean;
+};
+
 export type SlashCommandState =
   | { open: false }
   | {
@@ -107,6 +112,7 @@ export type SlashCommandState =
       bottom: number | null;
       maxHeight: number;
       placement: FloatingMenuPlacement;
+      gutterTarget?: GutterSlashTarget;
     };
 
 export const CLOSED_SLASH_COMMAND_STATE: SlashCommandState = { open: false };
@@ -124,7 +130,9 @@ export function slashCommandStatesEqual(
     left.x === right.x &&
     left.y === right.y &&
     left.maxHeight === right.maxHeight &&
-    left.placement === right.placement
+    left.placement === right.placement &&
+    left.gutterTarget?.blockPos === right.gutterTarget?.blockPos &&
+    left.gutterTarget?.reuseEmpty === right.gutterTarget?.reuseEmpty
   );
 }
 
@@ -259,54 +267,32 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
 ];
 
-export type GutterSlashOrigin = {
-  from: number;
-  insertedParagraph: boolean;
+type GutterSlashPending = GutterSlashTarget & {
+  anchor: RelativePosition | null;
 };
 
 type SlashPluginState = {
   dismissed: DismissedSlash | null;
-  gutter: GutterSlashOrigin | null;
+  gutter: GutterSlashPending | null;
 };
 
-type SlashPluginMeta = { type: "dismiss" } | { type: "gutter"; origin: GutterSlashOrigin };
+type SlashPluginMeta = { type: "dismiss" } | { type: "open-gutter"; target: GutterSlashTarget };
 
 const EMPTY_SLASH_PLUGIN_STATE: SlashPluginState = { dismissed: null, gutter: null };
 
 const slashCommandKey = new PluginKey<SlashPluginState>("dohc-slash-command");
 
-export function markGutterSlash(tr: Transaction, origin: GutterSlashOrigin): Transaction {
-  return tr.setMeta(slashCommandKey, { type: "gutter", origin } satisfies SlashPluginMeta);
+export function openGutterSlashCommand(view: EditorView, target: GutterSlashTarget): void {
+  view.dispatch(
+    view.state.tr
+      .setMeta(slashCommandKey, { type: "open-gutter", target } satisfies SlashPluginMeta)
+      .setMeta("addToHistory", false),
+  );
 }
 
 export function dismissSlashCommand(view: EditorView): void {
-  const { state } = view;
-  const pluginState = slashCommandKey.getState(state);
-  const trigger = findSlashTrigger(state);
-  const gutter = pluginState?.gutter;
-  if (gutter && trigger && trigger.from === gutter.from && trigger.query === "") {
-    const tr = state.tr;
-    const $from = state.doc.resolve(trigger.from);
-    if (
-      gutter.insertedParagraph &&
-      $from.parent.type.name === "paragraph" &&
-      $from.parent.textContent === "/" &&
-      state.doc.childCount > 1
-    ) {
-      const before = $from.before();
-      tr.delete(before, $from.after());
-      tr.setSelection(
-        Selection.near(tr.doc.resolve(Math.min(Math.max(0, before), tr.doc.content.size)), -1),
-      );
-    } else {
-      tr.delete(trigger.from, trigger.from + 1);
-    }
-    tr.setMeta(slashCommandKey, { type: "dismiss" } satisfies SlashPluginMeta);
-    view.dispatch(tr);
-    return;
-  }
   view.dispatch(
-    state.tr
+    view.state.tr
       .setMeta(slashCommandKey, { type: "dismiss" } satisfies SlashPluginMeta)
       .setMeta("addToHistory", false),
   );
@@ -383,8 +369,54 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
     return CLOSED_SLASH_COMMAND_STATE;
   }
 
+  const pluginState = slashCommandKey.getState(view.state);
+  const gutter = pluginState?.gutter ?? null;
+  if (gutter) {
+    const node = view.state.doc.nodeAt(gutter.blockPos);
+    if (!node) return CLOSED_SLASH_COMMAND_STATE;
+    const anchorPos = gutter.reuseEmpty
+      ? Math.min(gutter.blockPos + 1, view.state.doc.content.size)
+      : Math.min(gutter.blockPos + node.nodeSize, view.state.doc.content.size);
+    let x = 12;
+    let y = 40;
+    let bottom: number | null = null;
+    let maxHeight = FLOATING_MENU_MAX_HEIGHT;
+    let placement: FloatingMenuPlacement = "below";
+    try {
+      const dom = view.nodeDOM(gutter.blockPos);
+      const rect = dom instanceof HTMLElement ? dom.getBoundingClientRect() : null;
+      const cursorRect =
+        rect && (rect.width > 0 || rect.height > 0)
+          ? { left: rect.left, top: rect.bottom, bottom: rect.bottom }
+          : view.coordsAtPos(anchorPos);
+      const position = resolveFloatingMenuPosition({ cursorRect });
+      x = position.x;
+      y = position.y;
+      bottom = position.bottom ?? null;
+      maxHeight = position.maxHeight;
+      placement = position.placement;
+    } catch {
+      // Offscreen/jsdom editors cannot always resolve coordinates.
+    }
+    const selected = previous.open && previous.query === "" ? previous.selected : 0;
+    const itemCount = SLASH_COMMANDS.length;
+    return {
+      open: true,
+      from: anchorPos,
+      to: anchorPos,
+      query: "",
+      selected: itemCount ? Math.min(selected, itemCount - 1) : 0,
+      x,
+      y,
+      bottom,
+      maxHeight,
+      placement,
+      gutterTarget: { blockPos: gutter.blockPos, reuseEmpty: gutter.reuseEmpty },
+    };
+  }
+
   const trigger = findSlashTrigger(view.state);
-  if (!trigger || slashCommandKey.getState(view.state)?.dismissed?.from === trigger.from) {
+  if (!trigger || pluginState?.dismissed?.from === trigger.from) {
     return CLOSED_SLASH_COMMAND_STATE;
   }
 
@@ -424,6 +456,28 @@ function readSlashCommandState(view: EditorView, previous: SlashCommandState): S
   };
 }
 
+function materializeGutterText(
+  view: EditorView,
+  gutter: GutterSlashPending,
+  text: string,
+): boolean {
+  const { state } = view;
+  const node = state.doc.nodeAt(gutter.blockPos);
+  const paragraph = state.schema.nodes.paragraph;
+  if (!node || !paragraph) return false;
+  const reuse =
+    gutter.reuseEmpty && node.type.name === "paragraph" && node.textContent.length === 0;
+  const insertAt = reuse ? gutter.blockPos + 1 : gutter.blockPos + node.nodeSize + 1;
+  const tr = reuse
+    ? state.tr
+    : state.tr.insert(gutter.blockPos + node.nodeSize, paragraph.create());
+  const inserted = text === "/" ? "/" : /^[A-Za-z0-9_-]+$/u.test(text) ? `/${text}` : text;
+  tr.insertText(inserted, insertAt);
+  tr.setSelection(TextSelection.create(tr.doc, insertAt + inserted.length)).scrollIntoView();
+  view.dispatch(tr);
+  return true;
+}
+
 export function makeSlashCommandPlugin({
   stateRef,
   setState,
@@ -457,30 +511,64 @@ export function makeSlashCommandPlugin({
       init: () => EMPTY_SLASH_PLUGIN_STATE,
       apply(tr, prev, oldState, state) {
         const meta = tr.getMeta(slashCommandKey) as SlashPluginMeta | undefined;
-        const trigger = findSlashTrigger(state);
-
-        let gutter: GutterSlashOrigin | null = null;
-        if (meta?.type === "gutter") {
-          gutter = meta.origin;
-        } else if (meta?.type !== "dismiss" && prev.gutter && trigger && trigger.query === "") {
-          const mappedGutter = tr.mapping.mapResult(prev.gutter.from);
-          if (!mappedGutter.deleted && mappedGutter.pos === trigger.from) {
-            gutter = {
-              from: trigger.from,
-              insertedParagraph: prev.gutter.insertedParagraph,
-            };
-          }
-        }
-
-        const dismissing = meta?.type === "dismiss";
-        if (!prev.dismissed && !dismissing) {
-          return gutter ? { dismissed: null, gutter } : EMPTY_SLASH_PLUGIN_STATE;
-        }
-        if (!trigger) return EMPTY_SLASH_PLUGIN_STATE;
         // Read from the old state: this state's later plugins aren't built yet.
         const sync: YSyncState | undefined = yTiptap?.ySyncPluginKey.getState(oldState);
         const anchor = (from: number) =>
           yTiptap && sync ? anchorSlash(yTiptap, sync, from) : null;
+
+        if (meta?.type === "open-gutter") {
+          return {
+            dismissed: null,
+            gutter: { ...meta.target, anchor: anchor(meta.target.blockPos) },
+          };
+        }
+
+        const dismissing = meta?.type === "dismiss";
+        if (dismissing && prev.gutter) {
+          return EMPTY_SLASH_PLUGIN_STATE;
+        }
+
+        const change: { isChangeOrigin?: boolean } | undefined = yTiptap
+          ? tr.getMeta(yTiptap.ySyncPluginKey)
+          : undefined;
+
+        let gutter: GutterSlashPending | null = null;
+        if (prev.gutter) {
+          if (change?.isChangeOrigin) {
+            let nextBlockPos: number | null = null;
+            if (yTiptap && sync && prev.gutter.anchor && sync.type.doc) {
+              const abs = yTiptap.relativePositionToAbsolutePosition(
+                sync.type.doc,
+                sync.type,
+                prev.gutter.anchor,
+                sync.binding.mapping,
+              );
+              if (abs !== null && abs >= 1 && abs <= state.doc.content.size) {
+                const $pos = state.doc.resolve(abs);
+                nextBlockPos = $pos.depth >= 1 ? $pos.before(1) : 0;
+              }
+            } else {
+              const mapped = tr.mapping.mapResult(prev.gutter.blockPos);
+              if (!mapped.deleted) nextBlockPos = mapped.pos;
+            }
+            const node = nextBlockPos !== null ? state.doc.nodeAt(nextBlockPos) : null;
+            if (nextBlockPos !== null && node) {
+              gutter = {
+                blockPos: nextBlockPos,
+                reuseEmpty: node.type.name === "paragraph" && node.textContent.length === 0,
+                anchor: prev.gutter.anchor,
+              };
+            }
+          } else if (!tr.docChanged && !tr.selectionSet) {
+            gutter = prev.gutter;
+          }
+        }
+
+        const trigger = findSlashTrigger(state);
+        if (!prev.dismissed && !dismissing) {
+          return gutter ? { dismissed: null, gutter } : EMPTY_SLASH_PLUGIN_STATE;
+        }
+        if (!trigger) return gutter ? { dismissed: null, gutter } : EMPTY_SLASH_PLUGIN_STATE;
         if (dismissing || !prev.dismissed) {
           return {
             dismissed: { from: trigger.from, anchor: anchor(trigger.from) },
@@ -491,9 +579,6 @@ export function makeSlashCommandPlugin({
         // Y.js applies a remote edit, or an undo, by replacing the whole
         // document, which maps every position away. Its anchor still finds the
         // "/" when the "/" survives.
-        const change: { isChangeOrigin?: boolean } | undefined = yTiptap
-          ? tr.getMeta(yTiptap.ySyncPluginKey)
-          : undefined;
         const mapped = tr.mapping.mapResult(prev.dismissed.from);
         const same = change?.isChangeOrigin
           ? prev.dismissed.anchor !== null &&
@@ -518,6 +603,11 @@ export function makeSlashCommandPlugin({
       };
     },
     props: {
+      handleTextInput(view, _from, _to, text) {
+        const gutter = slashCommandKey.getState(view.state)?.gutter;
+        if (!gutter || text.length === 0) return false;
+        return materializeGutterText(view, gutter, text);
+      },
       handleKeyDown(view, event) {
         const slashState = stateRef.current;
         if (!slashState.open) return false;
@@ -554,6 +644,25 @@ export function makeSlashCommandPlugin({
           dismissSlashCommand(view);
           view.focus();
           return true;
+        }
+
+        const gutter = slashCommandKey.getState(view.state)?.gutter;
+        if (gutter) {
+          if (event.key === "Backspace") {
+            event.preventDefault();
+            dismissSlashCommand(view);
+            return true;
+          }
+          if (
+            !isComposingKey(event) &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.altKey &&
+            event.key.length === 1
+          ) {
+            event.preventDefault();
+            return materializeGutterText(view, gutter, event.key);
+          }
         }
 
         return false;
@@ -767,15 +876,47 @@ export function runSlashCommand(
 ): void {
   if (!state.open || !editor || !isEditableEditor(editor)) return;
 
-  const range = { from: state.from, to: state.to };
-  const chain = editor.chain().focus().deleteRange(range);
+  let commandFrom = state.from;
+  let chain = editor.chain().focus();
+  if (state.gutterTarget) {
+    const { blockPos, reuseEmpty } = state.gutterTarget;
+    const targetNode = editor.state.doc.nodeAt(blockPos);
+    const paragraph = editor.state.schema.nodes.paragraph;
+    if (!targetNode || !paragraph) {
+      setSlashState(CLOSED_SLASH_COMMAND_STATE);
+      return;
+    }
+    if (reuseEmpty && targetNode.type.name === "paragraph" && targetNode.textContent.length === 0) {
+      commandFrom = blockPos + 1;
+      chain = chain.command(({ tr, dispatch }) => {
+        if (dispatch) {
+          tr.setSelection(TextSelection.create(tr.doc, commandFrom));
+          tr.setMeta(slashCommandKey, { type: "dismiss" } satisfies SlashPluginMeta);
+        }
+        return true;
+      });
+    } else {
+      const insertPos = blockPos + targetNode.nodeSize;
+      commandFrom = insertPos + 1;
+      chain = chain.command(({ tr, dispatch }) => {
+        if (dispatch) {
+          tr.insert(insertPos, paragraph.create());
+          tr.setSelection(TextSelection.create(tr.doc, commandFrom));
+          tr.setMeta(slashCommandKey, { type: "dismiss" } satisfies SlashPluginMeta);
+        }
+        return true;
+      });
+    }
+  } else {
+    chain = chain.deleteRange({ from: state.from, to: state.to });
+  }
   setSlashState(CLOSED_SLASH_COMMAND_STATE);
 
   switch (id) {
     case "wikilink":
       chain
         .insertContent("[[]]")
-        .setTextSelection(state.from + 2)
+        .setTextSelection(commandFrom + 2)
         .run();
       return;
     case "heading-1":
@@ -819,7 +960,7 @@ export function runSlashCommand(
           content: [{ type: "paragraph" }],
         })
         .run();
-      focusInsertedCalloutTitle(editor, state.from);
+      focusInsertedCalloutTitle(editor, commandFrom);
       return;
     case "code-block":
       chain.setCodeBlock({ language: "" }).run();
@@ -833,7 +974,7 @@ export function runSlashCommand(
       // TeX input. Selection is resolved by scanning for the inserted node
       // rather than a guessed position (block insertion shifts the caret).
       chain.insertContent({ type: "mathBlock", attrs: { tex: "" } }).run();
-      selectInsertedMathBlock(editor, state.from);
+      selectInsertedMathBlock(editor, commandFrom);
       return;
     case "divider":
       chain.setHorizontalRule().run();
@@ -843,7 +984,7 @@ export function runSlashCommand(
       return;
     case "image":
       chain.run();
-      insertImage?.(editor.view, state.from);
+      insertImage?.(editor.view, commandFrom);
       return;
   }
 }

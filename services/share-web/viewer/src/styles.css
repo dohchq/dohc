@@ -100,8 +100,8 @@ header {
   border-bottom: 1px solid var(--viewer-line);
 }
 h1 { margin: 4px 0 0; font-family: Georgia, serif; font-size: 24px; font-weight: 500; }
-.eyebrow, .section-label { margin: 0; color: var(--viewer-subtle); font-family: ui-monospace, monospace; font-size: 11px; }
-.section-label { margin-bottom: 12px; text-transform: uppercase; letter-spacing: .08em; }
+.eyebrow, .section-label { margin: 0; color: var(--viewer-subtle); font-size: 12px; font-weight: 500; }
+.section-label { margin-bottom: 12px; text-transform: uppercase; letter-spacing: .06em; }
 .badge { border: 1px solid var(--viewer-line-strong); border-radius: 999px; padding: 5px 10px; color: var(--viewer-muted); font-size: 12px; }
 .header-actions { display: flex; align-items: flex-start; gap: 12px; margin-left: auto; }
 .handoff-panel { display: flex; max-width: 430px; flex-direction: column; align-items: flex-start; gap: 8px; color: var(--viewer-muted); font-size: 12px; line-height: 1.45; }
@@ -113,7 +113,7 @@ h1 { margin: 4px 0 0; font-family: Georgia, serif; font-size: 24px; font-weight:
 .handoff-button.primary:hover { opacity: .9; }
 .handoff-button.secondary { border: 1px solid var(--viewer-line-strong); background: transparent; color: var(--viewer-muted); }
 .handoff-button.secondary:hover { background: var(--viewer-panel-2); color: var(--viewer-ink); }
-.freshness { padding: 10px 32px; border-bottom: 1px solid var(--viewer-line); background: var(--viewer-panel-2); color: var(--viewer-muted); font-family: ui-monospace, monospace; font-size: 11px; }
+.freshness { padding: 10px 32px; border-bottom: 1px solid var(--viewer-line); background: var(--viewer-panel-2); color: var(--viewer-muted); font-size: 12px; }
 .layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(280px, 360px); min-height: calc(100vh - 116px); }
 nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background: var(--viewer-panel); }
 .tree, .tree ul { margin: 0; padding: 0; list-style: none; }
@@ -144,7 +144,7 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .comment-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0 0 6px; }
 .comment-author { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0; font-size: 13px; font-weight: 600; }
 .comment-time { margin-left: auto; color: var(--viewer-subtle); font-size: 12px; font-weight: 400; white-space: nowrap; }
-.unverified { color: var(--viewer-subtle); font-family: ui-monospace, monospace; font-size: 10px; font-weight: 400; text-transform: uppercase; letter-spacing: .06em; }
+.unverified { color: var(--viewer-subtle); font-size: 12px; font-weight: 400; }
 .comment-body { overflow-wrap: anywhere; margin: 0; white-space: pre-wrap; font-size: 13px; line-height: 1.55; }
 .comment-deleted { color: var(--viewer-subtle); font-size: 13px; font-style: italic; line-height: 1.55; }
 .comment-composer { display: grid; gap: 8px; }

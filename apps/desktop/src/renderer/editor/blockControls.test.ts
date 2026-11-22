@@ -1023,12 +1023,13 @@ describe("blockControls turn-into dropdown (bubble menu) command path", () => {
     expect(editor.getJSON().content?.[0]?.type).toBe("paragraph");
   });
 
-  it("inserts '/' when gutter + adds a block so typing immediately filters slash commands", () => {
+  it("opens the gutter slash menu without mutating the document until typing or picking a block", () => {
     const editor = track(makeEditor("Hello"));
-    insertBlockAfter(editor, 0);
-    expect(topLevelBlocks(editor).map((b) => b.type)).toEqual(["paragraph", "paragraph"]);
-    expect(editor.state.doc.child(1).textContent).toBe("/");
-    expect(editor.state.selection.from).toBe(editor.state.doc.content.size - 1);
+    const opened = vi.fn();
+    insertBlockAfter(editor, 0, opened);
+    expect(topLevelBlocks(editor).map((b) => b.type)).toEqual(["paragraph"]);
+    expect(editor.state.doc.textContent).toBe("Hello");
+    expect(opened).toHaveBeenCalledOnce();
   });
 
   it("renders crisp SVG icons inside gutter + and drag handle buttons", () => {
