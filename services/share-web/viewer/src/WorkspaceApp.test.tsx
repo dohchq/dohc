@@ -10,6 +10,7 @@ import { memberDocument, memberPageReady, openMemberPage } from "./memberLive";
 import "./MemberLivePage";
 import { jsonResponse, setControlValue, settle } from "./testing";
 import { writeDraft } from "./drafts";
+import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 
 // A workspace member's page in a browser: the workspace's files, a page, and
 // its Groups, at the member's level, and what it says when that ends.
@@ -26,19 +27,19 @@ const GRANT = "grant-1",
 const FILES = [
   {
     path: "trip/plan.md",
-    objectId: "object-plan",
+    objectId: `share-object:v1:${"1".repeat(64)}`,
     blobSha256: "a".repeat(64),
     contentKind: "text",
   },
   {
     path: "trip/to-pack.md",
-    objectId: "object-pack",
+    objectId: `share-object:v1:${"2".repeat(64)}`,
     blobSha256: "b".repeat(64),
     contentKind: "text",
   },
   {
     path: "welcome/readme.md",
-    objectId: "object-readme",
+    objectId: `share-object:v1:${"3".repeat(64)}`,
     blobSha256: "c".repeat(64),
     contentKind: "text",
   },
@@ -79,6 +80,8 @@ type Held = {
   path: string;
   url: URL;
   signal: AbortSignal;
+  // What the server would have answered when the request arrived.
+  body?: unknown;
   answer(value: unknown, status?: number): void;
 };
 
@@ -164,10 +167,23 @@ function server(
     openHeld?: boolean;
     user?: string;
     signOutFails?: boolean;
+    // The only account the grant belongs to. Another account's reads are refused.
+    memberOf?: string;
+    // The read that catches an Edit member's files up to the log fails, as if the log moved on.
+    catchUpFails?: boolean;
+    // The workspace holds more files than a browser lists.
+    tooLarge?: boolean;
+    // The account's session cannot be checked.
+    sessionFails?: boolean;
+    // How many reads of the Groups wait for the test to answer them.
+    holdGroups?: number;
+    // The relay refuses the Groups while the workspace still opens.
+    groupsGone?: boolean;
   } = {},
 ) {
   let signedIn = options.signedIn ?? true,
-    groupsFail = options.groupsFail ?? 0;
+    groupsFail = options.groupsFail ?? 0,
+    holdGroups = options.holdGroups ?? 0;
   // A test can change the level, the rules or the files while the page is open; the next read carries them.
   const files = () =>
     (options.files ?? FILES).map((file) => ({
@@ -198,7 +214,7 @@ function server(
     lastSettledKnown: true,
     ...(options.levelChangedBy ? { levelChangedBy: options.levelChangedBy } : {}),
   });
-  const hold = (path: string, url: URL, signal: AbortSignal) =>
+  const hold = (path: string, url: URL, signal: AbortSignal, body?: unknown) =>
     new Promise<Response>((resolve, reject) => {
       signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
         once: true,
@@ -207,6 +223,7 @@ function server(
         path,
         url,
         signal,
+        body,
         answer: (value, status = 200) => {
           held.splice(held.indexOf(item), 1);
           resolve(jsonResponse(value, status));
@@ -218,6 +235,8 @@ function server(
     const url = new URL(String(input), "https://share.test"),
       signal = init?.signal ?? new AbortController().signal;
     const headers = new Headers(init?.headers);
+    if (url.pathname === "/api/account/session" && options.sessionFails)
+      throw new TypeError("Failed to fetch");
     if (url.pathname === "/api/account/session")
       return jsonResponse({
         user:
@@ -236,7 +255,9 @@ function server(
     }
     // share-web gives an account that holds no membership the answer it gives an unknown grant.
     if (
-      (options.member === false || options.expired) &&
+      (options.member === false ||
+        options.expired ||
+        (options.memberOf !== undefined && options.memberOf !== user())) &&
       (url.pathname.startsWith("/api/view/") || url.pathname.startsWith("/api/named-chat/"))
     )
       return jsonResponse({ ok: false, error: "not found" }, 404);
@@ -244,34 +265,44 @@ function server(
       expect(headers.get("x-dohc-link-session") ?? url.searchParams.get("session")).toBe(SESSION);
       if (url.pathname === "/api/view/current" && options.openHeld)
         return hold("current", url, signal);
+      if (url.pathname === "/api/view/current" && options.tooLarge)
+        return jsonResponse(linkRefusalBody("link_too_many_files"), 413);
       if (url.pathname === "/api/view/current")
         return jsonResponse({ ...meta(), files: files(), nextCursor: 7, epochLogFloor: 0 });
       if (url.pathname === "/api/view/meta") return jsonResponse(meta());
       if (url.pathname === "/api/view/log")
         return url.searchParams.has("hold")
           ? hold("log", url, signal)
-          : jsonResponse({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 });
+          : options.catchUpFails
+            ? jsonResponse({ ok: false, error: "not found" }, 404)
+            : jsonResponse({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 });
       const sha = url.pathname.slice("/api/view/blob/".length);
       return new Response(TEXT[sha] ?? "", { headers: { "content-type": "text/plain" } });
     }
+    if (url.pathname === "/api/named-chat/channels" && options.groupsGone)
+      return jsonResponse({ ok: false, error: "not found" }, 404);
     if (url.pathname === "/api/named-chat/channels" && groupsFail > 0) {
       groupsFail -= 1;
       return jsonResponse({ ok: false, error: "unavailable" }, 503);
     }
-    if (url.pathname === "/api/named-chat/channels")
-      return jsonResponse({
-        shareId: "share",
-        userId: user(),
-        maxPostBytes: 9000,
-        maxBodyBytes: 8000,
-        channels: groups().map((group) => ({
-          channelWireId: group.wire,
-          name: group.name,
-          kind: "channel",
-          type: group.type ?? "both",
-          access: options.groupRules?.[group.wire] ?? access(),
-        })),
-      });
+    const listing = () => ({
+      shareId: "share",
+      userId: user(),
+      maxPostBytes: 9000,
+      maxBodyBytes: 8000,
+      channels: groups().map((group) => ({
+        channelWireId: group.wire,
+        name: group.name,
+        kind: "channel",
+        type: group.type ?? "both",
+        access: options.groupRules?.[group.wire] ?? access(),
+      })),
+    });
+    if (url.pathname === "/api/named-chat/channels" && holdGroups > 0) {
+      holdGroups -= 1;
+      return hold("groups", url, signal, listing());
+    }
+    if (url.pathname === "/api/named-chat/channels") return jsonResponse(listing());
     // The relay answers 404 for a file or Group the member no longer reaches.
     const gone = (place: { path?: unknown; channelWireId?: unknown }) =>
       typeof place.path === "string"
@@ -316,7 +347,10 @@ function server(
         path,
         nextCursor: 30,
         olderCursor: null,
-        messages: path === "trip/plan.md" ? [chat(9, "Nine is early")] : [],
+        // The relay keeps Comments on the file's object, so a new file at the same path has none.
+        messages: files().some((file) => file.path === path && file.objectId === FILES[0]!.objectId)
+          ? [chat(9, "Nine is early")]
+          : [],
       });
     }
     if (url.pathname === "/api/named-chat/messages" && url.searchParams.has("since"))
@@ -1238,7 +1272,7 @@ it.each([
   },
 );
 
-async function editing(options: { level?: Level; member?: boolean }) {
+async function editing(options: { level?: Level; member?: boolean; catchUpFails?: boolean }) {
   server(options);
   const session = liveSession();
   vi.mocked(openMemberPage).mockResolvedValue(ADMITTED);
@@ -2006,4 +2040,210 @@ it("treats an open Group set to No access as gone, not the membership, without w
   );
   expect(text()).not.toContain("membership");
   expect(text()).toContain("Leave at nine.");
+});
+
+it("keeps an Edit workspace open when the read that catches its files up fails while its grant still opens", async () => {
+  const options: { level: Level; catchUpFails?: boolean } = { level: "edit" };
+  await editing(options);
+  const dated = () => container.querySelector<HTMLElement>("header .workspace-dated");
+  // A rule change refuses the held read. The fresh list arrives, but the log read after it fails.
+  options.catchUpFails = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => dated() !== null);
+  expect(text()).not.toContain("membership");
+  expect(container.querySelector('[role="textbox"]')).not.toBeNull();
+  options.catchUpFails = false;
+  await settle(() => dated() === null && following("log").length === 1);
+});
+
+it("says another account signed in, not that the membership ended, when another tab switches accounts", async () => {
+  const options: { level: Level; memberOf: string; user?: string } = {
+    level: "comment",
+    memberOf: "sam",
+  };
+  server(options);
+  await render();
+  await opened();
+  // Another tab signed this browser in as Lee. Sam's grant now refuses every read.
+  options.user = "lee";
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => text().includes("This browser is signed in as another account."));
+  expect(container.querySelector(".state-message p")?.textContent).toBe(
+    "It is now signed in as Lee Park. Sign in as Sam Rivera to keep working in Trip.",
+  );
+  expect(text()).not.toContain("membership");
+  expect(text()).not.toContain("Leave at nine.");
+  await click("Switch account");
+  await settle(() => text().includes("Sign in to open this workspace"));
+});
+
+it("offers Try again, not an ended membership, when it cannot check the account after a refusal", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const options: { level: Level; member?: boolean; sessionFails?: boolean } = {
+    level: "comment",
+  };
+  server(options);
+  await render();
+  await opened();
+  const dated = () => container.querySelector<HTMLElement>("header .workspace-dated");
+  const toast = () =>
+    [...container.querySelectorAll<HTMLElement>(".workspace-toast")].find((node) =>
+      node.textContent?.includes("dohc could not update this workspace's files"),
+    );
+  options.member = false;
+  options.sessionFails = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => dated() !== null);
+  for (const wait of [1000, 2000]) await act(async () => vi.advanceTimersByTime(wait));
+  await settle(() => toast() !== undefined);
+  expect(text()).not.toContain("membership");
+  expect(text()).toContain("Leave at nine.");
+  options.member = true;
+  options.sessionFails = false;
+  await act(async () =>
+    [...toast()!.querySelectorAll("button")]
+      .find((node) => node.textContent === "Try again")!
+      .click(),
+  );
+  await settle(() => dated() === null && toast() === undefined && following("log").length === 1);
+});
+
+it("says a workspace too large for a browser is too large, and names the desktop app", async () => {
+  server({ level: "comment", tooLarge: true });
+  await render();
+  await settle(() => text().includes("This workspace is too large to open in a browser."));
+  expect(container.querySelector(".state-message p")?.textContent).toBe(
+    "Open it in the dohc desktop app.",
+  );
+  expect(text()).not.toContain("invite");
+});
+
+it("says the workspace grew too large for a browser, not that the membership ended", async () => {
+  const options: { level: Level; tooLarge?: boolean } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  options.tooLarge = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => text().includes("This workspace is too large to open in a browser."));
+  expect(text()).not.toContain("membership");
+});
+
+it("opens a replaced file's own Comments, not its predecessor's", async () => {
+  const options: { level: Level; files?: typeof FILES } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await showComments();
+  expect(commentsPanel().textContent).toContain("Nine is early");
+  // The owner put a different file at the same path. The old file's follow ends.
+  options.files = FILES.map((file) =>
+    file.path === "trip/plan.md"
+      ? { ...file, objectId: `share-object:v1:${"4".repeat(64)}`, blobSha256: "c".repeat(64) }
+      : file,
+  );
+  await act(async () => following("comments")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(
+    () =>
+      text().includes("Welcome.") &&
+      commentsPanel().textContent?.includes("No comments yet.") === true &&
+      following("comments").length === 1,
+  );
+  expect(commentsPanel().textContent).not.toContain("Nine is early");
+  expect(text()).not.toContain("membership");
+});
+
+it("follows a file's Comments again once the files read again still list it", async () => {
+  server({ level: "comment" });
+  await render();
+  await opened();
+  await showComments();
+  // The follow came back 404, but the file is still there.
+  await act(async () => following("comments")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => following("comments").length === 1);
+  expect(commentsPanel().textContent).toContain("Nine is early");
+  expect(text()).not.toContain("membership");
+});
+
+it("opens a replaced file's own Comments when the files read again, before its old follow ends", async () => {
+  const options: { level: Level; files?: typeof FILES; fileLevels?: Record<string, Level> } = {
+    level: "comment",
+  };
+  server(options);
+  await render();
+  await opened();
+  await showComments();
+  // The owner put a different file at the same path and changed a rule, so the files read again.
+  options.files = FILES.map((file) =>
+    file.path === "trip/plan.md"
+      ? { ...file, objectId: `share-object:v1:${"4".repeat(64)}`, blobSha256: "c".repeat(64) }
+      : file,
+  );
+  options.fileLevels = { "welcome/readme.md": "view" };
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(
+    () =>
+      text().includes("Welcome.") &&
+      commentsPanel().textContent?.includes("No comments yet.") === true,
+  );
+  expect(commentsPanel().textContent).not.toContain("Nine is early");
+});
+
+it("applies a rule change that lands while the first read of the Groups is still out", async () => {
+  const options: { level: Level; groupRules?: GroupRules; holdGroups: number } = {
+    level: "comment",
+    holdGroups: 1,
+  };
+  server(options);
+  await render();
+  await settle(
+    () =>
+      text().includes("Leave at nine.") &&
+      following("log").length === 1 &&
+      held.some((item) => item.path === "groups"),
+  );
+  const first = held.find((item) => item.path === "groups")!;
+  // The owner set the Group to View only. The files read again before the first listing arrives.
+  options.groupRules = { "wire-plans": "read-only" };
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(() => following("log").length === 1);
+  // The listing sent before the change arrives last.
+  await act(async () => first.answer(first.body));
+  await settle(
+    () => groupPanel().textContent?.includes("Only people who can comment post here.") === true,
+  );
+  expect(groupComposer()).toBeNull();
+});
+
+it("follows the Groups again once the Groups read again after their follow came back 404", async () => {
+  server({ level: "comment" });
+  await render();
+  await opened();
+  // The follow came back 404, but the membership and the Group are still there.
+  await act(async () => following("chat")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => following("chat").length === 1);
+  expect(groupPanel().textContent).toContain("Plans start here");
+  expect(text()).not.toContain("membership");
+});
+
+it("reads the Groups once when the relay refuses them while the workspace still opens", async () => {
+  const fetch = server({ level: "comment", groupsGone: true });
+  await render();
+  const currentReads = () =>
+    fetch.mock.calls.filter(
+      ([input]) => new URL(String(input), "https://share.test").pathname === "/api/view/current",
+    ).length;
+  // The refusal asks the page to read the files again. That read opens, so the Groups keep their Try again.
+  await settle(
+    () =>
+      currentReads() === 2 &&
+      following("log").length === 1 &&
+      groupPanel().querySelector(".load-failed") !== null,
+  );
+  expect(channelReads(fetch)).toBe(1);
+  expect(text()).not.toContain("membership");
 });

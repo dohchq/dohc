@@ -1,4 +1,5 @@
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pushMessageAccess, readPushMessage } from "./chatMessageInterest";
@@ -345,6 +346,28 @@ describe("a member reads the workspace through the link read routes", () => {
       "open/a.md": "edit",
       "open/access.yaml": "comment",
     });
+  });
+
+  // A browser tells a workspace too large to list apart from a lost membership, and names the desktop app.
+  it("refuses a workspace over the file limit with its own code, and a removed member with an unknown grant's bytes", async () => {
+    const { h, storage } = await seed(undefined, { linkCurrentFileLimit: 1 });
+    const ana = await member(h, storage, "ana");
+    const ben = await member(h, storage, "ben");
+    await ownerWrite(h, "later/new.md", "new work");
+    const large = await memberRead(h, "/sync/link/current", ana.grantId, "ana");
+    expect(large.status).toBe(413);
+    expect(await json(large)).toEqual(linkRefusalBody("link_too_many_files"));
+    // The grant still opens, so the browser can tell the two apart.
+    expect((await memberRead(h, "/sync/link/share", ana.grantId, "ana")).status).toBe(200);
+    const unknown = await refusalBytes(
+      await memberRead(h, "/sync/link/current", "grant-never", "ana"),
+    );
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ben.memberId}/remove`)).status).toBe(
+      200,
+    );
+    expect(await refusalBytes(await memberRead(h, "/sync/link/current", ben.grantId, "ben"))).toBe(
+      unknown,
+    );
   });
 
   it("refuses a removed member, an ended membership, a fenced owner and a forged person with the bytes of an unknown grant", async () => {
