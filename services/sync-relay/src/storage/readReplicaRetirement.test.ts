@@ -12,7 +12,9 @@ afterEach(closeTestStorages);
 
 const replicaObjects = (path: string) =>
   inspectDatabase(path, { readOnly: true })
-    .prepare("SELECT type, name FROM sqlite_schema WHERE name LIKE '%replica%' ORDER BY name")
+    .prepare(
+      "SELECT type, name FROM sqlite_schema WHERE name LIKE '%replica%' OR name LIKE 'sync_relay_history_%' ORDER BY name",
+    )
     .all();
 
 it("creates no read replica tables, triggers or indexes", async () => {
@@ -61,7 +63,9 @@ it("stops the read replica's triggers on an existing store and keeps its rows", 
       parentGrantId: null,
     },
   });
-  expect(replicaObjects(path)).toEqual([]);
+  expect(replicaObjects(path)).toEqual([
+    { type: "table", name: "sync_relay_history_grant_floors" },
+  ]);
   expect(
     inspectDatabase(path, { readOnly: true })
       .prepare("SELECT grant_id FROM sync_relay_history_grant_floors")
