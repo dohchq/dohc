@@ -445,7 +445,7 @@ pub(crate) fn redact_text_for_policy(
             if policy_degraded {
                 return false;
             }
-            let target_path = target.split('#').next().unwrap_or(target).trim();
+            let target_path = target.split(['#', '?']).next().unwrap_or(target).trim();
             if target_path.is_empty() {
                 return true;
             }
@@ -466,7 +466,7 @@ pub(crate) fn redact_text_for_policy(
             if policy_degraded {
                 return false;
             }
-            let target_path = target.split('#').next().unwrap_or(target).trim();
+            let target_path = target.split(['#', '?']).next().unwrap_or(target).trim();
             if target_path.is_empty() {
                 return true;
             }
@@ -482,7 +482,7 @@ pub(crate) fn redact_text_for_policy(
             if policy_degraded {
                 return false;
             }
-            let target_path = target.split('#').next().unwrap_or(target).trim();
+            let target_path = target.split(['#', '?']).next().unwrap_or(target).trim();
             if target_path.is_empty() {
                 return true;
             }
@@ -495,6 +495,18 @@ pub(crate) fn redact_text_for_policy(
             path_is_search_indexed(policy, normalized)
         },
     )
+}
+
+fn extract_full_heading(body: &str) -> Option<String> {
+    if let Some(heading) = extract_markdown_heading(body) {
+        return Some(heading);
+    }
+    strip_markdown_frontmatter(body)
+        .lines()
+        .find_map(|line| line.strip_prefix("# "))
+        .map(|heading| heading.trim().trim_end_matches('#').trim())
+        .filter(|heading| !heading.is_empty())
+        .map(|heading| truncate_chars(heading, 4096))
 }
 
 pub(crate) fn resolve_live_file_title(
@@ -525,17 +537,19 @@ pub(crate) fn resolve_live_file_title(
         None => None,
     };
 
-    let raw_title = if let Some(title) = link_title.filter(|t| !t.trim().is_empty()) {
+    let raw_title = if let Some(title) =
+        link_title.filter(|t| !t.trim().is_empty() && t.chars().count() < MAX_TITLE_CHARS)
+    {
         title
     } else if let Some(body) = preloaded_body {
-        extract_markdown_heading(body).unwrap_or_else(|| fallback_title_from_path(&head.path))
+        extract_full_heading(body).unwrap_or_else(|| fallback_title_from_path(&head.path))
     } else {
         let fetched = load_file_body_capped(conn, head.blob_sha256.as_deref(), 16 * 1024)?;
         fetched
             .as_deref()
             .map(|text| extract_search_text(&head.path, text))
             .as_deref()
-            .and_then(extract_markdown_heading)
+            .and_then(extract_full_heading)
             .unwrap_or_else(|| fallback_title_from_path(&head.path))
     };
 
@@ -659,11 +673,7 @@ fn prepare_retrieval_on_actor(
     let mut index_building = false;
     if !certified {
         if allow_index_build && !is_passive && !is_read_only {
-            let cancel = actor_token.clone();
-            let _ = store.hooks_with(|conn| {
-                conn.progress_handler(1000, Some(move || cancel.is_cancelled()))
-            });
-            let rebuild_res = store.mutate_with_connection(|conn| {
+            store.mutate_with_connection(|conn| {
                 ensure_search_index_for_version(
                     conn,
                     root_for_actor,
@@ -672,9 +682,7 @@ fn prepare_retrieval_on_actor(
                     now_ms,
                     &NoFaults,
                 )
-            });
-            let _ = store.hooks_with(|conn| conn.progress_handler(0, None::<fn() -> bool>));
-            rebuild_res?;
+            })?;
         } else {
             index_building = true;
         }
@@ -738,9 +746,7 @@ impl ActorHandle {
             let mut store = HeldReader::open(held)?;
             let resolver = prepared_resolver.map(cache::Prepared::build);
             let cancel = token.clone();
-            let _ = store.hooks_with(|conn| {
-                conn.progress_handler(1000, Some(move || cancel.is_cancelled()))
-            });
+            store.set_read_progress_handler(1000, Some(move || cancel.is_cancelled()))?;
             let read_result = store
                 .read_with(|conn| -> Result<RetrievalResponse, RuntimeError> {
                     let snapshot = conn
@@ -760,7 +766,7 @@ impl ActorHandle {
                     Ok(response)
                 })
                 .map_err(|err| map_runtime_or_cancelled(err, &token));
-            let _ = store.hooks_with(|conn| conn.progress_handler(0, None::<fn() -> bool>));
+            let _ = store.set_read_progress_handler(0, None::<fn() -> bool>);
             read_result
         })
         .await
@@ -863,6 +869,7 @@ fn retrieve_workspace_on_conn_inner(
             collect_transactional_datasets(
                 conn,
                 &policy,
+                active_resolver,
                 workspace_id,
                 version_id,
                 &parsed_query,
@@ -1283,6 +1290,7 @@ fn build_collection_snippet(description: &str, field_names: &[String]) -> String
 fn collect_transactional_datasets(
     conn: &Connection,
     policy: &SearchPolicySnapshot,
+    resolver: Option<&Resolver>,
     workspace_id: &str,
     version_id: &str,
     query: &ParsedQuery,
@@ -1391,14 +1399,28 @@ fn collect_transactional_datasets(
         if let Some(tables) = parsed.get("tables").and_then(Value::as_array) {
             for table in tables.iter().take(DATASET_MAX_TABLES) {
                 if let Some(tname) = table.get("name").and_then(Value::as_str) {
-                    table_names.push(tname.to_owned());
+                    let clean_table = collapse_whitespace(&redact_text_for_policy(
+                        tname,
+                        Some(&head.path),
+                        policy,
+                        resolver,
+                    ));
+                    if !clean_table.is_empty() {
+                        table_names.push(clean_table);
+                    }
                 }
                 if let Some(fields) = table.get("fields").and_then(Value::as_array) {
                     for field in fields.iter().take(DATASET_MAX_FIELDS) {
-                        if let Some(fname) = field.get("name").and_then(Value::as_str)
-                            && seen_fields.insert(fname.to_owned())
-                        {
-                            field_names.push(fname.to_owned());
+                        if let Some(fname) = field.get("name").and_then(Value::as_str) {
+                            let clean_field = collapse_whitespace(&redact_text_for_policy(
+                                fname,
+                                Some(&head.path),
+                                policy,
+                                resolver,
+                            ));
+                            if !clean_field.is_empty() && seen_fields.insert(clean_field.clone()) {
+                                field_names.push(clean_field);
+                            }
                         }
                     }
                 }
@@ -1408,12 +1430,30 @@ fn collect_transactional_datasets(
         if let Some(ops) = parsed.get("operations").and_then(Value::as_array) {
             for op in ops.iter().take(DATASET_MAX_OPERATIONS) {
                 if let Some(label) = op.get("label").and_then(Value::as_str) {
-                    op_labels.push(label.to_owned());
+                    let clean_label = collapse_whitespace(&redact_text_for_policy(
+                        label,
+                        Some(&head.path),
+                        policy,
+                        resolver,
+                    ));
+                    if !clean_label.is_empty() {
+                        op_labels.push(clean_label);
+                    }
                 }
             }
         }
 
-        let title = truncate_chars(name, MAX_TITLE_CHARS);
+        let redacted_name = collapse_whitespace(&redact_text_for_policy(
+            name,
+            Some(&head.path),
+            policy,
+            resolver,
+        ));
+        let title = if redacted_name.is_empty() {
+            fallback_title_from_path(&parent_dir)
+        } else {
+            truncate_chars(&redacted_name, MAX_TITLE_CHARS)
+        };
         let doc = ScoreDocument {
             title: title.clone(),
             path: head.path.clone(),
@@ -2315,10 +2355,11 @@ fn collect_chat_candidates(
         if message_id == crate::search::THREAD_HEADER_MESSAGE_ID {
             continue;
         }
-        let msg_row: Option<(String, Option<String>, i64)> = conn
+        let msg_row: Option<(String, String, bool, i64)> = conn
             .prepare_cached(
                 "SELECT author_display_name, \
-                        CASE WHEN length(CAST(body AS BLOB)) <= ?4 THEN body ELSE NULL END, \
+                        CASE WHEN length(CAST(body AS BLOB)) <= ?4 THEN body ELSE substr(body, 1, ?4) END, \
+                        length(CAST(body AS BLOB)) > ?4, \
                         created_at_ms \
                  FROM chat_messages \
                  WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
@@ -2326,17 +2367,16 @@ fn collect_chat_candidates(
             .map_err(SearchError::from)?
             .query_row(
                 params![workspace_id, thread_id, message_id, CHAT_BODY_CAP_BYTES],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(SearchError::from)?;
-        let Some((author, maybe_body, created_at_ms)) = msg_row else {
+        let Some((author, body, oversized, created_at_ms)) = msg_row else {
             continue;
         };
-        let Some(body) = maybe_body else {
+        if oversized {
             pool.scan_saturated = true;
-            continue;
-        };
+        }
         pool.hydrated_bytes = pool.hydrated_bytes.saturating_add(body.len());
 
         if entry.combined_messages.len() < CHAT_COMBINED_BODY_CAP_BYTES {
@@ -2346,6 +2386,8 @@ fn collect_chat_candidates(
             entry.combined_messages.push_str(&author);
             entry.combined_messages.push(' ');
             entry.combined_messages.push_str(&body);
+        } else {
+            pool.scan_saturated = true;
         }
 
         if entry.best_message_id.is_none() {

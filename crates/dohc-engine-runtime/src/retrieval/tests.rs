@@ -1530,7 +1530,25 @@ fn council_r2_and_codex_regressions() {
         &mut store,
         "obj-heading-leak",
         "notes/heading-leak.md",
-        "# Aurora [[private/secret-diary]]\n\nSee [doc](<private/secret-diary.md> \"Secret Title\") and [[notes/hub]].\n",
+        "# Aurora [[private/secret-diary]]\n\nSee [doc](<private/secret-diary.md> \"Secret Title\"), [![badge](notes/hub.md)](private/secret-diary.md), [q](.env?v=1), and [[notes/hub]].\n",
+        11,
+    );
+    let long_heading = format!(
+        "# Aurora {} [[private/secret-diary]]\n\nLong heading boundary check.\n",
+        "x".repeat(152)
+    );
+    write_text(
+        &mut store,
+        "obj-long-heading-leak",
+        "notes/long-heading-leak.md",
+        &long_heading,
+        11,
+    );
+    write_text(
+        &mut store,
+        "obj-dataset-leak",
+        "data/aurora/dataset.json",
+        r#"{"formatVersion":1,"name":"Aurora [[private/secret-diary]] Ledger","tables":[{"name":"items","fields":[{"name":"title","type":"text"}]}]}"#,
         11,
     );
     write_text(
@@ -1783,6 +1801,7 @@ fn council_r2_and_codex_regressions() {
     let aurora_json = serde_json::to_string(&aurora).expect("serialize aurora");
     assert!(
         !aurora_json.contains("secret-diary")
+            && !aurora_json.contains("[[private")
             && !aurora_json.contains("Secret Title")
             && !aurora_json.contains(".env")
             && !aurora_json.contains("DATABASE_URL"),
@@ -1794,6 +1813,20 @@ fn council_r2_and_codex_regressions() {
         .find(|h| h.path.as_deref() == Some("notes/heading-leak.md"))
         .expect("heading-leak hit");
     assert_eq!(leak_hit.title, "Aurora");
+    assert!(
+        aurora
+            .results
+            .iter()
+            .any(|h| h.path.as_deref() == Some("notes/long-heading-leak.md")),
+        "expected long-heading-leak page in results: {:?}",
+        aurora.results
+    );
+    let ds_leak_hit = aurora
+        .results
+        .iter()
+        .find(|h| h.dataset_path.as_deref() == Some("data/aurora/dataset.json"))
+        .expect("aurora dataset hit");
+    assert_eq!(ds_leak_hit.title, "Aurora Ledger");
     assert!(
         aurora
             .results
@@ -2016,15 +2049,17 @@ fn council_r2_and_codex_regressions() {
         long_chat.results[0].snippet
     );
 
-    // Check 8: SQLite OperationInterrupted on a chat-only query maps cleanly to RuntimeError::Cancelled.
-    let paths = store
+    // Check 8: SQLite OperationInterrupted on a read-only connection maps cleanly to RuntimeError::Cancelled.
+    let db = engine_db_path(&scratch).expect("db path");
+    let mut ro_store = EngineStore::open_read_only(&db).expect("open read-only");
+    let paths = ro_store
         .read_with(|conn| Resolver::paths_for_version(conn, WS, VER))
         .expect("paths");
     let resolver = Resolver::new(paths);
-    store
-        .hooks_with(|conn| conn.progress_handler(20, Some(|| true)))
-        .expect("install interrupt handler");
-    let interrupted = store.read_with(|conn| {
+    ro_store
+        .set_read_progress_handler(20, Some(|| true))
+        .expect("install read interrupt handler");
+    let interrupted = ro_store.read_with(|conn| {
         retrieve_workspace_on_conn(
             conn,
             root,
@@ -2039,11 +2074,16 @@ fn council_r2_and_codex_regressions() {
             &token,
         )
     });
-    store
-        .hooks_with(|conn| conn.progress_handler(0, None::<fn() -> bool>))
-        .expect("clear interrupt handler");
+    ro_store
+        .set_read_progress_handler(0, None::<fn() -> bool>)
+        .expect("clear read interrupt handler");
     assert!(
         matches!(interrupted, Err(RuntimeError::Cancelled)),
         "expected SQLite interrupt during chat query to map to RuntimeError::Cancelled, got {interrupted:?}"
+    );
+    // Installing a read progress handler on a writer store must be refused.
+    assert!(
+        store.set_read_progress_handler(20, Some(|| false)).is_err(),
+        "writer store must refuse set_read_progress_handler"
     );
 }

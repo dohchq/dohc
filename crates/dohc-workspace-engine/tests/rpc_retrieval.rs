@@ -269,7 +269,7 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
         "read-only attached handle must never certify or write engine_search_index_state"
     );
 
-    let mut cancelled_ctx = RequestContext::unbounded();
+    let cancelled_ctx = RequestContext::unbounded();
     cancelled_ctx.cancel.cancel();
     let cancelled_err = call_with_busy_retry(
         &transport,

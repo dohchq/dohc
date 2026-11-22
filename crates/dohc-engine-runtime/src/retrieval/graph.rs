@@ -442,7 +442,7 @@ fn hydrate_chat_node(
     let row = conn
         .prepare_cached(
             "SELECT t.title, t.linked_object_id, t.channel_id, \
-                    (SELECT m.body FROM chat_messages m \
+                    (SELECT substr(m.body, 1, 8192) FROM chat_messages m \
                      WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
                      ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
                     CASE WHEN t.channel_id IS NULL THEN 1 \

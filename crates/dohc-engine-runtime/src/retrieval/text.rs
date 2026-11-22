@@ -386,7 +386,7 @@ pub fn extract_markdown_heading(text: &str) -> Option<String> {
         if let Some(heading) = trimmed.strip_prefix("# ") {
             let cleaned = heading.trim().trim_end_matches('#').trim();
             if !cleaned.is_empty() {
-                return Some(truncate_chars(cleaned, MAX_TITLE_CHARS));
+                return Some(truncate_chars(cleaned, MAX_REF_SCAN_BYTES));
             }
         }
         break;
@@ -610,15 +610,7 @@ pub fn path_matches_prefix(path: &str, prefix: &str) -> bool {
 }
 
 const MAX_REF_SCAN_BYTES: usize = 2048;
-
-fn is_escaped(bytes: &[u8], idx: usize) -> bool {
-    !bytes[..idx]
-        .iter()
-        .rev()
-        .take_while(|&&b| b == b'\\')
-        .count()
-        .is_multiple_of(2)
-}
+const MAX_MD_LABEL_BYTES: usize = MAX_REF_SCAN_BYTES * 2;
 
 fn extract_markdown_link_dest(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -626,8 +618,17 @@ fn extract_markdown_link_dest(raw: &str) -> String {
         inside.split('>').next().unwrap_or("")
     } else {
         let mut end = trimmed.len();
+        let mut escaped = false;
         for (k, ch) in trimmed.char_indices() {
-            if ch.is_whitespace() && !is_escaped(trimmed.as_bytes(), k) {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch.is_whitespace() {
                 end = k;
                 break;
             }
@@ -646,6 +647,38 @@ fn extract_markdown_link_dest(raw: &str) -> String {
         }
     }
     dest
+}
+
+fn scan_markdown_target_end(bytes: &[u8], url_start: usize, line_end: usize) -> Option<usize> {
+    let mut j = url_start;
+    let mut depth = 0usize;
+    let mut angle = false;
+    let mut escaped = false;
+    while j < line_end && j - url_start <= MAX_REF_SCAN_BYTES {
+        if escaped {
+            escaped = false;
+            j += 1;
+            continue;
+        }
+        match bytes[j] {
+            b'\\' => escaped = true,
+            b'<' if depth == 0 => angle = true,
+            b'>' if angle => angle = false,
+            b'(' if !angle => depth += 1,
+            b')' if !angle && depth == 0 => return Some(j),
+            b')' if !angle => depth -= 1,
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+fn is_external_markdown_dest(dest: &str) -> bool {
+    dest.starts_with("http://")
+        || dest.starts_with("https://")
+        || dest.starts_with("mailto:")
+        || dest.starts_with('#')
 }
 
 pub fn redact_file_references(
@@ -732,42 +765,34 @@ pub fn redact_file_references(
             }
             if let Some(sep) = next_md_sep
                 && sep >= search_from
-                && sep - search_from <= MAX_REF_SCAN_BYTES
+                && sep - search_from <= MAX_MD_LABEL_BYTES
             {
                 let label = &input[search_from..sep];
-                if !label.contains('[') {
-                    let url_start = sep + 2;
-                    let mut j = url_start;
-                    let mut depth = 0usize;
-                    let mut angle = false;
-                    while j < line_end && j - url_start <= MAX_REF_SCAN_BYTES {
-                        if !is_escaped(bytes, j) {
-                            match bytes[j] {
-                                b'<' if depth == 0 => angle = true,
-                                b'>' if angle => angle = false,
-                                b'(' if !angle => depth += 1,
-                                b')' if !angle && depth == 0 => break,
-                                b')' if !angle => depth -= 1,
-                                _ => {}
-                            }
-                        }
-                        j += 1;
+                if !label.contains('[')
+                    && let Some(j) = scan_markdown_target_end(bytes, sep + 2, line_end)
+                    && input.is_char_boundary(j)
+                {
+                    let dest = extract_markdown_link_dest(&input[sep + 2..j]);
+                    if is_external_markdown_dest(&dest) || allow_markdown_link(&dest) {
+                        out.push_str(&input[i..j + 1]);
                     }
-                    if j < line_end && bytes[j] == b')' && input.is_char_boundary(j) {
-                        let raw_target = &input[url_start..j];
-                        let dest = extract_markdown_link_dest(raw_target);
-                        let is_external = dest.starts_with("http://")
-                            || dest.starts_with("https://")
-                            || dest.starts_with("mailto:")
-                            || dest.starts_with('#');
-                        if is_external || allow_markdown_link(&dest) {
-                            out.push_str(&input[i..j + 1]);
-                        }
-                        i = j + 1;
-                        continue;
-                    }
+                    i = j + 1;
+                    continue;
                 }
             }
+        }
+
+        if i + 2 <= line_end
+            && &bytes[i..i + 2] == b"]("
+            && let Some(j) = scan_markdown_target_end(bytes, i + 2, line_end)
+            && input.is_char_boundary(j)
+        {
+            let dest = extract_markdown_link_dest(&input[i + 2..j]);
+            if is_external_markdown_dest(&dest) || allow_markdown_link(&dest) {
+                out.push_str(&input[i..j + 1]);
+            }
+            i = j + 1;
+            continue;
         }
 
         let ch = input[i..].chars().next().unwrap();
