@@ -6200,19 +6200,25 @@ export function createWorkspaceEngineCapture(
         const deadline = Date.now() + OUTSIDE_WRITE_RECORD_DEADLINE_MS;
         try {
           for (let attempt = 1; ; attempt += 1) {
-            const waits = await outsideWriteWaits(input.path).catch((error: unknown) => {
-              if (isCaptureBusy(error)) return true;
-              throw error;
-            });
-            if (stopped || shuttingDown || !waits) {
+            if (
+              stopped ||
+              shuttingDown ||
+              !(await outsideWriteWaits(input.path).catch((error: unknown) => {
+                if (isCaptureBusy(error)) return true;
+                throw error;
+              }))
+            ) {
               outsideWritesUnrecorded.delete(input.path);
               return;
             }
-            if (Date.now() >= deadline)
-              throw new Error("capture still holds the change made outside dohc");
-            await new Promise((resolve) => setTimeout(resolve, Math.min(25 * 2 ** attempt, 500)));
+            const left = deadline - Date.now();
+            if (left <= 0) throw new Error("capture still holds the change made outside dohc");
+            await new Promise((resolve) =>
+              setTimeout(resolve, Math.min(25 * 2 ** attempt, 500, left)),
+            );
           }
         } catch (error) {
+          if (stopped || shuttingDown) return;
           outsideWritesUnrecorded.add(input.path);
           onError(`capture of ${input.path} after its close`, error);
         }
