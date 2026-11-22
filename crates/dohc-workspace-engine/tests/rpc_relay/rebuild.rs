@@ -2156,6 +2156,135 @@ async fn unsent_chat_is_saved_with_its_replies_decisions_and_attachments() {
     finish(&copy).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_uses_deletions_first_received_by_the_rebuilt_copy() {
+    let messages = [
+        ("parent", "Deleted parent words"),
+        ("live-parent", "Live parent words"),
+    ];
+    let mut more = vec![
+        (
+            share_row(
+                10,
+                "granter",
+                10,
+                "chat.channel.create",
+                json!({
+                    "channelId": "channel", "name": "General", "slug": "general", "kind": "channel", "createdAtMs": 5,
+                }),
+            ),
+            &b""[..],
+        ),
+        (
+            share_row(
+                11,
+                "granter",
+                11,
+                "chat.thread.create",
+                json!({
+                    "threadId": "thread", "title": "Venue", "channelSlug": "general", "channelWireId": "channel", "createdAtMs": 6,
+                }),
+            ),
+            &b""[..],
+        ),
+    ];
+    for (index, (message, body)) in messages.into_iter().enumerate() {
+        let seq = 12 + index as i64;
+        more.push((share_row(seq, "granter", seq, "chat.message.append", json!({
+            "messageId": message, "threadId": "thread", "authorKind": "human",
+            "authorDisplayName": "Owner", "authorUserId": "owner", "body": body, "createdAtMs": 7 + index,
+        })), &b""[..]));
+    }
+    let copy = closed_copy_serving(
+        "rpc-rebuild-fresh-deletions", true, false, &more, |transport, handle, _| {
+            Box::pin(async move {
+                let mut id = 50;
+                for (message, parent, body, attachment) in [
+                    ("reply", Some("parent"), "Keep my unsent reply", "open/a.md"),
+                    ("live-reply", Some("live-parent"), "Keep my other reply", "open/a.md"),
+                    ("lost", None, "Deleted local words", "open/c.md"),
+                ] {
+                    call(transport, handle, &mut id, "chats.messages.send", json!({
+                        "threadId": "thread", "messageId": message, "parentMessageId": parent,
+                        "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": "ada",
+                        "body": body, "nowMs": 20,
+                        "attachments": [{ "objectId": if message == "lost" { "object-c" } else { "object-a" }, "pathHint": attachment }],
+                    })).await;
+                }
+            })
+        },
+    ).await;
+    let db = Connection::open(engine_db_path(&copy.scratch).expect("old db")).expect("open old db");
+    let deleted: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM chat_deleted_messages WHERE workspace_id = ?1",
+            [&copy.workspace_id],
+            |row| row.get(0),
+        )
+        .expect("old deletions");
+    assert_eq!(deleted, 0, "the old copy must not know these deletions");
+    drop(db);
+
+    // The relay rewrites the parent's append and serves a local append whose
+    // push acknowledgement was lost as a tombstone on the fresh pull.
+    more[2].0 = share_row(
+        12,
+        "granter",
+        12,
+        "chat.message.tombstone",
+        json!({
+            "messageId": "parent", "threadId": "thread", "authorKind": "human",
+            "authorDisplayName": "Owner", "authorUserId": "owner", "createdAtMs": 7, "deletedAtMs": 30,
+        }),
+    );
+    more.push((share_row(14, "member", 1, "chat.message.tombstone", json!({
+        "messageId": "lost", "threadId": "thread", "authorKind": "human",
+        "authorDisplayName": "Ada", "authorUserId": "ada", "createdAtMs": 20, "deletedAtMs": 30,
+    })), &b""[..]));
+    serve_with(&copy.relay, "r2", "v2", false, &more);
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let recovery = copy
+        .scratch
+        .path()
+        .join(result["recoveryFolder"].as_str().expect("recovery"));
+    let names = names_in(&recovery);
+    let chat = names
+        .iter()
+        .find(|name| name.contains(" chat "))
+        .expect("saved chat");
+    let text = std::fs::read_to_string(recovery.join(chat)).expect("chat");
+    for kept in [
+        "Keep my unsent reply",
+        "Keep my other reply",
+        "Replying to Owner: \"Live parent words\"",
+        "Attached: open/a.md",
+    ] {
+        assert!(text.contains(kept), "missing {kept}: {text}");
+    }
+    for deleted in [
+        "Deleted parent words",
+        "Deleted local words",
+        "Attached: open/c.md",
+    ] {
+        assert!(
+            !text.contains(deleted),
+            "recovery copied deleted content {deleted}: {text}"
+        );
+    }
+    let db = Connection::open(engine_db_path(&copy.scratch).expect("new db")).expect("open new db");
+    let deleted: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM chat_deleted_messages WHERE workspace_id = ?1",
+            [&copy.workspace_id],
+            |row| row.get(0),
+        )
+        .expect("new deletions");
+    assert_eq!(deleted, 2, "the rebuilt copy must know both deletions");
+    drop(db);
+    finish(&copy).await;
+}
+
 /// A live draft main passes and the old store's displaced folder are saved.
 /// The folder moves with one rename, so its files keep their inodes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
