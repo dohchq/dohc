@@ -1,7 +1,8 @@
+import { randomBytes } from "node:crypto";
 import { createReceivedIdentity } from "./receivedIdentity";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import type { TokenBucketLimiter } from "@dohc/service-http";
-import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { visibleSharePath, type ShareAccess } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
   DiscussionActivityCapacityError,
@@ -12,6 +13,7 @@ import { notFound, relayError, RelayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import {
   isMemberRequest,
+  type LinkAuthority,
   type LinkAuthorityResolver,
   type LinkJsonResponse,
 } from "./linkAuthority";
@@ -28,6 +30,17 @@ export type LinkReadRoute =
   | { route: "link-current" }
   | { route: "link-log" }
   | { route: "link-blob"; sha256: string };
+
+/**
+ * A member's level on one file, which varies by folder. An admin reads rule
+ * files but edits none, so Edit there reads as Comment, as live editing judges.
+ */
+function memberFileAccess(files: ShareSelector, path: string): ShareAccess | null {
+  const level = pathLevel(files, path);
+  return level === "edit" && pathLevel({ ...files, ruleFiles: undefined }, path) !== "edit"
+    ? "comment"
+    : level;
+}
 
 export function createLinkReadRoutes(
   storage: Pick<
@@ -69,6 +82,14 @@ export function createLinkReadRoutes(
   lookupUserDisplayName?: LookupUserDisplayName,
 ) {
   const identity = createReceivedIdentity(linkKey);
+  // A member's answers carry their keyed reach signature. A change tells the browser to read the files again.
+  const reachKey = linkKey ?? randomBytes(32);
+  const memberReach = (fresh: LinkAuthority) =>
+    fresh.credential.kind === "member" &&
+    "reach" in fresh.effectiveSelector &&
+    fresh.effectiveSelector.reach
+      ? { reach: fresh.effectiveSelector.reach.keyedSignature(reachKey) }
+      : {};
 
   // A Group link also reads, or with read-write access posts in, the Group's
   // channel. The share's answer and its files' answer both name it.
@@ -134,6 +155,7 @@ export function createLinkReadRoutes(
         fresh,
         {
           ...changed,
+          ...memberReach(fresh),
           ok: true,
           receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
           effectiveSelector: presentation.selector,
@@ -207,6 +229,9 @@ export function createLinkReadRoutes(
               ),
               blobSha256: file.blobSha256,
               contentKind: file.contentKind,
+              ...(fresh.credential.kind === "member"
+                ? { access: memberFileAccess(fresh.effectiveSelector, file.path) }
+                : {}),
               ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml`
                 ? {
                     automationSwitchable:
@@ -230,6 +255,7 @@ export function createLinkReadRoutes(
           fresh,
           {
             ok: true,
+            ...memberReach(fresh),
             effectiveSelector: presentation.selector,
             access: fresh.access,
             subjectName: subjectName(fresh.shareId, request, fresh.effectiveSelector),

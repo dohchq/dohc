@@ -27,6 +27,7 @@ import {
   resolveSharedImage,
   type FileAccumulator,
   type RelayOp,
+  type ShareAccess,
   type SharedFile,
   type ViewMeta,
 } from "./model";
@@ -66,6 +67,20 @@ export interface LoadedLog {
 
 export interface LoadedCurrentState extends LoadedLog {
   meta: ViewMeta;
+  /** A member's level on each file the current read listed, which varies by folder. */
+  levels: ReadonlyMap<string, ShareAccess>;
+}
+
+const LEVELS: readonly unknown[] = ["view", "comment", "edit"];
+function fileLevels(files: unknown): Map<string, ShareAccess> {
+  const levels = new Map<string, ShareAccess>();
+  if (!Array.isArray(files)) return levels;
+  for (const file of files as unknown[]) {
+    const { path, access } = (file ?? {}) as Record<string, unknown>;
+    if (typeof path === "string" && LEVELS.includes(access))
+      levels.set(path, access as ShareAccess);
+  }
+  return levels;
 }
 
 export class ViewResponseError extends Error {
@@ -379,6 +394,7 @@ export function viewMeta(value: unknown): ViewMeta | null {
     ...(typeof record.levelChangedBy === "string" && record.levelChangedBy.trim()
       ? { levelChangedBy: record.levelChangedBy.trim() }
       : {}),
+    ...(typeof record.reach === "string" ? { reach: record.reach } : {}),
   };
 }
 
@@ -409,6 +425,7 @@ export async function loadCurrentProjection(
   return {
     meta,
     fileAccumulator,
+    levels: fileLevels(body.files),
     nextCursor: body.nextCursor,
     epochLogFloor: body.epochLogFloor,
   };
@@ -430,7 +447,7 @@ export async function loadCurrentState(
         signal,
         projection.epochLogFloor,
       );
-      return { ...caughtUp, meta: projection.meta };
+      return { ...caughtUp, meta: projection.meta, levels: projection.levels };
     } catch (error: unknown) {
       if (error instanceof ViewResponseError && error.status === 404) {
         const meta = await loadMeta(session, signal);

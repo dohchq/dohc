@@ -49,6 +49,7 @@ function memberAt(level: ShareAccess): WorkspaceShareSelector {
     groupLevel: () => level,
     hasGroupLevel: (wanted) => wanted === level,
     nearestRule: () => "",
+    pathVisibleBeforeMoment: () => true,
     objectVisible: () => true,
     objectPath: () => null,
   };
