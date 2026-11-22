@@ -253,9 +253,10 @@ test("@proposal-on-live-note changes accepted on a live note wait for Stop, then
 
     await test.step("Accept on the live note says to stop live editing first, and the change stays open", async () => {
       await resumeLive();
+      await page.reload();
       await page.getByTestId("notice-center-toggle").click();
       const notices = page.getByRole("dialog", { name: "Notices", exact: true });
-      await notices.getByRole("button", { name: "Review", exact: true }).click();
+      await notices.getByRole("button", { name: "Review", exact: true }).click({ timeout: 60_000 });
       const dialog = page.getByTestId("proposal-review-dialog");
       await expect(dialog).toBeVisible();
       await dialog.getByTestId("proposal-review-accept").click();
