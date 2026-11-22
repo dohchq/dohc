@@ -1,11 +1,18 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AgentRunStatusResult, DesktopUserSettingsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { testAgent } from "../../testing/agentSettings";
 import type { SettingsSectionId } from "../settings/settingsRegistry";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { useAgentSetup } from "./useAgentSetup";
+
+let shown = "";
+const wrapper = ({ children }: { children: ReactNode }) => (
+  <WorkspaceSessionProvider workspaceId={shown}>{children}</WorkspaceSessionProvider>
+);
 
 const inactive: AgentRunStatusResult = { activeRun: null, lastRun: null };
 const active: AgentRunStatusResult = {
@@ -30,7 +37,7 @@ it("reads run status when the workspace opens and again when Settings closes", a
   const { rerender } = renderHook(
     ({ section }: { section: SettingsSectionId | null }) =>
       useAgentSetup("ws-1", null, section, true),
-    { initialProps: { section: null } as { section: SettingsSectionId | null } },
+    { initialProps: { section: null } as { section: SettingsSectionId | null }, wrapper },
   );
   expect(getAgentRunStatus).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1" });
   rerender({ section: "agents" });
@@ -53,10 +60,10 @@ it("drops a slow run read from A after a switch to B and back to A", async () =>
   const settings: DesktopUserSettingsResult = { settings: DEFAULT_USER_SETTINGS, source: "stored" };
   const { result, rerender } = renderHook(
     ({ workspaceId }: { workspaceId: string }) => useAgentSetup(workspaceId, settings, null, true),
-    { initialProps: { workspaceId: "ws-a" } },
+    { initialProps: { workspaceId: (shown = "ws-a") }, wrapper },
   );
-  rerender({ workspaceId: "ws-b" });
-  rerender({ workspaceId: "ws-a" });
+  rerender({ workspaceId: (shown = "ws-b") });
+  rerender({ workspaceId: (shown = "ws-a") });
   expect(reads).toHaveLength(3);
 
   await act(async () => {
@@ -75,6 +82,7 @@ it("does not read agent status before workspace admission", async () => {
   vi.stubGlobal("dohcDesktop", { getAgentRunStatus });
   const { rerender } = renderHook(({ ready }) => useAgentSetup("workspace", null, null, ready), {
     initialProps: { ready: false },
+    wrapper,
   });
   expect(getAgentRunStatus).not.toHaveBeenCalled();
   await act(async () => {
@@ -93,7 +101,7 @@ it("sums up the agent dohc starts when an agent you run comes first", async () =
     },
     source: "stored",
   };
-  const { result } = renderHook(() => useAgentSetup("ws-1", settings, null, true));
+  const { result } = renderHook(() => useAgentSetup("ws-1", settings, null, true), { wrapper });
   await act(async () => undefined);
   expect(result.current.agentSetup).toMatchObject({
     agentName: "Nova",

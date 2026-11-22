@@ -722,7 +722,15 @@ function recoverLiveDrafts(
 // One row in Notices for failed reads of the Collections list; a read that works removes it.
 const COLLECTIONS_LIST_NOTICE = "collections-list";
 
-export function DesktopWorkspaceShell(props: {
+export function DesktopWorkspaceShell(props: Parameters<typeof WorkspaceShell>[0]) {
+  return (
+    <WorkspaceSessionProvider workspaceId={props.workspace.workspaceId}>
+      <WorkspaceShell {...props} />
+    </WorkspaceSessionProvider>
+  );
+}
+
+function WorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
   userSettings: DesktopUserSettingsResult | null;
@@ -8112,7 +8120,7 @@ export function DesktopWorkspaceShell(props: {
     : (version: { id: string; name: string }) =>
         setShareTarget({ kind: "version", versionId: version.id, versionName: version.name });
   const shell = (
-    <WorkspaceSessionProvider workspaceId={workspaceId}>
+    <>
       {workspaceIsReady && !shareView ? (
         <LiveRecoveryPackageNotices
           workspaceId={workspaceId}
@@ -10124,7 +10132,7 @@ export function DesktopWorkspaceShell(props: {
           </CustomizeContext.Provider>
         </AgentColorContext.Provider>
       </AgentSettingsProvider>
-    </WorkspaceSessionProvider>
+    </>
   );
   return (
     <AgentThreadLinesProvider
