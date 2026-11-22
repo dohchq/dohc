@@ -20,6 +20,9 @@
 .join-page a { color: var(--viewer-link); text-underline-offset: 3px; }
 .state-page .state p.join-aside { color: var(--viewer-subtle); font-size: 12px; }
 .join-page .state p.join-error { color: var(--viewer-danger); }
+/* The sign-in failure sits above Sign in with the alert mark, as the delete dialog's does. */
+.join-page .state .join-form p.join-error { display: flex; align-items: flex-start; gap: 4px; margin: 0; font-size: 12px; }
+.join-form .join-error .icon { flex: none; margin-top: 3px; }
 .join-name { color: var(--viewer-ink); }
 .join-link { border: 0; padding: 0; background: none; color: var(--viewer-link); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .join-link:disabled { color: var(--viewer-subtle); cursor: default; }
