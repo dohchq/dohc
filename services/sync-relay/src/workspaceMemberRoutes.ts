@@ -215,9 +215,18 @@ export function createWorkspaceMemberRoutes(options: {
   };
 
   const respondWithView = async (workspaceId: string, userId: string) => {
-    const snapshot = storage.readWorkspaceMembers(workspaceId, userId);
-    if (!snapshot) throw notFound();
-    return jsonResponse(await view(snapshot), 200, { "cache-control": "private, no-store" });
+    let snapshot = storage.readWorkspaceMembers(workspaceId, userId);
+    for (;;) {
+      if (!snapshot) throw notFound();
+      const body = await view(snapshot);
+      // The account lookups wait, and the viewer's role can change meanwhile.
+      // Without this check a removed or demoted admin receives emails and the
+      // invite link.
+      const current = storage.readWorkspaceMembers(workspaceId, userId);
+      if (current?.viewer.role === snapshot.viewer.role)
+        return jsonResponse(body, 200, { "cache-control": "private, no-store" });
+      snapshot = current;
+    }
   };
 
   const settle = (result: MemberChangeResult, workspaceId: string) => {
