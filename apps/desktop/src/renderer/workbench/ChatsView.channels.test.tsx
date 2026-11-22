@@ -891,4 +891,17 @@ describe("ChatsView Group access marks", () => {
     rerender({ groupAccessRevision: 1 });
     await waitFor(() => expect(marks().Hidden).toBe("none: Hidden from members"));
   });
+
+  // The owner or another admin can change a rule on another computer, and nothing tells this one.
+  it("reads the rules again when the window comes back into focus", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });
+    bridgeMock.workspaceMembers.mockResolvedValueOnce(membersList([]));
+    bridgeMock.workspaceMembers.mockResolvedValueOnce(membersList(rules));
+    renderView(vi.fn(), vi.fn());
+    await screen.findAllByTestId("chats-channel");
+    await waitFor(() => expect(bridgeMock.workspaceMembers).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("chats-group-access-mark")).toBeNull();
+    fireEvent.focus(window);
+    await waitFor(() => expect(marks().Hidden).toBe("none: Hidden from members"));
+  });
 });
