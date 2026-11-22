@@ -118,20 +118,25 @@ INLINE = letters, `escapedPunctuation`, `hardBreak`, `image`, `inlineAtom`, `mat
 - Split: insert one boundary at the caret, passing the formatting active at that index as the insert's attributes (never `{}`: Yjs would write negation items, and an undo could then change nearby marks).
 - Split at offset 0 of a block that is not empty: insert the new boundary BEFORE the existing one, so the existing boundary, its path and its container stay with the text.
 - Changing a block's kind or path: `setAttribute` on the same boundary. Never delete and insert. A writer sets `path` as one whole array.
+- A boundary carries every attribute its kind has (`level` for a heading, `language` for a code block) from the moment it has that kind, defaults included, so a later change to one is an overwrite.
+- A writer skips a write that would store the value already there.
+- Text before the first boundary has no boundary to change. A writer that changes that line's kind or path, or splits it at offset 0, first inserts a boundary for it at the start of the sequence, in the same transaction.
+- A split's new line copies the line's kind and path. When the line sits directly in a list item, the new line starts a new item (fresh id, all its records), and the item's later blocks go with it.
 - Typing: insert letters with the marks the editor gives them.
 - Never copy letters.
 - A boundary always carries `path`, `[]` for a line in no container, so a later change to it is an overwrite. No writer writes a path longer than 64: a change that would nest a line deeper is refused, since a reader would cut the path.
 - Containers:
   - a container keeps its id through a change if any of its leaves survives the change in it;
   - a new container gets a fresh id. The transaction that writes the paths naming it also writes its type record and a record for EVERY attribute of every kind it can become where it stands, with the values it starts with and defaults for the rest. The kinds: `blockquote` and `callout`; `bulletList`, `orderedList` and `taskList`; `listItem` and `taskItem`; `tableCell` and `tableHeader`. (`recordsOfContainer` does this.) Every later change to a record is then an overwrite, also a tick on an item that became a to-do because someone else changed its list;
-  - changing a container's type or attribute is one write to its record;
-  - no writer gives two containers one id. When someone's change leaves one id on two containers (2.2), a writer that changes a record of one of them first gives that one a fresh id, its records and its leaves' paths, in the same transaction.
+  - changing a container's type or attribute is one write to its record. Changing a list's kind writes the list's type and the type of each item whose stored type differs, and leaves ticks alone;
+  - when a change splits a container (a line lifted from its middle, an item outdented), the first part keeps the id and each later part gets a fresh id and a copy of every record;
+  - no writer gives two containers one id. When someone's change leaves one id on two containers (2.2), a writer that changes a record of one of them (a setting, or a type, as a change of a list's kind does for its items) first gives that one a fresh id, a copy of all its records and its leaves' paths, in the same transaction, and writes the change into the copy.
 - No record is ever deleted.
 - No writer repairs what it reads. In particular no editor writes table repairs (`fixTables`) or trailing lines in a live note. How an uneven table is drawn is the editor's business and writes nothing.
 - Undo is one `Y.UndoManager` over `[sequence, containers]` with `ignoreRemoteMapChanges: true` and a `deleteFilter` that refuses to delete any item whose parent is `containers`, following only the person's own origin. Changes from other people are applied with an origin the history does not follow.
   - Undo of a split deletes its boundary. Undo of a join inserts a new boundary (new id, the attributes the person last saw) at the old place.
   - Undo of a change to a path or a record writes the earlier value back.
-  - Undo of the change that made a container puts its lines' paths back and leaves its records, with the settings it was made with, for lines other people added to it.
+  - Undo of the change that made a container puts its lines' paths back and leaves its records for lines other people added to it: as the container was made, or as that same step or someone else last set them.
 - The editor adapter proves this undo rule with random runs for 3 to 4 people before anything is built on it. If a case cannot be met inside Yjs's undo, the fallback keeps the stored format: the adapter's history undoes record changes itself (it remembers each changed record's earlier value) and `containers` leaves the `Y.UndoManager`.
 
 ## 5. Checks
@@ -160,9 +165,11 @@ Accepted:
 - A writer that gives the later half of a split container a fresh id rewrites the path of every line in that half; someone changing one of those lines' paths at the same moment may have that change overwritten.
 - Undoing the change that made a quote, callout or list does not unwrap lines someone else added to it since; those stay in it, with its settings.
 - Two people changing one list's kind at the same moment: one kind wins, and every item follows it. Undoing a kind change puts back the kind the person had, even if someone changed it since.
-- As in Yjs today: when other people's changes have already removed everything a step did (a letter typed and since deleted by someone else), undo passes over that step and undoes the one before it.
-- With `ignoreRemoteMapChanges`, undoing a change to an attribute, a record or a path puts back the value the person had before it, even if someone changed it since, and redoing it writes the person's value back in the same way. A boundary or inline item restored by undo has the attributes the person last saw (someone else's change to it at the same moment is lost with the delete).
+- As in Yjs today: when other people's changes have already removed everything a step did (a letter typed and since deleted by someone else, or a change to the kind or path of a line someone has since removed), undo passes over that step and undoes the one before it. In 399,562 undos and redos by 2 to 4 people this happened 1,218 times, each time for a step with nothing left to undo.
+- With `ignoreRemoteMapChanges`, undoing a change to an attribute, a record or a path puts back the value the person had before it, even if someone changed it since, and redoing it writes back the value that undo replaced. A boundary or inline item restored by undo has the attributes the person last saw (someone else's change to it at the same moment is lost with the delete).
 - Two people changing one line's path at the same moment: one whole path wins.
+- A setting changed while someone else lifts a line out of the middle of that container shows on the first part only; the later part has the copy made when it was split.
+- Records are never deleted, so a note keeps the records of every container it ever had. Measured with random runs: about 27 bytes for each record no line names; a quote, callout or list leaves 4 when it goes and a list item 2; one person wrapping and lifting 2,000 times left 1,486 such records, 41 KB. Nothing removes them yet, and removing them is not safe while an undo or an offline change can still name them.
 - A letter typed in an empty line that someone joins away at the same moment lands at the end of the line above.
 
 Unchanged from today (Yjs inside one text), now also reachable across lines:
