@@ -34,6 +34,8 @@ const CASES: [string, string, string, string | undefined][] = [
   ],
   ["A\n\nB", "\nB", "A\n", ""],
   ["A\nB", "A", "B", ""],
+  ["A\n﻿\nB\nC", "A\nB\nC", "A\nB\n﻿\nC", undefined],
+  ["A\n\u0085\nB\nC", "A\nB\nC", "A\nB\n\u0085\nC", undefined],
 ];
 
 it.each(CASES)("merges %j, %j and %j like the engine", (base, local, remote, expected) => {

@@ -193,7 +193,8 @@ pub struct VersionFileChangePage {
 /// - A line that appears once in the base and each side appears once in the
 ///   merge. A line that isn't blank, appears at most once in the base and each
 ///   side, and that exactly one side added or removed, is added or removed in
-///   the merge too. Blank lines separate blocks and may move.
+///   the merge too. Blank lines, which hold only spaces and tabs, separate
+///   blocks and may move.
 /// - Between neighbouring lines of every longest chain of lines that appear
 ///   once in all four texts and keep their order, no line has fewer copies in
 ///   the merge than both sides kept or more than either side has. A check that
@@ -1559,7 +1560,8 @@ fn keeps_copies(texts: [&[&str]; 4]) -> bool {
     if counts.iter().any(|(line, &[base, local, remote, merged])| {
         base.max(local).max(remote) <= 1
             && (base, local, remote) != (0, 1, 1)
-            && (!line.trim().is_empty() || (base, local, remote) == (1, 1, 1))
+            && (!line.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
+                || (base, local, remote) == (1, 1, 1))
             && merged != if base == local { remote } else { local }
     }) {
         return false;

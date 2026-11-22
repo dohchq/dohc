@@ -992,7 +992,7 @@ function keepsCopies(lines: string[][]): boolean {
   const followsChange = (line: string, [base, local, remote, merged]: number[]): boolean =>
     Math.max(base!, local!, remote!) > 1 ||
     (base === 0 && local === 1 && remote === 1) ||
-    (line.trim() === "" && !(base === 1 && local === 1 && remote === 1)) ||
+    (/^[ \t]*$/.test(line) && !(base === 1 && local === 1 && remote === 1)) ||
     merged === (base === local ? remote : local);
   if (![...counts].every(([line, count]) => followsChange(line, count))) return false;
   const positions = new Map<string, number[]>();

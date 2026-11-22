@@ -38,7 +38,8 @@ fn lost_or_added_line_copy(texts: [&[&str]; 4]) -> Option<String> {
             std::array::from_fn(|index| counts[index].get(*line).copied().unwrap_or(0));
         base.max(local).max(remote) <= 1
             && (base, local, remote) != (0, 1, 1)
-            && (!line.trim().is_empty() || (base, local, remote) == (1, 1, 1))
+            && (!line.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
+                || (base, local, remote) == (1, 1, 1))
             && merged != if base == local { remote } else { local }
     }) {
         return Some(format!("{line:?} should follow the side that changed it"));
