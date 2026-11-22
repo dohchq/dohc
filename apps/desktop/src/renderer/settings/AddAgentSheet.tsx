@@ -1,5 +1,5 @@
-import { useCallback, useState, type ReactNode } from "react";
-import { CircleAlert, CloudOff, Link, LoaderCircle, Plug } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { CircleAlert, CloudOff, Info, Link, LoaderCircle, Plug } from "lucide-react";
 import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
@@ -77,6 +77,79 @@ const baseName = (choice: RunsWith) =>
 
 const THREAD_SEARCH_ID = "agent-add-thread-search";
 
+function isPrivateIpv4(a: number, b: number): boolean {
+  return (
+    a === 127 ||
+    a === 10 ||
+    a === 0 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
+}
+
+export function isPrivateServerHost(host: string): boolean {
+  let hostname: string;
+  try {
+    hostname = (host.includes("://") ? new URL(host).hostname : new URL(`https://${host}`).hostname)
+      .toLowerCase()
+      .replace(/\.+$/u, "");
+  } catch {
+    return false;
+  }
+  if (hostname.startsWith("[") && hostname.endsWith("]")) {
+    const ipv6 = hostname.slice(1, -1);
+    if (ipv6 === "::1" || ipv6 === "::") return true;
+    if (ipv6.startsWith("64:ff9b::")) return true;
+    if (ipv6.startsWith("::ffff:")) {
+      const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/u.exec(ipv6.slice("::ffff:".length));
+      if (hex) {
+        const hi = Number.parseInt(hex[1]!, 16);
+        return isPrivateIpv4((hi >> 8) & 0xff, hi & 0xff);
+      }
+    }
+    const firstHex = /^([0-9a-f]{1,4}):/u.exec(ipv6);
+    if (!firstHex) return false;
+    const first = Number.parseInt(firstHex[1]!, 16);
+    return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80;
+  }
+  if (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    !hostname.includes(".") ||
+    hostname.endsWith(".local") ||
+    hostname.endsWith(".lan") ||
+    hostname.endsWith(".internal") ||
+    hostname.endsWith(".home.arpa")
+  ) {
+    return true;
+  }
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(hostname);
+  if (!ipv4) return false;
+  return isPrivateIpv4(Number(ipv4[1]), Number(ipv4[2]));
+}
+
+export function agentLinkCloudWarning(linkUrl: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(linkUrl);
+  } catch {
+    return null;
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/\.+$/u, "");
+  if (isPrivateServerHost(parsed.host)) {
+    return "This server uses a local or private address. Cloud apps such as Claude and ChatGPT need a public HTTPS server to connect.";
+  }
+  if (parsed.protocol !== "https:") {
+    return "This link uses HTTP instead of HTTPS. Cloud apps such as Claude and ChatGPT need a public HTTPS server to connect.";
+  }
+  if (hostname.endsWith(".ts.net")) {
+    return "Tailscale addresses need Funnel turned on before cloud apps such as Claude and ChatGPT can connect.";
+  }
+  return null;
+}
+
 /**
  * Add agent: name and color, then what the agent runs with. Claude Code and
  * Codex run on this computer when their switch is on. T3 Code connects a
@@ -106,16 +179,35 @@ export function AddAgentSheet(props: {
 }) {
   const tools = ["claude", "codex"] as const;
   const looking = !props.detectionFailed && tools.some((tool) => props.toolState(tool) === null);
-  // The sheet shows no choice while dohc looks for the tools. Then it starts
-  // on the first tool that is ready, and only the person changes it.
+  const readyTool = tools.find((tool) => props.toolState(tool)?.status === "ready");
+  const [typed, setTyped] = useState<string | null>(null);
   const [initial, setInitial] = useState<RunsWith | null>(null);
-  const start =
+  const start: RunsWith | null =
     initial ??
-    (looking ? null : (tools.find((tool) => props.toolState(tool)?.status === "ready") ?? "mcp"));
+    (looking
+      ? null
+      : readyTool !== undefined
+        ? readyTool
+        : typed !== null
+          ? "mcp"
+          : props.agentLink.status === "loading"
+            ? null
+            : props.agentLink.status === "ready" && props.agentLink.link !== null
+              ? "link"
+              : "mcp");
   if (initial === null && start !== null) setInitial(start);
   const [picked, setPicked] = useState<RunsWith | null>(null);
   const choice = picked ?? start;
-  const [typed, setTyped] = useState<string | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (choice !== "link") return;
+    const form = formRef.current;
+    if (!form) return;
+    const focused = document.activeElement;
+    if (focused === null || focused === document.body || !form.contains(focused)) {
+      form.querySelector<HTMLElement>('[data-testid="agent-runs-with-link"]')?.focus();
+    }
+  }, [choice]);
   // The T3 Code thread to connect. Its title is the name until the person types one.
   const [thread, setThread] = useState<T3CodeThreadChoice | null>(null);
   const [threadMissing, setThreadMissing] = useState(false);
@@ -139,6 +231,8 @@ export function AddAgentSheet(props: {
   const tool = choice === "claude" || choice === "codex" ? choice : null;
   const state = tool ? props.toolState(tool) : null;
   const link = props.agentLink;
+  const cloudWarning =
+    link.status === "ready" && link.link !== null ? agentLinkCloudWarning(link.link) : null;
   const canAdd =
     !props.adding && problem === null && (choice === "mcp" || state?.status === "ready");
 
@@ -215,6 +309,7 @@ export function AddAgentSheet(props: {
   return (
     <Overlay onClose={props.adding ? undefined : props.onCancel}>
       <form
+        ref={formRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="agent-add-title"
@@ -332,7 +427,7 @@ export function AddAgentSheet(props: {
                 Through MCP
               </span>,
               false,
-              "Cursor, OpenCode, or any agent with MCP",
+              "Claude Desktop, Cursor, or any local MCP app",
             )}
             {option(
               "link",
@@ -357,8 +452,10 @@ export function AddAgentSheet(props: {
               ),
               link.status !== "ready",
               link.status === "no-server"
-                ? "Sign in to a server to give an agent a link."
-                : undefined,
+                ? "Sign in to a server to connect Claude, ChatGPT, OpenClaw, or another agent with a link."
+                : link.status === "ready"
+                  ? "Claude, ChatGPT, OpenClaw, and other MCP apps"
+                  : undefined,
             )}
           </div>
         </div>
@@ -383,37 +480,61 @@ export function AddAgentSheet(props: {
                 testId="agent-add-link-apps"
               />
             </div>
-            {/* Why the link can't be copied takes the place of what copying it does. */}
             <p data-testid="agent-add-link-note" className="m-0 -mt-2 text-[12px] text-muted">
               {link.link !== null
-                ? "The agent signs in through your browser, where you choose what it can reach."
+                ? "Copy the link and add it as a custom MCP connector in Claude, ChatGPT, OpenClaw, or another MCP app. Your browser opens to name it and choose what it can reach."
                 : `Sync this workspace to ${link.host} to give an agent a link.`}
             </p>
+            {cloudWarning !== null ? (
+              <p
+                data-testid="agent-add-link-private-note"
+                className="m-0 -mt-1 flex items-start gap-2 rounded-lg bg-panel-2 px-3 py-2 text-[12px] text-muted"
+              >
+                <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+                <span className="min-w-0">{cloudWarning}</span>
+              </p>
+            ) : null}
           </>
         ) : choice === "mcp" ? (
-          <div data-testid="agent-add-connect" className="rounded-lg border border-line bg-bg">
-            <div className="flex min-h-11 items-center gap-3 border-b border-line px-3 py-2">
-              <span className="text-[13px] text-ink">
-                Paste this into your agent's MCP settings
-              </span>
-              <span className="ml-auto">
-                <CopyButton
-                  label="Copy MCP config"
-                  size="button"
-                  testId="agent-add-config-copy"
-                  disabled={config === null}
-                  getText={() => config}
-                />
-              </span>
+          <>
+            <div data-testid="agent-add-connect" className="rounded-lg border border-line bg-bg">
+              <div className="flex min-h-11 items-center gap-3 border-b border-line px-3 py-2">
+                <span className="text-[13px] text-ink">
+                  Paste this into your agent's MCP settings
+                </span>
+                <span className="ml-auto">
+                  <CopyButton
+                    label="Copy MCP config"
+                    size="button"
+                    testId="agent-add-config-copy"
+                    disabled={config === null}
+                    getText={() => config}
+                  />
+                </span>
+              </div>
+              {config !== null ? (
+                <pre className="m-0 overflow-x-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed text-ink">
+                  {config}
+                </pre>
+              ) : props.mcpUnavailable ? (
+                <p className="m-0 px-3 py-2.5 text-[12px] text-danger">{props.mcpUnavailable}</p>
+              ) : null}
             </div>
-            {config !== null ? (
-              <pre className="m-0 overflow-x-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed text-ink">
-                {config}
-              </pre>
-            ) : props.mcpUnavailable ? (
-              <p className="m-0 px-3 py-2.5 text-[12px] text-danger">{props.mcpUnavailable}</p>
+            {config !== null || link.status === "no-server" ? (
+              <p data-testid="agent-add-mcp-note" className="m-0 -mt-2 text-[12px] text-muted">
+                {[
+                  config !== null
+                    ? "For local apps on this computer such as Claude Desktop or Cursor. Save the app's MCP config file, then restart the app."
+                    : null,
+                  link.status === "no-server"
+                    ? "To connect Claude, ChatGPT, or OpenClaw with a link instead, sign in to a server and sync this workspace."
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+              </p>
             ) : null}
-          </div>
+          </>
         ) : choice === "t3-code" ? (
           <T3CodeChoice
             picked={thread?.id ?? null}

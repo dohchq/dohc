@@ -1016,6 +1016,12 @@ export function AgentPage(props: {
               </p>
             ) : null}
           </div>
+          {props.mcpConfig !== null ? (
+            <p data-testid="agent-mcp-note" className="m-0 mt-2 text-[12px] text-muted">
+              For local apps on this computer such as Claude Desktop or Cursor. Save the app's MCP
+              config file, then restart the app.
+            </p>
+          ) : null}
           {props.run ? (
             <>
               <h4 className={SECTION}>History</h4>
