@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ACCOUNT_CSS_PATH, ACCOUNT_JS_PATH } from "./assets";
+import { ACCOUNT_CSS_PATH, ACCOUNT_FONT_PATH, ACCOUNT_JS_PATH } from "./assets";
 import type { ServerDescriptor } from "./config";
 import { createCrashReportIntake } from "./crashReports";
 import type { ReadinessReport } from "./readiness";
@@ -335,6 +335,19 @@ describe("account pages", () => {
     expect(css.headers.get("cache-control")).toContain("immutable");
     const js = await router()(get(ACCOUNT_JS_PATH));
     expect(js.headers.get("content-type")).toContain("javascript");
+  });
+
+  it("serves the font its stylesheet names, which the pages' policy lets them load", async () => {
+    const page = await router()(get("/account/sign-in"));
+    expect(page.headers.get("content-security-policy")).toContain("font-src 'self'");
+    const css = await (await router()(get(ACCOUNT_CSS_PATH))).text();
+    expect(css).toContain(`url("${ACCOUNT_FONT_PATH}")`);
+    const font = await router()(get(ACCOUNT_FONT_PATH));
+    expect(font.status).toBe(200);
+    expect(font.headers.get("content-type")).toBe("font/woff2");
+    expect(font.headers.get("cache-control")).toContain("immutable");
+    const bytes = new Uint8Array(await font.arrayBuffer());
+    expect(new TextDecoder().decode(bytes.subarray(0, 4))).toBe("wOF2");
   });
 });
 

@@ -1,10 +1,35 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 
-// The account pages ship as two static files and no build step: the stylesheet
-// and one script that dispatches on `body[data-page]`. Both are served under a
-// content hash so a browser can cache them forever and still pick up a change.
+function hashed(
+  name: string,
+  extension: string,
+  content: string | Uint8Array<ArrayBuffer>,
+): string {
+  const digest = createHash("sha256").update(content).digest("base64url").slice(0, 12);
+  return `/account/assets/${name}.${digest}.${extension}`;
+}
 
-export const ACCOUNT_CSS = `:root {
+export const ACCOUNT_FONT = new Uint8Array(
+  readFileSync(
+    createRequire(import.meta.url).resolve(
+      "@fontsource-variable/inter/files/inter-latin-opsz-normal.woff2",
+    ),
+  ),
+);
+export const ACCOUNT_FONT_PATH = hashed("inter-latin", "woff2", ACCOUNT_FONT);
+
+export const ACCOUNT_CSS = `@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("${ACCOUNT_FONT_PATH}") format("woff2-variations");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+:root {
   color-scheme: light dark;
   --bg: #faf9f5;
   --panel: #f3f1ea;
@@ -17,8 +42,7 @@ export const ACCOUNT_CSS = `:root {
   --danger: #a43e2a;
   --success: #38684e;
   --sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
-  --serif: "Iowan Old Style", Charter, Georgia, "Times New Roman", serif;
+  --mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -66,9 +90,10 @@ main {
   align-items: center;
   gap: 0.5rem;
   margin: 0 0 1.25rem;
-  font-family: var(--serif);
   font-size: 15px;
-  color: var(--subtle);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
 }
 
 .brand-mark {
@@ -81,8 +106,10 @@ main {
 
 h1 {
   margin: 0 0 0.5rem;
-  font-size: 18px;
+  font-size: 22px;
   font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
 }
 
 p { margin: 0 0 1rem; color: var(--muted); }
@@ -241,15 +268,13 @@ button.secondary:hover { background: var(--panel-2); color: var(--ink); }
 }
 
 .meta {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
+  color: var(--ink);
   word-break: break-all;
 }
 
 dl { margin: 0 0 1rem; }
 dt { font-size: 12px; color: var(--subtle); }
-dd { margin: 0 0 0.75rem; font-family: var(--mono); word-break: break-all; }
+dd { margin: 0 0 0.75rem; word-break: break-all; }
 
 .links {
   display: flex;
@@ -521,11 +546,6 @@ if (page === "account") {
   }
 }
 `;
-
-function hashed(name: string, extension: string, content: string): string {
-  const digest = createHash("sha256").update(content).digest("base64url").slice(0, 12);
-  return `/account/assets/${name}.${digest}.${extension}`;
-}
 
 export const ACCOUNT_CSS_PATH = hashed("account", "css", ACCOUNT_CSS);
 export const ACCOUNT_JS_PATH = hashed("account", "js", ACCOUNT_JS);
