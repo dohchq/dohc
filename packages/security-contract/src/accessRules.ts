@@ -103,8 +103,16 @@ function readLevel(value: string | null): ShareAccess | null {
  * words, no YAML anchors, tags, flow collections or multi-documents.
  */
 export function parseAccessRule(text: string): AccessRule | null {
-  if (new TextEncoder().encode(text).length > ACCESS_RULE_MAX_BYTES || text.includes("\0"))
-    return null;
+  if (new TextEncoder().encode(text).length > ACCESS_RULE_MAX_BYTES) return null;
+  return parseFormattedAccessRule(text);
+}
+
+/**
+ * Reads text `formatAccessRule` wrote. Its two-space indent and final newline
+ * can take a rule under the size cap past it, so this reads without the cap.
+ */
+export function parseFormattedAccessRule(text: string): AccessRule | null {
+  if (text.includes("\0")) return null;
   let members: ShareAccess | null = null;
   let sawMembers = false;
   let sawPeople = false;
@@ -177,7 +185,7 @@ export function formatAccessRule(rule: AccessRule): string | null {
     }
   }
   const text = lines.length ? `${lines.join("\n")}\n` : "";
-  const reread = parseAccessRule(text);
+  const reread = parseFormattedAccessRule(text);
   return reread && sameRule(reread, rule) ? text : null;
 }
 

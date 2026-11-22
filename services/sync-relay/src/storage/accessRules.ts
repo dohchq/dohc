@@ -5,6 +5,7 @@ import {
   accessRuleSet,
   formatAccessRule,
   parseAccessRule,
+  parseFormattedAccessRule,
   type AccessRuleSet,
 } from "@dohc/security-contract/access-rules";
 import { pathCollisionKey } from "../pathCollisionKey";
@@ -179,7 +180,10 @@ export function currentAccessRuleSet(db: SqliteDb, workspaceId: string): AccessR
   return accessRuleSet(
     rows.map((row) => {
       const text = row.rule_text;
-      return [String(row.folder), typeof text === "string" ? parseAccessRule(text) : null] as const;
+      return [
+        String(row.folder),
+        typeof text === "string" ? parseFormattedAccessRule(text) : null,
+      ] as const;
     }),
   );
 }
