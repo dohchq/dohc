@@ -656,7 +656,10 @@ mod tests {
     }
 
     fn notes() -> Vec<Note> {
-        serde_json::from_str(NOTES).expect("the shared notes parse")
+        use serde::Deserialize as _;
+        let mut json = serde_json::Deserializer::from_str(NOTES);
+        json.disable_recursion_limit();
+        Vec::deserialize(&mut json).expect("the shared notes parse")
     }
 
     fn stored(note: &Note) -> Ydoc {
