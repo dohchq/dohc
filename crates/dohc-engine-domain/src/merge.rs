@@ -1581,7 +1581,7 @@ fn keeps_copies(texts: [&str; 4]) -> bool {
         .filter_map(|line| positions.get(line).copied())
         .collect();
     let before = |earlier: usize, later: usize| {
-        (1..4).all(|index| anchors[earlier][index] < anchors[later][index])
+        (0..4).all(|index| anchors[earlier][index] < anchors[later][index])
     };
     let mut ending = vec![1_usize; anchors.len()];
     for later in 0..anchors.len() {
@@ -1688,13 +1688,15 @@ mod tests {
 
     #[test]
     fn reordering_both_halves_conflicts_quickly() {
-        let half = MAX_MERGE_LINES / 2;
-        let names: Vec<String> = (0..2 * half).map(|line| format!("line {line}")).collect();
+        let half = MAX_MERGE_LINES / 2 - 1;
+        let names: Vec<String> = (0..MAX_MERGE_LINES)
+            .map(|line| format!("line {line}"))
+            .collect();
         let mut local = names.clone();
         local[..half].reverse();
-        local[half..].reverse();
+        local[half..2 * half].reverse();
         let mut remote = names.clone();
-        remote[half / 2] = "remote".to_owned();
+        remote[MAX_MERGE_LINES - 1] = "remote".to_owned();
         let started = Instant::now();
         assert_eq!(
             merge_markdown(&names.join("\n"), &local.join("\n"), &remote.join("\n")),

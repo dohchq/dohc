@@ -2,7 +2,7 @@ use dohc_engine_domain::{MarkdownMergeResult, merge_markdown};
 
 /// The same cases and outcomes as the test loopback engine's merge test in
 /// `packages/workspace-engine-client`, so the two merges stay in step.
-const CASES: [(&str, &str, &str, Option<&str>); 14] = [
+const CASES: [(&str, &str, &str, Option<&str>); 15] = [
     ("base", "same", "same", Some("same")),
     ("base", "base", "remote", Some("remote")),
     ("a\nb\nc", "A\nb\nc", "a\nb\nC", Some("A\nb\nC")),
@@ -41,6 +41,12 @@ const CASES: [(&str, &str, &str, Option<&str>); 14] = [
         "New.\n\nOne.",
         "One.\nAdded.\nMore.\n\nTwo.",
         None,
+    ),
+    (
+        "A\n---\nC\n---\nD\nE",
+        "D\nA\n---\nC\n---\nE",
+        "A\n---\n---\nD\nE\nC",
+        Some("D\nA\n---\n---\nE\nC"),
     ),
 ];
 

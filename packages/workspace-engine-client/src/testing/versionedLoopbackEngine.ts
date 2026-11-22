@@ -1019,7 +1019,7 @@ function keepsCopies(texts: [string, string, string, string]): boolean {
     return at ? [at] : [];
   });
   const before = (earlier: number, later: number): boolean =>
-    [1, 2, 3].every((index) => anchors[earlier]![index]! < anchors[later]![index]!);
+    [0, 1, 2, 3].every((index) => anchors[earlier]![index]! < anchors[later]![index]!);
   const ending = anchors.map(() => 1);
   for (let later = 0; later < anchors.length; later += 1) {
     for (let earlier = 0; earlier < later; earlier += 1) {
