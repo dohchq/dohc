@@ -220,7 +220,8 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
 /// A folder the watcher cannot read is reported as an error that names it,
 /// while the watch on the rest of the workspace keeps working. Taking that
 /// error for a lost watch attaches again, meets the same folder, and attaches
-/// again, rescanning each time.
+/// again, rescanning each time. Once the folder can be read, changes inside it
+/// must be reported too.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreadable_folder_is_not_taken_for_a_lost_watch() {
@@ -265,8 +266,20 @@ async fn an_unreadable_folder_is_not_taken_for_a_lost_watch() {
         assert!(Instant::now() < deadline, "the write was not reported");
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
-    watcher.stop().expect("stop");
+
     mode(0o755).expect("unlock the folder");
+    tokio::time::sleep(dohc_engine_files::watch::WATCH_SETTLE * 3).await;
+    let before = dirty.load(Ordering::Acquire);
+    ws.write("locked/later.md", b"later");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dirty.load(Ordering::Acquire) == before {
+        assert!(
+            Instant::now() < deadline,
+            "a write inside the folder was not reported after it became readable"
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    watcher.stop().expect("stop");
 }
 
 /// A FAT32 volume stores a name that is not UTF-8 percent-encoded but reports
