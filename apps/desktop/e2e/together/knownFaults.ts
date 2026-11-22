@@ -7,6 +7,8 @@ import { test } from "@playwright/test";
 
 export const KNOWN_FAULTS: Readonly<Record<string, number>> = {
   "both add a line after the same last line, one just after the other": 4177,
+  "both join the same line": 4038,
+  "a join and a split of one line": 4038,
 };
 
 /**
@@ -17,6 +19,7 @@ export const KNOWN_FAULTS: Readonly<Record<string, number>> = {
  * a fault removes its line here too, and the long run then makes those edits again.
  */
 export const LEFT_OUT: Readonly<Record<string, number>> = {
+  "joining and splitting lines": 4038,
   "starting a new line where someone else starts one": 4177,
 };
 

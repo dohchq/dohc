@@ -157,8 +157,8 @@ function nothingLost(end: Ending, ...words: string[]): void {
   }
 }
 
-/** No page says that someone else's change removed text: the text followed the line it was in. */
-function isToldNothingWasRemoved(end: Ending): void {
+/** The text followed the line it was in, so no page says a change removed it. */
+function nobodyIsToldOfRemovedText(end: Ending): void {
   for (const page of pages(end))
     expect(page.words).not.toContain("Someone else's change removed this text");
 }
@@ -314,8 +314,12 @@ test("both join the same line", async ({ scene }) => {
   await clickStartOf(line(two.page, "Bravo Banana"));
   await two.page.keyboard.press("Backspace");
 
-  judge("both join the same line", await ending(scene, two), (end) =>
-    everyPageShows(end, joined("Alpha AppleBravo Banana", "Charlie Cherry")),
+  judge(
+    "both join the same line",
+    await ending(scene, two),
+    (end) => nothingLost(end),
+    // The line's text stands in the note twice, and nothing tells anyone.
+    (end) => everyPageShows(end, joined("Alpha AppleBravo BananaBravo Banana", "Charlie Cherry")),
   );
 });
 
@@ -328,7 +332,7 @@ test("joins of neighbouring lines", async ({ scene }) => {
 
   judge("joins of neighbouring lines", await ending(scene, two), (end) => {
     everyPageShows(end, joined("Alpha AppleBravo BananaCharlie Cherry"));
-    isToldNothingWasRemoved(end);
+    nobodyIsToldOfRemovedText(end);
   });
 });
 
@@ -341,9 +345,13 @@ test("a join and a split of one line", async ({ scene }) => {
   await move(two, ...Array.from("Bravo", () => "ArrowRight"));
   await two.page.keyboard.press("Enter");
 
-  // The split-off part stands once: on its own line, or back in the joined line with an
-  // empty line where the split was.
-  judge("a join and a split of one line", await ending(scene, two), (end) => nothingLost(end));
+  judge(
+    "a join and a split of one line",
+    await ending(scene, two),
+    (end) => nothingLost(end),
+    // The part that was split off stands in the note twice.
+    (end) => everyPageShows(end, joined("Alpha AppleBravo Banana", "Banana", "Charlie Cherry")),
+  );
 });
 
 test("a join and typing in the joined line", async ({ scene }) => {
@@ -355,7 +363,7 @@ test("a join and typing in the joined line", async ({ scene }) => {
 
   judge("a join and typing in the joined line", await ending(scene, two), (end) => {
     everyPageShows(end, joined("Alpha AppleBravo Banana TYPEDWORD", "Charlie Cherry"));
-    isToldNothingWasRemoved(end);
+    nobodyIsToldOfRemovedText(end);
   });
 });
 

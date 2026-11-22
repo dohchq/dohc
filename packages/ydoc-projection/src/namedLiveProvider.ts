@@ -507,8 +507,12 @@ export function createNamedLiveProvider(
                 ownText,
                 movedText,
               );
-              movedText.repair(doc, status === "live" && current(held));
-              if (removed) tellRemoved(removed);
+              const notPutBack = movedText.repair(doc, status === "live" && current(held));
+              if (removed || notPutBack.length > 0)
+                tellRemoved({
+                  text: [...(removed ? [removed.text] : []), ...notPutBack].join("\n"),
+                  clients: removed?.clients ?? new Set(ownClients),
+                });
               if (!current(held)) return;
             } else quarantine("unexpected-transfer");
           }

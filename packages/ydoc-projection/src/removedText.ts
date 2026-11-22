@@ -39,8 +39,9 @@ interface Piece {
  * when the merge deleted text. `keep` limits the report, for example to this
  * page's own text.
  *
- * With `moved`, text the change moved rather than removed is followed there, and the report
- * leaves out what the planned repairs put back. The caller then calls `moved.repair`.
+ * With `moved`, the report leaves out text of the page's own that `moved.repair` is planned
+ * to type again where its line went. The caller then calls `moved.repair`, and tells the person
+ * of what that returns too.
  */
 export function applyUpdateFindingRemovedText(
   doc: Y.Doc,
