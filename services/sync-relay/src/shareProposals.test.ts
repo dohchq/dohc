@@ -997,12 +997,16 @@ function hostForLiveEditing(storage: SyncRelayStorage, objectId: string, path: s
   ).run(WORKSPACE, objectId, lineageClaimId, path, "b".repeat(64), lineageClaimId);
   db.prepare(
     `INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-      source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes) VALUES ('test',?,?,'main',?,?,'{}','{}',?,x'0000',?,'{}',1)`,
-  ).run(activationId, WORKSPACE, objectId, lineageClaimId, lineageClaimId, GRANTER);
-  db.prepare(
-    `INSERT INTO sync_relay_service_host_enrollments(workspace_id,object_id,path,owner_user_id,replication_epoch,stream_identity,enabled,created_at_ms,updated_at_ms,accounted_bytes)
-      SELECT workspace_id,?,?,owner_user_id,replication_epoch,stream_identity,1,0,0,1 FROM sync_relay_workspaces WHERE workspace_id=?`,
-  ).run(objectId, path, WORKSPACE);
+      source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes) VALUES ('test',?,?,'main',?,?,?,'{}',?,x'0000',?,'{}',1)`,
+  ).run(
+    activationId,
+    WORKSPACE,
+    objectId,
+    lineageClaimId,
+    JSON.stringify({ replicationEpoch: LIVE_EPOCH, streamIdentity: LIVE_STREAM }),
+    lineageClaimId,
+    GRANTER,
+  );
   return {
     retireRequested() {
       db.prepare(
