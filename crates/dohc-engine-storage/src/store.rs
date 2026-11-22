@@ -1770,7 +1770,7 @@ mod pages_checked_tests {
         assert!(!marker.exists());
     }
 
-    fn store_one_migration_behind(db: &Path) -> &'static str {
+    fn store_one_migration_behind(db: &Path, passive: bool) -> &'static str {
         use crate::migration::{BASELINE_MIGRATIONS, MigrationContext, run_migrations};
         let (last, earlier) = BASELINE_MIGRATIONS.split_last().unwrap();
         let mut conn = Connection::open(db).unwrap();
@@ -1781,6 +1781,13 @@ mod pages_checked_tests {
             &crate::faults::NoFaults,
         )
         .unwrap();
+        if passive {
+            conn.execute(
+                "UPDATE engine_ownership SET store_role='passive' WHERE rowid_guard=1",
+                [],
+            )
+            .unwrap();
+        }
         last.id
     }
 
@@ -1799,40 +1806,42 @@ mod pages_checked_tests {
 
     #[test]
     fn a_store_migrates_before_its_pages_are_checked_and_is_refused_once_the_check_finds_damage() {
-        let root = ScratchDir::new_named("migrate-then-check").unwrap();
-        let db = root.join("engine.db");
-        let pending = store_one_migration_behind(&db);
-        damage_a_page(&db);
-        let marker = crate::page_check::check_first_marker(&db);
-        let (told, damage) = std::sync::mpsc::channel();
-        let mut store = EngineStore::open_serving_first(
-            &db,
-            2,
-            None,
-            None,
-            false,
-            Box::new(move || told.send(()).unwrap()),
-        )
-        .unwrap();
-        damage
-            .recv_timeout(std::time::Duration::from_secs(30))
-            .expect("the check reports the damage");
-        page_check_ended(&mut store);
-        drop(store);
-        assert_eq!(integrity_mark(&db, pending), Some(None));
-        assert!(marker.exists());
-        let never: crate::PagesDamaged = Box::new(|| panic!("no check runs after a refusal"));
-        assert!(matches!(
-            EngineStore::open_serving_first(&db, 3, None, None, false, never),
-            Err(StorageError::StateCorrupt { .. })
-        ));
+        for passive in [false, true] {
+            let root = ScratchDir::new_named("migrate-then-check").unwrap();
+            let db = root.join("engine.db");
+            let pending = store_one_migration_behind(&db, passive);
+            damage_a_page(&db);
+            let marker = crate::page_check::check_first_marker(&db);
+            let (told, damage) = std::sync::mpsc::channel();
+            let mut store = EngineStore::open_serving_first(
+                &db,
+                2,
+                None,
+                None,
+                passive,
+                Box::new(move || told.send(()).unwrap()),
+            )
+            .unwrap();
+            damage
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the check reports the damage");
+            page_check_ended(&mut store);
+            drop(store);
+            assert_eq!(integrity_mark(&db, pending), Some(None));
+            assert!(marker.exists());
+            let never: crate::PagesDamaged = Box::new(|| panic!("no check runs after a refusal"));
+            assert!(matches!(
+                EngineStore::open_serving_first(&db, 3, None, None, passive, never),
+                Err(StorageError::StateCorrupt { .. })
+            ));
+        }
     }
 
     #[test]
     fn an_open_that_checks_first_refuses_to_migrate_a_damaged_store() {
         let root = ScratchDir::new_named("check-then-migrate").unwrap();
         let db = root.join("engine.db");
-        let pending = store_one_migration_behind(&db);
+        let pending = store_one_migration_behind(&db, false);
         damage_a_page(&db);
         assert!(matches!(
             EngineStore::open(&db, 2),
@@ -1852,18 +1861,20 @@ mod pages_checked_tests {
             classify_ledger(&Connection::open(db).unwrap(), BASELINE_MIGRATIONS).unwrap()
         };
 
-        let later = root.join("later.db");
-        let pending = store_one_migration_behind(&later);
-        let mut store =
-            EngineStore::open_serving_first(&later, 2, None, None, false, never()).unwrap();
-        page_check_ended(&mut store);
-        drop(store);
-        assert_eq!(integrity_mark(&later, pending), Some(None));
-        assert_eq!(current(&later), LedgerState::Current);
-        assert!(!crate::page_check::check_first_marker(&later).exists());
+        for (name, passive) in [("later.db", false), ("later-passive.db", true)] {
+            let later = root.join(name);
+            let pending = store_one_migration_behind(&later, passive);
+            let mut store =
+                EngineStore::open_serving_first(&later, 2, None, None, passive, never()).unwrap();
+            page_check_ended(&mut store);
+            drop(store);
+            assert_eq!(integrity_mark(&later, pending), Some(None));
+            assert_eq!(current(&later), LedgerState::Current);
+            assert!(!crate::page_check::check_first_marker(&later).exists());
+        }
 
         let first = root.join("first.db");
-        let pending = store_one_migration_behind(&first);
+        let pending = store_one_migration_behind(&first, false);
         drop(EngineStore::open(&first, 2).unwrap());
         assert_eq!(integrity_mark(&first, pending), Some(Some(1)));
         assert_eq!(current(&first), LedgerState::Current);
@@ -1873,7 +1884,7 @@ mod pages_checked_tests {
     fn a_marked_store_is_checked_before_it_migrates() {
         let root = ScratchDir::new_named("marked-then-migrate").unwrap();
         let db = root.join("engine.db");
-        let pending = store_one_migration_behind(&db);
+        let pending = store_one_migration_behind(&db, false);
         damage_a_page(&db);
         std::fs::write(crate::page_check::check_first_marker(&db), b"").unwrap();
         let never: crate::PagesDamaged = Box::new(|| panic!("no check runs after a refusal"));
@@ -1882,6 +1893,21 @@ mod pages_checked_tests {
             Err(StorageError::StateCorrupt { .. })
         ));
         assert_eq!(integrity_mark(&db, pending), None);
+    }
+
+    #[test]
+    fn a_marked_sound_store_checks_its_migration_before_it_commits_and_loses_its_marker() {
+        let root = ScratchDir::new_named("marked-sound-migrate").unwrap();
+        let db = root.join("engine.db");
+        let pending = store_one_migration_behind(&db, false);
+        let marker = crate::page_check::check_first_marker(&db);
+        std::fs::write(&marker, b"").unwrap();
+        let never: crate::PagesDamaged = Box::new(|| panic!("a sound store is not damaged"));
+        let store = EngineStore::open_serving_first(&db, 2, None, None, false, never).unwrap();
+        assert!(store.page_check.is_none());
+        drop(store);
+        assert_eq!(integrity_mark(&db, pending), Some(Some(1)));
+        assert!(!marker.exists());
     }
 
     #[test]

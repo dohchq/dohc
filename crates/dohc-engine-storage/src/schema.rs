@@ -17,6 +17,8 @@
 //!    on, apply the *persistent* pragmas (`journal_mode = WAL`,
 //!    `synchronous = NORMAL`), then run the migration ledger
 //!    (`migration.rs`), then validate the required tables and `quick_check`.
+//!    An actor's open (`open_engine_db_serving_first`) leaves `quick_check`,
+//!    a pending migration's too, to the check that runs after the open.
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, NoFaults};
