@@ -136,5 +136,36 @@ describe("ImageView", () => {
     expect((screen.getByTestId("image-zoom-out") as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByTestId("image-zoom-in"));
     expect(screen.getByTestId("image-zoom-toggle").textContent).toBe("25%");
+    expect(tallImg.className).toContain("max-w-none");
+  });
+
+  it("keeps focus inside the viewer when Zoom Out or Zoom In hits its limit so 0 still resets to Fit", () => {
+    render(<ImageView url="blob:limit" path="assets/limit.png" />);
+    const img = screen.getByRole("img", { name: "limit.png" });
+    Object.defineProperty(img, "naturalWidth", { configurable: true, value: 1280 });
+    Object.defineProperty(img, "naturalHeight", { configurable: true, value: 720 });
+    img.getBoundingClientRect = () => ({
+      width: 400,
+      height: 225,
+      top: 0,
+      left: 0,
+      right: 400,
+      bottom: 225,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+    fireEvent.load(img);
+
+    const viewport = screen.getByRole("region", { name: "Image preview: limit.png" });
+    const zoomOut = screen.getByTestId("image-zoom-out") as HTMLButtonElement;
+    zoomOut.focus();
+    fireEvent.click(zoomOut);
+    expect(screen.getByTestId("image-zoom-toggle").textContent).toBe("25%");
+    expect(zoomOut.disabled).toBe(true);
+    expect(document.activeElement).toBe(viewport);
+
+    fireEvent.keyDown(document.activeElement!, { key: "0" });
+    expect(screen.getByTestId("image-zoom-toggle").textContent).toBe("Fit");
   });
 });

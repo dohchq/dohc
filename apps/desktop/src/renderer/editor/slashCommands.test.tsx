@@ -557,6 +557,36 @@ describe("filterSlashCommands tiered scoring & code suppression", () => {
     expect(stateRef.current.open).toBe(false);
     expect(editor.state.doc.textContent).toBe("/");
 
+    // Opening and escaping gutter '+' must preserve a previously dismissed typed '/' instead of reopening it.
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    press("Escape");
+    expect(stateRef.current.open).toBe(false);
+
+    // Leaf atoms (divider) track their exact Y.js block identity across peer edits and close if deleted by a peer.
+    editor.commands.setContent("<p>Lead</p><hr><p>Tail</p>");
+    const hrPos = editor.state.doc.child(0).nodeSize;
+    insertBlockAfter(editor, hrPos);
+    expect(stateRef.current).toMatchObject({ open: true, gutterTarget: { blockPos: hrPos } });
+    const leadText = (peerBody.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    leadText.insert(4, " edited");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(peerDoc));
+    const movedHrPos = editor.state.doc.child(0).nodeSize;
+    expect(stateRef.current).toMatchObject({ open: true, gutterTarget: { blockPos: movedHrPos } });
+    runSlashCommand(editor, "heading-1", stateRef.current, (next) => {
+      stateRef.current = typeof next === "function" ? next(stateRef.current) : next;
+    });
+    expect(editor.state.doc.child(0).type.name).toBe("paragraph");
+    expect(editor.state.doc.child(1).type.name).toBe("horizontalRule");
+    expect(editor.state.doc.child(2).type.name).toBe("heading");
+
+    // If a remote peer deletes the targeted divider, the gutter menu closes cleanly.
+    insertBlockAfter(editor, editor.state.doc.child(0).nodeSize);
+    expect(stateRef.current.open).toBe(true);
+    peerBody.delete(1, 1);
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(peerDoc));
+    expect(stateRef.current.open).toBe(false);
+
     editor.destroy();
     ydoc.destroy();
     peerDoc.destroy();

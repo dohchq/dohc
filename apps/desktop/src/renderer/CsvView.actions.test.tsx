@@ -241,16 +241,35 @@ describe("CSV view actions", () => {
       />,
     );
 
-    // Delete "city" column, then delete Ada's row, then undo the "city" deletion.
+    // Delete "city" column, then delete Ada's row, then undo "city" followed by undoing Ada's row.
     await user.click(screen.getByLabelText("Delete column 2"));
     const undoCity = notices.at(-1)?.onUndo;
     await user.click(screen.getByLabelText("Delete row 1"));
+    const undoAda = notices.at(-1)?.onUndo;
 
     act(() => undoCity?.());
     expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Grace");
     expect((screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value).toBe("Tokyo");
     expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Lin");
     expect((screen.getByLabelText("Row 2 column 2") as HTMLInputElement).value).toBe("Oslo");
+
+    // Undoing Ada's row after undoing "city" also restores Ada's original city ("Paris").
+    act(() => undoAda?.());
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
+    expect((screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value).toBe("Paris");
+    expect((screen.getByLabelText("Row 2 column 2") as HTMLInputElement).value).toBe("Tokyo");
+
+    // Reverse undo order (delete city, delete Ada, undo Ada first, then undo city) restores identically.
+    await user.click(screen.getByLabelText("Delete column 2"));
+    const undoCity2 = notices.at(-1)?.onUndo;
+    await user.click(screen.getByLabelText("Delete row 1"));
+    const undoAda2 = notices.at(-1)?.onUndo;
+    act(() => undoAda2?.());
+    act(() => undoCity2?.());
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
+    expect((screen.getByLabelText("Row 1 column 2") as HTMLInputElement).value).toBe("Paris");
+    expect((screen.getByLabelText("Row 2 column 2") as HTMLInputElement).value).toBe("Tokyo");
+    expect((screen.getByLabelText("Row 3 column 2") as HTMLInputElement).value).toBe("Oslo");
 
     // Switching to Raw mode and editing retires pending table Undo callbacks so they never overwrite Source edits.
     await user.click(screen.getByLabelText("Delete row 1"));

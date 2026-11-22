@@ -268,7 +268,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
 ];
 
 type GutterSlashPending = GutterSlashTarget & {
-  anchor: RelativePosition | null;
+  xmlChild: unknown;
 };
 
 type SlashPluginState = {
@@ -478,6 +478,25 @@ function materializeGutterText(
   return true;
 }
 
+function topLevelChildIndexAt(doc: EditorState["doc"], blockPos: number): number {
+  let found = -1;
+  let index = 0;
+  doc.forEach((_child, pos) => {
+    if (pos === blockPos) found = index;
+    index += 1;
+  });
+  return found;
+}
+
+function topLevelBlockPosAtIndex(doc: EditorState["doc"], childIndex: number): number | null {
+  if (childIndex < 0 || childIndex >= doc.childCount) return null;
+  let pos = 0;
+  for (let index = 0; index < childIndex; index += 1) {
+    pos += doc.child(index).nodeSize;
+  }
+  return pos;
+}
+
 export function makeSlashCommandPlugin({
   stateRef,
   setState,
@@ -517,15 +536,20 @@ export function makeSlashCommandPlugin({
           yTiptap && sync ? anchorSlash(yTiptap, sync, from) : null;
 
         if (meta?.type === "open-gutter") {
+          const childIndex = topLevelChildIndexAt(state.doc, meta.target.blockPos);
+          const xmlChild =
+            sync && childIndex >= 0 && childIndex < sync.type.length
+              ? sync.type.get(childIndex)
+              : null;
           return {
-            dismissed: null,
-            gutter: { ...meta.target, anchor: anchor(meta.target.blockPos) },
+            dismissed: prev.dismissed,
+            gutter: { ...meta.target, xmlChild },
           };
         }
 
         const dismissing = meta?.type === "dismiss";
         if (dismissing && prev.gutter) {
-          return EMPTY_SLASH_PLUGIN_STATE;
+          return { dismissed: prev.dismissed, gutter: null };
         }
 
         const change: { isChangeOrigin?: boolean } | undefined = yTiptap
@@ -536,17 +560,10 @@ export function makeSlashCommandPlugin({
         if (prev.gutter) {
           if (change?.isChangeOrigin) {
             let nextBlockPos: number | null = null;
-            if (yTiptap && sync && prev.gutter.anchor && sync.type.doc) {
-              const abs = yTiptap.relativePositionToAbsolutePosition(
-                sync.type.doc,
-                sync.type,
-                prev.gutter.anchor,
-                sync.binding.mapping,
-              );
-              if (abs !== null && abs >= 1 && abs <= state.doc.content.size) {
-                const $pos = state.doc.resolve(abs);
-                nextBlockPos = $pos.depth >= 1 ? $pos.before(1) : 0;
-              }
+            if (sync && prev.gutter.xmlChild !== null) {
+              const targetChild = prev.gutter.xmlChild;
+              const nextIndex = sync.type.toArray().findIndex((child) => child === targetChild);
+              if (nextIndex >= 0) nextBlockPos = topLevelBlockPosAtIndex(state.doc, nextIndex);
             } else {
               const mapped = tr.mapping.mapResult(prev.gutter.blockPos);
               if (!mapped.deleted) nextBlockPos = mapped.pos;
@@ -556,7 +573,7 @@ export function makeSlashCommandPlugin({
               gutter = {
                 blockPos: nextBlockPos,
                 reuseEmpty: node.type.name === "paragraph" && node.textContent.length === 0,
-                anchor: prev.gutter.anchor,
+                xmlChild: prev.gutter.xmlChild,
               };
             }
           } else if (!tr.docChanged && !tr.selectionSet) {
@@ -603,6 +620,16 @@ export function makeSlashCommandPlugin({
       };
     },
     props: {
+      handleDOMEvents: {
+        compositionstart(view) {
+          if (slashCommandKey.getState(view.state)?.gutter) dismissSlashCommand(view);
+          return false;
+        },
+        paste(view) {
+          if (slashCommandKey.getState(view.state)?.gutter) dismissSlashCommand(view);
+          return false;
+        },
+      },
       handleTextInput(view, _from, _to, text) {
         const gutter = slashCommandKey.getState(view.state)?.gutter;
         if (!gutter || text.length === 0) return false;
@@ -648,7 +675,7 @@ export function makeSlashCommandPlugin({
 
         const gutter = slashCommandKey.getState(view.state)?.gutter;
         if (gutter) {
-          if (event.key === "Backspace") {
+          if (event.key === "Backspace" || event.key === "Delete") {
             event.preventDefault();
             dismissSlashCommand(view);
             return true;

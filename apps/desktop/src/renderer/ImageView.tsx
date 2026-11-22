@@ -37,33 +37,43 @@ export function ImageView({ url, path }: { url: string; path: string }) {
   const [zoom, setZoom] = useState<Zoom>("fit");
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const prevUrlRef = useRef(url);
   const name = path.split("/").pop() ?? path;
 
-  useEffect(() => {
-    setDims(null);
-    setFitScale(null);
-    setFailed(false);
-    setZoom("fit");
-  }, [url]);
-
-  const measureFit = useCallback(() => {
-    if (!dims || dims.w <= 0 || dims.h <= 0) return;
+  const measureFit = useCallback((w: number, h: number) => {
+    if (w <= 0 || h <= 0) return;
     const rect = imgRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0 || rect.height <= 0) {
       setFitScale(null);
       return;
     }
-    const scale = Math.min(rect.width / dims.w, rect.height / dims.h, 1);
+    const scale = Math.min(rect.width / w, rect.height / h, 1);
     setFitScale(Number.isFinite(scale) && scale > 0 ? scale : null);
-  }, [dims]);
+  }, []);
+
+  useEffect(() => {
+    if (prevUrlRef.current !== url) {
+      prevUrlRef.current = url;
+      setDims(null);
+      setFitScale(null);
+      setFailed(false);
+      setZoom("fit");
+    }
+    const img = imgRef.current;
+    if (img?.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+      setDims({ w: img.naturalWidth, h: img.naturalHeight });
+      measureFit(img.naturalWidth, img.naturalHeight);
+    }
+  }, [url, measureFit]);
 
   useEffect(() => {
     if (zoom !== "fit" || !dims) return;
-    measureFit();
+    const sync = () => measureFit(dims.w, dims.h);
+    sync();
     const viewport = viewportRef.current;
     const img = imgRef.current;
     if ((!viewport && !img) || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measureFit);
+    const observer = new ResizeObserver(sync);
     if (viewport) observer.observe(viewport);
     if (img) observer.observe(img);
     return () => observer.disconnect();
@@ -74,18 +84,20 @@ export function ImageView({ url, path }: { url: string; path: string }) {
   const nextZoomOut = stepZoom(effectiveScale, -1);
 
   const zoomIn = useCallback(() => {
-    setZoom((current) => {
-      const base = current === "fit" ? (fitScale ?? 1) : current;
-      return stepZoom(base, 1) ?? current;
-    });
-  }, [fitScale]);
+    const base = zoom === "fit" ? (fitScale ?? 1) : zoom;
+    const next = stepZoom(base, 1);
+    if (next === null) return;
+    if (stepZoom(next, 1) === null) viewportRef.current?.focus({ preventScroll: true });
+    setZoom(next);
+  }, [zoom, fitScale]);
 
   const zoomOut = useCallback(() => {
-    setZoom((current) => {
-      const base = current === "fit" ? (fitScale ?? 1) : current;
-      return stepZoom(base, -1) ?? current;
-    });
-  }, [fitScale]);
+    const base = zoom === "fit" ? (fitScale ?? 1) : zoom;
+    const next = stepZoom(base, -1);
+    if (next === null) return;
+    if (stepZoom(next, -1) === null) viewportRef.current?.focus({ preventScroll: true });
+    setZoom(next);
+  }, [zoom, fitScale]);
 
   const toggleFit = useCallback(() => setZoom((current) => (current === "fit" ? 1 : "fit")), []);
 
@@ -131,6 +143,7 @@ export function ImageView({ url, path }: { url: string; path: string }) {
         role="region"
         tabIndex={0}
         aria-label={`Image preview: ${name}`}
+        style={{ containerType: "size" }}
         className="flex min-h-0 flex-1 overflow-auto p-6 focus-visible:-outline-offset-2"
         onWheel={(event) => {
           if (failed || !(event.ctrlKey || event.metaKey)) return;
@@ -146,9 +159,7 @@ export function ImageView({ url, path }: { url: string; path: string }) {
             data-testid="image-backdrop-frame"
             data-backdrop={backdrop}
             style={backdrop === "checker" ? CHECKER_STYLE : undefined}
-            className={`m-auto flex min-h-12 min-w-12 items-center justify-center rounded border border-line p-2 ${
-              zoom === "fit" ? "max-h-full max-w-full" : ""
-            } ${frameClass}`}
+            className={`m-auto flex min-h-12 min-w-12 items-center justify-center rounded border border-line p-2 ${frameClass}`}
           >
             <img
               ref={imgRef}
@@ -157,7 +168,7 @@ export function ImageView({ url, path }: { url: string; path: string }) {
               onClick={toggleFit}
               className={`block ${
                 zoom === "fit"
-                  ? "max-h-full max-w-full cursor-zoom-in object-contain"
+                  ? "h-auto w-auto max-h-[calc(100cqh-1.25rem)] max-w-[calc(100cqw-1.25rem)] cursor-zoom-in"
                   : "max-w-none cursor-zoom-out"
               }`}
               style={imgStyle}
@@ -165,12 +176,7 @@ export function ImageView({ url, path }: { url: string; path: string }) {
                 const w = e.currentTarget.naturalWidth;
                 const h = e.currentTarget.naturalHeight;
                 setDims({ w, h });
-                const rect = e.currentTarget.getBoundingClientRect();
-                const scale =
-                  w > 0 && h > 0 && rect.width > 0 && rect.height > 0
-                    ? Math.min(rect.width / w, rect.height / h, 1)
-                    : null;
-                setFitScale(scale && Number.isFinite(scale) ? scale : null);
+                measureFit(w, h);
               }}
               onError={() => setFailed(true)}
             />

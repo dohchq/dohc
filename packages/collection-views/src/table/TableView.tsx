@@ -1309,7 +1309,7 @@ export function TableView({
     if (!field) return;
     const grid = scrollRef.current;
     const width = popoverWidth(field);
-    let left = column === 0 && grid ? grid.scrollLeft + gutter : gutter + columnLeft(column);
+    let left = gutter + columnLeft(column);
     // A picker is wider than most cells. Near the right edge it moves left to stay in view.
     if (width !== null && grid) {
       const room =

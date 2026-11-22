@@ -579,9 +579,11 @@ export function CsvView({
     Array.from({ length: columnCountFor(rows) }, () => `csv-${nextIdRef.current++}`),
   );
   const tableSessionRef = useRef(1);
+  const deletedCellsRef = useRef(new Map<string, string>());
   const resetRowColIds = useCallback(
     (nextRows: string[][]) => {
       tableSessionRef.current += 1;
+      deletedCellsRef.current.clear();
       rowIdsRef.current = nextRows.map(() => allocId());
       colIdsRef.current = Array.from({ length: columnCountFor(nextRows) }, () => allocId());
     },
@@ -752,17 +754,24 @@ export function CsvView({
       const session = tableSessionRef.current;
       const colIds = colIdsRef.current;
       const removedRowId = rowIdsRef.current[rowIndex] ?? allocId();
-      const savedByColId = new Map<string, string>();
       for (let colIndex = 0; colIndex < removed.length; colIndex++) {
         const colId = colIds[colIndex];
-        if (colId) savedByColId.set(colId, removed[colIndex] ?? "");
+        if (colId)
+          deletedCellsRef.current.set(`${removedRowId}\0${colId}`, removed[colIndex] ?? "");
       }
       rowIdsRef.current = rowIdsRef.current.filter((_, index) => index !== rowIndex);
       const next = previous.filter((_, index) => index !== rowIndex);
       setRows(next);
       let undone = false;
       onNotice?.(`Deleted row ${rowIndex}.`, () => {
-        if (undone || rawRef.current || tableSessionRef.current !== session) return;
+        if (
+          undone ||
+          rawRef.current ||
+          tableSessionRef.current !== session ||
+          target.current?.workspaceId !== workspaceId ||
+          target.current?.path !== path
+        )
+          return;
         undone = true;
         const current = rowsRef.current;
         const currentColIds = colIdsRef.current;
@@ -770,7 +779,7 @@ export function CsvView({
         const width = Math.max(currentColIds.length, columnCountFor(current));
         const restored = Array.from({ length: width }, (_, colIndex) => {
           const colId = currentColIds[colIndex];
-          return colId ? (savedByColId.get(colId) ?? "") : "";
+          return colId ? (deletedCellsRef.current.get(`${removedRowId}\0${colId}`) ?? "") : "";
         });
         const updatedRows = [...current];
         updatedRows.splice(insertAt, 0, restored);
@@ -781,7 +790,7 @@ export function CsvView({
         setRows(updatedRows);
       });
     },
-    [allocId, onNotice, setRows],
+    [allocId, onNotice, path, setRows, workspaceId],
   );
 
   const deleteColumn = useCallback(
@@ -791,10 +800,13 @@ export function CsvView({
       const session = tableSessionRef.current;
       const removedColId = colIdsRef.current[cellIndex] ?? allocId();
       const savedRowOrder = [...rowIdsRef.current];
-      const savedByRowId = new Map<string, string>();
       for (let rIndex = 0; rIndex < previous.length; rIndex++) {
         const rowId = savedRowOrder[rIndex];
-        if (rowId) savedByRowId.set(rowId, previous[rIndex]?.[cellIndex] ?? "");
+        if (rowId)
+          deletedCellsRef.current.set(
+            `${rowId}\0${removedColId}`,
+            previous[rIndex]?.[cellIndex] ?? "",
+          );
       }
       colIdsRef.current = colIdsRef.current.filter((_, index) => index !== cellIndex);
       const next = previous.map((row) => row.filter((_, index) => index !== cellIndex));
@@ -809,13 +821,24 @@ export function CsvView({
       onNotice?.(
         headerName ? `Deleted column "${headerName}".` : `Deleted column ${cellIndex + 1}.`,
         () => {
-          if (undone || rawRef.current || tableSessionRef.current !== session) return;
+          if (
+            undone ||
+            rawRef.current ||
+            tableSessionRef.current !== session ||
+            target.current?.workspaceId !== workspaceId ||
+            target.current?.path !== path
+          )
+            return;
           undone = true;
           const current = rowsRef.current;
           if (current.length === 0) {
             rowIdsRef.current = [...savedRowOrder];
             colIdsRef.current = [removedColId];
-            setRows(savedRowOrder.map((rowId) => [savedByRowId.get(rowId) ?? ""]));
+            setRows(
+              savedRowOrder.map((rowId) => [
+                deletedCellsRef.current.get(`${rowId}\0${removedColId}`) ?? "",
+              ]),
+            );
             return;
           }
           const insertAt = Math.min(
@@ -831,14 +854,18 @@ export function CsvView({
             const cells = [...row];
             while (cells.length < insertAt) cells.push("");
             const rowId = currentRowIds[rIndex];
-            cells.splice(insertAt, 0, rowId ? (savedByRowId.get(rowId) ?? "") : "");
+            cells.splice(
+              insertAt,
+              0,
+              rowId ? (deletedCellsRef.current.get(`${rowId}\0${removedColId}`) ?? "") : "",
+            );
             return cells;
           });
           setRows(updated);
         },
       );
     },
-    [allocId, onNotice, setRows],
+    [allocId, onNotice, path, setRows, workspaceId],
   );
 
   const chooseMode = useCallback(
@@ -846,6 +873,7 @@ export function CsvView({
       if (mode === (raw ? "raw" : "table")) return;
       if (mode === "raw") {
         tableSessionRef.current += 1;
+        deletedCellsRef.current.clear();
         setRaw(true);
         return;
       }
