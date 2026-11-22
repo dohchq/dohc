@@ -281,6 +281,74 @@ describe("CSV view actions", () => {
     expect(rawEditor.value).toContain("Sam,Rome");
   });
 
+  it("restores all rows when deleting the last column of a one-column CSV and undoing in either order", async () => {
+    const user = userEvent.setup();
+    const notices: Array<{ message: string; onUndo?: () => void }> = [];
+    render(
+      <CsvView
+        {...csvFile("ws-1", "single.csv", "name\nAda\nGrace")}
+        onNotice={(message, onUndo) => notices.push({ message, onUndo })}
+      />,
+    );
+
+    // Delete Ada's row, then delete the only column, then undo row first and column second.
+    await user.click(screen.getByLabelText("Delete row 1"));
+    const undoAda = notices.at(-1)?.onUndo;
+    await user.click(screen.getByLabelText("Delete column 1"));
+    const undoCol = notices.at(-1)?.onUndo;
+
+    act(() => undoAda?.());
+    act(() => undoCol?.());
+    expect((screen.getByLabelText("Header column 1") as HTMLInputElement).value).toBe("name");
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
+    expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Grace");
+
+    // Repeat with column Undo first and row Undo second.
+    await user.click(screen.getByLabelText("Delete row 1"));
+    const undoAda2 = notices.at(-1)?.onUndo;
+    await user.click(screen.getByLabelText("Delete column 1"));
+    const undoCol2 = notices.at(-1)?.onUndo;
+
+    act(() => undoCol2?.());
+    act(() => undoAda2?.());
+    expect((screen.getByLabelText("Header column 1") as HTMLInputElement).value).toBe("name");
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
+    expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Grace");
+
+    // Starting a new table from the empty state retires older Undo notices.
+    await user.click(screen.getByLabelText("Delete column 1"));
+    const staleColUndo = notices.at(-1)?.onUndo;
+    await user.click(screen.getByTestId("csv-empty-add-row"));
+    act(() => staleColUndo?.());
+    expect((screen.getByLabelText("Header column 1") as HTMLInputElement).value).toBe("column");
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("");
+  });
+
+  it("preserves original row order when multiple row deletions are undone out of order", async () => {
+    const user = userEvent.setup();
+    const notices: Array<{ message: string; onUndo?: () => void }> = [];
+    render(
+      <CsvView
+        {...csvFile("ws-1", "people.csv", "name\nAda\nGrace\nLin\nJo")}
+        onNotice={(message, onUndo) => notices.push({ message, onUndo })}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Delete row 1"));
+    const undoAda = notices.at(-1)?.onUndo;
+    // After deleting Ada, rows are Grace (1), Lin (2), Jo (3).
+    await user.click(screen.getByLabelText("Delete row 2"));
+    const undoLin = notices.at(-1)?.onUndo;
+
+    // Undo Ada first, then Lin — original order Ada, Grace, Lin, Jo must hold.
+    act(() => undoAda?.());
+    act(() => undoLin?.());
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Ada");
+    expect((screen.getByLabelText("Row 2 column 1") as HTMLInputElement).value).toBe("Grace");
+    expect((screen.getByLabelText("Row 3 column 1") as HTMLInputElement).value).toBe("Lin");
+    expect((screen.getByLabelText("Row 4 column 1") as HTMLInputElement).value).toBe("Jo");
+  });
+
   it("does not append duplicate empty rows when pressing Enter on an empty last row", async () => {
     const user = userEvent.setup();
     render(<CsvView {...csvFile("ws-1", "data.csv", "name,count\nAda,1")} />);

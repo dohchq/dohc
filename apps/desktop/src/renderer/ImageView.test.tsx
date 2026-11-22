@@ -159,6 +159,7 @@ describe("ImageView", () => {
 
     const viewport = screen.getByRole("region", { name: "Image preview: limit.png" });
     const zoomOut = screen.getByTestId("image-zoom-out") as HTMLButtonElement;
+    const zoomIn = screen.getByTestId("image-zoom-in") as HTMLButtonElement;
     zoomOut.focus();
     fireEvent.click(zoomOut);
     expect(screen.getByTestId("image-zoom-toggle").textContent).toBe("25%");
@@ -167,5 +168,29 @@ describe("ImageView", () => {
 
     fireEvent.keyDown(document.activeElement!, { key: "0" });
     expect(screen.getByTestId("image-zoom-toggle").textContent).toBe("Fit");
+
+    // Step all the way to the 400% upper limit with focus on Zoom In and verify focus moves to viewport.
+    zoomIn.focus();
+    while (!zoomIn.disabled) {
+      fireEvent.click(zoomIn);
+    }
+    expect(screen.getByTestId("image-zoom-toggle").textContent).toBe("400%");
+    expect(zoomIn.disabled).toBe(true);
+    expect(document.activeElement).toBe(viewport);
+
+    fireEvent.keyDown(document.activeElement!, { key: "0" });
+    expect(screen.getByTestId("image-zoom-toggle").textContent).toBe("Fit");
+
+    // Ctrl+wheel reaching a zoom limit must not steal focus from another control.
+    const external = document.createElement("button");
+    document.body.appendChild(external);
+    try {
+      external.focus();
+      fireEvent.wheel(viewport, { ctrlKey: true, deltaY: 100 });
+      expect(screen.getByTestId("image-zoom-toggle").textContent).toBe("25%");
+      expect(document.activeElement).toBe(external);
+    } finally {
+      external.remove();
+    }
   });
 });

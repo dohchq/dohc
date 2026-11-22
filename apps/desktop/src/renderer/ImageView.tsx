@@ -37,6 +37,8 @@ export function ImageView({ url, path }: { url: string; path: string }) {
   const [zoom, setZoom] = useState<Zoom>("fit");
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const zoomOutRef = useRef<HTMLButtonElement | null>(null);
+  const zoomInRef = useRef<HTMLButtonElement | null>(null);
   const prevUrlRef = useRef(url);
   const name = path.split("/").pop() ?? path;
 
@@ -87,7 +89,9 @@ export function ImageView({ url, path }: { url: string; path: string }) {
     const base = zoom === "fit" ? (fitScale ?? 1) : zoom;
     const next = stepZoom(base, 1);
     if (next === null) return;
-    if (stepZoom(next, 1) === null) viewportRef.current?.focus({ preventScroll: true });
+    if (stepZoom(next, 1) === null && document.activeElement === zoomInRef.current) {
+      viewportRef.current?.focus({ preventScroll: true });
+    }
     setZoom(next);
   }, [zoom, fitScale]);
 
@@ -95,7 +99,9 @@ export function ImageView({ url, path }: { url: string; path: string }) {
     const base = zoom === "fit" ? (fitScale ?? 1) : zoom;
     const next = stepZoom(base, -1);
     if (next === null) return;
-    if (stepZoom(next, -1) === null) viewportRef.current?.focus({ preventScroll: true });
+    if (stepZoom(next, -1) === null && document.activeElement === zoomOutRef.current) {
+      viewportRef.current?.focus({ preventScroll: true });
+    }
     setZoom(next);
   }, [zoom, fitScale]);
 
@@ -192,6 +198,7 @@ export function ImageView({ url, path }: { url: string; path: string }) {
           <div className="flex shrink-0 items-center gap-2">
             <div className="flex items-center gap-0.5" role="group" aria-label="Image zoom">
               <IconButton
+                ref={zoomOutRef}
                 data-testid="image-zoom-out"
                 aria-label="Zoom out"
                 title="Zoom out (-)"
@@ -211,6 +218,7 @@ export function ImageView({ url, path }: { url: string; path: string }) {
                 {zoomLabel}
               </button>
               <IconButton
+                ref={zoomInRef}
                 data-testid="image-zoom-in"
                 aria-label="Zoom in"
                 title="Zoom in (+)"

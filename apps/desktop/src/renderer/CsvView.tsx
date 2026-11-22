@@ -477,6 +477,48 @@ function CsvAddRow(props: { columnCount: number; onAddRow: () => void }) {
   );
 }
 
+type CsvTableModel = {
+  allRowIds: string[];
+  allColIds: string[];
+  deletedRowIds: Set<string>;
+  deletedColIds: Set<string>;
+  cells: Map<string, string>;
+};
+
+function createCsvTableModel(rows: string[][], allocId: () => string): CsvTableModel {
+  const allRowIds = rows.map(() => allocId());
+  const allColIds = Array.from({ length: columnCountFor(rows) }, () => allocId());
+  const cells = new Map<string, string>();
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex]!;
+    const rowId = allRowIds[rowIndex]!;
+    for (let colIndex = 0; colIndex < row.length; colIndex++) {
+      const colId = allColIds[colIndex];
+      if (colId) cells.set(`${rowId}\0${colId}`, row[colIndex] ?? "");
+    }
+  }
+  return {
+    allRowIds,
+    allColIds,
+    deletedRowIds: new Set(),
+    deletedColIds: new Set(),
+    cells,
+  };
+}
+
+function visibleIds(allIds: readonly string[], deletedIds: ReadonlySet<string>): readonly string[] {
+  return deletedIds.size === 0 ? allIds : allIds.filter((id) => !deletedIds.has(id));
+}
+
+function visibleRowsFromModel(model: CsvTableModel): string[][] {
+  const visibleRowIds = visibleIds(model.allRowIds, model.deletedRowIds);
+  const visibleColIds = visibleIds(model.allColIds, model.deletedColIds);
+  if (visibleRowIds.length === 0 || visibleColIds.length === 0) return [];
+  return visibleRowIds.map((rowId) =>
+    visibleColIds.map((colId) => model.cells.get(`${rowId}\0${colId}`) ?? ""),
+  );
+}
+
 export function CsvView({
   body,
   contentHash,
@@ -574,18 +616,15 @@ export function CsvView({
   rawRef.current = raw;
   const nextIdRef = useRef(1);
   const allocId = useCallback(() => `csv-${nextIdRef.current++}`, []);
-  const rowIdsRef = useRef<string[]>(rows.map(() => `csv-${nextIdRef.current++}`));
-  const colIdsRef = useRef<string[]>(
-    Array.from({ length: columnCountFor(rows) }, () => `csv-${nextIdRef.current++}`),
+  const [initialModel] = useState(() =>
+    createCsvTableModel(rows, () => `csv-${nextIdRef.current++}`),
   );
+  const tableModelRef = useRef<CsvTableModel>(initialModel);
   const tableSessionRef = useRef(1);
-  const deletedCellsRef = useRef(new Map<string, string>());
-  const resetRowColIds = useCallback(
+  const resetTableModel = useCallback(
     (nextRows: string[][]) => {
       tableSessionRef.current += 1;
-      deletedCellsRef.current.clear();
-      rowIdsRef.current = nextRows.map(() => allocId());
-      colIdsRef.current = Array.from({ length: columnCountFor(nextRows) }, () => allocId());
+      tableModelRef.current = createCsvTableModel(nextRows, allocId);
     },
     [allocId],
   );
@@ -637,9 +676,9 @@ export function CsvView({
     if (identity.text === text && identity.delimiter === delimiter) return;
     const nextRows = delimitedTextCodec.parse(text, delimiter);
     tableDraftIdentity.current = { text, delimiter };
-    resetRowColIds(nextRows);
+    resetTableModel(nextRows);
     showRows(nextRows);
-  }, [delimiter, draft.draft, raw, resetRowColIds, showRows]);
+  }, [delimiter, draft.draft, raw, resetTableModel, showRows]);
 
   // The import reads the file in main, not this preview, so the offer needs
   // only its count, its source, and a way to open the database.
@@ -692,14 +731,18 @@ export function CsvView({
 
   const updateCell = useCallback(
     (rowIndex: number, cellIndex: number, value: string) => {
+      const model = tableModelRef.current;
       const nextRows = [...rowsRef.current];
-      while (nextRows.length <= rowIndex) {
-        nextRows.push([]);
-        rowIdsRef.current = [...rowIdsRef.current, allocId()];
+      while (nextRows.length <= rowIndex) nextRows.push([]);
+      while (model.allRowIds.length - model.deletedRowIds.size <= rowIndex) {
+        model.allRowIds.push(allocId());
       }
-      while (colIdsRef.current.length <= cellIndex) {
-        colIdsRef.current = [...colIdsRef.current, allocId()];
+      while (model.allColIds.length - model.deletedColIds.size <= cellIndex) {
+        model.allColIds.push(allocId());
       }
+      const rowId = visibleIds(model.allRowIds, model.deletedRowIds)[rowIndex]!;
+      const colId = visibleIds(model.allColIds, model.deletedColIds)[cellIndex]!;
+      model.cells.set(`${rowId}\0${colId}`, value);
       const nextRow = [...nextRows[rowIndex]!];
       // A sliced UTF-16 draft stays wide even after its last wide cell narrows.
       const narrowed =
@@ -715,53 +758,60 @@ export function CsvView({
   const addRow = useCallback(() => {
     const nextRows = rowsRef.current;
     if (nextRows.length === 0) {
-      rowIdsRef.current = [allocId(), allocId()];
-      colIdsRef.current = [allocId()];
+      resetTableModel([["column"], [""]]);
       setRows([["column"], [""]]);
       return;
     }
-    const width = Math.max(1, columnCountFor(nextRows));
-    while (colIdsRef.current.length < width) colIdsRef.current = [...colIdsRef.current, allocId()];
-    rowIdsRef.current = [...rowIdsRef.current, allocId()];
+    const model = tableModelRef.current;
+    const width = Math.max(
+      1,
+      model.allColIds.length - model.deletedColIds.size,
+      columnCountFor(nextRows),
+    );
+    while (model.allColIds.length - model.deletedColIds.size < width) {
+      model.allColIds.push(allocId());
+    }
+    model.allRowIds.push(allocId());
     setRows([...nextRows, Array.from({ length: width }, () => "")]);
-  }, [allocId, setRows]);
+  }, [allocId, resetTableModel, setRows]);
 
   const addColumn = useCallback(() => {
     const nextRows = rowsRef.current;
     if (nextRows.length === 0) {
-      rowIdsRef.current = [allocId()];
-      colIdsRef.current = [allocId()];
+      resetTableModel([["column"]]);
       setRows([["column"]]);
       return;
     }
-    const width = columnCountFor(nextRows);
-    while (colIdsRef.current.length < width) colIdsRef.current = [...colIdsRef.current, allocId()];
-    colIdsRef.current = [...colIdsRef.current, allocId()];
+    const model = tableModelRef.current;
+    const width = Math.max(
+      model.allColIds.length - model.deletedColIds.size,
+      columnCountFor(nextRows),
+    );
+    while (model.allColIds.length - model.deletedColIds.size < width) {
+      model.allColIds.push(allocId());
+    }
+    const newColId = allocId();
+    model.allColIds.push(newColId);
+    const newHeader = columnName(width);
+    const headerRowId = visibleIds(model.allRowIds, model.deletedRowIds)[0];
+    if (headerRowId) model.cells.set(`${headerRowId}\0${newColId}`, newHeader);
     const next = nextRows.map((row, index) => {
       const cells = [...row];
       while (cells.length < width) cells.push("");
-      cells.push(index === 0 ? columnName(width) : "");
+      cells.push(index === 0 ? newHeader : "");
       return cells;
     });
     setRows(next);
-  }, [allocId, columnName, setRows]);
+  }, [allocId, columnName, resetTableModel, setRows]);
 
   const deleteRow = useCallback(
     (rowIndex: number) => {
-      const previous = rowsRef.current;
-      const removed = previous[rowIndex];
-      if (!removed) return;
+      const model = tableModelRef.current;
+      const removedRowId = visibleIds(model.allRowIds, model.deletedRowIds)[rowIndex];
+      if (!removedRowId) return;
       const session = tableSessionRef.current;
-      const colIds = colIdsRef.current;
-      const removedRowId = rowIdsRef.current[rowIndex] ?? allocId();
-      for (let colIndex = 0; colIndex < removed.length; colIndex++) {
-        const colId = colIds[colIndex];
-        if (colId)
-          deletedCellsRef.current.set(`${removedRowId}\0${colId}`, removed[colIndex] ?? "");
-      }
-      rowIdsRef.current = rowIdsRef.current.filter((_, index) => index !== rowIndex);
-      const next = previous.filter((_, index) => index !== rowIndex);
-      setRows(next);
+      model.deletedRowIds.add(removedRowId);
+      setRows(visibleRowsFromModel(model));
       let undone = false;
       onNotice?.(`Deleted row ${rowIndex}.`, () => {
         if (
@@ -773,50 +823,22 @@ export function CsvView({
         )
           return;
         undone = true;
-        const current = rowsRef.current;
-        const currentColIds = colIdsRef.current;
-        const insertAt = Math.min(rowIndex, current.length);
-        const width = Math.max(currentColIds.length, columnCountFor(current));
-        const restored = Array.from({ length: width }, (_, colIndex) => {
-          const colId = currentColIds[colIndex];
-          return colId ? (deletedCellsRef.current.get(`${removedRowId}\0${colId}`) ?? "") : "";
-        });
-        const updatedRows = [...current];
-        updatedRows.splice(insertAt, 0, restored);
-        const updatedRowIds = [...rowIdsRef.current];
-        while (updatedRowIds.length < insertAt) updatedRowIds.push(allocId());
-        updatedRowIds.splice(insertAt, 0, removedRowId);
-        rowIdsRef.current = updatedRowIds;
-        setRows(updatedRows);
+        model.deletedRowIds.delete(removedRowId);
+        setRows(visibleRowsFromModel(model));
       });
     },
-    [allocId, onNotice, path, setRows, workspaceId],
+    [onNotice, path, setRows, workspaceId],
   );
 
   const deleteColumn = useCallback(
     (cellIndex: number) => {
-      const previous = rowsRef.current;
-      const headerName = previous[0]?.[cellIndex]?.trim();
+      const model = tableModelRef.current;
+      const removedColId = visibleIds(model.allColIds, model.deletedColIds)[cellIndex];
+      if (!removedColId) return;
+      const headerName = rowsRef.current[0]?.[cellIndex]?.trim();
       const session = tableSessionRef.current;
-      const removedColId = colIdsRef.current[cellIndex] ?? allocId();
-      const savedRowOrder = [...rowIdsRef.current];
-      for (let rIndex = 0; rIndex < previous.length; rIndex++) {
-        const rowId = savedRowOrder[rIndex];
-        if (rowId)
-          deletedCellsRef.current.set(
-            `${rowId}\0${removedColId}`,
-            previous[rIndex]?.[cellIndex] ?? "",
-          );
-      }
-      colIdsRef.current = colIdsRef.current.filter((_, index) => index !== cellIndex);
-      const next = previous.map((row) => row.filter((_, index) => index !== cellIndex));
-      if (next.every((row) => row.length === 0)) {
-        rowIdsRef.current = [];
-        colIdsRef.current = [];
-        setRows([]);
-      } else {
-        setRows(next);
-      }
+      model.deletedColIds.add(removedColId);
+      setRows(visibleRowsFromModel(model));
       let undone = false;
       onNotice?.(
         headerName ? `Deleted column "${headerName}".` : `Deleted column ${cellIndex + 1}.`,
@@ -830,61 +852,30 @@ export function CsvView({
           )
             return;
           undone = true;
-          const current = rowsRef.current;
-          if (current.length === 0) {
-            rowIdsRef.current = [...savedRowOrder];
-            colIdsRef.current = [removedColId];
-            setRows(
-              savedRowOrder.map((rowId) => [
-                deletedCellsRef.current.get(`${rowId}\0${removedColId}`) ?? "",
-              ]),
-            );
-            return;
-          }
-          const insertAt = Math.min(
-            cellIndex,
-            Math.max(colIdsRef.current.length, columnCountFor(current)),
-          );
-          const updatedColIds = [...colIdsRef.current];
-          while (updatedColIds.length < insertAt) updatedColIds.push(allocId());
-          updatedColIds.splice(insertAt, 0, removedColId);
-          colIdsRef.current = updatedColIds;
-          const currentRowIds = rowIdsRef.current;
-          const updated = current.map((row, rIndex) => {
-            const cells = [...row];
-            while (cells.length < insertAt) cells.push("");
-            const rowId = currentRowIds[rIndex];
-            cells.splice(
-              insertAt,
-              0,
-              rowId ? (deletedCellsRef.current.get(`${rowId}\0${removedColId}`) ?? "") : "",
-            );
-            return cells;
-          });
-          setRows(updated);
+          model.deletedColIds.delete(removedColId);
+          setRows(visibleRowsFromModel(model));
         },
       );
     },
-    [allocId, onNotice, path, setRows, workspaceId],
+    [onNotice, path, setRows, workspaceId],
   );
 
   const chooseMode = useCallback(
     (mode: CsvMode) => {
       if (mode === (raw ? "raw" : "table")) return;
       if (mode === "raw") {
-        tableSessionRef.current += 1;
-        deletedCellsRef.current.clear();
+        resetTableModel([]);
         setRaw(true);
         return;
       }
       const text = draftRef.current.getDraft();
       const nextRows = delimitedTextCodec.parse(text, delimiter);
       tableDraftIdentity.current = { text, delimiter };
-      resetRowColIds(nextRows);
+      resetTableModel(nextRows);
       showRows(nextRows);
       setRaw(false);
     },
-    [delimiter, raw, resetRowColIds, showRows],
+    [delimiter, raw, resetTableModel, showRows],
   );
 
   // The tab row's Import and the preview bound's run this one import.

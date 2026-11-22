@@ -268,7 +268,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
 ];
 
 type GutterSlashPending = GutterSlashTarget & {
-  xmlChild: unknown;
+  xmlChild: ReturnType<XmlFragment["get"]> | null;
 };
 
 type SlashPluginState = {
@@ -548,16 +548,12 @@ export function makeSlashCommandPlugin({
         }
 
         const dismissing = meta?.type === "dismiss";
-        if (dismissing && prev.gutter) {
-          return { dismissed: prev.dismissed, gutter: null };
-        }
-
         const change: { isChangeOrigin?: boolean } | undefined = yTiptap
           ? tr.getMeta(yTiptap.ySyncPluginKey)
           : undefined;
 
         let gutter: GutterSlashPending | null = null;
-        if (prev.gutter) {
+        if (prev.gutter && !dismissing) {
           if (change?.isChangeOrigin) {
             let nextBlockPos: number | null = null;
             if (sync && prev.gutter.xmlChild !== null) {
