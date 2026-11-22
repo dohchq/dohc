@@ -33,11 +33,11 @@
 .chat-author { font-weight: 600; overflow-wrap: anywhere; }
 .chat-agent-mark { align-self: center; width: 10px; height: 10px; border-radius: 3px; background: var(--viewer-accent); }
 .chat-link-mark { align-self: center; width: 12px; height: 12px; color: var(--viewer-subtle); }
-.chat-owner, .chat-meta time { color: var(--viewer-subtle); font: 11px/1.5 ui-monospace, monospace; }
-.chat-body.markdown { max-width: none; margin: 0; overflow-wrap: anywhere; font: 14px/1.55 ui-sans-serif, system-ui, sans-serif; }
+.chat-owner, .chat-meta time { color: var(--viewer-subtle); font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.chat-body.markdown { max-width: none; margin: 0; overflow-wrap: anywhere; font-size: 14px; line-height: 1.55; }
 .chat-body > * { margin: 0 0 6px; }
 .chat-body > :last-child { margin-bottom: 0; }
-.chat-body :is(h1, h2, h3, h4, h5, h6) { margin: 8px 0 4px; font: 600 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+.chat-body :is(h1, h2, h3, h4, h5, h6) { margin: 8px 0 4px; font-size: 14px; font-weight: 600; line-height: 1.5; }
 .chat-body pre { max-width: 100%; padding: 8px 10px; }
 .chat-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .chat-body :is(th, td) { border: 1px solid var(--viewer-line); padding: 4px 8px; }
@@ -64,7 +64,8 @@
   padding: 9px 10px;
   background: var(--viewer-field);
   color: var(--viewer-ink);
-  font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
   resize: none;
 }
 .chat-composer .handoff-button { min-height: 40px; padding-inline: 16px; }

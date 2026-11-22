@@ -1,6 +1,7 @@
 .named-recipient {
   color: var(--viewer-ink);
-  font: 13px/1.5 ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .named-recipient > header { gap: 16px; }
@@ -21,7 +22,8 @@
   border-radius: 6px;
   padding: 9px 8px;
   color: var(--viewer-muted);
-  font: 13px/1.5 ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.5;
   text-align: left;
   overflow-wrap: anywhere;
   white-space: normal;
@@ -33,7 +35,7 @@
 .named-recipient :is(button, input, a):focus-visible { outline: 2px solid var(--viewer-accent); outline-offset: 3px; }
 .named-recipient .named-document { padding: 32px clamp(24px, 5vw, 72px) 48px; }
 .named-document > h1, .named-document-status, .named-body-editor, .named-document .editor-toolbar { width: 100%; max-width: 820px; margin-inline: auto; }
-.named-document > h1 { font: 500 16px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
+.named-document > h1 { font-size: 16px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
 .named-document-status { min-height: 20px; margin-block: 8px 24px; color: var(--viewer-muted); font-size: 12px; }
 .named-body-editor { border-top: 1px solid var(--viewer-line); }
 .named-recipient .named-body-editor .ProseMirror {
@@ -42,7 +44,8 @@
   padding: 24px 4px;
   color: var(--viewer-ink);
   background: var(--viewer-paper);
-  font: 17px/1.7 Georgia, serif;
+  font-size: 16px;
+  line-height: 1.65;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   outline: 2px solid transparent;
