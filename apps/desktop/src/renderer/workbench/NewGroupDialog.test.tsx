@@ -12,6 +12,10 @@ describe("NewGroupDialog", () => {
   it("starts in Name with Chat picked and Create off until there's a name", () => {
     render(<NewGroupDialog onCreate={vi.fn()} onClose={vi.fn()} />);
     expect(document.activeElement).toBe(nameField());
+    // Optional follows the label; the field holds no placeholder.
+    const purpose = screen.getByLabelText("What it's for Optional");
+    expect(purpose).toBe(screen.getByTestId("chats-new-channel-purpose"));
+    expect(purpose.hasAttribute("placeholder")).toBe(false);
     expect(screen.getByRole("radio", { name: "Chat" }).getAttribute("aria-checked")).toBe("true");
     expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(
       true,

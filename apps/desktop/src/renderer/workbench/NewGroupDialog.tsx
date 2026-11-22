@@ -159,14 +159,13 @@ export function NewGroupDialog(props: {
           </div>
           <div className="flex flex-col gap-2">
             <label htmlFor={`${id}-purpose`} className="dohc-section-label">
-              What it&apos;s for
+              What it&apos;s for <span className="ml-1 font-normal">Optional</span>
             </label>
             <input
               id={`${id}-purpose`}
               data-testid="chats-new-channel-purpose"
               value={purpose}
               maxLength={200}
-              placeholder="Optional"
               disabled={busy}
               onChange={(event) => setPurpose(event.target.value)}
               className={FIELD}
