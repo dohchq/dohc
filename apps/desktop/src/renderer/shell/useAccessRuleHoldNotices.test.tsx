@@ -181,7 +181,8 @@ describe("useAccessRuleHoldNotices", () => {
   // not read, so there is no change to allow; Restore rule says why it
   // failed. The row leads with what the owner does, in the engine's words.
   it("says why the rule on disk cannot be read, what to do first, and offers no change to allow", async () => {
-    const until = "Until you choose, dohc doesn't record or share changes in team.";
+    // Restore rule is the one step, so the row names no choice between two.
+    const until = "Until you decide on this rule, dohc doesn't record or share changes in team.";
     // A locked rule names its file as spelled on disk, and its row reveals
     // the folder rather than opening a file dohc can't read.
     for (const [unreadable, rulePath, lead, target] of [
@@ -664,7 +665,8 @@ describe("useAccessRuleHoldNotices", () => {
         );
     await waitFor(() =>
       expect(failed()).toMatchObject({
-        message: "Another program has this file open. Close it there, then try again.",
+        // Beside Try again, the words end at what to do first.
+        message: "Another program has this file open. Close it there.",
         retry: expect.any(Function),
       }),
     );
