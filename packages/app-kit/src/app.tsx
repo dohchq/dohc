@@ -564,6 +564,8 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   const [error, setError] = useState<AppBackendError | null>(null);
   const [retained, setRetained] = useState<readonly RetainedSubmission[]>([]);
   const nextAttemptId = useRef(1);
+  const discardFloor = useRef(0);
+  const inFlightRetries = useRef(new Map<number, Promise<InvokeReply<TResult>>>());
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -599,7 +601,7 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
         const backendError = caught instanceof AppBackendError ? caught : new AppBackendError(503);
         if (mounted.current) {
           setError(backendError);
-          if (backendError.uncertain) {
+          if (backendError.uncertain && submission.id >= discardFloor.current) {
             setRetained((current) =>
               current.some((item) => item.id === submission.id)
                 ? current
@@ -647,10 +649,20 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   const retry = useCallback(async () => {
     const next = retained[0];
     if (!next) return null;
-    return execute(next);
+    const active = inFlightRetries.current.get(next.id);
+    if (active) return active;
+    const promise = execute(next).finally(() => {
+      if (inFlightRetries.current.get(next.id) === promise) {
+        inFlightRetries.current.delete(next.id);
+      }
+    });
+    inFlightRetries.current.set(next.id, promise);
+    return promise;
   }, [execute, retained]);
 
   const discardPending = useCallback(() => {
+    discardFloor.current = nextAttemptId.current;
+    inFlightRetries.current.clear();
     setRetained([]);
     setError(null);
   }, []);

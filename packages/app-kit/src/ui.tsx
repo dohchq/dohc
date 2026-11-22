@@ -446,7 +446,8 @@ const FOCUSABLE_SELECTOR =
 
 function isVisibleFocusable(element: HTMLElement): boolean {
   if (element.tabIndex < 0) return false;
-  if (element.closest('[hidden],[inert],[aria-hidden="true"]')) return false;
+  if (element.matches(":disabled")) return false;
+  if (element.closest("[hidden],[inert]")) return false;
   if (getComputedStyle(element).visibility === "hidden") return false;
   for (let current: HTMLElement | null = element; current; current = current.parentElement) {
     if (

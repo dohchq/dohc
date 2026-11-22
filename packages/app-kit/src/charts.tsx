@@ -488,7 +488,10 @@ export function BarChart({
           setKeyboardFocused(false);
           setActiveIndex(null);
         }}
-        onKeyDown={(event) => stepIndex(event, labels.length, selected, setActiveIndex)}
+        onKeyDown={(event) => {
+          setKeyboardFocused(true);
+          stepIndex(event, labels.length, selected, setActiveIndex);
+        }}
       >
         <span className="kit-sr-only" aria-live="polite">
           {readout}
@@ -519,7 +522,13 @@ export function BarChart({
             const labelAnchor = maxBarRight + 6 > width - 48 ? "end" : "start";
 
             return (
-              <g key={`${label}-${index}`} onMouseEnter={() => setActiveIndex(index)}>
+              <g
+                key={`${label}-${index}`}
+                onMouseEnter={() => {
+                  setKeyboardFocused(false);
+                  setActiveIndex(index);
+                }}
+              >
                 <text
                   x={pad.left - 8}
                   y={rowTop + rowHeight / 2 + 4}
@@ -648,7 +657,10 @@ export function BarChart({
         setKeyboardFocused(false);
         setActiveIndex(null);
       }}
-      onKeyDown={(event) => stepIndex(event, labels.length, selected, setActiveIndex)}
+      onKeyDown={(event) => {
+        setKeyboardFocused(true);
+        stepIndex(event, labels.length, selected, setActiveIndex);
+      }}
     >
       <span className="kit-sr-only" aria-live="polite">
         {readout}
@@ -689,7 +701,13 @@ export function BarChart({
           let negCursor = 0;
 
           return (
-            <g key={`${label}-${index}`} onMouseEnter={() => setActiveIndex(index)}>
+            <g
+              key={`${label}-${index}`}
+              onMouseEnter={() => {
+                setKeyboardFocused(false);
+                setActiveIndex(index);
+              }}
+            >
               {series.map((entry, seriesIndex) => {
                 const value = cleanValues[seriesIndex]![index]!;
                 const barW = stacked
@@ -848,7 +866,10 @@ export function DonutChart({
         setKeyboardFocused(false);
         setActiveIndex(null);
       }}
-      onKeyDown={(event) => stepIndex(event, items.length, selected, setActiveIndex)}
+      onKeyDown={(event) => {
+        setKeyboardFocused(true);
+        stepIndex(event, items.length, selected, setActiveIndex);
+      }}
     >
       <span className="kit-sr-only" aria-live="polite">
         {readout}
@@ -886,7 +907,10 @@ export function DonutChart({
               strokeDasharray={`${Math.max(0, length - 1.5)} ${circumference}`}
               strokeDashoffset={offset}
               transform={`rotate(-90 ${size / 2} ${size / 2})`}
-              onMouseEnter={() => setActiveIndex(index)}
+              onMouseEnter={() => {
+                setKeyboardFocused(false);
+                setActiveIndex(index);
+              }}
             />
           );
         })}
@@ -915,7 +939,10 @@ export function DonutChart({
               className={
                 selected === index ? "kit-donut-row kit-donut-row-active" : "kit-donut-row"
               }
-              onMouseEnter={() => setActiveIndex(index)}
+              onMouseEnter={() => {
+                setKeyboardFocused(false);
+                setActiveIndex(index);
+              }}
               onMouseLeave={() => setActiveIndex(null)}
             >
               <span className="kit-chart-legend-item">

@@ -350,7 +350,8 @@ describe("dohc/app", () => {
       </AppProvider>,
     );
 
-    // First retry replays B (first retained uncertain write), keeping A retained!
+    // Double-clicking Retry for the same retained write coalesces to a single RPC.
+    fireEvent.click(retryButton);
     fireEvent.click(retryButton);
     expect(fake.sent).toHaveLength(4);
     expect(fake.sent[3]!.operation).toBe("opA");
@@ -402,6 +403,9 @@ describe("dohc/ui and dohc/charts", () => {
               />
             </Field>
             <Button variant="primary">Save</Button>
+            <fieldset disabled>
+              <button type="button">DisabledFieldsetButton</button>
+            </fieldset>
             <div style={{ display: "none" }}>
               <button type="button">HiddenAction</button>
             </div>
@@ -568,11 +572,20 @@ describe("dohc/ui and dohc/charts", () => {
     const barGroup = screen.getByRole("group", { name: "Signed totals" });
     fireEvent.focus(barGroup);
     fireEvent.keyDown(barGroup, { key: "ArrowRight" });
-    expect(barGroup.textContent).toContain("Refund: Value -80");
+    expect(barGroup.querySelector('[aria-live="polite"]')?.textContent).toContain(
+      "Refund: Value -80",
+    );
+    // Hovering a focused bar chart clears live-region announcements.
+    fireEvent.mouseEnter(barGroup.querySelector("svg g rect")!.parentElement!);
+    expect(barGroup.querySelector('[aria-live="polite"]')?.textContent).toBe("");
 
     const donutGroup = screen.getByRole("group", { name: "Monthly breakdown" });
     fireEvent.focus(donutGroup);
-    expect(donutGroup.textContent).toContain("Housing: 1,800 (75%)");
+    expect(donutGroup.querySelector('[aria-live="polite"]')?.textContent).toContain(
+      "Housing: 1,800 (75%)",
+    );
+    fireEvent.mouseEnter(donutGroup.querySelector(".kit-donut-row")!);
+    expect(donutGroup.querySelector('[aria-live="polite"]')?.textContent).toBe("");
   });
 
   it("survives shrinking chart data while focused, preserves sparkline gaps, and attaches ResizeObserver after empty mount", () => {
