@@ -274,6 +274,9 @@ export function holderLinkAuthority(
   return createLinkAuthorityResolver({
     storage,
     personalAgents,
+    refreshAccountEmail: () => {
+      throw new Error("A link route never refreshes a personal agent's person.");
+    },
     linkKey,
     publicEditRelease: { version: 1 },
     relayExchangeKeyConfigured: true,

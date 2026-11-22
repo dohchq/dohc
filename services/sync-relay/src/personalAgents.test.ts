@@ -2521,6 +2521,34 @@ describe("a personal agent in a workspace its person joined", () => {
     await ok(await postIn({ filePath: "plans/a.md" }));
   });
 
+  // The person's own reads apply a new verified email within a minute; the
+  // agent's must too, or a rule that named the old address keeps reaching it.
+  it("follows its person's current verified email within a minute, as the person's reads do", async () => {
+    let email = "ada@dohc.test";
+    const f = await fixture({
+      lookupVerifiedUserEmail: async (userId: string) =>
+        userId === OWNER ? email : `${userId}@dohc.test`,
+    });
+    joinCommunity(f);
+    await communityWrite(f, "named/access.yaml", "people:\n  ada@dohc.test: view\n");
+    await communityWrite(f, "named/a.md", "for ada");
+    // The person's own read stored the address the rule names.
+    f.storage.refreshAccountEmail(OWNER, { verifiedEmail: email }, f.now.value);
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    const paths = async () =>
+      (
+        (await ok(await tool(f, agent, "files", { workspaceId: COMMUNITY }))).files as Array<{
+          path: string;
+        }>
+      ).map((file) => file.path);
+
+    expect(await paths()).toEqual(["named/a.md"]);
+    email = "another@dohc.test";
+    expect(await paths()).toEqual(["named/a.md"]);
+    f.now.value += 60_000;
+    expect(await paths()).toEqual([]);
+  });
+
   it("downloads a file whose bytes many hidden files that sort before it also hold", async () => {
     const f = await fixture();
     joinCommunity(f);
