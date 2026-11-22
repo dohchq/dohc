@@ -611,14 +611,17 @@ export function LinkedChatsPanel(props: {
       : undefined;
   // A chat whose opening comment was deleted is named for its file, as a
   // Group's post is named for its Group.
+  // A file's chat is made with its first comment, so in the list "New chat"
+  // means that comment was deleted.
+  const fileCommentTitle = filePath ? `Comment on ${basenameOf(filePath)}` : undefined;
   const opening = messages[0];
   const shownTitle = listedTitle ?? activeThread?.title;
   const heading =
     shownTitle === "New chat" &&
-    filePath &&
+    fileCommentTitle !== undefined &&
     opening?.threadId === activeThreadId &&
     opening.deletedAtMs !== undefined
-      ? `Comment on ${basenameOf(filePath)}`
+      ? fileCommentTitle
       : shownTitle;
   const reactionControls = useMemo(
     () => ({
@@ -817,7 +820,13 @@ export function LinkedChatsPanel(props: {
                 <ul className="m-0 list-none p-0">
                   {threads.threads.map((thread) => (
                     <li key={thread.id}>
-                      <AboutChatRow thread={thread} onOpen={() => void openThread(thread)} />
+                      <AboutChatRow
+                        thread={thread}
+                        {...(thread.title === "New chat" && fileCommentTitle !== undefined
+                          ? { title: fileCommentTitle }
+                          : {})}
+                        onOpen={() => void openThread(thread)}
+                      />
                     </li>
                   ))}
                 </ul>

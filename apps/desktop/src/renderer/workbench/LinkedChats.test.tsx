@@ -471,7 +471,9 @@ describe("LinkedChatsPanel live thread", () => {
       await listPanel();
       workspaceChanged();
       await waitFor(() => expect(screen.queryByText("Plant beans in May?")).toBeNull());
-      fireEvent.click(screen.getByText("New chat"));
+      // The row is named for its file, as the chat's heading is.
+      expect(screen.queryByText("New chat")).toBeNull();
+      fireEvent.click(screen.getByText("Comment on plan.md"));
       await expectFileCommentOpen();
     });
 
@@ -495,7 +497,7 @@ describe("LinkedChatsPanel live thread", () => {
       workspaceChanged();
       // The first read answers with the list from before the delete.
       await act(async () => first.resolve({ fileObjectId: "object-1", threads: [untitled] }));
-      await screen.findByText("New chat");
+      await screen.findByText("Comment on plan.md");
       expect(screen.queryByText("Plant beans in May?")).toBeNull();
     });
   });
