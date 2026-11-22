@@ -9,7 +9,7 @@ import WorkspaceApp from "./WorkspaceApp";
 import { memberDocument, memberPageReady, openMemberPage } from "./memberLive";
 import "./MemberLivePage";
 import { jsonResponse, setControlValue, settle } from "./testing";
-import { writeDraft } from "./drafts";
+import { readDraft, writeDraft } from "./drafts";
 import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 
 // A workspace member's page in a browser: the workspace's files, a page, and
@@ -169,6 +169,12 @@ function server(
     catchUpFails?: boolean;
     // The workspace holds more files than a browser lists.
     tooLarge?: boolean;
+    // The relay refuses the file list, as it does past its scan cap, while the grant still opens.
+    currentRefused?: boolean;
+    // The file list fails to arrive, as on a lost connection.
+    currentUnreachable?: boolean;
+    // The grant answers this many more reads, then loses its connection.
+    metaAnswers?: number;
     // The account's session cannot be checked.
     sessionFails?: boolean;
   } = {},
@@ -254,9 +260,17 @@ function server(
         return hold("current", url, signal);
       if (url.pathname === "/api/view/current" && options.tooLarge)
         return jsonResponse(linkRefusalBody("link_too_many_files"), 413);
+      if (url.pathname === "/api/view/current" && options.currentRefused)
+        return jsonResponse({ ok: false, error: "not found" }, 404);
+      if (url.pathname === "/api/view/current" && options.currentUnreachable)
+        throw new TypeError("Failed to fetch");
       if (url.pathname === "/api/view/current")
         return jsonResponse({ ...meta(), files: files(), nextCursor: 7, epochLogFloor: 0 });
-      if (url.pathname === "/api/view/meta") return jsonResponse(meta());
+      if (url.pathname === "/api/view/meta") {
+        if (options.metaAnswers !== undefined && options.metaAnswers-- <= 0)
+          throw new TypeError("Failed to fetch");
+        return jsonResponse(meta());
+      }
       if (url.pathname === "/api/view/log")
         return url.searchParams.has("hold")
           ? hold("log", url, signal)
@@ -774,6 +788,36 @@ it("shows a reply count at View only where a post has replies, and still opens t
   await click("1 reply");
   await settle(() => listed().includes("Agreed"));
   expect(groupPanel().querySelector('textarea[name="body"]')).toBeNull();
+});
+
+it("reopens a post's thread at View while it holds an unsent first reply, so the person can copy it", async () => {
+  const options: Parameters<typeof server>[0] = {
+    level: "comment",
+    groups: [{ wire: "wire-plans", name: "plans", type: "posts" }],
+    history: { "wire-plans": [chat(6, "Train or car?", "ana", { threadId: "t-ride" })] },
+  };
+  server(options);
+  await render();
+  await settle(() => listed().includes("Train or car?"));
+  await click("Reply");
+  setControlValue(composer(), "Car, I think");
+  // The member is lowered to View, and the page opens again, as Try again opens it after a failed read.
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  held = [];
+  options.level = "view";
+  await render();
+  await settle(() => listed().includes("Train or car?"));
+  await click("Unsent reply");
+  await settle(
+    () =>
+      groupPanel().querySelector<HTMLTextAreaElement>('textarea[aria-label="Your unsent message"]')
+        ?.value === "Car, I think",
+  );
+  expect(groupPanel().querySelector('textarea[name="body"]')).toBeNull();
+  await click("Discard");
+  await click("Back to posts");
+  expect(button("Unsent reply")).toBeUndefined();
 });
 
 // History arrives a page at a time, newest first, so a post's replies can arrive a page before the message that starts it.
@@ -1440,7 +1484,7 @@ it("keeps each account's drafts and unsent edits from another account signed in 
   expect(composer().value).toBe("Half a thought");
 });
 
-it("shows no account's kept edits on a fresh load before sign-in, then only the signed-in account's, still after its session ends", async () => {
+it("shows kept edits only while their account is signed in: none before sign-in or after sign-out, and only that account's", async () => {
   writeDraft(
     "unsent-edits",
     JSON.stringify([
@@ -1466,14 +1510,12 @@ it("shows no account's kept edits on a fresh load before sign-in, then only the 
       (node) => node.textContent,
     ),
   ).toEqual(["Unsent edits to to-pack.md"]);
-  // Signed out on the same page, the person still sees their own kept text, and only theirs.
+  // Signed out, the sign-in form may be filled by someone else, so it shows no kept text. The tab still keeps it.
   await click("Sign out");
   await settle(() => Boolean(container.querySelector('input[name="email"]')));
-  expect(
-    [...container.querySelectorAll('[aria-label="Unsent edits"] summary')].map(
-      (node) => node.textContent,
-    ),
-  ).toEqual(["Unsent edits to to-pack.md"]);
+  expect(recovery()).toBeNull();
+  expect(container.innerHTML).not.toContain("Socks.");
+  expect(JSON.parse(readDraft("unsent-edits"))).toHaveLength(2);
 });
 
 it("stops editing when the person loses Edit, and keeps the unsent text to copy, download or discard with Undo", async () => {
@@ -1975,6 +2017,10 @@ it("keeps an Edit workspace open when the read that catches its files up fails w
 });
 
 it("says another account signed in, not that the membership ended, when another tab switches accounts", async () => {
+  writeDraft(
+    "unsent-edits",
+    JSON.stringify([{ id: 1, accountId: "sam", path: "trip/plan.md", text: "Bring the tickets." }]),
+  );
   const options: { level: Level; memberOf: string; user?: string } = {
     level: "comment",
     memberOf: "sam",
@@ -1982,6 +2028,7 @@ it("says another account signed in, not that the membership ended, when another 
   server(options);
   await render();
   await opened();
+  expect(recovery()!.querySelector("textarea")?.value).toBe("Bring the tickets.");
   // Another tab signed this browser in as Lee. Sam's grant now refuses every read.
   options.user = "lee";
   await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
@@ -1991,8 +2038,23 @@ it("says another account signed in, not that the membership ended, when another 
   );
   expect(text()).not.toContain("membership");
   expect(text()).not.toContain("Leave at nine.");
+  // Lee sees none of Sam's kept edits, here or on the sign-in form.
+  expect(recovery()).toBeNull();
+  expect(container.innerHTML).not.toContain("Bring the tickets.");
   await click("Switch account");
   await settle(() => text().includes("Sign in to open this workspace"));
+  expect(recovery()).toBeNull();
+  expect(container.innerHTML).not.toContain("Bring the tickets.");
+  // Sam's edits are still kept, and come back once Sam signs in again.
+  options.user = "sam";
+  held = [];
+  await act(async () => {
+    setControlValue(container.querySelector('input[name="email"]')!, "sam@dohc.test");
+    setControlValue(container.querySelector('input[name="password"]')!, "secret");
+  });
+  await click("Sign in");
+  await opened();
+  expect(recovery()!.querySelector("textarea")?.value).toBe("Bring the tickets.");
 });
 
 it("offers Try again, not an ended membership, when it cannot check the account after a refusal", async () => {
@@ -2047,6 +2109,29 @@ it("says the workspace grew too large for a browser, not that the membership end
   expect(text()).not.toContain("membership");
 });
 
+it("stops offering the old level's controls when the level changes and the files cannot read again", async () => {
+  const options: { level: Level; currentRefused?: boolean } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await click("Comments");
+  await settle(() => commentBox() !== null);
+  // The owner lowered the members to View, and the relay refuses the fresh file list while the grant still opens.
+  options.level = "view";
+  options.currentRefused = true;
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(() => text().includes("dohc could not open this workspace."));
+  expect(container.querySelector('textarea[name="body"]')).toBeNull();
+  expect(text()).not.toContain("Can comment");
+  expect(text()).not.toContain("membership");
+  // Try again opens the workspace at its new level once the files read.
+  options.currentRefused = false;
+  await click("Try again");
+  await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+});
+
 it("opens a replaced file's own Comments, not its predecessor's", async () => {
   const options: { level: Level; files?: typeof FILES } = { level: "comment" };
   server(options);
@@ -2054,7 +2139,11 @@ it("opens a replaced file's own Comments, not its predecessor's", async () => {
   await opened();
   await showComments();
   expect(commentsPanel().textContent).toContain("Nine is early");
+  const box = () => commentsPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!;
+  await settle(() => commentBox() !== null);
+  setControlValue(box(), "Meant for the old plan");
   // The owner put a different file at the same path. The old file's follow ends.
+  const before = options.files;
   options.files = FILES.map((file) =>
     file.path === "trip/plan.md"
       ? { ...file, objectId: `share-object:v1:${"4".repeat(64)}`, blobSha256: "c".repeat(64) }
@@ -2069,6 +2158,106 @@ it("opens a replaced file's own Comments, not its predecessor's", async () => {
   );
   expect(commentsPanel().textContent).not.toContain("Nine is early");
   expect(text()).not.toContain("membership");
+  // The draft typed on the old file stays with it, so Send cannot post it to the new one.
+  expect(box().value).toBe("");
+  // The old file coming back brings its draft back.
+  options.files = before;
+  await act(async () => following("comments")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => commentsPanel().textContent?.includes("Nine is early") === true);
+  await settle(() => box().value === "Meant for the old plan");
+});
+
+it.each(["currentRefused", "currentUnreachable"] as const)(
+  "stops offering the old level's controls when a level change refuses the held read and the files then fail (%s)",
+  async (failure) => {
+    const options: {
+      level: Level;
+      currentRefused?: boolean;
+      currentUnreachable?: boolean;
+    } = { level: "comment" };
+    server(options);
+    await render();
+    await opened();
+    await click("Comments");
+    await settle(() => commentBox() !== null);
+    // The owner lowered the members to View. The relay refuses the read it held, and the fresh file list fails.
+    options.level = "view";
+    options[failure] = true;
+    await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+    await settle(() => text().includes("dohc could not open this workspace."));
+    expect(container.querySelector('textarea[name="body"]')).toBeNull();
+    expect(text()).not.toContain("Can comment");
+    options[failure] = false;
+    await click("Try again");
+    await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+  },
+);
+
+it("goes by the grant's first answer when a later read of it fails after a level change", async () => {
+  const options: { level: Level; currentRefused?: boolean; metaAnswers?: number } = {
+    level: "comment",
+  };
+  server(options);
+  await render();
+  await opened();
+  await click("Comments");
+  await settle(() => commentBox() !== null);
+  // The grant answers once, at View, and its next read fails.
+  options.level = "view";
+  options.currentRefused = true;
+  options.metaAnswers = 1;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => text().includes("dohc could not open this workspace."));
+  expect(container.querySelector('textarea[name="body"]')).toBeNull();
+  options.currentRefused = false;
+  options.metaAnswers = undefined;
+  await click("Try again");
+  await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+});
+
+it("asks the grant when the file poll fails, and opens the new level it reports", async () => {
+  const options: { level: Level } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await click("Comments");
+  await settle(() => commentBox() !== null);
+  // The owner lowered the members to View, and the poll that would have said so failed.
+  options.level = "view";
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "unavailable" }, 503));
+  await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+  expect(container.querySelector('textarea[name="body"]')).toBeNull();
+});
+
+it("stops editing when the files read again at a lower level but their catch-up fails", async () => {
+  const options: { level: Level; catchUpFails?: boolean } = { level: "edit" };
+  await editing(options);
+  options.level = "view";
+  options.catchUpFails = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => container.querySelector('[role="textbox"]') === null && recovery() !== null);
+  expect(text()).not.toContain("membership");
+});
+
+it("keeps each file's comment draft apart when the relay lists files without their identity", async () => {
+  // A development relay without a link key lists files with no object identity.
+  server({
+    level: "comment",
+    files: FILES.map(({ objectId: _, ...file }) => file) as typeof FILES,
+  });
+  await render();
+  await settle(() => text().includes("Leave at nine."));
+  await click("Comments");
+  const box = () => commentsPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+  await settle(() => box() !== null);
+  setControlValue(box()!, "About the plan");
+  await act(async () =>
+    [...container.querySelectorAll<HTMLElement>(".file")]
+      .find((node) => node.textContent === "to-pack.md")!
+      .click(),
+  );
+  await settle(() => text().includes("Fuel and food.") && box() !== null);
+  expect(box()!.value).toBe("");
 });
 
 it("follows a file's Comments again once the files read again still list it", async () => {
