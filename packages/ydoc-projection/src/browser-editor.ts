@@ -34,6 +34,8 @@ import {
 import { findWrapping } from "@tiptap/pm/transform";
 import { EditorView } from "@tiptap/pm/view";
 import {
+  defaultDeleteFilter,
+  defaultProtectedNodes,
   redo,
   undo,
   ySyncPlugin,
@@ -41,7 +43,7 @@ import {
   yUndoPlugin,
   yUndoPluginKey,
 } from "y-prosemirror";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 import { getDohcProseMirrorSchema } from "./import-export.js";
 
 const BLOB_IMAGE = /^\/api\/view\/blob\/[a-f0-9]{64}(?:\?session=[A-Za-z0-9_-]{12})?$/u;
@@ -514,7 +516,14 @@ export function mountLiveBodyEditor(
       schema,
       plugins: [
         ySyncPlugin(input.body),
-        yUndoPlugin(),
+        yUndoPlugin({
+          undoManager: new Y.UndoManager(input.body, {
+            trackedOrigins: new Set([ySyncPluginKey]),
+            deleteFilter: (item) => defaultDeleteFilter(item, defaultProtectedNodes),
+            captureTransaction: (transaction) => transaction.meta.get("addToHistory") !== false,
+            ignoreRemoteMapChanges: true,
+          }),
+        }),
         buildMarkdownInputRules(schema, input.canEdit),
         keymap({
           "Mod-z": (state) => {
