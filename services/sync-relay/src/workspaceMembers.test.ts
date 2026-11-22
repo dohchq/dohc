@@ -854,6 +854,59 @@ describe("who may change members", () => {
     expect((await h(request("stranger", `/sync/${WORKSPACE}/members`))).status).toBe(404);
   });
 
+  it("answers an admin's Members read with the role they hold when it ends, not when it began", async () => {
+    // The admin's read pauses at its first email lookup while the owner acts.
+    let pause: (() => Promise<void>) | null = null;
+    const { h } = await seed({
+      overrides: {
+        lookupUserEmail: async (userId: string) => {
+          const wait = pause;
+          pause = null;
+          await wait?.();
+          return `${userId}@dohc.test`;
+        },
+      },
+    });
+    const ana = await invited(h, "ana");
+    await invited(h, "ben");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    expect(await inviteLink(h, "ana", "turn-on")).not.toBeNull();
+
+    async function readWhile(change: () => Promise<Response>): Promise<Response> {
+      let reached!: () => void;
+      const paused = new Promise<void>((resolve) => (reached = resolve));
+      let resume!: () => void;
+      pause = () => {
+        reached();
+        return new Promise<void>((resolve) => (resume = resolve));
+      };
+      const read = h(request("ana", `/sync/${WORKSPACE}/members`));
+      await paused;
+      expect((await change()).status).toBe(200);
+      resume();
+      return read;
+    }
+
+    const demoted = await readWhile(() =>
+      post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "member" }),
+    );
+    expect(demoted.status).toBe(200);
+    const view = (await demoted.json()) as WorkspaceMembersView;
+    expect(view.viewer.role).toBe("member");
+    expect(view.inviteLink).toBeNull();
+    expect(view.people.every((person) => person.email === null)).toBe(true);
+
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    const removed = await readWhile(() =>
+      post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/remove`),
+    );
+    expect(removed.status).toBe(404);
+  });
+
   it("turns an email invite into a member when that address signs up", async () => {
     const { h, storage } = await seed();
     expect((await invite(h, OWNER, "New@Elsewhere.example")).status).toBe(200);
