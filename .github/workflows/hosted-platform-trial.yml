@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: Commit to verify (default main as of 19:05 UTC today)
+        description: Commit to verify (default main as of 19:05 UTC on the run's day). The js gate needs a commit with DOHC_VERIFY_POSTGRES_URL
         type: string
         default: ""
       platform:
@@ -31,6 +31,8 @@ permissions:
 jobs:
   verify:
     name: ${{ matrix.runner }} ${{ matrix.gate }}
+    # A run on another branch would put its checks on that branch's PR.
+    if: github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     strategy:
@@ -48,7 +50,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           COMMIT: ${{ inputs.commit }}
         run: |
-          sha="${COMMIT:-$(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=main&until=$(date -u +%Y-%m-%d)T19:05:00Z&per_page=1" --jq '.[0].sha')}"
+          day="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq '.created_at[0:10]')"
+          sha="${COMMIT:-$(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=main&until=${day}T19:05:00Z&per_page=1" --jq '.[0].sha')}"
           echo "Verifying $sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

@@ -120,6 +120,17 @@ export function takeGrant(env = process.env) {
   return { grant, output };
 }
 
+/**
+ * A Postgres the machine already runs, for runners that cannot start the Linux
+ * container. Removed from the environment like the grant, so tests that stub
+ * Docker or run another verifier do not inherit it.
+ */
+export function takeRunnerDatabase(env = process.env) {
+  const url = env.DOHC_VERIFY_POSTGRES_URL || null;
+  delete env.DOHC_VERIFY_POSTGRES_URL;
+  return url;
+}
+
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 function withDisplay(command, { platform = process.platform, env = process.env } = {}) {
   return platform === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY
@@ -296,8 +307,8 @@ export async function postgres(
   command = run,
   measure = (_name, action) => action(),
   label = "inline",
+  runnerDatabase = null,
 ) {
-  const runnerDatabase = process.env.DOHC_VERIFY_POSTGRES_URL;
   if (runnerDatabase) return { id: "runner", url: runnerDatabase, stop: async () => {} };
   const name = `dohc-verify-${randomUUID()}`;
   let id;
@@ -441,6 +452,7 @@ export async function verify(args) {
     throw new Error("Use --owner <name> with a PR run.");
   // The queue service runs this verifier in its lane with a grant; it must not queue again.
   const { grant, output: grantOutput } = takeGrant();
+  const runnerDatabase = takeRunnerDatabase();
   const reuseIndex = args.indexOf("--reuse-rust");
   const reuseRust = reuseIndex < 0 ? null : args[reuseIndex + 1];
   if (
@@ -1120,7 +1132,7 @@ export async function verify(args) {
       }
       if (mode === "pr" && gates.js) {
         database = await measure("postgres-start", () =>
-          postgres(output, run, measure, grant?.request ?? "inline"),
+          postgres(output, run, measure, grant?.request ?? "inline", runnerDatabase),
         );
         report.postgres = { id: database.id };
         save();
