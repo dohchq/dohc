@@ -105,8 +105,19 @@ test("@large-note-live a shared note too large for live editing says so, and Res
       { workspaceId, recipientEmail: recipientAccount.email, paths: [BIG, MID, SMALL] },
     );
     await expect
-      .poll(async () => (await rowOf(SMALL))?.status, { timeout: 180_000, intervals: [1000] })
+      .poll(async () => (await rowOf(SMALL))?.reason, { timeout: 180_000, intervals: [1000] })
+      .toBe("live-document-without-lineage");
+    await revealExplorerPath(page, SMALL);
+    await explorerRow(page, SMALL).click();
+    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 30_000 });
+    await expect
+      .poll(async () => (await rowOf(SMALL))?.status, {
+        message: "the small note goes live once opened",
+        timeout: 180_000,
+        intervals: [1000],
+      })
       .toBe("ready");
+    await page.keyboard.press("ControlOrMeta+w");
     await expect
       .poll(async () => [(await rowOf(BIG))?.reason, (await rowOf(MID))?.reason], {
         message: "the large notes have the server's reason",
