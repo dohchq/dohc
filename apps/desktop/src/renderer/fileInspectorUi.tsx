@@ -155,7 +155,7 @@ export function DocumentControls(props: {
           if (toggle.disabled) return;
           toggle.onClick?.();
         }}
-        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
+        className="min-w-16 shrink-0 rounded-md border border-line px-2 py-0.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
       >
         {toggle.label}
       </button>
