@@ -4546,7 +4546,7 @@ export function ChatsView(props: {
         <button
           type="button"
           onClick={() => void refreshOverview()}
-          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
+          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink"
         >
           Try again
         </button>
@@ -4597,7 +4597,7 @@ export function ChatsView(props: {
                   type="button"
                   data-testid="chats-feed-more"
                   onClick={() => void loadPersonalFeed(personalFeedNextCursor)}
-                  className="mt-4 h-8 w-full rounded-md border border-line text-[11px] text-muted hover:bg-hover hover:text-ink"
+                  className="mt-4 h-8 w-full rounded-md border border-line text-[12px] text-muted hover:bg-hover hover:text-ink"
                 >
                   Load older
                 </button>
@@ -4743,11 +4743,11 @@ export function ChatsView(props: {
                       {item.message.authorKind === "link" ? (
                         <LinkHolderMark testId="chats-feed-link-holder" />
                       ) : null}
-                      <span className="truncate text-[11px] tabular-nums text-subtle">{where}</span>
+                      <span className="truncate text-[12px] tabular-nums text-subtle">{where}</span>
                       <time
                         dateTime={time.iso}
                         title={time.label}
-                        className="shrink-0 text-[11px] tabular-nums text-subtle"
+                        className="shrink-0 text-[12px] tabular-nums text-subtle"
                       >
                         {formatShortTime(item.message.createdAtMs)}
                       </time>
@@ -4891,7 +4891,7 @@ export function ChatsView(props: {
               onChange={(event) => setDmRecipients(event.target.value)}
               className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
             />
-            <p className="m-0 px-1 text-[10px] leading-4 text-subtle">
+            <p className="m-0 px-1 text-[12px] leading-4 text-subtle">
               Separate several people with commas. They&apos;ll see the conversation on their next
               sync.
             </p>
@@ -4948,7 +4948,7 @@ export function ChatsView(props: {
               type="button"
               data-testid="chats-dm-leave"
               onClick={() => setLeavingDm(dm)}
-              className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
+              className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[12px] text-muted hover:bg-hover hover:text-ink"
             >
               Leave
             </button>
@@ -5038,7 +5038,7 @@ export function ChatsView(props: {
             {dmTop}
             <div
               data-testid="chats-dm-waiting"
-              className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] text-subtle"
+              className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[12px] text-subtle"
             >
               Waiting for this conversation to sync…
             </div>
@@ -5118,7 +5118,7 @@ export function ChatsView(props: {
                   title="Stop agent run"
                   disabled={dispatchActionBusy}
                   onClick={() => void stopThreadRun()}
-                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
+                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
                 >
                   <Square size={8} fill="currentColor" aria-hidden />
                   Stop
@@ -5143,7 +5143,7 @@ export function ChatsView(props: {
         {computerPausedStrip ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-muted"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[12px] text-muted"
           >
             <span>Agent replies paused on this computer</span>
             {!threadLocked ? (
@@ -5174,7 +5174,7 @@ export function ChatsView(props: {
         ) : dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-muted"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[12px] text-muted"
           >
             <span>Agent replies paused</span>
             {!threadLocked ? (
@@ -5194,7 +5194,7 @@ export function ChatsView(props: {
         ) : dispatchState && (liveRunId !== null || dispatchState.pendingCount > 0) ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-muted"
+            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[12px] tabular-nums text-muted"
           >
             {liveRunId !== null
               ? `agent working${
@@ -5526,14 +5526,14 @@ export function ChatsView(props: {
               kind="human"
               size="strip"
             />
-            <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
+            <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
               {joinedChannelLabel(channelJoined, ownerRemoved(channelJoined.shareId))}
             </span>
             <button
               type="button"
               data-testid="chats-leave-shared"
               onClick={() => void leaveShared(channelJoined.shareId)}
-              className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
+              className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[12px] text-muted hover:bg-hover hover:text-ink"
             >
               Leave
             </button>
@@ -5916,7 +5916,7 @@ export function ChatsView(props: {
           })}
           trailing={
             <>
-              {dm.connected ? null : <span className="shrink-0 text-[10px] text-muted">ended</span>}
+              {dm.connected ? null : <span className="shrink-0 text-[12px] text-muted">ended</span>}
               <UnreadPill
                 count={dm.unreadCount}
                 tone={archived ? "quiet" : "ink"}
@@ -5972,7 +5972,7 @@ export function ChatsView(props: {
         trailing={
           <>
             {off && !archived ? (
-              <span data-testid="chats-my-agent-state" className="shrink-0 text-[10px] text-muted">
+              <span data-testid="chats-my-agent-state" className="shrink-0 text-[12px] text-muted">
                 off
               </span>
             ) : null}
@@ -6068,7 +6068,7 @@ export function ChatsView(props: {
                       </div>
                       <ShareSender name={row.sharerName} email={row.granterEmail} />
                     </div>
-                    <span className="shrink-0 text-[10px] text-muted">
+                    <span className="shrink-0 text-[12px] text-muted">
                       {shareAccessLabel(row.access)}
                     </span>
                     <button
@@ -6077,7 +6077,7 @@ export function ChatsView(props: {
                       data-invitation={row.shareId}
                       disabled={joiningShareId !== null}
                       onClick={() => void joinShared(row.shareId)}
-                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
+                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
                     >
                       {joiningShareId === row.shareId ? "Joining…" : "Join"}
                     </button>
@@ -6115,7 +6115,7 @@ export function ChatsView(props: {
           {dmAcceptedElsewhere ? (
             <div
               data-testid="chats-dm-accepted-elsewhere"
-              className="mx-3 mt-3 flex min-h-7 items-center gap-2 rounded border border-line bg-panel-2 px-2 text-[11px] text-muted"
+              className="mx-3 mt-3 flex min-h-7 items-center gap-2 rounded border border-line bg-panel-2 px-2 text-[12px] text-muted"
             >
               <span className="min-w-0 flex-1 truncate">
                 {dmAcceptedElsewhere.granterEmail
@@ -6200,7 +6200,7 @@ export function ChatsView(props: {
                         labelTestId="chats-other-agent-name"
                         muted
                         trailing={
-                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-muted">
+                          <span className="max-w-[50%] shrink-0 truncate text-[12px] tabular-nums text-muted">
                             via {agent.owner}
                           </span>
                         }
@@ -6264,7 +6264,7 @@ export function ChatsView(props: {
                 ) : (
                   <span
                     data-testid="chats-archived-count"
-                    className="shrink-0 text-[11px] tabular-nums text-subtle"
+                    className="shrink-0 text-[12px] tabular-nums text-subtle"
                   >
                     {archivedRows.length}
                   </span>

@@ -252,7 +252,7 @@ function TruncatedNotice(props: {
   return (
     <div
       data-testid="truncated-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-warning"
     >
       <span>Showing the start of a large file.</span>
       <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>

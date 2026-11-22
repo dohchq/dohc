@@ -274,7 +274,7 @@ export function ScheduleHostRow(props: {
                 <span className="min-w-0 flex-1 truncate">{computerName(computer)}</span>
                 {/* The server is on whenever it is listed, so it has no last check-in to show. */}
                 {computer.kind === "server" ? null : (
-                  <span className="shrink-0 tabular-nums text-[11px] text-subtle">
+                  <span className="shrink-0 tabular-nums text-[12px] text-subtle">
                     {dayFormat.format(computer.lastSeenMs)}
                   </span>
                 )}

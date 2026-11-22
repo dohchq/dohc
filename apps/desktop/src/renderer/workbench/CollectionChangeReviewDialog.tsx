@@ -222,7 +222,7 @@ export function CollectionChangeReviewCard(props: {
         <h2 id={testId("title")} className="m-0 text-sm font-semibold text-ink">
           Review source change to {asked.proposal.name}
         </h2>
-        <span className="ml-auto flex items-center gap-1.5 text-[11px] text-subtle">
+        <span className="ml-auto flex items-center gap-1.5 text-[12px] text-subtle">
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd> Move <Kbd>Enter</Kbd> Open the file's changes
         </span>
@@ -236,7 +236,7 @@ export function CollectionChangeReviewCard(props: {
             {ready ? ready.files.length : asked.proposal.files.length} files
           </span>
           {authors.length ? (
-            <span className="shrink-0 text-[11px] text-subtle">{authors.join(", ")}</span>
+            <span className="shrink-0 text-[12px] text-subtle">{authors.join(", ")}</span>
           ) : null}
         </span>
       </div>
@@ -373,11 +373,11 @@ function ReviewRow(props: {
             {words.danger ? (
               <CircleAlert size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
             ) : null}
-            <span className={words.file ? "text-[11px]" : undefined}>{words.effect}</span>
+            <span className={words.file ? "text-[12px]" : undefined}>{words.effect}</span>
           </span>
         ) : null}
         {source ? (
-          <span className="col-start-2 flex flex-wrap items-center gap-1.5 text-[11px] text-subtle">
+          <span className="col-start-2 flex flex-wrap items-center gap-1.5 text-[12px] text-subtle">
             <span>{source.path}</span>
             {source.author ? (
               <>

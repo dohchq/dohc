@@ -192,7 +192,7 @@ export function FieldsDialog(props: {
             ) : (
               <div key={field.name} className="flex h-8 items-center gap-2 rounded-md px-2">
                 <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{field.name}</span>
-                <span className="shrink-0 text-[11px] text-subtle">
+                <span className="shrink-0 text-[12px] text-subtle">
                   {FIELD_TYPE_LABELS[field.type]}
                 </span>
                 {field.type === "button" &&

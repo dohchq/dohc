@@ -250,7 +250,7 @@ export function AppsSettings(props: {
                         </span>
                         <AppMarks app={app} />
                       </span>
-                      <span className="block truncate text-[11px] text-subtle">{app.root}</span>
+                      <span className="block truncate text-[12px] text-subtle">{app.root}</span>
                     </span>
                     <span
                       data-testid="settings-app-mode"
@@ -258,7 +258,7 @@ export function AppsSettings(props: {
                     >
                       {start ? (
                         <>
-                          <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-ink">
+                          <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[12px] text-ink">
                             {modeLabel(start.mode)}
                           </span>
                           <span>{SOURCE_WORDS[start.source]}</span>

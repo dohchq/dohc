@@ -222,7 +222,7 @@ export function WorkspaceSyncStatus({
         aria-label={description}
         title={description}
         // The dot's box keeps a 20x24 hover target for its tooltip.
-        className={`flex h-6 shrink-0 items-center gap-1.5 text-[11px] text-muted ${worded ? "px-1" : "w-5 justify-center"}`}
+        className={`flex h-6 shrink-0 items-center gap-1.5 text-[12px] text-muted ${worded ? "px-1" : "w-5 justify-center"}`}
       >
         <Dot kind={dot} />
         <span className={worded ? undefined : "sr-only"}>{shownLabel}</span>
@@ -235,7 +235,7 @@ export function WorkspaceSyncStatus({
           aria-label={liveLabel}
           title={liveLabel}
           // Shorten live delivery before local save status; retain its full tooltip.
-          className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted"
+          className="flex min-w-0 items-center gap-1.5 text-[12px] text-muted"
         >
           {liveDialling ? (
             <Dot kind="working" />

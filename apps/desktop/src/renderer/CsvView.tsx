@@ -874,7 +874,7 @@ export function CsvPreviewBound(props: {
 }) {
   if (!props.onImport) {
     return (
-      <p data-testid="csv-preview-bound" className="mb-0 mt-2 text-[11px] text-subtle">
+      <p data-testid="csv-preview-bound" className="mb-0 mt-2 text-[12px] text-subtle">
         Showing the first {MAX_CSV_PREVIEW_ROWS} of {props.rowCount} rows — import to SQLite to work
         with all of them.
       </p>
@@ -883,7 +883,7 @@ export function CsvPreviewBound(props: {
   return (
     <p
       data-testid="csv-preview-bound"
-      className="mb-0 mt-2 flex items-center gap-2 text-[11px] text-subtle"
+      className="mb-0 mt-2 flex items-center gap-2 text-[12px] text-subtle"
     >
       Showing the first {MAX_CSV_PREVIEW_ROWS} of {props.rowCount} rows.
       <SecondaryButton

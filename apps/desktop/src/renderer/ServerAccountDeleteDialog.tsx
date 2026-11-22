@@ -176,7 +176,7 @@ function Delete(props: ServerAccountDeleteDialogProps) {
             bodyId="delete-server-account-server"
             title={`Delete ${preview?.email ?? props.email} on this server?`}
           >
-            <p className="text-[11px] text-subtle" data-testid="server-account-delete-server">
+            <p className="text-[12px] text-subtle" data-testid="server-account-delete-server">
               {server}
             </p>
           </ConfirmationHead>
@@ -248,7 +248,7 @@ function Delete(props: ServerAccountDeleteDialogProps) {
                 <p className="m-0">The server's backups keep this data until they expire.</p>
               </div>
               <div className="flex flex-col gap-1">
-                <label className="block text-[11px] font-medium text-subtle">
+                <label className="block text-[12px] font-medium text-subtle">
                   Server account password
                   <input
                     type="password"

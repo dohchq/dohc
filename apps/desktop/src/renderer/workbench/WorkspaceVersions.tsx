@@ -1322,7 +1322,7 @@ function ConflictSidePane(props: {
         {props.heading}
       </SectionLabel>
       {preview === null ? (
-        <p className="m-0 px-2 py-2 text-[11px] italic leading-4 text-subtle">{props.note}</p>
+        <p className="m-0 px-2 py-2 text-[12px] italic leading-4 text-subtle">{props.note}</p>
       ) : (
         <>
           <pre
@@ -1335,7 +1335,7 @@ function ConflictSidePane(props: {
             <div className="flex items-center justify-between gap-2 border-t border-line bg-panel-2 px-2 py-1">
               <span
                 data-testid="version-conflict-side-hidden"
-                className="text-[10px] leading-4 text-subtle"
+                className="text-[12px] leading-4 text-subtle"
               >
                 {preview.hiddenChars.toLocaleString("en-US")} more characters hidden
               </span>
@@ -1343,7 +1343,7 @@ function ConflictSidePane(props: {
                 type="button"
                 data-testid="version-conflict-side-show-more"
                 onClick={() => setWindows((shown) => shown + 1)}
-                className="h-5 shrink-0 cursor-pointer rounded px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
+                className="h-5 shrink-0 cursor-pointer rounded px-1.5 text-[12px] text-muted hover:bg-hover hover:text-ink"
               >
                 Show more
               </button>
@@ -1602,7 +1602,7 @@ function ConflictResolver(props: {
         {!expanded && combined !== null ? (
           <span
             data-testid="version-conflict-draft-marker"
-            className="shrink-0 text-[10px] text-subtle"
+            className="shrink-0 text-[12px] text-subtle"
           >
             Combined copy in progress
           </span>
@@ -1618,7 +1618,7 @@ function ConflictResolver(props: {
           {conflict.origin === "sync" && conflict.waitingVersion ? (
             <p
               data-testid="version-conflict-waiting"
-              className="mb-2 mt-0 flex items-start gap-1.5 text-[11px] leading-4 text-muted"
+              className="mb-2 mt-0 flex items-start gap-1.5 text-[12px] leading-4 text-muted"
             >
               <Hourglass size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
               A newer version from another computer is waiting. It comes in after you resolve this
@@ -1628,7 +1628,7 @@ function ConflictResolver(props: {
           {isBinary ? (
             <div
               data-testid="version-conflict-binary"
-              className="mb-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
+              className="mb-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[12px] leading-4 text-muted"
             >
               Binary file. Choose which copy to keep.
             </div>
@@ -1675,7 +1675,7 @@ function ConflictResolver(props: {
               data-testid="version-conflict-combine"
               disabled={busy}
               onClick={() => startCombine(combineSeed.text)}
-              className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
+              className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[12px] text-subtle hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
             >
               Combine by hand instead…
             </button>
@@ -1687,7 +1687,7 @@ function ConflictResolver(props: {
               {combineSeed !== null ? (
                 <p
                   data-testid="version-conflict-combined-source"
-                  className="m-0 text-[11px] leading-4 text-subtle"
+                  className="m-0 text-[12px] leading-4 text-subtle"
                 >
                   {combineSeed.startedFrom}
                 </p>
@@ -1705,7 +1705,7 @@ function ConflictResolver(props: {
                 <p
                   data-testid="version-conflict-combined-too-large"
                   role="alert"
-                  className="mb-0 text-[11px] leading-4 text-danger"
+                  className="mb-0 text-[12px] leading-4 text-danger"
                 >
                   That change would make the combined copy {refusedBytes.toLocaleString("en-US")}{" "}
                   bytes. Combining by hand works up to{" "}
@@ -1718,7 +1718,7 @@ function ConflictResolver(props: {
                   data-testid="version-conflict-combine-cancel"
                   disabled={busy}
                   onClick={() => setCombined(null)}
-                  className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
+                  className="h-7 cursor-pointer rounded-md border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
                 >
                   Cancel
                 </button>
@@ -1747,7 +1747,7 @@ function ConflictResolver(props: {
         <p
           data-testid="version-conflict-error"
           role="alert"
-          className="mb-0 mt-2 text-[11px] leading-4 text-danger"
+          className="mb-0 mt-2 text-[12px] leading-4 text-danger"
         >
           {error}
         </p>
@@ -1756,7 +1756,7 @@ function ConflictResolver(props: {
         <p
           data-testid="version-conflict-busy"
           role="status"
-          className="mb-0 mt-2 text-[11px] leading-4 text-subtle"
+          className="mb-0 mt-2 text-[12px] leading-4 text-subtle"
         >
           Applying…
         </p>
@@ -1843,7 +1843,7 @@ function ConflictList(props: {
             {loadingMore ? "Loading…" : "Show more files"}
           </SecondaryButton>
           {loadMoreError ? (
-            <p className="m-0 text-[11px] leading-4 text-danger" role="alert">
+            <p className="m-0 text-[12px] leading-4 text-danger" role="alert">
               {loadMoreError}
             </p>
           ) : null}
@@ -2076,7 +2076,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
                     <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
                   )}
                   <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{file.path}</span>
-                  <span className="shrink-0 text-[11px] text-subtle">
+                  <span className="shrink-0 text-[12px] text-subtle">
                     {changeStatusLabel(file.status)}
                   </span>
                 </div>
@@ -2125,7 +2125,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
                   {loadingMore ? "Loading…" : "Show more files"}
                 </button>
                 {loadMoreError ? (
-                  <p className="m-0 text-[11px] leading-4 text-danger" role="alert">
+                  <p className="m-0 text-[12px] leading-4 text-danger" role="alert">
                     {loadMoreError}
                   </p>
                 ) : null}

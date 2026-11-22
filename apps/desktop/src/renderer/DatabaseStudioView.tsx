@@ -480,7 +480,7 @@ export function DatabaseStudioView(props: {
                   />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13px]">{table.name}</span>
-                    <span className="block truncate text-[11px] text-subtle">
+                    <span className="block truncate text-[12px] text-subtle">
                       {table.rows.length} row
                       {table.rows.length === 1 ? "" : "s"} · {table.columns.length} column
                       {table.columns.length === 1 ? "" : "s"}

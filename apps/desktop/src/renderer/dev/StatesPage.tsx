@@ -3317,19 +3317,19 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="native-controls" title="Native controls">
         <Specimen label="checkboxes and radios in the theme's colors, checked ones in the accent (Explorer's archived toggle)">
           <div className="flex flex-col">
-            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted">
+            <label className="flex h-7 items-center gap-2 px-2 text-[12px] text-muted">
               <input type="checkbox" defaultChecked={false} />
               Archived collections
             </label>
-            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted">
+            <label className="flex h-7 items-center gap-2 px-2 text-[12px] text-muted">
               <input type="checkbox" defaultChecked />
               Archived collections
             </label>
-            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted">
+            <label className="flex h-7 items-center gap-2 px-2 text-[12px] text-muted">
               <input type="radio" name={`native-radio-${theme}`} defaultChecked={false} />
               Off
             </label>
-            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted">
+            <label className="flex h-7 items-center gap-2 px-2 text-[12px] text-muted">
               <input type="radio" name={`native-radio-${theme}`} defaultChecked />
               On
             </label>
@@ -4311,7 +4311,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
         <Specimen label="Dismiss asks first, at the row's height">
-          <div className="flex w-[440px] items-center justify-between gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[11px]">
+          <div className="flex w-[440px] items-center justify-between gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[12px]">
             <span className="min-w-0 flex-1 truncate text-muted">{SET_ASIDE_ROWS[0]!.path}</span>
             <div className="flex shrink-0 items-center gap-2">
               <CopyButton testId={`states-recovery-copy-${theme}`} getText={() => null} />
@@ -6851,7 +6851,7 @@ const TRUST_OPTIONS = [
   { value: "restricted", label: "Restricted Mode" },
 ];
 const DIAGNOSTICS_BUTTON =
-  "rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
+  "rounded-md border border-line bg-transparent px-3 py-1.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink";
 
 // Privacy's rows as Settings draws them: a segmented control, two switches,
 // and Diagnostics' three buttons, the widest controls in Settings.

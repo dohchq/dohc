@@ -161,21 +161,21 @@ export function CommandPalette(props: {
             ))
           )}
         </ul>
-        <div className="flex items-center gap-3 border-t border-line px-3.5 py-2 text-[10px] text-subtle">
+        <div className="flex items-center gap-3 border-t border-line px-3.5 py-2 text-[12px] text-subtle">
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-sans">
+            <kbd className="rounded border border-line bg-bg px-1 font-sans text-[11px]">
               {shortcutText("palette-move", window.dohcDesktop?.platform)}
             </kbd>
             navigate
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-sans">
+            <kbd className="rounded border border-line bg-bg px-1 font-sans text-[11px]">
               {shortcutText("palette-accept", window.dohcDesktop?.platform)}
             </kbd>
             open
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-sans">
+            <kbd className="rounded border border-line bg-bg px-1 font-sans text-[11px]">
               {shortcutText("palette-dismiss", window.dohcDesktop?.platform)}
             </kbd>
             dismiss

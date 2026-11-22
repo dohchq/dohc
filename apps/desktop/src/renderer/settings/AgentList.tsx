@@ -277,7 +277,7 @@ function AutomationChip(props: { hue: AgentHue | undefined }) {
   return (
     <span
       data-testid="agent-for-automations"
-      className={`inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-current/14 pl-[5px] pr-[7px] text-[11px] font-medium ${ink}`}
+      className={`inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-current/14 pl-[5px] pr-[7px] text-[12px] font-medium ${ink}`}
     >
       <Workflow size={12} aria-hidden />
       For automations

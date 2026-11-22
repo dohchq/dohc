@@ -204,7 +204,7 @@ export function ThemeControl(props: { value: ThemeMode; onChange: (value: ThemeM
           <button
             key={option.value}
             {...group.radio(index)}
-            className={`group flex flex-col items-center gap-1.5 rounded-lg text-[11px] transition-colors ${
+            className={`group flex flex-col items-center gap-1.5 rounded-lg text-[12px] transition-colors ${
               checked ? "text-ink" : "text-muted"
             }`}
           >
@@ -308,7 +308,7 @@ export function StepperControl(props: {
           <span
             id={`${tipId}-${name}`}
             role="tooltip"
-            className="dohc-popover dohc-pop-in pointer-events-none absolute right-0 top-full z-50 mt-2 flex w-max items-center gap-1.5 rounded-md border border-line bg-panel px-2 py-1 text-[11px] text-ink"
+            className="dohc-popover dohc-pop-in pointer-events-none absolute right-0 top-full z-50 mt-2 flex w-max items-center gap-1.5 rounded-md border border-line bg-panel px-2 py-1 text-[12px] text-ink"
           >
             {spec.label}
             {spec.keys?.map((key) => (

@@ -88,7 +88,7 @@ export const AgentOffer = memo(function AgentOffer(props: { offer: AgentAddresse
       role="status"
       data-testid="composer-agent-offer"
       data-state={offer.state}
-      className="dohc-pop-in @container flex min-w-0 flex-1 items-center gap-1.5 px-1.5 text-[11px] tabular-nums text-muted"
+      className="dohc-pop-in @container flex min-w-0 flex-1 items-center gap-1.5 px-1.5 text-[12px] tabular-nums text-muted"
     >
       <span className="relative inline-grid shrink-0">
         <ChatAvatar
@@ -134,7 +134,7 @@ export const AgentOffer = memo(function AgentOffer(props: { offer: AgentAddresse
           <span
             data-testid="composer-agent-offer-reach"
             title={`Reaches ${offer.reach}`}
-            className={`inline-flex h-[18px] min-w-0 shrink-[100] items-center gap-1 overflow-hidden rounded border border-line bg-panel-2 px-1.5 text-[11px] text-muted ${hideFolder}`}
+            className={`inline-flex h-[18px] min-w-0 shrink-[100] items-center gap-1 overflow-hidden rounded border border-line bg-panel-2 px-1.5 text-[12px] text-muted ${hideFolder}`}
           >
             <Folder size={10} strokeWidth={2} aria-hidden className="shrink-0" />
             <span className="sr-only">reaches </span>

@@ -135,7 +135,7 @@ function WorkspaceRow(props: {
         </span>
         <PathLine
           path={displayPath(props.workspace.rootPath)}
-          className="text-[11px] leading-4 text-subtle"
+          className="text-[12px] leading-4 text-subtle"
         />
       </button>
       {/* One slot at the end: when it was last opened at rest, the row menu
@@ -144,7 +144,7 @@ function WorkspaceRow(props: {
         {props.workspace.lastOpenedAt !== undefined ? (
           <time
             dateTime={new Date(props.workspace.lastOpenedAt).toISOString()}
-            className={`pointer-events-none col-start-1 row-start-1 text-[11px] tabular-nums text-subtle transition-opacity ${
+            className={`pointer-events-none col-start-1 row-start-1 text-[12px] tabular-nums text-subtle transition-opacity ${
               menuOpen ? "opacity-0" : "group-hover:opacity-0 group-focus-within:opacity-0"
             }`}
           >

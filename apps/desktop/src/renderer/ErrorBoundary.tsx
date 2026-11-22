@@ -96,7 +96,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
         <span className="max-w-md break-words text-xs leading-relaxed text-muted">
           {errorMessage(this.state.error)}
         </span>
-        <span className="max-w-md text-[11px] text-subtle">
+        <span className="max-w-md text-[12px] text-subtle">
           {this.props.recoveryMessage ?? (
             <>The rest of dohc keeps working. Try again, or switch to another file or view.</>
           )}
@@ -151,7 +151,7 @@ export class AppErrorBoundary extends Component<{ children: ReactNode }, AppErro
         <span className="max-w-lg break-words text-xs leading-relaxed text-muted">
           {errorMessage(this.state.error)}
         </span>
-        <span className="max-w-lg text-[11px] text-subtle">
+        <span className="max-w-lg text-[12px] text-subtle">
           Your files are safe on disk. Reload to pick up where you left off.
         </span>
         <button

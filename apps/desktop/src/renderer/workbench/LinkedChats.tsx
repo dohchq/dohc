@@ -38,7 +38,7 @@ function ReadOnlyNotice() {
   return (
     <p
       data-testid="linked-chat-readonly-note"
-      className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
+      className="m-0 shrink-0 border-t border-line px-3 py-2 text-[12px] text-subtle"
     >
       {READ_ONLY}
     </p>

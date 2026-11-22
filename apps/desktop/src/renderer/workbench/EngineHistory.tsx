@@ -1494,7 +1494,7 @@ export function EngineHistoryView(props: {
               <>
                 {words.unavailable}
                 {words.omitted ? (
-                  <span className="mt-1 block text-[11px] text-subtle">{words.omitted}</span>
+                  <span className="mt-1 block text-[12px] text-subtle">{words.omitted}</span>
                 ) : null}
               </>
             ) : (

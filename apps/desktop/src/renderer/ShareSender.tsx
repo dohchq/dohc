@@ -26,7 +26,7 @@ export function ShareSender({
 }) {
   const full = shareSenderLabel(name, email);
   return (
-    <span className="block truncate text-[11px] text-muted" title={full}>
+    <span className="block truncate text-[12px] text-muted" title={full}>
       {full}
     </span>
   );

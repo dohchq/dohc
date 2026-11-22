@@ -580,7 +580,7 @@ export function CollectionChangeCardView(props: {
       {heading(
         status ? (
           <span className="ml-auto flex items-center gap-2 text-[12px] text-muted">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel-2 px-2 py-px text-[11px] text-ink">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel-2 px-2 py-px text-[12px] text-ink">
               <span className={`size-1.5 rounded-full ${status.dot}`} aria-hidden />
               {status.label}
             </span>
@@ -681,12 +681,12 @@ function ChangeRow(props: {
             {words.danger && !props.note ? (
               <CircleAlert size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
             ) : null}
-            <span className={words.file && !props.note ? "text-[11px]" : undefined}>{effect}</span>
+            <span className={words.file && !props.note ? "text-[12px]" : undefined}>{effect}</span>
           </div>
         ) : null}
       </div>
       {other ? (
-        <span className="mt-0.5 text-[11px] text-subtle">
+        <span className="mt-0.5 text-[12px] text-subtle">
           {by(author.name, props.row.source?.atMs ?? null)}
         </span>
       ) : (

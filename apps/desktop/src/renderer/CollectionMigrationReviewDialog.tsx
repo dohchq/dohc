@@ -488,11 +488,11 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                             {change.table}
                             {change.field ? ` · ${change.field}` : ""}
                           </span>
-                          <span className="ml-auto text-[11px] text-muted">{change.detail}</span>
+                          <span className="ml-auto text-[12px] text-muted">{change.detail}</span>
                         </div>
                         <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-3 p-3">
                           <div className="min-w-0">
-                            <span className="text-[11px] text-muted">Before</span>
+                            <span className="text-[12px] text-muted">Before</span>
                             <p className="m-0 mt-1 whitespace-pre-wrap break-words text-muted">
                               {change.before ?? "—"}
                             </p>
@@ -504,7 +504,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                             className="mt-6 text-muted"
                           />
                           <div className="min-w-0">
-                            <span className="text-[11px] text-muted">After</span>
+                            <span className="text-[12px] text-muted">After</span>
                             <p className="m-0 mt-1 whitespace-pre-wrap break-words text-ink">
                               {change.after ?? "—"}
                             </p>

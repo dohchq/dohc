@@ -168,7 +168,7 @@ export function ViewsDialog(props: {
             ) : (
               <div key={view.name} className="flex h-8 items-center gap-2 rounded-md px-2">
                 <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{view.name}</span>
-                <span className="shrink-0 text-[11px] text-subtle">
+                <span className="shrink-0 text-[12px] text-subtle">
                   {VIEW_KIND_LABELS[view.kind]}
                 </span>
                 <SecondaryButton

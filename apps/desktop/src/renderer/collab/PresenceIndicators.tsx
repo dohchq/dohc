@@ -83,7 +83,7 @@ export function TypingIndicator(props: { names: string[]; className?: string }) 
   // Reserve nothing when idle — no layout thrash, just a polite live region.
   return (
     <div
-      className={`dohc-typing-indicator text-[11px] italic text-muted ${props.className ?? ""}`}
+      className={`dohc-typing-indicator text-[12px] italic text-muted ${props.className ?? ""}`}
       role="status"
       aria-live="polite"
       data-testid="presence-typing"

@@ -29,7 +29,7 @@ const wordsClass =
 // default SecondaryButton.
 const WORDS_SIZE = {
   row: "h-fit min-h-6 py-0.5 gap-1.5 rounded-md px-2 text-[12px]",
-  header: "h-fit min-h-7 py-0.5 gap-1 rounded-md px-2 text-[11px]",
+  header: "h-fit min-h-7 py-0.5 gap-1 rounded-md px-2 text-[12px]",
   button: "h-fit min-h-8 py-1 gap-1.5 rounded-lg px-3 text-[13px]",
 } as const;
 

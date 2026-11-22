@@ -392,7 +392,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
             ) : null}
             <fieldset disabled={pending} className="m-0 flex flex-col border-0 p-0">
               <legend className="text-[12px] font-medium text-ink">Fields shown on form</legend>
-              <p className="m-0 mb-2 text-[11px] text-muted">
+              <p className="m-0 mb-2 text-[12px] text-muted">
                 This form can submit only these fields.
               </p>
               {allowed.map((field) => (
@@ -416,7 +416,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                     {required.includes(field) ? (
                       <span
                         title="Required"
-                        className="flex items-center gap-1 text-[11px] text-muted"
+                        className="flex items-center gap-1 text-[12px] text-muted"
                       >
                         <LockKeyhole size={12} strokeWidth={1.9} aria-hidden="true" />
                         Required
@@ -540,7 +540,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                 {source ? (
                   <details open>
                     <summary className="text-[12px] text-ink">Approved action source</summary>
-                    <p className="break-all text-[11px] text-muted">
+                    <p className="break-all text-[12px] text-muted">
                       {source.path}
                       <br />
                       <span className="font-mono">{source.sha256}</span>
@@ -561,7 +561,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                   className="mr-1.5 inline-block"
                 />
                 Source folder{" "}
-                <span className="ml-2 break-all text-[11px] text-muted">{appRoot}</span>
+                <span className="ml-2 break-all text-[12px] text-muted">{appRoot}</span>
               </summary>
               <div className="mt-2">
                 <p className="mb-2 mt-0">The app source stays in this workspace folder.</p>

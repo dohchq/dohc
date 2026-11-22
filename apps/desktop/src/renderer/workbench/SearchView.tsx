@@ -149,7 +149,7 @@ const FileGroup = memo(function FileGroup(props: {
                 type="button"
                 data-testid="search-show-more"
                 onClick={() => props.onShowAll(group.path)}
-                className="dohc-focus-row flex h-7 w-full items-center rounded-md pl-6 pr-2 text-left text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
+                className="dohc-focus-row flex h-7 w-full items-center rounded-md pl-6 pr-2 text-left text-[12px] text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 Show {hidden} more match{hidden === 1 ? "" : "es"}
               </button>
@@ -431,7 +431,7 @@ export function SearchView(props: {
             </label>
           </div>
         ) : null}
-        <div role="status" className="flex items-center gap-1.5 px-0.5 text-[11px] text-subtle">
+        <div role="status" className="flex items-center gap-1.5 px-0.5 text-[12px] text-subtle">
           {model.status === "idle" ? null : model.status === "searching" ||
             model.status === "updating" ? (
             <span data-testid="search-spinner" className="flex items-center gap-1.5">
@@ -451,7 +451,7 @@ export function SearchView(props: {
       {model.limitHit ? (
         <div
           data-testid="search-cap-notice"
-          className="border-b border-line bg-panel-2 px-3 py-1.5 text-[11px] text-warning"
+          className="border-b border-line bg-panel-2 px-3 py-1.5 text-[12px] text-warning"
         >
           Showing the first {RESULT_CAP} matches — narrow your search to see everything.
         </div>
@@ -461,7 +461,7 @@ export function SearchView(props: {
         <div
           data-testid="search-policy-notice"
           role="status"
-          className="border-b border-line bg-panel-2 px-3 py-1.5 text-[11px] text-warning"
+          className="border-b border-line bg-panel-2 px-3 py-1.5 text-[12px] text-warning"
         >
           {model.notice}
         </div>
@@ -530,7 +530,7 @@ export function SearchView(props: {
                 type="button"
                 data-testid="search-show-more-files"
                 onClick={() => setGroupWindow((current) => current + GROUP_WINDOW_STEP)}
-                className="dohc-focus-row flex h-7 w-full items-center rounded-md px-1.5 text-left text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
+                className="dohc-focus-row flex h-7 w-full items-center rounded-md px-1.5 text-left text-[12px] text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 Show {hiddenGroupCount} more file{hiddenGroupCount === 1 ? "" : "s"}
               </button>
