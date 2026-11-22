@@ -3786,6 +3786,7 @@ fn received_op_of_a_held_object_at_another_path_moves_it() {
             (
                 cursor,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -3910,6 +3911,7 @@ fn share_view_pages(pages: Vec<Vec<ShareReplicationEnvelope>>) -> Vec<(i64, Shar
             (
                 cursor,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -3923,6 +3925,7 @@ fn share_view_pages(pages: Vec<Vec<ShareReplicationEnvelope>>) -> Vec<(i64, Shar
     served.push((
         last,
         ShareViewResponse {
+            reach_signatures: None,
             work_references: Vec::new(),
             next_reference_after: None,
             reference_has_more: false,
