@@ -29,7 +29,7 @@ const BIG = "notes/big.md";
 const MID = "notes/mid.md";
 const SMALL = "notes/small.md";
 const TOO_LARGE =
-  "This note is larger than 256 KB, so it can't be edited live. Make it smaller or split it, then open it in dohc.";
+  "This note is larger than 256 KB, so it cannot be edited live. Make it smaller or split it, then open it in dohc.";
 
 const markdown = (bytes: number) => {
   const line = "A line of a long shared note that nobody created in dohc.\n";
