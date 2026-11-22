@@ -797,7 +797,7 @@ describe("ChatsView direct messages", () => {
     expect(listReports()).toHaveLength(1);
   });
 
-  it("names a message just sent as the earlier ones from the same account, not as You", async () => {
+  it("names every message from your account You, the ones the server named and the one just sent", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);
     history([{ ...sent(1, VIEWER, "Hi Sam"), authorName: "Ana" }, sent(2, "sam", "Hi Ana")]);
@@ -806,9 +806,10 @@ describe("ChatsView direct messages", () => {
     await openSam();
     await user.type(await screen.findByTestId("chats-dm-composer"), "On my way{Enter}");
     await waitFor(() => expect(screen.getAllByTestId("chats-dm-message")).toHaveLength(3));
-    const last = screen.getAllByTestId("chats-dm-message").at(-1)!.textContent;
-    expect(last).toContain("Ana");
-    expect(last).not.toContain("You");
+    const [first, , last] = screen.getAllByTestId("chats-dm-message").map((row) => row.textContent);
+    expect(first).toContain("You");
+    expect(first).not.toContain("Ana");
+    expect(last).toContain("You");
   });
 
   it("keeps the words of a send that failed, and Try again resends them with the same message id", async () => {
