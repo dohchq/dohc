@@ -11,6 +11,8 @@ const nameField = () => screen.getByTestId("chats-new-channel-name") as HTMLInpu
 describe("NewGroupDialog", () => {
   it("starts in Name with Chat picked and Create off until there's a name", () => {
     render(<NewGroupDialog onCreate={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByRole("heading").textContent).toBe("New Group");
+    expect(screen.getByTestId("chats-new-channel-submit").textContent).toBe("Create Group");
     expect(document.activeElement).toBe(nameField());
     // Optional follows the label; the field holds no placeholder.
     const purpose = screen.getByLabelText("What it's for Optional");
@@ -31,7 +33,7 @@ describe("NewGroupDialog", () => {
     render(<NewGroupDialog onCreate={onCreate} onClose={vi.fn()} />);
     fireEvent.keyDown(screen.getByTestId("chats-new-channel-purpose"), { key: "Enter" });
     expect(screen.getByTestId("chats-new-channel-name-error").textContent).toBe(
-      "Give the group a name.",
+      "Give the Group a name.",
     );
     expect(nameField().getAttribute("aria-invalid")).toBe("true");
     expect(document.activeElement).toBe(nameField());

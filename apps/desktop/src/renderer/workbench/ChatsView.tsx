@@ -5013,7 +5013,7 @@ export function ChatsView(props: {
             {createsGroups ? (
               <SectionActionButton
                 testId="chats-new-channel"
-                label="New group"
+                label="New Group"
                 onClick={() => setCreatingGroup(true)}
               >
                 <Plus size={12} aria-hidden />
