@@ -24,6 +24,7 @@ import type {
   NamedFrameSync,
 } from "./namedLiveFrameSession.js";
 import type { StorageContext } from "./storage/context.js";
+import type { LiveRoomAuthority } from "./storage/types.js";
 import { observeRelayWrites } from "./relayWriteChanges.js";
 import { appendLiveRoomEdit, liveRoomEdits } from "./storage/liveRoomEdits.js";
 import { liveRoomPaused, liveRoomPauses, pauseLiveRoom } from "./storage/liveRoomPauses.js";
@@ -48,6 +49,23 @@ const hostEpoch = parseHostEpoch(1);
 const ana: LiveAuthorSnapshot = [{ kind: "human", humanId: "ana", humanName: "Ana" }];
 const ben: LiveAuthorSnapshot = [{ kind: "human", humanId: "ben", humanName: "Ben" }];
 const olu: LiveAuthorSnapshot = [{ kind: "human", humanId: "olu", humanName: "Olu" }];
+const owner: LiveRoomAuthority = {
+  principalKind: "owner",
+  principalId: "owner",
+  grantId: null,
+  grantGeneration: null,
+};
+/** The person the fixture's note is shared with for editing: their access, and their credit. */
+const reader = { kind: "named", userId: "reader", grantId: "grant" } as const;
+const readerAccess: LiveRoomAuthority = {
+  principalKind: "named",
+  principalId: "reader",
+  grantId: "grant",
+  grantGeneration: 4,
+};
+const readerAuthor: LiveAuthorSnapshot = [
+  { kind: "human", humanId: "reader", humanName: "Reader" },
+];
 type Fixture = ReturnType<typeof registered>;
 
 interface Engine {
@@ -165,7 +183,6 @@ function rooms(
   f: Fixture,
   limits: {
     maxUpdateBytes?: number;
-    names?: boolean;
     saveTimeoutMs?: number;
     saveEveryMs?: number;
     pauseAfterMs?: number;
@@ -178,7 +195,6 @@ function rooms(
     maxUpdateBytes: limits.maxUpdateBytes ?? 1 << 20,
     maxNoteBytes: limits.maxNoteBytes ?? 1 << 22,
     maxAppliedBytes: 1 << 20,
-    namesEverySender: limits.names ?? false,
     // Tests save by leaving unless they set the timer.
     saveEveryMs: limits.saveEveryMs ?? 3_600_000,
     ...(limits.saveTimeoutMs ? { saveTimeoutMs: limits.saveTimeoutMs } : {}),
@@ -195,7 +211,12 @@ function rooms(
 }
 
 /** An editor's connection: a page's own Y.Doc behind its capture's access check. */
-function editor(f: Fixture, room: ReturnType<typeof rooms>, sender: LiveAuthorSnapshot) {
+function editor(
+  f: Fixture,
+  room: ReturnType<typeof rooms>,
+  sender: LiveAuthorSnapshot,
+  authority: LiveRoomAuthority = owner,
+) {
   const lifetime = new AbortController();
   const binding = f.storage.resolveCurrentLiveDocumentBinding({
     document: f.input.evidence.document,
@@ -222,6 +243,7 @@ function editor(f: Fixture, room: ReturnType<typeof rooms>, sender: LiveAuthorSn
       document: f.input.evidence.document,
       view: () => binding.binding,
       sender: () => (access.ended ? null : sender),
+      authority: () => authority,
     },
   } as unknown as NamedFrameRoomHost;
   const session = room.join(inner);
@@ -319,6 +341,7 @@ function ownerDesktop(
       document: f.input.evidence.document,
       view: () => binding.binding,
       sender: () => olu,
+      authority: () => owner,
     },
   } as unknown as NamedFrameRoomHost;
   const session = room.join(inner, { owner: true });
@@ -409,45 +432,63 @@ it("saves each sender's run of edits under that sender alone", async () => {
   expect(savedAuthors(f)).toEqual([ana, ben]);
 });
 
-it("with names on, saves everyone's edits at once and names each person once", async () => {
+it("saves a shared editor's edits under that editor's own access", async () => {
   const f = note();
-  const room = rooms(f, { names: true });
-  const a = editor(f, room, ana),
-    b = editor(f, room, ben);
-  await a.open();
-  await b.open();
-  for (const [person, other, key] of [
-    [b, a, "title"],
-    [a, b, "subtitle"],
-    [b, a, "place"],
-  ] as const) {
-    expect((await person.submit(person.change(key, "v"))).result).toBe("success");
-    await other.next();
-  }
-  a.session.close();
-  b.session.close();
+  const room = rooms(f);
+  const mine = editor(f, room, ana),
+    shared = editor(f, room, readerAuthor, readerAccess);
+  await mine.open();
+  await shared.open();
+  expect((await mine.submit(mine.change("title", "Lisbon"))).result).toBe("success");
+  await shared.next();
+  expect((await shared.submit(shared.change("place", "Porto"))).result).toBe("success");
+  mine.session.close();
+  shared.session.close();
   await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
-  expect(savedAuthors(f)).toEqual([[...ana, ...ben]]);
+  expect(savedAuthors(f)).toEqual([ana, readerAuthor]);
+  expect(principals(f)).toEqual([
+    ["owner", "owner", null, null],
+    ["named", "reader", "grant", 4],
+  ]);
 });
 
-it("keeps one sender's own snapshot, and saves an automation or unattributed edit alone", () => {
-  const edit = (sender: LiveAuthorSnapshot, size = 1) => ({ sender, bytes: new Uint8Array(size) });
+it("saves a shared editor's taken edit under the access they typed with, after it changes or ends", async () => {
+  const f = note();
+  const room = rooms(f);
+  const shared = editor(f, room, readerAuthor, readerAccess);
+  await shared.open();
+  expect((await shared.submit(shared.change("place", "Porto"))).result).toBe("success");
+  f.write((db) =>
+    db.exec("UPDATE sync_relay_share_grants SET status='revoked', revoked_at_ms=1, generation=5"),
+  );
+  shared.session.close();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(pauses(f)).toEqual([]);
+  expect(principals(f)).toEqual([["named", "reader", "grant", 4]]);
+});
+
+it("saves one sender's run under one access, and never joins two senders or two accesses", () => {
+  const edit = (sender: LiveAuthorSnapshot, authority: LiveRoomAuthority = owner, size = 1) => ({
+    sender,
+    authority,
+    bytes: new Uint8Array(size),
+  });
   const pair: LiveAuthorSnapshot = [
     ...ben,
     { kind: "agent", agentId: "helper", agentName: "Helper", onBehalfOf: "ben" },
   ] as LiveAuthorSnapshot;
-  expect(nextSave([edit(pair), edit(pair)], true, 100)).toEqual({ count: 2, authors: pair });
-  expect(nextSave([edit(pair), edit(ana)], true, 100).authors).toHaveLength(3);
+  expect(nextSave([edit(pair), edit(pair)], 100)).toBe(2);
+  expect(nextSave([edit(pair), edit(ana)], 100)).toBe(1);
+  expect(nextSave([edit(ana), edit(ana, readerAccess)], 100)).toBe(1);
+  expect(
+    nextSave([edit(ana, readerAccess), edit(ana, { ...readerAccess, grantGeneration: 5 })], 100),
+  ).toBe(1);
   const nobody: LiveAuthorSnapshot = [{ kind: "unattributed" }];
-  expect(nextSave([edit(ana), edit(nobody), edit(ana)], true, 100)).toEqual({
-    count: 1,
-    authors: ana,
-  });
-  expect(nextSave([edit(nobody), edit(ana)], true, 100)).toEqual({ count: 1, authors: nobody });
+  expect(nextSave([edit(ana), edit(nobody), edit(ana)], 100)).toBe(1);
+  expect(nextSave([edit(nobody), edit(nobody)], 100)).toBe(2);
   // A save stays under the largest update the engine passes on, whatever its first edit.
-  expect(nextSave([edit(ana, 60), edit(ben, 60)], true, 100).count).toBe(1);
-  expect(nextSave([edit(ana, 60), edit(ana, 60)], false, 100).count).toBe(1);
-  expect(nextSave([edit(ana, 160)], true, 100).count).toBe(1);
+  expect(nextSave([edit(ana, undefined, 60), edit(ana, undefined, 60)], 100)).toBe(1);
+  expect(nextSave([edit(ana, undefined, 160)], 100)).toBe(1);
 });
 
 it("counts a committed save whose engine answer never comes, and goes on saving", async () => {
@@ -791,6 +832,15 @@ it("keeps bringing a page other writers' changes past the capture's opening time
   expect(engine.opens).toBe(2);
 });
 
+const principals = (f: Fixture) =>
+  f
+    .journalRows()
+    .journal.map((row) => [
+      row.principal_kind,
+      row.principal_id,
+      row.grant_id,
+      row.grant_generation === null ? null : Number(row.grant_generation),
+    ]);
 const pauses = (f: Fixture) => liveRoomPauses(f.storage as StorageContext, "workspace");
 const usage = (f: Fixture) =>
   Number(
@@ -801,7 +851,7 @@ const usage = (f: Fixture) =>
 
 it("pauses a note whose save is refused for good: its copy holds every taken edit, its rows go, and every session ends", async () => {
   const f = note();
-  const room = rooms(f, { names: true, saveEveryMs: 10 }, { answers: ["invalid-update"] });
+  const room = rooms(f, { saveEveryMs: 10 }, { answers: ["invalid-update"] });
   const a = editor(f, room, ana),
     b = editor(f, room, ben);
   await a.open();
@@ -1389,6 +1439,7 @@ it("pauses a note whose leftover edit no longer applies, keeping every leftover 
       appendLiveRoomEdit(storage, {
         document,
         sender: row.sender,
+        authority: owner,
         clients: [{ clientId: row.page.clientID, inNote: false }],
         updateBytes: row.bytes,
         receivedAtMs: 1,
@@ -1408,6 +1459,35 @@ it("pauses a note whose leftover edit no longer applies, keeping every leftover 
     place: "place",
     note: "note",
   });
+});
+
+it("pauses a note with a copy when a leftover edit has no record of its sender's access", async () => {
+  const f = note();
+  const storage = f.storage as StorageContext;
+  const page = new Y.Doc();
+  Y.applyUpdate(page, Y.encodeStateAsUpdate(f.doc));
+  const before = Y.encodeStateVector(page);
+  page.getMap("frontmatter").set("place", "Porto");
+  expect(
+    appendLiveRoomEdit(storage, {
+      document: f.input.evidence.document,
+      sender: ana,
+      authority: owner,
+      clients: [{ clientId: page.clientID, inNote: false }],
+      updateBytes: Y.encodeStateAsUpdate(page, before),
+      receivedAtMs: 1,
+    }).kind,
+  ).toBe("written");
+  // As an edit taken before the relay kept each sender's access.
+  storage.db.exec("DELETE FROM sync_relay_live_room_edit_authorities");
+  await expect(editor(f, rooms(f), olu).open()).rejects.toThrow(LiveRoomPausedError);
+  expect(unsaved(f)).toEqual([]);
+  expect(f.journalRows().journal).toEqual([]);
+  const [paused] = pauses(f);
+  expect(paused).toMatchObject({ cause: "refused", refusal: "authority-refused", named: [ana] });
+  const copy = new Y.Doc();
+  Y.applyUpdate(copy, liveRoomCopy(f, paused!.pauseId));
+  expect(copy.getMap("frontmatter").get("place")).toBe("Porto");
 });
 
 it("saves edits a stopped relay took before it takes a new one", async () => {
@@ -1597,6 +1677,7 @@ it("refuses a room save that leaves out someone whose edit it holds", () => {
     appendLiveRoomEdit(storage, {
       document,
       sender: ana,
+      authority: owner,
       clients: [{ clientId: page.clientID, inNote: false }],
       updateBytes: bytes,
       receivedAtMs: 1,
@@ -1606,7 +1687,7 @@ it("refuses a room save that leaves out someone whose edit it holds", () => {
   expect(
     f.storage.commitLiveUpdateJournal({
       ...f.capture(bytes, "room-save"),
-      room: { authors: ben, committed },
+      room: { authors: ben, authority: owner, committed },
     }).result,
   ).toEqual({ kind: "refused", reason: "provenance-refused" });
   expect(committed).not.toHaveBeenCalled();
@@ -1614,8 +1695,8 @@ it("refuses a room save that leaves out someone whose edit it holds", () => {
   // A browser's own submission cannot carry a room save.
   expect(
     f.storage.commitLiveUpdateJournal({
-      ...f.capture(bytes, "named-save", { kind: "named", userId: "reader", grantId: "grant" }),
-      room: { authors: ana, committed },
+      ...f.capture(bytes, "named-save", reader),
+      room: { authors: ana, authority: owner, committed },
     }).result,
   ).toEqual({ kind: "refused", reason: "authority-refused" });
 });

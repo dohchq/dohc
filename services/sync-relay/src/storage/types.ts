@@ -711,10 +711,20 @@ export interface LiveUpdateJournalCommitInput {
   readonly receivedAtMs: number;
   readonly room?: LiveRoomSave;
 }
-/** A live room's save: several people's edits, committed under the owner's authority. */
+/** The access a live room edit came in under: the note's owner's, or a share's. */
+export type LiveRoomAuthority = Exclude<
+  ServerDerivedLiveUpdateAuthority,
+  { readonly principalKind: "personal" }
+>;
+/**
+ * A live room's save: one sender's edits, committed on the owner's capture and stored under the
+ * access the sender had when the room took them.
+ */
 export interface LiveRoomSave {
-  /** Everyone whose taken edits the save holds. */
+  /** The sender, as the room credited the edits when it took them. */
   readonly authors: import("@dohc/live-session-contract/live-authorship").LiveAuthorSnapshot;
+  /** The sender's access when the room took the edits. */
+  readonly authority: LiveRoomAuthority;
   /**
    * Runs inside the transaction that commits the save, with the save's journal cursor. What it
    * returns runs once that transaction has committed.

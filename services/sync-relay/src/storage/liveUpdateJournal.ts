@@ -37,6 +37,7 @@ import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
 import { captureSqliteReadRevisionMatches } from "./readRevision";
 import {
   liveAuthorIdentity,
+  liveOneAuthor,
   parseAdmittedLiveAuthorSnapshot,
   parseLiveAuthorSnapshot,
   type LiveAuthorSnapshot,
@@ -77,6 +78,7 @@ import type {
   RelayLiveUpdateJournalResult,
   CommittedLiveUpdateResult,
   LiveJournalValidation,
+  LiveRoomAuthority,
   StoredLiveDocumentAuthority,
 } from "./types";
 import { LiveJournalAdmittedCapacityError } from "./errors";
@@ -1509,6 +1511,14 @@ export function readLiveUpdateJournalCut(
 }
 
 /** Internal insertion only. Each caller must revalidate its admission capture in this transaction. */
+/** The access a live room edit came in under, as the room stored it. Never a personal agent's. */
+export function parseLiveRoomAuthority(value: unknown): LiveRoomAuthority {
+  const authority = parseServerDerivedLiveUpdateAuthority(value);
+  if (authority.principalKind === "personal")
+    throw new TypeError("A personal agent never edits in a room.");
+  return authority;
+}
+
 export function appendValidatedLiveJournal(
   storage: StorageContext,
   input: {
@@ -1878,16 +1888,20 @@ export function commitLiveUpdateJournal(
     outer.room === undefined
       ? undefined
       : (() => {
-          const save = baselineRecord(outer.room, ["authors", "committed"]);
+          const save = baselineRecord(outer.room, ["authors", "authority", "committed"]);
           if (typeof save.committed !== "function") throw new TypeError("Invalid live room save.");
+          const authority = parseLiveRoomAuthority(save.authority);
           return {
-            authors: parseAdmittedLiveAuthorSnapshot(save.authors, expectedAuthority),
+            authors: parseAdmittedLiveAuthorSnapshot(save.authors, authority),
+            authority,
             committed: save.committed as (journalCursor: number) => () => void,
           };
         })();
-  // A room's save is the room's own write under the owner's authority, never an editor's.
+  // A room's save is the room's own write on the owner's capture, never an editor's.
   if (room && (actorKind !== "owner" || trustedAutomation || rawMetadata.authorContext))
     return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
+  if (room && (!liveOneAuthor(room.authors) || room.authors.some((a) => a.kind === "automation")))
+    return { result: { kind: "refused", reason: "provenance-refused" }, admitted: null };
   const { token, issued } = captureJournalCut(storage, outer.cutToken);
   const updateBytes = journalBytes(outer.updateBytes),
     receivedAtMs = authorityInteger(outer.receivedAtMs);
@@ -1950,6 +1964,7 @@ export function commitLiveUpdateJournal(
         return refused({ kind: "refused", reason: "stale-binding" });
       if (!isDeepStrictEqual(current.authority, expectedAuthority))
         return refused({ kind: "refused", reason: "authority-refused" });
+      const saved = room ? { binding: current.binding, authority: room.authority } : current;
       // A personal agent's snapshot comes from its authority, so its update's context is ignored and never stored.
       const personal =
         current.authority.principalKind === "personal" ? current.authority : undefined;
@@ -1979,7 +1994,7 @@ export function commitLiveUpdateJournal(
         if (
           previous.receipt.updateDigest !== metadata.updateDigest ||
           !isDeepStrictEqual(previous.binding, current.binding) ||
-          !isDeepStrictEqual(previous.authority, current.authority) ||
+          !isDeepStrictEqual(previous.authority, saved.authority) ||
           (trustedAutomation
             ? !isDeepStrictEqual(row.admitted.metadata.authorSnapshot, [
                 { kind: "automation", ...trustedAutomation },
@@ -2141,7 +2156,7 @@ export function commitLiveUpdateJournal(
       }
       const limited = limitLiveDeclaredAgents(
         read.cut.suffix.map((row) => row.metadata),
-        current.authority,
+        saved.authority,
         authorSnapshot,
       );
       if (room && !isDeepStrictEqual(limited, authorSnapshot))
@@ -2151,7 +2166,7 @@ export function commitLiveUpdateJournal(
         !admitsWorkspaceLiveAuthorship(
           storage,
           document.workspaceId,
-          current.authority,
+          saved.authority,
           authorSnapshot,
         )
       )
@@ -2170,7 +2185,7 @@ export function commitLiveUpdateJournal(
         document,
         namespace,
         host,
-        current,
+        current: saved,
         metadata,
         updateBytes,
         receivedAtMs,

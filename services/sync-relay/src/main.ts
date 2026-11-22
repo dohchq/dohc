@@ -1330,8 +1330,6 @@ if (namedLiveConfig) {
           maxUpdateBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
           maxNoteBytes: bounds.maxAdmissionBytes,
           maxAppliedBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
-          // Off until the engine that credits every sender in one save is deployed with it.
-          namesEverySender: process.env.DOHC_RELAY_LIVE_ROOM_NAMES === "1",
           // A room saves as the workspace's owner, whoever is connected.
           async openSaver(document, signal) {
             const ownerUserId = workspaceOwner(storage as StorageContext, document.workspaceId);

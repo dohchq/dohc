@@ -167,8 +167,9 @@ Automatic device-to-service failover requires fences against competing writers.
 Direct Edit checks the sender's grant in full when the relay accepts each edit,
 not again when the edit is saved to the note. An edit accepted before access
 ended is kept. It is saved to the note, or, if the note can no longer take it,
-kept in the copy its owner gets when the note pauses. Each save records who
-sent which edit. Others' edits handed to a reader check its access again at
+kept in the copy its owner gets when the note pauses. Each save holds one
+sender's edits and is stored under the access that sender had when the relay
+accepted them, never the owner's. Others' edits handed to a reader check its access again at
 most once a second, so a reader whose link session or token expires can receive
 them for up to a second more. Its own edits are refused at once, and access
 removed by hand ends its connection at once.
