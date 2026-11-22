@@ -334,7 +334,7 @@ pub(super) fn journal_ready_in_tx(
     if let Some(moment) = unavailable {
         let terminal: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_settlement_attribution_unavailable WHERE workspace_id=?1 AND moment_id=?2 AND settlement_id=?3 AND reason='terminal-owner-source')",params![workspace,moment,id],|r|r.get(0)).map_err(SyncError::corrupt)?;
         let before = if terminal {
-            publication_source_before_in_tx(tx, &read_native_metadata(tx, workspace, id)?)?
+            publication_source_before_in_tx(tx, &read_native_metadata(tx, workspace, id)?, false)?
         } else {
             None
         };
@@ -364,7 +364,7 @@ pub(super) fn journal_ready_in_tx(
         params![workspace, record.moment_id], |row| row.get(0),
     ).map_err(SyncError::corrupt)?;
     if !published {
-        match publication_source_before_in_tx(tx, &record)? {
+        match publication_source_before_in_tx(tx, &record, true)? {
             Some(before) => crate::outbound::journal_moment_append_from_in_tx(
                 tx,
                 workspace,
@@ -386,6 +386,7 @@ pub(super) fn journal_ready_in_tx(
 fn publication_source_before_in_tx(
     tx: &Transaction<'_>,
     record: &SettlementRecord,
+    settlement_proof: bool,
 ) -> Result<Option<crate::outbound::PortableBefore>, SyncError> {
     if record.restore_operation_id.is_some() {
         return Ok(None);
@@ -412,14 +413,16 @@ fn publication_source_before_in_tx(
     {
         return Ok(Some(before));
     }
-    // An unavailable interval does not advance the relay's verified chain.
-    // The next proof starts at its prior accepted cut and names that artifact.
+    // The relay starts each proof at its prior accepted cut and names that
+    // artifact. An unavailable interval does not advance the cut, and a save
+    // while stopped moves the file past it.
     let skipped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id AND u.settlement_id=s.settlement_id WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor>?6 AND s.terminal_cursor<?7)",params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,record.terminal_cursor],|r|r.get(0)).map_err(SyncError::corrupt)?;
+    if record.previous_cursor > 0
+        && let Some(before) = tx.query_row(concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest AND (?7 OR (?9 AND s.markdown_digest IS NOT (SELECT payload_before_blob_sha256 FROM moments WHERE workspace_id=?1 AND moment_id=?8)))"),params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,skipped,record.moment_id,settlement_proof],portable_before_from_row).optional().map_err(SyncError::corrupt)?
+    {
+        return Ok(Some(before));
+    }
     if skipped && record.previous_cursor > 0 {
-        let accepted = tx.query_row(concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest"),params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor],portable_before_from_row).optional().map_err(SyncError::corrupt)?;
-        if let Some(before) = accepted {
-            return Ok(Some(before));
-        }
         // An empty handover writes the cut but leaves no settlement row.
         // The first unavailable interval from that exact cut kept its preimage.
         let mut statement = tx
@@ -713,14 +716,16 @@ mod tests {
             restore_operation_id: None,
         };
         let outcome = store.write_with(&NoFaults, |tx| {
-            Ok::<_, SyncError>(publication_source_before_in_tx(tx, &record)?.map(|before| {
-                let mut payload = serde_json::json!({});
-                before.apply_to(&mut payload);
-                payload["payloadBeforeBlobSha256"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned()
-            }))
+            Ok::<_, SyncError>(
+                publication_source_before_in_tx(tx, &record, true)?.map(|before| {
+                    let mut payload = serde_json::json!({});
+                    before.apply_to(&mut payload);
+                    payload["payloadBeforeBlobSha256"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                }),
+            )
         })?;
         match outcome {
             TxnOutcome::Committed(digest) => Ok(digest),
@@ -809,7 +814,7 @@ mod tests {
                 "sourceStateVectorDigest":"","acceptedStateBlobSha256":"","recordedAtMs":30,
                 "restoreOperationId":null
             })).unwrap();
-            let before = publication_source_before_in_tx(tx, &record)?.unwrap();
+            let before = publication_source_before_in_tx(tx, &record, true)?.unwrap();
             let mut payload = serde_json::json!({});
             before.apply_to(&mut payload);
             assert_eq!(payload["payloadBeforeBlobSha256"], accepted);
@@ -883,7 +888,7 @@ mod tests {
                     "sourceStateVectorDigest":"","acceptedStateBlobSha256":"","recordedAtMs":30,
                     "restoreOperationId":null
                 })).unwrap();
-                let before = publication_source_before_in_tx(tx, &record)?.map(|before| {
+                let before = publication_source_before_in_tx(tx, &record, true)?.map(|before| {
                     let mut payload = serde_json::json!({});
                     before.apply_to(&mut payload);
                     payload
