@@ -80,6 +80,8 @@ type Held = {
   path: string;
   url: URL;
   signal: AbortSignal;
+  // What the server would have answered when the request arrived.
+  body?: unknown;
   answer(value: unknown, status?: number): void;
 };
 
@@ -173,10 +175,15 @@ function server(
     tooLarge?: boolean;
     // The account's session cannot be checked.
     sessionFails?: boolean;
+    // How many reads of the Groups wait for the test to answer them.
+    holdGroups?: number;
+    // The relay refuses the Groups while the workspace still opens.
+    groupsGone?: boolean;
   } = {},
 ) {
   let signedIn = options.signedIn ?? true,
-    groupsFail = options.groupsFail ?? 0;
+    groupsFail = options.groupsFail ?? 0,
+    holdGroups = options.holdGroups ?? 0;
   // A test can change the level, the rules or the files while the page is open; the next read carries them.
   const files = () =>
     (options.files ?? FILES).map((file) => ({
@@ -207,7 +214,7 @@ function server(
     lastSettledKnown: true,
     ...(options.levelChangedBy ? { levelChangedBy: options.levelChangedBy } : {}),
   });
-  const hold = (path: string, url: URL, signal: AbortSignal) =>
+  const hold = (path: string, url: URL, signal: AbortSignal, body?: unknown) =>
     new Promise<Response>((resolve, reject) => {
       signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
         once: true,
@@ -216,6 +223,7 @@ function server(
         path,
         url,
         signal,
+        body,
         answer: (value, status = 200) => {
           held.splice(held.indexOf(item), 1);
           resolve(jsonResponse(value, status));
@@ -271,24 +279,30 @@ function server(
       const sha = url.pathname.slice("/api/view/blob/".length);
       return new Response(TEXT[sha] ?? "", { headers: { "content-type": "text/plain" } });
     }
+    if (url.pathname === "/api/named-chat/channels" && options.groupsGone)
+      return jsonResponse({ ok: false, error: "not found" }, 404);
     if (url.pathname === "/api/named-chat/channels" && groupsFail > 0) {
       groupsFail -= 1;
       return jsonResponse({ ok: false, error: "unavailable" }, 503);
     }
-    if (url.pathname === "/api/named-chat/channels")
-      return jsonResponse({
-        shareId: "share",
-        userId: user(),
-        maxPostBytes: 9000,
-        maxBodyBytes: 8000,
-        channels: groups().map((group) => ({
-          channelWireId: group.wire,
-          name: group.name,
-          kind: "channel",
-          type: group.type ?? "both",
-          access: options.groupRules?.[group.wire] ?? access(),
-        })),
-      });
+    const listing = () => ({
+      shareId: "share",
+      userId: user(),
+      maxPostBytes: 9000,
+      maxBodyBytes: 8000,
+      channels: groups().map((group) => ({
+        channelWireId: group.wire,
+        name: group.name,
+        kind: "channel",
+        type: group.type ?? "both",
+        access: options.groupRules?.[group.wire] ?? access(),
+      })),
+    });
+    if (url.pathname === "/api/named-chat/channels" && holdGroups > 0) {
+      holdGroups -= 1;
+      return hold("groups", url, signal, listing());
+    }
+    if (url.pathname === "/api/named-chat/channels") return jsonResponse(listing());
     // The relay answers 404 for a file or Group the member no longer reaches.
     const gone = (place: { path?: unknown; channelWireId?: unknown }) =>
       typeof place.path === "string"
@@ -2175,4 +2189,61 @@ it("opens a replaced file's own Comments when the files read again, before its o
       commentsPanel().textContent?.includes("No comments yet.") === true,
   );
   expect(commentsPanel().textContent).not.toContain("Nine is early");
+});
+
+it("applies a rule change that lands while the first read of the Groups is still out", async () => {
+  const options: { level: Level; groupRules?: GroupRules; holdGroups: number } = {
+    level: "comment",
+    holdGroups: 1,
+  };
+  server(options);
+  await render();
+  await settle(
+    () =>
+      text().includes("Leave at nine.") &&
+      following("log").length === 1 &&
+      held.some((item) => item.path === "groups"),
+  );
+  const first = held.find((item) => item.path === "groups")!;
+  // The owner set the Group to View only. The files read again before the first listing arrives.
+  options.groupRules = { "wire-plans": "read-only" };
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(() => following("log").length === 1);
+  // The listing sent before the change arrives last.
+  await act(async () => first.answer(first.body));
+  await settle(
+    () => groupPanel().textContent?.includes("Only people who can comment post here.") === true,
+  );
+  expect(groupComposer()).toBeNull();
+});
+
+it("follows the Groups again once the Groups read again after their follow came back 404", async () => {
+  server({ level: "comment" });
+  await render();
+  await opened();
+  // The follow came back 404, but the membership and the Group are still there.
+  await act(async () => following("chat")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => following("chat").length === 1);
+  expect(groupPanel().textContent).toContain("Plans start here");
+  expect(text()).not.toContain("membership");
+});
+
+it("reads the Groups once when the relay refuses them while the workspace still opens", async () => {
+  const fetch = server({ level: "comment", groupsGone: true });
+  await render();
+  const currentReads = () =>
+    fetch.mock.calls.filter(
+      ([input]) => new URL(String(input), "https://share.test").pathname === "/api/view/current",
+    ).length;
+  // The refusal asks the page to read the files again. That read opens, so the Groups keep their Try again.
+  await settle(
+    () =>
+      currentReads() === 2 &&
+      following("log").length === 1 &&
+      groupPanel().querySelector(".load-failed") !== null,
+  );
+  expect(channelReads(fetch)).toBe(1);
+  expect(text()).not.toContain("membership");
 });
