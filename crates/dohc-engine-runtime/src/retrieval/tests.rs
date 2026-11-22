@@ -1316,7 +1316,7 @@ fn council_r1_regressions_scope_live_blob_revisions_datasets_and_share_cursors()
     store
         .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
             tx.execute(
-                "UPDATE engine_search_files_fts SET text = 'STALE_FROZEN_DELETED_CANVAS' \
+                "UPDATE engine_search_files_fts SET text = 'OBSOLETE_DELETED_DRAWING_XYZZY' \
                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = 'obj-excal'",
                 params![WS, VER],
             )
@@ -1395,7 +1395,7 @@ fn council_r1_regressions_scope_live_blob_revisions_datasets_and_share_cursors()
                 root,
                 WS,
                 VER,
-                &default_req("STALE_FROZEN_DELETED_CANVAS"),
+                &default_req("OBSOLETE_DELETED_DRAWING_XYZZY"),
                 None,
                 true,
                 &token,
@@ -1967,6 +1967,9 @@ fn council_r2_and_codex_regressions() {
         "pending record_id IS NULL row must not inflate recordCount"
     );
 
+    // Drain the pending link update from Check 4 before asserting complete: true below.
+    drain_links_sync(&mut store);
+
     // Check 5: case-sensitive pathPrefix Target does not get displaced by 170 target/ files.
     let case_scoped = store
         .read_with(|conn| {
@@ -2057,7 +2060,7 @@ fn council_r2_and_codex_regressions() {
         .expect("paths");
     let resolver = Resolver::new(paths);
     ro_store
-        .set_read_progress_handler(20, Some(|| true))
+        .set_read_progress_handler(1, Some(|| true))
         .expect("install read interrupt handler");
     let interrupted = ro_store.read_with(|conn| {
         retrieve_workspace_on_conn(

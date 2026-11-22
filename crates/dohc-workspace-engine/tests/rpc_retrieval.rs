@@ -70,14 +70,8 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
         ".dohc/visibility.toml",
         b"[[rule]]\npath = \"private/**\"\nvisibility = \"hidden\"\n",
     );
-    let handle = open_with(
-        &transport,
-        &scratch,
-        1,
-        workspace_id,
-        json!({ "captureMode": "none", "reconcileCollections": true }),
-    )
-    .await;
+    let handle = open_with(&transport, &scratch, 1, workspace_id, json!({})).await;
+    reconcile_until_settled(&transport, &handle, 2).await;
 
     write_text(
         &transport,
@@ -162,14 +156,27 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
     .await;
 
     // Owner retrieval across pages, datasets, and chats; hidden + secret files never appear.
-    let res = call(
-        &transport,
-        &handle,
-        10,
-        "retrieval.query",
-        json!({ "query": "kyoto" }),
-    )
-    .await;
+    // Wait on the real link-drain condition so graph neighbors and complete=true are deterministic.
+    let res = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let mut req_id = 100u64;
+        loop {
+            req_id += 1;
+            let res = call(
+                &transport,
+                &handle,
+                req_id,
+                "retrieval.query",
+                json!({ "query": "kyoto" }),
+            )
+            .await;
+            if res["indexBuilding"] == json!(false) {
+                return res;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retrieval link index must finish draining");
     assert_eq!(res["versionId"], json!("main"));
     assert_eq!(res["complete"], json!(true));
     assert_eq!(res["indexBuilding"], json!(false));
@@ -204,19 +211,19 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
     let read_only = open_with(
         &transport,
         &scratch,
-        11,
+        10_001,
         workspace_id,
         json!({
-            "captureMode": "none",
             "recoverRunningDispatches": false,
             "skipStartupMaintenance": true,
         }),
     )
     .await;
+    assert_ne!(read_only, handle);
     let ro_res = call(
         &transport,
         &read_only,
-        12,
+        10_002,
         "retrieval.query",
         json!({ "query": "kyoto", "surfaces": ["page"] }),
     )
@@ -227,7 +234,7 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
     let branch = call(
         &transport,
         &handle,
-        120,
+        10_120,
         "versions.createNamed",
         json!({
             "workspaceId": workspace_id,
@@ -240,7 +247,7 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
     call(
         &transport,
         &handle,
-        121,
+        10_121,
         "versions.setActive",
         json!({ "workspaceId": workspace_id, "versionId": branch_id }),
     )
@@ -248,15 +255,18 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
     let ro_uncertified = call(
         &transport,
         &read_only,
-        122,
+        10_122,
         "retrieval.query",
         json!({ "query": "kyoto", "surfaces": ["page"] }),
     )
     .await;
+    assert_eq!(ro_uncertified["versionId"], json!(branch_id));
     assert_eq!(ro_uncertified["indexBuilding"], json!(true));
     assert_eq!(ro_uncertified["complete"], json!(false));
     let db_path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
-    let conn = rusqlite::Connection::open(db_path).expect("open db");
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open db");
     let certified_rows: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM engine_search_index_state WHERE workspace_id = ?1 AND version_id = ?2",
@@ -275,7 +285,7 @@ async fn retrieval_query_ranks_pages_collections_datasets_and_chats_with_graph_a
         &transport,
         cancelled_ctx,
         request(
-            123,
+            10_123,
             "retrieval.query",
             Some(handle.clone()),
             json!({ "query": "kyoto", "surfaces": ["chat"] }),
