@@ -1,4 +1,5 @@
 import { fetchShareWeb } from "./apiVersion";
+import { LINK_REFUSALS, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import {
   Component,
@@ -109,6 +110,24 @@ export async function versionMismatch(response: Response): Promise<VersionMismat
     (body.code === "api_version_too_old" || body?.code === "api_version_too_new") &&
     typeof body.error === "string"
     ? new VersionMismatchError(body.error)
+    : null;
+}
+
+// A member's workspace holds more files than a browser lists. The grant still opens.
+export class TooManyFilesError extends Error {
+  constructor() {
+    super("too many files");
+  }
+}
+
+async function tooManyFiles(response: Response): Promise<TooManyFilesError | null> {
+  if (response.status !== LINK_REFUSALS.link_too_many_files.status) return null;
+  const body: unknown = await response
+    .clone()
+    .json()
+    .catch(() => null);
+  return parseLinkRefusal(body, response.status) === "link_too_many_files"
+    ? new TooManyFilesError()
     : null;
 }
 
@@ -404,7 +423,11 @@ export async function loadCurrentProjection(
 ): Promise<LoadedCurrentState> {
   const response = await apiWithThrottleRetry(session, "/api/view/current", signal);
   if (!response.ok)
-    throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
+    throw (
+      (await versionMismatch(response)) ??
+      (await tooManyFiles(response)) ??
+      new ViewResponseError(response.status)
+    );
   const body = (await response.json()) as Record<string, unknown>;
   const meta = viewMeta(body);
   const fileAccumulator = accumulatorFromCurrentFiles(body.files);
@@ -897,7 +920,7 @@ export function DownloadCard(props: { file: SharedFile; session: string }) {
 
 /** A page that stands alone: the mark, what happened, and the next step when there is one. */
 export function StatePage(props: {
-  icon: "unlink" | "alert" | "refresh";
+  icon: "unlink" | "alert" | "refresh" | "users" | "info";
   failed?: boolean;
   title: string;
   children?: ReactNode;
