@@ -81,6 +81,7 @@ export interface StagedDatasetApproved {
   schemaSql: string;
   cursor: DatasetCursor;
   active: boolean;
+  checkpointSha256?: string;
 }
 
 export interface LocalStagedAppsDependencies {
@@ -172,6 +173,7 @@ interface StoredInProgressStep {
   action: "create" | "migrate";
   targetRevisionSha256: string;
   migrationSha256?: string;
+  checkpointSha256?: string;
 }
 
 interface StoredStageProposal {
@@ -1015,13 +1017,38 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
           const approveCreate = exclusive?.approveCreate ?? deps.approveCreate;
           const approveMigrationCandidate =
             exclusive?.approveMigrationCandidate ?? deps.approveMigrationCandidate;
-          const matchesInProgress = (step: StoredCollectionStep) =>
-            step.action !== "unchanged" &&
-            proposal.inProgress?.datasetId === step.datasetId &&
-            proposal.inProgress.action === step.action &&
-            proposal.inProgress.targetRevisionSha256 === step.targetRevisionSha256 &&
-            (step.action !== "migrate" ||
-              proposal.inProgress.migrationSha256 === step.migrationSha256);
+          const matchesInProgress = (
+            step: StoredCollectionStep,
+            existing?: StagedDatasetApproved | null,
+          ) => {
+            if (
+              step.action === "unchanged" ||
+              proposal.inProgress?.datasetId !== step.datasetId ||
+              proposal.inProgress.action !== step.action ||
+              proposal.inProgress.targetRevisionSha256 !== step.targetRevisionSha256
+            )
+              return false;
+            if (step.action === "create") {
+              if (!existing) return true;
+              return (
+                existing.revision.revision === step.targetRevision &&
+                existing.revision.revisionSha256 === step.targetRevisionSha256 &&
+                existing.cursor.revision === 0
+              );
+            }
+            if (
+              proposal.inProgress.migrationSha256 !== step.migrationSha256 ||
+              typeof proposal.inProgress.checkpointSha256 !== "string" ||
+              !SHA256_RE.test(proposal.inProgress.checkpointSha256)
+            )
+              return false;
+            if (!existing) return true;
+            return (
+              existing.revision.revision === step.targetRevision &&
+              existing.revision.revisionSha256 === step.targetRevisionSha256 &&
+              existing.checkpointSha256 === proposal.inProgress.checkpointSha256
+            );
+          };
           for (const step of proposal.collections) {
             deps.assertCurrent();
             input.signal.throwIfAborted();
@@ -1048,10 +1075,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
                   throw new Error(
                     `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
                   );
-                if (
-                  !matchesInProgress(step) ||
-                  existing.revision.revisionSha256 !== step.targetRevisionSha256
-                )
+                if (!matchesInProgress(step, existing))
                   throw new Error(`Collection "${step.name}" already exists. Stage the app again.`);
               }
               continue;
@@ -1061,7 +1085,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
                 `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
               );
             if (existing.revision.revisionSha256 === step.targetRevisionSha256) {
-              if (matchesInProgress(step)) continue;
+              if (matchesInProgress(step, existing)) continue;
               throw new Error(
                 `Collection "${step.name}" changed after staging. Stage the app again.`,
               );
@@ -1075,7 +1099,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
           const saveProposal = async () => {
             await writeAtomicFile(proposalPathIn(root, stageId), JSON.stringify(proposal, null, 2));
           };
-          const markInProgress = async (step: StoredCollectionStep) => {
+          const markInProgress = async (step: StoredCollectionStep, checkpointSha256?: string) => {
             if (step.action === "unchanged") return;
             proposal.inProgress = {
               datasetId: step.datasetId,
@@ -1084,15 +1108,21 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
               ...(step.migrationSha256 === undefined
                 ? {}
                 : { migrationSha256: step.migrationSha256 }),
+              ...(checkpointSha256 === undefined ? {} : { checkpointSha256 }),
             };
             await saveProposal();
           };
           const clearUncommittedInProgress = async (step: StoredCollectionStep) => {
             if (!matchesInProgress(step)) return;
-            const live = await deps
-              .tryApprovedArtifacts(step.datasetId, input.signal)
-              .catch(() => null);
-            if (live?.revision.revisionSha256 === step.targetRevisionSha256) return;
+            try {
+              const live = await deps.tryApprovedArtifacts(
+                step.datasetId,
+                new AbortController().signal,
+              );
+              if (live && matchesInProgress(step, live)) return;
+            } catch {
+              return;
+            }
             delete proposal.inProgress;
             await saveProposal().catch(() => undefined);
           };
@@ -1137,7 +1167,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
                     `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
                   );
                 if (
-                  matchesInProgress(step) &&
+                  matchesInProgress(step, existing) &&
                   existing.revision.revisionSha256 === step.targetRevisionSha256
                 ) {
                   await persistReceipt(step.datasetId, {
@@ -1210,7 +1240,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
                 `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
               );
             if (existing.revision.revisionSha256 === step.targetRevisionSha256) {
-              if (!matchesInProgress(step))
+              if (!matchesInProgress(step, existing))
                 throw new Error(
                   `Collection "${step.name}" changed after staging. Stage the app again.`,
                 );
@@ -1255,7 +1285,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
                 throw new Error(
                   `Collection "${step.name}" changed while applying. Stage the app again.`,
                 );
-              await markInProgress(step);
+              await markInProgress(step, candidate.checkpointSha256);
               approving = true;
               let migrated: { revision: DatasetRevision; cursor: DatasetCursor };
               try {

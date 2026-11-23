@@ -48,6 +48,9 @@ async function loadControlTowerFiles(): Promise<Map<string, string>> {
 async function openFixture(overrides?: {
   onBeforeApproveCreate?: (revisionSha256: string) => void | Promise<void>;
   onBeforePrepareMigration?: (datasetId: string) => void | Promise<void>;
+  onBeforeApproveMigration?: (datasetId: string) => void | Promise<void>;
+  onAfterApproveMigration?: (datasetId: string) => void | Promise<void>;
+  onEnterExclusiveDatasets?: () => void;
 }) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-staged-apps-"));
   roots.push(workspaceRoot);
@@ -90,19 +93,31 @@ async function openFixture(overrides?: {
       await overrides?.onBeforePrepareMigration?.(input.revision.datasetId);
       return host.prepareMigrationCandidate(input);
     },
-    approveMigrationCandidate: (input) => host.approveMigrationCandidate(input),
+    approveMigrationCandidate: async (input) => {
+      await overrides?.onBeforeApproveMigration?.(input.datasetId);
+      const migrated = await host.approveMigrationCandidate(input);
+      await overrides?.onAfterApproveMigration?.(input.datasetId);
+      return migrated;
+    },
     discardMigrationCandidate: (input) => host.discardMigrationCandidate(input),
     activateApp: (prepared, signal, agent) => host.apps.activate(prepared, signal, agent),
-    withExclusiveDatasets: (datasetIds, signal, work) =>
-      host.withExclusiveDatasets(datasetIds, signal, (exclusive) =>
+    withExclusiveDatasets: (datasetIds, signal, work) => {
+      overrides?.onEnterExclusiveDatasets?.();
+      return host.withExclusiveDatasets(datasetIds, signal, (exclusive) =>
         work({
           approveCreate: async (input) => {
             await overrides?.onBeforeApproveCreate?.(input.revisionSha256);
             return exclusive.approve(input);
           },
-          approveMigrationCandidate: (input) => exclusive.approveMigrationCandidate(input),
+          approveMigrationCandidate: async (input) => {
+            await overrides?.onBeforeApproveMigration?.(input.datasetId);
+            const migrated = await exclusive.approveMigrationCandidate(input);
+            await overrides?.onAfterApproveMigration?.(input.datasetId);
+            return migrated;
+          },
         }),
-      ),
+      );
+    },
   });
   return { workspaceRoot, host, staged };
 }
@@ -697,7 +712,16 @@ describe("localStagedApps", () => {
   }, 60_000);
 
   it("drains an in-flight Collection transfer before running staged approval pre-check", async () => {
-    const { host, staged } = await openFixture();
+    let enteredExclusive!: () => void;
+    const exclusiveEntered = new Promise<void>((resolve) => {
+      enteredExclusive = resolve;
+    });
+    let trackExclusive = false;
+    const { host, staged } = await openFixture({
+      onEnterExclusiveDatasets: () => {
+        if (trackExclusive) enteredExclusive();
+      },
+    });
     const files = await loadControlTowerFiles();
     const signal = new AbortController().signal;
 
@@ -768,6 +792,7 @@ describe("localStagedApps", () => {
       });
     await transferStarted;
 
+    trackExclusive = true;
     let approvalSettledBeforeTransfer = false;
     const approving = staged
       .approve({
@@ -779,7 +804,7 @@ describe("localStagedApps", () => {
         if (!transferSettled) approvalSettledBeforeTransfer = true;
         throw error;
       });
-    await Promise.resolve();
+    await exclusiveEntered;
     expect(approvalSettledBeforeTransfer).toBe(false);
     releaseTransfer();
     await transferring;
@@ -997,5 +1022,197 @@ describe("localStagedApps", () => {
         signal,
       }),
     ).rejects.toThrow(/changed after staging/i);
+  }, 60_000);
+
+  it("refuses to skip a staged SQL backfill after a pre-commit crash with a saved inProgress marker, while resuming a genuinely committed backfill", async () => {
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    let crashBeforeCommit = false;
+    let savedBeforeCommitProposal = "";
+    let proposalPath = "";
+    const preCommitFixture = await openFixture({
+      onBeforeApproveMigration: async () => {
+        if (!crashBeforeCommit) return;
+        crashBeforeCommit = false;
+        savedBeforeCommitProposal = await readFile(proposalPath, "utf8");
+        throw new Error("simulated crash before migration commit");
+      },
+    });
+    const preInitialStage = await preCommitFixture.staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+    const preInitialApproved = await preCommitFixture.staged.approve({
+      stageId: preInitialStage.stageId,
+      reviewDigest: preInitialStage.reviewDigest,
+      signal,
+    });
+    await preCommitFixture.host.apps.request(preInitialApproved.publicationId, "invoke", {
+      authorityRevision: preInitialApproved.authorityRevision,
+      dataset: "workouts",
+      operation: "logWorkout",
+      idempotencyKey: "wrk-pre-commit-seed",
+      input: {
+        date: "2026-11-23",
+        activity: "Row",
+        minutes: 25,
+        effort: "Moderate",
+        notes: "before",
+      },
+    });
+    const workoutsCol = preInitialStage.collections.find((c) => c.alias === "workouts")!;
+    const updatedFiles = new Map(files);
+    const updatedOps = `${files.get("personal-control-tower/workouts/operations.js")!}\n// backfill crash v2\n`;
+    updatedFiles.set("personal-control-tower/workouts/operations.js", updatedOps);
+    updatedFiles.set(
+      "personal-control-tower/workouts/backfill.sql",
+      "UPDATE workouts SET notes = 'backfilled';",
+    );
+    const preBackfillStage = await preCommitFixture.staged.stage({
+      appRoot: "personal-control-tower",
+      migrations: { workouts: "personal-control-tower/workouts/backfill.sql" },
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(updatedFiles),
+      signal,
+    });
+    proposalPath = join(
+      preCommitFixture.workspaceRoot,
+      ".dohc",
+      "local",
+      "staged-apps",
+      preBackfillStage.stageId,
+      "proposal.json",
+    );
+    crashBeforeCommit = true;
+    await expect(
+      preCommitFixture.staged.approve({
+        stageId: preBackfillStage.stageId,
+        reviewDigest: preBackfillStage.reviewDigest,
+        signal,
+      }),
+    ).rejects.toThrow(/simulated crash before migration commit/i);
+    expect(JSON.parse(savedBeforeCommitProposal).inProgress?.checkpointSha256).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
+
+    const liveBeforeStandalone = preCommitFixture.host.approvedArtifacts(workoutsCol.datasetId);
+    const sameRulesRevision = describeDatasetRevision({
+      definition: liveBeforeStandalone.revision.definition,
+      revision: 2,
+      schemaSql: liveBeforeStandalone.schemaSql,
+      operationSource: updatedOps,
+    });
+    const standalone = await preCommitFixture.host.prepareMigrationCandidate({
+      workspaceId: "w",
+      revision: sameRulesRevision,
+      expected: liveBeforeStandalone.cursor,
+      schemaSql: liveBeforeStandalone.schemaSql,
+      operationSource: updatedOps,
+      migrationSql: "SELECT 1;",
+      signal,
+    });
+    await preCommitFixture.host.approveMigrationCandidate({
+      workspaceId: "w",
+      datasetId: workoutsCol.datasetId,
+      candidateId: standalone.candidateId,
+      checkpointSha256: standalone.checkpointSha256,
+      signal,
+    });
+    await writeFile(proposalPath, savedBeforeCommitProposal, "utf8");
+
+    await expect(
+      preCommitFixture.staged.approve({
+        stageId: preBackfillStage.stageId,
+        reviewDigest: preBackfillStage.reviewDigest,
+        signal,
+      }),
+    ).rejects.toThrow(/changed after staging/i);
+    const liveAfterStandalone = preCommitFixture.host.approvedArtifacts(workoutsCol.datasetId);
+    const listWorkoutsOp = preCommitFixture.host
+      .describe(workoutsCol.datasetId)
+      .operations.find((op) => op.name === "listWorkouts")!;
+    const rowsAfterStandalone = await preCommitFixture.host.query({
+      datasetId: workoutsCol.datasetId,
+      revision: liveAfterStandalone.revision.revision,
+      revisionSha256: liveAfterStandalone.revision.revisionSha256,
+      operationId: listWorkoutsOp.operationId,
+      idempotencyKey: "wrk-after-standalone",
+      input: {},
+      signal,
+    });
+    expect((rowsAfterStandalone.result as Array<{ notes: string }>).map((r) => r.notes)).toEqual([
+      "before",
+    ]);
+
+    let crashAfterCommit = false;
+    const postCommitFixture = await openFixture({
+      onAfterApproveMigration: () => {
+        if (!crashAfterCommit) return;
+        crashAfterCommit = false;
+        throw new Error("simulated crash after migration commit before receipt");
+      },
+    });
+    const postInitialStage = await postCommitFixture.staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+    const postInitialApproved = await postCommitFixture.staged.approve({
+      stageId: postInitialStage.stageId,
+      reviewDigest: postInitialStage.reviewDigest,
+      signal,
+    });
+    await postCommitFixture.host.apps.request(postInitialApproved.publicationId, "invoke", {
+      authorityRevision: postInitialApproved.authorityRevision,
+      dataset: "workouts",
+      operation: "logWorkout",
+      idempotencyKey: "wrk-post-commit-seed",
+      input: {
+        date: "2026-11-23",
+        activity: "Row",
+        minutes: 25,
+        effort: "Moderate",
+        notes: "before",
+      },
+    });
+    const postBackfillStage = await postCommitFixture.staged.stage({
+      appRoot: "personal-control-tower",
+      migrations: { workouts: "personal-control-tower/workouts/backfill.sql" },
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(updatedFiles),
+      signal,
+    });
+    crashAfterCommit = true;
+    await expect(
+      postCommitFixture.staged.approve({
+        stageId: postBackfillStage.stageId,
+        reviewDigest: postBackfillStage.reviewDigest,
+        signal,
+      }),
+    ).rejects.toThrow(/simulated crash after migration commit before receipt/i);
+
+    const resumed = await postCommitFixture.staged.approve({
+      stageId: postBackfillStage.stageId,
+      reviewDigest: postBackfillStage.reviewDigest,
+      signal,
+    });
+    expect(resumed.collectionsApplied).toHaveLength(1);
+    expect(resumed.collectionsApplied[0]?.revision).toBe(2);
+    const resumedRows = (await postCommitFixture.host.apps.request(
+      resumed.publicationId,
+      "invoke",
+      {
+        authorityRevision: resumed.authorityRevision,
+        dataset: "workouts",
+        operation: "listWorkouts",
+        idempotencyKey: "wrk-after-resume",
+        input: {},
+      },
+    )) as { result: Array<{ notes: string }> };
+    expect(resumedRows.result.map((r) => r.notes)).toEqual(["backfilled"]);
   }, 60_000);
 });
