@@ -491,7 +491,7 @@ const tally = () => ({
   undosReadAsBeforeTheStep: 0,
   undosCheckedWithABoundaryGivenSinceTheStepBegan: 0,
   undosOfARedoneStepSomeoneElseChangedSinceItBegan: 0,
-  ofThoseLeftAnExtraEmptyParagraphOrListItem: 0,
+  ofThoseLeftAnEmptyBlockOrListItem: 0,
   ofThoseReadOtherwise: 0,
   boundariesForLinesAChangeMade: 0,
   othersLettersKeptInAGivenLine: 0,
@@ -659,20 +659,23 @@ function rowsKept(what: string, [, after, between, made]: Done) {
 }
 
 function readingWithoutEmpty(look: Look) {
-  const kept = (node: ProseMirrorNode): unknown => {
+  const kept = (node: ProseMirrorNode): unknown[] | null => {
     const size = node.content.size;
-    if (node.isTextblock || node.isLeaf)
-      return node.type.name === "paragraph" && size === 0
-        ? null
-        : [node.type.name, node.attrs, node.textBetween(0, size, undefined, OBJECT)];
-    const held: unknown[] = [];
+    if (node.isTextblock)
+      return [node.type.name, node.attrs, node.textBetween(0, size, "", OBJECT)];
+    if (node.isLeaf) return [node.type.name, node.attrs, null];
+    const held: unknown[][] = [];
     node.forEach((child) => {
       const one = kept(child);
-      if (one !== null) held.push(one);
+      const above = held.at(-1);
+      if (one === null) return;
+      if (above?.[2] === "" && one[0] === "paragraph") above[2] = one[2];
+      else held.push(one);
     });
-    return held.length === 0 && node.type !== schema.topNodeType
+    const full = held.filter((each) => !(each[0] === "paragraph" && each[2] === ""));
+    return full.length === 0 && node.type !== schema.topNodeType
       ? null
-      : [node.type.name, node.attrs, held];
+      : [node.type.name, node.attrs, full];
   };
   return json(kept(readBodyLeaves(schema, look.leaves)));
 }
@@ -1277,7 +1280,7 @@ PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
       if (readingOf(itsStep.look, false) !== readingOf(after, false))
         oracle.count[
           readingWithoutEmpty(itsStep.look) === readingWithoutEmpty(after)
-            ? "ofThoseLeftAnExtraEmptyParagraphOrListItem"
+            ? "ofThoseLeftAnEmptyBlockOrListItem"
             : "ofThoseReadOtherwise"
         ]++;
     }
