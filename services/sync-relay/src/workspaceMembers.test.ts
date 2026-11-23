@@ -2408,6 +2408,15 @@ describe("folder rules", () => {
     expect(open()).toEqual([]);
   });
 
+  it("preserves a marker that names a rule", async () => {
+    const { h } = await seed();
+    await created(h, "docs", "view");
+    expect((await post(h, OWNER, FOLDER_MARKERS, { folder: "docs" })).status).toBe(404);
+    expect((await membersView(h, OWNER)).folderRules).toMatchObject([
+      { folders: [{ path: "docs", state: "covered" }] },
+    ]);
+  });
+
   it("keeps a rule whose folder was deleted, and writes it no new marker", async () => {
     const { h, storage } = await seed();
     const context = storage as unknown as StorageContext;
