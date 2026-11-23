@@ -232,6 +232,22 @@ export function sharePinAtStatedLevel(pinned: unknown, stated: unknown): ShareVi
   return { ...pin, access: statement.access };
 }
 
+// Whether a copy can send file changes. A membership can wherever its stored
+// reach lists Edit, whatever its member level. A reach dohc can't read lists
+// no level.
+export function shareViewSendsFiles(
+  shareView: { grantedSelector?: unknown; reach?: unknown } | null | undefined,
+): boolean {
+  const grantedSelector = recordedShareSelector(shareView?.grantedSelector);
+  if (!grantedSelector) return false;
+  const reach =
+    grantedSelector.wholeWorkspace === true && shareView?.reach !== undefined
+      ? parseListedReach(shareView.reach)
+      : undefined;
+  const highest = reach === undefined ? grantedSelector.access : reach && highestListedLevel(reach);
+  return highest === "edit";
+}
+
 export function shareViewIdentitySelector(input: {
   shareView:
     | {
@@ -248,15 +264,7 @@ export function shareViewIdentitySelector(input: {
   const { shareView, relayUrl, relayUrlsMatch } = input;
   if (!shareView || shareView.ended === true) return null;
   const grantedSelector = recordedShareSelector(shareView.grantedSelector);
-  if (!grantedSelector) return null;
-  // A membership can send file changes wherever its stored reach lists Edit,
-  // whatever its member level. A reach dohc can't read lists no level.
-  const reach =
-    grantedSelector.wholeWorkspace === true && shareView.reach !== undefined
-      ? parseListedReach(shareView.reach)
-      : undefined;
-  const highest = reach === undefined ? grantedSelector.access : reach && highestListedLevel(reach);
-  if (highest !== "edit") return null;
+  if (!grantedSelector || !shareViewSendsFiles(shareView)) return null;
   if (!relayUrl) return null;
   if (shareView.relayUrl && !relayUrlsMatch(relayUrl, shareView.relayUrl)) {
     return null;
