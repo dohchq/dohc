@@ -467,7 +467,7 @@ export function NamedDocumentEditor({
           </button>
         </div>
       )}
-      {!bodyHidden && <PropertiesAsWritten block={frontmatter} collapsed={link} />}
+      {!bodyHidden && <PropertiesAsWritten block={frontmatter} collapsed />}
       <div className="named-body-editor" ref={element} hidden={bodyHidden} />
     </section>
   );

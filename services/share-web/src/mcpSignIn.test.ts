@@ -253,6 +253,9 @@ it("serves the consent page with its own headers and a cookie for this request o
   expect(form.html).toContain('<span class="tile agent">P</span>');
   expect(form.html).not.toContain("<script>");
   expect(form.html).toContain('<div class="row"><dt>Access</dt><dd class="k">Can view</dd></div>');
+  expect(form.html).toContain('<p class="cap">Can read shared files, comments, and chat.</p>');
+  expect(form.html).toContain("viewport-fit=cover");
+  expect(form.html).toContain("@media (pointer:coarse),(max-width:720px)");
   expect(form.html).toContain(
     "<bdi>Planner &#60;script&#62;</bdi> runs outside dohc. dohc limits what it reaches here, not what it does elsewhere.",
   );
