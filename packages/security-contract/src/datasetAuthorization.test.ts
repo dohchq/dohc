@@ -378,6 +378,28 @@ describe("assessAppDatasetDrift", () => {
     });
     expect(changedRead.reasons).toContain('Read fields for "Helper list" changed.');
 
+    const pickerCap = resolveAppDatasetCapability(
+      {
+        kind: "dataset",
+        datasetId: rev1.datasetId,
+        revision: rev1.revision,
+        revisionSha256: rev1.revisionSha256,
+        operationIds: [id(10)],
+      },
+      rev1,
+    );
+    const removedReadFieldDef = structuredClone(rev1.definition);
+    removedReadFieldDef.operations[0]!.fieldIds = [id(3)];
+    const removedReadFieldDrift = assessAppDatasetDrift(
+      pickerCap,
+      makeRevision(removedReadFieldDef, 2),
+      { scope: "link", bindingCurrent: true, preservesAccess: false, pinnedRevision: rev1 },
+    );
+    expect(removedReadFieldDrift.status).toBe("incompatible");
+    expect(removedReadFieldDrift.reasons).toContain(
+      'Action "List clients" no longer returns Name.',
+    );
+
     const customServerColDef = baseDefinition();
     customServerColDef.tables[0]!.fields.push({
       fieldId: id(7),

@@ -2022,6 +2022,11 @@ export async function createEverydayDesktop(
         }
         pub.active = false;
         pub.authorityRevision += 1;
+        for (const cap of pub.capabilities) {
+          for (const ds of datasetsByPath.values()) {
+            if (ds.revision.datasetId === cap.datasetId) reportSnapshot(ds);
+          }
+        }
         return {
           kind: "withdrawn",
           publicationId: pub.publicationId,

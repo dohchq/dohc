@@ -371,5 +371,14 @@ describe("discoverDatasetBoundApps", () => {
         signal: ac.signal,
       }),
     ).rejects.toThrow(/switched workspace/);
+
+    const stalled = await discoverDatasetBoundApps({
+      datasetId: rev1.datasetId,
+      targetRevision: rev2,
+      permissionsPage: async () => new Promise(() => {}),
+      signal: new AbortController().signal,
+      timeoutMs: 25,
+    });
+    expect(stalled).toEqual({ boundApps: [], boundAppsIncomplete: true });
   });
 });

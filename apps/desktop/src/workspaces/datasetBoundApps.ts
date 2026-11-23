@@ -83,14 +83,30 @@ export async function discoverDatasetBoundApps(input: {
   const finish = () =>
     incomplete ? { boundApps, boundAppsIncomplete: true as const } : { boundApps };
   const safe = async <T>(work: () => Promise<T>, fallback: T): Promise<T> => {
+    if (input.signal.aborted) input.signal.throwIfAborted();
+    if (bounded.aborted) {
+      incomplete = true;
+      return fallback;
+    }
+    let onAbort: (() => void) | undefined;
     try {
-      const value = await work();
+      const pending = work();
+      pending.catch(() => {});
+      const value = await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          onAbort = () => reject(bounded.reason ?? new Error("Discovery timed out."));
+          bounded.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
       input.signal.throwIfAborted();
       return value;
     } catch (error) {
-      if (input.signal.aborted) throw error;
+      if (input.signal.aborted) throw input.signal.reason ?? error;
       incomplete = true;
       return fallback;
+    } finally {
+      if (onAbort) bounded.removeEventListener("abort", onAbort);
     }
   };
 
@@ -224,7 +240,8 @@ export async function discoverDatasetBoundApps(input: {
           cap,
           e.current,
         );
-      } catch {
+      } catch (error) {
+        if (input.signal.aborted) throw input.signal.reason ?? error;
         incomplete = true;
       }
     }

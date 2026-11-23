@@ -1273,6 +1273,32 @@ describe("eval cases", () => {
         (c) => !c.pass && c.name.includes("apps/pledge-form share-link publication is approved"),
       ),
     ).toBe(true);
+
+    const withdrawnLinkApp = await replay(drift, "solution", async (callTool) => {
+      await drift.solution.run!(callTool);
+      const listed = (await callTool("dohc_publish_app", {
+        request: { action: "list", workspaceId: "ws-everyday", appRoot: "apps/pledge-form" },
+      })) as {
+        publications: Array<{ publicationId: string; authorityRevision: number; active: boolean }>;
+      };
+      for (const pub of listed.publications) {
+        if (!pub.active) continue;
+        await callTool("dohc_publish_app", {
+          request: {
+            action: "withdraw",
+            workspaceId: "ws-everyday",
+            publicationId: pub.publicationId,
+            expectedAuthorityRevision: pub.authorityRevision,
+          },
+        });
+      }
+    });
+    const withdrawnChecks = await grade(drift.expect, withdrawnLinkApp.run, drift.gradeRun);
+    expect(
+      withdrawnChecks.some(
+        (c) => !c.pass && c.name.includes("apps/pledge-form share-link publication is approved"),
+      ),
+    ).toBe(true);
   });
 
   it("keeps public skill automations.yaml examples valid under parseAutomationsFile", async () => {

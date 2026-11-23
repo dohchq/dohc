@@ -337,6 +337,13 @@ export function assessAppDatasetDrift(
       (oldOp && (next.kind !== oldOp.kind || next.tableId !== oldOp.tableId))
     )
       push(`Action "${label}" changed what it can do.`);
+    if (oldOp && next.kind === "read" && targetGenerated) {
+      const removed = oldOp.fieldIds.filter((id) => !next.fieldIds.includes(id));
+      if (removed.length > 0) {
+        const names = fieldNamesLabel(allTables, next.tableId, removed);
+        push(`Action "${label}" no longer returns ${names || "some fields"}.`);
+      }
+    }
     if (options.scope !== "link") continue;
     if (prev.access === "link" && next.access !== "link")
       push(`Action "${label}" is no longer available on share links.`);
