@@ -33,7 +33,7 @@ export const AGENT_RUN_UNDO_WRITE_DECLARATIONS = {
       operands: "<agent-run-id> <plan-token>",
       notes: [
         "Pass the planToken returned by `dohc history agent-run-plan <agent-run-id>`.",
-        "Recorded in History as an agent undo on behalf of the local owner; refused inside dohc-managed runs, active automation chains, received shares, and read-only workspaces.",
+        "Recorded in History as an agent undo on behalf of the local owner; refused for connected agents, dohc-managed or active runs, automation chains, received shares, and read-only workspaces.",
         "Skips files with later edits, renames, path collisions, live editors, open desktop windows, Collections, created drawings, or protection.",
       ],
       example: ["run-1", "plan-token"],

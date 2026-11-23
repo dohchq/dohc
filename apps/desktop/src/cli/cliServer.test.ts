@@ -2228,6 +2228,44 @@ describe("CLI socket server", () => {
     expect(agentRunUndo).not.toHaveBeenCalled();
     agentRunDepth = 0;
 
+    agentWriteRunId = "run-settings-active";
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { ok: false, reason: "Finish the active agent run before undoing an agent run." },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+    agentWriteRunId = null;
+
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: {
+          cwd: workspaceRoot,
+          actor: "agent",
+          agentId: "terminal",
+          agentRunId: "run-1",
+          planToken: "tok-1",
+        },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: {
+        ok: false,
+        reason:
+          "Connected agents cannot undo an agent run. Undo from desktop History or the owner's local CLI.",
+      },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+
     expect(
       await rawRequest({
         token,

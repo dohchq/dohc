@@ -2,7 +2,11 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { DaemonRefusalError, VERSIONED_METHOD } from "@dohc/workspace-engine-client";
+import {
+  DaemonRefusalError,
+  VERSIONED_METHOD,
+  type JsonObject,
+} from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { mockDaemonSessions } from "../testing/liveEngineSessions";
 import {
@@ -886,10 +890,10 @@ describe("planUndoAgentRun and undoAgentRun", () => {
       );
 
       const send = loopback.sendRequest.bind(loopback);
-      let templateMoment: Record<string, unknown> | undefined;
+      let templateMoment: JsonObject | undefined;
       const secretMomentId = "m-secret-agent";
       const secretObjectId = "obj-secret-env";
-      const makeSecretMoment = () => ({
+      const makeSecretMoment = (): JsonObject => ({
         ...templateMoment!,
         momentId: secretMomentId,
         objectId: secretObjectId,
@@ -903,9 +907,9 @@ describe("planUndoAgentRun and undoAgentRun", () => {
         ) {
           const safeGet = await send({
             ...request,
-            params: { momentId: templateMoment!.momentId },
+            params: { momentId: String(templateMoment!.momentId) },
           });
-          const safeMoment = (safeGet as { result: Record<string, unknown> }).result;
+          const safeMoment = (safeGet as { result: JsonObject }).result;
           return {
             id: request.id,
             result: {
@@ -920,7 +924,7 @@ describe("planUndoAgentRun and undoAgentRun", () => {
         const response = await send(request);
         if (request.method === VERSIONED_METHOD.momentsList && "result" in response) {
           const result = response.result as {
-            moments: Array<Record<string, unknown>>;
+            moments: JsonObject[];
             nextBeforeMomentOrder: number | null;
           };
           const params = request.params as {
@@ -1084,6 +1088,103 @@ describe("planUndoAgentRun and undoAgentRun", () => {
         expect(restoredMoment.moment.metadata.summary).toBe("Undid agent run");
         expect(restoredMoment.moment.authors).toEqual([cliAuthor]);
       }
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it("replays a pending CLI-committed restore from desktop without changing the committed author fingerprint", async () => {
+    const root = await createTestScratch("dohc-agent-run-undo-cli-desktop-retry-");
+    const loopback = new VersionedLoopbackEngine();
+    const engine = createCapture(root, loopback);
+    try {
+      await writeDisk(root, "notes/cross.md", "Before\n");
+      await engine.flush();
+      const run = agentAuthor("run-cross");
+      await engine.writeAuthoredFile(join(root, "notes/cross.md"), "After\n", run);
+
+      const plan1 = await engine.planUndoAgentRun("run-cross");
+      const cliAuthor = {
+        kind: "agent" as const,
+        agentId: "dohc-mcp",
+        onBehalfOf: "local-person",
+      };
+
+      const send = loopback.sendRequest.bind(loopback);
+      let failFirstPublish = true;
+      let publicationLanded = false;
+      let committedRestoreMomentId: string | null = null;
+      let committedRestoreResult: JsonObject | null = null;
+      const seenRestoreRequestIds: string[] = [];
+      const seenRestoreAuthors: unknown[] = [];
+      const spy = vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+        if (
+          committedRestoreMomentId !== null &&
+          !publicationLanded &&
+          request.method === VERSIONED_METHOD.textWrite &&
+          (request.params as { path?: string; origin?: string }).path === "notes/cross.md" &&
+          (request.params as { origin?: string }).origin === "local-file"
+        ) {
+          return {
+            id: request.id,
+            result: {
+              ...committedRestoreResult,
+              deduped: true,
+              materialized: false,
+            },
+          };
+        }
+        if (
+          request.method === VERSIONED_METHOD.textWrite &&
+          (request.params as { path?: string }).path === "notes/cross.md" &&
+          (request.params as { origin?: string }).origin === "restore"
+        ) {
+          seenRestoreRequestIds.push(request.idempotencyKey ?? "");
+          seenRestoreAuthors.push((request.params as { author?: unknown }).author);
+          const response = await send(request);
+          if (failFirstPublish && "result" in response) {
+            failFirstPublish = false;
+            const body = response.result as JsonObject;
+            committedRestoreResult = body;
+            const moment = body.moment as { momentId: string };
+            committedRestoreMomentId = moment.momentId;
+            return {
+              ...response,
+              result: { ...body, materialized: false, materializeOutcome: "error" },
+            };
+          }
+          publicationLanded = true;
+          return response;
+        }
+        if (
+          request.method === VERSIONED_METHOD.publicationApplied &&
+          committedRestoreMomentId !== null &&
+          (request.params as { momentId?: string }).momentId === committedRestoreMomentId
+        ) {
+          return { id: request.id, result: publicationLanded };
+        }
+        return send(request);
+      });
+
+      const attempt1 = await engine.undoAgentRun("run-cross", cliAuthor, {
+        expectedPlanToken: plan1.planToken,
+      });
+      expect(attempt1.failed.map((item) => item.path)).toEqual(["notes/cross.md"]);
+      expect(await readDisk(root, "notes/cross.md")).toBe("After\n");
+
+      const plan2 = await engine.planUndoAgentRun("run-cross");
+      expect(plan2.restorable.map((item) => item.path)).toEqual(["notes/cross.md"]);
+
+      const attempt2 = await engine.undoAgentRun("run-cross", RESTORER, {
+        expectedPlanToken: plan2.planToken,
+      });
+      expect(attempt2.failed).toEqual([]);
+      expect(attempt2.restored.map((item) => item.path)).toEqual(["notes/cross.md"]);
+      expect(await readDisk(root, "notes/cross.md")).toBe("Before\n");
+      expect(seenRestoreRequestIds).toHaveLength(2);
+      expect(seenRestoreRequestIds[1]).toBe(seenRestoreRequestIds[0]);
+      expect(seenRestoreAuthors).toEqual([cliAuthor, cliAuthor]);
+      spy.mockRestore();
     } finally {
       await engine.stop();
     }

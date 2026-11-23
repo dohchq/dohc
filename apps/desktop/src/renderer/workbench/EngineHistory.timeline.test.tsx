@@ -967,4 +967,47 @@ describe("History timeline sources", () => {
     });
     expect(screen.getByText("Undid agent run")).toBeTruthy();
   });
+
+  it("folds a 3-file agent run into one Agent run group even when files 2 and 3 share a correlationId", () => {
+    const onUndoAgentRun = vi.fn();
+    const runAuthor = (agentRunId: string) => ({
+      kind: "agent" as const,
+      agentId: "rover",
+      onBehalfOf: "user-1",
+      agentRunId,
+    });
+    view({
+      onUndoAgentRun,
+      entries: [
+        file("m-3", {
+          path: "notes/c.md",
+          correlationId: "corr-a",
+          recordedAtMs: DAY,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-mixed")],
+        }),
+        file("m-2", {
+          path: "notes/b.md",
+          correlationId: "corr-b",
+          recordedAtMs: DAY - 1000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-mixed")],
+        }),
+        file("m-1", {
+          path: "notes/a.md",
+          correlationId: "corr-b",
+          recordedAtMs: DAY - 2000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-mixed")],
+        }),
+      ],
+    });
+    const toggles = screen.getAllByTestId("engine-moment-group-toggle");
+    expect(toggles).toHaveLength(1);
+    expect(toggles[0]!.textContent).toContain("Agent run");
+    expect(toggles[0]!.textContent).toContain("3 files");
+    fireEvent.click(toggles[0]!);
+    fireEvent.click(screen.getByTestId("engine-moment-undo-run"));
+    expect(onUndoAgentRun).toHaveBeenCalledWith("run-mixed", "Rover");
+  });
 });

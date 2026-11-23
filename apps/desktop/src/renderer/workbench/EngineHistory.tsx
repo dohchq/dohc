@@ -416,7 +416,6 @@ export function groupTimeline(loaded: readonly TimelineEntry[]): TimelineItem[] 
       previous?.kind === "files" &&
       previous.group.agentRunId !== undefined &&
       previous.group.agentRunId === runId &&
-      !startsPass &&
       continuesAgentRun(previous.group.moments[previous.group.moments.length - 1]!, moment)
     ) {
       previous.group.moments.push(moment);

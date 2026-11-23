@@ -7387,6 +7387,24 @@ export function createWorkspaceEngineCapture(
     return true;
   }
 
+  function committedReplayAuthor(
+    authors: readonly MomentAuthor[] | undefined,
+    fallback: MomentWriteAuthor,
+  ): MomentWriteAuthor {
+    const first = authors?.[0];
+    if (!first) return fallback;
+    if (first.kind === "human") {
+      return { kind: "human", humanId: first.humanId };
+    }
+    if (first.kind === "agent" && first.onBehalfOf !== undefined) {
+      return { ...first, onBehalfOf: first.onBehalfOf };
+    }
+    if (first.kind === "automation") {
+      return first;
+    }
+    return fallback;
+  }
+
   async function replayPendingRestoreInQueue(
     engine: CaptureVersionedTextStore,
     activeVersionId: string,
@@ -7519,6 +7537,7 @@ export function createWorkspaceEngineCapture(
         }
       : undefined;
     const target = earliest.payload.before;
+    const replayAuthor = committedReplayAuthor(committed.authors, author);
     try {
       if (target) {
         const result =
@@ -7544,7 +7563,7 @@ export function createWorkspaceEngineCapture(
                   ...(expectedAbsent ? { createOnly: true } : {}),
                   ...pathClearFields,
                   metadata,
-                  author,
+                  author: replayAuthor,
                   ...(beforeSend ? { beforeSend } : {}),
                 });
               })()
@@ -7564,7 +7583,7 @@ export function createWorkspaceEngineCapture(
                   ...(expectedAbsent ? { createOnly: true } : {}),
                   ...pathClearFields,
                   metadata,
-                  author,
+                  author: replayAuthor,
                   ...(beforeSend ? { beforeSend } : {}),
                 });
               })();
@@ -7587,7 +7606,7 @@ export function createWorkspaceEngineCapture(
           ? { expectedSha256, expectedObjectId: earliest.objectId, ...pathClearFields }
           : {}),
         metadata,
-        author,
+        author: replayAuthor,
         ...(beforeSend ? { beforeSend } : {}),
       });
       return {

@@ -3073,7 +3073,18 @@ const DECLARED_WRITERS: {
         reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".`,
       };
     }
-    if (context.run !== undefined || options.agentRunDepth(context.workspaceId) > 0) {
+    if (context.connected !== undefined) {
+      return {
+        ok: false as const,
+        reason:
+          "Connected agents cannot undo an agent run. Undo from desktop History or the owner's local CLI.",
+      };
+    }
+    if (
+      context.run !== undefined ||
+      options.agentWriteRunId(context.workspaceId) !== null ||
+      options.agentRunDepth(context.workspaceId) > 0
+    ) {
       return {
         ok: false as const,
         reason: "Finish the active agent run before undoing an agent run.",
