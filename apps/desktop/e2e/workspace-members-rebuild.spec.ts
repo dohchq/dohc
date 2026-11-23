@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -253,6 +253,18 @@ test("@two-client a rule that hides a folder rebuilds a member's copy without it
     expect(await readFile(join(joined!.rootPath, "notes/plan.md"), "utf8")).toBe("# Plan\n");
     await expect(mine.getByTestId("status-workspace")).toHaveText(workspaceName);
     expect(await refresh(mine, joinedId)).not.toMatch(/^(failed|threw)/);
+
+    // The owner renames the folder on disk. Its marker moves with it, so the
+    // rule follows to the new path and the old path holds nothing.
+    await rename(join(ownerTemp.rootPath, "team"), join(ownerTemp.rootPath, "crew"));
+    const ruledFolders = async () => {
+      const view = await relayJson(relay!.baseUrl, OWNER.token, `/sync/${workspaceId}/members`);
+      const rules = (JSON.parse(view.body) as { folderRules?: { folders: { path: string }[] }[] })
+        .folderRules;
+      return (rules ?? []).flatMap((rule) => rule.folders.map((folder) => folder.path)).sort();
+    };
+    await expect.poll(ruledFolders, { timeout: 120_000, intervals: [1_000] }).toEqual(["crew"]);
+    expect(await exists(join(ownerTemp.rootPath, "team"))).toBe(false);
 
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
