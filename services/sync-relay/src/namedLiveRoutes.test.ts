@@ -563,12 +563,14 @@ async function fixture(
     body: unknown,
     cookie = defaultCookie,
     extra: Record<string, string> = {},
+    signal?: AbortSignal,
   ) {
     return new Promise<Response>((resolve, reject) => {
       const request = httpRequest(
         `http://127.0.0.1:${port}${path}`,
         {
           method: "POST",
+          signal,
           headers: {
             host: relayHost,
             "content-type": "application/json",
@@ -2443,6 +2445,8 @@ describe("a desktop's opens while a host is away", () => {
       return { token: "ticket", expiresAtMs: Date.now() + 60_000 };
     });
     const answers: (number | undefined)[] = [];
+    const ended = new AbortController();
+    cleanups.push(async () => ended.abort());
     const open = (path: string, person: "reader" | "other" = "reader") => {
       const index = answers.push(undefined) - 1;
       void f
@@ -2451,8 +2455,15 @@ describe("a desktop's opens while a host is away", () => {
           { shareId: person === "reader" ? scope.shareId : "other-person-share", path },
           "",
           person === "reader" ? {} : { authorization: "Bearer other-token" },
+          ended.signal,
         )
-        .then((response) => (answers[index] = response.status));
+        .then(
+          (response) => (answers[index] = response.status),
+          (error: unknown) => {
+            if (!ended.signal.aborted || (error as Error).cause !== ended.signal.reason)
+              throw error;
+          },
+        );
       return index;
     };
     const returns = () => {
