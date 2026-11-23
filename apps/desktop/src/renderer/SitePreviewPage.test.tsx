@@ -927,7 +927,7 @@ describe("SitePreviewPage", () => {
     const appViewBridge = {
       ...bridgeMock,
       appView: vi.fn(async () => ({ kind: "unapproved" as const, viewId: "v-1" })),
-      onAppViewState: vi.fn(() => () => undefined),
+      onAppViewEvent: vi.fn(() => () => undefined),
       publishOwnerApp: vi.fn(async () => ({ kind: "localListed" as const, publications: [] })),
     };
     vi.stubGlobal("dohcDesktop", appViewBridge);

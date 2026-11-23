@@ -1755,23 +1755,37 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     dataset.revision,
     dataset.revisionSha256,
   ]);
+  const relationLabelsIdentity = `collection-relation-labels:${dataset.datasetId}:${tableId}`;
   const [relationLabelsState, setRelationLabelsState] = useState<{
     scope: string;
     version: number;
     byField: ReadonlyMap<string, ReadonlyMap<string, string>>;
   }>({ scope: "", version: 0, byField: new Map() });
+  const [relationRetry, setRelationRetry] = useState(0);
   const resolveRelationRef = useRef(props.resolveRelation);
   resolveRelationRef.current = props.resolveRelation;
+  const relationOnErrorRef = useRef(onError);
+  relationOnErrorRef.current = onError;
+  const relationOnSettledRef = useRef(props.onSettled);
+  relationOnSettledRef.current = props.onSettled;
   const activeRelationLabels =
     relationLabelsState.scope === relationScope ? relationLabelsState.byField : null;
   const relationFields = useMemo(() => {
     const byId = new Map<string, TransactionalField>();
     for (const field of [...fields, ...createFields]) {
-      if (field.type === "relation" && field.relation?.datasetId === dataset.datasetId)
-        byId.set(field.fieldId, field);
+      if (field.type !== "relation" || field.relation?.datasetId !== dataset.datasetId) continue;
+      const relation = field.relation;
+      const readable = dataset.operations.some(
+        (operation) =>
+          operation.tableId === relation.tableId &&
+          operation.kind === "read" &&
+          operation.readOnly &&
+          operation.fieldIds.includes(relation.fieldId),
+      );
+      if (readable) byId.set(field.fieldId, field);
     }
     return [...byId.values()];
-  }, [fields, createFields, dataset.datasetId]);
+  }, [fields, createFields, dataset.datasetId, dataset.operations]);
   const populatedRelationTargets = useMemo(() => {
     const groups = new Map<string, { representativeFieldId: string; fieldIds: string[] }>();
     const hasNonEmpty = (value: AppBackendJson | undefined) =>
@@ -1799,6 +1813,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     const abort = new AbortController();
     void (async () => {
       const next = new Map<string, ReadonlyMap<string, string>>();
+      let failed = false;
+      let firstError: unknown = null;
       await Promise.all(
         populatedRelationTargets.map(async (target) => {
           try {
@@ -1829,28 +1845,46 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
               }
             }
             for (const fieldId of target.fieldIds) next.set(fieldId, map);
-          } catch {
-            return;
+          } catch (cause) {
+            if (abort.signal.aborted) return;
+            if (!failed) {
+              failed = true;
+              firstError = cause;
+            }
           }
         }),
       );
-      if (abort.signal.aborted || next.size === 0) return;
-      setRelationLabelsState((previous) => ({
-        scope: relationScope,
-        version: previous.scope === relationScope ? previous.version + 1 : 1,
-        byField: next,
-      }));
+      if (abort.signal.aborted) return;
+      if (next.size > 0 || failed) {
+        setRelationLabelsState((previous) => ({
+          scope: relationScope,
+          version: previous.scope === relationScope ? previous.version + 1 : 1,
+          byField: next,
+        }));
+      }
+      if (failed) {
+        relationOnErrorRef.current(
+          "dohc could not read related records.",
+          firstError,
+          () => setRelationRetry((value) => value + 1),
+          relationLabelsIdentity,
+        );
+      } else {
+        relationOnSettledRef.current?.(relationLabelsIdentity);
+      }
     })();
     return () => {
       abort.abort();
     };
   }, [
     relationScope,
+    relationLabelsIdentity,
     relationTargetsKey,
     offline,
     hasResolveRelation,
     props.recordsVersion,
     props.recordsChanged,
+    relationRetry,
   ]);
   const resourceKey = JSON.stringify([
     editableKey,

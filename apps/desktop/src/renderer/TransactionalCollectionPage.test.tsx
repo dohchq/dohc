@@ -5496,7 +5496,7 @@ describe("what a change that did not save leaves for the person", () => {
     expect(sent(invoke, remove)).toHaveLength(0);
   });
 
-  it("resolves single and multi-relation cell labels with one bounded read per target and falls back silently on error", async () => {
+  it("resolves single and multi-relation cell labels with one bounded read per target, skips unreadable targets, and reports transient failures with retry", async () => {
     const paidBy = id(51);
     const splitWith = id(52);
     const base = dataset();
@@ -5519,15 +5519,6 @@ describe("what a change that did not save leaves for the person", () => {
       },
     );
     base.operations.find((op) => op.operationId === read)!.fieldIds.push(paidBy, splitWith);
-    const resolveRelation = vi.fn<
-      NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["resolveRelation"]>
-    >(async () => ({
-      options: [
-        { value: "m-1", label: "Alex" },
-        { value: "m-2", label: "Sam" },
-      ],
-      hasMore: false,
-    }));
     const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({
       result: {
         rows: [
@@ -5545,24 +5536,66 @@ describe("what a change that did not save leaves for the person", () => {
         nextCursor: null,
       },
     }));
-    const { onError } = setup({ dataset: base, invoke, resolveRelation });
+
+    const unreadableResolve = vi.fn(async () => ({ options: [], hasMore: false }));
+    const unreadable = setup({ dataset: base, invoke, resolveRelation: unreadableResolve });
     await screen.findByText("Dinner");
+    expect(cell("Paid by").textContent).toBe("m-1");
+    expect(unreadableResolve).not.toHaveBeenCalled();
+    expect(unreadable.onError).not.toHaveBeenCalled();
+
+    cleanup();
+    const readableBase = structuredClone(base);
+    readableBase.operations.push({
+      operationId: id(49),
+      name: "listMembers",
+      label: "List members",
+      tableId: id(41),
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [id(40)],
+    });
+    let attempts = 0;
+    const retryingResolve = vi.fn<
+      NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["resolveRelation"]>
+    >(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary failure");
+      return {
+        options: [
+          { value: "m-1", label: "Alex" },
+          { value: "m-2", label: "Sam" },
+        ],
+        hasMore: false,
+      };
+    });
+    const onSettled = vi.fn();
+    const { onError } = setup({
+      dataset: readableBase,
+      invoke,
+      resolveRelation: retryingResolve,
+      onSettled,
+    });
+    await screen.findByText("Dinner");
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(cell("Paid by").textContent).toBe("m-1");
+    const [fallback, error, retry, identity] = onError.mock.calls[0]!;
+    expect(fallback).toBe("dohc could not read related records.");
+    expect(error).toBeInstanceOf(Error);
+    expect(typeof retry).toBe("function");
+    expect(identity).toBe(`collection-relation-labels:${id(1)}:${id(2)}`);
+    expect(retryingResolve).toHaveBeenCalledTimes(1);
+    expect(retryingResolve.mock.calls[0]![0]).toMatchObject({ search: "", limit: 100 });
+
+    act(() => {
+      retry!();
+    });
     await waitFor(() => {
       expect(cell("Paid by").textContent).toBe("Alex");
       expect(cell("Split with").textContent).toBe("Alex, Sam, m-missing");
     });
-    expect(resolveRelation).toHaveBeenCalledTimes(1);
-    expect(resolveRelation.mock.calls[0]![0]).toMatchObject({ search: "", limit: 100 });
-    expect(onError).not.toHaveBeenCalled();
-
-    cleanup();
-    const failingResolve = vi.fn(async () => {
-      throw new Error("no read access");
-    });
-    const failed = setup({ dataset: base, invoke, resolveRelation: failingResolve });
-    await screen.findByText("Dinner");
-    await waitFor(() => expect(failingResolve).toHaveBeenCalledTimes(1));
-    expect(cell("Paid by").textContent).toBe("m-1");
-    expect(failed.onError).not.toHaveBeenCalled();
+    expect(retryingResolve).toHaveBeenCalledTimes(2);
+    expect(onSettled).toHaveBeenCalledWith(`collection-relation-labels:${id(1)}:${id(2)}`);
   });
 });
