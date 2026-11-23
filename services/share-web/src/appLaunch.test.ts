@@ -798,17 +798,16 @@ it("keeps the launch page policy strict and its words free of link and workspace
   ])
     expect(app.html).not.toContain(detail);
 });
-it("sets mobile viewport, dynamic iframe height, color-scheme sync, and bfcache-safe lifecycle", async () => {
+it("sets dynamic iframe height, color-scheme sync, and single-flight bfcache-safe lifecycle", async () => {
   const { html } = await launch(fixture());
-  expect(html).toContain(
-    '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
-  );
+  expect(html).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
   expect(html).toContain(
     "frame.style='display:block;border:0;width:100%;height:100vh;height:100dvh'",
   );
   expect(html).toContain(
-    "const s=e.data?.kind==='dohc-color-scheme'?e.data.scheme:null;if(e.source===frame.contentWindow&&(s==='light'||s==='dark'))frame.style.colorScheme=s;",
+    "const s=e.data?.kind==='dohc-color-scheme'?e.data.scheme:null;if(frame.contentWindow&&e.source===frame.contentWindow&&(s==='light'||s==='dark'))frame.style.colorScheme=s;",
   );
+  expect(html).toContain("if(stopped||polling)return;polling=true;clearTimeout(pollTimer);");
   expect(html).toContain("addEventListener('pagehide',e=>{if(!e.persisted)stop();});");
   expect(html).toContain(
     "addEventListener('pageshow',e=>{if(e.persisted&&!stopped)void poll();});",

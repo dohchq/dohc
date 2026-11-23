@@ -5404,5 +5404,79 @@ describe("App", () => {
 
       expect(container.querySelector(".app-landing")).toBeNull();
     });
+
+    it.each(["", "not-a-publication-id"])(
+      "ignores empty or malformed ?app=%s and keeps the normal share view",
+      async (badApp) => {
+        const files: SharedFile[] = [
+          { path: "note.md", blobSha256: "b".repeat(64), contentKind: "text" },
+        ];
+        history.replaceState(null, "", `/s/${SESSION}?app=${badApp}`);
+        const fallback = viewerFetch(() => {
+          throw new Error("Unexpected handoff");
+        });
+        vi.stubGlobal(
+          "fetch",
+          vi.fn<typeof fetch>(async (input, init) => {
+            const route = requestPath(input);
+            if (route === "/api/view/current") return currentPage(files, 0);
+            if (route === "/api/view/log?since=0&limit=500") return logPage(files);
+            if (route.startsWith("/api/view/blob/")) return new Response("# Shared note");
+            return fallback(input, init);
+          }),
+        );
+
+        await renderApp();
+        await settle(() => container.textContent.includes("Shared note"));
+
+        expect(container.querySelector(".app-landing")).toBeNull();
+        expect(buttonNamed("Open app")).toBeUndefined();
+      },
+    );
+
+    it("aborts an in-flight app launch when Browse shared files is clicked", async () => {
+      const files: SharedFile[] = [
+        { path: "note.md", blobSha256: "b".repeat(64), contentKind: "text" },
+      ];
+      mockPublishedApps = [{ publicationId: PUBLICATION_ID, name: "Trip poll" }];
+      history.replaceState(null, "", `/s/${SESSION}?app=${PUBLICATION_ID}`);
+      let launchSignal: AbortSignal | undefined;
+      const fallback = viewerFetch(() => {
+        throw new Error("Unexpected handoff");
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const route = requestPath(input);
+          if (route === "/api/view/current") return currentPage(files, 0);
+          if (route === "/api/view/log?since=0&limit=500") return logPage(files);
+          if (route.startsWith("/api/view/blob/")) return new Response("# Shared note");
+          if (route === "/api/apps/launch") {
+            launchSignal = init?.signal ?? undefined;
+            return await new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener(
+                "abort",
+                () => reject(new DOMException("Aborted", "AbortError")),
+                { once: true },
+              );
+            });
+          }
+          return fallback(input, init);
+        }),
+      );
+
+      await renderApp();
+      await settle(() => container.querySelector(".app-landing h1")?.textContent === "Trip poll");
+
+      clickButton("Open app");
+      await settle(() => launchSignal !== undefined);
+      expect(launchSignal?.aborted).toBe(false);
+
+      clickButton("Browse shared files");
+      await settle(() => container.textContent.includes("Shared note"));
+
+      expect(launchSignal?.aborted).toBe(true);
+      expect(container.querySelector(".app-landing")).toBeNull();
+    });
   });
 });

@@ -64,9 +64,29 @@ class ExcalidrawRenderBoundary extends Component<
   }
 }
 
+class EditorLoadBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode; onError: () => void },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: true } {
+    return { failed: true };
+  }
+
+  componentDidCatch(): void {
+    this.props.onError();
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
 const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
 const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
+const PUBLICATION_ID = /^[a-f0-9]{64}$/u;
 const VIEW_LOG_HOLD_MS = 30_000;
 const TERMINAL_HEARTBEAT_STATUSES = new Set([401, 403, 404]);
 export const MAX_LOG_PAGES = 200;
@@ -1243,6 +1263,7 @@ export function App() {
   // The bar's place for an editor's Done, Save and saved state, and whether the live editor has the file.
   const [barSlot, setBarSlot] = useState<HTMLElement | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [editorLoadFailed, setEditorLoadFailed] = useState(false);
   // What is open beside or over the page. Nothing is, until the person opens it.
   const [surface, setSurface] = useState<Surface | null>(null);
   const trigger = useRef<HTMLElement | null>(null);
@@ -1543,7 +1564,8 @@ export function App() {
   const meta = ready?.meta ?? null;
   const files = ready?.files ?? [];
   const fileMap = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
-  const appToOpen = new URLSearchParams(location.search).get("app");
+  const rawApp = new URLSearchParams(location.search).get("app");
+  const appToOpen = rawApp && PUBLICATION_ID.test(rawApp) ? rawApp : null;
   const appLanding = appToOpen !== null && !browsingFiles && !editing;
   const sessionApps = ready && publishedApps.session === ready.session ? publishedApps.items : [];
   const appTitle =
@@ -1591,9 +1613,11 @@ export function App() {
     if (!shownSession || !shownNote) return;
     let cancelled = false;
     let release: (() => void) | undefined;
-    void import("./linkLive").then(({ showLinkDocument }) => {
-      if (!cancelled) release = showLinkDocument(shownSession, shownNote);
-    });
+    void import("./linkLive")
+      .then(({ showLinkDocument }) => {
+        if (!cancelled) release = showLinkDocument(shownSession, shownNote);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
       release?.();
@@ -1658,11 +1682,13 @@ export function App() {
   const namesLink = subject !== null && subject !== segments.at(-1) && subject !== segments[0];
   const toggle = (name: Surface) => (event: MouseEvent<HTMLButtonElement>) => {
     trigger.current = event.currentTarget;
+    if (narrow) setFilesToggled(false);
     setSurface((current) => (current === name ? null : name));
   };
   const stopEditing = () => {
     setEditing(null);
     setEditorOpen(false);
+    setEditorLoadFailed(false);
   };
   const editingCollectionFile = editing !== null && isCollectionOwnFile(editing.path);
   const available =
@@ -1707,7 +1733,7 @@ export function App() {
     !appLanding &&
     selected !== undefined &&
     ready !== null &&
-    !(editing && (editingCollectionFile || editorOpen));
+    !(editing && !editorLoadFailed && (editingCollectionFile || editorOpen));
   // A link that holds only apps leads with them, unless a direct ?app= link already leads with its launch card.
   const appsLead = appToOpen === null && files.length === 0 && apps === "some" && !editing;
   const discussion = meta?.channel ? "Channel" : "Comments";
@@ -1865,7 +1891,9 @@ export function App() {
               </button>
               <button
                 className={
-                  surface === "more" || surface === "about" ? "icon-button on" : "icon-button"
+                  surface === "more" || surface === "about" || (narrow && surface === "agent")
+                    ? "icon-button on"
+                    : "icon-button"
                 }
                 type="button"
                 aria-label="More"
@@ -1887,6 +1915,7 @@ export function App() {
                   type="button"
                   onClick={() => {
                     setSurface(null);
+                    setEditorLoadFailed(false);
                     setEditing({
                       discriminator: ready.session,
                       path: selected.path,
@@ -1905,43 +1934,83 @@ export function App() {
         <div className="layout">
           <div className="scroller" ref={scrollerRef}>
             <div className={appLanding ? "column app-landing-column" : "column"}>
-              {appToOpen !== null && ready && !editing ? (
-                <OpenSharedApp
-                  key={ready.session}
-                  session={ready.session}
-                  publicationId={appToOpen}
-                  leading={appLanding}
-                  title={appTitle ?? undefined}
-                  onBrowseFiles={
-                    appLanding && files.length > 0 ? () => setBrowsingFiles(true) : undefined
-                  }
-                />
-              ) : null}
-              {!appLanding && selected ? (
-                <h1 className="page-title">{fileTitle(selected.path)}</h1>
-              ) : null}
-              {!appLanding ? (
+              {appLanding && appToOpen !== null && ready && !editing ? (
                 <main className="content">
-                  <Suspense fallback={null}>{editor}</Suspense>
-                  {reads && ready && selected ? (
-                    <FileView
-                      // A new file starts with empty preview state, so one file's text
-                      // never renders under another file's kind.
-                      key={`${ready.session}\n${selected.path}\n${selected.blobSha256}`}
-                      session={ready.session}
-                      file={selected}
-                      files={files}
-                      onSelect={setSelectedPath}
-                      onStaleBlob={refreshStaleBlob}
-                    />
-                  ) : !editing && apps === "none" ? (
-                    <div className="empty-state">
-                      {EMPTY_PICTURE}
-                      <p>No files on this link yet. This page shows them as soon as they arrive.</p>
-                    </div>
-                  ) : null}
+                  <OpenSharedApp
+                    key={ready.session}
+                    session={ready.session}
+                    publicationId={appToOpen}
+                    leading
+                    title={appTitle ?? undefined}
+                    onBrowseFiles={files.length > 0 ? () => setBrowsingFiles(true) : undefined}
+                  />
                 </main>
-              ) : null}
+              ) : (
+                <>
+                  {appToOpen !== null && ready && !editing ? (
+                    <OpenSharedApp
+                      key={ready.session}
+                      session={ready.session}
+                      publicationId={appToOpen}
+                      title={appTitle ?? undefined}
+                    />
+                  ) : null}
+                  {selected ? <h1 className="page-title">{fileTitle(selected.path)}</h1> : null}
+                  <main className="content">
+                    {editing ? (
+                      <EditorLoadBoundary
+                        key={`${editing.discriminator}:${editing.path}`}
+                        onError={() => setEditorLoadFailed(true)}
+                        fallback={
+                          <div className="edit-notice" role="alert">
+                            <p>
+                              dohc could not open the editor. Reload the page to get the latest
+                              version.
+                            </p>
+                            <div className="handoff-buttons">
+                              <button
+                                className="handoff-button primary"
+                                type="button"
+                                onClick={() => location.reload()}
+                              >
+                                Reload
+                              </button>
+                              <button
+                                className="handoff-button secondary"
+                                type="button"
+                                onClick={stopEditing}
+                              >
+                                Done
+                              </button>
+                            </div>
+                          </div>
+                        }
+                      >
+                        <Suspense fallback={null}>{editor}</Suspense>
+                      </EditorLoadBoundary>
+                    ) : null}
+                    {reads && ready && selected ? (
+                      <FileView
+                        // A new file starts with empty preview state, so one file's text
+                        // never renders under another file's kind.
+                        key={`${ready.session}\n${selected.path}\n${selected.blobSha256}`}
+                        session={ready.session}
+                        file={selected}
+                        files={files}
+                        onSelect={setSelectedPath}
+                        onStaleBlob={refreshStaleBlob}
+                      />
+                    ) : !editing && apps === "none" ? (
+                      <div className="empty-state">
+                        {EMPTY_PICTURE}
+                        <p>
+                          No files on this link yet. This page shows them as soon as they arrive.
+                        </p>
+                      </div>
+                    ) : null}
+                  </main>
+                </>
+              )}
             </div>
           </div>
           {ready && (!editing || surface === "comments") ? (

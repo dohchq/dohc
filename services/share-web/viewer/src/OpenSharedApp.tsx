@@ -133,7 +133,16 @@ export function OpenSharedApp({
           {state === "opening" ? "Opening app" : "Open app"}
         </button>
         {leading && onBrowseFiles && (
-          <button className="handoff-button secondary" type="button" onClick={onBrowseFiles}>
+          <button
+            className="handoff-button secondary"
+            type="button"
+            onClick={() => {
+              active.current?.abort();
+              active.current = null;
+              setState("idle");
+              onBrowseFiles();
+            }}
+          >
             Browse shared files
           </button>
         )}
