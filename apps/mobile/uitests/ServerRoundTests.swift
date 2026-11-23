@@ -31,7 +31,7 @@ final class ServerRoundTests: XCTestCase {
   // A record's field reads "<field>, <value>", as a sibling of its record-field container; only a record's own screen
   // labels its values so.
   private func fieldShowing(_ app: XCUIApplication, _ text: String) -> XCUIElement {
-    app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", ", " + text, text)).firstMatch
+    app.descendants(matching: .any).matching(NSPredicate(format: "label ENDSWITH %@ OR value == %@", ", " + text, text)).firstMatch
   }
 
   private func say(_ line: String) {
@@ -394,26 +394,18 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertFalse(app.buttons["Discard"].exists, "\(what) should save, not fail or be refused")
   }
 
-  /// Reads the open record again from the server: back to its Collection, pull to refresh, and open the record again.
+  /// Reads the record from the server again. The phone keeps Collections in memory only, so a relaunch reads them afresh.
   @MainActor
-  private func reread(_ app: XCUIApplication, _ value: String) {
-    back(app)
-    let shows = NSPredicate(format: "label CONTAINS %@", value)
-    let list = app.scrollViews.containing(shows).firstMatch
-    XCTAssertTrue(list.waitForExistence(timeout: 10), "Back should show the Collection's records")
-    list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
-      .press(forDuration: 0.1, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)))
-    XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 30), "The Collection should read again within 30 s")
-    let row = app.buttons.matching(shows).firstMatch
-    XCTAssertTrue(row.waitForExistence(timeout: 30), "The records read again should show \(value)")
-    row.tap()
+  private func reread(_ app: XCUIApplication, _ name: String, _ value: String) -> XCUIElement {
+    app.terminate()
+    app.launch()
+    return openRecord(app, name, value)
   }
 
   // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1, and the record test9 reads, with DOHC_SERVER_RECORD in a text
   // field that a reversible edit changes. Adds a word to that field and waits for the change to save, which offers
-  // Undo; Undo puts the value back. Each save is checked by reading the record again. The phone keeps Undo in memory
-  // only, so Undo comes before the relaunch: the test then makes the change again, reads it back after a relaunch, and
-  // leaves the field as the seed had it.
+  // Undo; Undo puts the value back. Each save is checked by reading the record again after a relaunch, which also
+  // ends Undo. The test then makes the change again, reads it back, and leaves the field as the seed had it.
   @MainActor
   func test11_editsACollectionField() throws {
     let name = try need("DOHC_SERVER_COLLECTION")
@@ -438,33 +430,27 @@ final class ServerRoundTests: XCTestCase {
     settled(app, showing(changed), "The change")
     XCTAssertTrue(undo.exists, "A saved change should offer Undo")
     say("SERVER ROUND COLLECTION SAVED \(since(start)) ms")
-    reread(app, changed)
-    only(changed, "The server should have \(changed)")
-
-    // The record opened again still offers Undo for its last edit.
-    XCTAssertTrue(undo.waitForExistence(timeout: 10), "The record should still offer Undo")
     undo.tap()
     settled(app, showing(value), "Undo")
     only(value, "Undo should put \(value) back")
-    reread(app, value)
+    _ = reread(app, name, value)
     only(value, "The server should have \(value) back")
 
     edit(app, showing(value), typing: added)
     settled(app, showing(changed), "The change made again")
-    app.terminate()
-    app.launch()
-    let field = openRecord(app, name, changed)
+    let field = reread(app, name, changed)
+    only(changed, "The server should have \(changed)")
     // Back as the seed had it, for the next round.
     edit(app, field, deleting: added.count)
     settled(app, showing(value), "The seed's value")
-    reread(app, value)
+    _ = reread(app, name, value)
     only(value, "The server should have \(value) again")
   }
 
   // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1, and the Collection test9 reads, whose first table takes a new
   // record with its defaults, as a table made on the desktop does, holds fewer than 50 records, so a new one reads back
-  // on the first page, and shows first a text field an edit changes. Adds a record, names it, finds it after a pull to
-  // refresh, deletes it, and finds it gone after another.
+  // on the first page, and shows first a text field an edit changes. Adds a record, names it, finds it after a relaunch,
+  // deletes it, and finds it gone after another.
   @MainActor
   func test12_addsAndDeletesARecord() throws {
     let name = try need("DOHC_SERVER_COLLECTION")
@@ -489,8 +475,7 @@ final class ServerRoundTests: XCTestCase {
     let named = fieldShowing(app, added)
     XCTAssertTrue(named.waitForExistence(timeout: 10), "The field should show \(added) as it saves")
     settled(app, named, "Naming the new record")
-    reread(app, added)
-    XCTAssertTrue(named.waitForExistence(timeout: 10), "The server should have the new record named \(added)")
+    _ = reread(app, name, added)
 
     let delete = app.navigationBars.buttons["Delete record"]
     XCTAssertTrue(delete.waitForExistence(timeout: 10), "The record should offer Delete")
@@ -503,9 +488,11 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertTrue(list.waitForExistence(timeout: 60), "The deleted record's screen should leave within 60 s")
     let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", added)).firstMatch
     XCTAssertTrue(row.waitForNonExistence(timeout: 10), "The list should drop the deleted record")
-    list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
-      .press(forDuration: 0.1, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)))
-    XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 30), "The Collection should read again within 30 s")
+    app.terminate()
+    app.launch()
+    tab(app, "Home")
+    XCTAssertTrue(collection.waitForExistence(timeout: 30), "Home should list the Collection \(name)")
+    collection.tap()
     XCTAssertTrue(app.buttons.matching(seeded).firstMatch.waitForExistence(timeout: 30), "The records read again should show \(value)")
     XCTAssertFalse(row.exists, "The server should no longer have the record named \(added)")
   }
