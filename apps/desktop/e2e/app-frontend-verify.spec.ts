@@ -385,6 +385,34 @@ try {
         '<!doctype html><body><button id="disabled-btn" disabled>Disabled</button></body>',
     });
 
+    await writeApp("apps/fill-validation", {
+      "app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "index.html",
+        inputs: ["index.html", "app.js"],
+        packageMap: {},
+      }),
+      "index.html": [
+        "<!doctype html><body>",
+        '<input id="count" type="number" value="1" />',
+        '<select id="tier"><option value="standard">Standard</option><option value="vip">VIP</option></select>',
+        '<p id="picked">none</p>',
+        '<script type="module" src="./app.js"></script>',
+        "</body>",
+      ].join("\n"),
+      "app.js": `const count = document.getElementById("count");
+const tier = document.getElementById("tier");
+const picked = document.getElementById("picked");
+const update = () => {
+  if (!count.value || !tier.value) throw new Error("rejected_fill_fired_event");
+  picked.textContent = count.value + ":" + tier.value;
+};
+count.addEventListener("input", update);
+count.addEventListener("change", update);
+tier.addEventListener("input", update);
+tier.addEventListener("change", update);`,
+    });
+
     await writeApp("apps/prefill-click", {
       "app.publish.json": bookingManifest([WORKSHOP_BOOK_OP_ID], ["app.js"]),
       "index.html":
@@ -652,6 +680,41 @@ document.getElementById("q").addEventListener("input", () => {
       expect(disabledClick.diagnostics.some((d) => d.code === "step_not_clickable")).toBe(true);
     }
 
+    // Rejected number and select fills must fail with step_not_fillable without firing input/change handlers
+    const badNumberFill = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/fill-validation",
+      steps: [{ kind: "fill", selector: "#count", value: "abc" }],
+    });
+    expect(badNumberFill).toMatchObject({ kind: "frontendVerified", ok: false, stage: "steps" });
+    if (badNumberFill.kind === "frontendVerified") {
+      expect(badNumberFill.diagnostics.map((d) => d.code)).toEqual(["step_not_fillable"]);
+    }
+
+    const badSelectFill = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/fill-validation",
+      steps: [{ kind: "fill", selector: "#tier", value: "nonexistent" }],
+    });
+    expect(badSelectFill).toMatchObject({ kind: "frontendVerified", ok: false, stage: "steps" });
+    if (badSelectFill.kind === "frontendVerified") {
+      expect(badSelectFill.diagnostics.map((d) => d.code)).toEqual(["step_not_fillable"]);
+    }
+
+    const validFill = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/fill-validation",
+      steps: [
+        { kind: "fill", selector: "#count", value: "12" },
+        { kind: "fill", selector: "#tier", value: "vip" },
+        { kind: "waitFor", selector: "#picked", textIncludes: "12:vip" },
+      ],
+    });
+    expect(validFill).toMatchObject({ kind: "frontendVerified", ok: true, stage: "complete" });
+
     // Earlier-step in-flight backend call must not satisfy a later no-op click's expectBackend
     const prefillClick = await publish(desktop.page, {
       action: "verifyFrontend",
@@ -720,6 +783,9 @@ document.getElementById("q").addEventListener("input", () => {
       extVerify,
       rtcVerify,
       disabledClick,
+      badNumberFill,
+      badSelectFill,
+      validFill,
       prefillClick,
       longWaitFor,
       stalled,
