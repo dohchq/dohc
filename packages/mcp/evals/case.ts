@@ -1,5 +1,7 @@
 // The shape of an eval case and of what a run records. README.md says how to add a case.
 
+import type { DatasetBoundApp } from "@dohc/cli/dataset";
+
 /**
  * A JSON value the dohc app answers with, or a function of the request's arguments and the
  * workspace folder. A function that throws stands for a request whose answer never arrived.
@@ -12,6 +14,7 @@ export interface DatasetSnapshot {
   revision: number;
   revisionSha256: string;
   databaseBase64: string;
+  boundApps?: DatasetBoundApp[];
 }
 
 export interface FrontendVerificationRecord {

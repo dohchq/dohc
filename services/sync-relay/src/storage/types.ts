@@ -1269,7 +1269,7 @@ export interface SyncRelayStorage {
   ): import("./publications").LinkAppPublicationAuthority;
   readAppPublication(
     input: import("./publications").ReadAppPublicationInput,
-  ): import("./publications").AppPublicationRow;
+  ): ReturnType<typeof import("./publications").readAppPublication>;
   listAppPublications(
     input: import("./publications").ListAppPublicationsInput,
   ): ReturnType<typeof import("./publications").listAppPublications>;

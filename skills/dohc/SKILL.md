@@ -25,7 +25,7 @@ The desktop MCP server registers over 75 tools, most of them for sync recovery, 
 | Create, read, and edit Markdown documents | `dohc_create_document`, `dohc_read_document`, `dohc_edit_document` | `dohc document create\|read\|edit` |
 | Work with document Collections (`collection.yaml`) | `dohc_query_collection`, `dohc_create_record`, `dohc_set_record_fields` | `dohc document set-fields` |
 | Create, approve, migrate, and invoke transactional Collections (`dataset.json`) | `dohc_dataset` | `dohc dataset <verb> '<JSON>'` |
-| Scaffold, check, and publish web apps (`app.publish.json`) | `dohc_create_app`, `dohc_test_app`, `dohc_publish_app` | `dohc app <verb> '<JSON>'` |
+| Scaffold, stage, check, and publish web apps (`app.publish.json`) | `dohc_create_app`, `dohc_test_app`, `dohc_publish_app` | `dohc app <verb> '<JSON>'` |
 | Import CSV/JSON and query SQLite | `dohc_import_data`, `dohc_query_database` | (MCP only) |
 | Check and toggle Collection automations (`automations.yaml`) | `dohc_list_automations`, `dohc_switch_automation` | `dohc automation list\|switch` |
 | Post or reply in Groups and file comments | `dohc_list_groups`, `dohc_start_group_chat`, `dohc_start_file_chat`, `dohc_reply_to_chat` | `dohc chat groups\|post\|reply` |
@@ -41,15 +41,15 @@ The desktop MCP server registers over 75 tools, most of them for sync recovery, 
 
 Read the matching reference before authoring schemas, apps, or automations:
 
-- [references/collections-and-datasets.md](references/collections-and-datasets.md): `collection.yaml` syntax, `dataset.json` invariants, `dohc_dataset` action fields, custom `backend.ts` operations, schema migrations, and public relation choices.
-- [references/apps-and-publishing.md](references/apps-and-publishing.md): `app.publish.json` format, `dohc-app-channel` `MessagePort` protocol, local approval (`prepareLocal` -> `approve` -> `launchLocal`), and share-link publishing (`createLink` -> `prepare` -> `approve`).
+- [references/collections-and-datasets.md](references/collections-and-datasets.md): `collection.yaml` syntax, `dataset.json` (`formatVersion` 1 and 2) invariants, `dohc_dataset` action fields, custom `backend.ts` operations, schema migrations, bound-app drift checks, and public relation choices.
+- [references/apps-and-publishing.md](references/apps-and-publishing.md): `app.publish.json` format (optional `inputs`/`packageMap`, named `operations`, multi-Collection `datasets`), built-in `@dohc/app-kit`, `dohc-app-channel` protocol, unified `stage`/`approveStaged`, local approval, and share-link publishing.
 - [references/automations.md](references/automations.md): `automations.yaml` schema, triggers, steps, formulas vs. conditions, and message templates.
 
 ## Common pitfalls
 
 - **`dohc_dataset` path field name**: `action: "prepare"` takes `descriptorPath`. Collection-scoped actions (`describe`, `invoke`, `prepareSchemaChange`, `prepareMigration`, `askToApply`, `prepareRelationChoices`, `createForm`, `history`, `permissions`, `lifecycle`, `archive`, `restore`, `deletePreview`, `delete`, `export`, `upload`, `file`, etc.) take `datasetPath`. Workspace-scoped and preparation actions (`list`, `create`, `approve`, `discard`, `approveMigration`, `discardMigration`, `migrationPreviewPage`, `cancelInvoke`, and recovery actions) omit both. Always pass the path ending in `dataset.json` (for example `"tracker/dataset.json"`), never the folder alone and never `datasetId`.
 - **Approval arguments**: `dohc_dataset` `approve` takes `{ action: "approve", workspaceId, preparationId, revisionSha256 }` (read `revision.revisionSha256` from `prepare`; omit `datasetPath` and `sourceDigest`). `approveMigration` takes `{ action: "approveMigration", workspaceId, preparationId, revisionSha256, approvalDigest }` (omit `datasetPath`).
-- **Stale app bindings after migrations**: Whenever a Collection migrates to a new revision, update `revision` and `revisionSha256` in each bound app's `app.publish.json`, then run `prepareLocal`/`prepare` and `approve` again.
+- **Bound apps after Collection migrations**: Migration previews (`prepareSchemaChange`, `prepareMigration`, `prepareRelationChoices`, `prepareHistoryRestore`) and `dataset permissions` list connected local and share-link apps in `boundApps` with `status` (`"compatible"`, `"needs-refresh"`, or `"incompatible"`). Omit `revision` and `revisionSha256` in `app.publish.json` so `prepareLocal`, `prepare`, or `stage` pins the current approved revision automatically. If an older app still pins `revision` and `revisionSha256` in `app.publish.json`, remove those two lines once before re-preparing and approving it. When editing a local app and its Collections together, use `dohc_publish_app` `stage` -> `approveStaged`.
 - **File comments vs. Group posts**: To comment on a file, use `dohc_start_file_chat` (not `dohc_start_group_chat`). To check existing discussions on a file first, use `dohc_list_file_chats`.
 - **Versions**: `dohc_create_version` creates the copy and switches the workspace folder to it immediately. Edit files, run `dohc_compare_version`, then merge with `dohc_merge_version`.
-- **Secrets and sharing**: Never include owner-only read operations in a public share-link app's `operationIds`. Never read or copy secret files (`.env*`) into workspace apps or databases.
+- **Secrets and sharing**: Never include owner-only read operations in a public share-link app's `operations`/`operationIds`. Never read or copy secret files (`.env*`) into workspace apps or databases.

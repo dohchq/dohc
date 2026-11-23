@@ -824,7 +824,9 @@ export async function resolveRemoteDatasetArtifacts(
     (binding.revisionSha256 !== undefined &&
       approved.revision.revisionSha256 !== binding.revisionSha256)
   ) {
-    throw new Error("Collection rules changed. Reload the Collection and prepare the app again.");
+    throw new Error(
+      "Collection rules changed. Remove revision and revisionSha256 from app.publish.json (or update them) and prepare the app again.",
+    );
   }
   return { revision: approved.revision, schemaSql: approved.schemaSql };
 }

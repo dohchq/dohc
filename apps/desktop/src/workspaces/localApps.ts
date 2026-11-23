@@ -69,6 +69,10 @@ export function createLocalApps(
       kind(publicationId);
       return store.verificationPublication(publicationId);
     },
+    heldDatasetApp: (publicationId: string) => {
+      const value = store.heldRow(publicationId);
+      return value?.kind === "dataset" ? value : null;
+    },
     list: (appRoot: string) =>
       store
         .list(appRoot)

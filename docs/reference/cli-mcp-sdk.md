@@ -1667,7 +1667,7 @@ Set `targetRevisionSha256` to `entries[].schema.previousRevisionHash` from `hist
 - `targetRevisionSha256`: `SHA-256 hex`. Required.
 - `changedRevisionSha256`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs, boundApps?: { scope, publicationId, authorityRevision, appRoot, alias?, shareId?, grantId?, pinnedRevision, pinnedRevisionSha256, operationIds, status, reasons? }[], boundAppsIncomplete?: true }`.
 
 #### `dohc dataset permissions`
 
@@ -1679,7 +1679,7 @@ List app bindings and explicit data grants.
 - `after`: `string`
 - `limit`: `integer`
 
-Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here" } | { kind: "server", host } }`.
+Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here" } | { kind: "server", host }, boundApps?: { scope, publicationId, authorityRevision, appRoot, alias?, shareId?, grantId?, pinnedRevision, pinnedRevisionSha256, operationIds, status, reasons? }[], boundAppsIncomplete?: true }`.
 
 #### `dohc dataset setGrant`
 
@@ -1936,7 +1936,7 @@ Review the result, then approve it with approveMigration.
 - `fieldId`: `UUID`. Required.
 - `labelFieldId`: `UUID`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs, boundApps?: { scope, publicationId, authorityRevision, appRoot, alias?, shareId?, grantId?, pinnedRevision, pinnedRevisionSha256, operationIds, status, reasons? }[], boundAppsIncomplete?: true }`.
 
 #### `dohc dataset create`
 
@@ -1991,7 +1991,7 @@ Read more changed records with migrationPreviewPage. Review the result, then app
 - `expectedDatasetId`: `UUID`
 - `migrationPath`: `string | null`
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs, boundApps?: { scope, publicationId, authorityRevision, appRoot, alias?, shareId?, grantId?, pinnedRevision, pinnedRevisionSha256, operationIds, status, reasons? }[], boundAppsIncomplete?: true }`.
 
 #### `dohc dataset askToApply`
 
@@ -2031,7 +2031,7 @@ change.kind is one of renameCollection, renameTable, renameField, changeField, a
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `change`: `{ kind: "renameCollection", name: string } | { kind: "renameTable", tableId: UUID, name: string } | { kind: "renameField", tableId: UUID, fieldId: UUID, name: string } | { kind: "changeField", tableId: UUID, fieldId: UUID, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment" | "relation", required: boolean } | { kind: "addButton", tableId: UUID, name: string } | { kind: "addField", tableId: UUID, field: { name: string, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment", required: boolean, unique: boolean, default?: any JSON, options?: string[] } }`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs, boundApps?: { scope, publicationId, authorityRevision, appRoot, alias?, shareId?, grantId?, pinnedRevision, pinnedRevisionSha256, operationIds, status, reasons? }[], boundAppsIncomplete?: true }`.
 
 #### `dohc dataset approveMigration`
 

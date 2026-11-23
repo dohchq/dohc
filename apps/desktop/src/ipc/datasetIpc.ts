@@ -17,10 +17,20 @@ import {
   DatasetDeletePreview,
   DatasetDeleted,
   type DatasetListRefusal,
+  type DatasetPermissionsPage,
   type DatasetPlace,
 } from "@dohc/cli/dataset";
+import type { DatasetRevision } from "@dohc/security-contract/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import type { LocalDatasetAgent, LocalDatasetHost } from "../workspaces/localDatasetHost";
+import {
+  localDatasetStoreExists,
+  type LocalDatasetAgent,
+  type LocalDatasetHost,
+} from "../workspaces/localDatasetHost";
+import {
+  discoverDatasetBoundApps,
+  type ShareLinkPublication,
+} from "../workspaces/datasetBoundApps";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
@@ -51,7 +61,7 @@ import {
   type SourceCaptureStatus,
 } from "../workspaces/datasetSourceCapture";
 
-type Workspace = { workspaceId: string; shareView?: unknown };
+type Workspace = { workspaceId: string; rootPath?: string; shareView?: unknown };
 type SourceAdapter = Pick<
   VersionedLiveAdapter,
   | "captureSourceMetadata"
@@ -125,6 +135,11 @@ export function createDatasetHandler<
   automationName?(workspace: W, automationId: string): Promise<string | null>;
   /** Where a Collection is: only on this computer, or on the workspace's server. */
   collectionPlace?(workspace: W, datasetId: string, signal: AbortSignal): Promise<DatasetPlace>;
+  readShareLinkPublication?(
+    workspace: W,
+    publicationId: string,
+    signal: AbortSignal,
+  ): Promise<ShareLinkPublication | null>;
   collectionRulesChanged?(workspaceId: string, datasetId: string): void;
 }) {
   const migrations = new Map<
@@ -540,6 +555,72 @@ export function createDatasetHandler<
           }
           const data = await openData();
           current();
+          const discoverBoundApps = async (
+            datasetId: string,
+            targetRevision: DatasetRevision | (() => Promise<DatasetRevision>),
+            extra: {
+              previousRevision?: DatasetRevision;
+              initialPermissionsPage?: DatasetPermissionsPage;
+            } = {},
+          ) => {
+            const found = await discoverDatasetBoundApps({
+              datasetId,
+              targetRevision,
+              ...extra,
+              permissionsPage:
+                "permissions" in data && data.permissions
+                  ? async () =>
+                      data.permissions!({
+                        action: "permissions",
+                        workspaceId: input.workspaceId,
+                        datasetId,
+                        limit: 100,
+                      })
+                  : undefined,
+              historyRevision:
+                "historyRevision" in data && data.historyRevision
+                  ? async (revisionSha256) => data.historyRevision!({ datasetId, revisionSha256 })
+                  : undefined,
+              lookupLocalApps: async (ids) => {
+                if (
+                  operation.workspace.rootPath &&
+                  !(await localDatasetStoreExists(operation.workspace.rootPath))
+                )
+                  return new Map();
+                try {
+                  const apps = (await localHost()).apps;
+                  const map = new Map();
+                  for (const id of ids) {
+                    const row = apps?.heldDatasetApp?.(id);
+                    if (row) map.set(id, row);
+                  }
+                  return map;
+                } catch (error) {
+                  if (operation.signal.aborted) throw error;
+                  return null;
+                }
+              },
+              readShareLinkPublication: dependencies.readShareLinkPublication
+                ? (pubId, sig) =>
+                    dependencies.readShareLinkPublication!(operation.workspace, pubId, sig)
+                : undefined,
+              signal: operation.signal,
+            });
+            current();
+            return {
+              ...(found.boundApps.length > 0 ? { boundApps: found.boundApps } : {}),
+              ...(found.boundAppsIncomplete ? { boundAppsIncomplete: true as const } : {}),
+            };
+          };
+          const preparedWithBoundApps = async (prepared: LocalDatasetMigrationPreparation) => ({
+            kind: "migration-prepared" as const,
+            ...DatasetMigrationPreparation.parse({
+              ...prepared,
+              ...(await discoverBoundApps(prepared.revision.datasetId, prepared.revision, {
+                previousRevision: prepared.previousRevision,
+              })),
+            }),
+          });
           const credentialGeneration = dependencies.currentCredentialGeneration?.();
           const migrationAuthority = {
             workspaceId: input.workspaceId,
@@ -814,10 +895,7 @@ export function createDatasetHandler<
                 "The Collection changed while preparing this restore. Refresh History and review it again.",
               );
             }
-            return {
-              kind: "migration-prepared" as const,
-              ...DatasetMigrationPreparation.parse(prepared),
-            };
+            return await preparedWithBoundApps(prepared);
           }
           if (input.action === "history") {
             if (!("history" in data) || !data.history)
@@ -857,7 +935,20 @@ export function createDatasetHandler<
               operation.signal,
             );
             current();
-            return { kind: "permissions" as const, ...result, ...(place ? { place } : {}) };
+            const bound =
+              input.after === undefined
+                ? await discoverBoundApps(
+                    input.datasetId,
+                    async () => (await data.approvedArtifacts(input.datasetId)).revision,
+                    { initialPermissionsPage: result },
+                  )
+                : {};
+            return {
+              kind: "permissions" as const,
+              ...result,
+              ...(place ? { place } : {}),
+              ...bound,
+            };
           }
           if (input.action === "setGrant" || input.action === "removeGrant") {
             // A person reaches a Collection through the workspace's server.
@@ -1042,10 +1133,7 @@ export function createDatasetHandler<
                 "The Collection change differs from this review. Refresh the Collection and prepare it again.",
               );
             }
-            return {
-              kind: "migration-prepared" as const,
-              ...DatasetMigrationPreparation.parse(prepared),
-            };
+            return await preparedWithBoundApps(prepared);
           }
           if (input.action === "prepareMigration") {
             if (request.action !== "prepareMigration")
@@ -1056,10 +1144,7 @@ export function createDatasetHandler<
               migrationPath: input.migrationPath ?? null,
             });
             current();
-            return {
-              kind: "migration-prepared" as const,
-              ...DatasetMigrationPreparation.parse(prepared),
-            };
+            return await preparedWithBoundApps(prepared);
           }
           if (input.action === "askToApply") {
             if (request.action !== "askToApply")

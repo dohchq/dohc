@@ -28,28 +28,29 @@ Create records with `dohc_create_record` (pass `collectionPath`, `name`, optiona
 
 Every transactional Collection is defined by `dataset.json`, a SQLite schema (`schema.sql`), and operations source (`operations.js` or `backend.ts`).
 
-### Choosing between `create` and `prepare` + `approve`
+### Choosing between `create`, `prepare` + `approve`, and `app stage`
 
 - **Generated CRUD Collection**: Call `dohc_dataset` with `{ request: { action: "create", workspaceId, definition } }`, where `definition` is a `dataset.json` descriptor object (`formatVersion: 1` or `2`, `name`, `schemaPath`, `operationsPath`, `tables`, `operations`, plus `datasetId` for `formatVersion: 1`). dohc generates `dataset.json`, `schema.sql`, and `operations.js` and approves revision 1 in one step. Generated `create` operations take `input: { values: { "<fieldId>": value } }`; generated `edit` operations take `input: { id, expectedVersion, values: { "<fieldId>": value } }` (keyed by field UUIDs from `describe`).
 - **Custom business rules (`backend.ts` or `operations.js`)**: Write `dataset.json`, `schema.sql`, and `backend.ts` with `dohc_write_file`, then call `prepare` followed by `approve`.
+- **App + Collection created or changed together**: Use `dohc_publish_app` `stage` -> `approveStaged` to review and apply both in one approval.
 
-### Exact `dataset.json` rules (`formatVersion: 1`)
+### Exact `dataset.json` rules
 
-Every violation fails validation (for slug-based `formatVersion: 2` definitions where dohc derives UUIDs from SQL names, see `docs/reference/app-kit.md`):
+Every violation fails validation (for full slug-based `formatVersion: 2` details, see `docs/reference/app-kit.md`):
 
-- `formatVersion` is `1` for explicit-UUID definitions (or `2` for slug-based definitions).
-- `datasetId`, every `tableId`, every `fieldId`, and every `operationId` must be valid UUIDs and globally unique across the entire definition.
+- `formatVersion` may be `1` (explicit UUIDs for `datasetId`, `tableId`, `fieldId`, and `operationId`) or `2` (IDs may be omitted and are derived deterministically via UUIDv5 from `datasetId`, `sqlName`, `sqlColumn`, and operation `name`).
+- In `formatVersion: 1`, `datasetId`, every `tableId`, every `fieldId`, and every `operationId` must be valid UUIDs and globally unique across the entire definition.
 - `schemaPath` is workspace-relative and ends in `.sql`. `operationsPath` is workspace-relative and ends in `.js` or `.ts`.
-- Each table has `tableId`, `name`, `sqlName`, `primaryKey`, and `fields`. `primaryKey` must match a column field's `sqlColumn` whose `type` is `"text"` or `"number"`, with `required: true`, `unique: true`, and no `default`.
+- Each table has `name`, `sqlName`, `primaryKey`, and `fields` (plus `tableId` in v1). `primaryKey` must match a column field's `sqlColumn` whose `type` is `"text"` or `"number"`, with `required: true`, `unique: true`, and no `default`.
 - Optional `"generated": "record-id"` is valid only on the primary key field when `type: "text"`, `required: true`, `unique: true`, and no `default`.
-- Column field types: `text`, `number`, `checkbox`, `date`, `select`, `multi-select`, `url`, `attachment`, `relation` (plus `button` fields which have only `{ fieldId, name, type: "button" }`).
+- Column field types: `text`, `number`, `checkbox`, `date`, `select`, `multi-select`, `url`, `attachment`, `relation` (plus `button` fields which have only `{ fieldId?, name, type: "button" }`).
 - `select` and `multi-select` require non-empty unique `options: string[]`. Other field types must omit `options`.
-- Each operation has `operationId`, `name`, `label`, `tableId`, `kind` (`"read" | "create" | "edit" | "delete" | "action"`), `access` (`"link" | "helper" | "owner"`), `readOnly`, and `fieldIds`.
+- Each operation has `name`, `label`, `tableId` (or `table` in v2), `kind` (`"read" | "create" | "edit" | "delete" | "action"`), `access` (`"link" | "helper" | "owner"`), `readOnly`, and `fieldIds` (or `fields` in v2).
 - `readOnly` must be `true` when `kind === "read"`, and `false` when `kind` is `"create"`, `"edit"`, or `"delete"`. `"action"` may be either.
 - `kind === "delete"` must have `fieldIds: []`.
 - `kind === "create"` must NOT list a `generated: "record-id"` field in `fieldIds`.
 - `kind === "edit"` must NOT list the table's `primaryKey` field in `fieldIds`.
-- Every id in `fieldIds` must belong to a column field (not a button) on the operation's `tableId`.
+- Every field referenced by an operation must belong to a column field (not a button) on the operation's table.
 
 ### Custom operations (`backend.ts` / `operations.js`)
 
@@ -87,12 +88,13 @@ Pass `{ request: { action, ... } }` to `dohc_dataset`:
 | --- | --- | --- |
 | `list` | `workspaceId` | Returns approved Collections with `datasetPath`, `revision`, `revisionSha256`. |
 | `describe` | `workspaceId`, `datasetPath` | Returns tables, fields, operations, `revision`, `revisionSha256`. |
+| `permissions` | `workspaceId`, `datasetPath` | Returns collaborator grants, app bindings, and `boundApps` with drift `status` (`"compatible"`, `"needs-refresh"`, `"incompatible"`) and `reasons`. |
 | `create` | `workspaceId`, `definition` | Writes generated files and approves revision 1. |
 | `prepare` | `workspaceId`, `descriptorPath` | Captures edited `dataset.json`, `schemaPath`, `operationsPath`. Returns `preparationId` and `revision.revisionSha256`. |
 | `approve` | `workspaceId`, `preparationId`, `revisionSha256` | Approves a preparation. Do not pass `datasetPath` or `sourceDigest`. |
 | `invoke` | `workspaceId`, `datasetPath`, `operationId`, `revision`, `revisionSha256`, `input`, `idempotencyKey` | Runs an approved operation. Use a fresh `idempotencyKey` per intended write; reuse the same key and input to retry an uncertain write. |
-| `prepareSchemaChange` | `workspaceId`, `datasetPath`, `revision`, `revisionSha256`, `change` | `change.kind`: `addField`, `renameField`, `changeField`, `renameTable`, `renameCollection`, `addButton`. Required `addField` needs `default`. |
-| `prepareMigration` | `workspaceId`, `datasetPath`, `migrationPath` | Prepares edited source + SQL migration file for custom Collections. |
-| `prepareRelationChoices` | `workspaceId`, `datasetPath`, `revision`, `revisionSha256`, `tableId`, `fieldId`, `labelFieldId` | Adds a public read operation returning only key + `labelFieldId` for a relation field. |
+| `prepareSchemaChange` | `workspaceId`, `datasetPath`, `revision`, `revisionSha256`, `change` | `change.kind`: `addField`, `renameField`, `changeField`, `renameTable`, `renameCollection`, `addButton`. Required `addField` needs `default`. Returns `boundApps` when apps are connected. |
+| `prepareMigration` | `workspaceId`, `datasetPath`, `migrationPath` | Prepares edited source + SQL migration file for custom Collections. Pass `migrationPath: null` when only operations or metadata changed without schema SQL edits. Returns `boundApps` when apps are connected. |
+| `prepareRelationChoices` | `workspaceId`, `datasetPath`, `revision`, `revisionSha256`, `tableId`, `fieldId`, `labelFieldId` | Adds a public read operation returning only key + `labelFieldId` for a relation field. Returns `boundApps` when apps are connected. |
 | `approveMigration` | `workspaceId`, `preparationId`, `revisionSha256`, `approvalDigest` | Applies a prepared schema change, migration, or relation choices. Do not pass `datasetPath`. |
-| `createForm` | `workspaceId`, `datasetPath`, `revision`, `revisionSha256`, `tableId`, `createOperationId`, `appRoot`, `fieldIds` | Optional `title`, `relationChoices: [{ fieldId, operationId, labelFieldId }]`. |
+| `createForm` | `workspaceId`, `datasetPath`, `revision`, `revisionSha256`, `tableId`, `createOperationId`, `appRoot`, `fieldIds` | Optional `title`, `relationChoices: [{ fieldId, operationId, labelFieldId }]`. Generated `app.publish.json` omits `revision` and `revisionSha256` so re-preparing picks up later approved revisions automatically. |

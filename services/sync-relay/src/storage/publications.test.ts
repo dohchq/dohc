@@ -166,7 +166,14 @@ it("stores complete bytes atomically, persists withdrawal, and retains immutable
   expect(f.storage.readAppPublication(read)).toEqual({
     ...withdrawn,
     candidate: published.candidate,
+    linkCurrent: true,
   });
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_share_grants SET status='revoked', revoked_at_ms=50 WHERE grant_id='g'",
+    )
+    .run();
+  expect(f.storage.readAppPublication(read).linkCurrent).toBe(false);
 });
 
 it("authorizes link publication descriptors from the server session and exact bundle membership", () => {

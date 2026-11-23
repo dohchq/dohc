@@ -15,6 +15,8 @@ import {
 } from "./localDatasetHost";
 import { generateDatasetSources } from "./datasetGenerator";
 import { generateDatasetFormSources } from "./datasetFormGenerator";
+import { createDatasetHandler } from "../ipc/datasetIpc";
+import { DatasetResult } from "@dohc/cli/dataset";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { compileClosedApp } from "./closedAppCompiler";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./localAppLaunch";
@@ -1190,5 +1192,147 @@ describe("local app write attribution", () => {
     await expect(f.invoke("revoked")).rejects.toThrow(/approval changed/);
     expect(f.host.automations.next()).toBeNull();
     expect(f.host.history({ datasetId: id(1) }).entries).toEqual([]);
+  });
+
+  it("surfaces bound local forms in migration previews and re-approves unpinned forms without editing app.publish.json", async () => {
+    const f = await fixture();
+    const formManifest = JSON.parse(f.files.get("app/app.publish.json")!);
+    expect(formManifest.dataset.revision).toBeUndefined();
+    expect(formManifest.dataset.revisionSha256).toBeUndefined();
+    expect(f.host.apps.heldDatasetApp(f.published.publicationId)?.publicationId).toBe(
+      f.published.publicationId,
+    );
+
+    const abort = new AbortController();
+    const adapter = sourceAdapter(f.files);
+    const handler = createDatasetHandler({
+      flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }),
+      withWorkspaceOperation: async (_caller: string, _workspaceId, work) =>
+        work({
+          workspace: { workspaceId: "w", rootPath: f.workspaceRoot },
+          signal: abort.signal,
+          assertCurrent() {},
+        }),
+      hostForWorkspace: async () => f.host,
+      withAdapter: async (_ws, work) => work(adapter),
+      createSources: async (_ws, nextFiles) => {
+        for (const [path, content] of Object.entries(nextFiles)) f.files.set(path, content);
+      },
+    });
+
+    const beforePerms = DatasetResult.parse(
+      await handler("window", {
+        workspaceId: "w",
+        action: "permissions",
+        datasetPath: "data/dataset.json",
+      }),
+    );
+    expect(beforePerms).toMatchObject({
+      kind: "permissions",
+      boundApps: [
+        {
+          scope: "local",
+          publicationId: f.published.publicationId,
+          appRoot: "app",
+          status: "compatible",
+        },
+      ],
+    });
+
+    const prepared = DatasetResult.parse(
+      await handler("window", {
+        workspaceId: "w",
+        action: "prepareSchemaChange",
+        datasetPath: "data/dataset.json",
+        revision: f.revision.revision,
+        revisionSha256: f.revision.revisionSha256,
+        change: {
+          kind: "addField",
+          tableId: id(2),
+          field: {
+            name: "Notes",
+            type: "text",
+            required: false,
+            unique: false,
+          },
+        },
+      }),
+    );
+    expect(prepared).toMatchObject({
+      kind: "migration-prepared",
+      boundApps: [
+        {
+          scope: "local",
+          publicationId: f.published.publicationId,
+          appRoot: "app",
+          status: "needs-refresh",
+        },
+      ],
+    });
+    if (prepared.kind !== "migration-prepared") throw new Error("Expected migration-prepared");
+
+    const migrated = DatasetResult.parse(
+      await handler("window", {
+        workspaceId: "w",
+        action: "approveMigration",
+        preparationId: prepared.preparationId,
+        revisionSha256: prepared.revision.revisionSha256,
+        approvalDigest: prepared.approvalDigest,
+      }),
+    );
+    expect(migrated.kind).toBe("migrated");
+
+    const stalePerms = DatasetResult.parse(
+      await handler("window", {
+        workspaceId: "w",
+        action: "permissions",
+        datasetPath: "data/dataset.json",
+      }),
+    );
+    expect(stalePerms).toMatchObject({
+      kind: "permissions",
+      boundApps: [
+        {
+          scope: "local",
+          publicationId: f.published.publicationId,
+          appRoot: "app",
+          status: "needs-refresh",
+        },
+      ],
+    });
+
+    const rePrepared = await prepareLocalAppPublication(
+      { workspaceId: "w", appRoot: "app" },
+      {
+        deferredWrites: [],
+        adapter,
+        compile: compileClosedApp,
+        signal: abort.signal,
+        assertCurrent() {},
+        async resolveDatasetRevision(binding) {
+          return f.host.approvedArtifacts(binding.datasetId).revision;
+        },
+      },
+    );
+    const refreshed = await f.host.apps.activate(rePrepared, abort.signal);
+    const afterPerms = DatasetResult.parse(
+      await handler("window", {
+        workspaceId: "w",
+        action: "permissions",
+        datasetPath: "data/dataset.json",
+      }),
+    );
+    expect(afterPerms).toMatchObject({
+      kind: "permissions",
+      boundApps: [
+        {
+          scope: "local",
+          publicationId: refreshed.publicationId,
+          appRoot: "app",
+          pinnedRevision: 2,
+          status: "compatible",
+        },
+      ],
+    });
   });
 });

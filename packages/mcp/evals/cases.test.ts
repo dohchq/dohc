@@ -587,6 +587,11 @@ describe("eval cases", () => {
     expect(renamedChecks.some((c) => !c.pass && c.name.includes("3 seeded client records"))).toBe(
       true,
     );
+    expect(
+      renamedChecks.some(
+        (c) => !c.pass && c.detail?.includes("remove revision and revisionSha256"),
+      ),
+    ).toBe(true);
 
     const form = EVERYDAY_CASES.find((c) => c.id === "everyday-connected-form-relations")!;
     const formSolved = await replay(form, "solution");
@@ -606,7 +611,10 @@ describe("eval cases", () => {
     expect(formChecks.some((c) => !c.pass && c.detail?.includes("not in approved"))).toBe(true);
 
     const staleManifest = JSON.parse(formSolved.run.files["apps/signup-form/app.publish.json"]!);
+    expect(staleManifest.dataset.revision).toBeUndefined();
+    expect(staleManifest.dataset.revisionSha256).toBeUndefined();
     staleManifest.dataset.revision = 1;
+    staleManifest.dataset.revisionSha256 = "0".repeat(64);
     const staleFormRun: RunRecord = {
       ...formSolved.run,
       files: {
@@ -1173,6 +1181,98 @@ describe("eval cases", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+
+    const drift = EVERYDAY_CASES.find((c) => c.id === "everyday-bound-app-migration-drift")!;
+    const driftSolved = await replay(drift, "solution");
+    const leakedForm = JSON.parse(driftSolved.run.files["apps/pledge-form/app.publish.json"]!);
+    leakedForm.dataset.operationIds = [
+      "f5000000-0000-4000-8000-000000000006",
+      "f5000000-0000-4000-8000-000000000007",
+    ];
+    const leakedDriftChecks = await grade(
+      drift.expect,
+      {
+        ...driftSolved.run,
+        files: {
+          ...driftSolved.run.files,
+          "apps/pledge-form/app.publish.json": JSON.stringify(leakedForm, null, 2),
+        },
+      },
+      drift.gradeRun,
+    );
+    expect(leakedDriftChecks.some((c) => !c.pass && c.detail?.includes("leaked owner-only"))).toBe(
+      true,
+    );
+
+    const onlyOneAppApproved = await replay(drift, "solution", async (callTool) => {
+      const described = (await callTool("dohc_dataset", {
+        request: {
+          action: "describe",
+          workspaceId: "ws-everyday",
+          datasetPath: "fundraiser/dataset.json",
+        },
+      })) as { dataset: { revision: number; revisionSha256: string } };
+      const prep = (await callTool("dohc_dataset", {
+        request: {
+          action: "prepareSchemaChange",
+          workspaceId: "ws-everyday",
+          datasetPath: "fundraiser/dataset.json",
+          revision: described.dataset.revision,
+          revisionSha256: described.dataset.revisionSha256,
+          change: {
+            kind: "addField",
+            tableId: "f5000000-0000-4000-8000-000000000002",
+            field: { name: "Notes", type: "text", required: false, unique: false },
+          },
+        },
+      })) as {
+        preparationId: string;
+        approvalDigest: string;
+        revision: { revisionSha256: string };
+      };
+      await callTool("dohc_dataset", {
+        request: {
+          action: "approveMigration",
+          workspaceId: "ws-everyday",
+          preparationId: prep.preparationId,
+          revisionSha256: prep.revision.revisionSha256,
+          approvalDigest: prep.approvalDigest,
+        },
+      });
+      const localPrep = (await callTool("dohc_publish_app", {
+        request: { action: "prepareLocal", workspaceId: "ws-everyday", appRoot: "apps/organizer" },
+      })) as { approvalId: string; candidateDigest: string };
+      await callTool("dohc_publish_app", {
+        request: {
+          action: "approve",
+          workspaceId: "ws-everyday",
+          approvalId: localPrep.approvalId,
+          candidateDigest: localPrep.candidateDigest,
+        },
+      });
+      await callTool("dohc_publish_app", {
+        request: {
+          action: "prepare",
+          workspaceId: "ws-everyday",
+          appRoot: "apps/pledge-form",
+          shareId: "share_pledge",
+          grantId: "grant_pledge",
+        },
+      });
+      await callTool("dohc_dataset", {
+        request: {
+          action: "permissions",
+          workspaceId: "ws-everyday",
+          datasetPath: "fundraiser/dataset.json",
+        },
+      });
+    });
+    const oneAppChecks = await grade(drift.expect, onlyOneAppApproved.run, drift.gradeRun);
+    expect(
+      oneAppChecks.some(
+        (c) => !c.pass && c.name.includes("apps/pledge-form share-link publication is approved"),
+      ),
+    ).toBe(true);
   });
 
   it("keeps public skill automations.yaml examples valid under parseAutomationsFile", async () => {

@@ -619,4 +619,95 @@ describe("CollectionMigrationReviewDialog", () => {
     expect(await screen.findByText("This review expired. Prepare the change again.")).toBeTruthy();
     expect(onApprove).not.toHaveBeenCalled();
   });
+  it("lists affected connected apps with plain-English reasons and shows incomplete notice even when empty", () => {
+    const withApps = prep();
+    withApps.boundApps = [
+      {
+        scope: "local",
+        publicationId: "a".repeat(64),
+        authorityRevision: 1,
+        appRoot: "apps/dashboard",
+        alias: "fundraiser",
+        pinnedRevision: 1,
+        pinnedRevisionSha256: "1".repeat(64),
+        operationIds: [id(12)],
+        status: "needs-refresh",
+      },
+      {
+        scope: "link",
+        publicationId: "b".repeat(64),
+        authorityRevision: 2,
+        appRoot: "apps/public-signup",
+        shareId: "share-1",
+        grantId: "grant-1",
+        pinnedRevision: 1,
+        pinnedRevisionSha256: "1".repeat(64),
+        operationIds: [id(12)],
+        status: "incompatible",
+        reasons: ['Action "Read" would expose new fields (Receipt) on share links.'],
+      },
+    ];
+    setup({ initialPreparation: withApps });
+    const section = screen.getByRole("region", { name: "Connected apps" });
+    expect(section.textContent).toContain("Connected apps (2)");
+    expect(section.textContent).toContain("apps/dashboard");
+    expect(section.textContent).toContain("Local");
+    expect(section.textContent).toContain("Needs approval again");
+    expect(section.textContent).toContain("apps/public-signup");
+    expect(section.textContent).toContain("Share link");
+    expect(section.textContent).toContain("Needs update");
+    expect(section.textContent).toContain(
+      'Action "Read" would expose new fields (Receipt) on share links.',
+    );
+
+    cleanup();
+    const incompleteOnly = prep();
+    incompleteOnly.boundAppsIncomplete = true;
+    setup({ initialPreparation: incompleteOnly });
+    expect(screen.getByText(/Some connected apps could not be checked right now/)).toBeTruthy();
+  });
+  it("does not claim apps keep working on a rename-only change when pre-existing stale apps exist", () => {
+    const staleRename = prep();
+    staleRename.revision.definition = structuredClone(staleRename.previousRevision.definition);
+    staleRename.revision.definition.name = "Renamed Fundraiser";
+    staleRename.revision.schemaSha256 = staleRename.previousRevision.schemaSha256;
+    staleRename.revision.operationsSha256 = staleRename.previousRevision.operationsSha256;
+    staleRename.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 2,
+      afterRows: 2,
+      changedRows: 0,
+      deletedRows: 0,
+      beforeValues: {},
+      afterValues: {},
+      clearedValues: {},
+    };
+    staleRename.boundApps = [
+      {
+        scope: "local",
+        publicationId: "c".repeat(64),
+        authorityRevision: 1,
+        appRoot: "apps/stale",
+        pinnedRevision: 1,
+        pinnedRevisionSha256: "1".repeat(64),
+        operationIds: [id(12)],
+        status: "needs-refresh",
+      },
+    ];
+    setup({ initialPreparation: staleRename, generatedChange: true });
+    expect(screen.queryByText(/Existing shared apps keep working/)).toBeNull();
+    expect(screen.getByText(/connected apps listed above still need review/)).toBeTruthy();
+
+    cleanup();
+    const incompleteRename = structuredClone(staleRename);
+    delete incompleteRename.boundApps;
+    incompleteRename.boundAppsIncomplete = true;
+    setup({ initialPreparation: incompleteRename, generatedChange: true });
+    expect(screen.queryByText(/Existing shared apps keep working/)).toBeNull();
+    expect(
+      screen.getByText(
+        /keeps current access rules, though some connected apps could not be checked right now/,
+      ),
+    ).toBeTruthy();
+  });
 });

@@ -639,6 +639,23 @@ export const DatasetPreparation = z
   .object({ preparationId: identity, revision, sourceDigest: sha256 })
   .strict();
 export type DatasetPreparation = z.infer<typeof DatasetPreparation>;
+export const DatasetBoundApp = z
+  .object({
+    scope: z.enum(["local", "link"]),
+    publicationId: sha256,
+    authorityRevision: z.number().int().positive(),
+    appRoot: z.string().min(1).max(1024),
+    alias: z.string().min(1).max(64).optional(),
+    shareId: z.string().min(1).max(200).optional(),
+    grantId: z.string().min(1).max(200).optional(),
+    pinnedRevision: z.number().int().positive(),
+    pinnedRevisionSha256: sha256,
+    operationIds: z.array(identity).min(1).max(128),
+    status: z.enum(["compatible", "needs-refresh", "incompatible"]),
+    reasons: z.array(z.string().min(1).max(512)).max(16).optional(),
+  })
+  .strict();
+export type DatasetBoundApp = z.infer<typeof DatasetBoundApp>;
 export const DatasetMigrationPreparation = z
   .object({
     preparationId: identity,
@@ -655,6 +672,8 @@ export const DatasetMigrationPreparation = z
       .min(1)
       .max(256 * 1024),
     expiresAtMs: z.number().int().positive(),
+    boundApps: z.array(DatasetBoundApp).max(100).optional(),
+    boundAppsIncomplete: z.literal(true).optional(),
   })
   .strict();
 export type DatasetMigrationPreparation = z.infer<typeof DatasetMigrationPreparation>;
@@ -857,6 +876,8 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetPermissionsPage.extend({
     kind: z.literal("permissions"),
     place: DatasetPlace.optional(),
+    boundApps: z.array(DatasetBoundApp).max(100).optional(),
+    boundAppsIncomplete: z.literal(true).optional(),
   }).strict(),
   z.object({ kind: z.literal("grant-updated") }).strict(),
   z

@@ -16,21 +16,28 @@ import {
   datasetColumnFields,
   datasetDefinitionDigestContent,
   datasetRevisionDigestContent,
+  datasetRevisionsPreserveAccess,
   describeApprovedDataset,
   parseAppDatasetReference,
+  parseDatasetAlias,
   parseDatasetDefinition,
   resolveAppDatasetReferenceBinding,
+  type AppDatasetCapability,
+  type AppDatasetReference,
   type DatasetDefinition,
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
-import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
+import {
+  assessAppDatasetDrift,
+  resolveAppDatasetCapability,
+} from "@dohc/security-contract/dataset-authorization";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { automationDefinitionList } from "@dohc/workspace-contracts/automation-controls";
 import { fileVersionError } from "@dohc/workspace-contracts/file-version";
 import { WorkspaceSearchInput, WorkspaceSearchResult } from "@dohc/workspace-contracts/retrieval";
 import { validateUserMaterializePath, validateUserReadPath } from "@dohc/workspace-core/paths";
 import { realRelativeInRoot, resolvedAreaRefusal } from "@dohc/workspace-core/realPath";
-import type { DatasetRequest, DatasetSchemaChange } from "@dohc/cli/dataset";
+import type { DatasetBoundApp, DatasetRequest, DatasetSchemaChange } from "@dohc/cli/dataset";
 import type {
   AppFrontendBrokerCall,
   AppFrontendDiagnostic,
@@ -253,6 +260,7 @@ function generateSchemaSql(definition: DatasetDefinition): string {
 interface StoredDataset {
   datasetPath: string;
   revision: DatasetRevision;
+  history: Map<string, DatasetRevision>;
   schemaSql: string;
   operationSource: string;
   compiledSource: string;
@@ -299,6 +307,7 @@ interface PendingAppApproval {
   sourceRevision: string;
   pinnedManifest?: ParsedEvalManifest;
   pinnedFiles?: Record<string, string>;
+  capabilities: AppDatasetCapability[];
   shareId?: string;
   grantId?: string;
   access?: "view" | "comment" | "edit";
@@ -312,6 +321,8 @@ interface StoredAppPublication {
   pinnedManifest?: ParsedEvalManifest;
   pinnedFiles?: Record<string, string>;
   local: boolean;
+  active: boolean;
+  capabilities: AppDatasetCapability[];
   shareId?: string;
   grantId?: string;
 }
@@ -330,7 +341,26 @@ export interface EverydayDesktopSeed {
     string,
     Array<{ id: string; path: string; values: Record<string, unknown> }>
   >;
-  localPublications?: Array<{ appRoot: string; publicationId: string; sourceRevision: string }>;
+  links?: Array<{
+    shareId: string;
+    grantId: string;
+    paths: string[];
+    access: "view" | "comment" | "edit";
+  }>;
+  localPublications?: Array<{
+    appRoot: string;
+    publicationId: string;
+    sourceRevision: string;
+    capabilities?: AppDatasetCapability[];
+  }>;
+  shareLinkPublications?: Array<{
+    appRoot: string;
+    publicationId: string;
+    sourceRevision: string;
+    shareId: string;
+    grantId: string;
+    capabilities?: AppDatasetCapability[];
+  }>;
 }
 
 function buildDatasetRevision(input: {
@@ -465,13 +495,25 @@ async function parseAppManifestForEval(root: string, appRootInput: string) {
   if (versionErr) throw new Error(versionErr);
   const unknownKey = Object.keys(row).find(
     (key) =>
-      !["version", "entryPath", "inputs", "packageMap", "collection", "dataset"].includes(key),
+      ![
+        "version",
+        "entryPath",
+        "inputs",
+        "packageMap",
+        "collection",
+        "dataset",
+        "datasets",
+      ].includes(key),
   );
   if (unknownKey) {
     throw new Error(`${manifestRel} has an unknown key: ${unknownKey}.`);
   }
-  if (Object.hasOwn(row, "collection") && Object.hasOwn(row, "dataset")) {
-    throw new Error(`${manifestRel} must hold at most one of collection or dataset.`);
+  const bindingCount =
+    Number(Object.hasOwn(row, "collection")) +
+    Number(Object.hasOwn(row, "dataset")) +
+    Number(Object.hasOwn(row, "datasets"));
+  if (bindingCount > 1) {
+    throw new Error(`${manifestRel} must hold at most one of collection, dataset, or datasets.`);
   }
   const resolveRel = async (value: unknown, field: string): Promise<string> => {
     if (typeof value !== "string" || !value)
@@ -488,27 +530,43 @@ async function parseAppManifestForEval(root: string, appRootInput: string) {
     return (await resolveWorkspacePath(root, resolved, "read")).normalized;
   };
   const entryPath = await resolveRel(row.entryPath, "entryPath");
-  if (!Array.isArray(row.inputs) || row.inputs.length === 0) {
-    throw new Error(`${manifestRel} must list at least one input.`);
-  }
-  if (row.inputs.length >= MAX_MANIFEST_INPUTS) {
-    throw new Error(`${manifestRel} lists more than ${MAX_MANIFEST_INPUTS - 1} inputs.`);
-  }
   const inputs: string[] = [];
-  for (const entry of row.inputs) {
-    inputs.push(await resolveRel(entry, "input"));
+  if (Object.hasOwn(row, "inputs")) {
+    if (!Array.isArray(row.inputs) || row.inputs.length === 0) {
+      throw new Error(`${manifestRel} must list at least one input.`);
+    }
+    if (row.inputs.length >= MAX_MANIFEST_INPUTS) {
+      throw new Error(`${manifestRel} lists more than ${MAX_MANIFEST_INPUTS - 1} inputs.`);
+    }
+    for (const entry of row.inputs) {
+      inputs.push(await resolveRel(entry, "input"));
+    }
+    const repeated = inputs.find((path, index) => inputs.indexOf(path) !== index);
+    if (repeated) {
+      throw new Error(`${manifestRel} lists ${repeated} twice.`);
+    }
+    if (!inputs.includes(entryPath)) {
+      throw new Error(`${manifestRel} must list its entryPath ${entryPath} among its inputs.`);
+    }
+  } else {
+    const allFiles = await listWorkspaceTextFiles(root);
+    const prefix = `${appRoot}/`;
+    for (const path of allFiles.keys()) {
+      if (!path.startsWith(prefix)) continue;
+      const base = posix.basename(path);
+      if (base === "app.publish.json" || base === "dohc.json" || base === "dataset.json") continue;
+      inputs.push(path);
+    }
+    inputs.sort();
+    if (!inputs.includes(entryPath)) {
+      throw new Error(`${manifestRel} entryPath ${entryPath} does not exist.`);
+    }
   }
-  const repeated = inputs.find((path, index) => inputs.indexOf(path) !== index);
-  if (repeated) {
-    throw new Error(`${manifestRel} lists ${repeated} twice.`);
-  }
-  if (!inputs.includes(entryPath)) {
-    throw new Error(`${manifestRel} must list its entryPath ${entryPath} among its inputs.`);
-  }
-  if (!row.packageMap || typeof row.packageMap !== "object" || Array.isArray(row.packageMap)) {
+  const packageMap = Object.hasOwn(row, "packageMap") ? row.packageMap : {};
+  if (!packageMap || typeof packageMap !== "object" || Array.isArray(packageMap)) {
     throw new Error(`${manifestRel} has a packageMap that is not an object.`);
   }
-  for (const [name, target] of Object.entries(row.packageMap)) {
+  for (const [name, target] of Object.entries(packageMap)) {
     if (name.length > 256) {
       throw new Error(`${manifestRel} maps a package name longer than 256 characters.`);
     }
@@ -541,8 +599,31 @@ async function parseAppManifestForEval(root: string, appRootInput: string) {
       schemaSha256: "0".repeat(64),
     });
   }
-  const dataset = Object.hasOwn(row, "dataset") ? parseAppDatasetReference(row.dataset) : undefined;
-  return { appRoot, entryPath, inputs, dataset };
+  const datasets: Array<{ alias?: string; reference: AppDatasetReference }> = [];
+  if (Object.hasOwn(row, "dataset")) {
+    datasets.push({ reference: parseAppDatasetReference(row.dataset) });
+  } else if (Object.hasOwn(row, "datasets")) {
+    if (!Array.isArray(row.datasets) || row.datasets.length === 0 || row.datasets.length > 16) {
+      throw new Error(`${manifestRel} datasets must hold 1 to 16 entries.`);
+    }
+    for (const item of row.datasets) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error(`${manifestRel} datasets entries must be objects.`);
+      }
+      const entry = item as Record<string, unknown>;
+      const alias = Object.hasOwn(entry, "alias") ? parseDatasetAlias(entry.alias) : undefined;
+      const refInput = Object.hasOwn(entry, "dataset") ? entry.dataset : entry;
+      const { alias: _ignored, ...rest } =
+        refInput && typeof refInput === "object" && !Array.isArray(refInput)
+          ? (refInput as Record<string, unknown>)
+          : {};
+      datasets.push({
+        ...(alias !== undefined ? { alias } : {}),
+        reference: parseAppDatasetReference(rest),
+      });
+    }
+  }
+  return { appRoot, entryPath, inputs, datasets };
 }
 
 async function listWorkspaceTextFiles(root: string): Promise<Map<string, string>> {
@@ -580,10 +661,12 @@ export async function createEverydayDesktop(
   const onDatasetSnapshot = options.onDatasetSnapshot;
   const onFrontendVerified = options.onFrontendVerified;
   function reportSnapshot(stored: StoredDataset): void {
+    const { boundApps } = computeBoundApps(stored, stored.revision);
     onDatasetSnapshot?.(stored.datasetPath, {
       revision: stored.revision.revision,
       revisionSha256: stored.revision.revisionSha256,
       databaseBase64: Buffer.from(stored.database).toString("base64"),
+      ...(boundApps.length > 0 ? { boundApps } : {}),
     });
   }
   let datasetQueue: Promise<void> = Promise.resolve();
@@ -622,6 +705,16 @@ export async function createEverydayDesktop(
       rows.map((row) => ({ ...row, values: { ...row.values } })),
     );
   }
+  for (const link of seed.links ?? []) {
+    links.set(`${link.shareId}:${link.grantId}`, {
+      shareId: link.shareId,
+      grantId: link.grantId,
+      operationId: `seed-${link.shareId}`,
+      paths: [...link.paths],
+      access: link.access,
+      url: `https://share.dohc.local/s/${link.shareId}#secret_${link.grantId}`,
+    });
+  }
   for (const pub of seed.localPublications ?? []) {
     appPublications.set(pub.publicationId, {
       publicationId: pub.publicationId,
@@ -629,6 +722,21 @@ export async function createEverydayDesktop(
       authorityRevision: 1,
       sourceRevision: pub.sourceRevision,
       local: true,
+      active: true,
+      capabilities: pub.capabilities ? structuredClone(pub.capabilities) : [],
+    });
+  }
+  for (const pub of seed.shareLinkPublications ?? []) {
+    appPublications.set(pub.publicationId, {
+      publicationId: pub.publicationId,
+      appRoot: pub.appRoot,
+      authorityRevision: 1,
+      sourceRevision: pub.sourceRevision,
+      local: false,
+      active: true,
+      shareId: pub.shareId,
+      grantId: pub.grantId,
+      capabilities: pub.capabilities ? structuredClone(pub.capabilities) : [],
     });
   }
 
@@ -714,6 +822,7 @@ export async function createEverydayDesktop(
     const stored: StoredDataset = {
       datasetPath: spec.datasetPath,
       revision: rev,
+      history: new Map([[rev.revisionSha256, rev]]),
       schemaSql,
       operationSource,
       compiledSource,
@@ -728,6 +837,84 @@ export async function createEverydayDesktop(
 
   for (const spec of seed.datasets ?? []) {
     await loadSeededDataset(spec);
+  }
+
+  type AppPermissionEntry = {
+    kind: "app";
+    principal: string;
+    current: boolean;
+    metadata: {
+      kind: "dataset";
+      datasetId: string;
+      revision: number;
+      revisionSha256: string;
+      operationIds: string[];
+      createFields?: Array<{ operationId: string; fieldIds: string[] }>;
+      linkReads?: Array<{ operationId: string; fieldIds: string[] }>;
+    };
+  };
+  function computeBoundApps(
+    stored: StoredDataset,
+    targetRevision: DatasetRevision,
+    previousRevision?: DatasetRevision,
+  ): { permissions: AppPermissionEntry[]; boundApps: DatasetBoundApp[] } {
+    const permissions: AppPermissionEntry[] = [];
+    const boundApps: DatasetBoundApp[] = [];
+    const preservesAccess =
+      previousRevision === undefined ||
+      datasetRevisionsPreserveAccess(previousRevision, targetRevision);
+    for (const pub of appPublications.values()) {
+      if (!pub.active) continue;
+      const cap = pub.capabilities.find((entry) => entry.datasetId === stored.revision.datasetId);
+      if (!cap) continue;
+      const pinned = stored.history.get(cap.revisionSha256);
+      const bindingCurrent =
+        (cap.revision === stored.revision.revision &&
+          cap.revisionSha256 === stored.revision.revisionSha256) ||
+        (pinned !== undefined && datasetRevisionsPreserveAccess(pinned, stored.revision));
+      permissions.push({
+        kind: "app",
+        principal: pub.publicationId,
+        current: bindingCurrent,
+        metadata: {
+          kind: "dataset",
+          datasetId: cap.datasetId,
+          revision: cap.revision,
+          revisionSha256: cap.revisionSha256,
+          operationIds: [...cap.operationIds],
+          ...(cap.createFields ? { createFields: structuredClone(cap.createFields) } : {}),
+          ...(cap.linkReads ? { linkReads: structuredClone(cap.linkReads) } : {}),
+        },
+      });
+      const scope = pub.local ? ("local" as const) : ("link" as const);
+      const drift = assessAppDatasetDrift(cap, targetRevision, {
+        scope,
+        bindingCurrent,
+        preservesAccess,
+        pinnedRevision: pinned,
+      });
+      boundApps.push({
+        scope,
+        publicationId: pub.publicationId,
+        authorityRevision: pub.authorityRevision,
+        appRoot: pub.appRoot,
+        ...(cap.alias !== undefined ? { alias: cap.alias } : {}),
+        ...(pub.shareId !== undefined ? { shareId: pub.shareId } : {}),
+        ...(pub.grantId !== undefined ? { grantId: pub.grantId } : {}),
+        pinnedRevision: cap.revision,
+        pinnedRevisionSha256: cap.revisionSha256,
+        operationIds: [...cap.operationIds],
+        status: drift.status,
+        ...(drift.reasons.length > 0 ? { reasons: drift.reasons } : {}),
+      });
+    }
+    boundApps.sort(
+      (a, b) =>
+        a.scope.localeCompare(b.scope) ||
+        a.appRoot.localeCompare(b.appRoot) ||
+        a.publicationId.localeCompare(b.publicationId),
+    );
+    return { permissions, boundApps };
   }
 
   function assertWorkspace(requested: string): void {
@@ -849,6 +1036,18 @@ export async function createEverydayDesktop(
         }
         return { kind: "description", dataset: describeStored(stored) };
       }
+      case "permissions": {
+        const datasetPath = (await resolveWorkspacePath(root, req.datasetPath, "read")).normalized;
+        const stored = datasetsByPath.get(datasetPath);
+        if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
+        const { permissions, boundApps } = computeBoundApps(stored, stored.revision);
+        return {
+          kind: "permissions",
+          permissions,
+          nextCursor: null,
+          ...(boundApps.length > 0 ? { boundApps } : {}),
+        };
+      }
       case "create": {
         const definition = parseDatasetDefinition(req.definition);
         const schemaPath = (await resolveWorkspacePath(root, definition.schemaPath, "write"))
@@ -893,6 +1092,7 @@ export async function createEverydayDesktop(
         const stored: StoredDataset = {
           datasetPath,
           revision: rev,
+          history: new Map([[rev.revisionSha256, rev]]),
           schemaSql,
           operationSource,
           compiledSource,
@@ -973,9 +1173,13 @@ export async function createEverydayDesktop(
           );
         }
         preparations.delete(req.preparationId);
+        const existing = datasetsByPath.get(prep.datasetPath);
+        const history = existing ? new Map(existing.history) : new Map<string, DatasetRevision>();
+        history.set(prep.revision.revisionSha256, prep.revision);
         const stored: StoredDataset = {
           datasetPath: prep.datasetPath,
           revision: prep.revision,
+          history,
           schemaSql: prep.schemaSql,
           operationSource: prep.operationSource,
           compiledSource: prep.compiledSource,
@@ -1046,6 +1250,7 @@ export async function createEverydayDesktop(
               : {}),
           },
         });
+        const { boundApps } = computeBoundApps(stored, nextRevision, stored.revision);
         return {
           kind: "migration-prepared",
           preparationId,
@@ -1070,6 +1275,7 @@ export async function createEverydayDesktop(
           operationSource,
           migrationSql,
           expiresAtMs: Date.now() + 600_000,
+          ...(boundApps.length > 0 ? { boundApps } : {}),
         };
       }
       case "prepareRelationChoices": {
@@ -1152,6 +1358,7 @@ export async function createEverydayDesktop(
             [nextDefinition.operationsPath]: operationSource + "\n",
           },
         });
+        const { boundApps } = computeBoundApps(stored, nextRevision, stored.revision);
         return {
           kind: "migration-prepared",
           preparationId,
@@ -1173,6 +1380,7 @@ export async function createEverydayDesktop(
           operationSource,
           migrationSql,
           expiresAtMs: Date.now() + 600_000,
+          ...(boundApps.length > 0 ? { boundApps } : {}),
         };
       }
       case "prepareMigration": {
@@ -1184,14 +1392,6 @@ export async function createEverydayDesktop(
         if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
         const rawDef = await readWorkspaceText(root, datasetPath);
         if (rawDef === null) throw new Error(`Descriptor missing: ${datasetPath}.`);
-        let migrationSql = "";
-        if (migrationPath !== null) {
-          const text = await readWorkspaceText(root, migrationPath);
-          if (text === null || !text.trim()) {
-            throw new Error(`Migration SQL file missing or empty: ${migrationPath}.`);
-          }
-          migrationSql = text;
-        }
         let parsedDef: unknown;
         try {
           parsedDef = JSON.parse(rawDef);
@@ -1206,6 +1406,16 @@ export async function createEverydayDesktop(
           (await readWorkspaceText(root, nextDefinition.schemaPath)) ?? stored.schemaSql;
         const operationSource =
           (await readWorkspaceText(root, nextDefinition.operationsPath)) ?? stored.operationSource;
+        let migrationSql = "SELECT 1;";
+        if (migrationPath !== null) {
+          const text = await readWorkspaceText(root, migrationPath);
+          if (text === null || !text.trim()) {
+            throw new Error(`Migration SQL file missing or empty: ${migrationPath}.`);
+          }
+          migrationSql = text;
+        } else if (sha256(schemaSql) !== stored.revision.schemaSha256) {
+          throw new Error("The schema changed. Provide a migrationPath SQL file.");
+        }
         const compiledSource = await compileDatasetOperations(
           operationSource,
           nextDefinition.operationsPath,
@@ -1241,6 +1451,7 @@ export async function createEverydayDesktop(
           approvalDigest,
           changeSha256,
         });
+        const { boundApps } = computeBoundApps(stored, nextRevision, stored.revision);
         return {
           kind: "migration-prepared",
           preparationId,
@@ -1265,6 +1476,7 @@ export async function createEverydayDesktop(
           operationSource,
           migrationSql,
           expiresAtMs: Date.now() + 600_000,
+          ...(boundApps.length > 0 ? { boundApps } : {}),
         };
       }
       case "approveMigration": {
@@ -1285,6 +1497,7 @@ export async function createEverydayDesktop(
           }
         }
         stored.revision = pending.nextRevision;
+        stored.history.set(pending.nextRevision.revisionSha256, pending.nextRevision);
         stored.schemaSql = pending.schemaSql;
         stored.operationSource = pending.operationSource;
         stored.compiledSource = pending.compiledSource;
@@ -1346,8 +1559,6 @@ export async function createEverydayDesktop(
           dataset: {
             kind: "dataset",
             datasetPath,
-            revision: stored.revision.revision,
-            revisionSha256: stored.revision.revisionSha256,
             operationIds: opIds,
           },
         };
@@ -1571,23 +1782,26 @@ export async function createEverydayDesktop(
             }
           : { kind: "candidate" as const, appRoot: manifest.appRoot, sourceRevision };
         let approvedOpNames: Set<string> | undefined;
-        if (manifest.dataset) {
+        if (manifest.datasets.length > 0) {
           try {
-            const datasetPath = (
-              await resolveWorkspacePath(root, manifest.dataset.datasetPath, "read")
-            ).normalized;
-            const stored = datasetsByPath.get(datasetPath);
-            if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
-            const cap = resolveAppDatasetCapability(
-              resolveAppDatasetReferenceBinding(
-                manifest.dataset,
-                stored.revision.datasetId,
+            approvedOpNames = new Set<string>();
+            for (const entry of manifest.datasets) {
+              const datasetPath = (
+                await resolveWorkspacePath(root, entry.reference.datasetPath, "read")
+              ).normalized;
+              const stored = datasetsByPath.get(datasetPath);
+              if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
+              const cap = resolveAppDatasetCapability(
+                resolveAppDatasetReferenceBinding(
+                  entry.reference,
+                  stored.revision.datasetId,
+                  stored.revision,
+                ),
                 stored.revision,
-              ),
-              stored.revision,
-              () => stored.generated,
-            );
-            approvedOpNames = new Set(cap.operations.map((op) => op.name));
+                () => stored.generated,
+              );
+              for (const op of cap.operations) approvedOpNames.add(op.name);
+            }
           } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             onFrontendVerified?.(manifest.appRoot, {
@@ -1770,7 +1984,7 @@ export async function createEverydayDesktop(
       case "listLocal": {
         const appRoot = (await resolveWorkspacePath(root, req.appRoot, "read")).normalized;
         const publications = [...appPublications.values()]
-          .filter((p) => p.local && p.appRoot === appRoot)
+          .filter((p) => p.local && p.active && p.appRoot === appRoot)
           .map((p) => ({
             publicationId: p.publicationId,
             authorityRevision: p.authorityRevision,
@@ -1780,6 +1994,39 @@ export async function createEverydayDesktop(
             active: true,
           }));
         return { kind: "localListed", publications };
+      }
+      case "list": {
+        const appRoot = (await resolveWorkspacePath(root, req.appRoot, "read")).normalized;
+        const publications = [...appPublications.values()]
+          .filter((p) => !p.local && p.appRoot === appRoot)
+          .map((p) => ({
+            publicationId: p.publicationId,
+            authorityRevision: p.authorityRevision,
+            manifestUnavailable: false,
+            shareId: p.shareId ?? "",
+            grantId: p.grantId ?? "",
+            appRoot: p.appRoot,
+            sourceRevision: p.sourceRevision,
+            active: p.active,
+            linkCurrent: links.has(`${p.shareId}:${p.grantId}`),
+            collectionCapability: null,
+            datasetCapability: p.capabilities[0] ?? null,
+          }));
+        return { kind: "listed", publications, nextCursor: null };
+      }
+      case "withdraw": {
+        const pub = appPublications.get(req.publicationId);
+        if (!pub) throw new Error(`Unknown publicationId: ${req.publicationId}.`);
+        if (pub.authorityRevision !== req.expectedAuthorityRevision) {
+          throw new Error("Publication authority changed.");
+        }
+        pub.active = false;
+        pub.authorityRevision += 1;
+        return {
+          kind: "withdrawn",
+          publicationId: pub.publicationId,
+          authorityRevision: pub.authorityRevision,
+        };
       }
       case "checkLocal": {
         const manifest = await parseAppManifestForEval(root, req.appRoot);
@@ -1794,11 +2041,16 @@ export async function createEverydayDesktop(
       case "prepareLocal":
       case "prepare": {
         const manifest = await parseAppManifestForEval(root, req.appRoot);
-        const capabilities = [];
-        if (manifest.dataset) {
-          const datasetPath = (
-            await resolveWorkspacePath(root, manifest.dataset.datasetPath, "read")
-          ).normalized;
+        const isLocal = req.action === "prepareLocal";
+        if (!isLocal && manifest.datasets.length > 1) {
+          throw new Error(
+            "Shared links support at most one Collection. Use a single Collection or approve this app on your device.",
+          );
+        }
+        const capabilities: AppDatasetCapability[] = [];
+        for (const { alias, reference } of manifest.datasets) {
+          const datasetPath = (await resolveWorkspacePath(root, reference.datasetPath, "read"))
+            .normalized;
           const stored = datasetsByPath.get(datasetPath);
           if (!stored) {
             throw new Error(
@@ -1806,12 +2058,16 @@ export async function createEverydayDesktop(
             );
           }
           const binding = resolveAppDatasetReferenceBinding(
-            manifest.dataset,
+            reference,
             stored.revision.datasetId,
             stored.revision,
           );
           capabilities.push(
-            resolveAppDatasetCapability(binding, stored.revision, () => stored.generated),
+            resolveAppDatasetCapability(
+              alias === undefined ? binding : { ...binding, alias },
+              stored.revision,
+              () => stored.generated,
+            ),
           );
         }
         const snap = await readEvalAppSourceSnapshot(root, manifest);
@@ -1820,7 +2076,6 @@ export async function createEverydayDesktop(
         const candidateDigest = sha256(
           `${manifest.appRoot}:${sourceRevision}:${JSON.stringify(capabilities)}`,
         );
-        const isLocal = req.action === "prepareLocal";
         let audience:
           | {
               shareId: string;
@@ -1847,6 +2102,7 @@ export async function createEverydayDesktop(
           sourceRevision,
           pinnedManifest: manifest,
           pinnedFiles: snap.files,
+          capabilities,
           ...(audience
             ? { shareId: audience.shareId, grantId: audience.grantId, access: audience.access }
             : {}),
@@ -1872,6 +2128,11 @@ export async function createEverydayDesktop(
           throw new Error("candidateDigest does not match prepared app.");
         }
         appApprovals.delete(req.approvalId);
+        if (pending.local) {
+          for (const existing of appPublications.values()) {
+            if (existing.local && existing.appRoot === pending.appRoot) existing.active = false;
+          }
+        }
         const publicationId = sha256(`pub:${pending.appRoot}:${pending.candidateDigest}`);
         const existing = appPublications.get(publicationId);
         const authorityRevision = (existing?.authorityRevision ?? 0) + 1;
@@ -1883,9 +2144,16 @@ export async function createEverydayDesktop(
           ...(pending.pinnedManifest ? { pinnedManifest: pending.pinnedManifest } : {}),
           ...(pending.pinnedFiles ? { pinnedFiles: pending.pinnedFiles } : {}),
           local: pending.local,
+          active: true,
+          capabilities: structuredClone(pending.capabilities),
           ...(pending.shareId ? { shareId: pending.shareId } : {}),
           ...(pending.grantId ? { grantId: pending.grantId } : {}),
         });
+        for (const cap of pending.capabilities) {
+          for (const ds of datasetsByPath.values()) {
+            if (ds.revision.datasetId === cap.datasetId) reportSnapshot(ds);
+          }
+        }
         return pending.local
           ? {
               kind: "published",
