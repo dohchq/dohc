@@ -13,7 +13,6 @@
     "./hash": "./src/hash.ts",
     "./html": "./src/html.ts",
     "./records": "./src/records.ts",
-    "./mergeMarkdown": "./src/mergeMarkdown.ts",
     "./versionCompare": "./src/versionCompare.ts",
     "./app-source": "./src/appSource.ts"
   },

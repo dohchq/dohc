@@ -283,7 +283,7 @@ export function collectionChangeRows(input: {
   next: DatasetRevision;
   operationSource: string;
   migrationSql: string;
-  migrationPath: string;
+  migrationPath: string | null;
   counts?: Counts;
 }): Draft[] {
   const rows = collectionDefinitionRows(
@@ -313,7 +313,7 @@ export function collectionChangeRows(input: {
     rows.push({ kind: "code-changed", key: "code" });
   if (input.previous.schemaSha256 !== input.next.schemaSha256 && !structural)
     rows.push({ kind: "schema-changed", key: "schema", file: input.next.definition.schemaPath });
-  if (!RUNS_NOTHING.test(input.migrationSql)) {
+  if (input.migrationPath !== null && !RUNS_NOTHING.test(input.migrationSql)) {
     const records = input.counts
       ? input.counts.reduce((total, table) => total + table.beforeRows, 0)
       : null;
@@ -358,7 +358,7 @@ export const CollectionChangeProposal = z
     datasetId: z.string().min(1).max(128),
     name,
     datasetPath: filePath,
-    migrationPath: filePath,
+    migrationPath: filePath.nullable(),
     base: z.object({ revision: z.number().int().positive(), revisionSha256: sha256 }).strict(),
     revisionSha256: sha256,
     changeSha256: sha256,
@@ -375,7 +375,7 @@ export function collectionChangeProposal(
     DatasetMigrationPreparation,
     "previousRevision" | "revision" | "operationSource" | "migrationSql" | "candidate"
   >,
-  input: { datasetPath: string; migrationPath: string; note: string | null },
+  input: { datasetPath: string; migrationPath: string | null; note: string | null },
 ): CollectionChangeProposal {
   const { previousRevision: previous, revision: next } = prepared;
   const rows = collectionChangeRows({
@@ -392,7 +392,9 @@ export function collectionChangeProposal(
     previous.definitionSha256 === next.definitionSha256 ? null : input.datasetPath,
     previous.schemaSha256 === next.schemaSha256 ? null : next.definition.schemaPath,
     previous.operationsSha256 === next.operationsSha256 ? null : next.definition.operationsPath,
-    RUNS_NOTHING.test(prepared.migrationSql) ? null : input.migrationPath,
+    input.migrationPath === null || RUNS_NOTHING.test(prepared.migrationSql)
+      ? null
+      : input.migrationPath,
   ].filter((path) => path !== null);
   return CollectionChangeProposal.parse({
     kind: "dohc-collection-change",

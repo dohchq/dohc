@@ -48,6 +48,7 @@ function getManager(
     trackedOrigins: new Set([trackedOrigin]),
     deleteFilter,
     captureTransaction: (transaction) => transaction.meta.get("addToHistory") !== false,
+    ignoreRemoteMapChanges: true,
   });
   managers.set(doc, manager);
   return manager;

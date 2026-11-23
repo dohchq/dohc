@@ -66,14 +66,14 @@ it("states that deletion cannot be undone on this host, and keeps what recovery 
 it("names the folder Delete keeps and sends people to Files", async () => {
   const view = render(<CollectionDeleteDialog {...props()} />);
   await screen.findByText("form");
-  expect(screen.getByText(/^This deletes every table/).textContent).toBe(
-    "This deletes every table, record, upload, history entry, and app grant in this Collection. The Projects/Fundraiser folder and its files stay. Find them in Files.",
+  expect(screen.getByText(/^Deletes every table/).textContent).toBe(
+    "Deletes every table, record, upload, history entry, and app grant in this Collection. The Projects/Fundraiser folder and its files stay in Files.",
   );
   view.unmount();
   render(<CollectionDeleteDialog {...props()} folder="" />);
   await screen.findByText("form");
-  expect(screen.getByText(/^This deletes every table/).textContent).toMatch(
-    /in this Collection\. Its files stay\. Find them in Files\.$/,
+  expect(screen.getByText(/^Deletes every table/).textContent).toMatch(
+    /in this Collection\. Its files stay in Files\.$/,
   );
 });
 it("shows apps, saves optional recovery, pages with one review token, and requires acknowledgement", async () => {
@@ -137,7 +137,7 @@ it("reports stale deletion and leaves the dialog open", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
   await waitFor(() =>
     expect(p.onError).toHaveBeenCalledWith(
-      "Could not delete this Collection.",
+      "dohc could not delete this Collection.",
       expect.any(Error),
       expect.any(Function),
     ),
@@ -192,7 +192,7 @@ it("shows Try again in the list's place when a page fails, and reads that page a
   fireEvent.click(screen.getByRole("button", { name: "More apps" }));
   expect(await screen.findByTestId("collection-delete-apps-retry")).toBeTruthy();
   expect(p.onError).toHaveBeenCalledWith(
-    "Could not read the deletion preview.",
+    "dohc could not read the deletion preview.",
     expect.any(Error),
     expect.any(Function),
   );

@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { FolderSheets } from "./FolderSheets";
+import { isCloudSyncFolderCancelled } from "../ipc/errorWords";
 import { ipcErrorMessage } from "./ipcError";
 import { FieldError, GhostButton, PrimaryButton } from "./ui/controls";
 import { PathLine } from "./ui/PathLine";
@@ -134,7 +135,7 @@ export function NewWorkspaceCard(props: { onWorkspaceReady: (workspace: Workspac
       });
       props.onWorkspaceReady(workspace);
     } catch (cause) {
-      setError(ipcErrorMessage(cause));
+      if (!isCloudSyncFolderCancelled(cause)) setError(ipcErrorMessage(cause));
       setCreating(false);
     }
   }
@@ -160,10 +161,17 @@ export function NewWorkspaceCard(props: { onWorkspaceReady: (workspace: Workspac
             the tab's bottom edge matches the card fill to hide the seam. The
             tab stops at 60% of the card, so a long name scrolls inside it and
             two sheets always show. */}
-        <label className="relative z-3 -mb-px flex h-8 w-fit max-w-[60%] cursor-text items-center gap-2 rounded-t-lg border border-line border-b-panel bg-panel pl-4 pr-3.5">
+        <label
+          className={`relative z-3 -mb-px flex h-8 w-fit min-w-36 max-w-[60%] cursor-text items-center gap-2 rounded-t-lg border border-b-panel bg-panel pl-4 pr-3.5 transition-colors ${
+            nameError
+              ? "border-t-danger border-x-danger"
+              : "border-t-line border-x-line focus-within:border-t-ink focus-within:border-x-ink"
+          }`}
+        >
           <input
             ref={nameField}
             id="new-workspace-name"
+            data-framed-input=""
             aria-label="Workspace name"
             value={folderName}
             onChange={(event) => {
@@ -264,7 +272,7 @@ export async function openExistingFolder(
     if (!picked) return null;
     return await bridge().attachWorkspaceFolder({ rootPath: picked });
   } catch (error) {
-    refused(error, picked);
+    if (!isCloudSyncFolderCancelled(error)) refused(error, picked);
     return null;
   }
 }

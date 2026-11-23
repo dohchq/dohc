@@ -1,7 +1,8 @@
 import { ChevronRight, Plus, RotateCcw, X } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode, type RefObject } from "react";
 import { SwitchControl } from "../settings/SettingRow";
 import { GhostButton, IconButton } from "../ui/controls";
+import { useDismiss } from "../ui/useDismiss";
 import { GROUP_HUES, DEFAULT_DISPLAY, type GraphDisplay, type GraphShape } from "./GraphCanvas";
 import { DEFAULT_FORCES, type GraphForces } from "./graphLayout";
 
@@ -143,9 +144,18 @@ export function GraphSettings(props: {
   value: GraphSettingsValue;
   counts: Readonly<Record<GraphKind, number>>;
   local: boolean;
+  triggerRef?: RefObject<HTMLButtonElement | null>;
   onChange: (value: GraphSettingsValue) => void;
   onClose: () => void;
 }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const fallbackTriggerRef = useRef<HTMLButtonElement | null>(null);
+  useDismiss({
+    open: true,
+    container: containerRef,
+    trigger: props.triggerRef ?? fallbackTriggerRef,
+    onClose: props.onClose,
+  });
   const [open, setOpen] = useState({ filters: true, groups: false, display: false, forces: false });
   const { value, onChange } = props;
   const toggle = (key: keyof typeof open) =>
@@ -165,6 +175,7 @@ export function GraphSettings(props: {
 
   return (
     <div
+      ref={containerRef}
       data-testid="graph-settings"
       role="group"
       aria-label="Graph settings"
@@ -244,8 +255,8 @@ export function GraphSettings(props: {
             <div key={group.id} className="flex h-8 items-center gap-2 px-2 pl-6">
               <button
                 type="button"
-                aria-label={`Group colour, ${hue}. Change colour`}
-                title="Change colour"
+                aria-label={`Group color, ${hue}. Change color`}
+                title="Change color"
                 onClick={() => setGroup(group.id, { hue: (group.hue + 1) % GROUP_HUES.length })}
                 className={`grid size-6 shrink-0 place-items-center rounded-md hover:bg-hover ${HUE_TEXT[hue]}`}
               >

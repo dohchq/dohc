@@ -111,7 +111,7 @@ describe("ChatsView hybrid feed", () => {
     const onNavCommand = vi.fn();
     renderView(vi.fn(), vi.fn(), { onNavCommand });
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
-    await screen.findByText("No posts in your groups yet.");
+    await screen.findByText("No posts in your Groups yet.");
     await userEvent.click(screen.getByTestId("chats-feed-empty-groups"));
     expect(onNavCommand).toHaveBeenLastCalledWith({ level: "channels" });
     expect(await screen.findByTestId("chats-channel")).toBeTruthy();
@@ -120,7 +120,7 @@ describe("ChatsView hybrid feed", () => {
   it("centers an empty Home in the height below its header", async () => {
     renderView();
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
-    const empty = (await screen.findByText("No posts in your groups yet.")).parentElement!;
+    const empty = (await screen.findByText("No posts in your Groups yet.")).parentElement!;
     const list = empty.closest<HTMLElement>('[role="list"]')!;
     for (let box = empty; box !== list; box = box.parentElement!) {
       expect(box.className.split(" ")).toContain("flex-1");
@@ -203,7 +203,7 @@ describe("ChatsView hybrid feed", () => {
     );
     expect(screen.getByTestId("chats-feed-item").textContent).not.toContain("My agent");
     await userEvent.click(within(screen.getByTestId("chats-feed-item")).getByText("Done"));
-    expect((await screen.findByTestId("chats-thread-eyebrow")).textContent).toBe("Nova · thread");
+    expect((await screen.findByTestId("chats-thread-eyebrow")).textContent).toBe("Nova · Thread");
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Nova");
     expect(screen.getByTestId("chats-channel-agent-mark").firstElementChild!.className).toContain(
@@ -1012,7 +1012,7 @@ describe("ChatsView hybrid feed", () => {
     expect(poll.getAttribute("aria-label")).toBe("Unanswered");
     expect(poll.getAttribute("title")).toBe("Unanswered");
     expect(screen.getByTestId("chats-post-reaction-pill").textContent).toContain("1");
-    expect(screen.getByTestId("chats-post-agent-badge").textContent).toBe("agent");
+    expect(screen.getByTestId("chats-post-agent-badge").textContent).toBe("Agent");
     expect(cards[1]?.getAttribute("data-author-kind")).toBe("agent");
     expect(screen.getAllByTestId("chats-post-author")[1]?.textContent).toBe("You");
     expect(bridgeMock.listChannelThreads).toHaveBeenCalledTimes(1);

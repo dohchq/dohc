@@ -36,9 +36,11 @@ import {
   Code,
   Highlighter,
   Italic,
+  RemoveFormatting,
   Strikethrough,
   Underline as UnderlineIcon,
 } from "lucide-react";
+import { shortcutTitle, type ShortcutId } from "../../shortcuts/shortcutRegistry";
 import type * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 import { caretSelectionRender, resolveCaretUser } from "../collab/caretPresence";
@@ -78,18 +80,19 @@ import {
   type LinkMenuState,
 } from "./linkMenu";
 import type { WorkspaceLinkTarget } from "../linkActivation";
-import { makeWikilinkPlugin, type AutocompleteState, type WikilinkFile } from "./wikilinkPlugin";
+import {
+  makeWikilinkPlugin,
+  wikilinkPluginKey,
+  type AutocompleteState,
+  type WikilinkFile,
+} from "./wikilinkPlugin";
 import { makeMentionPlugin } from "./mentionTrigger";
 import { WikilinkPicker, type WikilinkPickerState } from "./WikilinkPicker";
 import { makeEmojiPlugin } from "./emojiTrigger";
 import { EmojiPicker, type EmojiPickerState } from "./EmojiPicker";
 import {
-  FLOATING_MENU_MAX_HEIGHT,
-  resolveFloatingMenuPosition,
-  type FloatingMenuPlacement,
-} from "./floatingMenuPosition";
-import {
   CLOSED_SLASH_COMMAND_STATE,
+  dismissSlashCommand,
   makeSlashCommandPlugin,
   runSlashCommand as runSlashCommandCore,
   slashCommandStatesEqual,
@@ -147,7 +150,9 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
 export type MarkdownEditorHandle = {
-  focus: (position?: "start" | "end") => void;
+  focus: (position?: "start" | "end" | number) => void;
+  /** Where the caret is while this editor has focus. */
+  caret: () => number | null;
   getMarkdown: () => string;
   replaceMarkdown: (markdown: string) => void;
   insertTypedText: (text: string, caret: number) => void;
@@ -262,7 +267,12 @@ const PLACEHOLDER_EXTENSION = Placeholder.configure({
   // empty paragraph in the document stamps "Type '/' for commands" at once.
   showOnlyCurrent: true,
   placeholder: ({ node }) => {
-    if (node.type.name === "tableCell" || node.type.name === "tableHeader") {
+    if (
+      node.type.name === "tableCell" ||
+      node.type.name === "tableHeader" ||
+      node.type.name === "codeBlock" ||
+      node.type.spec.code === true
+    ) {
       return "";
     }
     if (node.type.name === "heading") return "Heading";
@@ -300,15 +310,20 @@ function markdownContent(markdown: string): JSONContent | string {
 
 function BubbleButton(props: {
   label: string;
+  shortcut?: ShortcutId;
   active?: boolean;
   onClick: () => void;
   children: ReactNode;
 }) {
+  const title = props.shortcut
+    ? `${props.label} (${shortcutTitle(props.shortcut, window.dohcDesktop?.platform)})`
+    : props.label;
   return (
     <button
       type="button"
       aria-label={props.label}
-      title={props.label}
+      aria-pressed={Boolean(props.active)}
+      title={title}
       className={`dohc-bubble-menu__button${props.active ? " is-active" : ""}`}
       onClick={props.onClick}
     >
@@ -333,6 +348,7 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       <span className="dohc-bubble-menu__divider" aria-hidden="true" />
       <BubbleButton
         label="Bold"
+        shortcut="editor-bold"
         active={active.bold}
         onClick={() => editor.chain().focus().toggleBold().run()}
       >
@@ -340,6 +356,7 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       </BubbleButton>
       <BubbleButton
         label="Italic"
+        shortcut="editor-italic"
         active={active.italic}
         onClick={() => editor.chain().focus().toggleItalic().run()}
       >
@@ -347,6 +364,7 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       </BubbleButton>
       <BubbleButton
         label="Underline"
+        shortcut="editor-underline"
         active={active.underline}
         onClick={() => editor.chain().focus().toggleUnderline().run()}
       >
@@ -354,6 +372,7 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       </BubbleButton>
       <BubbleButton
         label="Strikethrough"
+        shortcut="editor-strike"
         active={active.strike}
         onClick={() => editor.chain().focus().toggleStrike().run()}
       >
@@ -361,6 +380,7 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       </BubbleButton>
       <BubbleButton
         label="Code"
+        shortcut="editor-code"
         active={active.code}
         onClick={() => editor.chain().focus().toggleCode().run()}
       >
@@ -368,12 +388,19 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       </BubbleButton>
       <BubbleButton
         label="Highlight"
+        shortcut="editor-highlight"
         active={active.highlight}
         onClick={() => editor.chain().focus().toggleMark("highlight").run()}
       >
         <Highlighter size={14} aria-hidden />
       </BubbleButton>
       <LinkBubbleButton editor={editor} active={active.link} onOpen={props.onOpenLink} />
+      <BubbleButton
+        label="Clear formatting"
+        onClick={() => editor.chain().focus().unsetAllMarks().run()}
+      >
+        <RemoveFormatting size={14} aria-hidden />
+      </BubbleButton>
     </>
   );
 }
@@ -480,13 +507,36 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const [chromeReady, setChromeReady] = useState(false);
     const [linkMenuState, setLinkMenuState] = useState<LinkMenuState>(CLOSED_LINK_MENU_STATE);
     const linkMenuStateRef = useRef<LinkMenuState>(linkMenuState);
+    linkMenuStateRef.current = linkMenuState;
     const containerRef = useRef<HTMLDivElement>(null);
     const slashStateRef = useRef<SlashCommandState>(slashState);
     const blockMenuStateRef = useRef<BlockMenuState>(blockMenuState);
     const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {});
     const blockInsertRef = useRef<(pos: number) => void>(() => {});
     const blockMenuOpenRef = useRef<(pos: number, handle: HTMLElement) => void>(() => {});
-    const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
+    const knownFilesMap = useMemo(() => {
+      const map = new Map<string, WikilinkFile>();
+      const stemCounts = new Map<string, number>();
+      for (const file of knownFiles) {
+        const stem = file.path
+          .replace(/\.(md|markdown)$/i, "")
+          .split("/")
+          .pop();
+        if (stem) stemCounts.set(stem, (stemCounts.get(stem) ?? 0) + 1);
+      }
+      for (const file of knownFiles) {
+        map.set(file.path, file);
+        const withoutExt = file.path.replace(/\.(md|markdown)$/i, "");
+        map.set(withoutExt, file);
+        const stem = withoutExt.split("/").pop();
+        if (stem && stemCounts.get(stem) === 1 && !map.has(stem)) {
+          map.set(stem, file);
+        }
+      }
+      return map;
+    }, [knownFiles]);
+    const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(knownFilesMap);
+    knownFilesRef.current = knownFilesMap;
     const applyingPendingUndoRef = useRef(false);
     const appliedPendingUndoToken = useRef<number | null>(null);
     const includePlaceholdersRef = useRef(value.length <= LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS);
@@ -581,15 +631,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     useEffect(() => {
       blockMenuStateRef.current = blockMenuState;
     }, [blockMenuState]);
-
-    useEffect(() => {
-      const map = new Map<string, WikilinkFile>();
-      for (const file of knownFiles) {
-        map.set(file.path, file);
-        map.set(file.path.replace(/\.md$/i, ""), file);
-      }
-      knownFilesRef.current = map;
-    }, [knownFiles]);
 
     useEffect(() => {
       onOpenWikilinkRef.current = onOpenWikilink ?? null;
@@ -829,6 +870,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     }, [editor, readOnly]);
 
     useEffect(() => {
+      if (!editor || editor.isDestroyed) return;
+      editor.view.dispatch(editor.state.tr.setMeta(wikilinkPluginKey, true));
+    }, [editor, knownFilesMap]);
+
+    useEffect(() => {
       setChromeReady(false);
       if (!editor) return;
       const frame = requestAnimationFrame(() => setChromeReady(true));
@@ -890,49 +936,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       if (editor && !editor.isDestroyed) dismissUrlPasteOffer(editor.view);
     }, [editor]);
 
-    const openSlashMenuAtPosition = useCallback(
-      (pos: number) => {
-        const view = editor?.view;
-        if (!view) return;
-
-        let x = 12;
-        let y = 40;
-        let bottom: number | null = null;
-        let maxHeight = FLOATING_MENU_MAX_HEIGHT;
-        let placement: FloatingMenuPlacement = "below";
-        try {
-          const coords = view.coordsAtPos(pos);
-          const position = resolveFloatingMenuPosition({ cursorRect: coords });
-          x = position.x;
-          y = position.y;
-          bottom = position.bottom ?? null;
-          maxHeight = position.maxHeight;
-          placement = position.placement;
-        } catch {
-          // Offscreen/jsdom editors cannot always resolve coordinates.
-        }
-
-        publishSlashState({
-          open: true,
-          from: pos,
-          to: pos,
-          query: "",
-          selected: 0,
-          x,
-          y,
-          bottom,
-          maxHeight,
-          placement,
-        });
-      },
-      [editor, publishSlashState],
-    );
-
     const insertBlockAfter = useCallback(
       (pos: number) => {
-        insertBlockAfterCore(editor, pos, openSlashMenuAtPosition);
+        insertBlockAfterCore(editor, pos);
       },
-      [editor, openSlashMenuAtPosition],
+      [editor],
     );
 
     // The handle of the block whose menu is open closes it, like any trigger.
@@ -1098,6 +1106,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           view.focus();
           view.dispatch(view.state.tr.scrollIntoView());
         },
+        caret() {
+          if (!editor || editor.isDestroyed || !editor.isFocused) return null;
+          return editor.state.selection.head;
+        },
         getMarkdown() {
           if (!editor) return value;
           // Escape literal `==` inside highlight marks before serializing so a
@@ -1174,12 +1186,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             <span>
               {collab.synced
                 ? collab.peerCount === 0
-                  ? "Live · just you"
+                  ? "Live · only you"
                   : `${collab.peerCount + 1} editing`
-                : "Syncing"}
+                : "Syncing…"}
             </span>
           </div>
         ) : null}
+        {editor ? <FindReplaceBar editor={editor} /> : null}
         {/* .dohc-editor-surface — not.dohc-tiptap-editor — is the CSS
          * container-query context for the outline/word-count grid trick.
          * Every position: fixed popover below (slash menu, block menu,
@@ -1190,15 +1203,16 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
          * editor-pane-relative ones. See the comment on .dohc-editor-surface
          * in styles.css for the full mechanism. */}
         <div className="dohc-editor-surface">
-          <EditorContent editor={editor} />
+          <EditorContent editor={editor} className="dohc-editor-content" />
           <OutlinePanel editor={editor} containerRef={containerRef} headingTarget={headingTarget} />
         </div>
-        {editor ? <FindReplaceBar editor={editor} /> : null}
         {editor && chromeReady ? (
           <BubbleMenu
             editor={editor}
-            className="dohc-bubble-menu"
-            shouldShow={({ editor: instance }) => hasFormattableSelection(instance.state.selection)}
+            className={linkMenuState.open ? "dohc-bubble-menu hidden" : "dohc-bubble-menu"}
+            shouldShow={({ editor: instance }) =>
+              !linkMenuStateRef.current.open && hasFormattableSelection(instance.state.selection)
+            }
           >
             <SelectionToolbar editor={editor} onOpenLink={setLinkMenuState} />
           </BubbleMenu>
@@ -1213,6 +1227,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                   current.open ? { ...current, selected: index } : current,
                 )
               }
+              onDismiss={() => {
+                if (editor && !editor.isDestroyed) dismissSlashCommand(editor.view);
+              }}
             />
             <BlockMenu
               state={blockMenuState}
@@ -1278,7 +1295,7 @@ const MarkdownEditorCollabLoader = forwardRef<MarkdownEditorHandle, MarkdownEdit
           className="dohc-tiptap-editor h-full"
           data-collab-state={props.collab?.status ?? "connecting"}
         >
-          <SkeletonRows layout="document" label="Loading editor..." className="pt-1.5" />
+          <SkeletonRows layout="document" label="Loading editor…" className="pt-1.5" />
         </div>
       );
     }

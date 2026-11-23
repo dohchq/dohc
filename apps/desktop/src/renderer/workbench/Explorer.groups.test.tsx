@@ -63,7 +63,7 @@ describe("Explorer editor groups", () => {
   it("keeps a single group's Open Editors list compact", () => {
     render(<Explorer {...explorerProps()} />);
 
-    expect(screen.queryByText("Group 1")).toBeNull();
+    expect(screen.queryByText("Editor group 1")).toBeNull();
     expect(screen.getAllByTestId("open-editor-row")).toHaveLength(2);
   });
 
@@ -95,9 +95,9 @@ describe("Explorer editor groups", () => {
       />,
     );
 
-    expect(screen.getByText("Group 1")).toBeTruthy();
-    expect(screen.getByText("Group 2")).toBeTruthy();
-    expect(screen.getByRole("list", { name: "Group 2 open editors" })).toBeTruthy();
+    expect(screen.getByText("Editor group 1")).toBeTruthy();
+    expect(screen.getByText("Editor group 2")).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Editor group 2 open editors" })).toBeTruthy();
 
     const groups = screen.getAllByTestId("open-editor-group");
     const firstRow = within(groups[0]!).getByTestId("open-editor-row");

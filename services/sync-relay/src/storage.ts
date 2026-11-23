@@ -4,21 +4,12 @@ import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
 import * as workspaceMembersStorage from "./storage/workspaceMembers";
 import * as directMessagesStorage from "./storage/directMessages";
-import * as replicaCurrentViews from "./storage/replicaCurrentViews";
-import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
-import * as replicaHistoryReads from "./replicaHistoryReads";
-import { createReplicaLinkReadService } from "./replicaLinkReadService";
-import {
-  nextReplicaHistoryPinAt,
-  type ReplicaHistoryObservation,
-} from "./storage/replicaHistoryPins";
 import { prepareLiveApplications } from "./storage/liveApplicationAuthorship";
 import { prepareHostedSettlements, prepareSettlementAudits } from "./storage/hostedSettlement";
 import * as serviceActivationPublication from "./storage/serviceActivationPublication";
 import * as serviceActivationRetirementStorage from "./storage/serviceActivationRetirement";
 import type { ServiceActivationRetirement } from "./storage/serviceActivationRetirement";
 import * as shareLabelsStorage from "./storage/shareLabels";
-import * as replicaReads from "./storage/replicaReads";
 import * as buttonInspections from "./automationButtonInspections";
 import type { ShareLabels } from "@dohc/security-contract/share-labels";
 import type { ShareLabelReader } from "./shareFilter";
@@ -381,6 +372,7 @@ export function openSyncRelayStorage(
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = FULL");
+    options.opened?.("file");
     if (
       !createOwner &&
       db.prepare("SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get()
@@ -388,12 +380,15 @@ export function openSyncRelayStorage(
       throw new Error("Use the configured relay deployment to open this database.");
     }
     owner = createOwner ? createOwner(db) : new RelayWriteOwner(db);
+    if (createOwner) options.opened?.("continuity");
     owner.write(() => initializeSyncRelaySchema(db));
     watchLiveAuthorityWrites(db);
+    options.opened?.("schema");
     const storage = new SqliteSyncRelayStorage(
       reusePreparedStatements(db),
       {
         pushConfigured: options.pushConfigured ?? false,
+        apnsConfigured: options.apnsConfigured ?? false,
         workspaceQuotaBytes,
         blobGraceMs,
         linkSessionsPerGrantLimit,
@@ -407,6 +402,7 @@ export function openSyncRelayStorage(
       owner,
     );
     storage.purgeExpiredShareRemovals(Date.now());
+    options.opened?.("purge");
     return storage;
   } catch (error) {
     try {
@@ -436,17 +432,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listWorkReferences(input: Parameters<SyncRelayStorage["listWorkReferences"]>[0]) {
     return workReferenceStorage.listWorkReferences(this, input);
   }
-  createReplicaLinkReadService(
-    ...args: Parameters<SyncRelayStorage["createReplicaLinkReadService"]>
-  ) {
-    return createReplicaLinkReadService(this, ...args);
-  }
   readonly newDiscussionId: () => string;
   private readingLiveAuthority = false;
 
   constructor(
     readonly db: SqliteDb,
-    readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>,
+    readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets" | "opened">>,
     private readonly liveTickets: LiveTicketStoragePolicy | undefined,
     private readonly owner: RelayWriteOwner,
   ) {
@@ -503,6 +494,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   readServiceHostEnrollment(workspaceId: string, path: string) {
     return serviceHostEnrollmentStorage.readServiceHostEnrollment(this, workspaceId, path);
+  }
+  isHostedForLiveEditing(workspaceId: string, objectId: string) {
+    return serviceHostEnrollmentStorage.isHostedForLiveEditing(this, workspaceId, objectId);
   }
   readServiceHostEnrollmentByObjectId(workspaceId: string, objectId: string) {
     return serviceHostEnrollmentStorage.readServiceHostEnrollmentByObjectId(
@@ -864,12 +858,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveUpdateJournalStorage.readCommittedLiveUpdate(this, input);
   }
 
-  readReplicaLiveJournal(
-    input: liveUpdateJournalStorage.ReplicaLiveJournalRead,
-  ): Promise<liveUpdateJournalStorage.ReplicaLiveJournalPage> {
-    return liveUpdateJournalStorage.readReplicaLiveJournal(this, input);
-  }
-
   createLiveCommittedDeliveryStore(
     history: LiveJournalHistoryAuthority,
     activation?: ServiceActivationAccess,
@@ -991,109 +979,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return workspacesStorage.workspaceOwner(this, workspaceId);
   }
 
-  discardReplicaCurrentView(
-    lease: Parameters<typeof replicaCurrentViews.discardReplicaCurrentView>[1],
-  ) {
-    return replicaCurrentViews.discardReplicaCurrentView(this, lease);
-  }
-  releaseReplicaCurrentView(
-    lease: Parameters<typeof replicaCurrentViews.releaseReplicaCurrentView>[1],
-  ) {
-    replicaCurrentViews.releaseReplicaCurrentView(this, lease);
-    replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this, lease.workspaceId);
-  }
-  bindReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.bindReplicaCurrentView>[1]) {
-    return replicaCurrentViews.bindReplicaCurrentView(this, lease);
-  }
-  replicaCurrentViewSelectors(workspaceId: string) {
-    return replicaCurrentViews.replicaCurrentViewSelectors(this, workspaceId);
-  }
-  stageReplicaCurrentView(
-    lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],
-    view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2],
-    observations?: ReplicaHistoryObservation[],
-  ) {
-    return replicaCurrentViews.stageReplicaCurrentView(this, lease, view, observations);
-  }
-  flipReplicaCurrentView(
-    lease: Parameters<typeof replicaCurrentViews.flipReplicaCurrentView>[1],
-    staged: Parameters<typeof replicaCurrentViews.flipReplicaCurrentView>[2],
-  ) {
-    return replicaCurrentViews.flipReplicaCurrentView(this, lease, staged);
-  }
-  advanceReplicaCurrentView(
-    lease: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[1],
-    view: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[2],
-    previous: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[3],
-  ) {
-    return replicaCurrentViews.advanceReplicaCurrentView(this, lease, view, previous);
-  }
-  storeReplicaCurrentView(
-    lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],
-    view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2],
-    observations?: ReplicaHistoryObservation[],
-  ) {
-    const saved = this.flipReplicaCurrentView(
-      lease,
-      this.stageReplicaCurrentView(lease, view, observations),
-    );
-    const needed = new Set(saved.files.map((f) => f.sha256));
-    return { ...saved, texts: view.texts.filter((t) => needed.has(t.sha256)) };
-  }
-  readReplicaCurrentView(workspaceId: string) {
-    return replicaCurrentViews.readReplicaCurrentView(this, workspaceId);
-  }
-  currentViewFilesAtFences(
-    workspaceId: string,
-    files: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[2],
-    previous: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[3],
-    omitted: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[4],
-  ) {
-    return replicaCurrentViews.currentViewFilesAtFences(
-      this,
-      workspaceId,
-      files,
-      previous,
-      omitted,
-    );
-  }
-  readReplicaCurrentViewText(workspaceId: string, sha: string) {
-    return replicaCurrentViews.readReplicaCurrentViewText(this, workspaceId, sha);
-  }
-  readReplicaStanding(workspaceId: string, shareGrantBindings?: string) {
-    return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings);
-  }
-  nextReplicaHistoryPinAt(workspaceId: string) {
-    return nextReplicaHistoryPinAt(this, workspaceId);
-  }
-  sampleReplicaHistory(lease: Parameters<typeof replicaCurrentViews.sampleReplicaHistory>[1]) {
-    return replicaCurrentViews.sampleReplicaHistory(this, lease);
-  }
-  listReplicaHistoryPins(
-    input: replicaCurrentViewReads.ReplicaCurrentViewReadInput,
-    source?: replicaCurrentViewReads.ReplicaCurrentViewSource,
-  ) {
-    return replicaHistoryReads.listReplicaHistoryPins(this, input, source);
-  }
-  readReplicaHistoryPin(
-    input: replicaCurrentViewReads.ReplicaCurrentViewReadInput & { pinId: string },
-    source?: replicaCurrentViewReads.ReplicaCurrentViewSource,
-  ) {
-    return replicaHistoryReads.readReplicaHistoryPin(this, input, source);
-  }
-  listReplicaCurrentViewFiles(
-    input: Parameters<typeof replicaCurrentViewReads.listReplicaCurrentViewFiles>[1],
-    source?: replicaCurrentViewReads.ReplicaCurrentViewSource,
-  ) {
-    return replicaCurrentViewReads.listReplicaCurrentViewFiles(this, input, source);
-  }
-  readReplicaCurrentViewFile(
-    input: replicaCurrentViewReads.ReplicaCurrentViewReadInput & { path: string },
-    source?: replicaCurrentViewReads.ReplicaCurrentViewSource,
-  ) {
-    return replicaCurrentViewReads.readReplicaCurrentViewFile(this, input, source);
-  }
-
   postAutomationWake(
     input: noticeStorage.PostAutomationWakeInput,
   ): noticeStorage.PostedAutomationWake {
@@ -1159,7 +1044,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return noticeStorage.noticeHead(this, recipientUserId);
   }
 
-  markNotices(input: noticeStorage.MarkNoticesInput): string[] {
+  markNotices(input: noticeStorage.MarkNoticesInput): { dismissed: string[]; repeated: string[] } {
     return noticeStorage.markNotices(this, input);
   }
 
@@ -1797,6 +1682,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return result;
   }
 
+  retuneNamedShareGrant(input: {
+    shareId: string;
+    grantId: string;
+    access: string;
+    changedAtMs: number;
+    guard: () => void;
+  }): ShareGrantTransitionResult {
+    const result = sharesStorage.retuneNamedShareGrant(this, input);
+    if (result.ok) notifyDesktopReadiness(this, { shareId: result.grant.shareId });
+    return result;
+  }
+
   revokeShareGrant(input: {
     shareId: string;
     grantId: string;
@@ -2115,6 +2012,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return shareRemovalStorage.listRemovedSharesForRecipient(this, userId, shareId);
   }
 
+  listRemovedSharesInRecipientList(userId: string, shareId?: string) {
+    return shareRemovalStorage.listRemovedSharesInRecipientList(this, userId, shareId);
+  }
+
+  leaveShare(input: Parameters<typeof shareRemovalStorage.leaveShare>[1]) {
+    const result = shareRemovalStorage.leaveShare(this, input);
+    if (result.ok && result.workspaceId !== null)
+      notifyDesktopReadiness(this, { shareId: input.shareId });
+    return result;
+  }
+
   revokeShare(shareId: string, revokedAtMs: number): boolean {
     try {
       return sharesStorage.revokeShare(this, shareId, revokedAtMs);
@@ -2427,6 +2335,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return currentFilesStorage.currentObjectFile(this, input);
   }
 
+  currentFileBlobSha256(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): string | undefined {
+    return currentFilesStorage.currentFileBlobSha256(this, input);
+  }
+
   currentFileObjectId(input: {
     workspaceId: string;
     versionId: string;
@@ -2572,7 +2488,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return agentConnectionStorage.authenticateAgentAccessToken(this, accessTokenHash, nowMs);
   }
 
-  // Opens no transaction, so a read inside a replica read's snapshot uses that snapshot.
+  // Opens no transaction, so a read inside another read's snapshot uses that snapshot.
   authenticateAgentAuthority(
     check: agentConnectionStorage.AgentAccessCheck,
     nowMs: number,

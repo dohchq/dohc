@@ -54,6 +54,7 @@ export function WorkStatus(props: {
   reportedBy?: { name: string; owner?: string; atMs: number };
   // Name the agent beside the status, where the row shows another author.
   showReporter?: boolean;
+  className?: string;
 }) {
   const { work, reportedBy } = props;
   const url = work.url;
@@ -65,7 +66,7 @@ export function WorkStatus(props: {
     <span
       data-testid={`${props.testIdPrefix}-work`}
       data-status={work.status}
-      className="inline-flex min-w-0 items-center gap-2 text-[12px] text-muted"
+      className={`mt-1.5 inline-flex min-w-0 items-center gap-2 text-[12px] text-muted ${props.className ?? ""}`}
     >
       <span title={reported} className="inline-flex shrink-0 items-center gap-1">
         <StatusMark status={work.status} />
@@ -87,7 +88,7 @@ export function WorkStatus(props: {
             event.stopPropagation();
             void openLink(url);
           }}
-          className="inline-flex shrink-0 items-center gap-1 rounded text-muted transition-colors duration-75 hover:text-ink"
+          className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
         >
           <ExternalLink size={12} strokeWidth={2} aria-hidden className="shrink-0" />
           {host}

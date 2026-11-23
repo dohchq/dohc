@@ -116,13 +116,7 @@ it("keeps a known-document preparation overload on the work retry cadence", asyn
   }
 });
 
-it("advances only from captured native positions and checks exact receipts", async () => {
-  const receipt = {
-    deliveryId: "delivery",
-    updateDigest: "b".repeat(64),
-    journalCursor: 8,
-    acceptingHostEpoch: parseHostEpoch(1),
-  };
+it("advances only from captured native positions and puts room rows on the owner's screen", async () => {
   const client = {
     ownerYDocPrepareEnrollment: vi.fn(async () => ({
       status: "observed",
@@ -144,7 +138,8 @@ it("advances only from captured native positions and checks exact receipts", asy
       acceptedCursor: 8,
       nativeHeadSequence: 10,
     })),
-    ownerYDocIsReceiptApplied: vi.fn(async () => false),
+    ownerYDocRestartCommittedRows: vi.fn(async () => undefined),
+    ownerYDocPutCommittedRow: vi.fn(async () => "reconnect" as const),
   };
   mock.drain.mockImplementation(async () => {
     const { acceptedState: state } = mock.options as OwnerYDocFrameDeliveryOptions;
@@ -172,9 +167,12 @@ it("advances only from captured native positions and checks exact receipts", asy
       { binding, previousAcceptedCursor: 6, journalCursor: 8, updateBytes: new Uint8Array([2]) },
       new AbortController().signal,
     );
-    expect(await state.isReceiptApplied({ binding, receipt }, new AbortController().signal)).toBe(
-      false,
-    );
+    expect(
+      await state.putRow(
+        { binding, position: 9, updateBytes: new Uint8Array([3, 4]) },
+        new AbortController().signal,
+      ),
+    ).toBe("reconnect");
     await expect(
       state.readState({ ...binding, objectId: "foreign" }, new AbortController().signal),
     ).rejects.toThrow("binding changed");
@@ -209,9 +207,13 @@ it("advances only from captured native positions and checks exact receipts", asy
     }),
     expect.any(AbortSignal),
   ]);
-  expect(client.ownerYDocIsReceiptApplied.mock.calls[0]).toEqual([
+  // A sync drops the rows an earlier connection put, before it installs.
+  expect(client.ownerYDocRestartCommittedRows.mock.invocationCallOrder[0]).toBeLessThan(
+    client.ownerYDocApplyInitialSync.mock.invocationCallOrder[0]!,
+  );
+  expect(client.ownerYDocPutCommittedRow.mock.calls[0]).toEqual([
     expect.anything(),
-    expect.objectContaining({ receipt, relayDatabaseNamespace: "namespace" }),
+    { binding, cursor: 9, updateBytes: new Uint8Array([3, 4]) },
     expect.any(AbortSignal),
   ]);
 });
@@ -284,6 +286,7 @@ it("requests a complete host checkpoint before discovering the enrolled outbox",
       .mockResolvedValue({ status: "observed", draft }),
     ownerYDocEnroll: vi.fn().mockResolvedValue(draft),
     ownerYDocReadState: vi.fn(),
+    ownerYDocRestartCommittedRows: vi.fn(async () => undefined),
   };
   mock.authority.mockImplementation(async () => {
     const state = (mock.options as OwnerYDocFrameDeliveryOptions).acceptedState;

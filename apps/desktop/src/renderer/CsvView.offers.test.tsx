@@ -157,7 +157,7 @@ describe("the CSV offer on the preview's bound", () => {
       renderCsv(overrides);
       expect(boundImport()).toBeNull();
       expect(screen.getByTestId("csv-preview-bound").textContent).toContain(
-        "import to SQLite to work with all of them.",
+        "Import to SQLite to work with all of them.",
       );
     },
   );
@@ -169,7 +169,7 @@ describe("the CSV offer on the preview's bound", () => {
     undoDatabaseImport.mockRejectedValueOnce(
       rejected(
         "desktop:undo-database-import",
-        "Cannot undo this import. data.sqlite-wal exists. Close programs using the database, then try again.",
+        "dohc could not undo this import. data.sqlite-wal exists. Close programs using the database, then try again.",
       ),
     );
 
@@ -182,7 +182,7 @@ describe("the CSV offer on the preview's bound", () => {
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(
       within(toast).getByText(
-        "Cannot undo this import. data.sqlite-wal exists. Close programs using the database, then try again.",
+        "dohc could not undo this import. data.sqlite-wal exists. Close programs using the database, then try again.",
       ),
     ).toBeTruthy();
 

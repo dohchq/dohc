@@ -115,8 +115,8 @@ export function ChangeThreadDialog(props: {
           </h2>
           <div id={`${id}-body`} className="flex flex-col gap-1 text-[13px] text-muted">
             <p className="m-0">
-              From now on, dohc forwards to the thread you choose, and the old thread keeps the
-              messages it has.
+              dohc will forward new messages to the thread you choose. The old thread keeps its
+              existing messages.
             </p>
             {otherWorkspaces > 0 ? (
               <p data-testid="agent-thread-change-workspaces" className="m-0">

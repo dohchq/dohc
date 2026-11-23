@@ -136,7 +136,7 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
     let sid = opened["sessionId"].as_str().unwrap().to_owned();
     let claim = opened["lineageClaimId"].as_str().unwrap().to_owned();
     let typed = doc.richdoc_append_paragraph("Typed by the owner");
-    service
+    let recorded = service
         .ydoc_record_update(
             &RequestContext::unbounded(),
             Some(handle.clone()),
@@ -151,6 +151,24 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
         )
         .await
         .unwrap();
+
+    // Only the owner's delivery connection may say the relay took an edit.
+    let draft = &recorded["ownerDraft"];
+    let taken = json!({"outboxId":draft["outboxId"],"receipt":{
+        "deliveryId":draft["deliveryId"],"updateDigest":draft["updateDigest"],
+        "journalCursor":7,"acceptingHostEpoch":1}});
+    let mut elsewhere = RequestContext::unbounded();
+    for connection in [
+        None,
+        Some(dohc_engine_protocol::transport::ConnectionOwner::authenticated()),
+    ] {
+        elsewhere.connection = connection.as_ref().map(|owner| owner.handle());
+        let refused = service
+            .owner_ydoc_outbox_acknowledge_taken(&elsewhere, Some(handle.clone()), taken.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.message, workspace_unavailable().message);
+    }
 
     // The row reaches the editor through a resync, and the editor shows it.
     let mut events = service.events.subscribe();
@@ -168,7 +186,7 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
         )
         .unwrap(),
         bytes: row,
-        reservation: service.reserve_owner_delivery().unwrap(),
+        reservation: std::sync::Arc::new(()),
     }
     };
     let put_request = request(5, "ydoc.ownerDelivery.putCommittedRow", &handle, json!({}));
@@ -289,4 +307,127 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
         .await
         .unwrap();
     assert_eq!(copy.response.result, json!({"status":"empty","stop":null}));
+}
+
+/// One engine hosts live editing or runs owner calls, never both, so a
+/// host's uploads never hold room that an owner call holding the session
+/// serial waits for. Whichever role comes second is refused. An owner call
+/// refused for its connection takes no role.
+#[tokio::test]
+async fn an_engine_hosts_live_editing_or_runs_owner_calls_not_both() {
+    for host_first in [true, false] {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let config = serde_json::from_value(json!({
+            "ingress":{"aggregateBytes":1_000_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000},
+            "maxRegistrations":2,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,
+            "maxApplicationsPerSettlement":100,
+            "ownerOutbox":{"maxPendingBytes":1_000_000,"maxPendingAgeMs":100_000},
+            "sync":{"policy":{"maxClientVectorBytes":100_000,"maxHostVectorBytes":100_000,"maxOutputBytes":1_000_000,"maxReadBytes":4_000_000},"workingReserveBytes":4_000_000}
+        })).unwrap();
+        let (service, connection, _ingress) = EngineService::ordinary_live_host(config).unwrap();
+        let params = json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"workspace","captureMode":"none"});
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(connection.handle());
+        let provision = || {
+            service.provision_live_application(
+                connection.handle(),
+                crate::LiveApplicationHostConfig {
+                    workspace: handle.clone(),
+                    namespace: "relay-history".into(),
+                    coordinate: serde_json::from_value(json!({
+                        "hostId": "host", "hostEpoch": 1,
+                        "instanceId": "instance", "connectionId": "connection",
+                    }))
+                    .unwrap(),
+                    max_registrations: 2,
+                },
+            )
+        };
+        let list = || {
+            service.owner_delivery_list_drafts(
+                ctx.clone(),
+                request(
+                    1,
+                    "ydoc.ownerDelivery.listDrafts",
+                    &handle,
+                    json!({"limit":10}),
+                ),
+            )
+        };
+        let refused = if host_first {
+            let stranger = service
+                .owner_delivery_list_drafts(
+                    RequestContext::unbounded(),
+                    request(
+                        1,
+                        "ydoc.ownerDelivery.listDrafts",
+                        &handle,
+                        json!({"limit":10}),
+                    ),
+                )
+                .await
+                .expect_err("a call without the owner's connection is refused");
+            assert_eq!(stranger.code, ErrorCode::WorkspaceUnavailable);
+            provision().await.unwrap();
+            list().await.err()
+        } else {
+            list().await.unwrap();
+            provision().await.err()
+        };
+        assert_eq!(
+            refused.expect("the second role was refused").code,
+            ErrorCode::Forbidden
+        );
+    }
+}
+
+/// An owner call that fits the budget waits while other work holds the room
+/// it needs, and runs once that room is released.
+#[tokio::test]
+async fn owner_call_waits_for_room_that_other_work_holds() {
+    let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+    // One owner reservation fits this budget, but not beside the held settlement.
+    let config = serde_json::from_value(json!({
+        "ingress":{"aggregateBytes":500_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000},
+        "maxRegistrations":2,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,
+        "maxApplicationsPerSettlement":100,
+        "ownerOutbox":{"maxPendingBytes":1_000_000,"maxPendingAgeMs":100_000},
+        "sync":{"policy":{"maxClientVectorBytes":100_000,"maxHostVectorBytes":100_000,"maxOutputBytes":1_000_000,"maxReadBytes":4_000_000},"workingReserveBytes":4_000_000}
+    })).unwrap();
+    let (service, connection, ingress) = EngineService::ordinary_live_host(config).unwrap();
+    let params = json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"workspace","captureMode":"none"});
+    let opened = service
+        .workspace_open(&RequestContext::unbounded(), params)
+        .await
+        .unwrap();
+    let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+    let mut ctx = RequestContext::unbounded();
+    ctx.connection = Some(connection.handle());
+    let held = ingress
+        .settlement_admission(20_000)
+        .unwrap()
+        .reserve()
+        .unwrap();
+    let list = service.owner_delivery_list_drafts(
+        ctx,
+        request(
+            1,
+            "ydoc.ownerDelivery.listDrafts",
+            &handle,
+            json!({"limit":10}),
+        ),
+    );
+    tokio::pin!(list);
+    tokio::select! {
+        biased;
+        result = &mut list => panic!("the owner call ended while its room was held: {:?}", result.err()),
+        () = std::future::ready(()) => {}
+    }
+    drop(held);
+    list.await.unwrap();
 }

@@ -54,9 +54,11 @@ export function shownProblem(error: unknown): ServerProblemKind | null {
   }
 }
 
+export type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+
 /** What the client needs of fetch: the app passes expo/fetch, which honours `credentials` and `redirect`. */
 export interface FetchInit {
-  readonly method: "GET" | "POST" | "PATCH";
+  readonly method: Method;
   readonly headers: Readonly<Record<string, string>>;
   readonly body?: string;
   readonly credentials: "omit";
@@ -80,7 +82,7 @@ export async function exchange(
   fetch: Fetch,
   url: string,
   request: {
-    readonly method: "GET" | "POST" | "PATCH";
+    readonly method: Method;
     readonly headers?: Readonly<Record<string, string>>;
     readonly body?: unknown;
     readonly signal: AbortSignal;
@@ -182,7 +184,7 @@ export interface ServerClient {
    * for an answer it can't use. A 401 ends the sign-in.
    */
   send<T>(
-    method: "GET" | "POST" | "PATCH",
+    method: Method,
     path: string,
     read: (body: unknown) => T | null,
     body?: unknown,

@@ -1,0 +1,27 @@
+{
+ "seed": -138,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-empty-list-in-table-cell",
+ "updates": [
+  "ARPIzMKrBAAHAQRib2R5AwV0YWJsZQcAyMzCqwQAAwh0YWJsZVJvdwcAyMzCqwQBAwt0YWJsZUhlYWRlcgcAyMzCqwQCAwlwYXJhZ3JhcGgHAMjMwqsEAwYEAMjMwqsEBARoZWFkKADIzMKrBAIHY29sc3BhbgF9ASgAyMzCqwQCB3Jvd3NwYW4BfQGHyMzCqwQBAwh0YWJsZVJvdwcAyMzCqwQLAwl0YWJsZUNlbGwHAMjMwqsEDAMJcGFyYWdyYXBoBwDIzMKrBA0GBADIzMKrBA4BYYfIzMKrBA0DCmJ1bGxldExpc3SHyMzCqwQQAwlwYXJhZ3JhcGgHAMjMwqsEEQYEAMjMwqsEEgFiKADIzMKrBAwHY29sc3BhbgF9ASgAyMzCqwQMB3Jvd3NwYW4BfQEA",
+  "AQHIzMKrBBYoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcYZW1wdHktbGlzdC1pbi10YWJsZS1jZWxsAA=="
+ ],
+ "mergedUpdateB64": "ARTIzMKrBAAHAQRib2R5AwV0YWJsZQcAyMzCqwQAAwh0YWJsZVJvdwcAyMzCqwQBAwt0YWJsZUhlYWRlcgcAyMzCqwQCAwlwYXJhZ3JhcGgHAMjMwqsEAwYEAMjMwqsEBARoZWFkKADIzMKrBAIHY29sc3BhbgF9ASgAyMzCqwQCB3Jvd3NwYW4BfQGHyMzCqwQBAwh0YWJsZVJvdwcAyMzCqwQLAwl0YWJsZUNlbGwHAMjMwqsEDAMJcGFyYWdyYXBoBwDIzMKrBA0GBADIzMKrBA4BYYfIzMKrBA0DCmJ1bGxldExpc3SHyMzCqwQQAwlwYXJhZ3JhcGgHAMjMwqsEEQYEAMjMwqsEEgFiKADIzMKrBAwHY29sc3BhbgF9ASgAyMzCqwQMB3Jvd3NwYW4BfQEoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcYZW1wdHktbGlzdC1pbi10YWJsZS1jZWxsAA==",
+ "stateVectorB64": "AcjMwqsEFw==",
+ "coverage": {
+  "nodes": [
+   "bulletList",
+   "doc",
+   "paragraph",
+   "table",
+   "tableCell",
+   "tableHeader",
+   "tableRow",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "| head   |\n| ------ |\n| a<br>b |\n"
+ }
+}

@@ -458,9 +458,7 @@ describe("RecordHistoryDialog", () => {
     const { rerender } = render(dialog());
     rerender(dialog({ workspaceId: "ws-2" }));
     await waitFor(() =>
-      expect(screen.getByRole("status").textContent).toBe(
-        "No field of this record has changed yet.",
-      ),
+      expect(screen.getByRole("status").textContent).toBe("No field changes recorded yet."),
     );
     slow.resolve({ entries: [entry(1, null, "Stale")], nextBeforeHistoryId: null });
     await slow.promise;
@@ -479,7 +477,7 @@ describe("RecordHistoryDialog", () => {
     expect(onRead).not.toHaveBeenCalled();
     bridge.getCollectionRecordHistory.mockResolvedValue({ entries: [], nextBeforeHistoryId: null });
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    await screen.findByText("No field of this record has changed yet.");
+    await screen.findByText("No field changes recorded yet.");
     expect(onRead.mock.calls).toEqual([[null]]);
   });
 

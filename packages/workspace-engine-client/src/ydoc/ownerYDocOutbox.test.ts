@@ -281,6 +281,25 @@ describe("OwnerYDocOutbox receipt boundary", () => {
     });
   });
 
+  it("sends a taken receipt as one, and checks it before sendRequest", async () => {
+    const client = new RecordingRequester();
+    await expect(outbox(client).acknowledgeTaken("outbox-1", receipt(1, 7))).resolves.toEqual({
+      acknowledged: 2,
+      pendingBytes: 0,
+      oldestEntryAtMs: null,
+    });
+    expect(client.requests).toHaveLength(1);
+    expect(client.requests[0]).toMatchObject({
+      method: "ydoc.ownerOutbox.acknowledgeTaken",
+      params: { outboxId: "outbox-1", receipt: receipt(1, 7) },
+      workspace: WORKSPACE,
+    });
+    await expect(
+      outbox(client).acknowledgeTaken("outbox-1", { ...receipt(1, 1), journalCursor: 0 as never }),
+    ).rejects.toThrow(TypeError);
+    expect(client.requests).toHaveLength(1);
+  });
+
   it.each([
     ["string", "1"],
     ["zero", 0],

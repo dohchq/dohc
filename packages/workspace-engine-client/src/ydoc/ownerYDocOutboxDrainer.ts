@@ -45,6 +45,7 @@ export interface OwnerYDocDeliveryEnvelope {
 }
 
 export type OwnerYDocDeliveryResult =
+  /** The relay took the update: its room or journal holds it at the receipt's cursor. */
   | { readonly kind: "receipt"; readonly receipt: LiveUpdateReceipt }
   /** Delivery durably refused the entry. It must never acknowledge it as accepted. */
   | { readonly kind: "not-accepted" }
@@ -163,6 +164,11 @@ export class OwnerYDocOutboxDrainer {
     private readonly delivery: OwnerYDocDelivery,
     /** Outlives this drainer: the coordinator's refusals for this engine. */
     private readonly refusals: OwnerKnownRefusals,
+    /**
+     * A receipt leaves the queue once the relay takes the update, before the
+     * accepted state holds it; until then the engine keeps it on screen.
+     */
+    private readonly taken = false,
   ) {}
 
   dispose(): void {
@@ -179,12 +185,15 @@ export class OwnerYDocOutboxDrainer {
   }
 
   private async drainHeld(): Promise<OwnerYDocDrainResult> {
-    let pending: Awaited<ReturnType<OwnerYDocOutbox["readHead"]>>;
-    try {
-      pending = await this.outbox.readHead(this.outboxId);
-    } catch (error) {
-      if (error instanceof OwnerYDocOutboxReadChangedError) return "retry";
-      throw error;
+    let pending: Awaited<ReturnType<OwnerYDocOutbox["readHead"]>> | undefined;
+    while (pending === undefined) {
+      try {
+        pending = await this.outbox.readHead(this.outboxId);
+      } catch (error) {
+        // The queue changed while it was read, as it does while its owner types: read the newer head.
+        if (!(error instanceof OwnerYDocOutboxReadChangedError)) throw error;
+        if (this.disposed) return "retry";
+      }
     }
     if (this.disposed) return "retry";
     const known = this.refusals.get(this.outboxId);
@@ -235,7 +244,8 @@ export class OwnerYDocOutboxDrainer {
     if (this.disposed) return "retry";
     if (result.kind === "not-accepted") return "not-accepted";
     if (result.kind === "retry") return "retry";
-    await this.outbox.acknowledge(pending.outboxId, [result.receipt]);
+    if (this.taken) await this.outbox.acknowledgeTaken(pending.outboxId, result.receipt);
+    else await this.outbox.acknowledge(pending.outboxId, [result.receipt]);
     return "acknowledged";
   }
 

@@ -3,10 +3,11 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import { desktopPins, settingsSectionPin } from "../../testPins";
 import { useRequestSequence } from "../useRequestSequence";
 import { CopyField } from "../ui/CopyButton";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { SecondaryButton } from "../ui/controls";
+import { PrimaryButton, SecondaryButton } from "../ui/controls";
 import { StateMark } from "../ui/StateMark";
-import { AlertTriangle, X } from "lucide-react";
+import { AlertTriangle, RotateCcw, X } from "lucide-react";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_SIDEBAR_SETTINGS,
@@ -227,6 +228,7 @@ export function SettingsDialog(props: {
     reset: () => Promise<void>;
   }>({ save: async () => undefined, reset: async () => undefined });
   const [settingsFilePath, setSettingsFilePath] = useState<string | null>(null);
+  const [confirmReset, setConfirmReset] = useState<"user" | "workspace" | null>(null);
 
   const clearSaveStateTimer = useCallback(() => {
     if (saveStateTimerRef.current) {
@@ -254,7 +256,10 @@ export function SettingsDialog(props: {
       ? dialogRef.current?.querySelector<HTMLElement>(`[data-testid="${props.focus.row}"]`)
       : null;
     if (!row) {
-      closeRef.current?.focus();
+      const search = dialogRef.current?.querySelector<HTMLElement>(
+        `[data-testid="${desktopPins.settingsSearch}"]`,
+      );
+      (search ?? closeRef.current)?.focus();
       return;
     }
     row.focus({ preventScroll: true });
@@ -634,7 +639,7 @@ export function SettingsDialog(props: {
     userResult?.warning,
     workspaceResult?.warning,
     workspaceResult?.refusal,
-    error ? `Settings error: ${error}` : null,
+    error || null,
   ].filter((message): message is string => Boolean(message));
 
   const saveAppearance = (patch: Partial<DesktopUserSettings["appearance"]>) =>
@@ -642,6 +647,9 @@ export function SettingsDialog(props: {
   const saveEditor = (patch: Partial<DesktopUserSettings["editor"]>) =>
     saveUserSettings({ ...userSettings, editor: { ...userSettings.editor, ...patch } });
   const customizeRow = (row: string) => (props.focus?.row === row ? { highlighted: true } : {});
+  const searchTerm = query.trim().toLowerCase();
+  const rowSearchMatch = (...terms: string[]) =>
+    searchTerm.length > 0 && terms.join(" ").toLowerCase().includes(searchTerm);
 
   const renderSection = () => {
     if (query.trim() && filteredSections.length === 0) {
@@ -660,11 +668,11 @@ export function SettingsDialog(props: {
       if (props.workspaceOpenFailed) {
         return (
           <p className="text-sm text-muted">
-            Couldn’t open this workspace. Close Settings to try again.
+            dohc could not open this workspace. Close Settings to try again.
           </p>
         );
       }
-      return <SkeletonRows layout="panel" label="Loading settings..." />;
+      return <SkeletonRows layout="panel" label="Loading settings…" />;
     }
 
     switch (activeSection) {
@@ -674,6 +682,7 @@ export function SettingsDialog(props: {
             <SettingsSection title="App">
               <SettingRow
                 title="Theme"
+                searchMatch={rowSearchMatch("Theme", "light", "dark", "system")}
                 modified={isModified(
                   userSettings.appearance.themeMode,
                   DEFAULT_USER_SETTINGS.appearance.themeMode,
@@ -701,6 +710,7 @@ export function SettingsDialog(props: {
               </SettingRow>
               <SettingRow
                 title="Zoom"
+                searchMatch={rowSearchMatch("Zoom", "scale")}
                 modified={zoomModified}
                 onReset={() => void stepZoomSetting("reset")}
                 testId="settings-row-zoom"
@@ -732,6 +742,7 @@ export function SettingsDialog(props: {
               </SettingRow>
               <SettingRow
                 title="Accent color"
+                searchMatch={rowSearchMatch("Accent color", "color", "hue")}
                 modified={userSettings.appearance.accentColor !== null}
                 onReset={() => void saveAppearance({ accentColor: null })}
                 testId="settings-row-accent"
@@ -739,11 +750,19 @@ export function SettingsDialog(props: {
                 <ColorControl
                   label="Accent color"
                   value={userSettings.appearance.accentColor ?? palette[colorScheme].accent}
-                  onChange={(accentColor) => void saveAppearance({ accentColor })}
+                  onChange={(accentColor) =>
+                    void saveAppearance({
+                      accentColor:
+                        accentColor.toLowerCase() === palette[colorScheme].accent.toLowerCase()
+                          ? null
+                          : accentColor,
+                    })
+                  }
                 />
               </SettingRow>
               <SettingRow
                 title="Sidebar"
+                searchMatch={rowSearchMatch("Sidebar", "views", "order", "rail")}
                 top
                 modified={
                   isModified(userSettings.sidebar.order, DEFAULT_SIDEBAR_SETTINGS.order) ||
@@ -771,6 +790,7 @@ export function SettingsDialog(props: {
             <SettingsSection title="Editor">
               <SettingRow
                 title="Editor font"
+                searchMatch={rowSearchMatch("Editor font", "sans", "serif", "mono", "typography")}
                 modified={isModified(
                   userSettings.editor.fontFamily,
                   DEFAULT_USER_SETTINGS.editor.fontFamily,
@@ -803,6 +823,7 @@ export function SettingsDialog(props: {
               </SettingRow>
               <SettingRow
                 title="Editor text size"
+                searchMatch={rowSearchMatch("Editor text size", "font size")}
                 modified={editorSizeModified}
                 onReset={() => void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize })}
                 testId="settings-row-editor-size"
@@ -885,17 +906,16 @@ export function SettingsDialog(props: {
               {!props.sharedView && props.onOpenLiveDocuments ? (
                 <SettingRow
                   title="Live documents"
-                  description="Documents this workspace is editing live. Stopping one keeps the file and its history."
+                  searchMatch={rowSearchMatch("Live documents", "editing", "live")}
+                  description="Documents this workspace is editing live. Stopping one keeps the file and its History."
                   testId="settings-row-live-documents"
                 >
-                  <button
-                    type="button"
+                  <PrimaryButton
                     aria-label="Open live documents"
                     onClick={props.onOpenLiveDocuments}
-                    className="h-8 rounded-lg bg-accent px-3 text-[13px] font-medium text-bg transition-opacity hover:opacity-90"
                   >
                     Open
-                  </button>
+                  </PrimaryButton>
                 </SettingRow>
               ) : null}
             </SettingsSection>
@@ -970,6 +990,7 @@ export function SettingsDialog(props: {
             <SettingsSection>
               <SettingRow
                 title="Attachments"
+                searchMatch={rowSearchMatch("Attachments", "images", "paste", "drop")}
                 modified={isModified(
                   workspaceSettings.files.attachmentLocation,
                   DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
@@ -982,7 +1003,7 @@ export function SettingsDialog(props: {
                   })
                 }
                 testId="settings-row-attachment-location"
-                description="Where dohc saves an image you paste, drop, or insert into a document."
+                description="Where dohc saves an image you paste, drop, or insert into a page."
                 top
                 aside={
                   <AttachmentLocationControl
@@ -996,10 +1017,11 @@ export function SettingsDialog(props: {
               />
               <SettingRow
                 title="Folder name"
+                searchMatch={rowSearchMatch("Folder name", "assets", "attachment")}
                 description={
                   workspaceSettings.files.attachmentLocation === "same-folder" ? (
                     <span id="attachment-folder-unused">
-                      Not used when images go beside the document.
+                      Not used when images go beside the page.
                     </span>
                   ) : undefined
                 }
@@ -1056,6 +1078,7 @@ export function SettingsDialog(props: {
               {!props.sharedView ? (
                 <SettingRow
                   title="Workspace trust"
+                  searchMatch={rowSearchMatch("Workspace trust", "restricted", "trusted")}
                   description="A trusted workspace runs its apps' dev and build commands, and starts agents, on this computer."
                   testId="settings-row-workspace-trust"
                 >
@@ -1076,6 +1099,7 @@ export function SettingsDialog(props: {
               ) : null}
               <SettingRow
                 title="Confirm external links"
+                searchMatch={rowSearchMatch("Confirm external links", "links")}
                 description="Ask before dohc opens a link in another app."
                 modified={isModified(
                   workspaceSettings.privacy.confirmExternalLinks,
@@ -1118,6 +1142,7 @@ export function SettingsDialog(props: {
               />
               <SettingRow
                 title="Settings file"
+                searchMatch={rowSearchMatch("Settings file", "json")}
                 description="Changes apply when you save the file."
                 testId="settings-row-settings-file"
               >
@@ -1129,7 +1154,9 @@ export function SettingsDialog(props: {
                       copyTestId="settings-file-path-copy"
                       getText={() => settingsFilePath}
                     >
-                      <code title={settingsFilePath}>{settingsFilePath}</code>
+                      <code title={settingsFilePath} className="font-sans">
+                        {settingsFilePath}
+                      </code>
                     </CopyField>
                   </div>
                 ) : null}
@@ -1143,31 +1170,25 @@ export function SettingsDialog(props: {
               </SettingRow>
               <SettingRow
                 title="Reset user settings"
-                description="Restore local user settings for this desktop install to defaults."
+                searchMatch={rowSearchMatch("Reset user settings", "defaults")}
+                description="Restore user settings on this computer to defaults."
                 modified={isModified(userSettings, DEFAULT_USER_SETTINGS)}
                 testId="settings-row-reset-user"
               >
-                <button
-                  type="button"
-                  onClick={() => void resetUserSettings()}
-                  className="h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                >
+                <SecondaryButton onClick={() => setConfirmReset("user")}>
                   Reset user
-                </button>
+                </SecondaryButton>
               </SettingRow>
               <SettingRow
                 title="Reset workspace settings"
-                description="Restore local settings for this workspace without touching workspace content."
+                searchMatch={rowSearchMatch("Reset workspace settings", "defaults")}
+                description="Restore this workspace's settings to defaults. Your files stay untouched."
                 modified={isModified(workspaceSettings, DEFAULT_WORKSPACE_SETTINGS)}
                 testId="settings-row-reset-workspace"
               >
-                <button
-                  type="button"
-                  onClick={() => void resetWorkspaceSettings()}
-                  className="h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                >
+                <SecondaryButton onClick={() => setConfirmReset("workspace")}>
                   Reset workspace
-                </button>
+                </SecondaryButton>
               </SettingRow>
             </SettingsSection>
           </div>
@@ -1221,6 +1242,7 @@ export function SettingsDialog(props: {
             <SettingsSection title="App">
               <SettingRow
                 title="dohc"
+                searchMatch={rowSearchMatch("dohc", "update", "version")}
                 lead={
                   <span
                     aria-hidden
@@ -1235,7 +1257,7 @@ export function SettingsDialog(props: {
                   updateState?.currentVersion ? (
                     <span
                       data-testid="desktop-updates-version"
-                      className="font-mono text-[12px] tabular-nums text-subtle"
+                      className="text-[12px] tabular-nums text-subtle"
                     >
                       <span className="sr-only">Version </span>
                       {updateState.currentVersion}
@@ -1248,7 +1270,7 @@ export function SettingsDialog(props: {
                     data-state={updateState?.status ?? "unknown"}
                     className={updateState?.failure ? "text-danger" : undefined}
                   >
-                    {updateState ? updateStatusLine(updateState) : "Update status unavailable."}
+                    {updateState ? updateStatusLine(updateState) : "Update status is unavailable."}
                   </span>
                 }
                 aside={
@@ -1273,23 +1295,33 @@ export function SettingsDialog(props: {
                 {/* One button for every step. It fills once the next step is
                     the person's: Update, then Restart to update. */}
                 {update.step ? (
-                  <button
-                    type="button"
-                    data-testid="desktop-updates-step"
-                    disabled={update.step.action === null}
-                    onClick={() => {
-                      const action = update.step?.action;
-                      if (action) void update.run(action);
-                    }}
-                    className={`flex h-8 shrink-0 items-center gap-2 rounded-lg px-3 text-[13px] transition-opacity disabled:opacity-50 ${
-                      update.step.action === "download" || update.step.action === "install"
-                        ? "bg-accent font-medium text-bg enabled:hover:opacity-90"
-                        : "border border-line text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink"
-                    }`}
-                  >
-                    {update.step.Icon ? <update.step.Icon size={12} aria-hidden /> : null}
-                    <UpdateStepLabel step={update.step} />
-                  </button>
+                  update.step.action === "download" || update.step.action === "install" ? (
+                    <PrimaryButton
+                      data-testid="desktop-updates-step"
+                      disabled={update.step.action === null}
+                      onClick={() => {
+                        const action = update.step?.action;
+                        if (action) void update.run(action);
+                      }}
+                      className="flex shrink-0 items-center gap-2"
+                    >
+                      {update.step.Icon ? <update.step.Icon size={12} aria-hidden /> : null}
+                      <UpdateStepLabel step={update.step} />
+                    </PrimaryButton>
+                  ) : (
+                    <SecondaryButton
+                      data-testid="desktop-updates-step"
+                      disabled={update.step.action === null}
+                      onClick={() => {
+                        const action = update.step?.action;
+                        if (action) void update.run(action);
+                      }}
+                      className="flex shrink-0 items-center gap-2"
+                    >
+                      {update.step.Icon ? <update.step.Icon size={12} aria-hidden /> : null}
+                      <UpdateStepLabel step={update.step} />
+                    </SecondaryButton>
+                  )
                 ) : null}
               </SettingRow>
             </SettingsSection>
@@ -1332,7 +1364,7 @@ export function SettingsDialog(props: {
               <div
                 key={`${index}-${warning}`}
                 data-testid={desktopPins.settingsWarning}
-                className="flex items-center gap-2 text-[11px] text-warning"
+                className="flex items-center gap-2 text-[12px] text-warning"
               >
                 <AlertTriangle size={12} aria-hidden />
                 {warning}
@@ -1372,6 +1404,45 @@ export function SettingsDialog(props: {
       >
         <X size={16} aria-hidden />
       </button>
+
+      {confirmReset === "user" ? (
+        <ConfirmDialog
+          title="Reset user settings?"
+          icon={RotateCcw}
+          intent="danger"
+          confirmLabel="Reset user"
+          testId="settings-confirm-reset-user"
+          cancelTestId="settings-cancel-reset-user"
+          confirmTestId="settings-confirm-reset-user-action"
+          onCancel={() => setConfirmReset(null)}
+          onConfirm={() => {
+            setConfirmReset(null);
+            void resetUserSettings();
+          }}
+        >
+          <p className="m-0">Restore local user settings for this desktop install to defaults.</p>
+        </ConfirmDialog>
+      ) : null}
+      {confirmReset === "workspace" ? (
+        <ConfirmDialog
+          title="Reset workspace settings?"
+          icon={RotateCcw}
+          intent="danger"
+          confirmLabel="Reset workspace"
+          testId="settings-confirm-reset-workspace"
+          cancelTestId="settings-cancel-reset-workspace"
+          confirmTestId="settings-confirm-reset-workspace-action"
+          onCancel={() => setConfirmReset(null)}
+          onConfirm={() => {
+            setConfirmReset(null);
+            void resetWorkspaceSettings();
+          }}
+        >
+          <p className="m-0">
+            Restore local settings for this workspace without touching workspace content.
+          </p>
+        </ConfirmDialog>
+      ) : null}
     </div>
   );
 }

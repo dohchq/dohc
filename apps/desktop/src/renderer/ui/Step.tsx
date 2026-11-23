@@ -34,7 +34,7 @@ export function Step(props: {
       )}
       <span
         aria-hidden
-        className={`grid size-6 place-items-center rounded-full border font-mono text-[11px] font-medium ${marker}`}
+        className={`grid size-6 place-items-center rounded-full border tabular-nums text-[11px] font-medium ${marker}`}
       >
         {props.state === "done" ? <Check size={12} strokeWidth={2.4} /> : props.number}
       </span>
@@ -47,7 +47,7 @@ export function Step(props: {
           <span className={titleClass}>{props.title}</span>
         )}
         {props.state === "done" && props.summary ? (
-          <span className="truncate font-mono text-[12px] text-muted">{props.summary}</span>
+          <span className="truncate text-[12px] text-muted">{props.summary}</span>
         ) : null}
         {props.state === "current" ? props.children : null}
       </div>
@@ -94,7 +94,7 @@ export const FolderChip = forwardRef<
       >
         {props.folder ? <PathLine path={props.folder} /> : props.placeholder}
       </span>
-      <span aria-hidden className="shrink-0 text-[11px] text-subtle group-hover:text-ink">
+      <span aria-hidden className="shrink-0 text-[12px] text-subtle group-hover:text-ink">
         {props.folder ? "Change" : "Browse"}
       </span>
     </button>

@@ -44,7 +44,7 @@ export interface RetirementKey {
 const COLUMNS = `relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
   json_extract(binding_json,'$.currentPath') AS path,retire_restore_generation,retire_accepted_cursor,retire_requested_at_ms`;
 // Whether the activation row `table` names was captured under its workspace's current identity.
-const currentIdentity = (
+export const currentIdentity = (
   table: string,
 ) => `EXISTS(SELECT 1 FROM sync_relay_workspaces current_identity
   WHERE current_identity.workspace_id=${table}.workspace_id
@@ -331,7 +331,7 @@ export interface RetiredJournalPage {
   readonly acceptedCursor: number;
   readonly rows: readonly {
     readonly journalCursor: number;
-    /** On a room save's row, the last room position the save holds. */
+    /** On a room save's row, the position through which every room row is saved. */
     readonly rowsThrough?: number;
     readonly updateBytes: Uint8Array;
   }[];

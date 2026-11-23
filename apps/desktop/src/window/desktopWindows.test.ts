@@ -468,7 +468,7 @@ describe("desktop workspace windows", () => {
     const f = fixture();
     f.windows.reportActivationFailure(workspace("a"), new Error("load failed"));
     expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith(
-      "Open workspace",
+      "dohc could not open this workspace",
       expect.stringContaining("C:\\work\\a"),
     );
   });
@@ -997,7 +997,7 @@ describe("desktop native menus", () => {
     // A member at View, or anyone while another account is signed in.
     f.offers.a = { write: false, folder: false, collection: false };
     const creates = () =>
-      ["New page", "New folder", "New collection", "Import files"].map(
+      ["New page", "New folder", "New Collection", "Import files"].map(
         (label) => item(f, "File", label).enabled,
       );
 
@@ -1005,7 +1005,7 @@ describe("desktop native menus", () => {
     f.windows.refreshApplicationMenuOffers();
     expect(creates()).toEqual([false, false, false, false]);
     // What reads stays.
-    expect(item(f, "File", "Export workspace as zip").enabled).toBe(true);
+    expect(item(f, "File", "Export workspace as ZIP").enabled).toBe(true);
 
     const built = f.templates.length;
     f.windows.refreshApplicationMenuOffers();
@@ -1221,7 +1221,7 @@ describe("desktop native menus", () => {
       await reported.promise;
       expect(f.dependencies.stepWindowZoom).toHaveBeenCalledExactlyOnceWith("in");
       expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith(
-        "Zoom",
+        "dohc could not change the window zoom",
         error instanceof Error
           ? "dohc did not save settings. Fix the file."
           : "dohc could not change the window zoom.",

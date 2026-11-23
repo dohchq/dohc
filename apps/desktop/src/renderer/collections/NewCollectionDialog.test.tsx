@@ -232,7 +232,7 @@ describe("NewCollectionDialog", () => {
     const types = screen.getAllByLabelText("Field type");
     fireEvent.change(types[1] as Element, { target: { value: "relation" } });
     fireEvent.click(screen.getByTestId("new-collection-create"));
-    expect(await screen.findByText("Choose a collection to relate to.")).toBeDefined();
+    expect(await screen.findByText("Choose a Collection to relate to.")).toBeDefined();
 
     fireEvent.change(types[1] as Element, { target: { value: "select" } });
     fireEvent.click(screen.getByTestId("new-collection-create"));

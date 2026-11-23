@@ -49,35 +49,52 @@ export function collectionFilePresent(
 }
 
 function readPresence(storage: StorageContext, workspaceId: string, datasetId: string): boolean {
+  const paths = collectionFilePaths(storage, workspaceId, datasetId);
+  // The capability check already refuses a Collection this server doesn't keep.
+  // A file at the approved path that names no Collection still counts, as it always has.
+  return paths === null || paths.current !== null || paths.unnamed;
+}
+
+/**
+ * The Collection's dataset.json on main: the path its approved folder gives, and where a file naming this Collection is
+ * now, which is that path or where a file that was there moved, or null when none does. `unnamed` when the file at the
+ * approved path names no Collection. Null for a Collection this server doesn't keep.
+ */
+export function collectionFilePaths(
+  storage: StorageContext,
+  workspaceId: string,
+  datasetId: string,
+): { approved: string; current: string | null; unnamed: boolean } | null {
   const approved = storage.db
     .prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?")
     .get(workspaceId, datasetId);
-  // The capability check already refuses a Collection this server doesn't keep.
-  if (!approved) return true;
+  if (!approved) return null;
   const folder = datasetBaseFolder(
     parseDatasetRevision(JSON.parse(String(approved.revision_json))).definition,
   );
   const path = folder === "." ? "dataset.json" : `${folder}/dataset.json`;
   const named = namedCollection(storage, workspaceId, path);
-  if (named === null || named === datasetId) return true;
+  if (named === datasetId) return { approved: path, current: path, unnamed: false };
   // Moving a folder keeps its files' objects, so follow the files that were here,
   // whatever now sits at this path.
   const objects = storage.db
     .prepare(`SELECT object_id FROM sync_relay_object_moments
     WHERE workspace_id=? AND version_id=? AND path=? GROUP BY object_id ORDER BY MAX(relay_seq) DESC LIMIT ${MAX_FOLLOWED_FILES}`)
     .all(workspaceId, MAIN_VERSION_ID, path);
-  return objects.some(({ object_id }) => {
+  for (const { object_id } of objects) {
     const moved = currentObjectPath(storage, {
       workspaceId,
       versionId: MAIN_VERSION_ID,
       objectId: String(object_id),
     });
-    return (
-      !!moved &&
+    if (
+      moved &&
       (moved === "dataset.json" || moved.endsWith("/dataset.json")) &&
       namedCollection(storage, workspaceId, moved) === datasetId
-    );
-  });
+    )
+      return { approved: path, current: moved, unnamed: false };
+  }
+  return { approved: path, current: null, unnamed: named === null };
 }
 
 /** The Collection a main dataset.json names: undefined with no file there, null when it names none. */

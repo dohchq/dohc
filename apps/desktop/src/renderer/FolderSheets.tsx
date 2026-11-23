@@ -16,10 +16,10 @@ const SHEETS: readonly {
   top: number;
   turn: number;
 }[] = [
-  { kind: "markdown", left: 94, top: -64, turn: -6 },
-  { kind: "collection", left: 158, top: -70, turn: -2 },
-  { kind: "drawing", left: 222, top: -66, turn: 2.5 },
-  { kind: "app", left: 284, top: -60, turn: 6.5 },
+  { kind: "markdown", left: 88, top: 32, turn: -6 },
+  { kind: "collection", left: 146, top: 26, turn: -2 },
+  { kind: "drawing", left: 204, top: 30, turn: 2.5 },
+  { kind: "app", left: 260, top: 36, turn: 6.5 },
 ];
 
 const placement = (sheet: (typeof SHEETS)[number]): CSSProperties => ({
@@ -33,7 +33,7 @@ export function FolderSheets() {
     <div
       data-testid="folder-sheets"
       aria-hidden
-      className="pointer-events-none absolute inset-x-0 top-0 z-1 h-0"
+      className="pointer-events-none absolute inset-x-0 -top-24 z-1 h-24 overflow-x-clip"
     >
       {SHEETS.map((sheet) => (
         <div

@@ -51,11 +51,9 @@ export function deleteConfirmText(
       ) : null,
     children: (
       <p>
-        {`${paths.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
-          paths.length === 1 ? "it" : "them"
-        } from. ${
-          shareView.granterEmail ?? "The person who shared it"
-        } still ${paths.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`}
+        {`${paths.length === 1 ? "This removes it" : "This removes them"} from your copy without using trash. The original stays with ${
+          shareView.granterEmail ?? "the person who shared it"
+        } until you send the change and they accept it. You can take the change back before then.`}
       </p>
     ),
   };

@@ -16,7 +16,9 @@ it.each([
     }),
   ).resolves.toEqual({ unchanged });
   expect(fetch).toHaveBeenCalledOnce();
-  expect(fetch.mock.calls[0]![0]).toBe("https://relay.test/sync/shares/share%2Fid/log?since=42");
+  expect(fetch.mock.calls[0]![0]).toBe(
+    "https://relay.test/sync/shares/share%2Fid/log?since=42&scan=page",
+  );
   expect(new Headers(fetch.mock.calls[0]![1]!.headers).get("authorization")).toBe("Bearer account");
 });
 

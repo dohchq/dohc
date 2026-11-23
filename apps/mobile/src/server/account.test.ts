@@ -2,7 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { createAccount, type Account, type SignIn, type StoredSignIn } from "./account";
 import { listWorkspaces } from "./api";
 import { ServerError } from "./client";
-import { deferred, memoryStore, testServer, type Answer } from "./testServer";
+import {
+  pendingSignOuts,
+  readRegistration,
+  saveRegistration,
+  type PendingSignOuts,
+} from "./pushRegistration";
+import { keptDisk } from "./testKeptDisk";
+import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 
 const SAVED: StoredSignIn = {
   origin: "https://dohc.example.com",
@@ -21,6 +28,28 @@ const SESSIONS = {
     ],
   },
 };
+
+function memoryPending() {
+  const rows = new Set<string>();
+  const log: string[] = [];
+  const key = (owner: { origin: string; userId: string }) => `${owner.origin} ${owner.userId}`;
+  const pending: PendingSignOuts = {
+    begin: async (owner) => {
+      log.push("begin");
+      rows.add(key(owner));
+    },
+    isPending: async (owner) => rows.has(key(owner)),
+    cancel: async (owner) => {
+      log.push("cancel");
+      rows.delete(key(owner));
+    },
+    end: async (owner) => {
+      log.push("end");
+      rows.delete(key(owner));
+    },
+  };
+  return { pending, rows, log };
+}
 
 function setup(saved: StoredSignIn | null = SAVED) {
   const server = testServer();
@@ -66,6 +95,7 @@ describe("restoring", () => {
       origin: null,
       ended: false,
       forgetFailed: false,
+      pendingSignOut: null,
     });
   });
 });
@@ -159,7 +189,7 @@ describe("the sign-in generation", () => {
     const signIn = signedIn(account);
     const held = deferred<Answer>();
     server.on("GET", "/sync/account/workspaces", () => held.promise);
-    server.on("GET", "/sync/account/sessions", "offline");
+    serveSessionEnd(server);
     const listing = listWorkspaces(signIn.client);
     await vi.waitFor(() => expect(server.calls).toHaveLength(1));
     const signingOut = account.signOut();
@@ -170,12 +200,13 @@ describe("the sign-in generation", () => {
       origin: SAVED.origin,
       ended: false,
       forgetFailed: false,
+      pendingSignOut: "running",
     });
     held.resolve(WORKSPACES);
     await expect(listing).rejects.toEqual(new ServerError("cancelled"));
     await signingOut;
     expect(tokens.current()).toBeNull();
-    expect(account.state()).toMatchObject({ status: "signed-out" });
+    expect(account.state()).toMatchObject({ status: "signed-out", pendingSignOut: null });
   });
 
   it("signs out on a 401, without revoking, and deletes the token", async () => {
@@ -193,6 +224,7 @@ describe("the sign-in generation", () => {
       origin: SAVED.origin,
       ended: true,
       forgetFailed: false,
+      pendingSignOut: null,
     });
     await vi.waitFor(() => expect(tokens.current()).toBeNull());
     expect(server.paths()).toEqual(["GET /sync/account/workspaces"]);
@@ -202,7 +234,7 @@ describe("the sign-in generation", () => {
     const { server, tokens, account } = setup();
     await account.restore();
     const earlier = signedIn(account);
-    server.on("GET", "/sync/account/sessions", "offline");
+    serveSessionEnd(server);
     await account.signOut();
     serveSignIn(server);
     await account.signIn(server.origin, () => {});
@@ -226,7 +258,7 @@ describe("signing out", () => {
       },
     });
     await account.restore();
-    server.on("GET", "/sync/account/sessions", "offline");
+    serveSessionEnd(server);
     await account.signOut();
     expect(order).toEqual(["outbox, token kept"]);
     expect(tokens.current()).toBeNull();
@@ -278,6 +310,7 @@ describe("signing out", () => {
     expect(tokens.current()).toEqual(SAVED);
     expect(server.calls).toHaveLength(0);
 
+    serveSessionEnd(server);
     const seen: string[] = [];
     const leaving = createAccount({
       store: tokens.store,
@@ -321,7 +354,13 @@ describe("signing out", () => {
     return { server, tokens, account, cleanup, endSession };
   }
 
-  const ENDED = { status: "signed-out", origin: SAVED.origin, ended: true, forgetFailed: false };
+  const ENDED = {
+    status: "signed-out",
+    origin: SAVED.origin,
+    ended: true,
+    forgetFailed: false,
+    pendingSignOut: null,
+  };
 
   it("leaves a session the server ended signed out when the hook rejects before leave", async () => {
     const { tokens, account, cleanup, endSession } = failingCleanup();
@@ -369,7 +408,7 @@ describe("signing out", () => {
 
   it("shares one cleanup between overlapping sign-outs of the same sign-in", async () => {
     const { server, tokens } = setup();
-    server.on("GET", "/sync/account/sessions", "offline");
+    serveSessionEnd(server);
     const cleanup = deferred<void>();
     const cleaned = vi.fn(async (leave: () => Promise<void>) => {
       await cleanup.promise;
@@ -455,39 +494,25 @@ describe("signing out", () => {
     expect(tokens.current()?.token).toBe("tok-2");
   });
 
-  it("ends a newer sign-in even while an earlier sign-out still waits on its revoke", async () => {
-    const { server, tokens } = setup();
+  it("refuses a sign-in, and keeps the token, while Sign out waits for the server", async () => {
+    const { server, tokens, account } = setup();
     const revoking = deferred<Answer>();
-    // Only the first sign-out's revoke is held; a later one finds the server offline.
-    let sessionsAsked = 0;
-    server.on("GET", "/sync/account/sessions", () =>
-      sessionsAsked++ === 0 ? revoking.promise : "offline",
-    );
-    const cleaned = vi.fn(async (leave: () => Promise<void>) => {
-      await leave();
-    });
-    const account = createAccount({
-      store: tokens.store,
-      fetch: server.fetch,
-      sleep: async () => {},
-      onSignOut: cleaned,
-    });
+    server.on("GET", "/sync/account/sessions", () => revoking.promise);
     await account.restore();
-    const earlier = account.signOut();
-    // The first sign-out has left, and now waits on the server to revoke tok-1.
+    const ending = account.signOut();
     await vi.waitFor(() => expect(server.paths()).toContain("GET /sync/account/sessions"));
-    expect(account.state()).toMatchObject({ status: "signed-out" });
+    expect(account.state()).toMatchObject({ status: "signed-out", pendingSignOut: "running" });
     serveSignIn(server);
-    expect(await account.signIn(server.origin, () => {})).toBe("signed-in");
-    expect(tokens.current()?.token).toBe("tok-2");
-    // Signing out again ends tok-2's sign-in with its own cleanup, not the old attempt's.
-    await account.signOut();
-    expect(cleaned).toHaveBeenCalledTimes(2);
+    await expect(account.signIn(server.origin, () => {})).rejects.toThrow(
+      "This phone is still signing out.",
+    );
+    account.cancelSignIn();
+    expect(tokens.current()).toEqual(SAVED);
+    serveSessionEnd(server);
+    revoking.resolve(SESSIONS);
+    await ending;
     expect(tokens.current()).toBeNull();
-    expect(account.state()).toMatchObject({ status: "signed-out" });
-    revoking.resolve({ status: 200, body: { ok: true, sessions: [] } });
-    await earlier;
-    expect(account.state()).toMatchObject({ status: "signed-out" });
+    expect(await account.signIn(server.origin, () => {})).toBe("signed-in");
   });
 
   it("refuses to sign in again while signed in, keeping the sign-in and the outbox", async () => {
@@ -504,17 +529,16 @@ describe("signing out", () => {
     expect(server.calls).toHaveLength(0);
   });
 
-  it("deletes the token first, then revokes this phone's session with the copy in memory", async () => {
+  it("ends this phone's session on the server first, then deletes the token", async () => {
     const { server, tokens, account } = setup();
     await account.restore();
     server.on("GET", "/sync/account/sessions", () => {
-      // If the phone closed here, no token would be left in its store.
-      expect(tokens.current()).toBeNull();
+      expect(tokens.current()).toEqual(SAVED);
       return SESSIONS;
     });
-    server.on("POST", "/sync/account/sessions/s-phone/revoke", {
-      status: 200,
-      body: { ok: true, sessionId: "s-phone" },
+    server.on("POST", "/sync/account/sessions/s-phone/revoke", () => {
+      expect(tokens.current()).toEqual(SAVED);
+      return { status: 200, body: { ok: true, sessionId: "s-phone" } };
     });
     await account.signOut();
     expect(tokens.log).toEqual(["clear"]);
@@ -528,22 +552,224 @@ describe("signing out", () => {
       origin: SAVED.origin,
       ended: false,
       forgetFailed: false,
+      pendingSignOut: null,
     });
   });
 
-  it("deletes the token when the server can't be reached, or the revoke fails", async () => {
-    const offline = setup();
-    await offline.account.restore();
-    offline.server.on("GET", "/sync/account/sessions", "offline");
-    await offline.account.signOut();
-    expect(offline.tokens.current()).toBeNull();
+  it("keeps the token and a pending Sign out when the server doesn't end the session, until Try again does", async () => {
+    for (const fail of ["sessions", "revoke", "busy"] as const) {
+      const { server, tokens, account } = setup();
+      await account.restore();
+      if (fail === "sessions") server.on("GET", "/sync/account/sessions", "offline");
+      else server.on("GET", "/sync/account/sessions", SESSIONS);
+      if (fail === "revoke") server.on("POST", "/sync/account/sessions/s-phone/revoke", "offline");
+      if (fail === "busy")
+        server.on("POST", "/sync/account/sessions/s-phone/revoke", { status: 503, body: {} });
+      await expect(account.signOut()).rejects.toBeInstanceOf(ServerError);
+      expect(account.state()).toMatchObject({ status: "signed-out", pendingSignOut: "failed" });
+      expect(tokens.current()).toEqual(SAVED);
 
-    const refused = setup();
-    await refused.account.restore();
-    refused.server.on("GET", "/sync/account/sessions", SESSIONS);
-    refused.server.on("POST", "/sync/account/sessions/s-phone/revoke", "offline");
-    await refused.account.signOut();
-    expect(refused.tokens.current()).toBeNull();
+      serveSessionEnd(server);
+      await account.signOut();
+      expect(account.state()).toMatchObject({ status: "signed-out", pendingSignOut: null });
+      expect(tokens.current()).toBeNull();
+    }
+  });
+
+  it("counts a session the server already ended as ended", async () => {
+    for (const ended of ["list", "revoke"] as const) {
+      const { server, tokens, account } = setup();
+      await account.restore();
+      if (ended === "list") server.on("GET", "/sync/account/sessions", { status: 401 });
+      else {
+        server.on("GET", "/sync/account/sessions", SESSIONS);
+        server.on("POST", "/sync/account/sessions/s-phone/revoke", { status: 404 });
+      }
+      await account.signOut();
+      expect(tokens.current()).toBeNull();
+      expect(account.state()).toMatchObject({ pendingSignOut: null });
+    }
+    const unknown = setup();
+    await unknown.account.restore();
+    await expect(unknown.account.signOut()).rejects.toEqual(
+      new ServerError("not-found", 404, "not_found"),
+    );
+    expect(unknown.tokens.current()).toEqual(SAVED);
+  });
+
+  it("keeps a pending Sign out in its row, and finishes it at the next launch without signing in", async () => {
+    const { server, tokens } = setup();
+    const { pending, rows, log } = memoryPending();
+    server.on("GET", "/sync/account/sessions", "offline");
+    const first = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      pendingSignOuts: pending,
+    });
+    await first.restore();
+    await expect(first.signOut()).rejects.toBeInstanceOf(ServerError);
+    expect(rows.size).toBe(1);
+    expect(log).toEqual(["begin"]);
+
+    const held = deferred<Answer>();
+    server.on("GET", "/sync/account/sessions", () => held.promise);
+    const relaunched = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      pendingSignOuts: pending,
+    });
+    const statuses: string[] = [];
+    relaunched.subscribe(() => statuses.push(relaunched.state().status));
+    await relaunched.restore();
+    expect(relaunched.state()).toMatchObject({ status: "signed-out", pendingSignOut: "running" });
+    held.resolve({ status: 401 });
+    await vi.waitFor(() => expect(tokens.current()).toBeNull());
+    expect(rows.size).toBe(0);
+    expect(log).toEqual(["begin", "end"]);
+    expect(statuses).not.toContain("signed-in");
+    expect(relaunched.state()).toMatchObject({ status: "signed-out", pendingSignOut: null });
+  });
+
+  it("commits the mark while still signed in, and stays signed in with its token when it can't", async () => {
+    const { server, tokens } = setup();
+    serveSessionEnd(server);
+    const { pending, log } = memoryPending();
+    const seen: string[] = [];
+    let failBegin = true;
+    const account = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      onSignOut: async (leave) => {
+        log.push("hook");
+        await leave();
+      },
+      pendingSignOuts: {
+        ...pending,
+        begin: async (owner) => {
+          seen.push(account.state().status);
+          if (failBegin) throw new Error("disk full");
+          await pending.begin(owner);
+        },
+      },
+    });
+    await account.restore();
+    const signIn = signedIn(account);
+    await expect(account.signOut()).rejects.toThrow("disk full");
+    expect(signedIn(account)).toBe(signIn);
+    expect(tokens.current()).toEqual(SAVED);
+    expect(server.calls).toHaveLength(0);
+    expect(log).toEqual([]);
+
+    failBegin = false;
+    await account.signOut();
+    expect(seen).toEqual(["signed-in", "signed-in"]);
+    expect(log).toEqual(["begin", "hook", "end"]);
+    expect(tokens.current()).toBeNull();
+  });
+
+  it("puts the registration row back, alerts on, when the hook rejects before leave", async () => {
+    const { server, tokens } = setup();
+    const kept = keptDisk().launch();
+    const owner = { origin: SAVED.origin, userId: SAVED.userId };
+    await saveRegistration(kept, owner, true, 4);
+    const account = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      onSignOut: async () => {
+        expect(await readRegistration(kept, owner)).toMatchObject({ signingOut: true });
+        throw new Error("couldn't delete");
+      },
+      pendingSignOuts: pendingSignOuts(kept),
+    });
+    await account.restore();
+    await expect(account.signOut()).rejects.toThrow("couldn't delete");
+    expect(await readRegistration(kept, owner)).toEqual({
+      alerts: true,
+      generation: 4,
+      signingOut: false,
+    });
+    expect(account.state().status).toBe("signed-in");
+  });
+
+  it("finishes once the server ended the session, even when the mark can't be cleared", async () => {
+    const { server, tokens } = setup();
+    serveSessionEnd(server);
+    const { pending } = memoryPending();
+    const account = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      pendingSignOuts: { ...pending, end: async () => Promise.reject(new Error("disk full")) },
+    });
+    await account.restore();
+    await account.signOut();
+    expect(account.state()).toMatchObject({ status: "signed-out", pendingSignOut: null });
+    expect(tokens.current()).toBeNull();
+  });
+
+  it("doesn't sign in when the launch can't read the mark, and signs in once Try again reads it", async () => {
+    const { server, tokens } = setup();
+    const { pending } = memoryPending();
+    let unreadable = true;
+    const account = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      pendingSignOuts: {
+        ...pending,
+        isPending: async (owner) =>
+          unreadable ? Promise.reject(new Error("I/O")) : pending.isPending(owner),
+      },
+    });
+    await account.restore();
+    expect(account.state()).toEqual({ status: "unreadable" });
+    unreadable = false;
+    await account.restore();
+    expect(account.state().status).toBe("signed-in");
+  });
+
+  it("shares one restore between two Try again presses, so a pending Sign out keeps its token until the server ends the session", async () => {
+    const { server, tokens } = setup();
+    const { pending, log } = memoryPending();
+    await pending.begin(SAVED);
+    const held = deferred<Answer>();
+    const kept: (StoredSignIn | null)[] = [];
+    server.on("GET", "/sync/account/sessions", () => {
+      kept.push(tokens.current());
+      return held.promise;
+    });
+    server.on("POST", "/sync/account/sessions/s-phone/revoke", () => {
+      kept.push(tokens.current());
+      return { status: 200, body: { ok: true, sessionId: "s-phone" } };
+    });
+    // As the keychain does, each read gives another object.
+    const load = async () => {
+      const found = await tokens.store.load();
+      return found && { ...found };
+    };
+    const account = createAccount({
+      store: { ...tokens.store, load },
+      fetch: server.fetch,
+      pendingSignOuts: pending,
+    });
+    await Promise.all([account.restore(), account.restore()]);
+    expect(account.state()).toMatchObject({ status: "signed-out", pendingSignOut: "running" });
+    await vi.waitFor(() => expect(kept).toHaveLength(1));
+    held.resolve(SESSIONS);
+    await vi.waitFor(() => expect(tokens.current()).toBeNull());
+    expect(kept).toEqual([SAVED, SAVED]);
+    expect(tokens.log).toEqual(["clear"]);
+    expect(log).toEqual(["begin", "end"]);
+  });
+
+  it("doesn't count a session list without this phone's session as ended", async () => {
+    const { server, tokens, account } = setup();
+    await account.restore();
+    server.on("GET", "/sync/account/sessions", {
+      status: 200,
+      body: { ok: true, sessions: [SESSIONS.body.sessions[0]] },
+    });
+    await expect(account.signOut()).rejects.toBeInstanceOf(ServerError);
+    expect(account.state()).toMatchObject({ status: "signed-out", pendingSignOut: "failed" });
+    expect(tokens.current()).toEqual(SAVED);
   });
 
   it("shows a failed delete, still revokes, and never signs in with that token again", async () => {
@@ -561,6 +787,7 @@ describe("signing out", () => {
       origin: SAVED.origin,
       ended: false,
       forgetFailed: true,
+      pendingSignOut: null,
     });
     expect(tokens.current()).toEqual(SAVED);
     expect(server.paths()).toContain("POST /sync/account/sessions/s-phone/revoke");

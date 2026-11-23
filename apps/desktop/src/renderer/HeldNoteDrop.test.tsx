@@ -74,7 +74,7 @@ it("names the waiting authors, cancels safely, and offers Undo after the band di
   );
   expect(
     within(dialog).getByText(
-      "The note returns to the file on disk. If it's shared, the waiting edits are removed for everyone. History keeps the waiting text, and Undo brings it back as held.",
+      "The note returns to the file on disk, and if shared, dohc removes the waiting edits for everyone. History keeps the waiting text, and Undo restores it as held.",
     ),
   ).toBeTruthy();
   await user.click(within(dialog).getByRole("button", { name: "Cancel" }));

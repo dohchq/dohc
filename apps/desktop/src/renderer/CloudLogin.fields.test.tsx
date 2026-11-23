@@ -101,7 +101,9 @@ describe("CloudLogin fields", () => {
     const pending = await screen.findByTestId("cloud-login-pending");
     expect(pending.textContent).toContain("Approve this device in your browser.");
     expect(screen.getByTestId("cloud-user-code").textContent).toBe("ABCD");
-    expect(screen.getByRole("status").textContent).toBe("Waiting for approval");
+    const status = screen.getByTestId("cloud-waiting-status");
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.textContent).toBe("Waiting for approval");
   });
 
   it("offers Try again in place when the status check fails", async () => {

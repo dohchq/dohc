@@ -436,6 +436,12 @@ test("a press outside closes the dialog on top, then Settings", async () => {
     await page.getByTestId("agent-add").click();
     const addSheet = page.getByTestId("agent-add-sheet");
     await expect(addSheet).toBeVisible();
+    // An open dialog leaves the titlebar dragging the window.
+    expect(
+      await page
+        .getByTestId(desktopPins.titlebar)
+        .evaluate((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region")),
+    ).toBe("drag");
     // The bottom-left corner of the window: outside both panels.
     const pressOutside = async () =>
       page.mouse.click(8, (await page.evaluate(() => innerHeight)) - 8);
@@ -443,11 +449,9 @@ test("a press outside closes the dialog on top, then Settings", async () => {
     await pressOutside();
     await expect(addSheet).toBeHidden();
     await expect(page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
-    await expect(page.locator(":root[data-modal-open]")).toHaveCount(1);
 
     await pressOutside();
     await expect(page.getByTestId(desktopPins.settingsDialog)).toHaveCount(0);
-    await expect(page.locator(":root[data-modal-open]")).toHaveCount(0);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

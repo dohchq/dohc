@@ -57,6 +57,38 @@ describe("wait for messages", () => {
     );
   });
 
+  it("normalizes CLI chat handles to engine ids so dohc_read_chat accepts them directly", async () => {
+    const request = vi.fn<NonNullable<ToolContext["request"]>>(async () => ({
+      messages: [
+        {
+          threadId: "th_a73050f8-715e-466d-ad52-085cab1ed4c3",
+          messageId: "msg_e7e590f4-ed17-4464-9635-e3038536f6a3",
+          group: { id: "ch_general", name: "general", slug: "general", kind: "group" },
+          author: { kind: "human", displayName: "You" },
+          createdAtMs: 1_700_000_000_000,
+          text: "@AuditAgent hello",
+        },
+      ],
+      cursor: "next",
+    }));
+    const { client } = await connect({ root: "/workspace", home: "/state", request });
+    const result = await client.callTool({ name: "dohc_wait_for_messages", arguments: {} });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({
+      messages: [
+        {
+          threadId: "thread-a73050f8-715e-466d-ad52-085cab1ed4c3",
+          messageId: "message-e7e590f4-ed17-4464-9635-e3038536f6a3",
+          group: { id: "channel-general", name: "general", slug: "general", kind: "group" },
+          author: { kind: "human", displayName: "You" },
+          createdAtMs: 1_700_000_000_000,
+          text: "@AuditAgent hello",
+        },
+      ],
+      cursor: "next",
+    });
+  });
+
   it("offers waits only on the owning workspace and describes the loop", async () => {
     for (const shareAccess of [undefined, "view", "comment", "edit"] as const) {
       const { client } = await connect({ root: "/workspace", home: "/state", shareAccess });

@@ -117,7 +117,9 @@ fn secret_changed_ingest_consumes_an_engine_self_write() {
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 2,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretDiskIntent::Materialize {
+                check: &|_, _, _, _| Ok(dohc_engine_storage::Preimage::Absent),
             },
             &FilesNoFaults,
         )

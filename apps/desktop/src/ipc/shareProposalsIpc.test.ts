@@ -371,7 +371,7 @@ describe("registered share proposal handlers", () => {
   it.each([
     ["signed out", "Sign in to your server first."],
     ["other account", "Sign in to the account that synced this workspace."],
-    ["other server", "Sign in to the cloud server this workspace uses."],
+    ["other server", "Sign in to the server this workspace uses."],
     ["missing relay", "Reconnect your server to refresh its connection settings, then try again."],
   ] as const)("refuses listing and settlement when %s", async (state, message) => {
     const h = await harness();

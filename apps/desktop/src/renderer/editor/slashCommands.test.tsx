@@ -10,11 +10,15 @@ import * as yTiptap from "@tiptap/y-tiptap";
 import * as Y from "yjs";
 import {
   CLOSED_SLASH_COMMAND_STATE,
+  dismissSlashCommand,
+  filterSlashCommands,
   makeSlashCommandPlugin,
+  runSlashCommand,
   SlashCommandMenu,
   type SlashCommandId,
   type SlashCommandState,
 } from "./slashCommands";
+import { insertBlockAfter } from "./blockControls";
 
 // Same Range stubs the other picker tests use — the plugin calls
 // view.coordsAtPos, which reaches into DOM Range measurement under jsdom.
@@ -379,7 +383,7 @@ describe("SlashCommandMenu on the Menu part's recipe", () => {
       const { rerender } = render(
         createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE }, ...props }),
       );
-      const list = screen.getByRole("listbox", { name: "slash commands" });
+      const list = screen.getByRole("listbox", { name: "Slash commands" });
       const options = screen.getAllByRole("option");
       const last = options.at(-1)!;
       expect(options[0]!.hasAttribute("data-active")).toBe(true);
@@ -418,5 +422,173 @@ describe("SlashCommandMenu on the Menu part's recipe", () => {
     expect(onHover).not.toHaveBeenCalled();
     fireEvent.mouseMove(second, { movementX: 0, movementY: 3 });
     expect(onHover).toHaveBeenCalledWith(1);
+  });
+
+  it("shows section headers when query is empty and hides them when filtering", () => {
+    const { rerender } = render(
+      createElement(SlashCommandMenu, {
+        state: { ...OPEN_STATE_BASE, query: "" },
+        onSelect: () => {},
+        onHover: () => {},
+      }),
+    );
+    expect(screen.getByText("Basic blocks")).toBeTruthy();
+    expect(screen.getByText("Lists")).toBeTruthy();
+    expect(screen.getByText("Blocks")).toBeTruthy();
+    expect(screen.getByText("Media & links")).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Basic blocks" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Lists" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Blocks" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Media & links" })).toBeTruthy();
+
+    rerender(
+      createElement(SlashCommandMenu, {
+        state: { ...OPEN_STATE_BASE, query: "head" },
+        onSelect: () => {},
+        onHover: () => {},
+      }),
+    );
+    expect(screen.queryByText("Basic blocks")).toBeNull();
+  });
+
+  it("dismisses on outside mousedown", () => {
+    const onDismiss = vi.fn();
+    render(
+      createElement(SlashCommandMenu, {
+        state: { ...OPEN_STATE_BASE },
+        onSelect: () => {},
+        onHover: () => {},
+        onDismiss,
+      }),
+    );
+    fireEvent.mouseDown(screen.getByRole("listbox", { name: "Slash commands" }));
+    expect(onDismiss).not.toHaveBeenCalled();
+    fireEvent.mouseDown(document.body);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("filterSlashCommands tiered scoring & code suppression", () => {
+  it("ranks label prefixes ahead of alias matches", () => {
+    expect(
+      filterSlashCommands("t")
+        .slice(0, 3)
+        .map((c) => c.id),
+    ).toEqual(["task-list", "toggle", "table"]);
+    expect(filterSlashCommands("d")[0]?.id).toBe("divider");
+    expect(filterSlashCommands("i")[0]?.id).toBe("image");
+    expect(
+      filterSlashCommands("m")
+        .slice(0, 2)
+        .map((c) => c.id),
+    ).toEqual(["math", "mermaid"]);
+  });
+
+  it("does not trigger inside code blocks or inline code marks", () => {
+    const { editor, stateRef } = makeSlashEditor();
+    editor.commands.setContent("<pre><code>/he</code></pre>");
+    editor.commands.setTextSelection(4);
+    expect(stateRef.current.open).toBe(false);
+
+    editor.commands.setContent("<p><code>/he</code></p>");
+    editor.commands.setTextSelection(4);
+    expect(stateRef.current.open).toBe(false);
+    editor.destroy();
+  });
+
+  it("keeps gutter '+' in pure UI state with zero Y.Doc mutation until typing or picking a block", () => {
+    const ydoc = new Y.Doc();
+    const peerDoc = new Y.Doc();
+    const syncUpdates: Uint8Array[] = [];
+    ydoc.on("update", (update: Uint8Array) => {
+      syncUpdates.push(update);
+      Y.applyUpdate(peerDoc, update);
+    });
+    const { editor, stateRef, press } = makeSlashEditor(ydoc);
+    editor.commands.setContent("<p>Hello</p>");
+    syncUpdates.length = 0;
+
+    // Clicking gutter '+' opens the slash menu without touching the document or emitting any Y.Doc update.
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    expect(editor.state.doc.childCount).toBe(1);
+    expect(editor.state.doc.textContent).toBe("Hello");
+    expect(syncUpdates).toHaveLength(0);
+
+    // A remote peer edit while the gutter menu is open followed by Escape leaves zero stray '/'.
+    const peerBody = peerDoc.getXmlFragment("default");
+    const peerParagraph = peerBody.get(0) as Y.XmlElement;
+    (peerParagraph.get(0) as Y.XmlText).insert(5, " peer");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(peerDoc));
+    press("Escape");
+    expect(stateRef.current.open).toBe(false);
+    expect(editor.state.doc.textContent).toBe("Hello peer");
+    expect(editor.state.doc.textContent).not.toContain("/");
+
+    // Clicking gutter '+' and running a command inserts the new block cleanly after the target block.
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    runSlashCommand(editor, "heading-1", stateRef.current, (next) => {
+      stateRef.current = typeof next === "function" ? next(stateRef.current) : next;
+    });
+    expect(editor.state.doc.childCount).toBe(2);
+    expect(editor.state.doc.child(0).textContent).toBe("Hello peer");
+    expect(editor.state.doc.child(1).type.name).toBe("heading");
+    expect(editor.state.doc.child(1).attrs.level).toBe(1);
+
+    // Clicking gutter '+' then typing 'h' materializes '/h' so filtering works seamlessly.
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    press("h");
+    expect(stateRef.current).toMatchObject({ open: true, query: "h" });
+    expect(editor.state.doc.child(1).textContent).toBe("/h");
+
+    // Outside-click dismiss on a fresh gutter open leaves zero doc edit, while manually typed '/' stays on Escape.
+    editor.commands.setContent("<p></p>");
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    dismissSlashCommand(editor.view);
+    expect(stateRef.current.open).toBe(false);
+    expect(editor.state.doc.textContent).toBe("");
+
+    editor.commands.insertContent("/");
+    expect(stateRef.current.open).toBe(true);
+    press("Escape");
+    expect(stateRef.current.open).toBe(false);
+    expect(editor.state.doc.textContent).toBe("/");
+
+    // Opening and escaping gutter '+' must preserve a previously dismissed typed '/' instead of reopening it.
+    insertBlockAfter(editor, 0);
+    expect(stateRef.current.open).toBe(true);
+    press("Escape");
+    expect(stateRef.current.open).toBe(false);
+
+    // Leaf atoms (divider) track their exact Y.js block identity across peer edits and close if deleted by a peer.
+    editor.commands.setContent("<p>Lead</p><hr><p>Tail</p>");
+    const hrPos = editor.state.doc.child(0).nodeSize;
+    insertBlockAfter(editor, hrPos);
+    expect(stateRef.current).toMatchObject({ open: true, gutterTarget: { blockPos: hrPos } });
+    const leadText = (peerBody.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    leadText.insert(4, " edited");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(peerDoc));
+    const movedHrPos = editor.state.doc.child(0).nodeSize;
+    expect(stateRef.current).toMatchObject({ open: true, gutterTarget: { blockPos: movedHrPos } });
+    runSlashCommand(editor, "heading-1", stateRef.current, (next) => {
+      stateRef.current = typeof next === "function" ? next(stateRef.current) : next;
+    });
+    expect(editor.state.doc.child(0).type.name).toBe("paragraph");
+    expect(editor.state.doc.child(1).type.name).toBe("horizontalRule");
+    expect(editor.state.doc.child(2).type.name).toBe("heading");
+
+    // If a remote peer deletes the targeted divider, the gutter menu closes cleanly.
+    insertBlockAfter(editor, editor.state.doc.child(0).nodeSize);
+    expect(stateRef.current.open).toBe(true);
+    peerBody.delete(1, 1);
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(peerDoc));
+    expect(stateRef.current.open).toBe(false);
+
+    editor.destroy();
+    ydoc.destroy();
+    peerDoc.destroy();
   });
 });

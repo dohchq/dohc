@@ -29,6 +29,8 @@ import type {
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
+import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "./workspace/workspaceSession";
 import { SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { TextNotSavedError } from "./shell/copyDetails";
@@ -55,7 +57,14 @@ import {
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
-import { addView, deleteView, renameView, setOptionColor } from "./collections/schemaAuthoring";
+import {
+  addView,
+  addViewPreservingTable,
+  deleteView,
+  orderGroupFields,
+  renameView,
+  setOptionColor,
+} from "./collections/schemaAuthoring";
 import { withErrorWords } from "../ipc/errorWords";
 import { openLink } from "./linkActivation";
 import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/collectionFieldMarks";
@@ -295,7 +304,7 @@ export function CollectionPage({
       setLoadError(null);
     } catch (error) {
       if (!detailsRequest.isCurrent(request)) return;
-      setLoadError(withErrorWords("dohc could not load this collection.", error));
+      setLoadError(withErrorWords("dohc could not load this Collection.", error));
     }
   }, [workspaceId, collectionPath]);
   useEffect(() => {
@@ -351,29 +360,17 @@ export function CollectionPage({
   // The people a person field can name: the ones main lists for this
   // Collection. A person cell then opens a picker and shows names. Without
   // the list, as on a received share, the cell keeps the typed id.
-  const [people, setPeople] = useState<ReadonlyArray<{ id: string; name: string }> | undefined>(
-    undefined,
-  );
-  const peopleRequests = useRequestSequence([workspaceId, collectionPath]);
   const hasPersonField = details?.schema.fields.some((field) => field.type === "person") ?? false;
-  useEffect(() => {
-    setPeople(undefined);
-    if (!hasPersonField) return;
-    const request = peopleRequests.next();
-    void bridge()
-      .listAutomationPeople({ workspaceId, collectionPath })
-      .then((result) => {
-        if (
-          !peopleRequests.isCurrent(request) ||
-          result.status !== "listed" ||
-          result.people.length === 0
-        )
-          return;
-        setPeople(result.people.map((person) => ({ id: person.userId, name: person.name })));
-      })
-      // A failed read leaves the typed id, which still works.
-      .catch(() => undefined);
-  }, [workspaceId, collectionPath, hasPersonField]);
+  const peopleRead = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([workspaceId, collectionPath, hasPersonField]),
+    manual: !hasPersonField,
+    load: () => bridge().listAutomationPeople({ workspaceId, collectionPath }),
+  });
+  const people = useMemo(() => {
+    const listed = peopleRead.value;
+    if (listed?.status !== "listed" || listed.people.length === 0) return undefined;
+    return listed.people.map((person) => ({ id: person.userId, name: person.name }));
+  }, [peopleRead.value]);
   const personLabel = useMemo(() => {
     if (!people) return undefined;
     const names = new Map(people.map((person) => [person.id, person.name]));
@@ -628,8 +625,8 @@ export function CollectionPage({
     if (unseen > 0)
       onNotice(
         unseen === 1
-          ? "Created a record. It is not among the records on screen."
-          : `Created ${unseen} records. They are not among the records on screen.`,
+          ? "Created 1 record. It is not shown in this view."
+          : `Created ${unseen} records. They are not shown in this view.`,
       );
   }, [rowsRead, state.status]);
   // The record made a moment ago from a board, a calendar, or New record beside one, which opens in the panel with its name ready to type.
@@ -934,7 +931,7 @@ export function CollectionPage({
       : (draftAccess.current.writeRefusal ??
         (draftAccess.current.accessEnded
           ? "Your access to this share ended."
-          : "Your access to this share changed. Ask for Edit access, then reopen the share."));
+          : "Your access to this share changed. Ask for Edit access, then return to this window."));
   mayNotWrite.current = accessRefusal;
   // Each record as the page last had it, so text left in a cell whose record a refresh took still has its record's name and file.
   const knownRecords = useRef(new Map<string, CollectionRecord>());
@@ -1098,11 +1095,11 @@ export function CollectionPage({
       if (result.status === "conflict") {
         // The conflict machinery holds the other write; re-read and retry.
         void refreshDetails();
-        failure = "This collection changed while you were editing. Try again.";
+        failure = "This Collection changed while you were editing. Try again.";
       } else {
         failure = result.detail
-          ? `dohc could not update this collection. ${result.detail}`
-          : "dohc could not update this collection.";
+          ? `dohc could not update this Collection. ${result.detail}`
+          : "dohc could not update this Collection.";
       }
       if (currentSchemaDialog.current !== dialog) onError(failure, new Error(failure));
       return failure;
@@ -1143,7 +1140,7 @@ export function CollectionPage({
     async (view: NewCollectionView): Promise<string | null> => {
       const request = schemaWrites.current();
       const failure = await applySchemaChange((current) =>
-        addView(current, {
+        addViewPreservingTable(current, {
           name: view.name,
           kind: view.kind,
           groupBy: view.kind === "board" ? (view.groupBy ?? null) : null,
@@ -1182,6 +1179,32 @@ export function CollectionPage({
       });
     },
     [applySchemaChange, onActiveViewChange, onError, schemaWrites],
+  );
+  const duplicateView = useCallback(
+    function duplicate(name: string) {
+      const source = details?.schema.views.find((view) => view.name === name);
+      if (!source) return;
+      const taken = new Set(details?.schema.views.map((view) => view.name) ?? []);
+      let copyName = `${source.name} copy`;
+      let n = 2;
+      while (taken.has(copyName)) {
+        copyName = `${source.name} copy ${n}`;
+        n += 1;
+      }
+      const dialog = currentSchemaDialog.current;
+      const request = schemaWrites.current();
+      void applySchemaChange((current) => addView(current, { ...source, name: copyName })).then(
+        (failure) => {
+          if (!schemaWrites.isCurrent(request)) return;
+          if (failure === null) {
+            onActiveViewChange(copyName);
+          } else if (currentSchemaDialog.current === dialog) {
+            onError(failure, new Error(failure), () => duplicate(name));
+          }
+        },
+      );
+    },
+    [applySchemaChange, details, onActiveViewChange, onError, schemaWrites],
   );
 
   // A typed select value not in the options yet: the whole edit enters the
@@ -1236,7 +1259,7 @@ export function CollectionPage({
             readAgain();
           }}
         >
-          Retry
+          Try again
         </SecondaryButton>
       </div>
     );
@@ -1248,7 +1271,7 @@ export function CollectionPage({
   const neverLoaded =
     (state.status === "loading" || state.status === "idle") && state.collection === null;
   if (details === null || neverLoaded) {
-    return <SkeletonRows inSlot layout="panel" label="Loading collection..." />;
+    return <SkeletonRows inSlot layout="panel" label="Loading Collection…" />;
   }
 
   const schema = details.schema;
@@ -1328,17 +1351,39 @@ export function CollectionPage({
     ? undefined
     : {
         // A board groups by stored values, and a button stores none.
-        groupFields: schema.fields
-          .filter((field) => field.type !== "button")
-          .map((field) => ({ id: field.name, name: field.name })),
+        groupFields: orderGroupFields(schema.fields).map((field) => ({
+          id: field.name,
+          name: field.name,
+        })),
         dateFields: dateFields.map((field) => ({ id: field.name, name: field.name })),
         onAddDateField: () => setFieldsOpen("date"),
         create: createView,
         rename: renameOpenView,
+        duplicate: duplicateView,
         remove: removeView,
         // Deleting a view drops its configuration with no reverse path, so the menu asks twice.
         confirmDelete: true,
       };
+
+  const orderedRecords =
+    boardReady && state.groups ? state.groups.flatMap((group) => group.records) : state.records;
+  const openRecordIndex =
+    openRecordId === null ? -1 : orderedRecords.findIndex((entry) => entry.id === openRecordId);
+  const activeSorts = state.query.sort ?? [];
+  const activeQuery =
+    activeSorts.length > 0
+      ? {
+          items: activeSorts.map((clause) => ({
+            id: `sort:${clause.field}`,
+            label: `Sort: ${clause.field} (${clause.direction})`,
+            onRemove: () =>
+              void store.setQuery({
+                sort: activeSorts.filter((entry) => entry.field !== clause.field),
+              }),
+          })),
+          onClearAll: () => void store.setQuery({ sort: [] }),
+        }
+      : undefined;
 
   // The open record, in the panel: its name as the table calls it, a row for each field of the Collection with
   // the table's own editors, and its page body. The ⚡ panel has the place while it is open.
@@ -1413,6 +1458,25 @@ export function CollectionPage({
         onOpenAsPage={
           record === null ? undefined : () => afterBodySaved(() => onOpenRecord(record.path))
         }
+        onPrevious={
+          openRecordIndex >= 0
+            ? () => {
+                const prev = orderedRecords[openRecordIndex - 1];
+                if (prev) openRecord(prev);
+              }
+            : undefined
+        }
+        onNext={
+          openRecordIndex >= 0
+            ? () => {
+                const next = orderedRecords[openRecordIndex + 1];
+                if (next) openRecord(next);
+              }
+            : undefined
+        }
+        canPrevious={openRecordIndex > 0}
+        canNext={openRecordIndex >= 0 && openRecordIndex < orderedRecords.length - 1}
+        onAddField={readOnly ? undefined : () => setFieldsOpen(true)}
         commands={commands}
         loading={record === null && recordProblem === undefined}
         unavailable={recordProblem}
@@ -1459,10 +1523,10 @@ export function CollectionPage({
         state.status === "error" ? (
           <>
             <span className="truncate text-[12px] text-danger">
-              dohc could not read this collection's records. {state.error}
+              dohc could not read this Collection's records. {state.error}
             </span>
             <SecondaryButton size="compact" onClick={readAgain}>
-              Retry
+              Try again
             </SecondaryButton>
           </>
         ) : writesPaused ? (
@@ -1485,6 +1549,7 @@ export function CollectionPage({
         if (id !== "") onActiveViewChange(id);
       }}
       views={frameViews}
+      activeQuery={activeQuery}
       automations={{
         open: automationsOpen,
         count: automationCount(automations.file),
@@ -1536,7 +1601,7 @@ export function CollectionPage({
       {drainCapped ? (
         <div
           data-testid="collection-drain-cap"
-          className="shrink-0 border-b border-line px-3 py-1 text-[11px] text-muted"
+          className="shrink-0 border-b border-line px-3 py-1 text-[12px] text-muted"
         >
           This view shows only the first {state.records.length} records.
         </div>
@@ -1559,12 +1624,12 @@ export function CollectionPage({
                 {accessEnded
                   ? "Access ended. This draft cannot be sent. It is kept on this computer."
                   : readOnly
-                    ? "This draft cannot be sent with the current share access. It is kept on this computer."
+                    ? "Your share access does not allow sending this draft. It is saved on this computer."
                     : record.creationDelivery === "offline"
-                      ? "Saved on this computer. This computer is offline"
+                      ? "Saved on this computer while offline"
                       : record.creationDelivery === "pending"
-                        ? "Saved on this computer. Waiting to send"
-                        : (record.creationRefusal ?? "The sync relay did not accept this draft")}
+                        ? "Saved on this computer, waiting to send"
+                        : (record.creationRefusal ?? "The server did not accept this draft")}
               </span>
               {!readOnly ? (
                 <SecondaryButton
@@ -1639,6 +1704,7 @@ export function CollectionPage({
             renderButton={readOnly ? undefined : renderButton}
             onNearEnd={loadNextPage}
             newRecord={readOnly ? undefined : tableNewRecord}
+            onAddField={readOnly ? undefined : () => setFieldsOpen(true)}
           />
         )}
       </div>

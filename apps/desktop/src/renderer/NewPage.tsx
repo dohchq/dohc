@@ -96,7 +96,7 @@ export function NewPage(props: {
         <div
           ref={pageRef}
           data-testid="new-page"
-          className="absolute inset-0 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          className="absolute inset-0 flex flex-col overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
           onPointerDown={(event) => {
             if (
               event.button !== 0 ||
@@ -108,7 +108,7 @@ export function NewPage(props: {
             focusBodyEnd();
           }}
         >
-          <div className="group/topmatter">
+          <div className="group/topmatter shrink-0">
             <div ref={identityRef} className="contents">
               <PageIdentity
                 body={draft}

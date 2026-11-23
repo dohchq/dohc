@@ -75,9 +75,9 @@ export function AutomationBadge(props: {
           <Zap size={12} strokeWidth={1.9} aria-hidden />
         </button>
       ) : (
-        <span {...markProps} tabIndex={0} aria-label="automation" className="inline-flex rounded">
+        <span {...markProps} tabIndex={0} aria-label="Automation" className="inline-flex rounded">
           <Zap size={12} strokeWidth={1.9} aria-hidden />
-          <span className="sr-only">automation</span>
+          <span className="sr-only">Automation</span>
         </span>
       )}
       {open ? (

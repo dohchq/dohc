@@ -6,7 +6,7 @@ export const OWNER_RELAY_SHARE_INACTIVE_MESSAGE =
 
 export function assertOriginalWorkspace(workspace: { shareView?: unknown }): void {
   if (shareViewIsPresent(workspace.shareView)) {
-    throw new Error("This is a shared view — only the original workspace can be shared.");
+    throw new Error("This is a shared view. Only the original workspace can be shared.");
   }
 }
 

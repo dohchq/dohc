@@ -1,5 +1,6 @@
 import { fetchShareWeb } from "./apiVersion";
 import { useEffect, useRef, useState } from "react";
+import { Icon } from "./icons";
 
 export type AppLaunch =
   | { discriminator: string; publicationId: string }
@@ -84,10 +85,16 @@ export function OpenSharedApp({
   session,
   publicationId,
   showNotice = true,
+  leading = false,
+  title,
+  onBrowseFiles,
 }: {
   session: string;
   publicationId: string;
   showNotice?: boolean;
+  leading?: boolean;
+  title?: string;
+  onBrowseFiles?: () => void;
 }) {
   const [state, setState] = useState<"idle" | "opening" | "failed">("idle");
   const active = useRef<AbortController | null>(null);
@@ -104,17 +111,42 @@ export function OpenSharedApp({
     }
   }
   return (
-    <section aria-label="Shared app">
+    <section aria-label="Shared app" className={leading ? "app-landing" : undefined}>
+      {leading && (
+        <div className="app-landing-head">
+          <span className="tile">
+            <Icon name="grid" size={18} />
+          </span>
+          <h1>{title ?? "Shared app"}</h1>
+        </div>
+      )}
       {showNotice && (
         <p>This app can use external services. Its author decides where it sends data.</p>
       )}
-      <button
-        className="handoff-button primary"
-        onClick={() => void open()}
-        disabled={state === "opening"}
-      >
-        {state === "opening" ? "Opening app" : "Open app"}
-      </button>
+      <div className={leading ? "app-landing-actions" : undefined}>
+        <button
+          className="handoff-button primary"
+          type="button"
+          onClick={() => void open()}
+          disabled={state === "opening"}
+        >
+          {state === "opening" ? "Opening app" : "Open app"}
+        </button>
+        {leading && onBrowseFiles && (
+          <button
+            className="handoff-button secondary"
+            type="button"
+            onClick={() => {
+              active.current?.abort();
+              active.current = null;
+              setState("idle");
+              onBrowseFiles();
+            }}
+          >
+            Browse shared files
+          </button>
+        )}
+      </div>
       {state === "failed" && (
         <LaunchFailure
           role="status"

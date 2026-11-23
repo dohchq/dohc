@@ -367,7 +367,9 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
               {rows.length > 0 && (
                 <>
                   <p className="m-0 text-[12px] text-muted">
-                    {rows.length} rows · {rows.filter((row) => row.errors.length).length} rows with
+                    {rows.length} {rows.length === 1 ? "row" : "rows"} ·{" "}
+                    {rows.filter((row) => row.errors.length).length}{" "}
+                    {rows.filter((row) => row.errors.length).length === 1 ? "row" : "rows"} with
                     input errors
                   </p>
                   <div className="max-h-56 overflow-auto rounded-lg border border-line">
@@ -382,7 +384,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
                       <tbody>
                         {rows.slice(0, 100).map((row) => (
                           <tr key={row.row} className="border-t border-line">
-                            <td className="p-2 font-mono">{row.row}</td>
+                            <td className="p-2 tabular-nums">{row.row}</td>
                             <td className="max-w-72 truncate p-2">
                               {Object.values(row.values)
                                 .map((value) =>
@@ -420,8 +422,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
               )}
               {!plan && (
                 <p className="m-0 text-[12px] text-muted">
-                  Save the retry report before importing. Open that report to resume without
-                  creating duplicates.
+                  Save the retry report before importing so you can resume without duplicates.
                 </p>
               )}
               {counts && (
@@ -501,12 +502,12 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
               </label>
               <p className="m-0 text-[12px] text-muted">
                 {raw
-                  ? "Raw text may run as spreadsheet formulas. Choose raw values only for tools that treat cells as data."
-                  : "Spreadsheet-safe export prefixes formula-like text with an apostrophe. This changes those exported text values."}
+                  ? "Raw text can run as spreadsheet formulas. Choose raw values only for tools that treat cells as plain data."
+                  : "Spreadsheet-safe export adds a leading apostrophe to formula-like text, which changes those exported values."}
               </p>
               {exported !== null && (
                 <p role="status" className="m-0 text-[12px] text-ink">
-                  Exported {exported} rows
+                  Exported {exported} {exported === 1 ? "row" : "rows"}
                 </p>
               )}
               <div className="flex justify-end">

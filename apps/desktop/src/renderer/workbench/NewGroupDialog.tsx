@@ -10,7 +10,7 @@ export type GroupType = "chat" | "posts" | "both";
 const TYPES: ReadonlyArray<{ value: GroupType; label: string; line: string; icon: LucideIcon }> = [
   { value: "chat", label: "Chat", line: "One conversation, with threads.", icon: MessagesSquare },
   { value: "posts", label: "Posts", line: "Topics, each with its replies.", icon: Newspaper },
-  { value: "both", label: "Both", line: "Posts and a chat in one group.", icon: Layers },
+  { value: "both", label: "Both", line: "Posts and a chat in one Group.", icon: Layers },
 ];
 
 const FIELD =
@@ -84,7 +84,7 @@ export function NewGroupDialog(props: {
         className="dohc-elevated flex w-[480px] max-w-[calc(100vw-2rem)] flex-col gap-6 rounded-xl border border-line bg-panel p-6"
       >
         <h2 id={`${id}-title`} className="m-0 text-base font-semibold text-ink">
-          New group
+          New Group
         </h2>
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
@@ -113,7 +113,7 @@ export function NewGroupDialog(props: {
                 data-testid="chats-new-channel-name-error"
                 className="m-0 text-[12px] text-danger"
               >
-                Give the group a name.
+                Give the Group a name.
               </p>
             ) : null}
           </div>
@@ -203,12 +203,8 @@ export function NewGroupDialog(props: {
             >
               Cancel
             </SecondaryButton>
-            <PrimaryButton
-              type="submit"
-              data-testid="chats-new-channel-submit"
-              disabled={!named || busy}
-            >
-              Create group
+            <PrimaryButton type="submit" data-testid="chats-new-channel-submit" disabled={busy}>
+              Create Group
             </PrimaryButton>
           </div>
         </div>

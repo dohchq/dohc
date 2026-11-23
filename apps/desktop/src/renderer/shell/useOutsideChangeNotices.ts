@@ -85,7 +85,7 @@ export function useOutsideChangeNotices(
         tone: "warning",
         title: `Not in the live note: ${path}`,
         message:
-          "This file changed outside dohc while its note was live. The note and History don't have the change. Keep a copy saves it beside the note.",
+          "This file changed outside dohc while live editing was active. The note and History do not have the change. Choose Keep a copy to save it beside the note.",
         retry: null,
         noDismiss: true,
         target: { to: "file", path },

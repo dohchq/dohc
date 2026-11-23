@@ -21,6 +21,7 @@ import type { CloudSyncFailure } from "./relaySyncEngine";
 import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import type { ActiveAgentRun } from "../agents/activeAgentRun";
 import { SyncStatusResult, type AgentRunStateEvent } from "../ipc/bridgeContract";
 
@@ -259,6 +260,41 @@ describe("workspaceActivity capture hooks", () => {
       );
     },
   );
+
+  it("closes a workspace whose data store the engine refuses", async () => {
+    const steps: string[] = [];
+    const activity = createWorkspaceActivity(vi.fn(), {
+      observationFor: () => ({
+        ...idleObservation(workspace(), {} as never),
+        stop: async () => {
+          steps.push("drain");
+          throw new DaemonRefusalError(
+            { code: "INTERNAL", message: "state-corrupt", retry: "no" },
+            null,
+          );
+        },
+      }),
+      captureFor: () => ({
+        shareView: false,
+        capture: {
+          start: () => {},
+          observationDrainFailed: () => steps.push("unconfirmed"),
+          resyncFileObservation: async () => {
+            steps.push("resync");
+          },
+          settleAndCloseAllLiveSessions: async () => {
+            steps.push("sessions");
+          },
+          stop: async () => {
+            steps.push("capture");
+          },
+        } as never,
+      }),
+    });
+    await activity.open(workspace());
+    await activity.close("activity-test");
+    expect(steps).toEqual(["drain", "sessions", "capture"]);
+  });
 
   it("bounds a slow first scan without reporting a file observation failure", async () => {
     vi.useFakeTimers();
@@ -1027,6 +1063,28 @@ describe("workspaceActivity cloud sync nudge", () => {
     check.resolve(true);
     await vi.waitFor(() => expect(notify).toHaveBeenCalledWith({ workspaceId: "activity-test" }));
     expect(service.getStatus(workspace(), state).onNetworkShare).toBe(true);
+    await service.stop(state);
+  });
+
+  it("opens without waiting for the cloud-sync-folder check, then pushes what it found", async () => {
+    const notify = vi.fn();
+    const check = Promise.withResolvers<{
+      service: string | null;
+      acknowledged?: boolean;
+    } | null>();
+    const cloudSyncFolder = vi.fn(() => check.promise);
+    const service = createPhysicalWorkspaceActivity(notify, {
+      observationFor: idleObservation,
+      cloudSyncFolder,
+    });
+    const state = new WorkspaceActivityState();
+    const opened = await service.open(workspace(), state);
+    expect(cloudSyncFolder).toHaveBeenCalledWith(workspace().rootPath);
+    expect(opened.cloudSyncFolder).toBeUndefined();
+    notify.mockClear();
+    check.resolve({ service: "OneDrive" });
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledWith({ workspaceId: "activity-test" }));
+    expect(service.getStatus(workspace(), state).cloudSyncFolder).toEqual({ service: "OneDrive" });
     await service.stop(state);
   });
 

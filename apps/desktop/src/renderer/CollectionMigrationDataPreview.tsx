@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { ArrowRight, Minus, Pencil, Plus } from "lucide-react";
+import { ArrowRight, Info, Minus, Pencil, Plus, TriangleAlert } from "lucide-react";
 import {
   datasetColumnFields,
   type DatasetDefinition,
@@ -23,7 +23,397 @@ export interface MigrationDataPreviewProps {
   onError(fallback: string, error: unknown, retry: (() => void) | null): void;
 }
 
-function Value({ value }: { value: MigrationPreviewValue | undefined }) {
+const RESERVED_VALUE_LABELS = new Set([
+  "true",
+  "false",
+  "null",
+  "Empty",
+  "Field absent",
+  "Binary value",
+]);
+const NUMERIC_STRING = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+const SPECIAL_CHAR =
+  /[\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/u;
+const SPECIAL_CHAR_GLOBAL =
+  /[\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/gu;
+
+function ownValue(
+  record: Record<string, MigrationPreviewValue> | null,
+  column: string,
+): MigrationPreviewValue | undefined {
+  return record && Object.hasOwn(record, column) ? record[column] : undefined;
+}
+
+function samePreviewValue(
+  a: MigrationPreviewValue | undefined,
+  b: MigrationPreviewValue | undefined,
+): boolean {
+  if (Object.is(a, b)) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (a.type !== b.type) return false;
+  return a.type === "integer"
+    ? a.value === (b as { type: "integer"; value: string }).value
+    : a.base64 === (b as { type: "blob"; base64: string }).base64;
+}
+
+function needsQuotes(value: string): boolean {
+  if (value === "" || value !== value.trim()) return true;
+  if (value.startsWith('"') || value.endsWith('"')) return true;
+  if (SPECIAL_CHAR.test(value)) return true;
+  if (RESERVED_VALUE_LABELS.has(value)) return true;
+  return NUMERIC_STRING.test(value);
+}
+
+function formatQuotedString(value: string): string {
+  return JSON.stringify(value).replace(SPECIAL_CHAR_GLOBAL, (char) => {
+    const code = char.codePointAt(0)!;
+    return code <= 0xffff
+      ? `\\u${code.toString(16).padStart(4, "0")}`
+      : `\\u{${code.toString(16)}}`;
+  });
+}
+
+function formatReal(value: number): string {
+  if (Object.is(value, -0)) return "-0.0";
+  const text = String(value);
+  return /^-?\d+$/.test(text) ? `${text}.0` : text;
+}
+
+export function recordCount(count: number): string {
+  return `${count} ${count === 1 ? "record" : "records"}`;
+}
+
+export function joinList(items: readonly string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+export function migrationTableLabel(
+  previousRevision: DatasetRevision,
+  revision: DatasetRevision,
+  sqlName: string,
+): string {
+  return (
+    revision.definition.tables.find((table) => table.sqlName === sqlName)?.name ??
+    previousRevision.definition.tables.find((table) => table.sqlName === sqlName)?.name ??
+    sqlName
+  );
+}
+
+export interface MigrationClearedColumn {
+  table: string;
+  column: string;
+  count: number;
+  renamedTo: string | null;
+  atLeast?: boolean;
+  fieldName?: string;
+}
+
+export interface MigrationReplacedColumn {
+  table: string;
+  column: string;
+  count: number;
+}
+
+export interface MigrationUnmatchedTable {
+  table: string;
+  beforeRows: number;
+  afterRows: number;
+  reason: "key-changed" | "table-renamed";
+}
+
+export interface MigrationPreviewTotals {
+  beforeRows: number;
+  afterRows: number;
+  changedRows: number;
+  addedRows: number;
+  updatedRows: number;
+  deletedRows: number;
+  unmatchedTables: MigrationUnmatchedTable[];
+  unmatchedSqlNames: Set<string>;
+  renamedOldSqlNames: Set<string>;
+  renamedNewSqlNames: Set<string>;
+  clearedValues: number;
+  clearedValuesAtLeast: boolean;
+  replacedValues: number;
+  renamedColumnValues: number;
+  clearedColumns: MigrationClearedColumn[];
+  replacedColumns: MigrationReplacedColumn[];
+}
+
+function renamedColumnOf(
+  beforeDef: DatasetDefinition["tables"][number] | undefined,
+  afterDef: DatasetDefinition["tables"][number] | undefined,
+  column: string,
+): string | null {
+  if (!beforeDef || !afterDef) return null;
+  const prior = datasetColumnFields(beforeDef).find((field) => field.sqlColumn === column);
+  if (!prior) return null;
+  const next = datasetColumnFields(afterDef).find((field) => field.fieldId === prior.fieldId);
+  return next && next.sqlColumn !== column ? next.sqlColumn : null;
+}
+
+export function summarizeMigrationPreview(
+  tables: DatasetMigrationCandidate["preview"]["tables"],
+  previousRevision: DatasetRevision,
+  revision: DatasetRevision,
+): MigrationPreviewTotals {
+  let beforeRows = 0;
+  let afterRows = 0;
+  let changedRows = 0;
+  let addedRows = 0;
+  let updatedRows = 0;
+  let deletedRows = 0;
+  let clearedValues = 0;
+  let clearedValuesAtLeast = false;
+  let replacedValues = 0;
+  let renamedColumnValues = 0;
+  const unmatchedTables: MigrationUnmatchedTable[] = [];
+  const unmatchedSqlNames = new Set<string>();
+  const renamedOldSqlNames = new Set<string>();
+  const renamedNewSqlNames = new Set<string>();
+  const clearedColumns: MigrationClearedColumn[] = [];
+  const replacedColumns: MigrationReplacedColumn[] = [];
+
+  const beforeTablesBySql = new Map(
+    previousRevision.definition.tables.map((table) => [table.sqlName, table]),
+  );
+  const afterTablesBySql = new Map(
+    revision.definition.tables.map((table) => [table.sqlName, table]),
+  );
+  const afterTablesById = new Map(
+    revision.definition.tables.map((table) => [table.tableId, table]),
+  );
+  const summaryBySql = new Map(tables.map((table) => [table.table, table]));
+
+  for (const oldTable of previousRevision.definition.tables) {
+    const nextTable = afterTablesById.get(oldTable.tableId);
+    if (
+      nextTable &&
+      nextTable.sqlName !== oldTable.sqlName &&
+      !afterTablesBySql.has(oldTable.sqlName) &&
+      !beforeTablesBySql.has(nextTable.sqlName) &&
+      summaryBySql.has(oldTable.sqlName)
+    ) {
+      renamedOldSqlNames.add(oldTable.sqlName);
+      renamedNewSqlNames.add(nextTable.sqlName);
+    }
+  }
+
+  for (const table of tables) {
+    beforeRows += table.beforeRows;
+    afterRows += table.afterRows;
+    changedRows += table.changedRows;
+
+    if (renamedOldSqlNames.has(table.table)) {
+      const oldDef = beforeTablesBySql.get(table.table);
+      const nextDef = oldDef ? afterTablesById.get(oldDef.tableId) : undefined;
+      const nextSummary = nextDef ? summaryBySql.get(nextDef.sqlName) : undefined;
+      const nextAfterRows = nextSummary?.afterRows ?? 0;
+      if (table.beforeRows > 0) {
+        unmatchedTables.push({
+          table: nextDef?.sqlName ?? table.table,
+          beforeRows: table.beforeRows,
+          afterRows: nextAfterRows,
+          reason: "table-renamed",
+        });
+      } else if (nextAfterRows > 0) {
+        addedRows += nextAfterRows;
+      }
+      continue;
+    }
+    if (renamedNewSqlNames.has(table.table)) {
+      continue;
+    }
+
+    const beforeKeys = Object.keys(table.beforeValues);
+    const afterKeys = Object.keys(table.afterValues);
+    const clearedKeys = Object.keys(table.clearedValues);
+    const beforeDef = beforeTablesBySql.get(table.table);
+    const afterDef = afterTablesBySql.get(table.table);
+    const unmatchedBySchema =
+      beforeKeys.length > 0 && afterKeys.length > 0 && clearedKeys.length === 0;
+
+    if (unmatchedBySchema && table.beforeRows > 0) {
+      unmatchedSqlNames.add(table.table);
+      unmatchedTables.push({
+        table: table.table,
+        beforeRows: table.beforeRows,
+        afterRows: table.afterRows,
+        reason: "key-changed",
+      });
+      continue;
+    }
+
+    const added = Math.max(0, table.afterRows - table.beforeRows + table.deletedRows);
+    const updated = Math.max(0, table.changedRows - table.deletedRows - added);
+    addedRows += added;
+    updatedRows += updated;
+    deletedRows += table.deletedRows;
+
+    const reusedRenamedColumns = new Set<string>();
+    if (beforeDef && afterDef) {
+      const afterFields = datasetColumnFields(afterDef);
+      const keptRows = Math.max(0, table.beforeRows - table.deletedRows);
+      for (const prior of datasetColumnFields(beforeDef)) {
+        const nextSameId = afterFields.find((field) => field.fieldId === prior.fieldId);
+        if (!nextSameId || nextSameId.sqlColumn === prior.sqlColumn) continue;
+        const reusedByOtherField = afterFields.some(
+          (field) => field.sqlColumn === prior.sqlColumn && field.fieldId !== prior.fieldId,
+        );
+        if (!reusedByOtherField) continue;
+        const beforeCount = Object.hasOwn(table.beforeValues, prior.sqlColumn)
+          ? (table.beforeValues[prior.sqlColumn] ?? 0)
+          : 0;
+        const possibleKept = Math.min(beforeCount, keptRows);
+        if (possibleKept <= 0) continue;
+        reusedRenamedColumns.add(prior.sqlColumn);
+        const clearedCount = Object.hasOwn(table.clearedValues, prior.sqlColumn)
+          ? (table.clearedValues[prior.sqlColumn] ?? 0)
+          : 0;
+        const guaranteedKept = Math.max(clearedCount, beforeCount - table.deletedRows);
+        const afterRenamedCount = Object.hasOwn(table.afterValues, nextSameId.sqlColumn)
+          ? (table.afterValues[nextSameId.sqlColumn] ?? 0)
+          : 0;
+        const shortfall = Math.max(0, guaranteedKept - afterRenamedCount);
+        const unverified = Math.max(0, possibleKept - shortfall);
+        if (shortfall > 0) {
+          clearedColumns.push({
+            table: table.table,
+            column: prior.sqlColumn,
+            count: shortfall,
+            renamedTo: null,
+            atLeast: true,
+            fieldName: nextSameId.name,
+          });
+          clearedValues += shortfall;
+          clearedValuesAtLeast = true;
+        }
+        if (unverified > 0) {
+          clearedColumns.push({
+            table: table.table,
+            column: prior.sqlColumn,
+            count: unverified,
+            renamedTo: nextSameId.sqlColumn,
+            fieldName: nextSameId.name,
+          });
+          renamedColumnValues += unverified;
+        }
+      }
+    }
+
+    for (const [column, count] of Object.entries(table.clearedValues)) {
+      if (count <= 0 || reusedRenamedColumns.has(column)) continue;
+      if (Object.hasOwn(table.afterValues, column)) {
+        clearedColumns.push({ table: table.table, column, count, renamedTo: null });
+        clearedValues += count;
+        continue;
+      }
+      const renamedTo = renamedColumnOf(beforeDef, afterDef, column);
+      if (!renamedTo) {
+        clearedColumns.push({ table: table.table, column, count, renamedTo: null });
+        clearedValues += count;
+        continue;
+      }
+      const afterRenamedCount = Object.hasOwn(table.afterValues, renamedTo)
+        ? (table.afterValues[renamedTo] ?? 0)
+        : 0;
+      const shortfall = Math.max(0, count - afterRenamedCount);
+      const unverified = count - shortfall;
+      if (shortfall > 0) {
+        clearedColumns.push({
+          table: table.table,
+          column,
+          count: shortfall,
+          renamedTo: null,
+          atLeast: true,
+        });
+        clearedValues += shortfall;
+        clearedValuesAtLeast = true;
+      }
+      if (unverified > 0) {
+        clearedColumns.push({ table: table.table, column, count: unverified, renamedTo });
+        renamedColumnValues += unverified;
+      }
+    }
+    for (const [column, count] of Object.entries(table.replacedValues ?? {})) {
+      if (count <= 0 || reusedRenamedColumns.has(column)) continue;
+      replacedColumns.push({ table: table.table, column, count });
+      replacedValues += count;
+    }
+  }
+  return {
+    beforeRows,
+    afterRows,
+    changedRows,
+    addedRows,
+    updatedRows,
+    deletedRows,
+    unmatchedTables,
+    unmatchedSqlNames,
+    renamedOldSqlNames,
+    renamedNewSqlNames,
+    clearedValues,
+    clearedValuesAtLeast,
+    replacedValues,
+    renamedColumnValues,
+    clearedColumns,
+    replacedColumns,
+  };
+}
+
+function summarySentence(
+  totals: MigrationPreviewTotals,
+  tableLabel: (sqlName: string) => string,
+): string {
+  if (totals.changedRows === 0) {
+    if (totals.beforeRows === 0 && totals.afterRows === 0) {
+      return "No records in this Collection yet.";
+    }
+    if (totals.beforeRows === 1) {
+      return "The 1 record stays unchanged.";
+    }
+    return `All ${recordCount(totals.beforeRows)} stay unchanged.`;
+  }
+  const parts: string[] = [];
+  if (totals.updatedRows > 0) parts.push(`${recordCount(totals.updatedRows)} updated`);
+  if (totals.addedRows > 0) parts.push(`${recordCount(totals.addedRows)} added`);
+  if (totals.deletedRows > 0) parts.push(`${recordCount(totals.deletedRows)} removed`);
+  if (parts.length === 0 && totals.unmatchedTables.length === 1) {
+    const unmatched = totals.unmatchedTables[0]!;
+    const why =
+      unmatched.reason === "table-renamed"
+        ? "table renamed; records were not matched by key"
+        : "dohc could not match them by key";
+    return `Replaces ${recordCount(unmatched.beforeRows)} in ${tableLabel(unmatched.table)} with ${recordCount(unmatched.afterRows)} (${why}).`;
+  }
+  if (totals.unmatchedTables.length > 0) {
+    for (const unmatched of totals.unmatchedTables) {
+      const why =
+        unmatched.reason === "table-renamed"
+          ? "after a table rename without a key match"
+          : "without a key match";
+      parts.push(
+        `${recordCount(unmatched.beforeRows)} in ${tableLabel(unmatched.table)} replaced with ${recordCount(unmatched.afterRows)} ${why}`,
+      );
+    }
+    const headline = joinList(parts);
+    const capitalized = headline.charAt(0).toUpperCase() + headline.slice(1);
+    return `${capitalized}. ${recordCount(totals.beforeRows)} before, ${recordCount(totals.afterRows)} after.`;
+  }
+  const headline =
+    parts.length > 0 ? joinList(parts) : `${recordCount(totals.changedRows)} changed`;
+  return `${headline} (${recordCount(totals.beforeRows)} before, ${recordCount(totals.afterRows)} after).`;
+}
+
+function Value({
+  value,
+  mono = false,
+}: {
+  value: MigrationPreviewValue | undefined;
+  mono?: boolean;
+}) {
   if (value === undefined) return <span className="text-muted">Field absent</span>;
   if (value === null) return <span className="text-muted">Empty</span>;
   if (typeof value === "object" && value.type === "blob")
@@ -35,17 +425,24 @@ function Value({ value }: { value: MigrationPreviewValue | undefined }) {
         </pre>
       </details>
     );
-  const text =
-    typeof value === "object"
-      ? value.value
-      : typeof value === "boolean"
-        ? value
-          ? "true"
-          : "false"
-        : typeof value === "string"
-          ? JSON.stringify(value)
-          : String(value);
-  return <span className="whitespace-pre-wrap break-all font-mono">{text}</span>;
+  if (typeof value === "object") {
+    return <span className="whitespace-pre-wrap break-all font-mono">{value.value}</span>;
+  }
+  if (typeof value === "number") {
+    return <span className="font-mono tabular-nums">{formatReal(value)}</span>;
+  }
+  if (needsQuotes(value)) {
+    return (
+      <span
+        className={`whitespace-pre-wrap break-all font-mono ${value === "" ? "text-muted" : ""}`}
+      >
+        {formatQuotedString(value)}
+      </span>
+    );
+  }
+  return (
+    <span className={`whitespace-pre-wrap break-words ${mono ? "font-mono" : ""}`}>{value}</span>
+  );
 }
 
 export function CollectionMigrationDataPreview(props: MigrationDataPreviewProps) {
@@ -105,11 +502,7 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
     }
   }
   function tableLabel(sqlName: string) {
-    return (
-      props.revision.definition.tables.find((table) => table.sqlName === sqlName)?.name ??
-      props.previousRevision.definition.tables.find((table) => table.sqlName === sqlName)?.name ??
-      sqlName
-    );
+    return migrationTableLabel(props.previousRevision, props.revision, sqlName);
   }
   function fieldLabel(tableName: string, column: string) {
     const named = (definition: DatasetDefinition) => {
@@ -118,6 +511,38 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
     };
     return named(props.revision.definition) ?? named(props.previousRevision.definition) ?? column;
   }
+
+  const totals = summarizeMigrationPreview(
+    props.preview.tables,
+    props.previousRevision,
+    props.revision,
+  );
+  const multiTable = props.preview.tables.length > 1;
+  const formatClearedItem = (
+    table: string,
+    column: string,
+    count: number,
+    atLeast?: boolean,
+    fieldName?: string,
+  ) =>
+    `${multiTable ? `${tableLabel(table)} · ` : ""}${fieldName ?? fieldLabel(table, column)} (${atLeast ? `at least ${count}` : count})`;
+  const confirmedClearedLabels = totals.clearedColumns
+    .filter((item) => item.renamedTo === null)
+    .map((item) =>
+      formatClearedItem(item.table, item.column, item.count, item.atLeast, item.fieldName),
+    );
+  const replacedLabels = totals.replacedColumns.map((item) =>
+    formatClearedItem(item.table, item.column, item.count),
+  );
+  const renamedColumnItems = totals.clearedColumns.filter((item) => item.renamedTo !== null);
+  const hasCaution =
+    totals.deletedRows > 0 ||
+    totals.clearedValues > 0 ||
+    totals.replacedValues > 0 ||
+    totals.renamedColumnValues > 0 ||
+    totals.unmatchedTables.length > 0;
+  const showPaging = busy || history.length > 0 || page.nextCursor !== null;
+
   return (
     <section
       aria-label="Record changes"
@@ -125,12 +550,47 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
       aria-busy={busy}
     >
       <h3 className="m-0 text-[12px] font-semibold text-ink">Record changes</h3>
+      <div
+        data-testid="migration-preview-summary"
+        className={`flex items-start gap-2 rounded-md border px-3 py-2 text-[12px] ${
+          hasCaution ? "border-warning/40 bg-panel-2 text-ink" : "border-line bg-panel-2 text-ink"
+        }`}
+      >
+        {hasCaution ? (
+          <TriangleAlert size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+        ) : (
+          <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+        )}
+        <div className="min-w-0 space-y-0.5">
+          <p className="m-0 font-medium">{summarySentence(totals, tableLabel)}</p>
+          {confirmedClearedLabels.length > 0 ? (
+            <p className="m-0 text-muted">
+              Clears existing values in {joinList(confirmedClearedLabels)}.
+            </p>
+          ) : null}
+          {replacedLabels.length > 0 ? (
+            <p className="m-0 text-muted">
+              Replaces existing values in {joinList(replacedLabels)}.
+            </p>
+          ) : null}
+          {renamedColumnItems.map((item) => (
+            <p key={`${item.table}:${item.column}:${item.renamedTo}`} className="m-0 text-muted">
+              {multiTable ? `${tableLabel(item.table)} · ` : ""}
+              {item.fieldName ?? fieldLabel(item.table, item.column)} renames column{" "}
+              <code className="font-mono text-ink">{item.column}</code> to{" "}
+              <code className="font-mono text-ink">{item.renamedTo}</code> ({item.count} unverified{" "}
+              {item.count === 1 ? "value" : "values"}). Check the records below to confirm none were
+              cleared or overwritten.
+            </p>
+          ))}
+        </div>
+      </div>
       <div className="overflow-x-auto rounded-md border border-line">
         <table className="w-full text-left text-[12px]">
           <thead className="bg-panel-2 text-muted">
             <tr>
               <th scope="col" className="px-3 py-2 font-medium">
-                Table
+                Records in
               </th>
               <th scope="col" className="px-3 py-2 font-medium">
                 Before
@@ -144,67 +604,106 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
             </tr>
           </thead>
           <tbody>
-            {props.preview.tables.map((table) => (
-              <tr key={table.table} className="border-t border-line">
-                <th scope="row" className="px-3 py-2 font-medium text-ink">
-                  {tableLabel(table.table)}
-                </th>
-                <td className="px-3 py-2 font-mono text-muted">
-                  {table.beforeRows} {table.beforeRows === 1 ? "record" : "records"}
-                </td>
-                <td className="px-3 py-2 font-mono text-ink">
-                  {table.afterRows} {table.afterRows === 1 ? "record" : "records"}
-                </td>
-                <td className="px-3 py-2 font-mono">
-                  <span
-                    className={
-                      table.changedRows ? "rounded bg-panel-2 px-1.5 py-0.5 text-ink" : "text-muted"
-                    }
-                  >
-                    {table.changedRows} {table.changedRows === 1 ? "record" : "records"}
-                  </span>
-                </td>
-              </tr>
-            ))}
+            {props.preview.tables.map((table) => {
+              const unmatched = totals.unmatchedSqlNames.has(table.table);
+              const renamed =
+                totals.renamedOldSqlNames.has(table.table) ||
+                totals.renamedNewSqlNames.has(table.table);
+              const changedText = unmatched
+                ? `${table.changedRows} ${table.changedRows === 1 ? "entry" : "entries"}`
+                : recordCount(table.changedRows);
+              return (
+                <tr key={table.table} className="border-t border-line">
+                  <th scope="row" className="px-3 py-2 font-medium text-ink">
+                    {tableLabel(table.table)}
+                  </th>
+                  <td className="px-3 py-2 tabular-nums text-muted">
+                    {recordCount(table.beforeRows)}
+                  </td>
+                  <td className="px-3 py-2 tabular-nums text-ink">
+                    {recordCount(table.afterRows)}
+                  </td>
+                  <td className="px-3 py-2 tabular-nums">
+                    <span
+                      className={
+                        table.changedRows
+                          ? "rounded bg-panel-2 px-1.5 py-0.5 text-ink"
+                          : "text-muted"
+                      }
+                    >
+                      {changedText}
+                    </span>
+                    {unmatched ? (
+                      <span className="ml-1.5 text-warning">(not matched by key)</span>
+                    ) : renamed ? (
+                      <span className="ml-1.5 text-warning">(table renamed)</span>
+                    ) : table.deletedRows > 0 ? (
+                      <span className="ml-1.5 text-danger">({table.deletedRows} removed)</span>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
       {page.changes.length === 0 ? (
         <p className="m-0 text-[12px] text-muted">
-          No record values change. Review the fields and actions before approving.
+          No records change. Review the fields and actions before approving.
         </p>
       ) : (
         page.changes.map((change, index) => {
           const columns = [
             ...new Set([...Object.keys(change.before ?? {}), ...Object.keys(change.after ?? {})]),
           ];
-          const unchanged = columns.filter(
-            (column) =>
-              JSON.stringify(change.before?.[column]) === JSON.stringify(change.after?.[column]),
+          const unchanged = columns.filter((column) =>
+            samePreviewValue(ownValue(change.before, column), ownValue(change.after, column)),
           );
+          const unmatchedKey = totals.unmatchedSqlNames.has(change.table);
+          const renamedTable =
+            totals.renamedOldSqlNames.has(change.table) ||
+            totals.renamedNewSqlNames.has(change.table);
           const ChangeIcon =
             change.kind === "delete" ? Minus : change.kind === "insert" ? Plus : Pencil;
+          const badgeTone =
+            unmatchedKey || renamedTable
+              ? change.kind === "delete"
+                ? "text-warning"
+                : "text-muted"
+              : change.kind === "delete"
+                ? "text-danger"
+                : change.kind === "insert"
+                  ? "text-success"
+                  : "text-muted";
+          const badgeLabel =
+            unmatchedKey || renamedTable
+              ? change.kind === "delete"
+                ? `Previous record (${renamedTable ? "table renamed" : "not matched by key"})`
+                : change.kind === "insert"
+                  ? `New record (${renamedTable ? "table renamed" : "not matched by key"})`
+                  : "Record changed"
+              : change.kind === "delete"
+                ? "Record removed"
+                : change.kind === "insert"
+                  ? "Record added"
+                  : "Record changed";
           return (
             <div key={`${history.length}:${index}`} className="border-t border-line pt-3">
               <div className="flex flex-wrap items-center gap-2 text-[12px]">
                 <strong className="text-ink">{tableLabel(change.table)}</strong>
                 <span
-                  className={`inline-flex items-center gap-1 rounded bg-panel-2 px-1.5 py-0.5 ${change.kind === "delete" ? "text-danger" : change.kind === "insert" ? "text-success" : "text-muted"}`}
+                  className={`inline-flex items-center gap-1 rounded bg-panel-2 px-1.5 py-0.5 ${badgeTone}`}
                 >
                   <ChangeIcon size={12} strokeWidth={1.9} aria-hidden />
-                  {change.kind === "delete"
-                    ? "Record removed"
-                    : change.kind === "insert"
-                      ? "Record added"
-                      : "Record changed"}
+                  {badgeLabel}
                 </span>
               </div>
-              <dl className="my-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted">
+              <dl className="my-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted">
                 {Object.entries(change.key).map(([key, value]) => (
                   <div key={key} className="flex gap-1">
                     <dt>{fieldLabel(change.table, key)}:</dt>
                     <dd className="m-0">
-                      <Value value={value} />
+                      <Value value={value} mono />
                     </dd>
                   </div>
                 ))}
@@ -237,10 +736,10 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
                               {fieldLabel(change.table, column)}
                             </th>
                             <td className="p-2 align-top text-muted">
-                              <Value value={change.before?.[column]} />
+                              <Value value={ownValue(change.before, column)} />
                             </td>
                             <td className="p-2 align-top text-ink">
-                              <Value value={change.after?.[column]} />
+                              <Value value={ownValue(change.after, column)} />
                             </td>
                           </tr>
                         );
@@ -250,7 +749,7 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
               </div>
               {unchanged.length > 0 && (
                 <details className="mt-2">
-                  <summary className="cursor-pointer text-[11px] text-muted">
+                  <summary className="cursor-pointer text-[12px] text-muted">
                     {unchanged.length} unchanged {unchanged.length === 1 ? "field" : "fields"}
                   </summary>
                   <dl className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-2 text-[12px] text-muted">
@@ -258,7 +757,7 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
                       <div key={column} className="contents">
                         <dt>{fieldLabel(change.table, column)}</dt>
                         <dd className="m-0">
-                          <Value value={change.before?.[column]} />
+                          <Value value={ownValue(change.before, column)} />
                         </dd>
                       </div>
                     ))}
@@ -269,27 +768,29 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
           );
         })
       )}
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[11px] text-muted">
-          {busy ? "Loading changes…" : `Page ${history.length + 1}`}
-        </span>
-        <div className="flex gap-2">
-          <SecondaryButton
-            disabled={busy || history.length === 0}
-            onClick={() => void load(history.at(-1), history.slice(0, -1))}
-          >
-            Previous changes
-          </SecondaryButton>
-          <SecondaryButton
-            disabled={busy || !page.nextCursor}
-            onClick={() => {
-              if (page.nextCursor) void load(page.nextCursor, [...history, cursor]);
-            }}
-          >
-            More changes
-          </SecondaryButton>
+      {showPaging ? (
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[12px] text-muted">
+            {busy ? "Loading changes…" : `Page ${history.length + 1}`}
+          </span>
+          <div className="flex gap-2">
+            <SecondaryButton
+              disabled={busy || history.length === 0}
+              onClick={() => void load(history.at(-1), history.slice(0, -1))}
+            >
+              Previous changes
+            </SecondaryButton>
+            <SecondaryButton
+              disabled={busy || !page.nextCursor}
+              onClick={() => {
+                if (page.nextCursor) void load(page.nextCursor, [...history, cursor]);
+              }}
+            >
+              More changes
+            </SecondaryButton>
+          </div>
         </div>
-      </div>
+      ) : null}
     </section>
   );
 }

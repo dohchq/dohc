@@ -3,9 +3,10 @@ import { authorizeShareAction } from "./shareAuthorization";
 import { linkChatOrigin } from "./relayLogInputs";
 import { filterOpForShare, type ChatShareThreadResolver } from "./shareFilter";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
+import { threadShownOnPhone } from "./storage/accountFeed";
 import type { StorageContext } from "./storage/context";
 
-export type ChatMessageReason = "mention" | "dm" | "reply";
+export type ChatMessageReason = "mention" | "dm" | "reply" | "agent";
 export interface PushMessage {
   workspaceId: string;
   threadId: string;
@@ -13,6 +14,7 @@ export interface PushMessage {
   relaySeq: number;
   payloadJson: string;
   authorUserId: string | null;
+  linkPrincipalId: string | null;
   authorKind: string;
   senderLabel: string;
   body: string;
@@ -69,6 +71,7 @@ export function readPushMessage(storage: StorageContext, relaySeq: number): Push
     body: payload.body,
     authorKind: String(payload.authorKind),
     authorUserId: payload.authorKind === "link" ? null : String(payload.authorUserId),
+    linkPrincipalId: payload.authorKind === "link" ? String(payload.linkPrincipalId) : null,
     senderLabel: pushPlainText(payload.authorDisplayName, "Someone"),
   };
 }
@@ -91,7 +94,8 @@ export interface ChatMessageAccess {
   place: string;
   /** True when the place is a chat channel rather than a file's comments. */
   channel: boolean;
-  dm: boolean;
+  /** The channel's kind in the owner's log, such as "dm" or "agent", or null for a file's comments. */
+  channelKind: string | null;
   /** The share the recipient reads the message through, or null for the owner. */
   shareId: string | null;
 }
@@ -127,6 +131,25 @@ function chatPlace(
   };
 }
 
+export function phoneCanShow(
+  storage: StorageContext,
+  userId: string,
+  workspaceId: string,
+  threadId: string,
+): boolean {
+  return (
+    !accountIsFenced(storage, userId) &&
+    !workspaceIsDeleted(storage, workspaceId) &&
+    storage.workspaceIsOwnedBy(workspaceId, userId) &&
+    storage.showsOnPhone(userId, workspaceId) &&
+    threadShownOnPhone(storage, workspaceId, threadId)
+  );
+}
+
+export function isOwnAgentMessage(message: PushMessage, userId: string): boolean {
+  return message.authorKind === "agent" && message.authorUserId === userId;
+}
+
 /** Returns a place label only through the recipient's current read authority. */
 export function pushMessageAccess(
   storage: StorageContext,
@@ -137,10 +160,10 @@ export function pushMessageAccess(
   if (accountIsFenced(storage, userId) || workspaceIsDeleted(storage, workspaceId)) return null;
   const resolver = pushChatResolver(storage, workspaceId);
   const channel = resolver.threadChannelWireId(threadId);
-  const dm = Boolean(channel && resolver.channelKind(channel) === "dm");
+  const channelKind = (channel && resolver.channelKind(channel)) || null;
   if (storage.workspaceIsOwnedBy(workspaceId, userId)) {
     const found = chatPlace(storage, message, resolver);
-    return found && { ...found, dm, shareId: null };
+    return found && { ...found, channelKind, shareId: null };
   }
   // A membership comes first and names the Group or file as the member
   // sees them, so a member reads the message where they read the workspace.
@@ -174,7 +197,7 @@ export function pushMessageAccess(
           "a chat",
         ),
       channel: found?.channel ?? Boolean(channel),
-      dm,
+      channelKind,
       shareId: authority.share.shareId,
     };
   }
@@ -195,8 +218,9 @@ export interface ChatMessageCandidate {
 /**
  * The only people a message can alert, by push or by Notice: accounts in the
  * workspace whose handle it mentions, earlier human authors in its thread,
- * and a direct message's participants. Never the human author, and never an
- * agent, which has no account of its own. The work is bounded by mentions
+ * a direct message's participants, and the owner whose agent writes in its
+ * own chat. Never the human author, and never an agent, which has no account
+ * of its own. The work is bounded by mentions
  * and thread authors, never by the number of members.
  */
 export function chatMessageCandidates(
@@ -224,7 +248,11 @@ export function chatMessageCandidates(
       candidate(String(row.user_id)).mentioned = true;
   }
   const channel = storage.findThreadCreateChannelWireId(workspaceId, threadId);
-  if (channel && storage.findChannelCreateKind(workspaceId, channel) === "dm") {
+  const channelKind = channel ? storage.findChannelCreateKind(workspaceId, channel) : null;
+  // The owner's phone hears what their own agent writes in its chat.
+  if (message.authorKind === "agent" && message.authorUserId && channelKind === "agent")
+    candidate(message.authorUserId);
+  if (channel && channelKind === "dm") {
     const owner = storage.db
       .prepare("SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ?")
       .get(workspaceId);
@@ -278,10 +306,12 @@ export function chatMessageInterest(
   if (!access) return null;
   const reason = candidate.mentioned
     ? "mention"
-    : access.dm
+    : access.channelKind === "dm"
       ? "dm"
       : candidate.threadAuthor
         ? "reply"
-        : null;
+        : isOwnAgentMessage(message, candidate.userId) && access.channelKind === "agent"
+          ? "agent"
+          : null;
   return reason && { reason, access };
 }

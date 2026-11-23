@@ -1,0 +1,177 @@
+:root {
+  --kit-bg: #faf9f5;
+  --kit-panel: #f3f1ea;
+  --kit-panel-2: #ebe8e0;
+  --kit-line: #e4e1d8;
+  --kit-ink: #1c1b18;
+  --kit-muted: #55524a;
+  --kit-subtle: #7f7b6e;
+  --kit-accent: #2d342e;
+  --kit-on-accent: #faf9f5;
+  --kit-focus: color-mix(in srgb, var(--kit-accent) 60%, transparent);
+  --kit-hover: color-mix(in srgb, var(--kit-ink) 7%, transparent);
+  --kit-selected: color-mix(in srgb, var(--kit-ink) 14%, transparent);
+  --kit-skeleton: color-mix(in srgb, var(--kit-ink) 11%, transparent);
+  --kit-scrim: rgba(0, 0, 0, 0.4);
+  --kit-success: #38684e;
+  --kit-warning: #855f1e;
+  --kit-danger: #9d3c28;
+  --kit-danger-fill: #9d3c28;
+  --kit-on-danger: #faf9f5;
+  --kit-chart-1: #22645a;
+  --kit-chart-2: #285884;
+  --kit-chart-3: #705012;
+  --kit-chart-4: #88412c;
+  --kit-chart-5: #4c528f;
+  --kit-chart-6: #764580;
+  --kit-radius: 10px;
+  --kit-radius-sm: 6px;
+  --kit-font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --kit-font-mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --kit-bg: #131211;
+    --kit-panel: #181715;
+    --kit-panel-2: #201f1c;
+    --kit-line: #2a2925;
+    --kit-ink: #f6f4ee;
+    --kit-muted: #aba79b;
+    --kit-subtle: #7d7a6e;
+    --kit-accent: #d7d0c0;
+    --kit-on-accent: #131211;
+    --kit-focus: color-mix(in srgb, var(--kit-accent) 50%, transparent);
+    --kit-scrim: rgba(0, 0, 0, 0.65);
+    --kit-success: #82c29b;
+    --kit-warning: #d9a94e;
+    --kit-danger: #e1866c;
+    --kit-danger-fill: #b04530;
+    --kit-on-danger: #f6f4ee;
+    --kit-chart-1: #82c9bb;
+    --kit-chart-2: #8fb8e2;
+    --kit-chart-3: #d9b05a;
+    --kit-chart-4: #dc9378;
+    --kit-chart-5: #a7abee;
+    --kit-chart-6: #d09fd9;
+  }
+}
+
+.kit-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.kit-chart {
+  position: relative;
+  width: 100%;
+  border-radius: var(--kit-radius-sm);
+}
+
+.kit-chart:focus-visible {
+  outline: 2px solid var(--kit-focus);
+  outline-offset: 2px;
+}
+
+.kit-chart svg {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+
+.kit-chart-axis {
+  font-size: 12px;
+  fill: var(--kit-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.kit-chart-grid {
+  stroke: var(--kit-line);
+  stroke-width: 1;
+}
+
+.kit-chart-zero {
+  stroke: var(--kit-subtle);
+  stroke-width: 1;
+}
+
+.kit-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--kit-muted);
+}
+
+.kit-chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kit-chart-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.kit-chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 10;
+  background: var(--kit-bg);
+  color: var(--kit-ink);
+  border: 1px solid var(--kit-line);
+  border-radius: var(--kit-radius-sm);
+  padding: 6px 9px;
+  font-size: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
+  font-variant-numeric: tabular-nums;
+  max-width: min(240px, calc(100% - 16px));
+  overflow-wrap: break-word;
+}
+
+.kit-donut-layout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 20px;
+}
+
+.kit-donut-legend {
+  flex: 1 1 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kit-donut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: var(--kit-radius-sm);
+}
+
+.kit-donut-row-active {
+  background: var(--kit-hover);
+}
+
+.kit-chart-empty {
+  text-align: center;
+  padding: 28px 16px;
+  color: var(--kit-muted);
+  font-size: 13px;
+}

@@ -400,7 +400,7 @@ describe("About Access", () => {
     const unknown = await screen.findByTestId("about-access-unknown");
     expect(unknown.dataset.reason).toBe("unexplained");
     expect(unknown.textContent).toContain(
-      "Access information is unavailable for this file. This does not mean that no one has access.",
+      "dohc could not check access for this file. Someone may still have access.",
     );
     expect(screen.getByTestId("about-access-freshness").textContent).toBe("Unknown");
     expect(screen.queryByTestId("about-access-empty")).toBeNull();

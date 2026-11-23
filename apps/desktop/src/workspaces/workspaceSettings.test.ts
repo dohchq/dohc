@@ -60,7 +60,7 @@ it("applies settings beside one unknown key and names it in one file notice", as
   expect(read.settings.sites.defaultPreviewMode).toBe("static");
   expect(read.ignored).toEqual([{ key: "sites.futurePreview", reason: "unknown" }]);
   expect(settingsFileNotice(".dohc/local/settings.local.json", read)).toBe(
-    "dohc ignored sites.futurePreview in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+    "dohc ignored sites.futurePreview in .dohc/local/settings.local.json because dohc does not recognize that setting. The other settings apply.",
   );
   await saveWorkspaceSettingsFile(workspace, { privacy: { confirmExternalLinks: false } });
   expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
@@ -319,13 +319,13 @@ describe("workspace settings file store", () => {
         const read = await readWorkspaceSettingsFile(workspace);
         expect(read.source).toBe("recovered");
         expect(read.warning).toBe(
-          "This workspace's .dohc/local can't be read, so dohc is using default settings. Make sure you can open it, then try again.",
+          "This workspace's .dohc/local cannot be read, so dohc is using default settings. Check that you can open it, then try again.",
         );
         expect(
           (await saveWorkspaceSettingsFile(workspace, { sites: { defaultPreviewMode: "static" } }))
             .refusal,
         ).toBe(
-          "dohc did not save workspace settings because this workspace's .dohc/local can't be read. Make sure you can open it, then try again.",
+          "dohc did not save workspace settings because this workspace's .dohc/local cannot be read. Check that you can open it, then try again.",
         );
       } finally {
         await chmod(dohc, 0o700);

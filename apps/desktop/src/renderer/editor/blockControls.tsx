@@ -1,4 +1,5 @@
 import { isCodeBlockNode, isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
+import { openGutterSlashCommand } from "./slashCommands";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
@@ -9,21 +10,24 @@ import {
   TextSelection,
   type Transaction,
 } from "@tiptap/pm/state";
-import { ReplaceStep } from "@tiptap/pm/transform";
+import { ReplaceStep, liftTarget } from "@tiptap/pm/transform";
 import { type Node as ProseMirrorNode, type ResolvedPos } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
+  Check,
   ChevronDown,
   ClipboardCopy,
   Copy,
   Heading1,
   Heading2,
   Heading3,
+  Info,
   List,
   ListOrdered,
   ListTodo,
   Pilcrow,
   Quote,
+  SquareCode,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -167,6 +171,26 @@ function topLevelBlockAround(doc: ProseMirrorNode, pos: number): number | null {
   return $pos.depth === 0 ? topLevelBlockAt(doc, pos) : $pos.before(1);
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+const PLUS_ICON_PATH = '<path d="M5 12h14"/><path d="M12 5v14"/>';
+const GRIP_ICON_PATH =
+  '<circle cx="9" cy="12" r="1"/><circle cx="9" cy="5" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="19" r="1"/>';
+
+function makeGutterSvg(pathMarkup: string): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("width", "13");
+  svg.setAttribute("height", "13");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = pathMarkup;
+  return svg;
+}
+
 function blockControl(doc: ProseMirrorNode, pos: number, refs: BlockControlRefs): Decoration {
   const { onInsertRef, onOpenMenuRef, ghostSlot, live } = refs;
   const node = doc.nodeAt(pos)!;
@@ -184,8 +208,9 @@ function blockControl(doc: ProseMirrorNode, pos: number, refs: BlockControlRefs)
       const plus = document.createElement("button");
       plus.type = "button";
       plus.className = "dohc-block-gutter-btn dohc-block-plus";
-      plus.title = "insert block";
-      plus.setAttribute("aria-label", "insert block");
+      plus.title = "Insert block";
+      plus.setAttribute("aria-label", "Insert block");
+      plus.appendChild(makeGutterSvg(PLUS_ICON_PATH));
       plus.addEventListener("mousedown", stopEditorMouseEvent);
       plus.addEventListener("click", (event) => {
         stopEditorMouseEvent(event);
@@ -197,11 +222,12 @@ function blockControl(doc: ProseMirrorNode, pos: number, refs: BlockControlRefs)
       const handle = document.createElement("button");
       handle.type = "button";
       handle.className = "dohc-block-gutter-btn dohc-block-handle";
-      handle.title = "drag to move · click for actions";
-      handle.setAttribute("aria-label", "block actions");
+      handle.title = "Drag to move · click for actions";
+      handle.setAttribute("aria-label", "Block actions");
       handle.setAttribute("aria-haspopup", "menu");
       handle.setAttribute("aria-expanded", "false");
       handle.setAttribute("draggable", "true");
+      handle.appendChild(makeGutterSvg(GRIP_ICON_PATH));
       // Only stop propagation (not preventDefault) so the native HTML5 drag
       // can still start — preventing the mousedown default cancels dragging.
       handle.addEventListener("mousedown", (event) => event.stopPropagation());
@@ -448,7 +474,7 @@ export function makeBlockControlsPlugin({
 export function insertBlockAfter(
   editor: Editor | null,
   pos: number,
-  openSlashMenuAtPosition: (pos: number) => void,
+  openSlashMenuAtPosition?: (pos: number) => void,
 ): void {
   const view = editor?.view;
   if (!view || !isEditableEditor(editor)) return;
@@ -460,13 +486,9 @@ export function insertBlockAfter(
 
   const canReuseEmptyParagraph = node.type.name === "paragraph" && node.textContent.length === 0;
   const selectionPos = canReuseEmptyParagraph ? pos + 1 : pos + node.nodeSize + 1;
-  const tr = canReuseEmptyParagraph
-    ? state.tr
-    : state.tr.insert(pos + node.nodeSize, paragraph.create());
-  tr.setSelection(TextSelection.near(tr.doc.resolve(selectionPos))).scrollIntoView();
-  view.dispatch(tr);
+  openGutterSlashCommand(view, { blockPos: pos, reuseEmpty: canReuseEmptyParagraph });
   view.focus();
-  openSlashMenuAtPosition(selectionPos);
+  openSlashMenuAtPosition?.(selectionPos);
 }
 
 export type BlockMenuTurnIntoId =
@@ -477,7 +499,9 @@ export type BlockMenuTurnIntoId =
   | "bulleted-list"
   | "numbered-list"
   | "task-list"
-  | "quote";
+  | "quote"
+  | "code-block"
+  | "callout";
 
 type BlockMenuActionId = "duplicate" | "copy-markdown" | "delete";
 
@@ -512,11 +536,13 @@ export const TURN_INTO_ENTRIES: BlockMenuEntry[] = [
   { kind: "turn-into", id: "numbered-list", label: "Numbered list", icon: ListOrdered },
   { kind: "turn-into", id: "task-list", label: "Todo list", icon: ListTodo },
   { kind: "turn-into", id: "quote", label: "Quote", icon: Quote },
+  { kind: "turn-into", id: "code-block", label: "Code block", icon: SquareCode },
+  { kind: "turn-into", id: "callout", label: "Callout", icon: Info },
 ];
 
 const ACTION_ENTRIES: BlockMenuEntry[] = [
   { kind: "action", id: "duplicate", label: "Duplicate", icon: Copy },
-  { kind: "action", id: "copy-markdown", label: "Copy as markdown", icon: ClipboardCopy },
+  { kind: "action", id: "copy-markdown", label: "Copy as Markdown", icon: ClipboardCopy },
   { kind: "action", id: "delete", label: "Delete", icon: X },
 ];
 
@@ -567,41 +593,97 @@ export function deleteBlock(editor: Editor | null, pos: number): void {
   view.focus();
 }
 
+function liftOutOf(editor: Editor, nodeName: string): void {
+  while (true) {
+    const { state } = editor.view;
+    const { $from, $to } = state.selection;
+    const range = $from.blockRange($to, (node) => node.type.name === nodeName);
+    if (!range) break;
+    const target = liftTarget(range);
+    if (target === null) break;
+    editor.view.dispatch(state.tr.lift(range, target));
+  }
+}
+
+export function turnSelectionInto(editor: Editor | null, id: BlockMenuTurnIntoId): void {
+  const view = editor?.view;
+  if (!editor || !view || !isEditableEditor(editor)) return;
+
+  switch (id) {
+    case "paragraph":
+      liftOutOf(editor, "callout");
+      liftOutOf(editor, "blockquote");
+      editor.chain().focus().clearNodes().setParagraph().run();
+      return;
+    case "heading-1":
+      editor.chain().focus().setHeading({ level: 1 }).run();
+      return;
+    case "heading-2":
+      editor.chain().focus().setHeading({ level: 2 }).run();
+      return;
+    case "heading-3":
+      editor.chain().focus().setHeading({ level: 3 }).run();
+      return;
+    case "bulleted-list":
+      if (editor.isActive("bulletList")) {
+        editor.commands.focus();
+        return;
+      }
+      editor.chain().focus().toggleBulletList().run();
+      return;
+    case "numbered-list":
+      if (editor.isActive("orderedList")) {
+        editor.commands.focus();
+        return;
+      }
+      editor.chain().focus().toggleOrderedList().run();
+      return;
+    case "task-list":
+      if (editor.isActive("taskList")) {
+        editor.commands.focus();
+        return;
+      }
+      editor.chain().focus().toggleTaskList().run();
+      return;
+    case "quote":
+      liftOutOf(editor, "callout");
+      if (editor.isActive("blockquote")) {
+        editor.commands.focus();
+        return;
+      }
+      editor.chain().focus().toggleBlockquote().run();
+      return;
+    case "code-block":
+      if (editor.isActive("codeBlock")) {
+        editor.commands.focus();
+        return;
+      }
+      editor.chain().focus().setCodeBlock().run();
+      return;
+    case "callout":
+      if (editor.isActive("callout")) {
+        editor.commands.focus();
+        return;
+      }
+      liftOutOf(editor, "blockquote");
+      editor.chain().focus().wrapIn("callout", { calloutType: "note", title: "", fold: "" }).run();
+      return;
+  }
+}
+
 export function turnBlockInto(editor: Editor | null, pos: number, id: BlockMenuTurnIntoId): void {
   const view = editor?.view;
   if (!editor || !view || !isEditableEditor(editor)) return;
   const node = view.state.doc.nodeAt(pos);
-  if (!node) return;
+  if (!node || node.isAtom) return;
 
-  const inside = pos + 1;
-  const chain = editor.chain().focus().setTextSelection(inside);
-
-  switch (id) {
-    case "paragraph":
-      chain.setParagraph().run();
-      return;
-    case "heading-1":
-      chain.toggleHeading({ level: 1 }).run();
-      return;
-    case "heading-2":
-      chain.toggleHeading({ level: 2 }).run();
-      return;
-    case "heading-3":
-      chain.toggleHeading({ level: 3 }).run();
-      return;
-    case "bulleted-list":
-      chain.toggleBulletList().run();
-      return;
-    case "numbered-list":
-      chain.toggleOrderedList().run();
-      return;
-    case "task-list":
-      chain.toggleTaskList().run();
-      return;
-    case "quote":
-      chain.toggleBlockquote().run();
-      return;
-  }
+  const blockEnd = pos + node.nodeSize;
+  const start = TextSelection.near(view.state.doc.resolve(pos + 1), 1);
+  const end = TextSelection.near(view.state.doc.resolve(blockEnd - 1), -1);
+  if (start.from >= blockEnd) return;
+  const to = Math.min(blockEnd - 1, Math.max(start.from, end.to));
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, start.from, to)));
+  turnSelectionInto(editor, id);
 }
 
 /**
@@ -637,11 +719,13 @@ export function turnIntoIdAt($pos: ResolvedPos): BlockMenuTurnIntoId {
       if (level === 2) return "heading-2";
       if (level === 3) return "heading-3";
     }
+    if (isCodeBlockNode(node)) return "code-block";
     ancestors.add(node.type.name);
   }
   if (ancestors.has("bulletList")) return "bulleted-list";
   if (ancestors.has("orderedList")) return "numbered-list";
   if (ancestors.has("taskList")) return "task-list";
+  if (ancestors.has("callout")) return "callout";
   if (ancestors.has("blockquote")) return "quote";
   return "paragraph";
 }
@@ -769,7 +853,7 @@ export function BlockMenu({
       // focus outline, so the frame draws none of its own.
       className={`dohc-block-menu ${MENU_FRAME} ${MENU_ENTER} outline-none`}
       role="menu"
-      aria-label="block actions"
+      aria-label="Block actions"
       aria-activedescendant={rowId(active)}
       tabIndex={-1}
       data-placement={state.placement}
@@ -926,9 +1010,8 @@ export function TurnIntoMenu({
 
   const select = (entry: BlockMenuEntry) => {
     setOpen(false);
-    const pos = topLevelBlockPos(editor);
-    if (pos == null || entry.kind !== "turn-into") return;
-    turnBlockInto(editor, pos, entry.id);
+    if (entry.kind !== "turn-into") return;
+    turnSelectionInto(editor, entry.id);
   };
 
   return (
@@ -957,7 +1040,7 @@ export function TurnIntoMenu({
           // draws the focus outline, so the frame draws none of its own.
           className={`dohc-turn-into-menu ${MENU_FRAME} ${MENU_ENTER} outline-none`}
           role="listbox"
-          aria-label="turn into"
+          aria-label="Turn into"
           aria-activedescendant={optionId(selected)}
           tabIndex={-1}
           data-placement={dropdown.placement}
@@ -1009,6 +1092,7 @@ export function TurnIntoMenu({
                   <Icon size={14} aria-hidden />
                 </span>
                 <span className={MENU_LABEL}>{entry.label}</span>
+                {current ? <Check size={13} aria-hidden className="shrink-0 text-accent" /> : null}
               </button>
             );
           })}

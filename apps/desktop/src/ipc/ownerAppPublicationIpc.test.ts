@@ -1,6 +1,7 @@
 import * as datasetAuthorization from "@dohc/security-contract/dataset-authorization";
 import * as datasetOperations from "@dohc/security-contract/dataset-operations";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
+import { generateDatasetSchema } from "../workspaces/datasetGenerator";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -210,7 +211,7 @@ const collection = {
 const collectionSchema =
   "fields:\n  name:\n    type: text\n  destination:\n    type: select\n    options: [Tokyo, Manila]\n";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-function withDataset(h: ReturnType<typeof harness>, includeRead = false) {
+function withDataset(h: ReturnType<typeof harness>, includeRead = false, customSchemaSql?: string) {
   const definition: DatasetDefinition = {
     formatVersion: 1,
     datasetId: id(1),
@@ -267,16 +268,19 @@ function withDataset(h: ReturnType<typeof harness>, includeRead = false) {
       readOnly: true,
       fieldIds: [id(3), id(4)],
     });
+  const schemaSql =
+    customSchemaSql ?? (includeRead ? generateDatasetSchema(definition) : "PRIVATE_SQL");
+  const operationSource = includeRead ? generateDatasetOperations(definition) : "PRIVATE_SOURCE";
   const revision = describeDatasetRevision({
     definition,
     revision: 1,
-    schemaSql: "PRIVATE_SQL",
-    operationSource: includeRead ? generateDatasetOperations(definition) : "PRIVATE_SOURCE",
+    schemaSql,
+    operationSource,
   });
   const approved = {
     revision,
-    schemaSql: "PRIVATE_SQL",
-    operationSource: includeRead ? generateDatasetOperations(definition) : "PRIVATE_SOURCE",
+    schemaSql,
+    operationSource,
     active: true,
     cursor: {
       workspaceId: "w",
@@ -286,6 +290,7 @@ function withDataset(h: ReturnType<typeof harness>, includeRead = false) {
       revision: 0,
       digest: "0".repeat(64),
     },
+    checkpointSha256: "2".repeat(64),
   };
   h.source.set("private/dataset.json", Buffer.from(JSON.stringify(definition)));
   h.source.set(
@@ -918,7 +923,118 @@ it("keeps the publication candidate unchanged when no read is approved", async (
   const publication = h.relay.mock.calls.find((call) => call[1].endsWith("/app-publications"))!;
   const candidate = JSON.parse(String(publication[2]!.body)).candidate;
   expect(hash(JSON.stringify(candidate))).toBe(prepared.candidateDigest);
+  expect(candidate.capabilities[0].operations[0]).not.toHaveProperty("display");
+  expect(candidate.capabilities[0].operations[1]).not.toHaveProperty("display");
   expect(candidate.capabilities[0].operations[1]).not.toHaveProperty("fields");
+  expect(prepared.capabilities[0]).toMatchObject({
+    kind: "dataset",
+    operations: [
+      {
+        operationId: id(5),
+        display: { kind: "create", label: "Submit", fields: ["Name"] },
+      },
+      {
+        operationId: id(6),
+        display: { kind: "read", label: "List", fields: ["ID", "Name"] },
+      },
+    ],
+  });
+});
+
+it("adds verified display metadata on dataset reactivation review and publication listing without changing stored digests", async () => {
+  const h = withDataset(harness(), true);
+  const prepared = await h.prepare();
+  await h.approve(prepared);
+  const publishCall = h.relay.mock.calls.find((call) => call[1].endsWith("/app-publications"))!;
+  const { candidate } = JSON.parse(String(publishCall[2]!.body));
+  const storedCapability = candidate.capabilities[0];
+  expect(storedCapability.operations[0]).not.toHaveProperty("display");
+  const owner = {
+    workspaceId: "w",
+    ownerUserId: "owner",
+    shareId: "s",
+    grantId: "g",
+    generation: 7,
+  };
+  const original = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) => {
+    if (args[1].endsWith(`/app-publications/${"a".repeat(64)}`)) {
+      return {
+        publicationId: "a".repeat(64),
+        candidate,
+        owner,
+        active: false,
+        authorityRevision: 2,
+      };
+    }
+    if (args[1].includes("/app-publications?")) {
+      return {
+        publications: [
+          {
+            publicationId: "a".repeat(64),
+            authorityRevision: 2,
+            shareId: "s",
+            grantId: "g",
+            appRoot: "app",
+            sourceRevision: candidate.sourceRevision,
+            active: true,
+            datasetCapability: storedCapability,
+            collectionCapability: null,
+            linkCurrent: true,
+            manifestUnavailable: false,
+          },
+        ],
+        nextCursor: null,
+      };
+    }
+    return original(...args);
+  });
+  const reactivated = await h.invoke({
+    action: "reviewReactivation",
+    workspaceId: "w",
+    publicationId: "a".repeat(64),
+  });
+  expect(reactivated).toMatchObject({
+    kind: "prepared",
+    candidateDigest: prepared.candidateDigest,
+    capabilities: [
+      {
+        kind: "dataset",
+        operations: [
+          { operationId: id(5), display: { kind: "create", label: "Submit", fields: ["Name"] } },
+          { operationId: id(6), display: { kind: "read", label: "List", fields: ["ID", "Name"] } },
+        ],
+      },
+    ],
+  });
+  const artifactsBeforeList = h.relay.mock.calls.filter((call) =>
+    call[1].endsWith("/artifacts"),
+  ).length;
+  const listed = await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" });
+  expect(listed).toMatchObject({
+    kind: "listed",
+    publications: [{ datasetCapability: storedCapability }],
+  });
+  expect(h.relay.mock.calls.filter((call) => call[1].endsWith("/artifacts"))).toHaveLength(
+    artifactsBeforeList,
+  );
+});
+
+it("falls back to custom action display when generated operations have a custom SQL trigger", async () => {
+  const base = withDataset(harness(), true);
+  const triggered = withDataset(
+    harness(),
+    true,
+    `${base.approved.schemaSql}\nCREATE TRIGGER audit_insert AFTER INSERT ON responses BEGIN SELECT 1; END;`,
+  );
+  const prepared = await triggered.prepare();
+  expect(prepared.capabilities[0]).toMatchObject({
+    kind: "dataset",
+    operations: [
+      { operationId: id(5), display: { kind: "action", label: "Submit", fields: [] } },
+      { operationId: id(6), display: { kind: "action", label: "List", fields: [] } },
+    ],
+  });
 });
 
 it("checks relay-returned revisions directly on every publication preparation", async () => {

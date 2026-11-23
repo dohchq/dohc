@@ -2,16 +2,49 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { createDohcMcpServer } from "../src/server";
 import type { Check, EvalCase, RecordedCall } from "./case";
 import { CASES } from "./cases";
 import { claudeArguments, runClaudeSample, type SampleUsage } from "./claude";
+import { codexArguments, runCodexSample } from "./codex";
+import { EVERYDAY_CASES } from "./everydayCases";
 import { casePasses, grade } from "./grade";
-import { readOptions, USAGE, type RunOptions } from "./options";
+import {
+  readOptions,
+  USAGE,
+  type EvalHarness,
+  type RunOptions,
+  type SuiteSelection,
+} from "./options";
 
 const SAMPLE_TIMEOUT_MS = 300_000;
+
+function casesForSuite(suite: SuiteSelection): readonly EvalCase[] {
+  if (suite === "everyday") return EVERYDAY_CASES;
+  if (suite === "all") return [...CASES, ...EVERYDAY_CASES];
+  return CASES;
+}
+
+async function loadSkillPrompt(skillPath: string): Promise<string> {
+  const fullPath = resolve(skillPath);
+  const main = await readFile(fullPath, "utf8");
+  const refsDir = join(dirname(fullPath), "references");
+  const refEntries = await readdir(refsDir, { withFileTypes: true }).catch(() => []);
+  const mdFiles = refEntries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+    .map((entry) => entry.name)
+    .sort();
+  if (mdFiles.length === 0) return main;
+  const sections = await Promise.all(
+    mdFiles.map(async (name) => {
+      const body = await readFile(join(refsDir, name), "utf8");
+      return `\n\n---\n<!-- reference: references/${name} -->\n${body}`;
+    }),
+  );
+  return `${main}${sections.join("")}`;
+}
 
 interface ResultRow {
   case: string;
@@ -23,6 +56,7 @@ interface ResultRow {
   error?: string;
   checks?: Check[];
   calls?: RecordedCall[];
+  refusals?: string[];
   text?: string;
   usage: SampleUsage;
   harness?: string;
@@ -49,9 +83,11 @@ async function toolListBytes(): Promise<{ tools: number; bytes: number }> {
 
 async function sample(
   evalCase: EvalCase,
+  harnessName: EvalHarness,
   model: string,
   index: number,
   keepSessionRoute: boolean,
+  skillPrompt?: string,
 ): Promise<ResultRow> {
   const base = {
     case: evalCase.id,
@@ -60,19 +96,37 @@ async function sample(
     sample: index,
     route: keepSessionRoute ? ("session" as const) : ("sign-in" as const),
   };
-  const outcome = await runClaudeSample({
-    evalCase,
-    model,
-    timeoutMs: SAMPLE_TIMEOUT_MS,
-    keepSessionRoute,
-  });
+  const outcome =
+    harnessName === "codex"
+      ? await runCodexSample({
+          evalCase,
+          model,
+          timeoutMs: SAMPLE_TIMEOUT_MS,
+          keepSessionRoute,
+          ...(skillPrompt ? { skillPrompt } : {}),
+        })
+      : await runClaudeSample({
+          evalCase,
+          model,
+          timeoutMs: SAMPLE_TIMEOUT_MS,
+          keepSessionRoute,
+          ...(skillPrompt ? { skillPrompt } : {}),
+        });
   const harness = outcome.harness ? { harness: outcome.harness } : {};
+  const refusals = outcome.refusals?.length ? { refusals: outcome.refusals } : {};
   if (!outcome.run)
-    return { ...base, ...harness, error: outcome.error ?? "unknown error", usage: outcome.usage };
-  const checks = grade(evalCase.expect, outcome.run);
+    return {
+      ...base,
+      ...harness,
+      ...refusals,
+      error: outcome.error ?? "unknown error",
+      usage: outcome.usage,
+    };
+  const checks = await grade(evalCase.expect, outcome.run, evalCase.gradeRun);
   return {
     ...base,
     ...harness,
+    ...refusals,
     pass: checks.every((check) => check.pass),
     checks,
     calls: outcome.run.calls,
@@ -84,20 +138,22 @@ async function sample(
 /** Two samples, and a third when they disagree. */
 async function runCase(
   evalCase: EvalCase,
+  harness: EvalHarness,
   model: string,
   samples: number,
   keepSessionRoute: boolean,
+  skillPrompt: string | undefined,
   record: (row: ResultRow) => Promise<void>,
 ): Promise<ResultRow[]> {
   const rows: ResultRow[] = [];
   for (let index = 1; index <= samples; index += 1) {
-    const row = await sample(evalCase, model, index, keepSessionRoute);
+    const row = await sample(evalCase, harness, model, index, keepSessionRoute, skillPrompt);
     rows.push(row);
     await record(row);
   }
   const graded = rows.filter((row) => row.pass !== undefined);
   if (samples === 2 && graded.length === 2 && graded[0]!.pass !== graded[1]!.pass) {
-    const row = await sample(evalCase, model, 3, keepSessionRoute);
+    const row = await sample(evalCase, harness, model, 3, keepSessionRoute, skillPrompt);
     rows.push(row);
     await record(row);
   }
@@ -187,14 +243,17 @@ function summary(input: {
   }
   if (regressions.length > 0)
     lines.push("", `Regressions against the baseline: ${regressions.join(", ")}.`);
-  const cost = input.rows.reduce((total, row) => total + row.usage.costUsd, 0);
+  const hasCost = input.rows.some((row) => row.usage.costUsd !== undefined);
+  const cost = input.rows.reduce((total, row) => total + (row.usage.costUsd ?? 0), 0);
   const tokens = input.rows.reduce(
     (total, row) => total + row.usage.inputTokens + row.usage.outputTokens,
     0,
   );
   lines.push(
     "",
-    `${input.rows.length} samples used ${tokens.toLocaleString("en-US")} tokens, which is $${cost.toFixed(2)} at API prices. A subscription run is not billed this amount.`,
+    hasCost
+      ? `${input.rows.length} samples used ${tokens.toLocaleString("en-US")} tokens, which is $${cost.toFixed(2)} at API prices. A subscription run is not billed this amount.`
+      : `${input.rows.length} samples used ${tokens.toLocaleString("en-US")} tokens (API cost unavailable for this harness).`,
     "",
   );
   return { text: lines.join("\n"), regressions };
@@ -215,27 +274,42 @@ async function main(argv: readonly string[]): Promise<number> {
     );
     return 0;
   }
+  const pool = casesForSuite(options.suite);
+  const allPool = [...CASES, ...EVERYDAY_CASES];
   const wanted = options.cases;
-  const cases = wanted ? CASES.filter((evalCase) => wanted.includes(evalCase.id)) : CASES;
-  const unknown = (wanted ?? []).filter((id) => !CASES.some((evalCase) => evalCase.id === id));
+  const cases = wanted ? allPool.filter((evalCase) => wanted.includes(evalCase.id)) : pool;
+  const unknown = (wanted ?? []).filter((id) => !allPool.some((evalCase) => evalCase.id === id));
   if (unknown.length > 0) {
     process.stderr.write(
-      `no case named ${unknown.join(", ")}; cases: ${CASES.map((evalCase) => evalCase.id).join(", ")}\n`,
+      `no case named ${unknown.join(", ")}; cases: ${allPool.map((evalCase) => evalCase.id).join(", ")}\n`,
     );
     return 1;
   }
-  const { model, samples, keepSessionRoute } = options;
+  const skillPrompt = options.skill ? await loadSkillPrompt(options.skill) : undefined;
+  const { harness, model, samples, keepSessionRoute } = options;
   if (options.dryRun) {
     for (const evalCase of cases) {
-      process.stdout.write(
-        `${evalCase.id}\n  claude ${claudeArguments({
-          prompt: evalCase.prompt,
-          model,
-          mcpConfigPath: "<mcp.json>",
-        })
-          .map((part) => JSON.stringify(part))
-          .join(" ")}\n`,
-      );
+      const cmd =
+        harness === "codex"
+          ? `codex ${codexArguments({
+              prompt: evalCase.prompt,
+              model,
+              root: "<workspace>",
+              serverCommand: "node",
+              serverArgs: ["<server.ts>", evalCase.id],
+              hasSkill: Boolean(skillPrompt),
+            })
+              .map((part) => JSON.stringify(part))
+              .join(" ")}${skillPrompt ? ` (CODEX_HOME/AGENTS.md <- ${options.skill})` : ""}`
+          : `claude ${claudeArguments({
+              prompt: evalCase.prompt,
+              model,
+              mcpConfigPath: "<mcp.json>",
+              ...(skillPrompt ? { skillPrompt: `<skill:${options.skill}>` } : {}),
+            })
+              .map((part) => JSON.stringify(part))
+              .join(" ")}`;
+      process.stdout.write(`${evalCase.id}\n  ${cmd}\n`);
     }
     return 0;
   }
@@ -257,15 +331,16 @@ async function main(argv: readonly string[]): Promise<number> {
   const record = async (row: ResultRow): Promise<void> => {
     rows.push(row);
     await appendFile(resultsPath, `${JSON.stringify(row)}\n`);
+    const refused = (row.calls ?? []).filter((c) => !c.ok).length;
     process.stdout.write(
-      `${row.case} #${row.sample}: ${row.error ? `error: ${row.error}` : row.pass ? "pass" : "FAIL"}\n`,
+      `${row.case} #${row.sample}: ${row.error ? `error: ${row.error}` : row.pass ? "pass" : "FAIL"} (${row.usage.turns} turns, ${refused} refused)\n`,
     );
   };
   const queue = [...cases];
   await Promise.all(
     Array.from({ length: options.concurrency }, async () => {
       for (let evalCase = queue.shift(); evalCase; evalCase = queue.shift())
-        await runCase(evalCase, model, samples, keepSessionRoute, record);
+        await runCase(evalCase, harness, model, samples, keepSessionRoute, skillPrompt, record);
     }),
   );
 

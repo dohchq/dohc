@@ -6,6 +6,10 @@ export const GATE_POLL_MS = { js: 3_000, rust: 10_000 };
 
 export class WorkflowAllowanceError extends Error {}
 
+// Re-running failed jobs lists each passed job again under the new attempt with its first run's
+// times, so it started before it was listed.
+export const carriedOver = (job) => Date.parse(job.started_at) < Date.parse(job.created_at);
+
 async function requireAllowance(response) {
   if (
     ![403, 429].includes(response.status) ||

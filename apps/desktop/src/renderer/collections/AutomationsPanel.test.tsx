@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
+import {
+  act,
+  cleanup,
+  render as renderBare,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -32,6 +40,12 @@ import { AutomationRuns } from "./AutomationRuns";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
 import type { AutomationDatasetTable, AutomationTable } from "./automationDraft";
 import { START_OVER_SENTENCE } from "./useAutomationRetry";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
+
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="ws-1">{children}</WorkspaceSessionProvider>;
+}
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: Session });
 
 const HASH = "a".repeat(64);
 const FIELDS: FieldDefinition[] = [
@@ -574,15 +588,15 @@ describe("the builder's triggers", () => {
     ).toBe("invoices.settle");
 
     await user.selectOptions(screen.getByRole("combobox", { name: "Table" }), "Refunds");
-    expect(screen.getByText("Settle is not a field in Refunds.")).toBeTruthy();
+    expect(screen.getByText("The Collection Refunds has no field named Settle.")).toBeTruthy();
     expect(options("Button")).toEqual(["Settle", "Refund"]);
     await user.click(screen.getByRole("button", { name: "Save" }));
     const button = screen.getByRole("combobox", { name: "Button" });
     await waitFor(() => expect(document.activeElement).toBe(button));
     expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe(
-      "Settle is not a button in Refunds. Choose a button.",
+      "The Collection Refunds has no button named Settle. Choose a button.",
     );
-    expect(screen.queryByText("Settle is not a field in Refunds.")).toBeNull();
+    expect(screen.queryByText("The Collection Refunds has no field named Settle.")).toBeNull();
     expect(written).toEqual([]);
     await user.selectOptions(button, "Refund");
     await user.selectOptions(screen.getByRole("combobox", { name: "Trigger" }), "field-changed");
@@ -1333,7 +1347,7 @@ describe("an automation's runs", () => {
         "1 added record will stay. This Collection has no delete action available to the automation.",
         "1 added record will stay because someone changed it.",
         "1 added record is already gone.",
-        "You cannot undo these deletions in dohc.",
+        "dohc cannot undo these deletions.",
       ]);
       const confirm = within(dialog).getByRole("button", { name: "Undo and delete 3 records" });
       expect(confirm.matches(":disabled")).toBe(true);
@@ -1397,7 +1411,7 @@ describe("the builder", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(onError).toHaveBeenCalledWith(
-        '"Stamp the finish date!" changed in automations.yaml while you were editing, so dohc did not save. Save again to replace it with yours.',
+        'The automation "Stamp the finish date!" changed in automations.yaml while you were editing, so dohc did not save. Save again to replace it with yours.',
         null,
       ),
     );

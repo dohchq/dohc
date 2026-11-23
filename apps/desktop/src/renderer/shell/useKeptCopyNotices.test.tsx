@@ -69,7 +69,7 @@ describe("useKeptCopyNotices", () => {
     act(() => h.result.current.runShellErrorAction(row.id));
     await waitFor(() =>
       expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([
-        "Saved the other copy of notes/a.md as notes/a (kept copy).md",
+        "Saved the other copy of notes/a.md as notes/a (kept copy).md.",
       ]),
     );
     expect(h.bridge.saveKeptCopy).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a", id: 3 });
@@ -116,7 +116,7 @@ describe("useKeptCopyNotices", () => {
     act(() => h.result.current.retryShellError(failure.id));
     await waitFor(() =>
       expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([
-        "Saved the other copy of a.md as a (kept copy).md",
+        "Saved the other copy of a.md as a (kept copy).md.",
       ]),
     );
   });
@@ -155,7 +155,7 @@ describe("useKeptCopyNotices", () => {
     expect(rows).toEqual([
       { message: keptCopyMessage("a.md"), seen: true },
       { message: keptCopyMessage("b.md"), seen: true },
-      { message: "dohc kept 2 copies of files other programs changed.", seen: false },
+      { message: "dohc kept 2 copies of files changed outside dohc.", seen: false },
       {
         message: "dohc kept more copies than Notices can list. Save these copies to see the rest.",
         seen: true,
@@ -178,7 +178,7 @@ describe("useKeptCopyNotices", () => {
     const failure = h.result.current.shellErrors[1]!;
     expect(failure.message).toBe(keptCopyNoNameMessage("a.md"));
     expect(failure.message).toBe(
-      "dohc could not save the other copy of a.md: no name beside it is short enough. Rename a.md or its folder to something shorter, then try again.",
+      "dohc could not save the other copy of a.md because the file path is too long. Shorten the file or folder name.",
     );
     expect(failure.retry).not.toBeNull();
     expect(h.result.current.shellErrors[0]!.id).toBe(row.id);

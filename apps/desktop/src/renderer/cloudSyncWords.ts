@@ -5,12 +5,12 @@
 // a restart, so the words state what failed and promise nothing. Settings,
 // About and the Notices row all say this.
 export const SYNC_UNCONFIRMED_ACCOUNT =
-  "dohc couldn't confirm this workspace's account, so it isn't syncing.";
+  "dohc could not confirm this workspace's account, so it is not syncing.";
 
 // A synced workspace while nobody is connected to a server. Disconnecting is
 // a choice, not a fault, so the words name the way back and blame nothing.
-export const SYNC_NOT_CONNECTED = "This workspace isn't syncing until you connect your server.";
+export const SYNC_NOT_CONNECTED = "This workspace is not syncing until you connect your server.";
 
 // A synced workspace whose sign-in the server stopped accepting. Sign in
 // again renews it at the same server, with no Disconnect first.
-export const SYNC_SIGN_IN_EXPIRED = "This workspace isn't syncing until you sign in again.";
+export const SYNC_SIGN_IN_EXPIRED = "This workspace is not syncing until you sign in again.";

@@ -138,7 +138,7 @@ describe("CalendarView", () => {
 
   it("shows the empty state when the collection has no records", () => {
     render(<CalendarView schema={makeSchema()} records={[]} dateField="due" />);
-    expect(screen.getByText("No records in this collection yet.")).toBeDefined();
+    expect(screen.getByText("No records in this Collection yet.")).toBeDefined();
   });
 
   it("moves a month at a time with the arrows and back with Today", () => {
@@ -251,7 +251,7 @@ describe("CalendarView", () => {
       />,
     );
     const marked = [...container.querySelectorAll(".rbc-event")].filter((entry) =>
-      entry.classList.contains("ring-ink"),
+      entry.classList.contains("ring-accent"),
     );
     expect(marked).toHaveLength(1);
     expect(marked[0]!.textContent).toBe("Book flights");
@@ -304,5 +304,35 @@ describe("CalendarView", () => {
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ id: "rec-dated", path: "tasks/rec-dated.md" }),
     );
+  });
+
+  it("supports host-controlled viewMode so Week persists across remounts", () => {
+    const onViewModeChange = vi.fn();
+    const first = render(
+      <CalendarView
+        schema={makeSchema()}
+        records={makeRecords()}
+        dateField="due"
+        defaultDate={AUGUST}
+        viewMode="month"
+        onViewModeChange={onViewModeChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "Week" }));
+    expect(onViewModeChange).toHaveBeenCalledExactlyOnceWith("week");
+    first.unmount();
+
+    render(
+      <CalendarView
+        schema={makeSchema()}
+        records={makeRecords()}
+        dateField="due"
+        defaultDate={AUGUST}
+        viewMode="week"
+        onViewModeChange={onViewModeChange}
+      />,
+    );
+    expect(screen.getByRole("radio", { name: "Week" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("button", { name: "Next week" })).toBeDefined();
   });
 });

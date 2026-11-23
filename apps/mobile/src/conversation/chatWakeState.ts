@@ -1,5 +1,5 @@
 import { chatWords } from "@dohc/interface-words/notices";
-import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
+import type { PhoneChatWake, PhoneMentionCandidate } from "@dohc/workspace-contracts/chat-wakes";
 import type { SignIn } from "../server/account";
 import {
   earlierWakeCursor,
@@ -19,6 +19,9 @@ import { shownProblem, type ServerClient } from "../server/client";
 // they started, and an answer lands only for the read or wait that is still current. A failed read or wait keeps the
 // last wakes, marked failed, until Try again reads them again.
 //
+// The same read gives who the conversation can mention, which lives and fails with its wakes: it changes only when a
+// context read lands, never on a poll of its own.
+//
 // Try again on a line that didn't start, or wasn't confirmed, sends one request the person asked for, while they watch.
 // Its operation ID is minted once, on the press, after the alert for one that wasn't confirmed. A second press, or Try
 // again after a lost answer, sends that ID for that exact wake again. Each step, the answer's included, first checks
@@ -28,14 +31,18 @@ import { shownProblem, type ServerClient } from "../server/client";
 // leaving the conversation, a sign-in change and stop abort it and forget it, so another press needs a fresh read
 // first. Nothing of it is stored, and nothing sends it later.
 
-/** A conversation's wakes as its latest read gave them, by message, with each message's wakes kept apart. */
+/**
+ * A conversation's wakes as its latest read gave them, by message, with each message's wakes kept apart, and who it
+ * can mention, from the same read.
+ */
 export interface WakeView {
   readonly byMessage: ReadonlyMap<string, readonly PhoneChatWake[]>;
-  /** The latest read or wait failed: the wakes are from the read before it. */
+  /** The latest read or wait failed: the wakes and mentions are from the read before it. */
   readonly failed: boolean;
+  readonly mentions: readonly PhoneMentionCandidate[];
 }
 
-const NO_WAKES: WakeView = { byMessage: new Map(), failed: false };
+const NO_WAKES: WakeView = { byMessage: new Map(), failed: false, mentions: [] };
 
 /**
  * Where a line's Try again stands, for the wake generation it was pressed on. `sending` until its answer and the read
@@ -272,7 +279,11 @@ export function createChatWakes(options: {
           return;
         }
         entry.cursor = answer.wakeCursor;
-        setView(entry, { byMessage: byMessage(answer.wakes), failed: false });
+        setView(entry, {
+          byMessage: byMessage(answer.wakes),
+          failed: false,
+          mentions: answer.mentions,
+        });
         settle(entry);
         hold(workspaceId);
       },

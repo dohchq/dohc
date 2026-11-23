@@ -1446,7 +1446,7 @@ ${SHARED_LIVE_RESTORE_BODY}`,
   });
 
   it("stops live editing for a page they created, then removes it; a Stop that waits keeps it for review", async () => {
-    const LIVE = "dohc can't restore it while it has live editing on";
+    const LIVE = "dohc cannot restore it while it has live editing on";
     const ledger = {
       "grant-edit": [
         {

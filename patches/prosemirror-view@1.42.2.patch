@@ -1,8 +1,16 @@
 diff --git a/dist/index.cjs b/dist/index.cjs
-index a615cb7cd5d320ac05db42ae3b0a516e08c72e91..a354ebc135fabdaf084918d28859fb03858bbf17 100644
+index a615cb7cd5d320ac05db42ae3b0a516e08c72e91..360b6edd2bb9bdee6379e7d85f13bbb5b38e2139 100644
 --- a/dist/index.cjs
 +++ b/dist/index.cjs
-@@ -3860,6 +3860,7 @@ var DecorationSet = function () {
+@@ -1857,6 +1857,7 @@ var ViewTreeUpdater = function () {
+         }
+       }
+       if (found < 0) return false;
++      this.top.children[found].node = node;
+       this.destroyBetween(this.index, found);
+       this.index++;
+       return true;
+@@ -3860,6 +3861,7 @@ var DecorationSet = function () {
    function DecorationSet(local, children) {
      _classCallCheck(this, DecorationSet);
      this.local = local.length ? local : none;
@@ -10,7 +18,7 @@ index a615cb7cd5d320ac05db42ae3b0a516e08c72e91..a354ebc135fabdaf084918d28859fb03
      this.children = children.length ? children : none;
    }
    _createClass(DecorationSet, [{
-@@ -3975,6 +3976,7 @@ var DecorationSet = function () {
+@@ -3975,6 +3977,7 @@ var DecorationSet = function () {
          if (this.children[i] == offset) child = this.children[i + 2];
          break;
        }
@@ -19,10 +27,18 @@ index a615cb7cd5d320ac05db42ae3b0a516e08c72e91..a354ebc135fabdaf084918d28859fb03
          end = start + node.content.size;
        for (var _i9 = 0; _i9 < this.local.length; _i9++) {
 diff --git a/dist/index.js b/dist/index.js
-index 61118eedda91103ffe9801239855f505c42b0751..3339e84544ee5cc9f1b1f4c8161715a1958974de 100644
+index 61118eedda91103ffe9801239855f505c42b0751..977a08e28a7176f31d843786165952d6b14e0e47 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -4115,6 +4115,7 @@ class DecorationSet {
+@@ -1875,6 +1875,7 @@ class ViewTreeUpdater {
+         }
+         if (found < 0)
+             return false;
++        this.top.children[found].node = node;
+         this.destroyBetween(this.index, found);
+         this.index++;
+         return true;
+@@ -4115,6 +4116,7 @@ class DecorationSet {
      */
      constructor(local, children) {
          this.local = local.length ? local : none;
@@ -30,7 +46,7 @@ index 61118eedda91103ffe9801239855f505c42b0751..3339e84544ee5cc9f1b1f4c8161715a1
          this.children = children.length ? children : none;
      }
      /**
-@@ -4272,6 +4273,7 @@ class DecorationSet {
+@@ -4272,6 +4274,7 @@ class DecorationSet {
                      child = this.children[i + 2];
                  break;
              }
@@ -67,3 +83,15 @@ index 31ee3700a3da54a83f37c61a5a2e1c874d5e1ece..0b85b04628a0cae05b5a6d791d696a10
      let start = offset + 1, end = start + node.content.size
      for (let i = 0; i < this.local.length; i++) {
        let dec = this.local[i]
+diff --git a/src/viewdesc.ts b/src/viewdesc.ts
+index 007ee1c97a51681ed7c76686bd0a8d7db8de05b8..973238dfc4a6ec54b1205ad8e313c249bc226ec8 100644
+--- a/src/viewdesc.ts
++++ b/src/viewdesc.ts
+@@ -1279,6 +1279,7 @@ class ViewTreeUpdater {
+       }
+     }
+     if (found < 0) return false
++    ;(this.top.children[found] as NodeViewDesc).node = node
+     this.destroyBetween(this.index, found)
+     this.index++
+     return true

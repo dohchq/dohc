@@ -229,7 +229,8 @@ describe("FieldCell display", () => {
         })}
       />,
     );
-    expect(screen.getByText("Design, Build")).toBeDefined();
+    expect(screen.getByText("Design")).toBeDefined();
+    expect(screen.getByText("Build")).toBeDefined();
     rerender(<FieldCell field={field("blocks")} indexed={indexedValue("blocks", ["rec-a"])} />);
     expect(screen.getByText("rec-a")).toBeDefined();
   });
@@ -501,7 +502,7 @@ describe("CellEditor", () => {
       expect(close).not.toHaveBeenCalled();
     }
     const error = screen.getByRole("alert");
-    expect(error.textContent).toBe("This value is not a number. Enter a number.");
+    expect(error.textContent).toBe("Enter a number.");
     expect(input.getAttribute("aria-invalid")).toBe("true");
     expect(input.getAttribute("aria-describedby")).toBe(error.id);
     expect(input.hasAttribute("data-unsaved")).toBe(true);
@@ -1057,10 +1058,10 @@ describe("option picker", () => {
       />
     );
     const view = render(editor({}));
-    expect(screen.queryByRole("button", { name: "todo options" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Options for todo" })).toBeNull();
     view.rerender(editor({ onOptionColorChange }));
 
-    const menu = screen.getByRole("button", { name: "todo options" });
+    const menu = screen.getByRole("button", { name: "Options for todo" });
     expect(menu.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(menu);
     const colors = screen.getByRole("radiogroup", { name: "Color for todo" });
@@ -1088,7 +1089,7 @@ describe("option picker", () => {
         onOptionColorChange={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "doing options" }));
+    fireEvent.click(screen.getByRole("button", { name: "Options for doing" }));
     fireEvent.keyDown(search(), { key: "Escape" });
     expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(close).not.toHaveBeenCalled();
@@ -1252,7 +1253,7 @@ describe("tags picker", () => {
     expect(emit).not.toHaveBeenCalled();
   });
 
-  it("adds a created option to the picks, and saves it with them when the picker closes", () => {
+  it("flushes a created option immediately with pending picks without re-saving on close", () => {
     const emit = writeEmitter();
     const onCreateOption = vi.fn();
     tags(["alpha"], { emit, onCreateOption });
@@ -1261,43 +1262,58 @@ describe("tags picker", () => {
     fireEvent.keyDown(search(), { key: "Enter" });
     expect(chips()).toEqual(["alpha", "beta", "delta"]);
     expect(picked("delta")).toBe(true);
-    expect(onCreateOption).not.toHaveBeenCalled();
-
-    fireEvent.keyDown(search(), { key: "Tab" });
     expect(onCreateOption).toHaveBeenCalledExactlyOnceWith(
       "delta",
       ["alpha", "beta", "delta"],
       [["alpha"]],
     );
+
+    fireEvent.keyDown(search(), { key: "Tab" });
+    expect(onCreateOption).toHaveBeenCalledTimes(1);
     expect(emit).not.toHaveBeenCalled();
   });
 
-  it("saves through the plain edit when the created option was removed before closing", () => {
+  it("allows removing a just-created option and saves the remaining picks on close", () => {
     const emit = writeEmitter();
-    const onCreateOption = vi.fn();
+    const onCreateOption = vi.fn(() => 1);
     tags(["alpha"], { emit, onCreateOption });
     fireEvent.change(search(), { target: { value: "delta" } });
     fireEvent.click(option("Create delta"));
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith(
+      "delta",
+      ["alpha", "delta"],
+      [["alpha"]],
+    );
     fireEvent.click(option("beta"));
     fireEvent.click(screen.getByRole("button", { name: "Remove delta" }));
-    expect(screen.queryByRole("option", { name: "delta" })).toBeNull();
+    expect(picked("delta")).toBe(false);
     fireEvent.keyDown(search(), { key: "Tab" });
-    expect(emit).toHaveBeenCalledExactlyOnceWith(["alpha", "beta"], [["alpha"]]);
-    expect(onCreateOption).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledExactlyOnceWith(
+      ["alpha", "beta"],
+      [["alpha"], ["alpha", "delta"]],
+    );
   });
 
-  it("adds one new option per edit, and says how to add the next", () => {
-    const onCreateOption = vi.fn();
+  it("allows creating multiple new options in the same open session without blocking", () => {
+    let nextId = 0;
+    const onCreateOption = vi.fn(() => ++nextId);
     tags(["alpha"], { onCreateOption });
     fireEvent.change(search(), { target: { value: "delta" } });
     fireEvent.keyDown(search(), { key: "Enter" });
     fireEvent.change(search(), { target: { value: "epsilon" } });
-    const held = option(/^Create epsilon/);
-    expect(held.getAttribute("aria-disabled")).toBe("true");
-    expect(held.textContent).toContain('Click away to save "delta" first.');
+    const second = option("Create epsilon");
+    expect(second.getAttribute("aria-disabled")).toBeNull();
     fireEvent.keyDown(search(), { key: "Enter" });
-    expect(chips()).toEqual(["alpha", "delta"]);
-    expect(search().value).toBe("epsilon");
+    expect(chips()).toEqual(["alpha", "delta", "epsilon"]);
+    expect(search().value).toBe("");
+    expect(onCreateOption).toHaveBeenCalledTimes(2);
+    expect(onCreateOption).toHaveBeenNthCalledWith(1, "delta", ["alpha", "delta"], [["alpha"]]);
+    expect(onCreateOption).toHaveBeenNthCalledWith(
+      2,
+      "epsilon",
+      ["alpha", "delta", "epsilon"],
+      [["alpha"], ["alpha", "delta"]],
+    );
   });
 
   it("starts a second edit from the first when the cell reopens before the index shows it", () => {

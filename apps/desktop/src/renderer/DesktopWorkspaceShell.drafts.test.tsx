@@ -214,7 +214,7 @@ describe("workspace switch admission", () => {
           (await navigator.clipboard.readText()).split("\n")[0],
           "the action first, so the toast's limit cuts only the reason",
         ).toBe(
-          "Notice: Restore tabs brings them back. Until you pick it, tab changes aren't saved. Your saved tabs didn't load within 4 minutes.",
+          "Notice: Choose Restore tabs to bring them back. Until then, tab changes are not saved. Your saved tabs did not load within 4 minutes.",
         );
 
         await user.click(within(row).getByRole("button", { name: "Restore tabs" }));

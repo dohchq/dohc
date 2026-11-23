@@ -4,7 +4,7 @@ import { useRouter } from "expo-router";
 import { useCallback } from "react";
 import { choose, confirm } from "../confirm";
 import { useShowToast } from "../notices/Toast";
-import type { PhoneWorkspace } from "./sample";
+import type { PhoneWorkspace } from "./types";
 import { useWorkspaces } from "./Workspaces";
 
 // Forget drops the workspace from this phone's list at once and opens the next one; it stays on the server,

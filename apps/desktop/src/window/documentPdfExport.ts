@@ -28,7 +28,7 @@ let exportInFlight = false;
 // backing temp file) is always cleaned up, even if load/print throws.
 export async function renderHtmlToPdf(html: string): Promise<Buffer> {
   if (exportInFlight) {
-    throw new Error("An export is already in progress.");
+    throw new Error("dohc is already exporting a PDF. Wait for it to finish, then try again.");
   }
   exportInFlight = true;
   let dir: string | null = null;

@@ -32,19 +32,20 @@ export function retainedCopiesNotice(summary: RetainedCopiesSummary): {
 } {
   return {
     title: oldFileCopies(summary.count),
-    message: `They take up ${retainedCopiesSize(summary.bytes)}. dohc can't check whether another program still uses these copies on this drive.`,
+    message: `They take up ${retainedCopiesSize(summary.bytes)}. dohc cannot check whether another program still uses these copies on this drive.`,
   };
 }
 
 export const RETAINED_COPIES_ACTION = "Delete copies…";
 export const RETAINED_COPIES_NOT_YET =
-  "dohc can't delete these old file copies yet: they changed recently or dohc still needs them.";
+  "dohc cannot delete these old file copies yet because they changed recently or dohc still needs them.";
 
 export function retainedCopiesDeleted(answer: { deleted: number; skipped: number }): string {
   const deleted = `Deleted ${oldFileCopies(answer.deleted)}`;
-  return answer.skipped === 0
-    ? deleted
-    : `${deleted}. ${answer.skipped.toLocaleString("en-US")} stay because they changed or dohc still needs them.`;
+  if (answer.skipped === 0) return deleted;
+  return answer.skipped === 1
+    ? `${deleted}. 1 copy stays because it changed or dohc still needs it.`
+    : `${deleted}. ${answer.skipped.toLocaleString("en-US")} copies stay because they changed or dohc still needs them.`;
 }
 
 // This computer's profile keeps which workspaces were told, so the toast
@@ -223,8 +224,8 @@ export function useRetainedCopiesNotice(input: {
       onConfirm={() => void confirm()}
     >
       <p>
-        Close other programs that use this workspace first. A program that still uses one of these
-        copies may lose what it writes next. This can't be undone.
+        Close other programs using this workspace first. A program still using one of these copies
+        could lose its next writes. This cannot be undone.
       </p>
     </ConfirmDialog>
   ) : null;

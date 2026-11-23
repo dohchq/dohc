@@ -370,6 +370,7 @@ pub(super) fn journal_ready_in_tx(
                 workspace,
                 &record.moment_id,
                 &before,
+                crate::outbound::mark_unproven_hosted_authors,
             )?,
             None => crate::journal_moment_append_in_tx(tx, workspace, &record.moment_id)?,
         }

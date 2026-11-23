@@ -25,6 +25,7 @@ export { BoardView, type BoardViewProps } from "./board/BoardView";
 export {
   CalendarView,
   type CalendarRecordEvent,
+  type CalendarViewMode,
   type CalendarViewProps,
 } from "./calendar/CalendarView";
 export { RecordProperties } from "./record/RecordProperties";

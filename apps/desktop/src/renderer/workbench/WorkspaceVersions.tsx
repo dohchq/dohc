@@ -28,6 +28,7 @@ import {
   FileArchive,
   FileText,
   Hourglass,
+  Info,
   Layers,
   Lock,
   Merge,
@@ -181,13 +182,13 @@ function mergeNotice(
         ? {
             identity,
             title,
-            message: `Some of ${source.name}'s changes are in Main. ${AFTER_STORE_FIX}`,
+            message: `Some changes from ${source.name} are in Main. ${AFTER_STORE_FIX}`,
             cause: answer.error,
           }
         : {
             identity,
             title,
-            message: `Some of ${source.name}'s changes are in Main, and History shows which.`,
+            message: `Some changes from ${source.name} are in Main, and History shows which.`,
             cause: answer.error,
             retry,
             offersHistory: true,
@@ -560,7 +561,7 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
                 another name.
               </>
             ) : (
-              "dohc can't use that name. Choose another name."
+              "dohc cannot use that name. Choose another name."
             ),
           );
           return;
@@ -816,9 +817,17 @@ export function VersionMenu(props: {
             type="button"
             data-testid="version-menu-button"
             aria-label={`Version: ${activeName}${onMain ? "" : " (not Main)"}`}
-            title={`You're working in the ${activeName} version`}
+            title={
+              onMain
+                ? "Working in Main"
+                : `Working in ${activeName} (not Main). Agents connected through an Agent link still read files from Main.`
+            }
             disabled={busy !== null || props.disabled}
-            className="titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[13px] text-muted hover:bg-hover hover:text-ink focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
+            className={`titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md border px-2 text-[13px] focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60 ${
+              onMain
+                ? "border-transparent text-muted hover:bg-hover hover:text-ink"
+                : "border-line bg-panel-2 text-ink hover:bg-hover"
+            }`}
           >
             <Layers size={12} aria-hidden className="shrink-0" />
             {active !== null && !onMain ? (
@@ -1186,7 +1195,7 @@ function MergeFailure(props: { wordsId: string; error: unknown; sourceName: stri
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const words = isMergeStoppedPartway(props.error)
-    ? `dohc could not finish the merge. Some of ${props.sourceName}'s changes are in Main, and History shows which.`
+    ? `dohc could not finish the merge. Some changes from ${props.sourceName} are in Main, and History shows which.`
     : ipcErrorMessage(props.error, `dohc could not merge ${props.sourceName} into Main.`);
   const { cause } = readError(props.error);
   const details = errorDetails([
@@ -1322,7 +1331,7 @@ function ConflictSidePane(props: {
         {props.heading}
       </SectionLabel>
       {preview === null ? (
-        <p className="m-0 px-2 py-2 text-[11px] italic leading-4 text-subtle">{props.note}</p>
+        <p className="m-0 px-2 py-2 text-[12px] italic leading-4 text-subtle">{props.note}</p>
       ) : (
         <>
           <pre
@@ -1335,7 +1344,7 @@ function ConflictSidePane(props: {
             <div className="flex items-center justify-between gap-2 border-t border-line bg-panel-2 px-2 py-1">
               <span
                 data-testid="version-conflict-side-hidden"
-                className="text-[10px] leading-4 text-subtle"
+                className="text-[12px] leading-4 text-subtle"
               >
                 {preview.hiddenChars.toLocaleString("en-US")} more characters hidden
               </span>
@@ -1343,7 +1352,7 @@ function ConflictSidePane(props: {
                 type="button"
                 data-testid="version-conflict-side-show-more"
                 onClick={() => setWindows((shown) => shown + 1)}
-                className="h-5 shrink-0 cursor-pointer rounded px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
+                className="h-5 shrink-0 cursor-pointer rounded px-1.5 text-[12px] text-muted hover:bg-hover hover:text-ink"
               >
                 Show more
               </button>
@@ -1387,7 +1396,7 @@ function conflictSideLabels(
       incomingName: "your other machine",
       keepCurrent: "Keep this machine's copy",
       keepIncoming: "Keep your other machine's copy",
-      currentMissing: "This machine doesn't have this file.",
+      currentMissing: "This machine does not have this file.",
       incomingMissing: "Your other machine removed this file.",
     };
   }
@@ -1398,8 +1407,8 @@ function conflictSideLabels(
     incomingName: sourceName,
     keepCurrent: "Keep Main's copy",
     keepIncoming: `Keep ${sourceName}'s copy`,
-    currentMissing: "Main doesn't have this file.",
-    incomingMissing: `${sourceName} removed this file.`,
+    currentMissing: "Main does not have this file.",
+    incomingMissing: `Removed in ${sourceName}.`,
   };
 }
 
@@ -1602,7 +1611,7 @@ function ConflictResolver(props: {
         {!expanded && combined !== null ? (
           <span
             data-testid="version-conflict-draft-marker"
-            className="shrink-0 text-[10px] text-subtle"
+            className="shrink-0 text-[12px] text-subtle"
           >
             Combined copy in progress
           </span>
@@ -1618,7 +1627,7 @@ function ConflictResolver(props: {
           {conflict.origin === "sync" && conflict.waitingVersion ? (
             <p
               data-testid="version-conflict-waiting"
-              className="mb-2 mt-0 flex items-start gap-1.5 text-[11px] leading-4 text-muted"
+              className="mb-2 mt-0 flex items-start gap-1.5 text-[12px] leading-4 text-muted"
             >
               <Hourglass size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
               A newer version from another computer is waiting. It comes in after you resolve this
@@ -1628,7 +1637,7 @@ function ConflictResolver(props: {
           {isBinary ? (
             <div
               data-testid="version-conflict-binary"
-              className="mb-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-muted"
+              className="mb-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-[12px] leading-4 text-muted"
             >
               Binary file. Choose which copy to keep.
             </div>
@@ -1675,9 +1684,9 @@ function ConflictResolver(props: {
               data-testid="version-conflict-combine"
               disabled={busy}
               onClick={() => startCombine(combineSeed.text)}
-              className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
+              className="mt-2 h-7 cursor-pointer rounded-md px-2 text-[12px] text-subtle hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50"
             >
-              Combine by hand instead…
+              Combine by hand…
             </button>
           ) : !isBinary ? (
             <div className="mt-2 flex flex-col gap-1.5">
@@ -1687,7 +1696,7 @@ function ConflictResolver(props: {
               {combineSeed !== null ? (
                 <p
                   data-testid="version-conflict-combined-source"
-                  className="m-0 text-[11px] leading-4 text-subtle"
+                  className="m-0 text-[12px] leading-4 text-subtle"
                 >
                   {combineSeed.startedFrom}
                 </p>
@@ -1705,11 +1714,11 @@ function ConflictResolver(props: {
                 <p
                   data-testid="version-conflict-combined-too-large"
                   role="alert"
-                  className="mb-0 text-[11px] leading-4 text-danger"
+                  className="mb-0 text-[12px] leading-4 text-danger"
                 >
-                  That change would make the combined copy {refusedBytes.toLocaleString("en-US")}{" "}
-                  bytes. Combining by hand works up to{" "}
-                  {CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")} bytes. Add less text.
+                  That change makes the combined copy {refusedBytes.toLocaleString("en-US")} bytes,
+                  which exceeds the {CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")}-byte
+                  limit for combining by hand. Add less text.
                 </p>
               ) : null}
               <div className="flex justify-end gap-2">
@@ -1718,7 +1727,7 @@ function ConflictResolver(props: {
                   data-testid="version-conflict-combine-cancel"
                   disabled={busy}
                   onClick={() => setCombined(null)}
-                  className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
+                  className="h-7 cursor-pointer rounded-md border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
                 >
                   Cancel
                 </button>
@@ -1747,7 +1756,7 @@ function ConflictResolver(props: {
         <p
           data-testid="version-conflict-error"
           role="alert"
-          className="mb-0 mt-2 text-[11px] leading-4 text-danger"
+          className="mb-0 mt-2 text-[12px] leading-4 text-danger"
         >
           {error}
         </p>
@@ -1756,7 +1765,7 @@ function ConflictResolver(props: {
         <p
           data-testid="version-conflict-busy"
           role="status"
-          className="mb-0 mt-2 text-[11px] leading-4 text-subtle"
+          className="mb-0 mt-2 text-[12px] leading-4 text-subtle"
         >
           Applying…
         </p>
@@ -1843,7 +1852,7 @@ function ConflictList(props: {
             {loadingMore ? "Loading…" : "Show more files"}
           </SecondaryButton>
           {loadMoreError ? (
-            <p className="m-0 text-[11px] leading-4 text-danger" role="alert">
+            <p className="m-0 text-[12px] leading-4 text-danger" role="alert">
               {loadMoreError}
             </p>
           ) : null}
@@ -1900,8 +1909,16 @@ function CompareFileDiff(props: { currentText?: string; incomingText?: string })
 // Full-page comparison of a version against Main (virtual editor tab).
 // Mirrors the history diff page's rendering so diffs look the same
 // everywhere.
-export function VersionComparePage(props: { workspaceId: string; versionId: string }) {
-  const { workspaceId, versionId } = props;
+export function VersionComparePage(props: {
+  workspaceId: string;
+  versionId: string;
+  versions?: WorkspaceVersions;
+  disabled?: boolean;
+}) {
+  const { workspaceId, versionId, versions, disabled } = props;
+  const record = versions?.snapshot?.versions.find((version) => version.id === versionId) ?? null;
+  const main = versions?.snapshot?.versions.find((version) => version.kind === "main") ?? null;
+  const locked = (versions?.busy ?? null) !== null || disabled === true;
   const [state, setState] = useState<
     | { status: "loading" }
     | { status: "error"; message: string }
@@ -1950,7 +1967,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
       onError: (error) => {
         setState({
           status: "error",
-          message: ipcErrorMessage(error, "Could not compare with Main."),
+          message: ipcErrorMessage(error, "dohc could not compare with Main."),
         });
       },
     },
@@ -1982,7 +1999,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
       })
       .catch((error) => {
         if (windowGeneration.current !== generation) return;
-        setLoadMoreError(ipcErrorMessage(error, "Couldn't load more changed files."));
+        setLoadMoreError(ipcErrorMessage(error, "dohc could not load more changed files."));
       })
       .finally(() => {
         // Only this generation's pending flag: the effect already cleared it
@@ -1990,6 +2007,16 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
         if (windowGeneration.current === generation) setLoadingMore(false);
       });
   }, [state, workspaceId, versionId]);
+
+  const showBackToMain = versions !== undefined && main !== null && !versions.onMain;
+  const showKeepInMain =
+    versions !== undefined &&
+    record !== null &&
+    record.kind !== "main" &&
+    record.canMergeIntoMain &&
+    state.status === "ready" &&
+    state.files.length > 0;
+  const cannotMerge = record !== null && record.kind !== "main" && !record.canMergeIntoMain;
 
   return (
     <section
@@ -1999,7 +2026,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
       {/* The tab says Compare with Main, so the header names the version and
           what the list is, the words the Versions page counts, and counts the
           files that differ. The empty state says when none do. */}
-      <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line bg-panel px-4 py-2">
+      <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b border-line bg-panel px-4 py-2">
         <Layers size={14} aria-hidden className="shrink-0 text-subtle" />
         <h2 className="m-0 flex min-w-0 items-baseline gap-2 text-[14px] font-semibold text-ink">
           {state.status === "ready" ? (
@@ -2039,7 +2066,39 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
         >
           <RefreshCw size={13} aria-hidden />
         </button>
+        {showBackToMain ? (
+          <SecondaryButton
+            size="compact"
+            data-testid="version-compare-back-to-main"
+            disabled={locked}
+            onClick={() => versions.requestSwitch(main.id)}
+          >
+            {versions.busy === "switch" ? "Switching…" : "Back to Main"}
+          </SecondaryButton>
+        ) : null}
+        {showKeepInMain ? (
+          <PrimaryButton
+            size="compact"
+            data-testid="version-compare-keep-in-main"
+            disabled={locked}
+            onClick={() => versions.openMerge(record)}
+          >
+            Keep in Main…
+          </PrimaryButton>
+        ) : null}
       </header>
+
+      <div
+        data-testid="version-compare-scope"
+        className="flex shrink-0 items-start gap-2 border-b border-line bg-panel-2 px-4 py-2 text-[12px] text-muted"
+      >
+        <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+        <span className="min-w-0">
+          Comparisons show tracked file changes. Chats are the same in every version, and agents
+          connected through an Agent link read files from Main.
+          {cannotMerge ? " Only versions made from Main can merge into Main." : ""}
+        </span>
+      </div>
 
       <div className="min-h-0 flex-1 overflow-auto overflow-x-hidden p-4">
         {state.status === "loading" ? (
@@ -2076,7 +2135,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
                     <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
                   )}
                   <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{file.path}</span>
-                  <span className="shrink-0 text-[11px] text-subtle">
+                  <span className="shrink-0 text-[12px] text-subtle">
                     {changeStatusLabel(file.status)}
                   </span>
                 </div>
@@ -2089,7 +2148,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
                     <Lock size={14} aria-hidden className="text-subtle" />
                     <span className="text-sm text-muted">Protected file changed</span>
                     <span className="text-xs text-subtle">
-                      This file follows the version, but its contents are never shown in
+                      This file belongs to this version, but its contents are never shown in
                       comparisons.
                     </span>
                   </div>
@@ -2101,8 +2160,8 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
                     <FileArchive size={14} aria-hidden className="text-subtle" />
                     <span className="text-sm text-muted">Binary file changed</span>
                     <span className="text-xs text-subtle">
-                      This file follows the version byte-for-byte, but contents are not shown in
-                      text diffs.
+                      This file is versioned byte-for-byte, and its contents are not shown in text
+                      diffs.
                     </span>
                   </div>
                 ) : (
@@ -2125,7 +2184,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
                   {loadingMore ? "Loading…" : "Show more files"}
                 </button>
                 {loadMoreError ? (
-                  <p className="m-0 text-[11px] leading-4 text-danger" role="alert">
+                  <p className="m-0 text-[12px] leading-4 text-danger" role="alert">
                     {loadMoreError}
                   </p>
                 ) : null}

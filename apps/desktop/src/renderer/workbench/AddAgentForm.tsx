@@ -26,10 +26,10 @@ import { ownAgentPresentation, ownPresentation } from "./actorPresentation";
 import { Overlay } from "../Overlay";
 
 const COMMAND_PLACEHOLDER = "node agent.mjs";
-const LABEL_CLASS = "text-[11px] font-medium text-muted";
+const LABEL_CLASS = "text-[12px] font-medium text-muted";
 const INPUT_CLASS =
   "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
-const HINT_CLASS = "m-0 text-[11px] leading-relaxed text-muted";
+const HINT_CLASS = "m-0 text-[12px] leading-relaxed text-muted";
 // Fits the dialog under Overlay's 6rem top and above its 1rem bottom and the
 // toasts, so picking a tool grows it downward and its body scrolls. A window
 // too short for the title and actions alone (a CSS viewport under about 250px)
@@ -137,7 +137,7 @@ export function AddAgentForm(props: {
       return requests.isCurrent(token);
     } catch (cause) {
       if (requests.isCurrent(token))
-        props.onError(ipcErrorMessage(cause, "Could not save the agent."), cause);
+        props.onError(ipcErrorMessage(cause, "dohc could not save the agent."), cause);
       return false;
     } finally {
       if (requests.isCurrent(token)) setSaving(false);
@@ -160,10 +160,10 @@ export function AddAgentForm(props: {
       setCheck({ status: result.ok ? "ok" : "failed", detail: result.detail });
     } catch (cause) {
       if (!requests.isCurrent(token)) return;
-      props.onError(ipcErrorMessage(cause, "The check could not start."), cause);
+      props.onError(ipcErrorMessage(cause, "dohc could not start the check."), cause);
       setCheck({
         status: "failed",
-        detail: ipcErrorMessage(cause, "The check could not start."),
+        detail: ipcErrorMessage(cause, "dohc could not start the check."),
       });
     }
   }, [props.workspaceId, props.onError, requests, save, settings]);
@@ -292,7 +292,7 @@ export function AddAgentForm(props: {
             <p
               data-testid="chats-add-agent-error"
               role="alert"
-              className="m-0 text-[11px] text-danger"
+              className="m-0 text-[12px] text-danger"
             >
               {error}
             </p>
@@ -302,9 +302,9 @@ export function AddAgentForm(props: {
               data-testid="chats-add-agent-check-result"
               data-state={check.status}
               role={check.status === "failed" ? "alert" : "status"}
-              className={`m-0 text-[11px] ${check.status === "ok" ? "text-success" : "text-danger"}`}
+              className={`m-0 text-[12px] ${check.status === "ok" ? "text-success" : "text-danger"}`}
             >
-              {check.status === "ok" ? check.detail : "Check failed. See Notices."}
+              {check.status === "ok" ? check.detail : "Check failed. Open Notices for details."}
             </p>
           ) : null}
 
@@ -325,7 +325,7 @@ export function AddAgentForm(props: {
               data-testid="chats-add-agent-cancel"
               disabled={busy}
               onClick={props.onCancel}
-              className="h-7 rounded-md px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
+              className="h-7 rounded-md px-2.5 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
             >
               Cancel
             </button>

@@ -1,4 +1,10 @@
-import { CaptureUpdateAction, Excalidraw, restore, serializeAsJSON } from "@excalidraw/excalidraw";
+import {
+  CaptureUpdateAction,
+  Excalidraw,
+  MainMenu,
+  restore,
+  serializeAsJSON,
+} from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import "./excalidrawTheme.css";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -261,6 +267,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
             loadScene: false,
             saveToActiveFile: false,
             export: false,
+            toggleTheme: false,
           },
           ...(props.sceneDoc ? { tools: { image: false } } : {}),
         }}
@@ -312,7 +319,14 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
                 props.onChange?.(serialized);
               }
         }
-      />
+      >
+        <MainMenu>
+          <MainMenu.DefaultItems.ClearCanvas />
+          <MainMenu.DefaultItems.SaveAsImage />
+          <MainMenu.DefaultItems.ChangeCanvasBackground />
+          <MainMenu.DefaultItems.Help />
+        </MainMenu>
+      </Excalidraw>
     </div>
   );
 }

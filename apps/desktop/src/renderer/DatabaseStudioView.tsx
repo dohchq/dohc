@@ -323,7 +323,7 @@ export function DatabaseStudioView(props: {
   const readOnlyReason = props.readOnly
     ? "This database is shared with you to read."
     : keyless
-      ? "This table has no unique row key, so dohc can't change its rows."
+      ? "This table has no unique row key, so dohc cannot change its rows."
       : null;
 
   function selectTable(name: string) {
@@ -428,7 +428,7 @@ export function DatabaseStudioView(props: {
             data-testid="view-database"
             icon={TriangleAlert}
             tone="danger"
-            title="Couldn't read this database."
+            title="dohc could not read this database."
           />
         ) : (
           <SkeletonRows inSlot layout="panel" testId="view-database" label="Loading database…" />
@@ -480,7 +480,7 @@ export function DatabaseStudioView(props: {
                   />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13px]">{table.name}</span>
-                    <span className="block truncate text-[11px] text-subtle">
+                    <span className="block truncate text-[12px] text-subtle">
                       {table.rows.length} row
                       {table.rows.length === 1 ? "" : "s"} · {table.columns.length} column
                       {table.columns.length === 1 ? "" : "s"}
@@ -783,7 +783,7 @@ export function DatabaseGrid(props: {
                 className="border-t border-line px-3 py-10 text-center text-[13px] text-muted"
                 data-testid="db-empty-rows"
               >
-                No loaded rows match the current search.
+                No loaded rows match this search.
               </td>
             </tr>
           ) : null}

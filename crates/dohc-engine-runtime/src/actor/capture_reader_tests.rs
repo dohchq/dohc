@@ -580,11 +580,8 @@ async fn outside_reader_fold_requires_engine_serialization_to_match_the_file() {
         let doc = store
             .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
             .unwrap();
-        assert!(
-            doc.canonical_content()["body"]
-                .to_string()
-                .contains("**bold**")
-        );
+        let body = doc.canonical_content()["body"].to_string();
+        assert!(body.contains("\"bold\":") && !body.contains("**"), "{body}");
         assert_eq!(
             std::fs::read_to_string(scratch.path().join("note.md")).unwrap(),
             source

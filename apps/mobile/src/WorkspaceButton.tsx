@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useWorkspaces } from "./chats/Workspaces";
 import { sampleBuild } from "./sampleBuild";
 import { useTheme } from "./theme";
+import { symbolFallback } from "./symbolFallback";
 
 // The workspace switcher, in the header as in Slack and Notion. A signed-in build opens the switcher sheet; the
 // sample has none.
@@ -27,7 +28,7 @@ export function WorkspaceButton() {
         size={11}
         weight="bold"
         tintColor={theme.ink}
-        fallback={null}
+        fallback={symbolFallback("chevron.down", 11, theme.ink)}
       />
     </Pressable>
   );

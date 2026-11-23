@@ -159,7 +159,6 @@ test("canonical repository checks include every script contract except the Docke
     "scripts/self-host/recovery.docker.test.mjs",
     "scripts/self-host/drill.docker.test.mjs",
     "scripts/self-host/snapshot.docker.test.mjs",
-    "scripts/self-host/replica-sandbox.docker.test.mjs",
   ]);
   const tracked = execFileSync(
     "git",

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import { parseCliArguments } from "./args";
+import { executeCli } from "./index";
 
 const capability = {
   kind: "collection-create",
@@ -249,4 +250,152 @@ it("preserves the operator record in owner listings and rejects caller-selected 
       publications: [{ ...publication, operatorTakedown: { ...operatorTakedown, actor: "owner" } }],
     }).success,
   ).toBe(false);
+});
+
+describe("verifyFrontend app publication contract", () => {
+  const hash = "a".repeat(64);
+  it("enforces XOR between appRoot and publicationId and validates expectations and steps", () => {
+    expect(
+      OwnerAppPublicationRequest.safeParse({
+        action: "verifyFrontend",
+        workspaceId: "w1",
+        appRoot: "apps/booking",
+        expectStartupBackend: [{ op: "backend.invoke", operation: "listItems", status: 200 }],
+        steps: [
+          { kind: "fill", selector: "#seats", value: "2" },
+          {
+            kind: "click",
+            selector: "#submit",
+            expectBackend: {
+              op: "backend.invoke",
+              operation: "bookSeat",
+              status: 409,
+              refusalCode: "workshop_full",
+            },
+          },
+          { kind: "waitFor", selector: "#status", textIncludes: "Full" },
+        ],
+        timeoutMs: 5000,
+      }).success,
+    ).toBe(true);
+    expect(
+      OwnerAppPublicationRequest.safeParse({
+        action: "verifyFrontend",
+        workspaceId: "w1",
+        publicationId: hash,
+      }).success,
+    ).toBe(true);
+    expect(
+      OwnerAppPublicationRequest.safeParse({
+        action: "verifyFrontend",
+        workspaceId: "w1",
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerAppPublicationRequest.safeParse({
+        action: "verifyFrontend",
+        workspaceId: "w1",
+        appRoot: "apps/booking",
+        publicationId: hash,
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerAppPublicationRequest.safeParse({
+        action: "verifyFrontend",
+        workspaceId: "w1",
+        appRoot: "apps/booking",
+        expectStartupBackend: [{}],
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerAppPublicationRequest.safeParse({
+        action: "verifyFrontend",
+        workspaceId: "w1",
+        appRoot: "apps/booking",
+        timeoutMs: 500,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("parses CLI app verifyFrontend args and exits 1 on ok:false while printing structured JSON", async () => {
+    const parsed = parseCliArguments(
+      [
+        "app",
+        "verifyFrontend",
+        JSON.stringify({ workspaceId: "w1", appRoot: "apps/booking" }),
+        "--json",
+      ],
+      {},
+    );
+    expect(parsed).toMatchObject({
+      verb: "appPublication",
+      json: true,
+      request: { action: "verifyFrontend", workspaceId: "w1", appRoot: "apps/booking" },
+    });
+
+    const failedResult = OwnerAppPublicationResult.parse({
+      kind: "frontendVerified",
+      ok: false,
+      stage: "runtime",
+      target: { kind: "candidate", appRoot: "apps/booking", sourceRevision: hash },
+      startupOk: false,
+      stepsOk: true,
+      handshake: { delivered: true, messageCount: 0 },
+      brokerCalls: [],
+      steps: [],
+      diagnostics: [
+        {
+          code: "csp_violation",
+          severity: "error",
+          directive: "script-src-elem",
+          remedy: "Move inline script to a listed module file.",
+        },
+      ],
+      externalRequestsBlocked: 0,
+    });
+
+    const failed = await executeCli({
+      argv: [
+        "app",
+        "verifyFrontend",
+        JSON.stringify({ workspaceId: "w1", appRoot: "apps/booking" }),
+        "--json",
+      ],
+      cwd: "/workspace",
+      env: {},
+      request: async () => failedResult,
+    });
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr).toBe("");
+    expect(JSON.parse(failed.stdout)).toMatchObject({
+      kind: "frontendVerified",
+      ok: false,
+      stage: "runtime",
+    });
+
+    const okResult = {
+      ...failedResult,
+      ok: true,
+      stage: "complete" as const,
+      startupOk: true,
+      diagnostics: [],
+    };
+    const passed = await executeCli({
+      argv: [
+        "app",
+        "verifyFrontend",
+        JSON.stringify({ workspaceId: "w1", appRoot: "apps/booking" }),
+        "--json",
+      ],
+      cwd: "/workspace",
+      env: {},
+      request: async () => okResult,
+    });
+    expect(passed.exitCode).toBe(0);
+    expect(JSON.parse(passed.stdout)).toMatchObject({
+      kind: "frontendVerified",
+      ok: true,
+      stage: "complete",
+    });
+  });
 });

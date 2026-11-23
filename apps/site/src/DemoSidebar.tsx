@@ -1,5 +1,10 @@
 import { useCallback, useMemo, useState } from "react";
-import type { EngineMomentRecord, WorkspaceFileEntry } from "../../desktop/src/ipc/bridgeContract";
+import type {
+  EngineMomentRecord,
+  SitePackageInfo,
+  WorkspaceFileEntry,
+} from "../../desktop/src/ipc/bridgeContract";
+import type { ExplorerApps } from "../../desktop/src/renderer/workbench/AppsSection";
 import { ChatsView } from "../../desktop/src/renderer/workbench/ChatsView";
 import { ReactionStoreProvider } from "../../desktop/src/renderer/workbench/reactionStore";
 import { EngineHistoryView } from "../../desktop/src/renderer/workbench/EngineHistory";
@@ -11,15 +16,49 @@ import { SidePanel } from "../../desktop/src/renderer/workbench/SidePanel";
 import { VIEW_IDENTITY } from "../../desktop/src/renderer/workbench/viewIdentity";
 import type { ExplorerMode } from "../../desktop/src/renderer/workbench/workbenchState";
 
-// The demo has no engine, so no folder is a collection.
-const emptyCollectionFolders: ReadonlySet<string> = new Set();
-const noopOpenCollection = () => {};
 import { useWorkspaceSearch } from "../../desktop/src/renderer/workbench/useWorkspaceSearch";
 import {
   projectTreePath,
   type PendingTreeChange,
 } from "../../desktop/src/renderer/workbench/file-tree-optimistic";
+import { GUESTS_DATASET, GUESTS_DATASET_PATH, GUESTS_TABLE_ID } from "./demoCollection";
 import type { DemoPanelId } from "./demoPanels";
+import { APP_ENTRY, APP_ROOT, APP_TITLE } from "./demoWorkspace";
+
+const noCollectionFolders: ReadonlySet<string> = new Set();
+const APP_FOLDERS: ReadonlySet<string> = new Set([APP_ROOT]);
+const FIXED_FILES: readonly WorkspaceFileEntry[] = [
+  { path: APP_ENTRY, kind: "file" },
+  { path: GUESTS_DATASET_PATH, kind: "file" },
+];
+const DATA_COLLECTIONS = [
+  {
+    datasetId: GUESTS_DATASET.datasetId,
+    datasetPath: GUESTS_DATASET_PATH,
+    tableId: GUESTS_TABLE_ID,
+    name: GUESTS_DATASET.name,
+  },
+];
+const TRIP_PLANNER: SitePackageInfo = {
+  root: APP_ROOT,
+  title: APP_TITLE,
+  kind: "static",
+  confidence: "high",
+  entryPath: APP_ENTRY,
+  configPath: null,
+  packagePath: null,
+  packageManager: null,
+  scripts: {},
+  configuredScripts: {},
+  configuredPreviewMode: null,
+  configuredBuildOutput: null,
+  buildOutputs: [],
+  sourceFiles: [APP_ENTRY],
+  shareManifest: { ok: false, reason: "no-runnable-artifact" },
+  diagnostics: [],
+  authority: { kind: "workspace" },
+};
+const noop = () => {};
 
 // The demo has no editing pipeline, so no path ever holds a set-aside draft.
 const NO_PATHS: ReadonlySet<string> = new Set();
@@ -46,31 +85,40 @@ function parentFolders(paths: string[]): string[] {
   return [...folders].sort();
 }
 
+type DemoMomentAuthor =
+  | { personAuthorName: string }
+  | { liveAuthorName: string }
+  | { agentAuthorName: string };
+
 function demoMoments(documents: DemoWorkspaceDocument[]): EngineMomentRecord[] {
-  const events = [
-    ["Edited welcome.md", "welcome.md", 55_000],
-    ["Saved launch plan", "projects/launch-plan.md", 180_000],
-    ["Updated agent workflow", "research/agent-workflows.md", 3_600_000],
-    ["Merged offline edits", "welcome.md", 86_400_000],
-  ] as const;
+  const events: Array<[string, string, number, DemoMomentAuthor]> = [
+    ["Ticked off the Alfama flat", "Trip plan.md", 50_000, { personAuthorName: "You" }],
+    ["Added the Regaleira tickets", "Days/Day 2 - Sintra.md", 900_000, { liveAuthorName: "Priya" }],
+    ["Built the trip planner app", APP_ENTRY, 3_600_000, { agentAuthorName: "Your agent" }],
+    ["Split the costs", "Budget.md", 7_200_000, { liveAuthorName: "Sam" }],
+    ["Started the trip plan", "Trip plan.md", 86_400_000, { personAuthorName: "You" }],
+  ];
+  const paths = new Set([APP_ENTRY, ...documents.map((document) => document.path)]);
   return events
-    .filter(([, path]) => documents.some((document) => document.path === path))
-    .map(([summary, path, age], index) => {
-      const isAgentEvent = path === "research/agent-workflows.md";
-      return {
-        id: `demo-moment-${index}`,
-        versionId: "main",
-        path,
-        recordedAtMs: Date.now() - age,
-        operation: "write" as const,
-        origin: isAgentEvent ? ("api" as const) : ("local-file" as const),
-        ...(isAgentEvent ? { agentAuthorName: "Your agent" } : {}),
-        summary,
-        momentOrder: events.length - index,
-        contentKind: "text" as const,
-        byteLength: documents.find((document) => document.path === path)?.body.length ?? 0,
-      };
-    });
+    .filter(([, path]) => paths.has(path))
+    .map(([summary, path, age, author], index) => ({
+      id: `demo-moment-${index}`,
+      versionId: "main",
+      path,
+      recordedAtMs: Date.now() - age,
+      operation: "write" as const,
+      origin:
+        "agentAuthorName" in author
+          ? ("api" as const)
+          : "liveAuthorName" in author
+            ? ("ydoc" as const)
+            : ("local-file" as const),
+      ...author,
+      summary,
+      momentOrder: events.length - index,
+      contentKind: "text" as const,
+      byteLength: documents.find((document) => document.path === path)?.body.length ?? 0,
+    }));
 }
 
 export function DemoSidebar(props: {
@@ -80,6 +128,12 @@ export function DemoSidebar(props: {
   folders?: string[];
   activePath: string | null;
   openTabs: readonly string[];
+  tabLabels: ReadonlyMap<string, string>;
+  pinnedPages: readonly string[];
+  pinnedApps: readonly string[];
+  onTogglePinnedPage: (path: string) => void;
+  onSetAppPinned: (appRoot: string, pinned: boolean) => void;
+  onNewCollection: () => void;
   onOpenDocument: (path: string) => void;
   onCloseTab: (path: string) => void;
   onCloseAllTabs: () => void;
@@ -91,11 +145,7 @@ export function DemoSidebar(props: {
   const [width, setWidth] = useState(305);
   const [openEditorsHeight, setOpenEditorsHeight] = useState(180);
   const [explorerMode, setExplorerMode] = useState<ExplorerMode>("home");
-  const [expandedFolders, setExpandedFolders] = useState<string[]>([
-    "notes",
-    "projects",
-    "research",
-  ]);
+  const [expandedFolders, setExpandedFolders] = useState<string[]>(["Days"]);
   const [searchError, setSearchError] = useState<{
     message: string;
     retry: () => void;
@@ -114,30 +164,44 @@ export function DemoSidebar(props: {
   const clearSearchError = useCallback(() => setSearchError(null), []);
   const search = useWorkspaceSearch("marketing-demo", reportSearchError, clearSearchError);
   const files = useMemo<WorkspaceFileEntry[]>(
-    () =>
-      props.documents.map((document) => ({
+    () => [
+      ...props.documents.map((document) => ({
         path: document.path,
-        kind: "file",
+        kind: "file" as const,
         ...(document.icon ? { icon: document.icon } : {}),
       })),
+      ...FIXED_FILES,
+    ],
     [props.documents],
+  );
+  const apps = useMemo<ExplorerApps>(
+    () => ({
+      state: { status: "ready", workspaceId: "marketing-demo", apps: [TRIP_PLANNER] },
+      retry: noop,
+      pinnedApps: props.pinnedApps,
+      onSetPinned: props.onSetAppPinned,
+      reveal: false,
+      onRevealed: noop,
+    }),
+    [props.onSetAppPinned, props.pinnedApps],
   );
   const folders = useMemo(
     () =>
       [
-        ...new Set([
-          ...parentFolders(props.documents.map((document) => document.path)),
-          ...(props.folders ?? []),
-        ]),
+        ...new Set([...parentFolders(files.map((file) => file.path)), ...(props.folders ?? [])]),
       ].sort(),
-    [props.documents, props.folders],
+    [files, props.folders],
   );
   const moments = useMemo(() => demoMoments(props.documents), [props.documents]);
   const historyEntries = useMemo(
     () => moments.map((moment) => ({ kind: "file" as const, moment })),
     [moments],
   );
-  const refreshKey = props.documents.map((document) => document.path).join("|");
+  const refreshKey = props.documents
+    .map(
+      (document) => `${document.path}:${document.body.match(/\[\[[^\]\n]*\]\]/g)?.join("") ?? ""}`,
+    )
+    .join("|");
 
   function reprojectPaths(changes: PendingTreeChange[]) {
     const project = (paths: string[]) => [
@@ -175,9 +239,13 @@ export function DemoSidebar(props: {
           files={files}
           folders={folders}
           listingRequest={DEMO_LISTING}
-          collectionFolders={emptyCollectionFolders}
-          onOpenCollection={noopOpenCollection}
-          onNewCollection={noopOpenCollection}
+          collectionFolders={noCollectionFolders}
+          onOpenCollection={noop}
+          onNewCollection={props.onNewCollection}
+          appFolders={APP_FOLDERS}
+          apps={apps}
+          dataCollections={DATA_COLLECTIONS}
+          onOpenDataCollection={() => props.onOpenDocument(GUESTS_DATASET_PATH)}
           editorGroups={[
             {
               id: DEMO_EDITOR_GROUP_ID,
@@ -187,10 +255,11 @@ export function DemoSidebar(props: {
             },
           ]}
           activeEditorGroup={DEMO_EDITOR_GROUP_ID}
+          tabLabels={props.tabLabels}
           dirtyPaths={NO_PATHS}
           recoveryPaths={NO_PATHS}
           expandedFolders={expandedFolders}
-          pinned={[]}
+          pinned={[...props.pinnedPages]}
           openEditorsHeight={openEditorsHeight}
           onOpenEditorsHeightChange={setOpenEditorsHeight}
           newFolderRequest={null}
@@ -216,7 +285,7 @@ export function DemoSidebar(props: {
                 : [...current, path],
             )
           }
-          onTogglePin={() => undefined}
+          onTogglePin={props.onTogglePinnedPage}
           onBeginChanges={async () => {
             await props.onBeforeChanges();
             return {
@@ -268,16 +337,17 @@ export function DemoSidebar(props: {
               {
                 id: "agent:default",
                 kind: "agent",
-                handle: "Nova",
-                label: "Nova",
+                handle: "agent",
+                label: "Your agent",
                 description: "your agent",
               },
+              { id: "user:sam", kind: "user", handle: "sam", label: "Sam", description: "Sam" },
               {
-                id: "user:you",
+                id: "user:priya",
                 kind: "user",
-                handle: "you",
-                label: "You",
-                description: "you",
+                handle: "priya",
+                label: "Priya",
+                description: "Priya",
               },
             ]}
           />
