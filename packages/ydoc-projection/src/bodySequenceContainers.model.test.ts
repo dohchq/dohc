@@ -711,14 +711,32 @@ function madeRows(doc: Y.Doc, between: Look, after: Look): Set<Id> {
 
 const linesAs = (look: Look) =>
   json(look.lines.map((line) => [line.type, line.units, idsOf(line.path)]));
-const bareLines = (look: Look) =>
+const bareLines = (look: Look, gone: Set<number>) =>
   json(
-    look.lines.flatMap((line) =>
-      line.bare === ""
+    look.lines.flatMap((line, at) =>
+      line.bare === "" || gone.has(at)
         ? []
         : [[line.bare, look.rows[line.row]?.boundary ?? null, idsOf(line.path), line.chars]],
     ),
   );
+const isNeededFirst = (lines: Line[], at: number) => {
+  const line = lines[at];
+  const next = lines[at + 1];
+  const depth = (line?.path.length ?? 0) - 1;
+  const item = line?.path[depth];
+  if (!line || !next || !item || !ITEMS.includes(item.type) || line.type !== "paragraph")
+    return false;
+  if (lines[at - 1]?.path[depth]?.key === item.key || next.path[depth]?.key !== item.key)
+    return false;
+  return !(next.path.length === line.path.length && next.type === "paragraph");
+};
+const placeOf = (look: Look, line: Line, offset: number) => {
+  let place = 0;
+  for (const row of look.rows.slice(0, line.row))
+    place += row.chars.length + (row.boundary === null ? 0 : 1);
+  if (line.bare === "item") return place;
+  return place + (look.rows[line.row]!.boundary === null ? 0 : 1) + line.from + offset;
+};
 const addedAbove = (lines: Line[], at: number) => {
   const above: number[] = [];
   for (let index = at - 1; lines[index]?.bare === "item"; index--) above.push(index);
@@ -859,14 +877,14 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
 
   const local = (
     before: Look,
-    between: Look,
     depth: number,
-    act: () => void,
+    act: () => Look,
     mayMark: boolean,
     settings: string[],
     itsOwn = NO_BLOCK,
+    gone = NO_BLOCK,
   ): Done => {
-    act();
+    const between = act();
     const [effects, after] = seen(between);
     effects.marks = mayMark;
     const moved = blocksMoved(between, after, itsOwn);
@@ -874,7 +892,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       throw new Error(
         `[8 blocks] a change moved what it did not touch: ${moved}${shownBoth(between, after)}`,
       );
-    if (bareLines(between) !== bareLines(after))
+    if (bareLines(between, gone) !== bareLines(after, NO_BLOCK))
       throw new Error(
         `[9 given] a change edited or made a line with no boundary of its own${shownBoth(between, after)}`,
       );
@@ -895,7 +913,12 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     else if (top && history.undoStack.length === depth) join(top, effects);
     if (history.redoStack.length === 0) redoMirror = [];
     oracle.count.changes++;
-    return [effects, after, between, madeRows(doc, between, after)];
+    const made = madeRows(doc, between, after);
+    if (made.size > 0 && linesAs(between) === linesAs(after))
+      throw new Error(
+        `[9 given] a change made a boundary and changed nothing a person can see${shownBoth(between, after)}`,
+      );
+    return [effects, after, between, made];
   };
 
   const withoutFreshIds = (plan: BodyWrites) => {
@@ -919,6 +942,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     mayMark?: boolean;
     itsOwn?: Set<number>;
     edits?: number[];
+    gone?: Set<number>;
     given?: (given: BodyChange["given"]) => BodyChange["given"];
     plan?: (plan: BodyWrites, between: Look) => void;
   };
@@ -927,52 +951,8 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     item: "boundariesForAddedParagraphs",
     spill: "boundariesForParagraphsAfter",
   } as const;
-  const nothing = (): BodyWrites => ({
-    records: new Map(),
-    attributes: new Map(),
-    erased: [],
-    added: [],
-  });
 
-  const write = (before: Look, change: BodyChange | null, how: How = {}): Done | null => {
-    if (!change) {
-      asked.clear();
-      return null;
-    }
-    const depth = history.undoStack.length;
-    const first = how.given ? how.given(change.given) : change.given;
-    const given =
-      fault === FAULT.givenAsAsked
-        ? first.map((each) => ({ ...each, attrs: { ...each.attrs, type: "heading", level: 1 } }))
-        : first;
-    let between = before;
-    if (given.length > 0) {
-      const origin = fault === FAULT.givenWithItsChange ? LOCAL : undefined;
-      writeBody(doc, { given, writes: nothing, made: () => [] }, LOCAL, origin);
-      between = givenSeen(before);
-    }
-    const plan = change.writes();
-    const unused = [...asked].filter((id) => !plan.records.has(id));
-    asked.clear();
-    if (unused.length > 0 && fault === undefined)
-      throw new Error(
-        `[writer] a change asked for a fresh id and did not use it${
-          process.env.BODY_CONTAINERS_DEBUG
-            ? `
-UNUSED ${json(unused)} GIVEN ${json(given)} RECORDS ${json([...plan.records.keys()])} ATTRS ${json([...plan.attributes.values()])}
-WAS ${shownAs(before)}
-PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
-            : ""
-        }`,
-      );
-    how.plan?.(plan, between);
-    const settings: string[] = [];
-    for (const [key, value] of plan.records)
-      if (!records.has(key.split(".")[0]!)) oracle.asMade.set(key, json(value));
-      else {
-        oracle.asMade.delete(key);
-        settings.push(key);
-      }
+  const recordFaults = (plan: BodyWrites) => {
     for (const [key, value] of fault === undefined ? [] : [...plan.records]) {
       const [id, attribute] = key.split(".") as [string, string | undefined];
       const isDefault = attribute !== undefined && json(value) === json(DEFAULTS[attribute]);
@@ -987,32 +967,77 @@ PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
       } else if (fault === FAULT.wrongSetting && attribute === "start")
         plan.records.set(key, Number(value) + 1);
     }
-    const missing = [...plan.records.keys()].filter(
-      (key) => key.includes(".") && !records.has(key),
-    );
-    if (fault === FAULT.defaultFirst && missing.length > 0) {
-      const earlier = lookAt(doc);
+  };
+
+  const write = (before: Look, change: BodyChange | null, how: How = {}): Done | null => {
+    if (!change) {
+      asked.clear();
+      return null;
+    }
+    const depth = history.undoStack.length;
+    const first = how.given ? how.given(change.given) : change.given;
+    const given =
+      fault === FAULT.givenAsAsked
+        ? first.map((each) => ({ ...each, attrs: { ...each.attrs, type: "heading", level: 1 } }))
+        : first;
+    const settings: string[] = [];
+    let between = before;
+    if (fault === FAULT.defaultFirst && given.length === 0) {
+      const plan = change.writes();
+      for (const [key, value] of plan.records)
+        if (!records.has(key.split(".")[0]!)) oracle.asMade.set(key, json(value));
+      recordFaults(plan);
+      const missing = [...plan.records.keys()].filter(
+        (key) => key.includes(".") && !records.has(key),
+      );
       doc.transact(() => {
         for (const key of missing) records.set(key, DEFAULTS[key.split(".")[1]!]);
       }, OUTSIDE_HISTORY);
-      between = seen(earlier)[1];
+      if (missing.length > 0) between = seen(before)[1];
     }
-    const typed = fault === FAULT.typingInheritsMarks ? plan.typed : undefined;
-    if (typed) delete plan.typed;
-    const made = fault === FAULT.madeLineBare ? () => [] : change.made;
+    let typed: BodyWrites["typed"];
+    const planned = () => {
+      if (given.length > 0) between = givenSeen(before);
+      const plan = change.writes();
+      const unused = [...asked].filter((id) => !plan.records.has(id));
+      asked.clear();
+      if (unused.length > 0 && fault === undefined)
+        throw new Error("[writer] a change asked for a fresh id and did not use it");
+      how.plan?.(plan, between);
+      for (const [key, value] of plan.records)
+        if (!records.has(key.split(".")[0]!)) oracle.asMade.set(key, json(value));
+        else {
+          oracle.asMade.delete(key);
+          settings.push(key);
+        }
+      recordFaults(plan);
+      if (fault === FAULT.typingInheritsMarks) {
+        typed = plan.typed;
+        delete plan.typed;
+      }
+      if (fault === FAULT.deleteAndRecreate)
+        for (const key of plan.records.keys()) if (records.has(key)) records.delete(key);
+      return plan;
+    };
+    const whole = {
+      given,
+      writes: planned,
+      made: fault === FAULT.madeLineBare ? () => [] : change.made,
+    };
     const done = local(
       before,
-      between,
       depth,
       () => {
-        if (fault === FAULT.deleteAndRecreate)
-          for (const key of plan.records.keys()) if (records.has(key)) records.delete(key);
-        writeBody(doc, { given: [], writes: () => plan, made }, LOCAL);
-        if (typed) doc.transact(() => sequence.insert(typed.index, typed.letters), LOCAL);
+        if (fault === FAULT.givenWithItsChange) writeBody(doc, whole, LOCAL, LOCAL);
+        else writeBody(doc, whole, LOCAL);
+        const { index, letters } = typed ?? { index: 0, letters: "" };
+        if (letters !== "") doc.transact(() => sequence.insert(index, letters), LOCAL);
+        return between;
       },
       how.mayMark ?? false,
       settings,
       how.itsOwn,
+      how.gone,
     );
     const after = done[1];
     const edits = how.edits ?? [];
@@ -1021,7 +1046,7 @@ PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
       return row && boundary !== null ? json(pathOf(row)) : undefined;
     };
     before.lines.forEach((line, at) => {
-      const now = between.lines[at];
+      const now = done[2].lines[at];
       if (line.bare === "" || now?.bare !== "") {
         if (line.bare !== "" && edits.includes(at))
           throw new Error(
@@ -1029,9 +1054,11 @@ PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
           );
         return;
       }
-      const own = between.rows[now.row]!.boundary;
+      const own = done[2].rows[now.row]!.boundary;
       const owner = before.rows[line.row]!.boundary;
-      const itMoved = pathAt(after, own) !== pathAt(between, own);
+      if (pathAt(after, own) === undefined)
+        throw new Error("[9 given] a change gave a line a boundary and then deleted it");
+      const itMoved = pathAt(after, own) !== pathAt(done[2], own);
       const ownerMoved = owner !== null && pathAt(after, owner) !== pathAt(before, owner);
       if (!edits.includes(at) && !itMoved && !ownerMoved)
         throw new Error("[9 given] a line the change neither edits nor moves was given a boundary");
@@ -1509,22 +1536,29 @@ PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
         offset + length <= line.chars.length &&
         !cutsALetter(line.units, offset) &&
         !cutsALetter(line.units, offset + length);
-      const change = setMarks(schema, doc, at, offset, length, marks);
-      if (refusal(before, change, fits, "a change of marks") || !line) return false;
-      const after = unchanged("a change of marks", before, change, { edits: [at], mayMark: true });
-      const marked = new Set(line.chars.slice(offset, offset + length));
-      const was = new Map(before.shot.tokens.map((token) => [token.id, token]));
-      for (const token of after.shot.tokens) {
-        const earlier = was.get(token.id);
-        if (token.kind !== "char" || earlier?.kind !== "char" || token.atom) continue;
-        const wanted = new Map(JSON.parse(earlier.marks) as [string, unknown][]);
-        if (marked.has(token.id))
+      const marked = new Set(fits ? line.chars.slice(offset, offset + length) : []);
+      const wantedOf = (letter: Letter) => {
+        const wanted = new Map(JSON.parse(letter.marks) as [string, unknown][]);
+        if (marked.has(letter.id))
           for (const [name, value] of Object.entries(marks))
             if (isPlain(value)) wanted.set(name, value);
             else wanted.delete(name);
-        if (marksOf(wanted) !== token.marks)
+        return marksOf(wanted);
+      };
+      const letters = before.shot.tokens.flatMap((token) =>
+        token.kind === "char" && !token.atom ? [token] : [],
+      );
+      const changes = letters.some((letter) => wantedOf(letter) !== letter.marks);
+      const change = setMarks(schema, doc, at, offset, length, marks);
+      if (refusal(before, change, fits && changes, "a change of marks") || !line) return false;
+      const after = unchanged("a change of marks", before, change, { edits: [at], mayMark: true });
+      const was = new Map(letters.map((letter) => [letter.id, letter]));
+      for (const token of after.shot.tokens) {
+        const earlier = was.get(token.id);
+        if (token.kind !== "char" || !earlier || token.atom) continue;
+        if (wantedOf(earlier) !== token.marks)
           throw new Error(
-            `[2 letters] a letter holds the marks ${token.marks} after ${json(marks)} was asked for, where it should hold ${marksOf(wanted)}`,
+            `[2 letters] a letter holds the marks ${token.marks} after ${json(marks)} was asked for, where it should hold ${wantedOf(earlier)}`,
           );
       }
       oracle.count.markChanges++;
@@ -1543,23 +1577,50 @@ PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
         toOffset <= last.chars.length &&
         !cutsALetter(first.units, offset) &&
         !cutsALetter(last.units, toOffset);
-      const some = fits && (at < toAt || (at === toAt && offset < toOffset));
+      const left = before.shot.tokens.find((token) => token.id === last?.chars[toOffset]);
+      const holders = left?.kind === "char" && left.atom ? HOLDS_INLINE : HOLDS_LETTERS;
+      const cannotJoin = at < toAt && last?.bare === "" && left !== undefined;
+      const joins = !cannotJoin || holders.includes(first?.type ?? "");
+      const span = fits
+        ? placeOf(before, last, toOffset) - placeOf(before, first, offset) - (joins ? 0 : 1)
+        : 0;
+      const stored = lines.flatMap((line, index) =>
+        index > at && index <= toAt && line.bare === "" ? [index] : [],
+      );
+      const backAgain = stored.every((index) => isNeededFirst(lines, index));
+      const onlyBoundaries = joins && stored.length > 0 && span === stored.length;
+      const some = span > 0 && !(onlyBoundaries && last?.chars.length === 0 && backAgain);
       if (refusal(before, change, some, "a delete") || !first || !last) return false;
       const joined = lines.flatMap((_, index) => (index >= at && index <= toAt ? [index] : []));
+      const stays = (index: number) => {
+        const line = lines[index]!;
+        const added = line.bare === "item" && last.bare === "item" && line.row === last.row;
+        const after = last.bare === "spill" && index === at + 1 && toOffset === 0;
+        return added || (after && index === toAt && first.bare === "");
+      };
+      const gone = joined.filter(
+        (index) => index > at && lines[index]!.bare !== "" && !stays(index),
+      );
       const leftBare = fault === FAULT.deleteLeavesNoBoundary && first.bare === "spill";
       let want: Want[] = [];
       const done = write(before, change, {
         mayMark: true,
         itsOwn: at < toAt ? new Set(joined) : NO_BLOCK,
-        edits: [...joined, ...(at < toAt ? afterIt(lines, toAt) : [])],
+        edits: [at, ...(at < toAt && joins ? afterIt(lines, toAt) : [])],
+        gone: new Set(gone),
         given: leftBare && at === toAt ? () => [] : undefined,
         plan: (_, between) => {
           const from = between.lines[at]!;
           const to = between.lines[toAt]!;
           want = wantOf(between);
+          const upTo = to.bare === "item";
+          const end = upTo ? to.row - 1 : to.row;
+          const cut = upTo ? want[end]!.chars.length : to.from + toOffset;
           const kept = want[from.row]!.chars.slice(0, from.from + offset);
-          want[from.row]!.chars = [...kept, ...want[to.row]!.chars.slice(to.from + toOffset)];
-          want.splice(from.row + 1, to.row - from.row);
+          const rest = want[end]!.chars.slice(cut);
+          want[from.row]!.chars = joins ? [...kept, ...rest] : kept;
+          if (!joins) want[end]!.chars = rest;
+          want.splice(from.row + 1, end - from.row - (joins ? 0 : 1));
           keepApart(want, from.row);
         },
       })!;
@@ -1639,17 +1700,22 @@ PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
       const upper = lines[at - 1];
       const change = joinLine(schema, doc, at, freshId);
       const emptyAbove = upper?.bare === "" && upper.chars.length === 0;
-      const fits = upper !== undefined && lower !== undefined && (lower.bare === "" || emptyAbove);
-      if (refusal(before, change, fits, "a join") || !change || !upper || !lower) return false;
-      const depth = upper.path.length - 1;
-      const item = upper.path[depth];
+      const depth = (upper?.path.length ?? 0) - 1;
+      const item = upper?.path[depth];
       const itsFirst =
         item !== undefined &&
         ITEMS.includes(item.type) &&
         lines[at - 2]?.path[depth]?.key !== item.key;
-      const takesItsPlace = lower.path.length === upper.path.length && lower.type === "paragraph";
-      const keepsUpper = itsFirst && lower.path[depth]?.key === item.key && !takesItsPlace;
+      const takesItsPlace =
+        lower?.path.length === upper?.path.length && lower?.type === "paragraph";
+      const keepsUpper = itsFirst && lower?.path[depth]?.key === item.key && !takesItsPlace;
       const upperGoes = emptyAbove && !keepsUpper;
+      const opens = before.shot.tokens.find((token) => token.id === lower?.chars[0]);
+      const holders = opens?.kind === "char" && opens.atom ? HOLDS_INLINE : HOLDS_LETTERS;
+      const takes = opens ? holders.includes(upper?.type ?? "") : !isNeededFirst(lines, at);
+      const joins = lower?.bare === "" && takes;
+      const fits = upper !== undefined && lower !== undefined && (upperGoes || joins);
+      if (refusal(before, change, fits, "a join") || !change || !upper || !lower) return false;
       let want: Want[] = [];
       const done = write(before, change, {
         itsOwn: new Set([at - 1, at]),
@@ -1722,7 +1788,8 @@ PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
       const line = before.lines[at];
       const change = wrapBlocks(schema, doc, at, depth, count, type, attrs, freshId);
       const alone = line?.bare === "item" && depth === line.path.length;
-      const inAList = LISTS.includes(line?.path[depth - 1]?.type ?? "");
+      const around = line?.path[depth - 1]?.type ?? "";
+      const inAList = [...LISTS, "table", "tableRow"].includes(around);
       const shallow = before.frames.every((path) => path.length < 60);
       if (!change && line && depth <= line.path.length && !inAList && shallow && !alone)
         throw new Error("[writer] a wrap was refused where blocks can be wrapped");
@@ -1899,7 +1966,36 @@ const leafNote = () =>
       ["mn", PARAGRAPH, []],
     ],
   );
-const STARTS = [plainNote, nestedNote, () => nestedNote("u\u{1F389}v"), twinNote, leafNote];
+const tableNote = () =>
+  note(
+    [
+      { id: "T", type: "table", attrs: {} },
+      { id: "R1", type: "tableRow", attrs: {} },
+      { id: "A", type: "tableHeader", attrs: {} },
+      { id: "B", type: "tableHeader", attrs: {} },
+      { id: "R2", type: "tableRow", attrs: {} },
+      { id: "C", type: "tableCell", attrs: {} },
+      { id: "D", type: "tableCell", attrs: {} },
+      { id: "Q", type: "blockquote", attrs: {} },
+    ],
+    [
+      ["ab", PARAGRAPH, []],
+      ["cd", PARAGRAPH, ["T", "R1", "A"]],
+      ["ef", PARAGRAPH, ["T", "R1", "B"]],
+      [["g", IMAGE, "h"], PARAGRAPH, ["T", "R2", "C"]],
+      ["ij", { type: "codeBlock", language: null }, ["T", "R2", "C"]],
+      ["kl", PARAGRAPH, ["T", "R2", "D", "Q"]],
+      ["mn", PARAGRAPH, []],
+    ],
+  );
+const STARTS = [
+  plainNote,
+  nestedNote,
+  () => nestedNote("u\u{1F389}v"),
+  twinNote,
+  leafNote,
+  tableNote,
+];
 
 function team(count: number, baseline: Uint8Array, gc = true, fault?: Fault) {
   const oracle = new Oracle();
@@ -2593,6 +2689,7 @@ it.each(SETUPS)(
     for (const [which, { runs, first }] of failed)
       console.log(`FAILED in ${String(runs)} runs: ${which}\n${first}`);
     expect(total.runs).toBe(2 * SEEDS);
+    expect(total.ofThoseReadOtherwise).toBe(0);
   },
   600_000,
 );
@@ -3281,11 +3378,8 @@ it.each([
     const writes = split.writes();
     if (wrong) writes.added[0]!.index++;
     written(splitter, { ...split, writes: () => writes });
-    ticker.transact(() => {
-      const tick = setContainerAttributes(schema, ticker, 0, 1, { checked: true }, String)!;
-      writeBody(ticker, tick, LOCAL);
-      writeBody(ticker, setLineKind(schema, ticker, 0, { type: "heading", level: 2 })!, LOCAL);
-    }, LOCAL);
+    written(ticker, setContainerAttributes(schema, ticker, 0, 1, { checked: true }, String));
+    written(ticker, setLineKind(schema, ticker, 0, { type: "heading", level: 2 }));
     exchange(splitter, ticker);
     const list = (
       readBodySequence(schema, ticker).toJSON() as {
@@ -3745,4 +3839,170 @@ it("writes the boundary of a line a change makes as part of that change, so its 
   expect(rowsRead(joined)).toEqual(["codeBlock :abc", `paragraph :${OBJECT}d`]);
   joins.undo();
   expect(linesRead(joined)).toEqual(["line codeBlock:ab", `line paragraph:c${OBJECT}d`]);
+});
+
+const NESTED_WRITES: [string, () => Uint8Array, (doc: Y.Doc) => BodyChange | null][] = [
+  [
+    "typing in the paragraph after a code block",
+    afterCodeNote,
+    (doc) => typeLetters(schema, doc, 1, 0, "A", {}),
+  ],
+  [
+    "typing in a list item's added first paragraph",
+    titleNote,
+    (doc) => typeLetters(schema, doc, 1, 0, "A", {}),
+  ],
+  [
+    "an inline item placed in the paragraph after a code block",
+    afterCodeNote,
+    (doc) => insertInline(schema, doc, 1, 0, "mathInline", MATH.attrs),
+  ],
+];
+
+it.each(NESTED_WRITES)("refuses to write %s inside an open transaction", (_, baseline, plan) => {
+  const doc = open(baseline(), 10);
+  const change = plan(doc)!;
+  const stored = view(doc);
+  expect(change.given).toHaveLength(1);
+  for (const origin of [LOCAL, OUTSIDE_HISTORY])
+    expect(() => doc.transact(() => writeBody(doc, change, LOCAL), origin)).toThrow(
+      "open transaction",
+    );
+  expect(view(doc)).toBe(stored);
+  expect(written(doc, change)).toBe(true);
+});
+
+it("gives no boundary to a line a join would take away again, and refuses the join", () => {
+  const doc = open(
+    note(
+      [
+        { id: "L1", type: "bulletList", attrs: {} },
+        { id: "I1", type: "listItem", attrs: {} },
+        { id: "L2", type: "bulletList", attrs: {} },
+        { id: "I2", type: "listItem", attrs: {} },
+      ],
+      [
+        ["", PARAGRAPH, ["L1", "I1"]],
+        ["head", { type: "heading", level: 1 }, ["L1", "I1", "L2", "I2"]],
+      ],
+    ),
+    10,
+  );
+  const stored = view(doc);
+  expect(linesRead(doc)).toEqual(["line paragraph:", "item paragraph:", "line heading:head"]);
+  expect(joinLine(schema, doc, 1, String)).toBeNull();
+  expect(view(doc)).toBe(stored);
+});
+
+it("gives no boundary to a line a delete runs into, and leaves what cannot join as a line", () => {
+  const intoAfter = open(codeNote(), 10);
+  const change = deleteRange(schema, intoAfter, 1, 1, 2, 1, String)!;
+  expect(change.given).toEqual([]);
+  expect(written(intoAfter, change)).toBe(true);
+  expect(rowsRead(intoAfter)).toEqual(["paragraph :top", "codeBlock :cde", "paragraph :z"]);
+
+  const intoAdded = open(
+    note(
+      [
+        { id: "L", type: "bulletList", attrs: {} },
+        { id: "I", type: "listItem", attrs: {} },
+      ],
+      [
+        ["ab", PARAGRAPH, []],
+        ["head", { type: "heading", level: 1 }, ["L", "I"]],
+      ],
+    ),
+    20,
+  );
+  const upTo = deleteRange(schema, intoAdded, 0, 1, 1, 0, String)!;
+  expect(upTo.given).toEqual([]);
+  expect(written(intoAdded, upTo)).toBe(true);
+  expect(linesRead(intoAdded)).toEqual([
+    "line paragraph:a",
+    "item paragraph:",
+    "line heading:head",
+  ]);
+  expect(deleteRange(schema, intoAdded, 0, 1, 1, 0, String)).toBeNull();
+
+  const items = [["co", IMAGE, MATH, "de"], { type: "codeBlock", language: null }, []] as Written;
+  const part = open(note([], [items]), 30);
+  const history = bodyHistory(part, LOCAL, NEVER_ELAPSES);
+  const first = readOf(part);
+  const partly = deleteRange(schema, part, 0, 1, 1, 1, String)!;
+  expect(partly.given).toEqual([]);
+  expect(written(part, partly)).toBe(true);
+  expect(rowsRead(part)).toEqual(["codeBlock :c", `paragraph :${OBJECT}de`]);
+  history.undo();
+  expect(readOf(part)).toBe(first);
+  expect(linesRead(part)).toEqual(["line codeBlock:co", `spill paragraph:${OBJECT}${OBJECT}de`]);
+
+  const below = [[IMAGE, MATH, "x"], PARAGRAPH, []] as Written;
+  const apart = open(note([], [["ab", { type: "codeBlock", language: null }, []], below]), 40);
+  const kept = storedLines(apart).length;
+  expect(deleteRange(schema, apart, 0, 2, 1, 0, String)).toBeNull();
+  expect(joinLine(schema, apart, 1, String)).toBeNull();
+  expect(written(apart, deleteRange(schema, apart, 0, 1, 1, 1, String))).toBe(true);
+  expect(rowsRead(apart)).toEqual(["codeBlock :a", `paragraph :${OBJECT}x`]);
+  expect(storedLines(apart)).toHaveLength(kept);
+  expect(written(apart, deleteRange(schema, apart, 0, 1, 1, 1, String))).toBe(true);
+  expect(rowsRead(apart)).toEqual(["codeBlock :ax"]);
+});
+
+it("refuses a join or a delete that would only take away the empty first paragraph a list item needs", () => {
+  const doc = open(
+    note(
+      [
+        { id: "L", type: "bulletList", attrs: {} },
+        { id: "I", type: "listItem", attrs: {} },
+      ],
+      [
+        ["x", PARAGRAPH, []],
+        ["", PARAGRAPH, ["L", "I"]],
+        ["head", { type: "heading", level: 1 }, ["L", "I"]],
+      ],
+    ),
+    10,
+  );
+  const stored = view(doc);
+  expect(joinLine(schema, doc, 1, String)).toBeNull();
+  expect(deleteRange(schema, doc, 0, 1, 1, 0, String)).toBeNull();
+  expect(view(doc)).toBe(stored);
+  expect(written(doc, deleteRange(schema, doc, 0, 0, 1, 0, String))).toBe(true);
+  expect(rowsRead(doc)).toEqual(["paragraph :", "paragraph L/I:", "heading L/I:head"]);
+});
+
+it("writes nothing for marks the letters already hold", () => {
+  const doc = open(afterCodeNote(), 10);
+  const stored = view(doc);
+  expect(setMarks(schema, doc, 1, 1, 2, BOLD)).toBeNull();
+  expect(setMarks(schema, doc, 1, 0, 1, BOLD)).toBeNull();
+  expect(setMarks(schema, doc, 0, 0, 2, { bold: null })).toBeNull();
+  expect(view(doc)).toBe(stored);
+  const off = setMarks(schema, doc, 1, 1, 2, { bold: null })!;
+  expect(off.given).toHaveLength(1);
+  expect(written(doc, off)).toBe(true);
+  expect(setMarks(schema, doc, 1, 1, 2, { bold: null })).toBeNull();
+});
+
+it("lifts only out of a quote, a callout or a list, and takes only kinds that fit", () => {
+  const table = open(tableNote(), 10);
+  const stored = view(table);
+  for (const depth of [1, 2, 3]) expect(liftBlocks(schema, table, 1, depth, 1, String)).toBeNull();
+  expect(setContainerKind(schema, table, 1, 2, "blockquote", String)).toBeNull();
+  expect(setContainerKind(schema, table, 5, 3, "bulletList", String)).toBeNull();
+  expect(wrapBlocks(schema, table, 0, 0, 1, "tableCell", {}, String)).toBeNull();
+  expect(wrapBlocks(schema, table, 0, 0, 1, "paragraph", {}, String)).toBeNull();
+  expect(wrapBlocks(schema, table, 0, 0, 1, "bogus", {}, String)).toBeNull();
+  expect(setLineKind(schema, table, 0, { type: "blockquote" })).toBeNull();
+  expect(setLineKind(schema, table, 0, { type: "bogus" })).toBeNull();
+  expect(splitLine(schema, table, 0, 1, String, { type: "bogus" })).toBeNull();
+  expect(splitLine(schema, table, 0, 1, String, { type: "tableRow" })).toBeNull();
+  expect(view(table)).toBe(stored);
+  expect(pathsOf(table)[5]).toEqual(["T", "R2", "D", "Q"]);
+  expect(written(table, liftBlocks(schema, table, 5, 4, 1, String))).toBe(true);
+  expect(pathsOf(table)[5]).toEqual(["T", "R2", "D"]);
+
+  const unknown = open(note([], [["ab", { type: "bogus" }, []]]), 20);
+  expect(written(unknown, splitLine(schema, unknown, 0, 1, String))).toBe(true);
+  expect(storedLines(unknown)[1]).toEqual({ type: "paragraph", path: [], text: "b" });
 });

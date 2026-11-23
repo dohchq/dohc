@@ -97,6 +97,12 @@ const ITEM_OF_LIST: Record<string, string> = {
 const isList = (type: string | undefined) =>
   type !== undefined && Object.hasOwn(ITEM_OF_LIST, type);
 const isItem = (type: string | undefined) => type === "listItem" || type === "taskItem";
+const isBox = (type: string | undefined) => type === "blockquote" || type === "callout";
+const isLeafKind = (schema: Schema, type: unknown) => {
+  const node = typeof type === "string" ? schema.nodes[type] : undefined;
+  const isLeaf = node?.isBlock === true && (node.isTextblock || node.isLeaf);
+  return isLeaf && node !== schema.topNodeType;
+};
 
 const whole = (value: unknown) =>
   typeof value === "bigint" &&
@@ -368,7 +374,14 @@ const bareIn = (lines: BodyLine[]) =>
   lines.flatMap((line) =>
     line.bare === ""
       ? []
-      : [{ bare: line.bare, owner: line.owner?.boundary, depth: line.ids.length }],
+      : [
+          {
+            bare: line.bare,
+            owner: line.owner?.boundary,
+            depth: line.ids.length,
+            text: line.text,
+          },
+        ],
   );
 
 function asGiven(lines: BodyLine[], given: Set<number>): BodyLine[] {
@@ -431,7 +444,8 @@ function changeOf(
         (known) =>
           known.bare === line.bare &&
           known.owner === line.owner?.boundary &&
-          known.depth === line.ids.length,
+          known.depth === line.ids.length &&
+          known.text === line.text,
       );
     return {
       given:
@@ -632,6 +646,9 @@ function elementAt(sequence: Y.Text, index: number): Y.XmlElement | null {
   return null;
 }
 
+const unitAt = (doc: Y.Doc, index: number) =>
+  elementAt(doc.getText(BODY_SEQUENCE_FIELD), index)?.nodeName ?? "text";
+
 /** Change attributes of the inline item that stands at an offset of a line. */
 export function setInlineAttributes(
   schema: Schema,
@@ -659,7 +676,29 @@ export function setInlineAttributes(
   );
 }
 
-/** Set or take off marks on part of one line. Refused where it would cut a surrogate pair. */
+function marksDiffer(sequence: Y.Text, index: number, length: number, asked: SequenceAttrs) {
+  const isOn = (value: unknown) =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+  const held = new Map<string, unknown>();
+  let passed = 0;
+  for (let item = sequence._start; item !== null && passed < index + length; item = item.right) {
+    if (item.deleted) continue;
+    if (item.content instanceof Y.ContentFormat) held.set(item.content.key, item.content.value);
+    if (!item.countable) continue;
+    passed += item.length;
+    if (!(item.content instanceof Y.ContentString) || passed <= index) continue;
+    const differs = Object.entries(asked).some(([key, value]) =>
+      isOn(value) ? !isOn(held.get(key)) || !same(held.get(key), value) : isOn(held.get(key)),
+    );
+    if (differs) return true;
+  }
+  return false;
+}
+
+/**
+ * Set or take off marks on part of one line. Refused where it would cut a surrogate pair, and
+ * where every letter in the range already holds the marks asked for.
+ */
 export function setMarks(
   schema: Schema,
   doc: Y.Doc,
@@ -669,25 +708,27 @@ export function setMarks(
   marks: SequenceAttrs,
 ): BodyChange | null {
   keepMarkRules(schema, marks);
+  const line = readBody(schema, doc)[at];
+  if (!line || length <= 0 || offset < 0 || offset + length > line.text.length) return null;
+  if (splitsALetter(line.text, offset) || splitsALetter(line.text, offset + length)) return null;
+  const sequence = doc.getText(BODY_SEQUENCE_FIELD);
+  if (!marksDiffer(sequence, line.start + offset, length, marks)) return null;
   return changeOf(
     schema,
     doc,
     noId,
     (lines) => [lines[at]],
-    (lines) => {
-      const line = lines[at];
-      if (!line || length <= 0 || offset < 0 || offset + length > line.text.length) return null;
-      if (splitsALetter(line.text, offset) || splitsALetter(line.text, offset + length))
-        return null;
-      return { ...nothing(), marked: { index: line.start + offset, length, marks } };
-    },
+    (lines) => ({ ...nothing(), marked: { index: lines[at]!.start + offset, length, marks } }),
   );
 }
 
 /**
  * Delete from an offset of one line to an offset of the same or a later line: the letters and
  * inline items between, and the boundary of each line after the first, so what is left of the
- * last line joins the first. Refused where it would cut a surrogate pair.
+ * last line joins the first. When the first line cannot hold what is left of the last, the last
+ * line keeps its boundary and stays a line. A line after the first that is read with no boundary
+ * gets none, as the delete would only take it away again. Refused where it would cut a surrogate
+ * pair, and where all it would delete is the empty first paragraph a list item needs.
  */
 export function deleteRange(
   schema: Schema,
@@ -698,23 +739,41 @@ export function deleteRange(
   toOffset: number,
   freshId: () => string,
 ): BodyChange | null {
+  let joins = true;
   return changeOf(
     schema,
     doc,
     freshId,
-    (lines) => [...lines.slice(at, toAt + 1), at < toAt ? afterIt(lines, lines[toAt]) : undefined],
+    (lines) => {
+      const first = lines[at];
+      const last = lines[toAt];
+      const isLeft = last?.boundary && at < toAt && toOffset >= 0 && toOffset < last.text.length;
+      joins = !isLeft || !first || holdsIt(schema, first.type, unitAt(doc, last.start + toOffset));
+      return [first, at < toAt && joins ? afterIt(lines, last) : undefined];
+    },
     (lines, freshId) => {
       const first = lines[at];
       const last = lines[toAt];
       if (!first || !last || offset < 0 || toOffset < 0) return null;
       if (offset > first.text.length || toOffset > last.text.length) return null;
       if (splitsALetter(first.text, offset) || splitsALetter(last.text, toOffset)) return null;
-      if (at > toAt || (at === toAt && offset >= toOffset)) return null;
       const from = first.start + offset;
       const to = last.start + toOffset;
-      lines.splice(at + 1, toAt - at);
+      const ranges = joins
+        ? [{ index: from, length: to - from }]
+        : [
+            { index: from, length: last.start - 1 - from },
+            { index: last.start, length: toOffset },
+          ];
+      const erased = ranges.filter((range) => range.length > 0);
+      if (erased.length === 0) return null;
+      const stored = lines.slice(at + 1, toAt + 1).filter((line) => line.boundary);
+      const backAgain = stored.every((line) => isNeededFirst(lines, lines.indexOf(line)));
+      const onlyBoundaries = joins && stored.length > 0 && to - from === stored.length;
+      if (onlyBoundaries && last.text === "" && backAgain) return null;
+      lines.splice(at + 1, toAt - at - (joins ? 0 : 1));
       const writes = writesOf(schema, doc, lines, freshId);
-      writes?.erased.push({ index: from, length: to - from });
+      writes?.erased.push(...erased);
       return writes;
     },
   );
@@ -724,7 +783,7 @@ export function deleteRange(
  * Split a line at an offset, as section 4 of the format says. The new line gets `kind`, or the
  * line's own kind when none is given, and the line's path; a split of a list item's first block
  * starts a new item, and at offset 0 of a line that holds text the new boundary goes before the
- * line's own. Refused inside a surrogate pair.
+ * line's own. Refused inside a surrogate pair, and for a kind that is not a leaf block's.
  */
 export function splitLine(
   schema: Schema,
@@ -747,7 +806,9 @@ export function splitLine(
       const line = lines[at];
       if (!line || offset < 0 || offset > line.text.length) return null;
       if (splitsALetter(line.text, offset)) return null;
-      const attrs = kind ? kindOf(schema, {}, kind) : kindOf(schema, line.attrs, {});
+      const asRead = { ...line.attrs, type: line.type };
+      const attrs = kind ? kindOf(schema, {}, kind) : kindOf(schema, asRead, {});
+      if (!isLeafKind(schema, attrs.type)) return null;
       if (kind) keepRules(schema, [String(attrs.type)], kind);
       const above = offset === 0 && line.text !== "";
       const fresh: Planned = {
@@ -775,6 +836,16 @@ export function splitLine(
   );
 }
 
+function isNeededFirst(lines: BodyLine[], at: number): boolean {
+  const line = lines[at];
+  const next = lines[at + 1];
+  const depth = (line?.path.length ?? 0) - 1;
+  const item = line?.path[depth];
+  if (!line || !next || !item || !isItem(item.type) || line.type !== "paragraph") return false;
+  if (lines[at - 1]?.path[depth] === item || next.path[depth] !== item) return false;
+  return !(next.path.length === line.path.length && next.type === "paragraph");
+}
+
 function goneInJoin(lines: BodyLine[], at: number): BodyLine | undefined {
   const lower = lines[at];
   const upper = lines[at - 1];
@@ -788,10 +859,12 @@ function goneInJoin(lines: BodyLine[], at: number): BodyLine | undefined {
 
 /**
  * Join a line to the one above: delete the lower line's boundary, or the upper line's when the
- * upper line is empty and is not the first paragraph its list item needs. Refused for a line read
- * with no boundary under a line that holds something: it would get a boundary only to lose it,
- * and what it holds cannot be read into the block above. Two containers that share an id and
- * would then stand together are kept apart by a fresh id for the later one.
+ * upper line is empty and is not the first paragraph its list item needs. Refused when nothing
+ * would join: the upper line cannot hold what the lower line starts with, or the lower line is
+ * the empty first paragraph its list item needs. Such a join would only take a boundary away and
+ * put it back, and for a line read with no boundary of its own it would give one first. Two
+ * containers that share an id and would then stand together are kept apart by a fresh id for the
+ * later one.
  */
 export function joinLine(
   schema: Schema,
@@ -807,10 +880,11 @@ export function joinLine(
       const lower = lines[at];
       const upper = lines[at - 1];
       if (!lower || !upper) return null;
-      if (!lower.boundary && !(upper.boundary && upper.text === "")) return null;
-      const others =
-        goneInJoin(lines, at) === lower ? [afterIt(lines, lower)] : addedAbove(lines, upper);
-      return [upper, lower, ...others];
+      const lowerGoes = goneInJoin(lines, at) === lower;
+      const joins = lower.text === "" || holdsIt(schema, upper.type, unitAt(doc, lower.start));
+      if (lowerGoes && !joins) return null;
+      if (lowerGoes && lower.text === "" && isNeededFirst(lines, at)) return null;
+      return [upper, lower, ...(lowerGoes ? [afterIt(lines, lower)] : addedAbove(lines, upper))];
     },
     (lines, freshId) => {
       const gone = goneInJoin(lines, at)!;
@@ -824,7 +898,8 @@ export function joinLine(
 
 /**
  * Change a line's kind on its boundary: its `type`, and every attribute that kind has, with the
- * default for one neither asked for nor stored. Refused for a list item's added first paragraph.
+ * default for one neither asked for nor stored. Refused for a list item's added first paragraph,
+ * and for a kind that is not a leaf block's.
  */
 export function setLineKind(
   schema: Schema,
@@ -839,6 +914,7 @@ export function setLineKind(
     (lines) => {
       const line = lines[at];
       if (!line || line.bare === "item") return null;
+      if (typeof asked.type === "string" && !isLeafKind(schema, asked.type)) return null;
       const retyped = typeof asked.type === "string" && asked.type !== line.type;
       return retyped ? [line, afterIt(lines, line), ...addedAbove(lines, line)] : [line];
     },
@@ -870,6 +946,7 @@ export function wrapBlocks(
   attrs: SequenceAttrs,
   freshId: () => string,
 ): BodyChange | null {
+  if (!isBox(type) && !isList(type)) return null;
   keepRecordRules(schema, attrs);
   return changeOf(
     schema,
@@ -904,6 +981,7 @@ export function wrapBlocks(
  * Lift `count` neighbouring blocks, starting with the one that holds line `at` at `depth`, out of
  * the quote or callout around them, or out of their list when the blocks are its items. What the
  * container holds after them goes to a container with a fresh id and a copy of its records.
+ * Refused for blocks directly in any other container: a list item, a table, a row or a cell.
  */
 export function liftBlocks(
   schema: Schema,
@@ -921,7 +999,7 @@ export function liftBlocks(
     (lines, freshId) => {
       const line = lines[at];
       const around = line?.path[depth - 1];
-      if (!line || !around || isItem(around.type)) return null;
+      if (!line || !around || !(isBox(around.type) || isList(around.type))) return null;
       const levels = isList(around.type) ? 2 : 1;
       if (line.path.length < depth - 1 + levels) return null;
       const { blocks, own } = blocksAround(lines, at, depth);
@@ -1017,6 +1095,10 @@ export function setContainerKind(
       const stored = doc.getMap(BODY_CONTAINERS_FIELD);
       const container = lines[at]?.path[depth];
       if (!container) return null;
+      const itsFamily = isList(container.type)
+        ? isList(type)
+        : isBox(container.type) && isBox(type);
+      if (!itsFamily) return null;
       const changed = [container];
       if (stored.get(container.id) !== type) container.changes.set("", type);
       if (isList(type))
@@ -1080,7 +1162,8 @@ export const GIVEN_BOUNDARY = Symbol("a boundary for a line that had none");
  * lines that had none are written first, in a change of their own with the origin `given`; the
  * rest follows in one change. No history may follow `given`: undo then leaves those boundaries,
  * what someone else typed in such a line stays in it, and undoing the rest puts every boundary
- * back as it was. It stores plain data: a BigInt it is given is stored as the number it reads as.
+ * back as it was. It throws inside an open transaction, where Yjs would write the two changes as
+ * one. It stores plain data: a BigInt it is given is stored as the number it reads as.
  */
 export function writeBody(
   doc: Y.Doc,
@@ -1088,6 +1171,10 @@ export function writeBody(
   origin: unknown,
   given: unknown = GIVEN_BOUNDARY,
 ): void {
+  if (doc._transaction !== null)
+    throw new Error(
+      "writeBody cannot run inside an open transaction: its two changes would be written as one, and undo would take away the boundary it gives a line.",
+    );
   const sequence = doc.getText(BODY_SEQUENCE_FIELD);
   const records = doc.getMap(BODY_CONTAINERS_FIELD);
   const set = (element: Y.XmlElement, attrs: SequenceAttrs) => {
