@@ -824,7 +824,7 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
   act(() =>
     answer({
       ok: false,
-      error: "What Grok Bot can reach changed. Check it and save again.",
+      error: "What Grok Bot can reach changed. Check it and try again.",
     }),
   );
   await waitFor(() => expect(remove.disabled).toBe(false));
@@ -832,7 +832,7 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
   expect(document.activeElement).toBe(remove);
   // The refused change named a stale revision, so trying it again would fail again.
   expect(onError).toHaveBeenCalledWith(
-    "What Grok Bot can reach changed. Check it and save again.",
+    "What Grok Bot can reach changed. Check it and try again.",
     undefined,
     undefined,
   );

@@ -319,7 +319,7 @@ export function createPersonalAgentRoster(deps: {
             409: () =>
               new Refusal(
                 change.kind === "reach"
-                  ? `What ${name} can reach changed. Check it and save again.`
+                  ? `What ${name} can reach changed. Check it and try again.`
                   : `Sign out ${name} before you remove it.`,
                 true,
               ),

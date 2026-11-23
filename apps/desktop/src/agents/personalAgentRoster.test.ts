@@ -211,7 +211,7 @@ describe("the personal agents roster in main", () => {
         { kind: "reach", reach, revision: 3 },
         "change what Grok Bot can reach",
       ),
-    ).toEqual({ ok: false, error: "What Grok Bot can reach changed. Check it and save again." });
+    ).toEqual({ ok: false, error: "What Grok Bot can reach changed. Check it and try again." });
     // The roster read again and kept the reach the relay holds.
     await vi.waitFor(() => expect(roster.view().accounts[0]?.roster?.revision).toBe(4));
     expect(roster.view().accounts[0]?.roster?.agents[0]?.reach).toEqual([
