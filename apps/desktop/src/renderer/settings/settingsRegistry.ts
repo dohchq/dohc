@@ -2,6 +2,7 @@ import {
   AppWindow,
   Cloud,
   FolderOpen,
+  KeyRound,
   Keyboard,
   MonitorCog,
   Settings,
@@ -152,6 +153,14 @@ export const SETTINGS_SECTIONS = [
     group: "workspace",
     keywords: ["sync", "share", "server", "connect", "cloud", "members"],
     Icon: Cloud,
+  },
+  {
+    id: "secrets",
+    label: "Secrets",
+    scope: "Workspace",
+    group: "workspace",
+    keywords: ["secret", "secrets", "api", "key", "token", "webhook", "automation", "url"],
+    Icon: KeyRound,
   },
   {
     id: "advanced",

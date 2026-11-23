@@ -1542,6 +1542,22 @@ const LISTED_CAPABILITIES = {
     ipc: ["deleteServerAccount", "retryServerAccountDisconnect"],
     mcpReason: "No desktop MCP tool; account deletion needs the account password.",
   }),
+  "workspace.secrets.list": capability(
+    "List the names, usages, and allowed hosts of this workspace's sealed secrets.",
+    {
+      ipc: ["listWorkspaceSecrets"],
+      mcpReason: "Desktop UI only; workspace secrets are managed by the owner in Settings.",
+    },
+  ),
+  "workspace.secrets.set": capability("Save or replace a sealed secret for this workspace.", {
+    ipc: ["setWorkspaceSecret"],
+    mcpReason:
+      "Desktop UI only; local and connected agents cannot create or rotate workspace secrets.",
+  }),
+  "workspace.secrets.delete": capability("Delete a sealed secret from this workspace.", {
+    ipc: ["deleteWorkspaceSecret"],
+    mcpReason: "Desktop UI only; local and connected agents cannot delete workspace secrets.",
+  }),
 } as const;
 
 // Each declared operation joins its capability after the listed rows and tools.

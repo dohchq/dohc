@@ -46,6 +46,7 @@ import type { CustomizeTarget } from "./customize";
 import { KeyboardSettings } from "./KeyboardSettings";
 import { ProfileHeader } from "./ProfileHeader";
 import { ScheduleHostRow } from "./ScheduleHostRow";
+import { WorkspaceSecretsSettings } from "./WorkspaceSecretsSettings";
 import {
   ColorControl,
   HueControl,
@@ -336,9 +337,16 @@ export function SettingsDialog(props: {
     };
   }, [props.workspaceId, props.workspaceIsReady]);
 
+  const availableSections = useMemo(
+    () =>
+      props.sharedView
+        ? SETTINGS_SECTIONS.filter((section) => section.id !== "secrets")
+        : SETTINGS_SECTIONS,
+    [props.sharedView],
+  );
   const filteredSections = useMemo(
-    () => SETTINGS_SECTIONS.filter((section) => sectionMatches(section, query)),
-    [query],
+    () => availableSections.filter((section) => sectionMatches(section, query)),
+    [availableSections, query],
   );
   const sharingResults = useSharingSearch(
     props.workspaceId,
@@ -348,13 +356,20 @@ export function SettingsDialog(props: {
 
   useEffect(() => {
     if (
+      !availableSections.some((section) => section.id === activeSection) &&
+      availableSections[0]
+    ) {
+      setActiveSection(availableSections[0].id);
+      return;
+    }
+    if (
       query.trim() &&
       !filteredSections.some((section) => section.id === activeSection) &&
       filteredSections[0]
     ) {
       setActiveSection(filteredSections[0].id);
     }
-  }, [activeSection, filteredSections, query]);
+  }, [activeSection, availableSections, filteredSections, query]);
 
   // Answers with what main saved, or null. A failed save reports why and puts back what the file holds.
   const saveUserSettings = useCallback(
@@ -1092,6 +1107,15 @@ export function SettingsDialog(props: {
             <UsageRecordSettings onError={props.onError} />
           </div>
         );
+      case "secrets":
+        return (
+          <div data-testid={settingsSectionPin("secrets")}>
+            <WorkspaceSecretsSettings
+              workspaceId={props.workspaceId}
+              {...(props.onError ? { onError: props.onError } : {})}
+            />
+          </div>
+        );
       case "advanced":
         return (
           <div data-testid={settingsSectionPin("advanced")}>
@@ -1290,7 +1314,7 @@ export function SettingsDialog(props: {
     }
   };
 
-  const visibleSections = query.trim() ? filteredSections : SETTINGS_SECTIONS;
+  const visibleSections = query.trim() ? filteredSections : availableSections;
 
   // Toasts don't move Settings. The panel gives back the room Overlay leaves
   // for them, and its content leaves that room instead, so the last controls
