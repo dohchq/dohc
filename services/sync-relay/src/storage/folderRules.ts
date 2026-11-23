@@ -56,6 +56,17 @@ function heldMarkerPath(statements: AccessRuleStatements, workspaceId: string, f
   return held === undefined ? markerPath(folder) : String(held.path);
 }
 
+// A disk that ignores case holds "team" and "Team" as one folder, so a rule
+// typed in another case belongs to the folder the owner has.
+function heldFolderPath(statements: AccessRuleStatements, workspaceId: string, folder: string) {
+  if (folderHasFiles(statements, workspaceId, folder)) return folder;
+  const key = pathCollisionKey(folder);
+  const held = statements.keyUnder.get(workspaceId, `${key}/`, `${key}0`);
+  return held === undefined
+    ? folder
+    : String(held.path).split("/").slice(0, folder.split("/").length).join("/");
+}
+
 export function changeFolderRule(
   storage: StorageContext,
   input: { workspaceId: string; actorUserId: string; change: FolderRuleChange; nowMs: number },
@@ -71,8 +82,9 @@ export function changeFolderRule(
     let revision: number;
     let folders: string[];
     if (change.kind === "create") {
+      const folder = heldFolderPath(statements, workspaceId, change.folder);
       // A folder or its twin on some disk takes one rule.
-      const key = pathCollisionKey(change.folder);
+      const key = pathCollisionKey(folder);
       const taken = storage.db
         .prepare(
           `SELECT b.folder FROM sync_relay_folder_rule_bindings b
@@ -91,8 +103,8 @@ export function changeFolderRule(
            VALUES (?, ?, 1, ?, ?, ?)`,
         )
         .run(workspaceId, ruleId, ruleText(change.rule), input.actorUserId, nowMs);
-      statements.bind.run(workspaceId, ruleId, change.folder);
-      folders = [change.folder];
+      statements.bind.run(workspaceId, ruleId, folder);
+      folders = [folder];
     } else {
       ruleId = change.ruleId;
       const held = storage.db
