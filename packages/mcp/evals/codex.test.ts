@@ -151,31 +151,45 @@ describe("codex eval harness", () => {
     });
   });
 
-  it("records unmanaged workspace writes and post-MCP shell overwrites while ignoring unchanged MCP-owned writes", () => {
+  it("records unmanaged writes, post-MCP overwrites/reverts/deletes, and ignores untouched MCP binary writes", () => {
+    const binHash = createHash("sha256")
+      .update(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe]))
+      .digest("hex");
     const calls = appendUnmanagedFileWrites(
       [{ tool: "Bash", args: { command: "write files" }, ok: true }],
-      { "pricing.md": "old", "notes.md": "keep" },
-      {
-        "pricing.md": "new",
-        "notes.md": "keep",
-        "mcp-clean.md": "owned",
-        "mcp-tampered.md": "overwritten-by-shell",
-        "shell.md": "bypass",
-      },
+      new Map([
+        ["pricing.md", sha256("old")],
+        ["notes.md", sha256("keep")],
+        ["reverted.md", sha256("seed")],
+      ]),
+      new Map([
+        ["pricing.md", sha256("new")],
+        ["notes.md", sha256("keep")],
+        ["mcp-clean.md", sha256("owned")],
+        ["mcp-bin.png", binHash],
+        ["mcp-tampered.md", sha256("overwritten-by-shell")],
+        ["reverted.md", sha256("seed")],
+        ["shell.md", sha256("bypass")],
+      ]),
       new Map([
         ["mcp-clean.md", sha256("owned")],
+        ["mcp-bin.png", binHash],
         ["mcp-tampered.md", sha256("original-mcp-content")],
+        ["reverted.md", sha256("mcp-edited")],
+        ["mcp-deleted.md", sha256("created-then-rm")],
       ]),
     );
     expect(calls).toEqual([
       { tool: "Bash", args: { command: "write files" }, ok: true },
+      { tool: "Edit", args: { file_path: "mcp-deleted.md" }, ok: true },
       { tool: "Edit", args: { file_path: "mcp-tampered.md" }, ok: true },
       { tool: "Edit", args: { file_path: "pricing.md" }, ok: true },
+      { tool: "Edit", args: { file_path: "reverted.md" }, ok: true },
       { tool: "Write", args: { file_path: "shell.md" }, ok: true },
     ]);
   });
 
-  it("resolves Windows npm/pnpm codex.cmd shims using Windows semicolon PATH regardless of host OS and rejects unknown .cmd wrappers", async () => {
+  it("resolves Windows npm/pnpm codex.cmd shims, JS CODEX_BIN entrypoints, and rejects unknown .cmd wrappers", async () => {
     const dir = await mkdtemp(join(tmpdir(), "dohc-codex-bin-"));
     try {
       const npmDir = join(dir, "npm");
@@ -198,6 +212,14 @@ describe("codex eval harness", () => {
         "C:\\node.exe",
       );
       expect(explicit).toEqual({ command: "C:\\node.exe", args: [targetJs, "exec"] });
+
+      const explicitJs = resolveCodexCommand(
+        ["exec"],
+        { CODEX_BIN: targetJs, PATH: "" },
+        "win32",
+        "C:\\node.exe",
+      );
+      expect(explicitJs).toEqual({ command: "C:\\node.exe", args: [targetJs, "exec"] });
 
       const exeDir = join(dir, "native");
       await mkdir(exeDir, { recursive: true });

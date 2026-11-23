@@ -6,6 +6,7 @@
 // agent gets no shell.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -201,6 +202,20 @@ export async function workspaceFiles(root: string): Promise<Record<string, strin
     files[rel] = await readFile(absolute, "utf8");
   }
   return files;
+}
+
+/** Raw-byte SHA-256 hashes of every workspace file outside .dohc, safe for binary files. */
+export async function workspaceFileHashes(root: string): Promise<Map<string, string>> {
+  const hashes = new Map<string, string>();
+  for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const absolute = join(entry.parentPath, entry.name);
+    const rel = relative(root, absolute).split(sep).join("/");
+    if (rel === ".dohc" || rel.startsWith(".dohc/")) continue;
+    const bytes = await readFile(absolute);
+    hashes.set(rel, createHash("sha256").update(bytes).digest("hex"));
+  }
+  return hashes;
 }
 
 /**

@@ -205,6 +205,7 @@ describe("eval cases", () => {
         },
       });
       expect(escaped.isError).toBe(true);
+      expect(JSON.stringify(escaped.content)).toContain("escapes-workspace");
 
       const badManifest = await client.callTool({
         name: "dohc_publish_app",
@@ -390,6 +391,37 @@ describe("eval cases", () => {
     expect(financeChecks.some((c) => !c.pass && c.name.includes("expense"))).toBe(true);
     expect(financeChecks.some((c) => !c.pass && c.name.includes("check-in"))).toBe(true);
 
+    const swappedCheckinRun: RunRecord = {
+      ...financeSolved.run,
+      calls: financeSolved.run.calls.map((call) => {
+        const req = call.args.request as Record<string, unknown> | undefined;
+        if (
+          call.tool === "dohc_dataset" &&
+          req?.action === "invoke" &&
+          req.operationId === "a1000000-0000-4000-8000-000000000015"
+        ) {
+          return {
+            ...call,
+            args: {
+              request: {
+                ...req,
+                input: {
+                  values: {
+                    "a1000000-0000-4000-8000-000000000010": "2026-11-22",
+                    "a1000000-0000-4000-8000-000000000011": 40,
+                    "a1000000-0000-4000-8000-000000000012": 7.5,
+                  },
+                },
+              },
+            },
+          };
+        }
+        return call;
+      }),
+    };
+    const swappedChecks = await grade(finance.expect, swappedCheckinRun, finance.gradeRun);
+    expect(swappedChecks.some((c) => !c.pass && c.name.includes("check-in"))).toBe(true);
+
     const booking = EVERYDAY_CASES.find((c) => c.id === "everyday-booking-capacity-app")!;
     const bookingSolved = await replay(booking, "solution");
     const brokenBookingRun: RunRecord = {
@@ -398,8 +430,10 @@ describe("eval cases", () => {
         ...bookingSolved.run.files,
         "workshop/backend.ts": `globalThis.operations = {
   bookSeat(ctx, input) {
-    if (Number(input?.seats) === 4) ctx.refuse("no_four", "No fours");
-    ctx.db.execute("INSERT INTO bookings(id, name, seats) VALUES(?, ?, ?)", [ctx.requestId, String(input?.name ?? ""), 1]);
+    const taken = Number(ctx.db.query("SELECT COALESCE(SUM(seats), 0) AS t FROM bookings")[0].t);
+    const seats = Number(input?.seats ?? 1);
+    if (taken > 0 && taken + seats > 8) ctx.refuse("full", "Full");
+    ctx.db.execute("INSERT INTO bookings(id, name, seats) VALUES(?, ?, ?)", [ctx.requestId, String(input?.name ?? ""), seats]);
     return { id: ctx.requestId };
   },
   listBookings(ctx) {
@@ -427,6 +461,18 @@ describe("eval cases", () => {
     };
     const formChecks = await grade(form.expect, bogusFormRun, form.gradeRun);
     expect(formChecks.some((c) => !c.pass && c.detail?.includes("not in approved"))).toBe(true);
+
+    const staleManifest = JSON.parse(formSolved.run.files["apps/signup-form/app.publish.json"]!);
+    staleManifest.dataset.revision = 1;
+    const staleFormRun: RunRecord = {
+      ...formSolved.run,
+      files: {
+        ...formSolved.run.files,
+        "apps/signup-form/app.publish.json": JSON.stringify(staleManifest, null, 2),
+      },
+    };
+    const staleChecks = await grade(form.expect, staleFormRun, form.gradeRun);
+    expect(staleChecks.some((c) => !c.pass && c.detail?.includes("stale revision"))).toBe(true);
   });
 
   it("keeps public skill automations.yaml examples valid under parseAutomationsFile", async () => {

@@ -3,7 +3,6 @@
 // when --skill is passed).
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -14,6 +13,7 @@ import type { EvalCase, RecordedCall, RunRecord } from "./case";
 import {
   sampleEnvironment,
   seedWorkspace,
+  workspaceFileHashes,
   workspaceFiles,
   workspacePaths,
   type SampleOutcome,
@@ -48,10 +48,6 @@ interface CodexEvent {
     } | null;
     changes?: Array<{ path?: string; kind?: string }>;
   };
-}
-
-function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
 }
 
 function mcpCallSucceeded(item: NonNullable<CodexEvent["item"]>): boolean {
@@ -153,13 +149,13 @@ export function readCodexTranscript(lines: readonly string[]): {
 }
 
 /**
- * Records any workspace file added, modified, or deleted outside dohc MCP tools (including shell
- * overwrites after an earlier MCP write) so unmanaged writes cannot bypass `notCalls` checks.
+ * Records any workspace file added, modified, restored, or deleted outside dohc MCP tools using
+ * raw-byte SHA-256 hashes so binary files match cleanly and post-MCP shell tampering is caught.
  */
 export function appendUnmanagedFileWrites(
   calls: readonly RecordedCall[],
-  initialFiles: Readonly<Record<string, string>>,
-  finalFiles: Readonly<Record<string, string>>,
+  initialHashes: ReadonlyMap<string, string>,
+  finalHashes: ReadonlyMap<string, string>,
   mcpWrittenHashes: ReadonlyMap<string, string>,
 ): RecordedCall[] {
   const out = [...calls];
@@ -169,15 +165,22 @@ export function appendUnmanagedFileWrites(
       .map((c) => (typeof c.args.file_path === "string" ? c.args.file_path : ""))
       .filter(Boolean),
   );
-  const allPaths = new Set([...Object.keys(initialFiles), ...Object.keys(finalFiles)]);
+  const allPaths = new Set([
+    ...initialHashes.keys(),
+    ...finalHashes.keys(),
+    ...mcpWrittenHashes.keys(),
+  ]);
   for (const relPath of [...allPaths].sort()) {
-    const initial = initialFiles[relPath];
-    const final = finalFiles[relPath];
+    const initial = initialHashes.get(relPath);
+    const final = finalHashes.get(relPath);
+    if (mcpWrittenHashes.has(relPath)) {
+      if (final !== undefined && mcpWrittenHashes.get(relPath) === final) continue;
+      out.push({ tool: "Edit", args: { file_path: relPath }, ok: true });
+      continue;
+    }
     if (initial === final) continue;
-    if (final !== undefined && mcpWrittenHashes.get(relPath) === sha256(final)) continue;
-    if (recordedPaths.has(relPath) && !mcpWrittenHashes.has(relPath)) continue;
-    const tool =
-      Object.hasOwn(initialFiles, relPath) || mcpWrittenHashes.has(relPath) ? "Edit" : "Write";
+    if (recordedPaths.has(relPath)) continue;
+    const tool = initial !== undefined ? "Edit" : "Write";
     out.push({ tool, args: { file_path: relPath }, ok: true });
   }
   return out;
@@ -224,7 +227,11 @@ export function resolveCodexCommand(
 ): { command: string; args: string[] } {
   const explicit = env.CODEX_BIN?.trim();
   if (explicit) {
-    if (platform === "win32" && /\.(?:cmd|bat)$/i.test(extname(explicit))) {
+    const ext = extname(explicit);
+    if (/\.(?:c|m)?js$/i.test(ext)) {
+      return { command: nodeExecutable, args: [explicit, ...args] };
+    }
+    if (platform === "win32" && /\.(?:cmd|bat)$/i.test(ext)) {
       return unwrapWindowsCmdShim(explicit, args, nodeExecutable);
     }
     return { command: explicit, args: [...args] };
@@ -329,7 +336,7 @@ export async function runCodexSample(input: {
   const startedAt = Date.now();
   try {
     await seedWorkspace(root, input.evalCase, home);
-    const initialFiles = await workspaceFiles(root);
+    const initialHashes = await workspaceFileHashes(root);
     await prepareIsolatedCodexHome(codexHome, process.env, input.skillPrompt);
     const serverArgs = [
       "--import",
@@ -401,11 +408,12 @@ export async function runCodexSample(input: {
       };
     const mcpWritesRaw = await readFile(writesLog, "utf8").catch(() => "");
     const mcpWrittenHashes = parseMcpWritesLog(mcpWritesRaw);
+    const finalHashes = await workspaceFileHashes(root);
     const finalFiles = await workspaceFiles(root);
     const calls = appendUnmanagedFileWrites(
       workspacePaths(transcript.calls, root),
-      initialFiles,
-      finalFiles,
+      initialHashes,
+      finalHashes,
       mcpWrittenHashes,
     );
     const run: RunRecord = {

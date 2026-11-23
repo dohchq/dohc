@@ -722,15 +722,32 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       ],
     },
     gradeRun: async (run) => {
-      const collectPrimitives = (value: unknown, out: Array<string | number> = []) => {
-        if (typeof value === "string" || typeof value === "number") {
-          out.push(value);
-        } else if (Array.isArray(value)) {
-          for (const item of value) collectPrimitives(item, out);
-        } else if (value && typeof value === "object") {
-          for (const entry of Object.values(value)) collectPrimitives(entry, out);
+      const inputFieldMap = (input: unknown): Record<string, unknown> => {
+        if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+        const obj = input as Record<string, unknown>;
+        const nested =
+          obj.values && typeof obj.values === "object" && !Array.isArray(obj.values)
+            ? (obj.values as Record<string, unknown>)
+            : {};
+        return { ...obj, ...nested };
+      };
+      const valueForField = (
+        table: DatasetDefinition["tables"][number] | undefined,
+        fields: Record<string, unknown>,
+        pattern: RegExp,
+      ): unknown => {
+        const matchedField = table?.fields.find(
+          (f) => f.type !== "button" && (pattern.test(f.name) || pattern.test(f.sqlColumn)),
+        );
+        if (matchedField && matchedField.type !== "button") {
+          for (const key of [matchedField.fieldId, matchedField.sqlColumn, matchedField.name]) {
+            if (Object.hasOwn(fields, key)) return fields[key];
+          }
         }
-        return out;
+        for (const [key, value] of Object.entries(fields)) {
+          if (pattern.test(key)) return value;
+        }
+        return undefined;
       };
       const checks: Check[] = [
         checkDatasetJsonValid(run, "tracker/dataset.json"),
@@ -786,24 +803,26 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       const expenseWrite = writeInvokes.find((req) => {
         const op = opById.get(String(req.operationId));
         if (!op || (expenseTable && op.tableId !== expenseTable.tableId)) return false;
-        const vals = collectPrimitives(req.input);
-        const hasFood = vals.some(
-          (v) => typeof v === "string" && v.trim().toLowerCase() === "food",
+        const fields = inputFieldMap(req.input);
+        const category = valueForField(expenseTable, fields, /category/i);
+        const amount = valueForField(expenseTable, fields, /amount/i);
+        return (
+          typeof category === "string" &&
+          category.trim().toLowerCase() === "food" &&
+          amount === 18.5
         );
-        const hasAmount = vals.some((v) => v === 18.5);
-        return hasFood && hasAmount;
       });
       const checkinWrite = writeInvokes.find((req) => {
         const op = opById.get(String(req.operationId));
         if (!op || (checkinTable && op.tableId !== checkinTable.tableId)) return false;
-        const vals = collectPrimitives(req.input);
-        const hasSleep = vals.some((v) => v === 7.5);
-        const hasWorkout = vals.some((v) => v === 40);
-        return hasSleep && hasWorkout;
+        const fields = inputFieldMap(req.input);
+        const sleep = valueForField(checkinTable, fields, /sleep/i);
+        const workout = valueForField(checkinTable, fields, /workout/i);
+        return sleep === 7.5 && workout === 40;
       });
       let expensePersisted = false;
       let checkinPersisted = false;
-      if (def && expenseWrite && checkinWrite) {
+      if (def) {
         const schemaSql = run.files[def.schemaPath];
         const opSource = run.files[def.operationsPath];
         if (schemaSql && opSource) {
@@ -811,32 +830,36 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
             const compiled = await compileDatasetOperations(opSource, def.operationsPath);
             const tables = def.tables.map((t) => t.sqlName);
             const db0 = await initializeAppDatabase({ schemaSql, tables });
-            const expOp = opById.get(String(expenseWrite.operationId))!;
-            const afterExp = await evaluateAppOperation({
-              database: db0,
-              source: compiled,
-              operation: expOp.name,
-              caller: { kind: "owner" },
-              input: (expenseWrite.input ?? {}) as JsonValue,
-              nowMs: 1_760_000_000_000,
-              requestId: "grade-exp-1",
-              tables,
-              readOnly: false,
-            });
-            expensePersisted = afterExp.changed;
-            const chkOp = opById.get(String(checkinWrite.operationId))!;
-            const afterChk = await evaluateAppOperation({
-              database: afterExp.database,
-              source: compiled,
-              operation: chkOp.name,
-              caller: { kind: "owner" },
-              input: (checkinWrite.input ?? {}) as JsonValue,
-              nowMs: 1_760_000_001_000,
-              requestId: "grade-chk-1",
-              tables,
-              readOnly: false,
-            });
-            checkinPersisted = afterChk.changed;
+            if (expenseWrite) {
+              const expOp = opById.get(String(expenseWrite.operationId))!;
+              const afterExp = await evaluateAppOperation({
+                database: db0,
+                source: compiled,
+                operation: expOp.name,
+                caller: { kind: "owner" },
+                input: (expenseWrite.input ?? {}) as JsonValue,
+                nowMs: 1_760_000_000_000,
+                requestId: "grade-exp-1",
+                tables,
+                readOnly: false,
+              });
+              expensePersisted = afterExp.changed;
+            }
+            if (checkinWrite) {
+              const chkOp = opById.get(String(checkinWrite.operationId))!;
+              const afterChk = await evaluateAppOperation({
+                database: db0,
+                source: compiled,
+                operation: chkOp.name,
+                caller: { kind: "owner" },
+                input: (checkinWrite.input ?? {}) as JsonValue,
+                nowMs: 1_760_000_001_000,
+                requestId: "grade-chk-1",
+                tables,
+                readOnly: false,
+              });
+              checkinPersisted = afterChk.changed;
+            }
           } catch {
             expensePersisted = false;
             checkinPersisted = false;
@@ -1104,7 +1127,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         const opSource = run.files[def.operationsPath];
         if (!schemaSql || !opSource) {
           checks.push({
-            name: "bookSeat accepts 5 seats, refuses 4 more (>8), and accepts 3 more (=8)",
+            name: "bookSeat enforces 8-seat capacity across multiple booking sequences",
             pass: false,
             detail: "missing schema or operations file",
           });
@@ -1138,6 +1161,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
                 return isAppBackendRuntimeError(error);
               }
             };
+            const refusedEmptyOverCap = await expectRefused(db0, "Oversize", 9, "book-0");
             const first = await book(db0, "Alice", 5, "book-1");
             const refusedOverCap = await expectRefused(first.database, "Bob", 4, "book-2");
             const exactCap = await book(first.database, "Cara", 3, "book-3");
@@ -1153,6 +1177,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
             );
 
             const passed =
+              refusedEmptyOverCap &&
               first.changed &&
               refusedOverCap &&
               exactCap.changed &&
@@ -1166,7 +1191,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
               ...(passed
                 ? {}
                 : {
-                    detail: `5+4ref=${String(refusedOverCap)}, 5+3ok=${String(exactCap.changed)}, 8+1ref=${String(refusedAfterFull)}, 4+4ok=${String(fourFirst.changed && fourSecond.changed)}, pairsFullRef=${String(refusedAfterPairs)}`,
+                    detail: `0+9ref=${String(refusedEmptyOverCap)}, 5+4ref=${String(refusedOverCap)}, 5+3ok=${String(exactCap.changed)}, 8+1ref=${String(refusedAfterFull)}, 4+4ok=${String(fourFirst.changed && fourSecond.changed)}, pairsFullRef=${String(refusedAfterPairs)}`,
                   }),
             });
           } catch (error) {
@@ -1628,6 +1653,43 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           "apps/signup-form/app.publish.json",
           "events/dataset.json",
           (ref) => {
+            if (ref.revision < 2) {
+              return `manifest still pinned to stale revision ${ref.revision}`;
+            }
+            if (approvedDef) {
+              const schemaSql = run.files[approvedDef.schemaPath];
+              const opSource = run.files[approvedDef.operationsPath];
+              if (schemaSql !== undefined && opSource !== undefined) {
+                const expectedRevSha = sha256(
+                  datasetRevisionDigestContent({
+                    datasetId: approvedDef.datasetId,
+                    revision: ref.revision,
+                    revisionSha256: "0".repeat(64),
+                    definitionSha256: sha256(datasetDefinitionDigestContent(approvedDef)),
+                    schemaSha256: sha256(schemaSql),
+                    operationsSha256: sha256(opSource),
+                    definition: approvedDef,
+                  }),
+                );
+                const expectedRevShaTrimmed = sha256(
+                  datasetRevisionDigestContent({
+                    datasetId: approvedDef.datasetId,
+                    revision: ref.revision,
+                    revisionSha256: "0".repeat(64),
+                    definitionSha256: sha256(datasetDefinitionDigestContent(approvedDef)),
+                    schemaSha256: sha256(schemaSql),
+                    operationsSha256: sha256(opSource.replace(/\n$/, "")),
+                    definition: approvedDef,
+                  }),
+                );
+                if (
+                  ref.revisionSha256 !== expectedRevSha &&
+                  ref.revisionSha256 !== expectedRevShaTrimmed
+                ) {
+                  return "manifest revisionSha256 does not match approved events/dataset.json";
+                }
+              }
+            }
             if (ref.operationIds.includes(uuid("e2000000", 10))) {
               return "leaked private owner readSessions operation";
             }
