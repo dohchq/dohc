@@ -515,6 +515,7 @@ export function deleteRange(
   const left = lines.filter(
     (line, index) =>
       !(kept && index >= at && line.owner === kept && line.bare === "item") &&
+      !(index > at && index <= toAt && line.bare !== "") &&
       !gone.includes(line) &&
       !(line.owner !== undefined && gone.includes(line.owner) && line.gives !== true),
   );

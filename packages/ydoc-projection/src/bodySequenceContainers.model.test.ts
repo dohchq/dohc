@@ -2634,6 +2634,35 @@ it("gives the paragraph after a code block a boundary when a change needs one", 
   expect(rowsRead(deleted)).toEqual(["paragraph :to", `paragraph :${rest}`, "paragraph :z"]);
 });
 
+it("deletes from an added first paragraph into the paragraph after the item's first line", () => {
+  const baseline = note(
+    [
+      { id: "L", type: "bulletList", attrs: {} },
+      { id: "I", type: "listItem", attrs: {} },
+      { id: "C", type: "callout", attrs: TIP },
+    ],
+    [
+      [["co", MATH, "de"], { type: "codeBlock", language: null }, ["L", "I", "C"]],
+      ["z", PARAGRAPH, []],
+    ],
+  );
+  const doc = open(baseline, 10);
+  expect(linesRead(doc).slice(0, 3)).toEqual([
+    "item paragraph:",
+    "line codeBlock:co",
+    `spill paragraph:${OBJECT}de`,
+  ]);
+  expect(written(doc, deleteRange(schema, doc, 0, 0, 2, 2, String))).toBe(true);
+  expect(rowsRead(doc)).toEqual(["paragraph L/I:e", "paragraph :z"]);
+  const kept = open(baseline, 20);
+  expect(written(kept, deleteRange(schema, kept, 0, 0, 1, 1, String))).toBe(true);
+  expect(rowsRead(kept)).toEqual([
+    "paragraph L/I:o",
+    `paragraph L/I/C:${OBJECT}de`,
+    "paragraph :z",
+  ]);
+});
+
 it("stores every attribute a line's kind has, with the default for one not asked for", () => {
   const doc = open(plainNote(), 10);
   const first = () => storedLines(doc)[0];
