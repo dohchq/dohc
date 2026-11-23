@@ -54,21 +54,14 @@ export type BodyLine = {
   owner?: BodyLine;
 };
 
-/**
- * What one change writes. `writeBody` writes it. Every place in the sequence is the place before
- * any of the change is made.
- */
+/** What one change writes once every line it edits has a boundary of its own. */
 export type BodyWrites = {
   records: Map<string, unknown>;
   attributes: Map<Y.XmlElement, SequenceAttrs>;
   /** Ranges to delete. */
   erased: { index: number; length: number }[];
-  /**
-   * Boundaries to insert, in the order they stand in the note, with the attributes each ends
-   * with. `given` is on one for a line that is read with no boundary of its own, and holds the
-   * kind and path that line reads with.
-   */
-  added: { index: number; attrs: SequenceAttrs; given?: SequenceAttrs }[];
+  /** Boundaries to insert, in the order they stand in the note. */
+  added: { index: number; attrs: SequenceAttrs }[];
   /** Letters to insert, with their marks; no marks means plain. */
   typed?: { index: number; letters: string; marks: SequenceAttrs };
   /** An inline item to insert. */
@@ -77,7 +70,24 @@ export type BodyWrites = {
   marked?: { index: number; length: number; marks: SequenceAttrs };
 };
 
-type Planned = BodyLine & { gives?: boolean; fresh?: boolean };
+/**
+ * One change to a note's body, for `writeBody` to write. A change edits only lines that have a
+ * boundary of their own, so it comes in three parts, each planned on the note as the part before
+ * left it. Every place in the sequence is the place when that part is written.
+ */
+export type BodyChange = {
+  /**
+   * A boundary for each line that is read with none of its own and that the change edits, or
+   * whose reading the change can alter, with the kind and path the line reads with.
+   */
+  given: { index: number; attrs: SequenceAttrs }[];
+  /** What the change writes once those boundaries stand. */
+  writes: () => BodyWrites;
+  /** A boundary for each line the written change would leave with none of its own. */
+  made: () => { index: number; attrs: SequenceAttrs }[];
+};
+
+type Planned = BodyLine & { fresh?: boolean };
 
 const ITEM_OF_LIST: Record<string, string> = {
   bulletList: "listItem",
@@ -342,11 +352,108 @@ const nothing = (): BodyWrites => ({
   erased: [],
   added: [],
 });
+const noId = () => "";
 
-const spillOf = (lines: Planned[], line: Planned): Planned | undefined => {
-  const next = lines[lines.indexOf(line) + 1];
-  return next?.bare === "spill" && next.owner === line ? next : undefined;
-};
+const idsOf = (path: BodyContainer[]) => path.map((container) => container.id);
+const moved = (line: BodyLine) => !same(idsOf(line.path), line.ids);
+const paragraphFor = (line: BodyLine) => ({
+  index: line.start,
+  attrs: { type: "paragraph", path: line.ids },
+});
+const afterIt = (lines: BodyLine[], line: BodyLine | undefined) =>
+  lines.find((each) => line !== undefined && each.bare === "spill" && each.owner === line);
+const addedAbove = (lines: BodyLine[], line: BodyLine | undefined) =>
+  lines.filter((each) => line !== undefined && each.bare === "item" && each.owner === line);
+const bareIn = (lines: BodyLine[]) =>
+  lines.flatMap((line) =>
+    line.bare === ""
+      ? []
+      : [{ bare: line.bare, owner: line.owner?.boundary, depth: line.ids.length }],
+  );
+
+function asGiven(lines: BodyLine[], given: Set<number>): BodyLine[] {
+  let shift = 0;
+  lines.forEach((line, at) => {
+    line.start += shift;
+    if (!given.has(at)) return;
+    shift++;
+    Object.assign(line, {
+      boundary: new Y.XmlElement(BLOCK_ELEMENT),
+      bare: "",
+      start: line.start + 1,
+      attrs: { type: "paragraph", path: line.ids },
+      owner: undefined,
+    });
+  });
+  return lines;
+}
+
+function changeOf(
+  schema: Schema,
+  doc: Y.Doc,
+  freshId: () => string,
+  edited: (lines: BodyLine[]) => (BodyLine | undefined)[] | null,
+  plan: (lines: Planned[], freshId: () => string) => BodyWrites | null,
+): BodyChange | null {
+  let tried = 0;
+  const idToTry = () => `?${String(tried++)}`;
+  let lines = readBody(schema, doc);
+  const operands = edited(lines);
+  if (!operands) return null;
+  const given = new Set<number>();
+  lines.forEach((line, at) => {
+    if (line.bare !== "" && operands.includes(line)) given.add(at);
+  });
+  for (;;) {
+    const all = [...asGiven(lines, given)];
+    const tryout = plan(lines, idToTry);
+    if (!tryout) return null;
+    const known = given.size;
+    all.forEach((line, at) => {
+      if (line.bare !== "" && (moved(line) || (line.owner !== undefined && moved(line.owner))))
+        given.add(at);
+    });
+    if (given.size > known) {
+      lines = readBody(schema, doc);
+      continue;
+    }
+    let written = tryout;
+    let bare = bareIn(all);
+    const planned = () => {
+      const now = readBody(schema, doc);
+      bare = bareIn(now);
+      written = plan(now, freshId)!;
+      return written;
+    };
+    if (given.size === 0 && tried > 0) planned();
+    const had = (line: BodyLine) =>
+      bare.some(
+        (known) =>
+          known.bare === line.bare &&
+          known.owner === line.owner?.boundary &&
+          known.depth === line.ids.length,
+      );
+    return {
+      given:
+        given.size === 0
+          ? []
+          : readBody(schema, doc)
+              .filter((_, at) => given.has(at))
+              .map(paragraphFor),
+      writes: () => (given.size === 0 ? written : planned()),
+      made: () => {
+        const elements = [...written.attributes.keys()];
+        const structural =
+          written.erased.length + written.added.length > 0 ||
+          elements.some((element) => element.nodeName === BLOCK_ELEMENT);
+        if (!structural) return [];
+        return readBody(schema, doc)
+          .filter((line) => line.bare !== "" && !had(line))
+          .map(paragraphFor);
+      },
+    };
+  }
+}
 
 function writesOf(
   schema: Schema,
@@ -355,7 +462,7 @@ function writesOf(
   freshId: () => string,
 ): BodyWrites | null {
   const stored = doc.getMap(BODY_CONTAINERS_FIELD);
-  const lines = read.filter((line) => line.bare !== "item" || line.gives === true);
+  const lines = read.filter((line) => line.bare === "");
   const placed = new Set<BodyContainer>();
   let asHeld: BodyContainer[] = [];
   let asWritten: BodyContainer[] = [];
@@ -413,22 +520,11 @@ function writesOf(
   }
 
   for (const line of lines) {
-    const ids = line.path.map((container) => container.id);
-    const inherent = line.owner && lines.includes(line.owner) ? line.owner.path : [];
-    const follows =
-      line.path.length === inherent.length &&
-      line.path.every((container, depth) => container === inherent[depth]);
+    const ids = idsOf(line.path);
     if (ids.length > MAX_SEQUENCE_DEPTH || new Set(ids).size < ids.length) return null;
     if (line.fresh === true)
       writes.added.push({ index: line.start, attrs: { ...line.attrs, path: ids } });
-    else if (line.gives === true || (line.bare !== "" && !follows))
-      writes.added.push({
-        index: line.start,
-        attrs: { type: "paragraph", path: ids },
-        given: { type: "paragraph", path: line.ids },
-      });
-    else if (line.boundary && !same(ids, line.ids))
-      writes.attributes.set(line.boundary, { path: ids });
+    else if (!same(ids, line.ids)) writes.attributes.set(line.boundary!, { path: ids });
   }
   return writes;
 }
@@ -460,28 +556,22 @@ function blocksAround(lines: BodyLine[], at: number, depth: number) {
 
 function landing(
   schema: Schema,
-  line: BodyLine,
+  line: BodyLine | undefined,
   offset: number,
   what: string,
-): { index: number; added: BodyWrites["added"] } | null {
-  if (offset < 0 || offset > line.text.length || splitsALetter(line.text, offset)) return null;
-  if (line.bare === "" && !holdsIt(schema, line.type, what)) return null;
-  const readAbove =
-    line.bare === "spill" && offset === 0 && holdsIt(schema, line.owner!.type, what);
-  const paragraph = { type: "paragraph", path: line.ids };
-  const added =
-    line.bare === "item" || readAbove
-      ? [{ index: line.start, attrs: paragraph, given: paragraph }]
-      : [];
-  return { index: line.start + offset, added };
+): number | null {
+  if (!line || offset < 0 || offset > line.text.length || splitsALetter(line.text, offset))
+    return null;
+  return holdsIt(schema, line.type, what) ? line.start + offset : null;
 }
 
 /**
  * Type letters into a line, with the marks they are to carry; no marks means plain. Refused
  * between the two units of a surrogate pair, for letters that hold half of one, and in a block
- * that holds no letters. A line read with no boundary gets one when the letters would otherwise
- * be read into another block. Like every change here that takes values, it throws a `RangeError`
- * naming the attribute for a value that breaks the attribute's rule in section 2.3 of the format.
+ * that holds no letters. Like every change here, it first gives a boundary to each line read with
+ * none that it edits or whose reading it can alter, and writes the boundary of any such line it
+ * would make. Like every change here that takes values, it throws a `RangeError` naming the
+ * attribute for a value that breaks the attribute's rule in section 2.3 of the format.
  */
 export function typeLetters(
   schema: Schema,
@@ -490,13 +580,18 @@ export function typeLetters(
   offset: number,
   letters: string,
   marks: SequenceAttrs,
-): BodyWrites | null {
+): BodyChange | null {
   keepMarkRules(schema, marks);
-  const line = readBody(schema, doc)[at];
-  if (!line || letters === "" || LONE_HALF.test(letters)) return null;
-  const lands = landing(schema, line, offset, "text");
-  return (
-    lands && { ...nothing(), added: lands.added, typed: { index: lands.index, letters, marks } }
+  if (letters === "" || LONE_HALF.test(letters)) return null;
+  return changeOf(
+    schema,
+    doc,
+    noId,
+    (lines) => [lines[at]],
+    (lines) => {
+      const index = landing(schema, lines[at], offset, "text");
+      return index === null ? null : { ...nothing(), typed: { index, letters, marks } };
+    },
   );
 }
 
@@ -508,12 +603,19 @@ export function insertInline(
   offset: number,
   name: string,
   attrs: SequenceAttrs,
-): BodyWrites | null {
+): BodyChange | null {
   keepRules(schema, [name], attrs);
-  const line = readBody(schema, doc)[at];
-  if (!line || !isInlineItem(schema, name)) return null;
-  const lands = landing(schema, line, offset, name);
-  return lands && { ...nothing(), added: lands.added, placed: { index: lands.index, name, attrs } };
+  if (!isInlineItem(schema, name)) return null;
+  return changeOf(
+    schema,
+    doc,
+    noId,
+    (lines) => [lines[at]],
+    (lines) => {
+      const index = landing(schema, lines[at], offset, name);
+      return index === null ? null : { ...nothing(), placed: { index, name, attrs } };
+    },
+  );
 }
 
 function elementAt(sequence: Y.Text, index: number): Y.XmlElement | null {
@@ -537,7 +639,7 @@ export function setInlineAttributes(
   at: number,
   offset: number,
   attrs: SequenceAttrs,
-): BodyWrites | null {
+): BodyChange | null {
   const line = readBody(schema, doc)[at];
   if (!line || offset < 0 || offset >= line.text.length) return null;
   const element = elementAt(doc.getText(BODY_SEQUENCE_FIELD), line.start + offset);
@@ -548,7 +650,13 @@ export function setInlineAttributes(
     ([key, value]) => !Object.hasOwn(stored, key) || !same(stored[key], value),
   );
   if (changed.length === 0) return null;
-  return { ...nothing(), attributes: new Map([[element, Object.fromEntries(changed)]]) };
+  return changeOf(
+    schema,
+    doc,
+    noId,
+    (lines) => [lines[at]],
+    () => ({ ...nothing(), attributes: new Map([[element, Object.fromEntries(changed)]]) }),
+  );
 }
 
 /** Set or take off marks on part of one line. Refused where it would cut a surrogate pair. */
@@ -559,20 +667,27 @@ export function setMarks(
   offset: number,
   length: number,
   marks: SequenceAttrs,
-): BodyWrites | null {
+): BodyChange | null {
   keepMarkRules(schema, marks);
-  const line = readBody(schema, doc)[at];
-  if (!line || length <= 0 || offset < 0 || offset + length > line.text.length) return null;
-  if (splitsALetter(line.text, offset) || splitsALetter(line.text, offset + length)) return null;
-  return { ...nothing(), marked: { index: line.start + offset, length, marks } };
+  return changeOf(
+    schema,
+    doc,
+    noId,
+    (lines) => [lines[at]],
+    (lines) => {
+      const line = lines[at];
+      if (!line || length <= 0 || offset < 0 || offset + length > line.text.length) return null;
+      if (splitsALetter(line.text, offset) || splitsALetter(line.text, offset + length))
+        return null;
+      return { ...nothing(), marked: { index: line.start + offset, length, marks } };
+    },
+  );
 }
 
 /**
  * Delete from an offset of one line to an offset of the same or a later line: the letters and
  * inline items between, and the boundary of each line after the first, so what is left of the
- * last line joins the first. When the delete takes the item that made the paragraph after a block
- * a paragraph, what is left of it gets a boundary where the item stood. Refused where it would cut
- * a surrogate pair.
+ * last line joins the first. Refused where it would cut a surrogate pair.
  */
 export function deleteRange(
   schema: Schema,
@@ -582,58 +697,34 @@ export function deleteRange(
   toAt: number,
   toOffset: number,
   freshId: () => string,
-): BodyWrites | null {
-  const lines: Planned[] = readBody(schema, doc);
-  const first = lines[at];
-  const last = lines[toAt];
-  if (!first || !last || offset < 0 || toOffset < 0) return null;
-  if (offset > first.text.length || toOffset > last.text.length) return null;
-  if (splitsALetter(first.text, offset) || splitsALetter(last.text, toOffset)) return null;
-  const from = first.start + offset;
-  const to = last.start + toOffset;
-  if (from >= to) return null;
-  const gone = lines.filter(
-    (line) => line.boundary !== null && line.start - 1 >= from && line.start - 1 < to,
+): BodyChange | null {
+  return changeOf(
+    schema,
+    doc,
+    freshId,
+    (lines) => [...lines.slice(at, toAt + 1), at < toAt ? afterIt(lines, lines[toAt]) : undefined],
+    (lines, freshId) => {
+      const first = lines[at];
+      const last = lines[toAt];
+      if (!first || !last || offset < 0 || toOffset < 0) return null;
+      if (offset > first.text.length || toOffset > last.text.length) return null;
+      if (splitsALetter(first.text, offset) || splitsALetter(last.text, toOffset)) return null;
+      if (at > toAt || (at === toAt && offset >= toOffset)) return null;
+      const from = first.start + offset;
+      const to = last.start + toOffset;
+      lines.splice(at + 1, toAt - at);
+      const writes = writesOf(schema, doc, lines, freshId);
+      writes?.erased.push({ index: from, length: to - from });
+      return writes;
+    },
   );
-  const kept = first.bare === "item" ? gone.shift() : undefined;
-  const retyped = kept !== undefined && kept.attrs.type !== "paragraph";
-  if (kept) kept.path = [...first.path];
-  for (const line of kept && retyped ? [kept, ...gone] : gone) {
-    const spill = spillOf(lines, line);
-    if (spill && spill.start >= to) spill.gives = true;
-  }
-  const emptied = first.bare === "start" && offset === 0 && toOffset === last.text.length;
-  if (emptied && toAt < lines.length - 1) first.gives = true;
-  if (first.bare === "spill" && offset === 0 && toOffset < last.text.length) {
-    const next = elementAt(doc.getText(BODY_SEQUENCE_FIELD), to)?.nodeName ?? "text";
-    if (holdsIt(schema, first.owner!.type, next)) first.gives = true;
-  }
-  const left = lines.filter(
-    (line, index) =>
-      !(kept && index >= at && line.owner === kept && line.bare === "item") &&
-      !(index > at && index <= toAt && line.bare !== "" && line.gives !== true) &&
-      !gone.includes(line) &&
-      !(line.owner !== undefined && gone.includes(line.owner) && line.gives !== true),
-  );
-  const writes = writesOf(schema, doc, left, freshId);
-  if (!writes) return null;
-  if (kept && retyped)
-    writes.attributes.set(kept.boundary!, {
-      ...writes.attributes.get(kept.boundary!),
-      type: "paragraph",
-    });
-  const start = kept ? from + 1 : from;
-  if (start < to) writes.erased.push({ index: start, length: to - start });
-  return writes;
 }
 
 /**
  * Split a line at an offset, as section 4 of the format says. The new line gets `kind`, or the
  * line's own kind when none is given, and the line's path; a split of a list item's first block
  * starts a new item, and at offset 0 of a line that holds text the new boundary goes before the
- * line's own. The paragraph after the line gets a boundary when the split is at the line's end or
- * the new line is of another kind, so it does not read into the new line. Refused inside a
- * surrogate pair.
+ * line's own. Refused inside a surrogate pair.
  */
 export function splitLine(
   schema: Schema,
@@ -642,121 +733,126 @@ export function splitLine(
   offset: number,
   freshId: () => string,
   kind?: SequenceAttrs,
-): BodyWrites | null {
-  const lines: Planned[] = readBody(schema, doc);
-  const line = lines[at];
-  if (!line || offset < 0 || offset > line.text.length) return null;
-  if (splitsALetter(line.text, offset)) return null;
-  const above = offset === 0 && line.bare !== "item" && (line.text !== "" || line.bare !== "");
-  if (line.bare !== "" && offset === 0) line.gives = true;
-  const attrs = kind ? kindOf(schema, {}, kind) : kindOf(schema, line.attrs, {});
-  if (kind) keepRules(schema, [String(attrs.type)], kind);
-  const spill = spillOf(lines, line);
-  if (spill && !above && (offset === line.text.length || attrs.type !== line.type))
-    spill.gives = true;
-  const fresh: Planned = {
-    boundary: null,
-    bare: "",
-    start: above && line.boundary ? line.start - 1 : line.start + offset,
-    text: "",
-    type: "",
-    attrs,
-    path: [...line.path],
-    ids: [],
-    fresh: true,
-  };
-  const depth = line.path.length - 1;
-  const item = line.path[depth];
-  if (item && isItem(item.type) && lines[at - 1]?.path[depth] !== item) {
-    const next = { id: freshId(), type: item.type, starts: {}, changes: new Map() };
-    fresh.path[depth] = next;
-    for (let later = at + 1; !above && lines[later]?.path[depth] === item; later++)
-      lines[later]!.path[depth] = next;
-  }
-  lines.splice(above ? at : at + 1, 0, fresh);
-  return writesOf(schema, doc, lines, freshId);
+): BodyChange | null {
+  return changeOf(
+    schema,
+    doc,
+    freshId,
+    (lines) => [
+      lines[at],
+      afterIt(lines, lines[at]),
+      ...(offset === 0 ? addedAbove(lines, lines[at]) : []),
+    ],
+    (lines, freshId) => {
+      const line = lines[at];
+      if (!line || offset < 0 || offset > line.text.length) return null;
+      if (splitsALetter(line.text, offset)) return null;
+      const attrs = kind ? kindOf(schema, {}, kind) : kindOf(schema, line.attrs, {});
+      if (kind) keepRules(schema, [String(attrs.type)], kind);
+      const above = offset === 0 && line.text !== "";
+      const fresh: Planned = {
+        boundary: null,
+        bare: "",
+        start: above ? line.start - 1 : line.start + offset,
+        text: "",
+        type: "",
+        attrs,
+        path: [...line.path],
+        ids: [],
+        fresh: true,
+      };
+      const depth = line.path.length - 1;
+      const item = line.path[depth];
+      if (item && isItem(item.type) && lines[at - 1]?.path[depth] !== item) {
+        const next = { id: freshId(), type: item.type, starts: {}, changes: new Map() };
+        fresh.path[depth] = next;
+        for (let later = at + 1; !above && lines[later]?.path[depth] === item; later++)
+          lines[later]!.path[depth] = next;
+      }
+      lines.splice(above ? at : at + 1, 0, fresh);
+      return writesOf(schema, doc, lines, freshId);
+    },
+  );
+}
+
+function goneInJoin(lines: BodyLine[], at: number): BodyLine | undefined {
+  const lower = lines[at];
+  const upper = lines[at - 1];
+  if (!lower || !upper || upper.bare !== "" || upper.text !== "") return lower;
+  const depth = upper.path.length - 1;
+  const item = upper.path[depth];
+  const itsFirst = item !== undefined && isItem(item.type) && lines[at - 2]?.path[depth] !== item;
+  const takesItsPlace = lower.path.length === upper.path.length && lower.type === "paragraph";
+  return itsFirst && lower.path[depth] === item && !takesItsPlace ? lower : upper;
 }
 
 /**
  * Join a line to the one above: delete the lower line's boundary, or the upper line's when the
- * upper line is empty. A line joined into a list item's added first paragraph keeps its boundary
- * and becomes that paragraph. Below an empty block, the paragraph after it gets its own boundary
- * as the block's is deleted. Refused for any other line with no boundary: it has none to delete,
- * and deleting the upper line's would give that line's letters to the block above. Two containers
- * that share an id and would then stand together are kept apart by a fresh id for the later one.
+ * upper line is empty and is not the first paragraph its list item needs. Refused for a line read
+ * with no boundary under a line that holds something: it would get a boundary only to lose it,
+ * and what it holds cannot be read into the block above. Two containers that share an id and
+ * would then stand together are kept apart by a fresh id for the later one.
  */
 export function joinLine(
   schema: Schema,
   doc: Y.Doc,
   at: number,
   freshId: () => string,
-): BodyWrites | null {
-  const lines: Planned[] = readBody(schema, doc);
-  const lower = lines[at];
-  const upper = lines[at - 1];
-  if (!lower || !upper) return null;
-  const emptyAbove = upper.boundary !== null && upper.text === "";
-  if (!lower.boundary && !emptyAbove) return null;
-  const spill = spillOf(lines, lower);
-  if (upper.bare === "item" && lower.boundary) {
-    const retyped = lower.attrs.type !== "paragraph";
-    if (spill && retyped) spill.gives = true;
-    lower.path = [...upper.path];
-    lines.splice(at - 1, 1);
-    const writes = writesOf(schema, doc, lines, freshId);
-    if (writes && retyped)
-      writes.attributes.set(lower.boundary, {
-        ...writes.attributes.get(lower.boundary),
-        type: "paragraph",
-      });
-    return writes;
-  }
-  const gone = emptyAbove ? upper : lower;
-  if (gone === lower && spill) spill.gives = true;
-  if (lower.bare === "spill") lower.gives = true;
-  lines.splice(lines.indexOf(gone), 1);
-  const writes = writesOf(schema, doc, lines, freshId);
-  writes?.erased.push({ index: gone.start - 1, length: 1 });
-  return writes;
+): BodyChange | null {
+  return changeOf(
+    schema,
+    doc,
+    freshId,
+    (lines) => {
+      const lower = lines[at];
+      const upper = lines[at - 1];
+      if (!lower || !upper) return null;
+      if (!lower.boundary && !(upper.boundary && upper.text === "")) return null;
+      const others =
+        goneInJoin(lines, at) === lower ? [afterIt(lines, lower)] : addedAbove(lines, upper);
+      return [upper, lower, ...others];
+    },
+    (lines, freshId) => {
+      const gone = goneInJoin(lines, at)!;
+      lines.splice(lines.indexOf(gone), 1);
+      const writes = writesOf(schema, doc, lines, freshId);
+      writes?.erased.push({ index: gone.start - 1, length: 1 });
+      return writes;
+    },
+  );
 }
 
 /**
  * Change a line's kind on its boundary: its `type`, and every attribute that kind has, with the
- * default for one neither asked for nor stored. A line with no boundary gets one, as does the
- * paragraph after the line when the line's type changes. Refused for a list item's added first
- * paragraph.
+ * default for one neither asked for nor stored. Refused for a list item's added first paragraph.
  */
 export function setLineKind(
   schema: Schema,
   doc: Y.Doc,
   at: number,
   asked: SequenceAttrs,
-): BodyWrites | null {
-  const lines = readBody(schema, doc);
-  const line = lines[at];
-  if (!line || line.bare === "item") return null;
-  const stored = line.boundary ? line.attrs : { type: "paragraph" };
-  const kind = kindOf(schema, stored, asked);
-  keepRules(schema, [String(kind.type)], asked);
-  const changed = Object.entries(kind).filter(
-    ([key, value]) => !Object.hasOwn(stored, key) || !same(stored[key], value),
+): BodyChange | null {
+  return changeOf(
+    schema,
+    doc,
+    noId,
+    (lines) => {
+      const line = lines[at];
+      if (!line || line.bare === "item") return null;
+      const retyped = typeof asked.type === "string" && asked.type !== line.type;
+      return retyped ? [line, afterIt(lines, line), ...addedAbove(lines, line)] : [line];
+    },
+    (lines) => {
+      const line = lines[at]!;
+      const kind = kindOf(schema, line.attrs, asked);
+      keepRules(schema, [String(kind.type)], asked);
+      const changed = Object.entries(kind).filter(
+        ([key, value]) => !Object.hasOwn(line.attrs, key) || !same(line.attrs[key], value),
+      );
+      if (changed.length === 0) return null;
+      return { ...nothing(), attributes: new Map([[line.boundary!, Object.fromEntries(changed)]]) };
+    },
   );
-  if (changed.length === 0) return null;
-  const writes = nothing();
-  const paragraph = (bare: BodyLine) => ({ type: "paragraph", path: bare.ids });
-  if (!line.boundary) {
-    writes.added.push({
-      index: line.start,
-      attrs: { ...kind, path: line.ids },
-      given: paragraph(line),
-    });
-    return writes;
-  }
-  writes.attributes.set(line.boundary, Object.fromEntries(changed));
-  const spill = spillOf(lines, line);
-  if (spill && changed.some(([key]) => key === "type"))
-    writes.added.push({ index: spill.start, attrs: paragraph(spill), given: paragraph(spill) });
-  return writes;
 }
 
 /**
@@ -773,27 +869,35 @@ export function wrapBlocks(
   type: string,
   attrs: SequenceAttrs,
   freshId: () => string,
-): BodyWrites | null {
-  const lines: Planned[] = readBody(schema, doc);
-  const line = lines[at];
+): BodyChange | null {
   keepRecordRules(schema, attrs);
-  const around = line?.path[depth - 1]?.type ?? schema.topNodeType.name;
-  if (!line || depth > line.path.length || !holdsIt(schema, around, type)) return null;
-  const make = (made: string, starts: SequenceAttrs): BodyContainer => ({
-    id: freshId(),
-    type: made,
-    starts,
-    changes: new Map(),
-  });
-  const { blocks, own, addedOnly } = blocksAround(lines, at, depth);
-  if (addedOnly(count)) return null;
-  const wrap = make(type, attrs);
-  for (const block of blocks.slice(own, own + count)) {
-    const around = isList(type) ? [wrap, make(ITEM_OF_LIST[type]!, {})] : [wrap];
-    for (let index = block.from; index <= block.to; index++)
-      lines[index]!.path.splice(depth, 0, ...around);
-  }
-  return writesOf(schema, doc, lines, freshId);
+  return changeOf(
+    schema,
+    doc,
+    freshId,
+    (lines) => {
+      const line = lines[at];
+      const around = line?.path[depth - 1]?.type ?? schema.topNodeType.name;
+      if (!line || depth > line.path.length || !holdsIt(schema, around, type)) return null;
+      return blocksAround(lines, at, depth).addedOnly(count) ? null : [];
+    },
+    (lines, freshId) => {
+      const make = (made: string, starts: SequenceAttrs): BodyContainer => ({
+        id: freshId(),
+        type: made,
+        starts,
+        changes: new Map(),
+      });
+      const { blocks, own } = blocksAround(lines, at, depth);
+      const wrap = make(type, attrs);
+      for (const block of blocks.slice(own, own + count)) {
+        const around = isList(type) ? [wrap, make(ITEM_OF_LIST[type]!, {})] : [wrap];
+        for (let index = block.from; index <= block.to; index++)
+          lines[index]!.path.splice(depth, 0, ...around);
+      }
+      return writesOf(schema, doc, lines, freshId);
+    },
+  );
 }
 
 /**
@@ -808,19 +912,25 @@ export function liftBlocks(
   depth: number,
   count: number,
   freshId: () => string,
-): BodyWrites | null {
-  const lines: Planned[] = readBody(schema, doc);
-  const line = lines[at];
-  const around = line?.path[depth - 1];
-  if (!line || !around || isItem(around.type)) return null;
-  const levels = isList(around.type) ? 2 : 1;
-  if (line.path.length < depth - 1 + levels) return null;
-  const { blocks, own, addedOnly } = blocksAround(lines, at, depth);
-  if (addedOnly(count)) return null;
-  for (const block of blocks.slice(own, own + count))
-    for (let index = block.from; index <= block.to; index++)
-      lines[index]!.path.splice(depth - 1, levels);
-  return writesOf(schema, doc, lines, freshId);
+): BodyChange | null {
+  return changeOf(
+    schema,
+    doc,
+    freshId,
+    (lines) => (lines[at] && blocksAround(lines, at, depth).addedOnly(count) ? null : []),
+    (lines, freshId) => {
+      const line = lines[at];
+      const around = line?.path[depth - 1];
+      if (!line || !around || isItem(around.type)) return null;
+      const levels = isList(around.type) ? 2 : 1;
+      if (line.path.length < depth - 1 + levels) return null;
+      const { blocks, own } = blocksAround(lines, at, depth);
+      for (const block of blocks.slice(own, own + count))
+        for (let index = block.from; index <= block.to; index++)
+          lines[index]!.path.splice(depth - 1, levels);
+      return writesOf(schema, doc, lines, freshId);
+    },
+  );
 }
 
 /**
@@ -833,19 +943,26 @@ export function indentItem(
   at: number,
   depth: number,
   freshId: () => string,
-): BodyWrites | null {
-  const lines: Planned[] = readBody(schema, doc);
-  const list = lines[at]?.path[depth - 1];
-  if (!list || !isList(list.type) || !lines[at]!.path[depth]) return null;
-  const { blocks, own } = blocksAround(lines, at, depth);
-  const above = lines[blocks[own - 1]?.to ?? -1]?.path;
-  if (!above?.[depth]) return null;
-  const nested = isList(above[depth + 1]?.type)
-    ? above[depth + 1]!
-    : { id: freshId(), type: list.type, starts: {}, changes: new Map() };
-  for (let index = blocks[own]!.from; index <= blocks[own]!.to; index++)
-    lines[index]!.path.splice(depth, 0, above[depth], nested);
-  return writesOf(schema, doc, lines, freshId);
+): BodyChange | null {
+  return changeOf(
+    schema,
+    doc,
+    freshId,
+    () => [],
+    (lines, freshId) => {
+      const list = lines[at]?.path[depth - 1];
+      if (!list || !isList(list.type) || !lines[at]!.path[depth]) return null;
+      const { blocks, own } = blocksAround(lines, at, depth);
+      const above = lines[blocks[own - 1]?.to ?? -1]?.path;
+      if (!above?.[depth]) return null;
+      const nested = isList(above[depth + 1]?.type)
+        ? above[depth + 1]!
+        : { id: freshId(), type: list.type, starts: {}, changes: new Map() };
+      for (let index = blocks[own]!.from; index <= blocks[own]!.to; index++)
+        lines[index]!.path.splice(depth, 0, above[depth], nested);
+      return writesOf(schema, doc, lines, freshId);
+    },
+  );
 }
 
 /**
@@ -858,17 +975,25 @@ export function outdentItem(
   at: number,
   depth: number,
   freshId: () => string,
-): BodyWrites | null {
-  const lines: Planned[] = readBody(schema, doc);
-  const path = lines[at]?.path ?? [];
-  const item = path[depth];
-  if (!item || !isList(path[depth - 1]?.type) || !isList(path[depth - 3]?.type)) return null;
-  const { blocks, own } = blocksAround(lines, at, depth);
-  for (let index = blocks[own]!.from; index <= blocks[own]!.to; index++)
-    lines[index]!.path.splice(depth - 2, 2);
-  for (const block of blocks.slice(own + 1))
-    for (let index = block.from; index <= block.to; index++) lines[index]!.path[depth - 2] = item;
-  return writesOf(schema, doc, lines, freshId);
+): BodyChange | null {
+  return changeOf(
+    schema,
+    doc,
+    freshId,
+    () => [],
+    (lines, freshId) => {
+      const path = lines[at]?.path ?? [];
+      const item = path[depth];
+      if (!item || !isList(path[depth - 1]?.type) || !isList(path[depth - 3]?.type)) return null;
+      const { blocks, own } = blocksAround(lines, at, depth);
+      for (let index = blocks[own]!.from; index <= blocks[own]!.to; index++)
+        lines[index]!.path.splice(depth - 2, 2);
+      for (const block of blocks.slice(own + 1))
+        for (let index = block.from; index <= block.to; index++)
+          lines[index]!.path[depth - 2] = item;
+      return writesOf(schema, doc, lines, freshId);
+    },
+  );
 }
 
 /**
@@ -882,22 +1007,29 @@ export function setContainerKind(
   depth: number,
   type: string,
   freshId: () => string,
-): BodyWrites | null {
-  const lines: Planned[] = readBody(schema, doc);
-  const stored = doc.getMap(BODY_CONTAINERS_FIELD);
-  const container = lines[at]?.path[depth];
-  if (!container) return null;
-  const changed = [container];
-  if (stored.get(container.id) !== type) container.changes.set("", type);
-  if (isList(type))
-    for (const block of blocksAround(lines, at, depth + 1).blocks) {
-      const item = lines[block.from]!.path[depth + 1];
-      if (!item || stored.get(item.id) === ITEM_OF_LIST[type]) continue;
-      item.changes.set("", ITEM_OF_LIST[type]);
-      changed.push(item);
-    }
-  if (changed.every((each) => each.changes.size === 0)) return null;
-  return writesOf(schema, doc, lines, freshId);
+): BodyChange | null {
+  return changeOf(
+    schema,
+    doc,
+    freshId,
+    () => [],
+    (lines, freshId) => {
+      const stored = doc.getMap(BODY_CONTAINERS_FIELD);
+      const container = lines[at]?.path[depth];
+      if (!container) return null;
+      const changed = [container];
+      if (stored.get(container.id) !== type) container.changes.set("", type);
+      if (isList(type))
+        for (const block of blocksAround(lines, at, depth + 1).blocks) {
+          const item = lines[block.from]!.path[depth + 1];
+          if (!item || stored.get(item.id) === ITEM_OF_LIST[type]) continue;
+          item.changes.set("", ITEM_OF_LIST[type]);
+          changed.push(item);
+        }
+      if (changed.every((each) => each.changes.size === 0)) return null;
+      return writesOf(schema, doc, lines, freshId);
+    },
+  );
 }
 
 /** Change attributes of the container that holds line `at` at `depth`. */
@@ -908,16 +1040,23 @@ export function setContainerAttributes(
   depth: number,
   attrs: SequenceAttrs,
   freshId: () => string,
-): BodyWrites | null {
-  const lines: Planned[] = readBody(schema, doc);
-  const stored = doc.getMap(BODY_CONTAINERS_FIELD);
-  const container = lines[at]?.path[depth];
+): BodyChange | null {
   keepRecordRules(schema, attrs);
-  if (!container) return null;
-  for (const [name, value] of Object.entries(attrs))
-    if (!same(stored.get(`${container.id}.${name}`), value)) container.changes.set(name, value);
-  if (container.changes.size === 0) return null;
-  return writesOf(schema, doc, lines, freshId);
+  return changeOf(
+    schema,
+    doc,
+    freshId,
+    () => [],
+    (lines, freshId) => {
+      const stored = doc.getMap(BODY_CONTAINERS_FIELD);
+      const container = lines[at]?.path[depth];
+      if (!container) return null;
+      for (const [name, value] of Object.entries(attrs))
+        if (!same(stored.get(`${container.id}.${name}`), value)) container.changes.set(name, value);
+      if (container.changes.size === 0) return null;
+      return writesOf(schema, doc, lines, freshId);
+    },
+  );
 }
 
 function formattingAt(sequence: Y.Text, index: number): Record<string, unknown> {
@@ -937,15 +1076,15 @@ function formattingAt(sequence: Y.Text, index: number): Record<string, unknown> 
 export const GIVEN_BOUNDARY = Symbol("a boundary for a line that had none");
 
 /**
- * Write one change as the writer whose origin is `origin`. A boundary for a line that is read
- * with none of its own is written first, with the kind and path the line reads with, in a change
- * of its own with the origin `given`; the rest follows in one change. No history may follow
- * `given`: undo then leaves the boundary, and what someone else typed in that line stays in it.
- * It stores plain data: a BigInt it is given is stored as the number it reads as.
+ * Write one change as the writer whose origin is `origin`. The boundaries the change gives to
+ * lines that had none are written first, in a change of their own with the origin `given`; the
+ * rest follows in one change. No history may follow `given`: undo then leaves those boundaries,
+ * what someone else typed in such a line stays in it, and undoing the rest puts every boundary
+ * back as it was. It stores plain data: a BigInt it is given is stored as the number it reads as.
  */
 export function writeBody(
   doc: Y.Doc,
-  writes: BodyWrites,
+  change: BodyChange,
   origin: unknown,
   given: unknown = GIVEN_BOUNDARY,
 ): void {
@@ -959,61 +1098,43 @@ export function writeBody(
     const element = new Y.XmlElement(name);
     set(element, attrs);
     sequence.insertEmbed(index, element, formattingAt(sequence, index));
-    return element;
   };
-  const first = writes.added.filter((boundary) => boundary.given !== undefined);
-  const made = new Map<BodyWrites["added"][number], Y.XmlElement>();
-  if (first.length > 0)
-    doc.transact(() => {
-      for (const boundary of [...first].reverse())
-        made.set(boundary, embed(boundary.index, BLOCK_ELEMENT, boundary.given!));
-    }, given);
-  const past = (index: number) =>
-    index + first.filter((boundary) => boundary.index <= index).length;
+  const bound = (boundaries: BodyChange["given"]) => {
+    for (const { index, attrs } of [...boundaries].reverse()) embed(index, BLOCK_ELEMENT, attrs);
+  };
+  if (change.given.length > 0) doc.transact(() => bound(change.given), given);
   doc.transact(() => {
+    const writes = change.writes();
     for (const [key, value] of writes.records) records.set(key, plain(value));
     for (const [element, attrs] of writes.attributes) set(element, attrs);
-    for (const [boundary, element] of made)
-      set(
-        element,
-        Object.fromEntries(
-          Object.entries(boundary.attrs).filter(
-            ([key, value]) => !same(value, boundary.given![key]),
-          ),
-        ),
-      );
     const { marked, typed, placed } = writes;
-    if (marked)
-      sequence.format(past(marked.index), marked.length, plain(marked.marks) as SequenceAttrs);
+    if (marked) sequence.format(marked.index, marked.length, plain(marked.marks) as SequenceAttrs);
     const edits: { index: number; rank: number; make: () => void }[] = [];
     for (const { index, length } of writes.erased)
-      edits.push({ index, rank: 0, make: () => sequence.delete(past(index), length) });
+      edits.push({ index, rank: 0, make: () => sequence.delete(index, length) });
     if (typed)
       edits.push({
         index: typed.index,
         rank: 1,
         make: () =>
-          sequence.insert(past(typed.index), typed.letters, plain(typed.marks) as SequenceAttrs),
+          sequence.insert(typed.index, typed.letters, plain(typed.marks) as SequenceAttrs),
       });
     if (placed)
       edits.push({
         index: placed.index,
         rank: 1,
-        make: () => embed(past(placed.index), placed.name, placed.attrs),
+        make: () => embed(placed.index, placed.name, placed.attrs),
       });
-    let before = 0;
-    writes.added.forEach((boundary, order) => {
-      const givenBefore = before;
-      if (boundary.given !== undefined) before++;
-      else
-        edits.push({
-          index: boundary.index,
-          rank: 2 + writes.added.length - order,
-          make: () => embed(boundary.index + givenBefore, BLOCK_ELEMENT, boundary.attrs),
-        });
-    });
+    writes.added.forEach(({ index, attrs }, order) =>
+      edits.push({
+        index,
+        rank: 2 + writes.added.length - order,
+        make: () => embed(index, BLOCK_ELEMENT, attrs),
+      }),
+    );
     edits.sort((one, other) => other.index - one.index || one.rank - other.rank);
     for (const edit of edits) edit.make();
+    bound(change.made());
   }, origin);
 }
 

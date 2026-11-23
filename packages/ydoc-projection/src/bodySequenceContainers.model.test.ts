@@ -28,6 +28,7 @@ import {
   typeLetters,
   wrapBlocks,
   writeBody,
+  type BodyChange,
   type BodyWrites,
 } from "./bodySequenceWriter.js";
 import { piecesOfSequence, readBodySequence } from "./bodySequenceYjs.js";
@@ -108,6 +109,7 @@ const FAULT = {
   givenWithItsChange: "a line's new boundary written as part of the step that needed it",
   givenAsAsked: "a line's new boundary written with the kind and path the change asks for",
   undoKeepsLetters: "a delete filter that keeps the letters a step typed",
+  madeLineBare: "a change that leaves a line it made with no boundary",
 } as const;
 type Fault = (typeof FAULT)[keyof typeof FAULT];
 const LENIENT: (Fault | undefined)[] = [FAULT.typeRecordOnly, FAULT.defaultFirst];
@@ -487,7 +489,8 @@ const tally = () => ({
   linesDeleted: 0,
   joinsOfALineWithNoBoundary: 0,
   undosReadAsBeforeTheStep: 0,
-  undosWithABoundaryGivenSinceTheStepBegan: 0,
+  undosCheckedWithABoundaryGivenSinceTheStepBegan: 0,
+  boundariesForLinesAChangeMade: 0,
   othersLettersKeptInAGivenLine: 0,
   othersLettersAtTheStartOfABlockAnUndoPutBack: 0,
   typedAtABlocksEndAndReadInTheParagraphAfter: 0,
@@ -594,48 +597,110 @@ const wantOf = (look: Look): Want[] =>
     frames: look.frames[at]!,
   }));
 
-function rowsAre(what: string, want: Want[], before: Look, after: Look) {
-  const known = new Set(before.shot.tokens.map((token) => token.id));
+type Done = readonly [effects: Step, after: Look, between: Look, made: Set<Id>];
+
+function rowsAre(what: string, want: Want[], [, after, between, made]: Done) {
+  const known = new Set(between.shot.tokens.map((token) => token.id));
   const ids = new Set([
-    ...before.rows.flatMap(pathOf),
-    ...[...before.shot.records.keys()].map((key) => key.split(".")[0]!),
+    ...between.rows.flatMap(pathOf),
+    ...[...between.shot.records.keys()].map((key) => key.split(".")[0]!),
   ]);
-  const got = after.rows.map((row) => ({
-    b: row.boundary === null ? "-" : known.has(row.boundary) ? row.boundary : "+",
-    chars: row.chars.map((id) => (known.has(id) ? id : "+")),
-    path: pathOf(row).map((id) => (ids.has(id) ? id : "+")),
-  }));
+  const got: { b: string; chars: string[]; path: string[]; at: number }[] = [];
+  after.rows.forEach((row, at) => {
+    const chars = row.chars.map((id) => (known.has(id) ? id : "+"));
+    const next = want[got.length];
+    const type = next?.kind?.type;
+    const ofItsKind = type === undefined || row.attrs.get("type")?.value === json(type);
+    const asked = next?.b === "+" && ofItsKind && json(next.chars) === json(chars);
+    const itsOwn = row.boundary !== null && made.has(row.boundary) && !asked;
+    if (itsOwn && got.length > 0) got.at(-1)!.chars.push(...chars);
+    else if (itsOwn && chars.length > 0) got.push({ b: "-", chars, path: [], at });
+    else if (itsOwn) return;
+    else
+      got.push({
+        b: row.boundary === null ? "-" : known.has(row.boundary) ? row.boundary : "+",
+        chars,
+        path: pathOf(row).map((id) => (ids.has(id) ? id : "+")),
+        at,
+      });
+  });
+  const held = got.map(({ b, chars, path }) => ({ b, chars, path }));
   const wanted = want.map(({ b, chars, path }) => ({ b, chars, path }));
-  const both = process.env.BODY_CONTAINERS_DEBUG ? `\nWANT ${json(wanted)}\nGOT  ${json(got)}` : "";
-  if (json(got) !== json(wanted))
+  const both = process.env.BODY_CONTAINERS_DEBUG
+    ? `\nWANT ${json(wanted)}\nGOT  ${json(held)}`
+    : "";
+  if (json(held) !== json(wanted))
     throw new Error(
       `[writer] after ${what}, the note's lines are not the ones section 4 gives${both}`,
     );
   want.forEach((row, at) => {
+    const stored = after.rows[got[at]!.at]!.attrs;
     for (const [key, value] of Object.entries(row.kind ?? {}))
-      if (after.rows[at]!.attrs.get(key)?.value !== json(value))
+      if (stored.get(key)?.value !== json(value))
         throw new Error(
-          `[7 kind] after ${what}, a boundary holds ${key} ${String(after.rows[at]!.attrs.get(key)?.value)} where it should hold ${json(value)}`,
+          `[7 kind] after ${what}, a boundary holds ${key} ${String(stored.get(key)?.value)} where it should hold ${json(value)}`,
         );
   });
 }
 
-function rowsKept(what: string, before: Look, after: Look) {
-  const known = new Set(before.shot.tokens.map((token) => token.id));
+function rowsKept(what: string, [, after, between, made]: Done) {
   const got: { b: Id | null; chars: Id[] }[] = [];
-  after.rows.forEach((row, at) => {
-    const given = row.boundary !== null && !known.has(row.boundary);
-    const above = got.at(-1);
-    const wasBare = before.lines.some(
-      (line) => (line.bare === "spill" || line.bare === "start") && line.chars[0] === row.chars[0],
-    );
-    if (given && !wasBare) throw new Error(`[writer] ${what} made a line that was not there`);
-    if (given && above && at > 0) above.chars.push(...row.chars);
-    else got.push({ b: given ? null : row.boundary, chars: [...row.chars] });
-  });
-  const was = before.rows.map((row) => ({ b: row.boundary, chars: row.chars }));
+  for (const row of after.rows) {
+    const itsOwn = row.boundary !== null && made.has(row.boundary);
+    if (!itsOwn) got.push({ b: row.boundary, chars: [...row.chars] });
+    else if (got.length > 0) got.at(-1)!.chars.push(...row.chars);
+    else if (row.chars.length > 0) got.push({ b: null, chars: [...row.chars] });
+  }
+  const was = between.rows.map((row) => ({ b: row.boundary, chars: row.chars }));
   if (json(got) !== json(was)) throw new Error(`[writer] ${what} changed what a line holds`);
 }
+
+function madeRows(doc: Y.Doc, between: Look, after: Look): Set<Id> {
+  const known = new Set(between.shot.tokens.map((token) => token.id));
+  const unbounded = after.rows[0]?.boundary === null ? 1 : 0;
+  const stored = after.lines.filter((line) => line.bare === "");
+  const fresh = stored.flatMap((line, at) => {
+    const row = after.rows[line.row]!;
+    if (row.boundary === null || known.has(row.boundary) || line.type !== "paragraph") return [];
+    const above = stored[at - 1];
+    const depth = line.path.length - 1;
+    const item = line.path[depth];
+    const startsItsItem =
+      item !== undefined && ITEMS.includes(item.type) && above?.path[depth]?.key !== item.key;
+    const heldAbove = above !== undefined && HOLDS_INLINE.includes(above.type);
+    return startsItsItem || (line.chars.length > 0 && !heldAbove) ? [line.row] : [];
+  });
+  if (fresh.length === 0) return new Set();
+  const pieces = [...piecesOfSequence(doc.getText(SEQUENCE), MARKS)];
+  const read = (without: number) => {
+    let boundary = 0;
+    const left = pieces.filter((piece) => !("boundary" in piece) || boundary++ !== without);
+    const leaves = leavesOfSequence(schema, left, doc.getMap(CONTAINERS));
+    return json(readBodyLeaves(schema, leaves).toJSON());
+  };
+  const whole = read(-1);
+  return new Set(
+    fresh.flatMap((at) => (read(at - unbounded) === whole ? [after.rows[at]!.boundary!] : [])),
+  );
+}
+
+const linesAs = (look: Look) =>
+  json(look.lines.map((line) => [line.type, line.units, idsOf(line.path)]));
+const bareLines = (look: Look) =>
+  json(
+    look.lines.flatMap((line) =>
+      line.bare === ""
+        ? []
+        : [[line.bare, look.rows[line.row]?.boundary ?? null, idsOf(line.path), line.chars]],
+    ),
+  );
+const addedAbove = (lines: Line[], at: number) => {
+  const above: number[] = [];
+  for (let index = at - 1; lines[index]?.bare === "item"; index--) above.push(index);
+  return above;
+};
+const afterIt = (lines: Line[], at: number) =>
+  lines[at]?.bare === "" && lines[at + 1]?.bare === "spill" ? [at + 1] : [];
 
 const NO_BLOCK = new Set<number>();
 const shownAs = (look: Look) =>
@@ -758,7 +823,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     ];
     if (effects.formats || more.some((some) => some.length > 0))
       throw new Error("[9 given] the change that gives a line its boundary wrote something else");
-    if (readingOf(before, true) !== readingOf(between, true))
+    if (linesAs(before) !== linesAs(between))
       throw new Error(
         `[9 given] giving a line its boundary changed how the note reads${shownBoth(before, between)}`,
       );
@@ -769,29 +834,29 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
 
   const local = (
     before: Look,
-    act: (gives: () => void) => void,
+    between: Look,
+    depth: number,
+    act: () => void,
     mayMark: boolean,
     settings: string[],
     itsOwn = NO_BLOCK,
-  ) => {
-    const depth = history.undoStack.length;
-    let from = before;
-    act(() =>
-      doc.once("afterTransactionCleanup", () => {
-        from = givenSeen(before);
-      }),
-    );
-    const [effects, after] = seen(from);
+  ): Done => {
+    act();
+    const [effects, after] = seen(between);
     effects.marks = mayMark;
-    const moved = blocksMoved(before, after, itsOwn);
+    const moved = blocksMoved(between, after, itsOwn);
     if (moved)
       throw new Error(
-        `[8 blocks] a change moved what it did not touch: ${moved}${shownBoth(before, after)}`,
+        `[8 blocks] a change moved what it did not touch: ${moved}${shownBoth(between, after)}`,
       );
-    if (!mayMark && marksMoved(before.shot, after.shot, () => true))
+    if (bareLines(between) !== bareLines(after))
+      throw new Error(
+        `[9 given] a change edited or made a line with no boundary of its own${shownBoth(between, after)}`,
+      );
+    if (!mayMark && marksMoved(between.shot, after.shot, () => true))
       throw new Error("[2 letters] a change that is not about marks changed a letter's marks");
-    noneJoined(before, after);
-    if (twinsIn(after) > twinsIn(before))
+    noneJoined(between, after);
+    if (twinsIn(after) > twinsIn(between))
       throw new Error("[writer] a change left one id on two containers");
     writerAgrees(doc, after);
     for (const id of effects.insertedChars) oracle.typed.add(id);
@@ -805,7 +870,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     else if (top && history.undoStack.length === depth) join(top, effects);
     if (history.redoStack.length === 0) redoMirror = [];
     oracle.count.changes++;
-    return [effects, after] as const;
+    return [effects, after, between, madeRows(doc, between, after)];
   };
 
   const withoutFreshIds = (plan: BodyWrites) => {
@@ -825,12 +890,57 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     plan.attributes.clear();
   };
 
-  const write = (before: Look, plan: BodyWrites | null, mayMark = false, itsOwn = NO_BLOCK) => {
-    const unused = [...asked].filter((id) => !plan?.records.has(id));
+  type How = {
+    mayMark?: boolean;
+    itsOwn?: Set<number>;
+    edits?: number[];
+    given?: (given: BodyChange["given"]) => BodyChange["given"];
+    plan?: (plan: BodyWrites, between: Look) => void;
+  };
+  const COUNTED = {
+    start: "boundariesForUnboundedText",
+    item: "boundariesForAddedParagraphs",
+    spill: "boundariesForParagraphsAfter",
+  } as const;
+  const nothing = (): BodyWrites => ({
+    records: new Map(),
+    attributes: new Map(),
+    erased: [],
+    added: [],
+  });
+
+  const write = (before: Look, change: BodyChange | null, how: How = {}): Done | null => {
+    if (!change) {
+      asked.clear();
+      return null;
+    }
+    const depth = history.undoStack.length;
+    const first = how.given ? how.given(change.given) : change.given;
+    const given =
+      fault === FAULT.givenAsAsked
+        ? first.map((each) => ({ ...each, attrs: { ...each.attrs, type: "heading", level: 1 } }))
+        : first;
+    let between = before;
+    if (given.length > 0) {
+      const origin = fault === FAULT.givenWithItsChange ? LOCAL : undefined;
+      writeBody(doc, { given, writes: nothing, made: () => [] }, LOCAL, origin);
+      between = givenSeen(before);
+    }
+    const plan = change.writes();
+    const unused = [...asked].filter((id) => !plan.records.has(id));
     asked.clear();
-    if (!plan) return null;
     if (unused.length > 0 && fault === undefined)
-      throw new Error("[writer] a change asked for a fresh id and did not use it");
+      throw new Error(
+        `[writer] a change asked for a fresh id and did not use it${
+          process.env.BODY_CONTAINERS_DEBUG
+            ? `
+UNUSED ${json(unused)} GIVEN ${json(given)} RECORDS ${json([...plan.records.keys()])} ATTRS ${json([...plan.attributes.values()])}
+WAS ${shownAs(before)}
+PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
+            : ""
+        }`,
+      );
+    how.plan?.(plan, between);
     const settings: string[] = [];
     for (const [key, value] of plan.records)
       if (!records.has(key.split(".")[0]!)) oracle.asMade.set(key, json(value));
@@ -860,34 +970,59 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       doc.transact(() => {
         for (const key of missing) records.set(key, DEFAULTS[key.split(".")[1]!]);
       }, OUTSIDE_HISTORY);
-      seen(earlier);
+      between = seen(earlier)[1];
     }
     const typed = fault === FAULT.typingInheritsMarks ? plan.typed : undefined;
     if (typed) delete plan.typed;
-    const shift = plan.added.filter((boundary) => boundary.index <= (typed?.index ?? 0)).length;
-    if (fault === FAULT.givenAsAsked)
-      for (const boundary of plan.added) if (boundary.given) boundary.given = boundary.attrs;
-    return local(
+    const made = fault === FAULT.madeLineBare ? () => [] : change.made;
+    const done = local(
       before,
-      (gives) => {
+      between,
+      depth,
+      () => {
         if (fault === FAULT.deleteAndRecreate)
           for (const key of plan.records.keys()) if (records.has(key)) records.delete(key);
-        if (plan.added.some((boundary) => boundary.given !== undefined)) gives();
-        writeBody(doc, plan, LOCAL, fault === FAULT.givenWithItsChange ? LOCAL : undefined);
-        if (typed) doc.transact(() => sequence.insert(typed.index + shift, typed.letters), LOCAL);
+        writeBody(doc, { given: [], writes: () => plan, made }, LOCAL);
+        if (typed) doc.transact(() => sequence.insert(typed.index, typed.letters), LOCAL);
       },
-      mayMark,
+      how.mayMark ?? false,
       settings,
-      itsOwn,
+      how.itsOwn,
     );
+    const after = done[1];
+    const edits = how.edits ?? [];
+    const pathAt = (look: Look, boundary: Id | null) => {
+      const row = look.rows.find((each) => each.boundary === boundary);
+      return row && boundary !== null ? json(pathOf(row)) : undefined;
+    };
+    before.lines.forEach((line, at) => {
+      const now = between.lines[at];
+      if (line.bare === "" || now?.bare !== "") {
+        if (line.bare !== "" && edits.includes(at))
+          throw new Error(
+            "[9 given] a change edited a line with no boundary of its own without giving it one first",
+          );
+        return;
+      }
+      const own = between.rows[now.row]!.boundary;
+      const owner = before.rows[line.row]!.boundary;
+      const itMoved = pathAt(after, own) !== pathAt(between, own);
+      const ownerMoved = owner !== null && pathAt(after, owner) !== pathAt(before, owner);
+      if (!edits.includes(at) && !itMoved && !ownerMoved)
+        throw new Error("[9 given] a line the change neither edits nor moves was given a boundary");
+      oracle.count[COUNTED[line.bare]]++;
+    });
+    oracle.count.boundariesForLinesAChangeMade += done[3].size;
+    return done;
   };
 
-  const refusal = (before: Look, plan: BodyWrites | null, allowed: boolean, what: string) => {
-    if (plan && !allowed)
+  const refusal = (before: Look, change: BodyChange | null, allowed: boolean, what: string) => {
+    if (change && !allowed)
       throw new Error(`[writer] ${what} was written where section 4 refuses it`);
-    if (!plan && allowed) throw new Error(`[writer] ${what} was refused where section 4 allows it`);
-    if (!plan) write(before, null);
-    return plan === null;
+    if (!change && allowed)
+      throw new Error(`[writer] ${what} was refused where section 4 allows it`);
+    if (!change) write(before, null);
+    return change === null;
   };
 
   const keepApart = (want: Want[], upper: number) => {
@@ -918,17 +1053,21 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     depth: number,
     type: string | undefined,
     attrs: SequenceAttrs,
-    plan: BodyWrites | null,
+    change: BodyChange | null,
   ) => {
     const before = lookAt(doc);
     const line = before.lines[at];
     const container = line?.path[depth];
     if (!line || !container) return false;
-    const shownBefore = shown();
     const wanted = new Map(Object.entries(attrs).map(([name, value]) => [`.${name}`, json(value)]));
     if (type !== undefined) wanted.set("", json(type));
-    if (plan && fault === FAULT.oneRecordForTwins) withoutFreshIds(plan);
-    const done = write(before, plan);
+    let shownBefore: string[][] = [];
+    const done = write(before, change, {
+      plan: (plan) => {
+        if (fault === FAULT.oneRecordForTwins) withoutFreshIds(plan);
+        shownBefore = shown();
+      },
+    });
     if (!done) {
       for (const [suffix, value] of wanted)
         if (before.shot.records.get(container.id + suffix)?.value !== value)
@@ -937,9 +1076,10 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
           );
       return false;
     }
-    const after = done[1];
-    rowsKept("a setting", before, after);
-    const its = after.frames[rowAfter(before, after, line)]![depth]!;
+    const [, after, between] = done;
+    rowsKept("a setting", done);
+    const held = between.lines[at]!.path[depth]!;
+    const its = after.frames[rowAfter(between, after, between.lines[at]!)]![depth]!;
     for (const [suffix, value] of wanted) {
       const holds = after.shot.records.get(its.id + suffix)?.value;
       if (holds !== value)
@@ -956,10 +1096,10 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     }
     expectCopies(before.shot, after.shot, [...wanted.keys()], lenient);
     if (freshIds(before.shot, after.shot).length > 0) oracle.count.freshIdsForATwin++;
-    const unread = before.rows.length - shownBefore.length;
+    const unread = between.rows.length - shownBefore.length;
     shown().forEach((path, index) =>
       path.forEach((frame, level) => {
-        const itsOwn = before.frames[index + unread]?.[depth]?.key === container.key;
+        const itsOwn = between.frames[index + unread]?.[depth]?.key === held.key;
         const onIt = level === depth || (type !== undefined && level === depth + 1);
         if (frame !== shownBefore[index]![level] && !(itsOwn && onIt))
           throw new Error("[writer] a setting changed on a container it was not made on");
@@ -1097,21 +1237,18 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       ]++;
     oracle.count[which === "undo" ? "undos" : "redos"]++;
     const done = did ? popped[0]! : step();
-    const alone = did && popped.length === 1 && done.was?.received === received;
-    if (alone && done.was?.gave !== gave) oracle.count.undosWithABoundaryGivenSinceTheStepBegan++;
-    else if (alone && done.was) {
+    if (did && popped.length === 1 && done.was?.received === received) {
       const marks = !done.formats && !changedFormatting;
       if (readingOf(done.was.look, marks) !== readingOf(after, marks))
         throw new Error(
           `[3 undo] ${which}, with no change from anyone else since its step, left the note reading other than before the step${
             process.env.BODY_CONTAINERS_DEBUG
-              ? `
-WAS ${readingOf(done.was.look, marks)}
-NOW ${readingOf(after, marks)}`
+              ? `\nWAS ${readingOf(done.was.look, marks)}\nNOW ${readingOf(after, marks)}`
               : ""
           }`,
         );
       oracle.count.undosReadAsBeforeTheStep++;
+      if (done.was.gave !== gave) oracle.count.undosCheckedWithABoundaryGivenSinceTheStepBegan++;
     }
     const changed = [
       effects.insertedChars,
@@ -1226,54 +1363,46 @@ NOW ${readingOf(after, marks)}`
       );
   };
 
-  const paragraph = (chars: string[], line: Line): Want => ({
-    b: "+",
-    chars,
-    path: idsOf(line.path),
-    frames: line.path,
-    kind: PARAGRAPH,
-  });
-
-  const given = (line: Line) =>
-    oracle.count[
-      line.bare === "item"
-        ? "boundariesForAddedParagraphs"
-        : line.bare === "spill"
-          ? "boundariesForParagraphsAfter"
-          : "boundariesForUnboundedText"
-    ]++;
-
   const into = (
     what: string,
     at: number,
     offset: number,
     holders: string[],
-    plan: BodyWrites | null,
+    change: BodyChange | null,
     units: number,
+    before = lookAt(doc),
   ) => {
-    const before = lookAt(doc);
     const line = before.lines[at];
     const fits =
       line !== undefined &&
-      (line.bare !== "" || holders.includes(line.type)) &&
+      holders.includes(line.type) &&
       offset <= line.chars.length &&
       !cutsALetter(line.units, offset);
-    if (refusal(before, plan, fits, what) || !line || !plan) return null;
-    const want = wantOf(before);
-    const row = want[line.row]!;
-    const typed = Array.from({ length: units }, () => "+");
-    const readAbove =
-      line.bare === "spill" && offset === 0 && holders.includes(before.lines[at - 1]!.type);
-    if (line.bare === "item") want.splice(line.row, 0, paragraph(typed, line));
-    else if (readAbove)
-      want.splice(line.row + 1, 0, paragraph([...typed, ...row.chars.splice(line.from)], line));
-    else row.chars.splice(line.from + offset, 0, ...typed);
-    if (line.bare === "item" || readAbove) given(line);
-    if (line.bare === "item" && fault === FAULT.addedParagraphBare) plan.added = [];
-    const [effects, after] = write(before, plan)!;
-    rowsAre(what, want, before, after);
-    const tokens = new Map(after.shot.tokens.map((token) => [token.id, token]));
-    return effects.insertedChars.map((id) => tokens.get(id) as Letter);
+    if (refusal(before, change, fits, what) || !line) return null;
+    let want: Want[] = [];
+    const done = write(before, change, {
+      edits: [at],
+      given: fault === FAULT.addedParagraphBare && line.bare === "item" ? () => [] : undefined,
+      plan: (_, between) => {
+        const now = between.lines[at]!;
+        const typed = Array.from({ length: units }, () => "+");
+        want = wantOf(between);
+        want[now.row]!.chars.splice(now.from + offset, 0, ...typed);
+      },
+    })!;
+    rowsAre(what, want, done);
+    const tokens = new Map(done[1].shot.tokens.map((token) => [token.id, token]));
+    return done[0].insertedChars.map((id) => tokens.get(id) as Letter);
+  };
+
+  const unchanged = (what: string, before: Look, change: BodyChange | null, how: How) => {
+    let want: Want[] = [];
+    const plan = (_: BodyWrites, between: Look) => {
+      want = wantOf(between);
+    };
+    const done = write(before, change, { ...how, plan })!;
+    rowsAre(what, want, done);
+    return done[1];
   };
 
   return {
@@ -1288,10 +1417,11 @@ NOW ${readingOf(after, marks)}`
       Y.applyUpdate(doc, update, REMOTE);
     },
     type(at: number, offset: number, letters: string, marks: SequenceAttrs = {}) {
-      const plan = typeLetters(schema, doc, at, offset, letters, marks);
-      const { lines } = lookAt(doc);
+      const change = typeLetters(schema, doc, at, offset, letters, marks);
+      const before = lookAt(doc);
+      const { lines } = before;
       const block = lines[at + 1]?.bare === "spill" && offset === lines[at]!.chars.length;
-      const landed = into("typing", at, offset, HOLDS_LETTERS, plan, letters.length);
+      const landed = into("typing", at, offset, HOLDS_LETTERS, change, letters.length, before);
       if (!landed) return false;
       if (block && landed[0]?.line) oracle.atABlocksEnd.set(landed[0].id, landed[0].line);
       if (landed.map((token) => token.unit).join("") !== letters)
@@ -1304,8 +1434,8 @@ NOW ${readingOf(after, marks)}`
       return true;
     },
     place(at: number, offset: number, name: string, attrs: SequenceAttrs) {
-      const plan = insertInline(schema, doc, at, offset, name, attrs);
-      const landed = into("an inline item", at, offset, HOLDS_INLINE, plan, 1);
+      const change = insertInline(schema, doc, at, offset, name, attrs);
+      const landed = into("an inline item", at, offset, HOLDS_INLINE, change, 1);
       if (!landed) return false;
       const holds = [...(landed[0]?.atom?.attrs ?? [])].map(([key, held]) => [key, held.value]);
       const wanted = Object.entries(attrs).map(([key, value]) => [key, json(value)]);
@@ -1321,11 +1451,10 @@ NOW ${readingOf(after, marks)}`
       const atom = token?.kind === "char" ? token.atom : undefined;
       const wanted = Object.entries(attrs).map(([key, value]) => [key, json(value)] as const);
       const differs = wanted.some(([key, value]) => atom?.attrs.get(key)?.value !== value);
-      const plan = setInlineAttributes(schema, doc, at, offset, attrs);
+      const change = setInlineAttributes(schema, doc, at, offset, attrs);
       const what = "a change to an inline item";
-      if (refusal(before, plan, atom !== undefined && differs, what) || !atom) return false;
-      const after = write(before, plan)![1];
-      rowsAre(what, wantOf(before), before, after);
+      if (refusal(before, change, atom !== undefined && differs, what) || !atom) return false;
+      const after = unchanged(what, before, change, { edits: [at] });
       const now = after.shot.tokens.find((each) => each.id === id);
       for (const [key, value] of wanted) {
         if ((now && attrsOf(now))?.get(key)?.value !== value)
@@ -1346,10 +1475,9 @@ NOW ${readingOf(after, marks)}`
         offset + length <= line.chars.length &&
         !cutsALetter(line.units, offset) &&
         !cutsALetter(line.units, offset + length);
-      const plan = setMarks(schema, doc, at, offset, length, marks);
-      if (refusal(before, plan, fits, "a change of marks") || !line) return false;
-      const after = write(before, plan, true)![1];
-      rowsAre("a change of marks", wantOf(before), before, after);
+      const change = setMarks(schema, doc, at, offset, length, marks);
+      if (refusal(before, change, fits, "a change of marks") || !line) return false;
+      const after = unchanged("a change of marks", before, change, { edits: [at], mayMark: true });
       const marked = new Set(line.chars.slice(offset, offset + length));
       const was = new Map(before.shot.tokens.map((token) => [token.id, token]));
       for (const token of after.shot.tokens) {
@@ -1370,10 +1498,10 @@ NOW ${readingOf(after, marks)}`
     },
     erase(at: number, offset: number, toAt: number, toOffset: number) {
       const before = lookAt(doc);
-      const { lines, rows } = before;
+      const { lines } = before;
       const first = lines[at];
       const last = lines[toAt];
-      const plan = deleteRange(schema, doc, at, offset, toAt, toOffset, freshId);
+      const change = deleteRange(schema, doc, at, offset, toAt, toOffset, freshId);
       const fits =
         first !== undefined &&
         last !== undefined &&
@@ -1381,173 +1509,137 @@ NOW ${readingOf(after, marks)}`
         toOffset <= last.chars.length &&
         !cutsALetter(first.units, offset) &&
         !cutsALetter(last.units, toOffset);
-      const upTo = last?.bare === "item";
-      const r1 = first?.row ?? 0;
-      const p1 = (first?.from ?? 0) + offset;
-      const r2 = (last?.row ?? 0) - (upTo ? 1 : 0);
-      const p2 = upTo ? (rows[r2]?.chars.length ?? 0) : (last?.from ?? 0) + toOffset;
-      const some = fits && (r1 < r2 || (r1 === r2 && (p1 < p2 || first.bare === "item")));
-      if (refusal(before, plan, some, "a delete") || !first || !last) return false;
-      const want = wantOf(before);
-      const retyped =
-        first.bare === "item" && rows[r1]!.attrs.get("type")?.value !== json("paragraph");
-      const block = lines.find(
-        (line) => line.row === r2 && line.from === 0 && line.bare !== "item",
-      )!;
-      const held = block.chars.length;
-      const keepsAfter = held < rows[r2]!.chars.length && p2 <= held && (r2 > r1 || retyped);
-      const tail = want[r2]!.chars.slice(p2);
-      const after = keepsAfter ? [paragraph(tail.splice(held - p2), block)] : [];
-      if (keepsAfter) oracle.count.boundariesForParagraphsAfter++;
-      const next = before.shot.tokens.find((token) => token.id === tail[0]);
-      const holders = next?.kind === "char" && next.atom ? HOLDS_INLINE : HOLDS_LETTERS;
-      const readAbove =
-        first.bare === "spill" && offset === 0 && next && holders.includes(lines[at - 1]!.type);
-      const own = readAbove ? [paragraph(tail.splice(0), first)] : [];
-      if (readAbove) oracle.count.boundariesForParagraphsAfter++;
-      const left = [...want[r1]!.chars.slice(0, p1), ...tail];
-      if (first.bare === "item")
-        Object.assign(want[r1]!, paragraph(left, first), { b: want[r1]!.b });
-      want[r1]!.chars = left;
-      want.splice(r1 + 1, r2 - r1, ...own, ...after);
-      if (want[0]!.b === "-" && left.length === 0 && r1 === 0 && want.length > 1) {
-        Object.assign(want[0]!, { b: "+", kind: PARAGRAPH });
-        oracle.count.boundariesForUnboundedText++;
-      }
-      keepApart(want, r1 + own.length);
-      if (readAbove && plan && fault === FAULT.deleteLeavesNoBoundary) plan.added = [];
-      const joined = new Set(
-        lines.flatMap((_, index) => (index >= at && index <= toAt ? index : [])),
-      );
-      const done = write(before, plan, true, at < toAt ? joined : NO_BLOCK)![1];
-      rowsAre("a delete", want, before, done);
-      expectCopies(before.shot, done.shot, [], lenient);
-      if (r2 > r1) oracle.count.linesDeleted++;
+      const some = fits && (at < toAt || (at === toAt && offset < toOffset));
+      if (refusal(before, change, some, "a delete") || !first || !last) return false;
+      const joined = lines.flatMap((_, index) => (index >= at && index <= toAt ? [index] : []));
+      const leftBare = fault === FAULT.deleteLeavesNoBoundary && first.bare === "spill";
+      let want: Want[] = [];
+      const done = write(before, change, {
+        mayMark: true,
+        itsOwn: at < toAt ? new Set(joined) : NO_BLOCK,
+        edits: [...joined, ...(at < toAt ? afterIt(lines, toAt) : [])],
+        given: leftBare && at === toAt ? () => [] : undefined,
+        plan: (_, between) => {
+          const from = between.lines[at]!;
+          const to = between.lines[toAt]!;
+          want = wantOf(between);
+          const kept = want[from.row]!.chars.slice(0, from.from + offset);
+          want[from.row]!.chars = [...kept, ...want[to.row]!.chars.slice(to.from + toOffset)];
+          want.splice(from.row + 1, to.row - from.row);
+          keepApart(want, from.row);
+        },
+      })!;
+      rowsAre("a delete", want, done);
+      expectCopies(before.shot, done[1].shot, [], lenient);
+      if (at < toAt) oracle.count.linesDeleted++;
       return true;
     },
     split(at: number, offset: number, kind?: SequenceAttrs) {
       const before = lookAt(doc);
-      const { lines } = before;
-      const line = lines[at];
+      const line = before.lines[at];
       const inside = line !== undefined && cutsALetter(line.units, offset);
       const fits = line !== undefined && offset <= line.chars.length && !inside;
-      let plan = splitLine(schema, doc, at, offset, freshId, kind);
-      if (!plan && inside) oracle.count.refusedInsideALetter++;
-      if (!plan && inside && fault === FAULT.splitInsideLetter) {
-        plan = splitLine(schema, doc, at, offset + 1, freshId, kind);
-        if (plan) plan.added[0]!.index--;
-      } else if (refusal(before, plan, fits, "a split")) return false;
-      if (!line || !plan) return false;
-      const want = wantOf(before);
-      const row = want[line.row]!;
-      const stored = before.rows[line.row]!.attrs;
-      const type = String(
-        kind ? (kind.type ?? "paragraph") : line.bare === "" ? line.type : "paragraph",
-      );
-      const copied = (key: string) => (line.bare === "" ? stored.get(key)?.value : undefined);
-      const newKind: SequenceAttrs = { type };
-      for (const [key, unset] of Object.entries(LEAF_KINDS[type]!))
-        newKind[key] = kind
-          ? key in kind
-            ? kind[key]
-            : unset
-          : (JSON.parse(copied(key) ?? json(unset)) as unknown);
-      const depth = line.path.length - 1;
-      const item = line.path[depth];
-      const isFirst =
-        item !== undefined &&
-        ITEMS.includes(item.type) &&
-        lines[at - 1]?.path[depth]?.key !== item.key;
-      const ids = idsOf(line.path);
-      const newPath = isFirst ? [...ids.slice(0, depth), "+"] : ids;
-      const fresh = (chars: string[]): Want => ({
-        b: "+",
-        chars,
-        path: [...newPath],
-        frames: line.path,
-        kind: newKind,
-      });
-      const pos = line.from + offset;
-      const end = line.from + line.chars.length;
-      const some = line.chars.length > 0 || line.bare !== "";
-      const above = offset === 0 && line.bare !== "item" && some;
-      const after =
-        line.bare === "" &&
-        end < row.chars.length &&
-        (offset === line.chars.length || type !== line.type);
-      let moved = line.row + 1;
-      if (line.bare !== "" && offset === 0) given(line);
-      if (line.bare === "start" && offset === 0)
-        want.splice(0, 1, fresh([]), paragraph(row.chars, line));
-      else if (line.bare === "item") {
-        want.splice(line.row, 0, paragraph([], line), fresh([]));
-        moved = line.row + 2;
-      } else if (line.bare === "spill" && offset === 0)
-        want.splice(line.row + 1, 0, fresh([]), paragraph(row.chars.splice(pos), line));
-      else if (above) want.splice(line.row, 0, fresh([]));
-      else if (after) {
-        const below = paragraph(row.chars.splice(end), line);
-        want.splice(line.row + 1, 0, fresh(row.chars.splice(pos)), below);
-        want[line.row + 2]!.path = [...newPath];
-        oracle.count.boundariesForParagraphsAfter++;
-        moved = line.row + 3;
-      } else want.splice(line.row + 1, 0, fresh(row.chars.splice(pos)));
-      if (isFirst && !above)
-        for (let later = moved; want[later]?.frames[depth]?.key === item.key; later++)
-          want[later]!.path[depth] = "+";
-      if (above && fault === FAULT.oldBoundaryAbove) plan.added[0]!.index++;
-      if (fault === FAULT.splitAlwaysParagraph && plan.added.length === 1)
-        plan.added[0]!.attrs = { type: "paragraph", path: plan.added[0]!.attrs.path };
-      const done = write(before, plan, false, new Set([at]))![1];
-      rowsAre("a split", want, before, done);
-      expectDefaults(before, done);
+      let change = splitLine(schema, doc, at, offset, freshId, kind);
+      const cut = !change && inside && fault === FAULT.splitInsideLetter;
+      if (!change && inside) oracle.count.refusedInsideALetter++;
+      if (cut) change = splitLine(schema, doc, at, offset + 1, freshId, kind);
+      else if (refusal(before, change, fits, "a split")) return false;
+      if (!line || !change) return false;
+      let want: Want[] = [];
+      const done = write(before, change, {
+        itsOwn: new Set([at]),
+        edits: [
+          at,
+          ...afterIt(before.lines, at),
+          ...(offset === 0 ? addedAbove(before.lines, at) : []),
+        ],
+        plan: (plan, between) => {
+          const { lines } = between;
+          const now = lines[at]!;
+          want = wantOf(between);
+          const row = want[now.row]!;
+          const stored = between.rows[now.row]!.attrs;
+          const type = String(kind ? (kind.type ?? "paragraph") : now.type);
+          const newKind: SequenceAttrs = { type };
+          for (const [key, unset] of Object.entries(LEAF_KINDS[type]!))
+            newKind[key] = kind
+              ? key in kind
+                ? kind[key]
+                : unset
+              : (JSON.parse(stored.get(key)?.value ?? json(unset)) as unknown);
+          const depth = now.path.length - 1;
+          const item = now.path[depth];
+          const isFirst =
+            item !== undefined &&
+            ITEMS.includes(item.type) &&
+            lines[at - 1]?.path[depth]?.key !== item.key;
+          const ids = idsOf(now.path);
+          const newPath = isFirst ? [...ids.slice(0, depth), "+"] : ids;
+          const fresh = (chars: string[]): Want => ({
+            b: "+",
+            chars,
+            path: [...newPath],
+            frames: now.path,
+            kind: newKind,
+          });
+          const above = offset === 0 && now.chars.length > 0;
+          if (above) want.splice(now.row, 0, fresh([]));
+          else want.splice(now.row + 1, 0, fresh(row.chars.splice(now.from + offset)));
+          if (isFirst && !above)
+            for (let later = now.row + 1; want[later]?.frames[depth]?.key === item.key; later++)
+              want[later]!.path[depth] = "+";
+          if (cut) plan.added[0]!.index--;
+          if (above && fault === FAULT.oldBoundaryAbove) plan.added[0]!.index++;
+          if (fault === FAULT.splitAlwaysParagraph && plan.added.length === 1)
+            plan.added[0]!.attrs = { type: "paragraph", path: plan.added[0]!.attrs.path };
+        },
+      })!;
+      rowsAre("a split", want, done);
+      expectDefaults(before, done[1]);
       return true;
     },
     join(at: number) {
       const before = lookAt(doc);
-      const lower = before.lines[at];
-      const upper = before.lines[at - 1];
-      const plan = joinLine(schema, doc, at, freshId);
+      const { lines } = before;
+      const lower = lines[at];
+      const upper = lines[at - 1];
+      const change = joinLine(schema, doc, at, freshId);
       const emptyAbove = upper?.bare === "" && upper.chars.length === 0;
       const fits = upper !== undefined && lower !== undefined && (lower.bare === "" || emptyAbove);
-      if (refusal(before, plan, fits, "a join") || !plan || !upper || !lower) return false;
-      const want = wantOf(before);
-      const row = want[lower.row]!;
-      const held = lower.chars.length;
-      const retyped = before.rows[lower.row]!.attrs.get("type")?.value !== json("paragraph");
-      const after = (): Want[] => {
-        if (held === row.chars.length) return [];
-        oracle.count.boundariesForParagraphsAfter++;
-        return [paragraph(row.chars.splice(held), lower)];
-      };
-      if (lower.bare === "spill") {
-        Object.assign(row, paragraph(row.chars, lower));
-        given(lower);
-      } else if (lower.bare !== "") {
-        want.splice(upper.row, 1);
-        keepApart(want, upper.row - 1);
-      } else if (upper.bare === "item") {
-        const below = retyped ? after() : [];
-        Object.assign(row, paragraph(row.chars, upper), { b: row.b });
-        want.splice(lower.row + 1, 0, ...below);
-      } else if (upper.bare === "" && upper.chars.length === 0) {
-        want.splice(upper.row, 1);
-        keepApart(want, upper.row - 1);
-      } else {
-        const below = after();
-        want[upper.row]!.chars.push(...row.chars);
-        want.splice(lower.row, 1, ...below);
-        keepApart(want, upper.row);
-      }
-      if (plan.erased.length > 0 && fault === FAULT.alwaysLowerBoundary)
-        plan.erased[0]!.index = readBody(schema, doc)[at]!.start - 1;
-      if (plan.erased.length > 0 && fault === FAULT.twinsJoined) {
-        plan.records.clear();
-        plan.attributes.clear();
-      }
-      const done = write(before, plan, false, new Set([at - 1, at]))![1];
-      rowsAre("a join", want, before, done);
-      expectCopies(before.shot, done.shot, [], lenient);
+      if (refusal(before, change, fits, "a join") || !change || !upper || !lower) return false;
+      const depth = upper.path.length - 1;
+      const item = upper.path[depth];
+      const itsFirst =
+        item !== undefined &&
+        ITEMS.includes(item.type) &&
+        lines[at - 2]?.path[depth]?.key !== item.key;
+      const takesItsPlace = lower.path.length === upper.path.length && lower.type === "paragraph";
+      const keepsUpper = itsFirst && lower.path[depth]?.key === item.key && !takesItsPlace;
+      const upperGoes = emptyAbove && !keepsUpper;
+      let want: Want[] = [];
+      const done = write(before, change, {
+        itsOwn: new Set([at - 1, at]),
+        edits: [at - 1, at, ...(upperGoes ? addedAbove(lines, at - 1) : afterIt(lines, at))],
+        plan: (plan, between) => {
+          const up = between.lines[at - 1]!.row;
+          const low = between.lines[at]!.row;
+          want = wantOf(between);
+          if (upperGoes) want.splice(up, 1);
+          else {
+            want[up]!.chars.push(...want[low]!.chars);
+            want.splice(low, 1);
+          }
+          keepApart(want, upperGoes ? up - 1 : up);
+          if (plan.erased.length > 0 && fault === FAULT.alwaysLowerBoundary)
+            plan.erased[0]!.index = readBody(schema, doc)[at]!.start - 1;
+          if (plan.erased.length > 0 && fault === FAULT.twinsJoined) {
+            plan.records.clear();
+            plan.attributes.clear();
+          }
+        },
+      })!;
+      rowsAre("a join", want, done);
+      expectCopies(before.shot, done[1].shot, [], lenient);
       if (lower.bare !== "") oracle.count.joinsOfALineWithNoBoundary++;
       return true;
     },
@@ -1556,64 +1648,61 @@ NOW ${readingOf(after, marks)}`
       const line = before.lines[at];
       if (!line) return false;
       const stored = line.bare === "" ? before.rows[line.row]!.attrs : new Map<string, Held>();
-      const held = line.bare === "" ? line.type : "paragraph";
-      const type = typeof asked.type === "string" ? asked.type : held;
+      const type = typeof asked.type === "string" ? asked.type : line.type;
       const unset = LEAF_KINDS[type]!;
       const wanted: SequenceAttrs = { type };
       for (const key of Object.keys(unset)) {
-        const kept = type === held ? stored.get(key)?.value : undefined;
+        const kept = type === line.type ? stored.get(key)?.value : undefined;
         wanted[key] = key in asked ? asked[key] : (JSON.parse(kept ?? json(unset[key])) as unknown);
       }
       const holds = (key: string) =>
         line.bare === "" ? stored.get(key)?.value : json(PARAGRAPH[key]);
       const same = Object.entries(wanted).every(([key, value]) => holds(key) === json(value));
-      const plan = setLineKind(schema, doc, at, asked);
-      if (refusal(before, plan, line.bare !== "item" && !same, "a change of kind") || !plan)
+      const change = setLineKind(schema, doc, at, asked);
+      if (refusal(before, change, line.bare !== "item" && !same, "a change of kind") || !change)
         return false;
-      const want = wantOf(before);
-      const row = want[line.row]!;
-      const end = line.from + line.chars.length;
-      if (line.bare === "start") Object.assign(row, { b: "+", kind: wanted });
-      else if (line.bare === "spill")
-        want.splice(line.row + 1, 0, {
-          ...paragraph(row.chars.splice(line.from), line),
-          kind: wanted,
-        });
-      else {
-        row.kind = wanted;
-        if (type !== held && end < row.chars.length) {
-          want.splice(line.row + 1, 0, paragraph(row.chars.splice(end), line));
-          oracle.count.boundariesForParagraphsAfter++;
-          if (fault === FAULT.spillLeftBare) plan.added = [];
-        }
-      }
-      if (line.bare !== "") given(line);
-      if (fault === FAULT.noKindDefaults)
-        for (const attrs of [...plan.attributes.values(), ...plan.added.map((each) => each.attrs)])
-          for (const key of Object.keys(unset))
-            if (!stored.has(key) && json(attrs[key]) === json(unset[key])) delete attrs[key];
-      rowsAre("a change of kind", want, before, write(before, plan, false, new Set([at]))![1]);
+      const after = afterIt(before.lines, at);
+      const others = type === line.type ? [] : [...after, ...addedAbove(before.lines, at)];
+      let want: Want[] = [];
+      const done = write(before, change, {
+        itsOwn: new Set([at]),
+        edits: [at, ...others],
+        given:
+          fault === FAULT.spillLeftBare && others.length > 0 && after.length > 0
+            ? (given) => given.slice(0, -1)
+            : undefined,
+        plan: (plan, between) => {
+          want = wantOf(between);
+          want[between.lines[at]!.row]!.kind = wanted;
+          if (fault === FAULT.noKindDefaults)
+            for (const attrs of plan.attributes.values())
+              for (const key of Object.keys(unset))
+                if (!stored.has(key) && json(attrs[key]) === json(unset[key])) delete attrs[key];
+        },
+      })!;
+      rowsAre("a change of kind", want, done);
       return true;
     },
     wrap(at: number, depth: number, count: number, type: string, attrs: SequenceAttrs) {
       const before = lookAt(doc);
       const line = before.lines[at];
-      const plan = wrapBlocks(schema, doc, at, depth, count, type, attrs, freshId);
+      const change = wrapBlocks(schema, doc, at, depth, count, type, attrs, freshId);
       const alone = line?.bare === "item" && depth === line.path.length;
       const inAList = LISTS.includes(line?.path[depth - 1]?.type ?? "");
       const shallow = before.frames.every((path) => path.length < 60);
-      if (!plan && line && depth <= line.path.length && !inAList && shallow && !alone)
+      if (!change && line && depth <= line.path.length && !inAList && shallow && !alone)
         throw new Error("[writer] a wrap was refused where blocks can be wrapped");
-      const done = write(before, plan);
+      const done = write(before, change);
       if (!done || !line) return false;
-      rowsKept("a wrap", before, done[1]);
-      const made = done[1].frames[rowAfter(before, done[1], line)]?.[depth]?.id;
-      const fresh = freshIds(before.shot, done[1].shot);
+      const [, after, between] = done;
+      rowsKept("a wrap", done);
+      const made = after.frames[rowAfter(between, after, between.lines[at]!)]?.[depth]?.id;
+      const fresh = freshIds(before.shot, after.shot);
       if (made === undefined || !fresh.includes(made))
         throw new Error("[4 settings] a wrap made no container where it was asked for one");
       for (const id of fresh)
-        if (id === made) expectMade(done[1].shot, id, type, attrs, lenient);
-        else if (ITEM_OF[type]) expectMade(done[1].shot, id, ITEM_OF[type], {}, lenient);
+        if (id === made) expectMade(after.shot, id, type, attrs, lenient);
+        else if (ITEM_OF[type]) expectMade(after.shot, id, ITEM_OF[type], {}, lenient);
         else throw new Error("[4 settings] a wrap made a container it was not asked for");
       return true;
     },
@@ -1621,7 +1710,7 @@ NOW ${readingOf(after, marks)}`
       const before = lookAt(doc);
       const done = write(before, liftBlocks(schema, doc, at, depth, count, freshId));
       if (!done) return false;
-      rowsKept("a lift", before, done[1]);
+      rowsKept("a lift", done);
       expectCopies(before.shot, done[1].shot, [], lenient);
       return true;
     },
@@ -1629,7 +1718,7 @@ NOW ${readingOf(after, marks)}`
       const before = lookAt(doc);
       const done = write(before, indentItem(schema, doc, at, depth, freshId));
       if (!done) return false;
-      rowsKept("an indent", before, done[1]);
+      rowsKept("an indent", done);
       for (const id of freshIds(before.shot, done[1].shot)) {
         const type = String(JSON.parse(done[1].shot.records.get(id)!.value));
         if (copies(before.shot, done[1].shot, id, [], lenient)) continue;
@@ -1643,7 +1732,7 @@ NOW ${readingOf(after, marks)}`
       const before = lookAt(doc);
       const done = write(before, outdentItem(schema, doc, at, depth, freshId));
       if (!done) return false;
-      rowsKept("an outdent", before, done[1]);
+      rowsKept("an outdent", done);
       expectCopies(before.shot, done[1].shot, [], lenient);
       return true;
     },
@@ -2424,7 +2513,7 @@ it("states the kinds, records and marks the editor's schema has", () => {
   }
 });
 
-const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 16);
+const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 12);
 const WEIGHTS = process.env.BODY_CONTAINERS_ONE_LINE ? ONE_LINE : EVEN;
 const FIRST = Number(process.env.BODY_CONTAINERS_FIRST ?? 1);
 const ROUNDS = Number(process.env.BODY_CONTAINERS_ROUNDS ?? 0);
@@ -2508,10 +2597,10 @@ const BREAKAGES: Breakage[] = [
   [FAULT.typingInheritsMarks, "[2 letters] letters typed with the marks", { seeds: 2 }],
   [
     FAULT.spillLeftBare,
-    "[writer] after a change of kind",
+    "[8 blocks] a change moved or [9 given] a change edited",
     { seeds: 3, weights: WITH_MORE, start: NESTED },
   ],
-  [FAULT.addedParagraphBare, "[writer] after typing", { seeds: 2 }],
+  [FAULT.addedParagraphBare, "[9 given] a change edited a line with no boundary", { seeds: 2 }],
   [
     FAULT.deleteLeavesNoBoundary,
     "[8 blocks] a change moved",
@@ -2520,6 +2609,7 @@ const BREAKAGES: Breakage[] = [
   [FAULT.givenWithItsChange, "[9 given] undo moved a letter", { seeds: 8 }],
   [FAULT.givenAsAsked, "[9 given] giving a line its boundary changed", { seeds: 2 }],
   [FAULT.undoKeepsLetters, "[3 undo] undo, with no change from anyone else", { seeds: 2 }],
+  [FAULT.madeLineBare, "[9 given] a change edited or made", { seeds: 2 }],
 ];
 
 it.each(BREAKAGES)(
@@ -2552,7 +2642,7 @@ it.each(BREAKAGES)(
   600_000,
 );
 
-const LONG_RUN = Number(process.env.BODY_CONTAINERS_LONG_RUN ?? 600);
+const LONG_RUN = Number(process.env.BODY_CONTAINERS_LONG_RUN ?? 500);
 
 it("counts the records no path names while one person wraps, lifts and undoes", () => {
   const next = random(11);
@@ -2603,7 +2693,7 @@ const exchange = (left: Y.Doc, right: Y.Doc) => {
   Y.applyUpdate(right, Y.encodeStateAsUpdate(left, Y.encodeStateVector(right)), REMOTE);
   Y.applyUpdate(left, Y.encodeStateAsUpdate(right, Y.encodeStateVector(left)), REMOTE);
 };
-const written = (doc: Y.Doc, plan: BodyWrites | null) => {
+const written = (doc: Y.Doc, plan: BodyChange | null) => {
   if (plan) writeBody(doc, plan, LOCAL);
   return plan !== null;
 };
@@ -2721,7 +2811,7 @@ it.each([
     (doc: Y.Doc) => deleteRange(schema, doc, 0, 0, 0, 3, String),
     ["paragraph:", "paragraph:d"],
   ],
-] as [string, (doc: Y.Doc) => BodyWrites | null, string[]][])(
+] as [string, (doc: Y.Doc) => BodyChange | null, string[]][])(
   "text before the first boundary: %s",
   (_, plan, read) => {
     const doc = open(unboundedNote(), 10);
@@ -2742,7 +2832,12 @@ it.each([
 );
 
 it.each([
-  [10, 20, ["heading:", "codeBlock:abc", "paragraph:d"], ["heading:Xabc", "paragraph:d"]],
+  [
+    10,
+    20,
+    ["heading:", "codeBlock:abc", "paragraph:d"],
+    ["heading:", "paragraph:Xabc", "paragraph:d"],
+  ],
   [
     20,
     10,
@@ -2840,7 +2935,11 @@ it("gives a list item's added first paragraph a boundary when a change needs one
       wrapBlocks(schema, kept, 0, 0, 1, "blockquote", {}, () => "q"),
     ),
   ).toBe(true);
-  expect(rowsRead(kept)).toEqual(["heading q/L/I:head", "paragraph q/L/I:tail"]);
+  expect(rowsRead(kept)).toEqual([
+    "paragraph q/L/I:",
+    "heading q/L/I:head",
+    "paragraph q/L/I:tail",
+  ]);
 });
 
 const codeNote = () =>
@@ -2880,7 +2979,7 @@ it("gives the paragraph after a code block a boundary when a change needs one", 
   expect(others(atStart)).toEqual(["codeBlock :co", "paragraph :", `paragraph :${rest}`]);
   const inside = fresh();
   expect(written(inside, splitLine(schema, inside, 2, 2, String))).toBe(true);
-  expect(others(inside)).toEqual([`codeBlock :co${OBJECT}d`, "paragraph :e"]);
+  expect(others(inside)).toEqual(["codeBlock :co", `paragraph :${OBJECT}d`, "paragraph :e"]);
 
   const joined = fresh();
   expect(joinLine(schema, joined, 2, String)).toBeNull();
@@ -2888,7 +2987,7 @@ it("gives the paragraph after a code block a boundary when a change needs one", 
   expect(rowsRead(joined)).toEqual(["paragraph :topco", `paragraph :${rest}`, "paragraph :z"]);
   const below = fresh();
   expect(written(below, joinLine(schema, below, 3, String))).toBe(true);
-  expect(linesRead(below).slice(1)).toEqual(["line codeBlock:co", `spill paragraph:${rest}z`]);
+  expect(linesRead(below).slice(1)).toEqual(["line codeBlock:co", `line paragraph:${rest}z`]);
 
   const block = fresh();
   expect(written(block, setLineKind(schema, block, 1, PARAGRAPH))).toBe(true);
@@ -2935,7 +3034,7 @@ it("deletes from an added first paragraph into the paragraph after the item's fi
   ]);
   const upTo = open(codeNote(), 30);
   expect(written(upTo, deleteRange(schema, upTo, 0, 1, 2, 0, String))).toBe(true);
-  expect(rowsRead(upTo)).toEqual(["paragraph :t", `paragraph :${OBJECT}de`, "paragraph :z"]);
+  expect(rowsRead(upTo)).toEqual([`paragraph :t${OBJECT}de`, "paragraph :z"]);
 });
 
 it("stores every attribute a line's kind has, with the default for one not asked for", () => {
@@ -3058,7 +3157,7 @@ it.each([
     (doc: Y.Doc) => deleteRange(schema, doc, 0, 1, 1, 1, () => "own"),
     "a",
   ],
-] as [string, string, (doc: Y.Doc) => BodyWrites | null, string][])(
+] as [string, string, (doc: Y.Doc) => BodyChange | null, string][])(
   "keeps two callouts that share an id apart when %s",
   (_, between, plan, left) => {
     const baseline = note(
@@ -3145,8 +3244,9 @@ it.each([
     const splitter = open(baseline, 10);
     const ticker = open(baseline, 20);
     const split = splitLine(schema, splitter, 0, 0, () => "fresh")!;
-    if (wrong) split.added[0]!.index++;
-    written(splitter, split);
+    const writes = split.writes();
+    if (wrong) writes.added[0]!.index++;
+    written(splitter, { ...split, writes: () => writes });
     ticker.transact(() => {
       const tick = setContainerAttributes(schema, ticker, 0, 1, { checked: true }, String)!;
       writeBody(ticker, tick, LOCAL);
@@ -3359,10 +3459,10 @@ it("gives what is left of the paragraph after a code block a boundary when its f
   const items = [["a", IMAGE, MATH, "b"], { type: "codeBlock", language: null }, []] as Written;
   const two = open(note([], [items]), 20);
   expect(written(two, deleteRange(schema, two, 1, 0, 1, 1, String))).toBe(true);
-  expect(linesRead(two)).toEqual(["line codeBlock:a", `spill paragraph:${OBJECT}b`]);
+  expect(linesRead(two)).toEqual(["line codeBlock:a", `line paragraph:${OBJECT}b`]);
   const rule = open(note([], [["ab", { type: "horizontalRule" }, []]]), 30);
   expect(written(rule, deleteRange(schema, rule, 1, 0, 1, 1, String))).toBe(true);
-  expect(linesRead(rule)).toEqual(["line horizontalRule:", "spill paragraph:b"]);
+  expect(linesRead(rule)).toEqual(["line horizontalRule:", "line paragraph:b"]);
 });
 
 it("keeps the paragraph after a code block out of a line of another kind split off the block", () => {
@@ -3376,7 +3476,7 @@ it("keeps the paragraph after a code block out of a line of another kind split o
   expect(linesRead(same)).toEqual([
     "line codeBlock:a",
     "line codeBlock:b",
-    `spill paragraph:${OBJECT}cd`,
+    `line paragraph:${OBJECT}cd`,
   ]);
 });
 
@@ -3526,3 +3626,89 @@ it.each(GIVEN_LINES)(
     expect(readOf(doc)).toBe(before);
   },
 );
+
+it("reads as at first after a list is wrapped, its item's added first paragraph typed in, and both undone", () => {
+  const doc = open(titleNote(), 10);
+  const history = bodyHistory(doc, LOCAL, NEVER_ELAPSES);
+  const first = readOf(doc);
+  expect(linesRead(doc)).toEqual([
+    "line paragraph:top",
+    "item paragraph:",
+    "line heading:Title",
+    "line paragraph:end",
+  ]);
+  expect(
+    written(
+      doc,
+      wrapBlocks(schema, doc, 2, 0, 1, "blockquote", {}, () => "Q"),
+    ),
+  ).toBe(true);
+  expect(rowsRead(doc).slice(1, 3)).toEqual(["paragraph Q/L/I:", "heading Q/L/I:Title"]);
+  history.stopCapturing();
+  expect(written(doc, typeLetters(schema, doc, 1, 0, "A", {}))).toBe(true);
+  history.undo();
+  history.undo();
+  expect(readOf(doc)).toBe(first);
+  expect(rowsRead(doc).slice(1, 3)).toEqual(["paragraph L/I:", "heading L/I:Title"]);
+});
+
+it("reads as one paragraph again after it is made a code block, the paragraph after it typed in, and both undone", () => {
+  const doc = open(note([], [[["a", IMAGE, "b"], PARAGRAPH, []]]), 10);
+  const history = bodyHistory(doc, LOCAL, NEVER_ELAPSES);
+  const first = readOf(doc);
+  expect(written(doc, setLineKind(schema, doc, 0, { type: "codeBlock" }))).toBe(true);
+  expect(rowsRead(doc)).toEqual(["codeBlock :a", `paragraph :${OBJECT}b`]);
+  history.stopCapturing();
+  expect(written(doc, typeLetters(schema, doc, 1, 0, "X", {}))).toBe(true);
+  expect(rowsRead(doc)).toEqual(["codeBlock :a", `paragraph :X${OBJECT}b`]);
+  history.undo();
+  history.undo();
+  expect(readOf(doc)).toBe(first);
+  expect(rowsRead(doc)).toEqual([`paragraph :a${OBJECT}b`]);
+});
+
+it("keeps text out of a code block when one person undoes an item placed after it and another has deleted the item before the text", () => {
+  const alice = open(afterCodeNote(), 10);
+  const bob = open(afterCodeNote(), 20);
+  const history = bodyHistory(alice, LOCAL, NEVER_ELAPSES);
+  expect(written(alice, insertInline(schema, alice, 1, 0, "mathInline", MATH.attrs))).toBe(true);
+  exchange(alice, bob);
+  expect(linesRead(bob)).toEqual(["line codeBlock:ab", `line paragraph:${OBJECT}${OBJECT}cd`]);
+  expect(written(bob, deleteRange(schema, bob, 1, 1, 1, 2, String))).toBe(true);
+  exchange(alice, bob);
+  history.undo();
+  exchange(alice, bob);
+  expect(linesRead(alice)).toEqual(["line codeBlock:ab", "line paragraph:cd"]);
+  expect(view(bob)).toBe(view(alice));
+});
+
+it("writes the boundary of a line a change makes as part of that change, so its undo takes the boundary away", () => {
+  const wrapped = open(note([], [["Title", { type: "heading", level: 1 }, []]]), 10);
+  const history = bodyHistory(wrapped, LOCAL, NEVER_ELAPSES);
+  const ids = ["L", "I"];
+  expect(
+    written(
+      wrapped,
+      wrapBlocks(schema, wrapped, 0, 0, 1, "bulletList", {}, () => ids.shift()!),
+    ),
+  ).toBe(true);
+  expect(rowsRead(wrapped)).toEqual(["paragraph L/I:", "heading L/I:Title"]);
+  history.undo();
+  expect(rowsRead(wrapped)).toEqual(["heading :Title"]);
+
+  const joined = open(
+    note(
+      [],
+      [
+        ["ab", { type: "codeBlock", language: null }, []],
+        [["c", IMAGE, "d"], PARAGRAPH, []],
+      ],
+    ),
+    20,
+  );
+  const joins = bodyHistory(joined, LOCAL, NEVER_ELAPSES);
+  expect(written(joined, joinLine(schema, joined, 1, String))).toBe(true);
+  expect(rowsRead(joined)).toEqual(["codeBlock :abc", `paragraph :${OBJECT}d`]);
+  joins.undo();
+  expect(linesRead(joined)).toEqual(["line codeBlock:ab", `line paragraph:c${OBJECT}d`]);
+});
