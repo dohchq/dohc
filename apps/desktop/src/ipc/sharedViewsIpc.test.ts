@@ -491,6 +491,8 @@ describe("metadata-only access checks", () => {
       signature,
       visibilitySignature: "v1",
       rootLevel: "view" as const,
+      groupDefault: "view" as const,
+      groups: [],
       folders: [],
     });
     Object.assign(h.workspace.shareView!, {
@@ -1360,6 +1362,8 @@ describe("registered received-view handlers", () => {
         signature: "r1",
         visibilitySignature: "v1",
         rootLevel: "view" as const,
+        groupDefault: "view" as const,
+        groups: [],
         folders: [{ path: "Notes", level: "edit" as const }],
       };
       h.fetchReach.mockResolvedValue(listed);
