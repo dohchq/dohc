@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { setBlockType } from "@tiptap/pm/commands";
 import { Fragment, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { EditorState, NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
 import { EditorView } from "@tiptap/pm/view";
@@ -1642,58 +1643,6 @@ describe("a split inside a list item someone else stored", () => {
 });
 
 describe("a block deleted together with part of the text after it that it cannot hold", () => {
-  const types = (a: Person) =>
-    elementsOf(a.sequence, "boundary").map(
-      (token) =>
-        (JSON.parse(token.attrs) as [string, unknown][]).find(([key]) => key === "type")![1],
-    );
-
-  it("keeps the rule's boundary for the rest of that text, as a paragraph's", () => {
-    const a = person(
-      noteOf(({ sequence }) => {
-        sequence.insertEmbed(0, boundary({ type: "horizontalRule" }), {});
-        sequence.insert(1, "abc", {});
-      }),
-      10,
-    );
-    const [rule] = a.boundaryIds();
-    expect(a.blocks()).toEqual(["horizontalRule", "paragraph"]);
-    const effects = a.effects(() => a.view.dispatch(a.view.state.tr.delete(0, 4)));
-    expect(a.blocks()).toEqual(["paragraph"]);
-    expect(effects.goneLetters).toBe("ab");
-    expect(effects.madeLetters).toBe("");
-    expect(effects.goneBoundaries).toEqual([]);
-    expect(a.boundaryLines()).toEqual([{ id: rule, text: "c" }]);
-    expect(types(a)).toEqual(["paragraph"]);
-    a.expectMirror();
-  });
-
-  it("does the same below another rule, and below a line", () => {
-    const below = (upper: Record<string, unknown>, text: string) =>
-      noteOf(({ sequence }) => {
-        sequence.insertEmbed(0, boundary(upper), {});
-        sequence.insert(1, text, {});
-        sequence.insertEmbed(sequence.length, boundary({ type: "horizontalRule" }), {});
-        sequence.insert(sequence.length, "abc", {});
-      });
-    const a = person(below({ type: "horizontalRule" }, ""), 10);
-    const [, lower] = a.boundaryIds();
-    a.view.dispatch(a.view.state.tr.delete(1, 5));
-    expect(a.blocks()).toEqual(["horizontalRule", "paragraph"]);
-    expect(a.boundaryLines().at(-1)).toEqual({ id: lower, text: "c" });
-    expect(types(a)).toEqual(["horizontalRule", "paragraph"]);
-    a.expectMirror();
-
-    const b = person(below({}, "One"), 20);
-    const [, rule] = b.boundaryIds();
-    const from = b.view.state.doc.child(0).nodeSize;
-    b.view.dispatch(b.view.state.tr.delete(from, from + 4));
-    expect(b.lines()).toEqual(["One", "c"]);
-    expect(b.boundaryLines().at(-1)).toEqual({ id: rule, text: "c" });
-    expect(types(b)).toEqual(["paragraph", "paragraph"]);
-    b.expectMirror();
-  });
-
   it("never leaves that text without a boundary that can hold it, for any delete in a small note", () => {
     const upper: [Record<string, unknown> | null, string][] = [
       [null, ""],
@@ -1758,6 +1707,394 @@ describe("a block deleted together with part of the text after it that it cannot
             }
         }
     expect(deletes).toBeGreaterThan(3000);
+  });
+});
+
+type Part =
+  | string
+  | readonly [string, Record<string, unknown>]
+  | { letters: string; marks: Record<string, unknown> };
+type StoredLine = { boundary: Record<string, unknown> | null; parts: readonly Part[] };
+
+const HARD_BREAK: Part = ["hardBreak", {}];
+const WIKILINK: Part = ["wikilink", { target: "Page", label: null }];
+const CODE = { type: "codeBlock", language: null };
+const RULE = { type: "horizontalRule" };
+const MATH = { type: "mathBlock", tex: "x" };
+const RAW = { type: "rawBlock", source: "<hr>" };
+const IN_ITEM = { path: ["L", "I"] };
+const stored = (boundaryAttrs: Record<string, unknown> | null, ...parts: Part[]): StoredLine => ({
+  boundary: boundaryAttrs,
+  parts,
+});
+
+function noteOfLines(lines: readonly StoredLine[]): Uint8Array {
+  return noteOf(({ sequence, containers }) => {
+    for (const [id, type] of [
+      ["L", "bulletList"],
+      ["I", "listItem"],
+      ["Q", "blockquote"],
+      ["Q2", "blockquote"],
+    ] as const)
+      for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
+        containers.set(key, value);
+    for (const line of lines) {
+      if (line.boundary) sequence.insertEmbed(sequence.length, boundary(line.boundary), {});
+      for (const part of line.parts)
+        if (typeof part === "string") sequence.insert(sequence.length, part, {});
+        else if ("letters" in part) sequence.insert(sequence.length, part.letters, part.marks);
+        else sequence.insertEmbed(sequence.length, element(part[0], part[1]), {});
+    }
+  });
+}
+
+describe.each(["bare", "hosted"] as const)(
+  "on a %s page, a finding of the second review",
+  (shape) => {
+    it("keeps the text after code in its own paragraph when the item that started it is deleted", () => {
+      const a = person(
+        noteOfLines([stored(CODE, "ab", HARD_BREAK, "cd", WIKILINK, "ef")]),
+        10,
+        shape,
+      );
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(codeBlock("ab"), paragraph(hardBreak, "cd", wikilink, "ef"))',
+      );
+      const effects = a.effects(() => a.view.dispatch(a.view.state.tr.delete(5, 6)));
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(codeBlock("ab"), paragraph("cd", wikilink, "ef"))',
+      );
+      expect(effects.goneLetters).toBe("");
+      expect(effects.madeLetters).toBe("");
+      expect(effects.gone.items).toBe(1);
+      expect(effects.madeBoundaries).toHaveLength(1);
+      a.expectMirror();
+    });
+
+    it("keeps three shown blocks when a list item's code block becomes a paragraph, and the letter typed with it", () => {
+      const a = person(
+        noteOfLines([stored({ ...CODE, ...IN_ITEM }, "ab", HARD_BREAK, "cd"), stored({}, "ef")]),
+        10,
+        shape,
+      );
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(bulletList(listItem(paragraph, codeBlock("ab"), paragraph(hardBreak, "cd"))), paragraph("ef"))',
+      );
+      a.select([1, 0]);
+      const retyped = a.view.state.tr;
+      setBlockType(schema.nodes.paragraph!)(a.view.state, (transaction) => {
+        for (const step of transaction.steps) retyped.step(step);
+      });
+      retyped.insertText("!", retyped.doc.content.size - 1);
+      const effects = a.effects(() => a.view.dispatch(retyped));
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(bulletList(listItem(paragraph, paragraph("ab"), paragraph(hardBreak, "cd"))), paragraph("ef!"))',
+      );
+      expect(effects.madeLetters).toBe("!");
+      expect(effects.goneLetters).toBe("");
+      expect(pathsOf(a)).toEqual(["L/I", "L/I", "L/I", ""]);
+      a.expectMirror();
+    });
+
+    it("gives the rest of the text after a deleted rule its own boundary, and deletes the rule's", () => {
+      const a = person(noteOfLines([stored(RULE, "abc")]), 10, shape);
+      const [rule] = a.boundaryIds();
+      const effects = a.effects(() => a.view.dispatch(a.view.state.tr.delete(0, 4)));
+      expect(a.view.state.doc.toString()).toBe('doc(paragraph("c"))');
+      expect(effects.goneBoundaries).toEqual([rule]);
+      expect(effects.madeBoundaries).toHaveLength(1);
+      expect(effects.goneLetters).toBe("ab");
+      expect(effects.madeLetters).toBe("");
+      expect(a.boundaryLines()).toEqual([{ id: effects.madeBoundaries[0], text: "c" }]);
+      a.expectMirror();
+    });
+
+    it("does not bring a deleted rule back when someone else changes it at the same moment", () => {
+      const a = person(noteOfLines([stored(RULE, "abc")]), 10, shape);
+      const b = person(noteOfLines([stored(RULE, "abc")]), 20, shape);
+      a.view.dispatch(a.view.state.tr.delete(0, 4));
+      b.view.dispatch(b.view.state.tr.setSelection(NodeSelection.create(b.view.state.doc, 0)));
+      b.put("mathBlock", { tex: "x" });
+      expect(b.blocks()).toEqual(["mathBlock", "paragraph"]);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe('doc(paragraph("c"))');
+      }
+    });
+
+    it("keeps a line's own boundary when the block above it is deleted with part of the line", () => {
+      const a = person(note("abc", "def"), 10, shape);
+      const [upper, lower] = a.boundaryIds();
+      const effects = a.effects(() => a.view.dispatch(a.view.state.tr.delete(0, 7)));
+      expect(a.lines()).toEqual(["ef"]);
+      expect(effects.goneBoundaries).toEqual([upper]);
+      expect(effects.madeBoundaries).toEqual([]);
+      expect(a.boundaryLines()).toEqual([{ id: lower, text: "ef" }]);
+      a.expectMirror();
+    });
+
+    it("sends each run of a dispatch as its own update, so a peer never shows a state the writer never showed", () => {
+      const replacesXWithZ = new Plugin({
+        appendTransaction(transactions, _before, state) {
+          if (!transactions.some((transaction) => transaction.getMeta("replaceX") === true))
+            return null;
+          return state.tr.insertText("Z", 2, 3).setMeta("addToHistory", false);
+        },
+      });
+      const a = person(note("abc"), 10, shape, [replacesXWithZ]);
+      const peer = page(note("abc"), 20);
+      a.view.dispatch(a.view.state.tr.insertText("X", 2).setMeta("replaceX", true));
+      expect(a.lines()).toEqual(["aZbc"]);
+      const seen = a.sent.map((update) => {
+        peer.receive(update);
+        return readBodySequence(schema, peer.doc).textContent;
+      });
+      expect(seen).toEqual(["aXbc", "aZbc"]);
+      a.expectMirror();
+    });
+
+    it("refuses undo while part of a dispatch still waits to be written", () => {
+      const appendsY = new Plugin({
+        appendTransaction(transactions, _before, state) {
+          if (!transactions.some((transaction) => transaction.getMeta("appendY") === true))
+            return null;
+          return state.tr.insertText("Y", 1).setMeta("addToHistory", false);
+        },
+      });
+      const a = person(note("abc"), 10, shape, [appendsY]);
+      a.typeAt(0, 3, "!");
+      let inside: boolean | null = null;
+      a.doc.transact(() => {
+        a.view.dispatch(a.view.state.tr.insertText("X", 2).setMeta("appendY", true));
+        inside = a.undo();
+      });
+      expect(inside).toBe(false);
+      expect(a.lines()).toEqual(["YaXbc!"]);
+      a.expectMirror();
+      expect(a.undo()).toBe(true);
+      expect(a.lines()).toEqual(["Yabc!"]);
+    });
+
+    it("gives an anchor at the start of a block with no boundary of its own that stays in that block", () => {
+      const a = person(noteOfLines([stored(CODE, "ab", HARD_BREAK, "cd")]), 10, shape);
+      const b = person(noteOfLines([stored(CODE, "ab", HARD_BREAK, "cd")]), 20, shape);
+      expect(a.view.state.doc.toString()).toBe('doc(codeBlock("ab"), paragraph(hardBreak, "cd"))');
+      const atStart = bodySequenceAnchor(a.view.state, 5)!;
+      const atCodeEnd = bodySequenceAnchor(a.view.state, 3)!;
+      expect(bodySequenceAnchorPosition(a.view.state, atStart)).toBe(5);
+      expect(bodySequenceAnchorPosition(a.view.state, atCodeEnd)).toBe(3);
+      expect(bodySequenceAnchorPosition(b.view.state, atStart)).toBe(5);
+      b.typeAt(0, 2, "z");
+      exchange(b, a);
+      expect(a.lines()).toEqual(["abz", "cd"]);
+      expect(bodySequenceAnchorPosition(a.view.state, atStart)).toBe(6);
+
+      const item = () =>
+        noteOfLines([
+          stored({}, "Top"),
+          stored({ type: "heading", level: 2, ...IN_ITEM }, "Title"),
+        ]);
+      const c = person(item(), 30, shape);
+      const d = person(item(), 40, shape);
+      expect(c.lines()).toEqual(["Top", "", "Title"]);
+      const added = c.view.state.doc.child(0).nodeSize + 3;
+      expect(c.view.state.doc.resolve(added).parent.content.size).toBe(0);
+      const inAdded = bodySequenceAnchor(c.view.state, added)!;
+      const atTopEnd = bodySequenceAnchor(c.view.state, 4)!;
+      expect(bodySequenceAnchorPosition(c.view.state, inAdded)).toBe(added);
+      expect(bodySequenceAnchorPosition(d.view.state, inAdded)).toBe(added);
+      expect(bodySequenceAnchorPosition(c.view.state, atTopEnd)).toBe(4);
+    });
+  },
+);
+
+const ORACLE_NOTES: [string, StoredLine[]][] = [
+  ["two paragraphs", [stored({}, "ab"), stored({}, "cd")]],
+  [
+    "a heading, an empty line and a paragraph",
+    [stored({ type: "heading", level: 2 }, "ab"), stored({}), stored({}, "cd")],
+  ],
+  ["text before the first boundary, then a paragraph", [stored(null, "hh"), stored({}, "ab")]],
+  ["code, an inline item, text", [stored(CODE, "ab", HARD_BREAK, "cd")]],
+  ["code, an item, text, an item, text", [stored(CODE, "ab", HARD_BREAK, "cd", WIKILINK, "ef")]],
+  ["empty code, an item, text", [stored(CODE, HARD_BREAK, "cd")]],
+  [
+    "a paragraph, code with an item and text, a paragraph",
+    [stored({}, "ab"), stored(CODE, "cd", WIKILINK, "ef"), stored({}, "gh")],
+  ],
+  ["a rule with text", [stored(RULE, "abc")]],
+  ["a math block with text", [stored(MATH, "abc")]],
+  ["a raw block with an item and text", [stored(RAW, WIKILINK, "ab")]],
+  [
+    "a paragraph, a rule with text, a paragraph",
+    [stored({}, "ab"), stored(RULE, "cd"), stored({}, "ef")],
+  ],
+  ["two rules, the second with text", [stored(RULE), stored(RULE, "abc")]],
+  ["code, then a rule with text", [stored(CODE, "ab"), stored(RULE, "cd")]],
+  [
+    "a list item whose first block is a heading",
+    [stored({}, "ab"), stored({ type: "heading", level: 2, ...IN_ITEM }, "cd"), stored({}, "ef")],
+  ],
+  [
+    "a list item whose first block is code with an item and text",
+    [stored({ ...CODE, ...IN_ITEM }, "ab", HARD_BREAK, "cd"), stored({}, "ef")],
+  ],
+  [
+    "a list item whose first block is a rule with text",
+    [stored({}, "ab"), stored({ ...RULE, ...IN_ITEM }, "cd")],
+  ],
+  [
+    "a list item with a paragraph and a rule with text",
+    [stored(IN_ITEM, "ab"), stored({ ...RULE, ...IN_ITEM }, "cd"), stored({}, "ef")],
+  ],
+  [
+    "a list item with two paragraphs, then a paragraph",
+    [stored(IN_ITEM, "ab"), stored(IN_ITEM, "cd"), stored({}, "ef")],
+  ],
+  [
+    "a quote with a rule and text, then a paragraph",
+    [stored({ ...RULE, path: ["Q"] }, "ab"), stored({}, "cd")],
+  ],
+  [
+    "a quote with code, an item and text",
+    [stored({}, "ab"), stored({ ...CODE, path: ["Q"] }, "cd", HARD_BREAK, "ef")],
+  ],
+  [
+    "code, then a quoted list item whose first block is an empty heading",
+    [
+      stored(CODE, "ab"),
+      stored({ type: "heading", level: 2, path: ["Q", "L", "I"] }),
+      stored({}, "cd"),
+    ],
+  ],
+  [
+    "code whose letters carry stored formatting, then a paragraph",
+    [stored(CODE, "a", { letters: "bc", marks: { bold: {} } }), stored({}, "de")],
+  ],
+  [
+    "a quote that ends with a rule and text, then a quote of its own",
+    [stored({ ...RULE, path: ["Q"] }, "ab"), stored({ path: ["Q2"] }, "cd")],
+  ],
+];
+
+const SWEPT_ABOVE: [string, StoredLine | null][] = [
+  ["nothing", null],
+  ["text before the first boundary", stored(null, "hh")],
+  ["a paragraph", stored({}, "One")],
+  ["a rule", stored(RULE)],
+  ["a rule with text", stored(RULE, "zz")],
+  ["code", stored(CODE, "cc")],
+];
+const SWEPT_BLOCKS: [string, Record<string, unknown>, Part[]][] = [
+  ["a rule with text", RULE, ["abc"]],
+  ["a math block with text", MATH, ["abc"]],
+  ["code, an item and text", CODE, ["kk", HARD_BREAK, "abc"]],
+];
+for (const [aboveName, above] of SWEPT_ABOVE)
+  for (const [blockName, block, parts] of SWEPT_BLOCKS)
+    for (const inItem of [false, true])
+      ORACLE_NOTES.push([
+        `${aboveName}, then ${blockName}${inItem ? " in a list item" : ""}`,
+        [...(above ? [above] : []), stored(inItem ? { ...block, ...IN_ITEM } : block, ...parts)],
+      ]);
+
+const ORACLE_KINDS: [string, Record<string, unknown> | undefined][] = [
+  ["paragraph", undefined],
+  ["heading", { level: 1 }],
+  ["heading", { level: 3 }],
+  ["codeBlock", undefined],
+];
+
+/**
+ * A difference between what ProseMirror computed for a step and what the note then reads as that
+ * is right: the reader gives the format's reading where ProseMirror's document has no stored form.
+ */
+const ORACLE_EXCEPTIONS: {
+  name: string;
+  why: string;
+  holds: (computed: ProseMirrorNode, read: ProseMirrorNode) => boolean;
+}[] = [
+  {
+    name: "formatting stored under a code block's letters",
+    why: "A code block's letters keep the formatting items stored around them, which no reader shows while the block is code. ProseMirror's code block holds no marks, so its document has none after the block changes kind; the note reads the stored ones again.",
+    holds: (computed, read) =>
+      withoutMarks(computed) === withoutMarks(read) &&
+      computed.rangeHasMark(0, computed.content.size, schema.marks.bold!) === false,
+  },
+];
+
+const oracle = { applied: 0, refused: 0, excepted: new Map<string, number>() };
+afterAll(() => {
+  console.log(
+    `the oracle run: ${String(oracle.applied)} steps applied and compared, ${String(oracle.refused)} refused or not offered; exceptions: ${
+      [...oracle.excepted].map(([name, count]) => `${name} (${String(count)})`).join("; ") || "none"
+    }`,
+  );
+});
+
+describe("the note reads as the document ProseMirror computed", () => {
+  it.each(ORACLE_NOTES)("for every delete and every kind change in %s", (_name, lines) => {
+    const baseline = noteOfLines(lines);
+    const size = readBodySequence(schema, person(baseline, 10).doc).content.size;
+    stopEveryone();
+    let applied = 0;
+    const check = (label: string, act: (a: Person) => void) => {
+      const a = person(baseline, 10);
+      const before = a.view.state.doc;
+      let computed: ProseMirrorNode | null = null;
+      const dispatch = a.view.dispatch.bind(a.view);
+      a.view.dispatch = (transaction) => {
+        const own = transaction.docChanged && !isBodySequenceChange(transaction);
+        if (own && a.view.state.applyTransaction(transaction).transactions.length > 0)
+          computed = transaction.doc;
+        dispatch(transaction);
+      };
+      try {
+        act(a);
+      } catch (error) {
+        if (!(error instanceof RangeError)) throw error;
+      }
+      const wanted = computed as ProseMirrorNode | null;
+      if (!wanted) oracle.refused += 1;
+      else {
+        applied += 1;
+        oracle.applied += 1;
+        a.expectMirror();
+        const read = readBodySequence(schema, a.doc);
+        if (!read.eq(wanted)) {
+          const exception = ORACLE_EXCEPTIONS.find((each) => each.holds(wanted, read));
+          if (!exception)
+            throw new Error(
+              `${label} in ${before.toString()}\n  ProseMirror computed ${wanted.toString()}\n  the note reads as     ${read.toString()}`,
+            );
+          oracle.excepted.set(exception.name, (oracle.excepted.get(exception.name) ?? 0) + 1);
+        }
+      }
+      stopEveryone();
+    };
+    for (let from = 0; from < size; from++)
+      for (let to = from + 1; to <= size; to++)
+        check(`delete(${String(from)}, ${String(to)})`, (a) =>
+          a.view.dispatch(a.view.state.tr.delete(from, to)),
+        );
+    const places = textPlaces(readBodySequence(schema, person(baseline, 10).doc));
+    stopEveryone();
+    const ranges: [number, number][] = places.map((place) => [place.pos, place.pos]);
+    if (places.length > 1) {
+      const last = places.at(-1)!;
+      ranges.push([places[0]!.pos, last.pos + last.size]);
+      ranges.push([places[0]!.pos, places[1]!.pos + places[1]!.size]);
+    }
+    for (const [from, to] of ranges)
+      for (const [kind, attrs] of ORACLE_KINDS)
+        check(`${kind}${JSON.stringify(attrs ?? {})} over ${String(from)}-${String(to)}`, (a) => {
+          a.view.dispatch(
+            a.view.state.tr.setSelection(TextSelection.create(a.view.state.doc, from, to)),
+          );
+          a.retype(kind, attrs);
+        });
+    expect(applied).toBeGreaterThan(0);
   });
 });
 

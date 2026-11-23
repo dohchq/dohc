@@ -4,12 +4,13 @@ import {
   leavesOfSequence,
   placeLeaves,
   readLeaf,
+  type ContainerRecords,
   type LeafBlock,
   type ReadLeaf,
   type SequenceBoundary,
   type SequenceInline,
 } from "./bodySequenceGrammar.js";
-import { boundaryOf, visitPieces } from "./bodySequenceYjs.js";
+import { boundaryOf, storedValue, visitPieces } from "./bodySequenceYjs.js";
 
 /**
  * A letter run or an inline item the editor shows. `index` is its sequence position counted from
@@ -114,6 +115,35 @@ export function isAddedParagraph(reading: BodyReading, block: number): boolean {
   const read = reading.lines[block]?.read;
   const shown = reading.blocks[block];
   return read !== null && read !== undefined && read.own !== shown && read.after !== shown;
+}
+
+/**
+ * For a document position at the start of a block with no boundary of its own: the sequence
+ * position of what follows it, which holds that place. That is the block's first item, or for a
+ * paragraph the reader added, the boundary of the block it stands in front of. Else -1.
+ */
+export function whatFollowsStartOf(reading: BodyReading, pos: number): number {
+  const block = blockHolding(reading, pos);
+  if (block < 0 || pos !== reading.starts[block]! + 1 || boundaryAt(reading, block) >= 0) return -1;
+  const first = reading.blocks[block]!.shown[0];
+  if (first) return reading.bases[block]! + first.index;
+  return isAddedParagraph(reading, block) ? reading.bases[block]! : -1;
+}
+
+/**
+ * The document position a place held by `whatFollowsStartOf` has now: just before the item, or
+ * for a boundary, inside the paragraph the reader added in front of its block, or at that block's
+ * start when there is none. -1 when no item is shown at that sequence position.
+ */
+export function startBefore(reading: BodyReading, index: number): number {
+  const shown = positionOf(reading, index);
+  const block = shown < 0 ? -1 : blockStartingAt(reading, shown);
+  if (block < 0) return shown;
+  const added =
+    block > 0 &&
+    reading.lines[block - 1] === reading.lines[block] &&
+    isAddedParagraph(reading, block - 1);
+  return added ? reading.starts[block - 1]! + 1 : shown + 1;
 }
 
 /** The index of the block that starts at a document position, or -1. */
@@ -261,6 +291,7 @@ export function pathAt(reading: BodyReading, pos: number): readonly string[] {
 export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y.Map<unknown>) {
   const markNames: ReadonlySet<string> = new Set(Object.keys(schema.marks));
   const known = new WeakMap<Y.XmlElement, SequenceLine>();
+  const records: ContainerRecords = { get: (key) => storedValue(containers, key) };
   let lines: SequenceLine[] = [];
   let reading: BodyReading | null = null;
   let stale = true;
@@ -310,7 +341,7 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
         pieces.push({ ...piece, index, element: behind });
       }
     });
-    const [leaf] = leavesOfSequence(schema, pieces, containers);
+    const [leaf] = leavesOfSequence(schema, pieces, records);
     const read = leaf ? readLeaf(schema, leaf) : null;
     if (read && was?.read) {
       const before = was.read;
@@ -337,7 +368,7 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
     const leaf = line.read?.leaf;
     if (!leaf || !Object.hasOwn(leaf.attrs, "path")) return;
     if (!Array.isArray(leaf.attrs.path) || leaf.attrs.path.length === 0) return;
-    const [again] = leavesOfSequence<ShownPiece>(schema, [{ boundary: leaf.attrs }], containers);
+    const [again] = leavesOfSequence<ShownPiece>(schema, [{ boundary: leaf.attrs }], records);
     line.read = { ...line.read!, leaf: { ...leaf, path: again!.path } };
   };
 

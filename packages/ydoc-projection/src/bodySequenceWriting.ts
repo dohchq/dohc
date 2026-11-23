@@ -9,6 +9,7 @@ import {
 } from "@tiptap/pm/transform";
 import * as Y from "yjs";
 import { BLOCK_ELEMENT } from "./bodySequenceGrammar.js";
+import { storedValue } from "./bodySequenceYjs.js";
 import {
   blockHolding,
   blockStartingAt,
@@ -160,7 +161,7 @@ function tokensBetween(doc: ProseMirrorNode, from: number, to: number): Token[] 
   return tokens;
 }
 
-type Unit = { key: string; pos: number };
+type Unit = { key: string; pos: number; kind?: string };
 const BLOCK_START = "\0";
 
 function unitsBetween(doc: ProseMirrorNode, from: number, to: number): Unit[] {
@@ -172,7 +173,8 @@ function unitsBetween(doc: ProseMirrorNode, from: number, to: number): Unit[] {
       for (let at = 0; at < letters.length; at++)
         units.push({ key: letters[at]!, pos: first + at });
     } else if (node.isInline) units.push({ key: `\0${node.type.name}`, pos });
-    else if (holdsNoBlocks(node) && pos >= from) units.push({ key: BLOCK_START, pos });
+    else if (holdsNoBlocks(node) && pos >= from)
+      units.push({ key: BLOCK_START, pos, kind: node.type.name });
     return !node.isInline;
   });
   return units;
@@ -227,7 +229,7 @@ function setAttribute(
   key: string,
   value: object | string | number | boolean | null,
 ): void {
-  if (!sameValue(element.getAttribute(key), value)) element.setAttribute(key, value);
+  if (!sameValue(storedValue(element, key), value)) element.setAttribute(key, value);
 }
 
 function setBoundary(
@@ -383,10 +385,32 @@ function writeRange(
   reader.touch(index - 1, index + count);
   const start = rest[0];
   const startsWithBlock = start !== undefined && "block" in start;
+  const ends = replaced && holder < 0 && startsWithBlock ? blockHolding(reading, oldEnd) : -1;
+  const continuesLaterBlock = replaced && ends > first.block;
+  if (continuesLaterBlock && boundaryAt(reading, ends) >= 0) {
+    const kept = boundaryAt(reading, ends);
+    const continued = tokens.findLastIndex((token) => "block" in token);
+    const path = pathAt(reading, oldStart);
+    const behind = formattingInForceAfter(sequence, kept + 1);
+    apply(sequence, [
+      ...retain(index),
+      ...inserts(tokens.slice(0, continued), path, formattingInForceAfter(sequence, index)),
+      { delete: kept - index },
+      { retain: 1 },
+      ...inserts(tokens.slice(continued + 1), path, behind),
+      ...(last.index > kept ? [{ delete: last.index - kept }] : []),
+    ]);
+    const block = tokens[continued]!;
+    if ("block" in block)
+      setBoundary(boundaryElement(reading, ends)!, reading.blocks[ends]!.node, block.block, null);
+    return;
+  }
   if (
     replaced &&
     first.piece === null &&
-    (startsWithBlock || readerAddedParagraphBefore(reading, first.block, oldStart))
+    (startsWithBlock
+      ? !continuesLaterBlock
+      : readerAddedParagraphBefore(reading, first.block, oldStart))
   ) {
     const path = pathAt(reading, oldStart);
     setBoundary(
@@ -423,52 +447,109 @@ function writeRange(
   ]);
 }
 
-function cutsNoContainer(doc: ProseMirrorNode, from: number, to: number): boolean {
-  let whole = true;
-  doc.nodesBetween(from, to, (node, pos) => {
-    if (holdsBlocks(node) && (pos >= from || pos + node.nodeSize <= to)) whole = false;
-    return whole && !node.isTextblock;
+type BlockStartEdit = { drop: Unit } | { add: Unit; before: number };
+
+function blockStartsEndingAt(units: readonly Unit[], last: number): number {
+  let count = 0;
+  while (units[last - count]?.key === BLOCK_START) count++;
+  return count;
+}
+
+function blockStartEdits(
+  stored: readonly Unit[],
+  wanted: readonly Unit[],
+): BlockStartEdit[] | null {
+  const edits: BlockStartEdit[] = [];
+  let have = stored.length - 1;
+  let want = wanted.length - 1;
+  while (have >= 0 || want >= 0) {
+    const held = stored[have];
+    const asked = wanted[want];
+    const spare = blockStartsEndingAt(wanted, want) - blockStartsEndingAt(stored, have);
+    const same = held !== undefined && asked !== undefined && held.key === asked.key;
+    const bothStart = same && held.key === BLOCK_START;
+    if (same && (!bothStart || held.kind === asked.kind || spare === 0)) {
+      have--;
+      want--;
+    } else if (asked?.key === BLOCK_START && (!bothStart || spare > 0)) {
+      edits.push({ add: asked, before: have + 1 });
+      want--;
+    } else if (held?.key === BLOCK_START) {
+      edits.push({ drop: held });
+      have--;
+    } else return null;
+  }
+  return edits;
+}
+
+function containersOf(doc: ProseMirrorNode): { pos: number; node: ProseMirrorNode }[] {
+  const found: { pos: number; node: ProseMirrorNode }[] = [];
+  doc.descendants((node, pos) => {
+    if (holdsBlocks(node)) found.push({ pos, node });
+    return holdsBlocks(node);
   });
-  return whole;
+  return found;
+}
+
+function pathOfSameContainer(
+  reading: BodyReading,
+  after: ProseMirrorNode,
+  inAfter: number,
+  depth: number,
+): readonly string[] | null {
+  if (depth === 0) return [];
+  const wanted = containersOf(after);
+  const read = containersOf(reading.doc);
+  const ordinal = wanted.findIndex((container) => container.pos === inAfter);
+  const same = read[ordinal];
+  if (!same || read.length !== wanted.length || same.node.type !== wanted[ordinal]!.node.type)
+    return null;
+  const path = reading.paths[countBelow(reading.starts, same.pos)];
+  return path && path.length >= depth ? path.slice(0, depth) : null;
 }
 
 function writeBlockStartsThatDiffer(writing: BodyWriting, after: ProseMirrorNode): boolean {
+  const { sequence, reader } = writing;
   for (let attempt = 0; attempt < 4; attempt++) {
-    const read = writing.reader.reading().doc;
-    const start = read === after ? null : read.content.findDiffStart(after.content);
-    if (start === null) {
-      writing.reader.adopt(after);
+    const reading = reader.reading();
+    const read = reading.doc;
+    const differs = read === after ? null : read.content.findDiffStart(after.content);
+    if (differs === null) {
+      reader.adopt(after);
       return true;
     }
     let { a, b } = read.content.findDiffEnd(after.content)!;
-    const overlap = start - Math.min(a, b);
+    const overlap = differs - Math.min(a, b);
     if (overlap > 0) {
       a += overlap;
       b += overlap;
     }
+    const $differs = read.resolve(differs);
+    const start = $differs.parent.isTextblock ? $differs.before() : differs;
     const stored = unitsBetween(read, start, a);
-    const wanted = unitsBetween(after, start, b);
-    const most = Math.min(stored.length, wanted.length);
-    let lead = 0;
-    while (lead < most && stored[lead]!.key === wanted[lead]!.key) lead++;
-    let tail = 0;
-    while (
-      lead + tail < most &&
-      stored[stored.length - 1 - tail]!.key === wanted[wanted.length - 1 - tail]!.key
-    )
-      tail++;
-    const gone = stored.slice(lead, stored.length - tail);
-    const come = wanted.slice(lead, wanted.length - tail);
-    if (gone.length === 0 && come.length === 0) return true;
-    const oldEnd = tail > 0 ? stored[stored.length - tail]!.pos : a;
-    const newEnd = tail > 0 ? wanted[wanted.length - tail]!.pos : b;
-    const oldStart = gone[0]?.pos ?? oldEnd;
-    const newStart = come[0]?.pos ?? newEnd;
-    const starts = (units: readonly Unit[]) => units.every((unit) => unit.key === BLOCK_START);
-    const adds = gone.length === 0 && starts(come) && cutsNoContainer(after, newStart, newEnd);
-    const drops = come.length === 0 && starts(gone) && cutsNoContainer(read, oldStart, oldEnd);
-    if (!adds && !drops) return false;
-    writeRange(writing, after, oldStart, oldEnd, newStart, newEnd);
+    const edits = blockStartEdits(stored, unitsBetween(after, start, b));
+    if (edits === null) return false;
+    if (edits.length === 0) return true;
+    let wrote = false;
+    for (const edit of edits) {
+      if ("drop" in edit) {
+        const block = blockStartingAt(reading, edit.drop.pos);
+        const boundary = block < 0 ? -1 : boundaryAt(reading, block);
+        if (boundary < 0) continue;
+        reader.touch(boundary - 1, boundary + 1);
+        apply(sequence, [...retain(boundary), { delete: 1 }]);
+        wrote = true;
+        continue;
+      }
+      const $block = after.resolve(edit.add.pos);
+      const depth = $block.depth;
+      const path = pathOfSameContainer(reading, after, depth > 0 ? $block.before(depth) : 0, depth);
+      if (path === null) return false;
+      const place = stored[edit.before]?.pos ?? a;
+      insertBoundary(writing, indexAt(reading, place), $block.nodeAfter!, path);
+      wrote = true;
+    }
+    if (!wrote) return false;
   }
   return false;
 }
@@ -601,11 +682,15 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  * that replace nothing are written as formatting and as attributes of the same elements. Every
  * new boundary carries the formatting in force where it goes, and its path.
  *
+ * A step that deletes a block and keeps text that followed it never reuses that block's boundary:
+ * the text keeps its own boundary, or is given a new one when it had none.
+ *
  * A block with no boundary of its own can come or go when its neighbours change: the paragraph
  * for what stands before the first boundary, the one the reader adds in front of a list item's
  * content, and the one for what a block cannot hold. After each step the sequence is read again,
- * and a block start the editor has and the reading lacks is written as a boundary. No letter and
- * no inline item is written to make the two agree.
+ * and each block start the editor has and the reading lacks is written as a boundary, in front of
+ * the boundary of the text that follows it. No letter and no inline item is written to make the
+ * two agree.
  *
  * Returns false when it stopped at a step after which the sequence does not read as the editor's
  * document: two containers that share an id became neighbours and read as one.
