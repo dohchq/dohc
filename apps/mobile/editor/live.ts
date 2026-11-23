@@ -1,6 +1,5 @@
 // A page edited live (liveAdapter.ts). The page shows the text the app read until the provider is live, then the live
-// document replaces it in one paint. It takes edits only while live, and never binds a note format this build doesn't
-// know (format.ts), even one a later change gives the document.
+// document replaces it in one paint. It takes edits only while live.
 import { yDocToMarkdown } from "@dohc/ydoc-projection";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
 import { post } from "./bridge";

@@ -3,9 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { createLiveAdapter, LiveProvider } from "../../editor/liveAdapter";
 
-// The page's editor binds only the note format this build knows (editor/format.ts): a note in another format gets no
-// editor, takes no edits, and the page tells the app, which shows that the page needs a newer dohc.
-
 const hoisted = vi.hoisted(() => ({
   posted: [] as string[],
   mounted: [] as {
@@ -67,7 +64,6 @@ function note(format?: number) {
   return doc;
 }
 
-/** Counts every change made to the doc from here on. */
 function writes(doc: Y.Doc) {
   let count = 0;
   doc.on("update", () => count++);
