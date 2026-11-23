@@ -3,6 +3,7 @@ import { memo, useEffect } from "react";
 import { Pressable, StyleSheet, Text } from "react-native";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import { useTheme } from "../theme";
+import { symbolFallback } from "../symbolFallback";
 
 // Slack's section header, quieter than the chats under it: the name on the left, the chevron on the right.
 export const SectionHeader = memo(function SectionHeader({
@@ -40,7 +41,7 @@ export const SectionHeader = memo(function SectionHeader({
           size={12}
           weight="medium"
           tintColor={theme.muted}
-          fallback={null}
+          fallback={symbolFallback("chevron.down", 12, theme.muted)}
         />
       </Animated.View>
     </Pressable>
