@@ -1314,6 +1314,51 @@ fn capture_manifest_excludes_pending_conflict_installed_ydoc_asset() {
 }
 
 #[test]
+fn capture_manifest_seeds_a_placed_folder_marker_whoever_wrote_it() {
+    use dohc_engine_domain::capture_manifest_seed;
+
+    let (_scratch, mut store) = open_store();
+    let write = |path: &str, object_id: &str| WriteText {
+        workspace_id: WS.to_owned(),
+        version_id: VERSION.to_owned(),
+        object_id: object_id.to_owned(),
+        path: path.to_owned(),
+        text: "rule".to_owned(),
+        moment_id: format!("m-{object_id}"),
+        request_id: None,
+        metadata_origin: "sync".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 10,
+    };
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            write_text_in_tx(tx, &write("team/.dohc-access", "obj-placed-marker"))?;
+            write_text_in_tx(tx, &write("team/notes.md", "obj-synced-note"))?;
+            // Both files reached disk.
+            tx.execute(
+                "DELETE FROM materialization_jobs WHERE workspace_id = ?1",
+                [WS],
+            )
+            .map_err(DomainError::sql_corrupt)?;
+            write_text_in_tx(tx, &write("crew/.DOHC-ACCESS", "obj-waiting-marker"))?;
+            Ok::<_, DomainError>(())
+        })
+        .expect("write synced files");
+
+    let seeded: Vec<String> = capture_manifest_seed(&store, WS, VERSION)
+        .expect("capture manifest seed")
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    // A folder renamed while dohc was closed must retire its old marker, so
+    // the first scan has to know the marker was on disk. A marker still
+    // waiting to be placed, and other synced files, stay out.
+    assert_eq!(seeded, vec!["team/.dohc-access".to_owned()]);
+}
+
+#[test]
 fn capture_manifest_ignores_another_versions_unwritten_switch_write() {
     use dohc_engine_domain::store::{CAPTURE_ORIGIN, text_blob_sha256};
     use dohc_engine_domain::{capture_manifest_seed, switch_projection_job_id};
