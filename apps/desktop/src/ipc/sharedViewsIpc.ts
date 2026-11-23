@@ -49,6 +49,7 @@ import {
   SharePinInvalidError,
   sharePinAtStatedLevel,
   shareViewIdentitySelector,
+  shareViewSendsFiles,
   recordedShareSelector,
 } from "../workspaces/shareViewRecords";
 import { type ShareAccess, shareAccessRank } from "@dohc/security-contract/share-selector";
@@ -218,24 +219,27 @@ export function registerSharedViewsIpcHandlers<
   const accessStatements = new Map<string, number>();
   const accessStatementsFor = (workspaceId: string) => accessStatements.get(workspaceId) ?? 0;
 
+  // True when the copy can take its level: it has the identity, or its levels
+  // list no Edit, so it sends no file changes and needs none.
   async function recordShareViewIdentity(
     workspace: RegistryEntry & { attachmentId: symbol },
   ): Promise<boolean> {
     await warmCredentialCache().catch(() => undefined);
     const credentials = currentCredentials();
-    const grantedSelector = shareViewIdentitySelector({
-      shareView: workspace.shareView,
-      relayUrl: credentials?.relayUrl,
-      relayUrlsMatch,
-    });
     if (
-      !grantedSelector ||
       !credentials?.relayUrl ||
       !workspace.shareView?.recipientUserId ||
       workspace.shareView.recipientUserId !== credentials.userId ||
       workspace.shareView.ended
     )
       return false;
+    if (!shareViewSendsFiles(workspace.shareView)) return true;
+    const grantedSelector = shareViewIdentitySelector({
+      shareView: workspace.shareView,
+      relayUrl: credentials.relayUrl,
+      relayUrlsMatch,
+    });
+    if (!grantedSelector) return false;
     const recorded = await receivedShareEngine
       .relayFor({
         engineWorkspaceId: workspace.workspaceId,
@@ -572,26 +576,27 @@ export function registerSharedViewsIpcHandlers<
           recipientUserId: credentials.userId,
         };
         await setWorkspaceShareView(created.workspaceId, shareView);
+        // Before the first pull: a share view that writes back needs its own
+        // sync identity, and the pull is what gives it the share cursor that
+        // makes local writes journal. A membership at View can still list Edit
+        // in a folder, so this runs whatever the stated level.
+        //
+        // Soft. Opening a share is a read, and a failure here costs the
+        // recipient editing, not what they were given: the copy opens at
+        // View, and a refresh that finds Edit records the identity and
+        // pins Edit.
+        const recorded = await workspaceAuthorities
+          .withBinding(authorityBinding, (lease) =>
+            recordShareViewIdentity({
+              ...canonicalWorkspaceFor(lease),
+              shareView: { ...shareView, grantedSelector },
+            }),
+          )
+          .catch((error) => {
+            console.error("[desktop] share view identity:", error);
+            return false;
+          });
         if (statedEdit) {
-          // Before the first pull: a share view that writes back needs its own
-          // sync identity, and the pull is what gives it the share cursor that
-          // makes local writes journal.
-          //
-          // Soft. Opening a share is a read, and a failure here costs the
-          // recipient editing, not what they were given: the copy opens at
-          // View, and a refresh that finds Edit records the identity and
-          // pins Edit.
-          const recorded = await workspaceAuthorities
-            .withBinding(authorityBinding, (lease) =>
-              recordShareViewIdentity({
-                ...canonicalWorkspaceFor(lease),
-                shareView: { ...shareView, grantedSelector },
-              }),
-            )
-            .catch((error) => {
-              console.error("[desktop] share view identity:", error);
-              return false;
-            });
           const written = requireWorkspace(created.workspaceId).shareView;
           if (
             recorded &&
