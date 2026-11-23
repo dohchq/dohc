@@ -4634,10 +4634,10 @@ fn a_member_view_refuses_general_agent_chats_and_direct_messages() {
     // Channels this store already holds that are not Groups: its own General,
     // its agent's chat, and a direct message.
     LinkedChatStore::new(&mut engine)
-        .ensure_general_channel("ws", "general-local", 10, &NoFaults)
+        .ensure_general_channel("ws", 10, &NoFaults)
         .expect("general");
     LinkedChatStore::new(&mut engine)
-        .ensure_agent_channel("ws", "agent-local", "agent", "Agent", 10, &NoFaults)
+        .ensure_agent_channel("ws", "agent", "Agent", 10, &NoFaults)
         .expect("agent chat");
     LinkedChatStore::new(&mut engine)
         .create_channel("ws", "dm-local", "Bo", ChatChannelKind::Dm, 10, &NoFaults)
@@ -5036,6 +5036,7 @@ fn note_share_relay(versions: &[Vec<u8>]) -> PagedShareRelay {
                     .collect(),
                 next_cursor: versions.len() as i64,
                 has_more: false,
+                reach_signatures: None,
             },
         )],
     )
@@ -5241,6 +5242,7 @@ fn note_behind_empty_log_pages(empty_pages: i64, note: &[u8]) -> PagedShareRelay
         ops,
         next_cursor,
         has_more,
+        reach_signatures: None,
     };
     let sha256 = dohc_engine_storage::hex_sha256(note);
     PagedShareRelay::new(
