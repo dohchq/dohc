@@ -19,8 +19,12 @@ import {
   ORDINARY_FOLD_RUN_PAGES,
   type OrdinaryFoldValidator,
 } from "./storage/ordinaryActivationFold.js";
-import { ServiceActivationStaleCut } from "./storage/ordinaryActivationSource.js";
+import {
+  ServiceActivationLineageEnding,
+  ServiceActivationStaleCut,
+} from "./storage/ordinaryActivationSource.js";
 import { SERVICE_ACTIVATIONS } from "./storage/serviceActivationSchema.js";
+import { releaseRetiredLiveDelivery } from "./storage/liveDeliveryReservations.js";
 import { serverLogLine } from "./serverLogWords.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import {
@@ -368,6 +372,100 @@ it("an activation refused for its baseline names why in the server log", async (
   expect(serverLogLine((await activate(note, validate)).outcome)).toBe(
     "ServerLogError: Service activation requires a new live baseline: already-registered.",
   );
+});
+
+/**
+ * The note's text replaced while it was off, as accepting a sent change or a History restore does: the owner's engine
+ * writes the new text, then seeds a new lineage from it, and captures that lineage.
+ */
+function replacedLineage(note: TypedRelayNote) {
+  const seed = markdownToYDoc("Accepted change\n", { clientID: 3 }),
+    baseline = Y.encodeStateAsUpdate(seed);
+  seed.destroy();
+  const document = {
+    ...note.document,
+    lineageClaimId: createHash("sha256").update(baseline).digest("hex"),
+  };
+  const projected = createLiveMarkdownRegistrationValidator(ACTIVATION.validation)({
+    document,
+    currentPath: note.path,
+    checkpoint: baseline,
+  });
+  if (projected.kind !== "accepted") throw new Error("Invalid replaced note fixture.");
+  note.appendWrite("accepted-change", projected.evidence, true);
+  const baseRelaySeq = note.appendUpdate(baseline, {
+    isBaseState: true,
+    lineageClaimId: document.lineageClaimId,
+  });
+  const captured = note.captureAt(baseline);
+  const baseOriginSeq = Number(
+    note.raw.prepare("SELECT origin_seq FROM sync_relay_log WHERE relay_seq=?").get(baseRelaySeq)!
+      .origin_seq,
+  );
+  return {
+    document,
+    capture: {
+      ...captured,
+      activationId: `ordinary-activation-${"b".repeat(64)}`,
+      baselineBytes: Buffer.from(baseline),
+      source: { ...captured.source, ...document, baseOriginSeq, baseRelaySeq },
+    },
+  };
+}
+const liveDocumentRows = (note: TypedRelayNote) =>
+  note.raw
+    .prepare(
+      "SELECT lineage_claim_id,lineage_state,admission_state,replaces_lineage_claim_id FROM sync_relay_live_documents ORDER BY lineage_state DESC",
+    )
+    .all();
+
+it("a note whose text was replaced while it was off goes live on its new lineage", async () => {
+  const note = await typedRelayNote(100);
+  const validate = validation();
+  expect((await activate(note, validate)).outcome).toMatchObject({ replayed: false });
+  note.raw
+    .prepare(
+      `UPDATE ${SERVICE_ACTIVATIONS} SET retire_requested_at_ms=3,retire_restore_generation=1,retire_accepted_cursor=0,
+        retired_at_ms=3,retired_boundary_json='null',state_bytes=NULL`,
+    )
+    .run();
+  releaseRetiredLiveDelivery(
+    note.deployment.storage as unknown as StorageContext,
+    note.document,
+    note.host.hostId,
+  );
+  const replaced = replacedLineage(note);
+  expect((await activate(note, validate, replaced.capture)).outcome).toEqual({
+    document: replaced.document,
+    replayed: false,
+    completed: false,
+  });
+  expect(liveDocumentRows(note)).toEqual([
+    {
+      lineage_claim_id: note.document.lineageClaimId,
+      lineage_state: "retired",
+      admission_state: "closed",
+      replaces_lineage_claim_id: null,
+    },
+    {
+      lineage_claim_id: replaced.document.lineageClaimId,
+      lineage_state: "current",
+      admission_state: "open",
+      replaces_lineage_claim_id: note.document.lineageClaimId,
+    },
+  ]);
+});
+
+it("a note on a new lineage waits while its last live session is still open", async () => {
+  const note = await typedRelayNote(100);
+  const validate = validation();
+  expect((await activate(note, validate)).outcome).toMatchObject({ replayed: false });
+  const before = liveDocumentRows(note);
+  const replaced = replacedLineage(note);
+  expect((await activate(note, validate, replaced.capture)).outcome).toBeInstanceOf(
+    ServiceActivationLineageEnding,
+  );
+  expect(liveDocumentRows(note)).toEqual(before);
 });
 
 // One keystroke past today's entry limit: the activation folds its rows into a checkpoint before its last read.

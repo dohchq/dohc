@@ -380,6 +380,82 @@ test("@server-copy-follows-owner a link shows the owner's latest save of a note 
       );
     });
 
+    await test.step("a note stopped, deleted and restored from History goes live again after Resume, with the owner typing through it and a link editor's edit reaching the owner", async () => {
+      await page.keyboard.press("ControlOrMeta+w");
+      await expect(editor(page)).toHaveCount(0);
+      await expect
+        .poll(() => status(live), { timeout: 120_000, intervals: [1000] })
+        .toBe("retired");
+      const api = (
+        name: "deleteWorkspacePath" | "listEngineMoments" | "restoreEngineMomentFile",
+        payload: Record<string, unknown>,
+      ) =>
+        page.evaluate(
+          ({ name, payload }) =>
+            (
+              (window as unknown as { dohcDesktop: Api }).dohcDesktop[name] as (
+                payload: unknown,
+              ) => Promise<unknown>
+            )(payload),
+          { name, payload },
+        );
+      await api("deleteWorkspacePath", { workspaceId, relativePath: live });
+      await expect.poll(() => ownerFileOrEmptyMidRename(live), { timeout: 30_000 }).toBe("");
+      const deletion = async () =>
+        (
+          (await api("listEngineMoments", { workspaceId, limit: 50 })) as {
+            moments?: { id: string; path: string; operation: string }[];
+          }
+        ).moments?.find((moment) => moment.path === live && moment.operation === "delete")?.id;
+      await expect.poll(deletion, { timeout: 30_000 }).toBeTruthy();
+      await api("restoreEngineMomentFile", { workspaceId, momentId: await deletion() });
+      await expect
+        .poll(() => ownerFileOrEmptyMidRename(live), { timeout: 30_000 })
+        .toContain("A later save after the Stop.");
+
+      await openOnDesktop();
+      const typist = typeNumberedWordsUntilStopped(page, "restored");
+      await expect.poll(async () => typist.words.length, { timeout: 30_000 }).toBeGreaterThan(5);
+      await page.evaluate(
+        ({ workspaceId, path }) =>
+          (window as unknown as { dohcDesktop: Api }).dohcDesktop.resumeOwnerLiveDocument({
+            workspaceId,
+            path,
+          }),
+        { workspaceId, path: live },
+      );
+      const resumedAt = typist.words.length;
+      await expect
+        .poll(async () => typist.words.length, { timeout: 30_000 })
+        .toBeGreaterThan(resumedAt + 5);
+      await typist.stop();
+      await expect
+        .poll(
+          async () => (await ownerFileOrEmptyMidRename(live)).includes(typist.words.join(" ")),
+          {
+            message: "every word the owner typed through the Resume is in the owner's file",
+            timeout: 60_000,
+          },
+        )
+        .toBe(true);
+      await page.keyboard.press("ControlOrMeta+w");
+      await expect(editor(page)).toHaveCount(0);
+      await expect.poll(() => status(live), { timeout: 180_000, intervals: [1000] }).toBe("ready");
+      const box = await openLinkEditor();
+      await expect(box).toContainText(typist.words.at(-1)!, { timeout: 60_000 });
+      const marker = ` restored-${randomBytes(6).toString("hex")}`;
+      await box.getByText(typist.words.at(-1)!, { exact: false }).click({ timeout: 15_000 });
+      await linkEditor.keyboard.press("End");
+      await linkEditor.keyboard.insertText(marker);
+      await expect
+        .poll(async () => (await ownerFileOrEmptyMidRename(live)).includes(marker.trim()), {
+          message: "after the restore and Resume, the link editor's edit reaches the owner's file",
+          timeout: 120_000,
+          intervals: [1000],
+        })
+        .toBe(true);
+    });
+
     console.log(`[server-copy-follows-owner] timings:\n${timings.join("\n")}`);
     expect(shared.failures).toEqual([]);
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
