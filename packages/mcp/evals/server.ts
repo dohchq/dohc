@@ -5,16 +5,17 @@
 import { appendFileSync, writeFileSync } from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createDohcMcpServer } from "../src/server";
-import type { DatasetSnapshot } from "./case";
+import type { DatasetSnapshot, FrontendVerificationRecord } from "./case";
 import { CASES } from "./cases";
 import { fakeDesktop } from "./desktop";
 import { EVERYDAY_CASES } from "./everydayCases";
 
-const [caseId, root, unansweredLog, homeArg, writesLog, snapshotsFile] = process.argv.slice(2);
+const [caseId, root, unansweredLog, homeArg, writesLog, snapshotsFile, verificationsFile] =
+  process.argv.slice(2);
 const evalCase = [...CASES, ...EVERYDAY_CASES].find((candidate) => candidate.id === caseId);
 if (!evalCase || !root || !unansweredLog) {
   process.stderr.write(
-    "usage: server.ts <case id> <workspace folder> <unanswered-request log> [home folder] [writes log] [snapshots file]\n",
+    "usage: server.ts <case id> <workspace folder> <unanswered-request log> [home folder] [writes log] [snapshots file] [verifications file]\n",
   );
   process.exit(1);
 }
@@ -36,9 +37,18 @@ const onDatasetSnapshot = snapshotsFile
     }
   : undefined;
 
+const frontendVerifications: Record<string, FrontendVerificationRecord> = {};
+const onFrontendVerified = verificationsFile
+  ? (appRoot: string, record: FrontendVerificationRecord) => {
+      frontendVerifications[appRoot] = record;
+      writeFileSync(verificationsFile, JSON.stringify(frontendVerifications));
+    }
+  : undefined;
+
 const desktopOptions = {
   ...(onWrite ? { onWrite } : {}),
   ...(onDatasetSnapshot ? { onDatasetSnapshot } : {}),
+  ...(onFrontendVerified ? { onFrontendVerified } : {}),
 };
 
 const answers = {

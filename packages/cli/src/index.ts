@@ -717,7 +717,8 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
   if (result !== null && "kind" in result && result.kind === "collections-refused") {
     return result.refusal.words;
   }
-  if (result === null || !("ok" in result) || result.ok !== false) return null;
+  if (result === null || !("ok" in result) || result.ok !== false || !("reason" in result))
+    return null;
   return "notice" in result && result.notice
     ? `${result.reason} ${result.notice.title}: ${result.notice.body}`
     : result.reason;
@@ -876,6 +877,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
           result !== null &&
           (("remaining" in result && result.remaining.length > 0) ||
             ("kind" in result && result.kind === "partial") ||
+            ("kind" in result && result.kind === "frontendVerified" && !result.ok) ||
             ("disconnectError" in result && result.disconnectError !== null))
             ? 1
             : 0,

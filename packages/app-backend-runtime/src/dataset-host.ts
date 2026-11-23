@@ -321,7 +321,10 @@ function synchronous<T>(run: () => T): T {
  * `undo`, the input its reverse action takes, within DATASET_UNDO_BYTES, so
  * every change it makes has a way back.
  */
-function missingUndo(operation: DatasetOperation, result: JsonValue): AppOperationRefusal | null {
+export function missingUndo(
+  operation: DatasetOperation,
+  result: JsonValue,
+): AppOperationRefusal | null {
   const undo =
     result !== null &&
     typeof result === "object" &&

@@ -5,12 +5,18 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import type { DatasetSnapshot, EvalCase, RecordedCall, RunRecord } from "./case";
+import type {
+  DatasetSnapshot,
+  EvalCase,
+  FrontendVerificationRecord,
+  RecordedCall,
+  RunRecord,
+} from "./case";
 import {
+  evalServerArgs,
+  readEvalJsonRecord,
   sampleEnvironment,
   seedWorkspace,
   workspaceFileHashes,
@@ -325,8 +331,6 @@ export async function runCodexSample(input: {
   keepSessionRoute: boolean;
   skillPrompt?: string;
 }): Promise<SampleOutcome & { refusals?: string[] }> {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
   const sampleDir = await mkdtemp(join(tmpdir(), "dohc-eval-codex-"));
   const root = join(sampleDir, "workspace");
   const home = join(sampleDir, "home");
@@ -334,22 +338,21 @@ export async function runCodexSample(input: {
   const unansweredLog = join(sampleDir, "unanswered.log");
   const writesLog = join(sampleDir, "mcp-writes.log");
   const snapshotsFile = join(sampleDir, "datasets.json");
+  const verificationsFile = join(sampleDir, "verifications.json");
   const startedAt = Date.now();
   try {
     await seedWorkspace(root, input.evalCase, home);
     const initialHashes = await workspaceFileHashes(root);
     await prepareIsolatedCodexHome(codexHome, process.env, input.skillPrompt);
-    const serverArgs = [
-      "--import",
-      tsxLoader,
-      join(here, "server.ts"),
-      input.evalCase.id,
+    const serverArgs = evalServerArgs({
+      caseId: input.evalCase.id,
       root,
       unansweredLog,
       home,
       writesLog,
       snapshotsFile,
-    ];
+      verificationsFile,
+    });
     const codexArgs = codexArguments({
       prompt: input.evalCase.prompt,
       model: input.model,
@@ -410,15 +413,9 @@ export async function runCodexSample(input: {
       };
     const mcpWritesRaw = await readFile(writesLog, "utf8").catch(() => "");
     const mcpWrittenHashes = parseMcpWritesLog(mcpWritesRaw);
-    const snapshotsRaw = await readFile(snapshotsFile, "utf8").catch(() => "");
-    let datasetSnapshots: Record<string, DatasetSnapshot> | undefined;
-    if (snapshotsRaw.trim()) {
-      try {
-        datasetSnapshots = JSON.parse(snapshotsRaw) as Record<string, DatasetSnapshot>;
-      } catch {
-        datasetSnapshots = undefined;
-      }
-    }
+    const datasetSnapshots = await readEvalJsonRecord<DatasetSnapshot>(snapshotsFile);
+    const frontendVerifications =
+      await readEvalJsonRecord<FrontendVerificationRecord>(verificationsFile);
     const finalHashes = await workspaceFileHashes(root);
     const finalFiles = await workspaceFiles(root);
     const calls = appendUnmanagedFileWrites(
@@ -432,6 +429,7 @@ export async function runCodexSample(input: {
       text: transcript.text,
       files: finalFiles,
       ...(datasetSnapshots ? { datasetSnapshots } : {}),
+      ...(frontendVerifications ? { frontendVerifications } : {}),
     };
     return {
       harness: "Codex CLI",

@@ -22,6 +22,7 @@
   "app.collection.revoke",
   "app.create",
   "app.detect",
+  "app.frontend.verify",
   "app.link.create",
   "app.local.check",
   "app.local.launch",

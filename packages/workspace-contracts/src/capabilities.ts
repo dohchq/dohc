@@ -1279,6 +1279,14 @@ const LISTED_CAPABILITIES = {
     mcpReason:
       "Cancel a running Collection request in the workspace, identified by its invocationId. Shared profiles omit the multiplexed tool.",
   }),
+  "app.frontend.verify": capability(
+    "Verify a candidate or approved local app frontend in dohc's sandbox against an empty ephemeral Collection.",
+    {
+      ipcReason:
+        "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
+      mcp: { owner: ["dohc_publish_app"] },
+    },
+  ),
   "app.link.create": capability("Create a share link for an app.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",

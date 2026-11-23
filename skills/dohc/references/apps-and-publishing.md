@@ -82,6 +82,38 @@ window.addEventListener("message", (event) => {
 
 Other app channel operations: `backend.upload` (`name`, `contentType`, `bytesBase64`, `idempotencyKey`), `backend.file` (`fileId`, `operation`, `input`), `backend.attempt` (`operation`, `request`), and for document-Collection share-link apps: `collection.list` and `collection.create`.
 
+## Verifying an app frontend (`dohc_publish_app` `verifyFrontend`)
+
+Before publishing or handing an app to a user, verify its compiled frontend inside dohc's real sandboxed document, CSP, and `dohc-app-channel` broker with `{ action: "verifyFrontend", workspaceId, appRoot }` (candidate source) or `{ action: "verifyFrontend", workspaceId, publicationId }` (active local publication). Specify exactly one of `appRoot` or `publicationId`.
+
+- Runs completely offline against a fresh, empty ephemeral Collection database (never reads or mutates live Collection rows, uploaded files, or workspace files).
+- Catches manifest/input errors, bundle compile errors, CSP violations (inline scripts, native form submission without `event.preventDefault()`), uncaught page/console errors, broken `dohc-app-channel` handshakes, malformed broker messages, and unapproved operations.
+- Optional checks:
+  - `expectStartupBackend`: array of `{ op?, operation?, status?, refusalCode? }` expected during startup.
+  - `steps`: ordered UI checks (`{ kind: "waitFor", selector, textIncludes? }`, `{ kind: "fill", selector, value }`, `{ kind: "click", selector, expectBackend? }`).
+  - `timeoutMs`: `1000`–`30000` (default `10000`).
+- Use `dohc_test_app` for quick folder detection and entry presence checks; use `verifyFrontend` to compile and run the frontend end to end against an empty ephemeral Collection.
+
+```json
+{
+  "request": {
+    "action": "verifyFrontend",
+    "workspaceId": "<workspaceId>",
+    "appRoot": "apps/booking",
+    "steps": [
+      { "kind": "fill", "selector": "#name", "value": "Ada" },
+      { "kind": "fill", "selector": "#seats", "value": "5" },
+      {
+        "kind": "click",
+        "selector": "#submit",
+        "expectBackend": { "op": "backend.invoke", "operation": "createBooking", "status": 200 }
+      },
+      { "kind": "waitFor", "selector": "#status", "textIncludes": "Booked" }
+    ]
+  }
+}
+```
+
 ## Local approval and launch (`dohc_publish_app`)
 
 Pass `{ request: { action, ... } }` to `dohc_publish_app`:

@@ -12,7 +12,13 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { DatasetSnapshot, EvalCase, RecordedCall, RunRecord } from "./case";
+import type {
+  DatasetSnapshot,
+  EvalCase,
+  FrontendVerificationRecord,
+  RecordedCall,
+  RunRecord,
+} from "./case";
 
 const BUILT_IN_TOOLS = "Read,Glob,Grep,Edit,Write";
 const MCP_PREFIX = "mcp__dohc__";
@@ -259,6 +265,45 @@ export function claudeArguments(input: {
   ];
 }
 
+/** Builds the shared stdio MCP server argv used by both Claude and Codex eval harnesses. */
+export function evalServerArgs(input: {
+  caseId: string;
+  root: string;
+  unansweredLog: string;
+  home: string;
+  writesLog?: string;
+  snapshotsFile: string;
+  verificationsFile: string;
+}): string[] {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+  return [
+    "--import",
+    tsxLoader,
+    join(here, "server.ts"),
+    input.caseId,
+    input.root,
+    input.unansweredLog,
+    input.home,
+    input.writesLog ?? "",
+    input.snapshotsFile,
+    input.verificationsFile,
+  ];
+}
+
+/** Reads an optional JSON record written by evals/server.ts. */
+export async function readEvalJsonRecord<T>(
+  filePath: string,
+): Promise<Record<string, T> | undefined> {
+  const raw = await readFile(filePath, "utf8").catch(() => "");
+  if (!raw.trim()) return undefined;
+  try {
+    return JSON.parse(raw) as Record<string, T>;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runClaudeSample(input: {
   evalCase: EvalCase;
   model: string;
@@ -266,13 +311,12 @@ export async function runClaudeSample(input: {
   keepSessionRoute: boolean;
   skillPrompt?: string;
 }): Promise<SampleOutcome> {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
   const sampleDir = await mkdtemp(join(tmpdir(), "dohc-eval-"));
   const root = join(sampleDir, "workspace");
   const home = join(sampleDir, "home");
   const unansweredLog = join(sampleDir, "unanswered.log");
   const snapshotsFile = join(sampleDir, "datasets.json");
+  const verificationsFile = join(sampleDir, "verifications.json");
   const mcpConfigPath = join(sampleDir, "mcp.json");
   try {
     await seedWorkspace(root, input.evalCase, home);
@@ -282,17 +326,14 @@ export async function runClaudeSample(input: {
         mcpServers: {
           dohc: {
             command: process.execPath,
-            args: [
-              "--import",
-              tsxLoader,
-              join(here, "server.ts"),
-              input.evalCase.id,
+            args: evalServerArgs({
+              caseId: input.evalCase.id,
               root,
               unansweredLog,
               home,
-              "",
               snapshotsFile,
-            ],
+              verificationsFile,
+            }),
           },
         },
       }),
@@ -348,15 +389,9 @@ export async function runClaudeSample(input: {
               : undefined));
     const harness = transcript.harness ? { harness: transcript.harness } : {};
     if (error) return { error, usage: transcript.usage, ...harness };
-    const snapshotsRaw = await readFile(snapshotsFile, "utf8").catch(() => "");
-    let datasetSnapshots: Record<string, DatasetSnapshot> | undefined;
-    if (snapshotsRaw.trim()) {
-      try {
-        datasetSnapshots = JSON.parse(snapshotsRaw) as Record<string, DatasetSnapshot>;
-      } catch {
-        datasetSnapshots = undefined;
-      }
-    }
+    const datasetSnapshots = await readEvalJsonRecord<DatasetSnapshot>(snapshotsFile);
+    const frontendVerifications =
+      await readEvalJsonRecord<FrontendVerificationRecord>(verificationsFile);
     return {
       ...harness,
       run: {
@@ -364,6 +399,7 @@ export async function runClaudeSample(input: {
         text: transcript.text,
         files: await workspaceFiles(root),
         ...(datasetSnapshots ? { datasetSnapshots } : {}),
+        ...(frontendVerifications ? { frontendVerifications } : {}),
       },
       usage: transcript.usage,
     };

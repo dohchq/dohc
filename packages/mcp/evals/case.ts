@@ -14,6 +14,23 @@ export interface DatasetSnapshot {
   databaseBase64: string;
 }
 
+export interface FrontendVerificationRecord {
+  mode: "observed" | "stand-in";
+  sourceRevision?: string;
+  ok: boolean;
+  stage: "compile" | "runtime" | "steps" | "complete";
+  expectStartupBackend?: unknown[];
+  requestedSteps?: unknown[];
+  steps?: Array<{ index: number; kind: string; ok: boolean }>;
+  brokerCalls: Array<{
+    op: string;
+    operation?: string;
+    status: number | null;
+    ok: boolean;
+    refusalCode?: string;
+  }>;
+}
+
 export interface EvalCase {
   id: string;
   /** `tool-use` is focused single-flow tool selection; `everyday` is multi-step user jobs. */
@@ -36,6 +53,7 @@ export interface EvalCase {
     options?: {
       onWrite?: (path: string, contentSha256: string) => void;
       onDatasetSnapshot?: (datasetPath: string, snapshot: DatasetSnapshot) => void;
+      onFrontendVerified?: (appRoot: string, record: FrontendVerificationRecord) => void;
     },
   ) => Record<string, DesktopAnswer> | Promise<Record<string, DesktopAnswer>>;
   /** What the person asks the agent. */
@@ -104,6 +122,8 @@ export interface RunRecord {
   files: Record<string, string>;
   /** Final approved SQLite checkpoints recorded by stateful eval desktops, by datasetPath. */
   datasetSnapshots?: Record<string, DatasetSnapshot>;
+  /** Latest verifyFrontend outcomes recorded by stateful eval desktops, by appRoot. */
+  frontendVerifications?: Record<string, FrontendVerificationRecord>;
 }
 
 export interface Check {

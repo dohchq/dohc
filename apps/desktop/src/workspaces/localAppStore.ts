@@ -225,6 +225,34 @@ export function createLocalAppStore(options: {
       authority.revision === value.authorityRevision
     );
   }
+  function readPublication(publicationId: string) {
+    const checked = row(publicationId),
+      storage = source(checked.kind);
+    const files = checked.candidate.files.map((metadata) => {
+      const stored = db
+        .prepare(
+          "SELECT content FROM " + storage.artifactTable + " WHERE publication_id=? AND path=?",
+        )
+        .get(publicationId, metadata.path);
+      if (
+        !stored ||
+        !(stored.content instanceof Uint8Array) ||
+        stored.content.byteLength !== metadata.byteLength ||
+        hash(stored.content) !== metadata.sha256
+      )
+        throw new Error("App bundle integrity check failed.");
+      return { ...metadata, bytes: Uint8Array.from(stored.content) };
+    });
+    return {
+      publicationId,
+      authorityRevision: checked.authorityRevision,
+      appRoot: checked.appRoot,
+      kind: checked.kind,
+      resourceId: checked.resourceId,
+      candidate: checked.candidate,
+      files,
+    };
+  }
   return {
     row,
     held,
@@ -392,29 +420,11 @@ export function createLocalAppStore(options: {
       return { kind: checked.kind, publicationId, authorityRevision };
     },
     browserPublication(publicationId: string) {
-      const checked = row(publicationId),
-        storage = source(checked.kind);
-      const files = checked.candidate.files.map((metadata) => {
-        const stored = db
-          .prepare(
-            "SELECT content FROM " + storage.artifactTable + " WHERE publication_id=? AND path=?",
-          )
-          .get(publicationId, metadata.path);
-        if (
-          !stored ||
-          !(stored.content instanceof Uint8Array) ||
-          stored.content.byteLength !== metadata.byteLength ||
-          hash(stored.content) !== metadata.sha256
-        )
-          throw new Error("App bundle integrity check failed.");
-        return { ...metadata, bytes: Uint8Array.from(stored.content) };
-      });
-      return {
-        publicationId,
-        authorityRevision: checked.authorityRevision,
-        appRoot: checked.appRoot,
-        files,
-      };
+      const { authorityRevision, appRoot, files } = readPublication(publicationId);
+      return { publicationId, authorityRevision, appRoot, files };
+    },
+    verificationPublication(publicationId: string) {
+      return readPublication(publicationId);
     },
     deleteResources(kind: LocalAppKind, resourceId: string) {
       options.assertCurrent();

@@ -2505,7 +2505,7 @@ const HAND_WRITTEN_SHARE_RULES: {
     request.args.request.action === "approveStaged" ||
     request.args.request.action === "discardStaged"
       ? "owner"
-      : "appRoot" in request.args.request
+      : "appRoot" in request.args.request && typeof request.args.request.appRoot === "string"
         ? "anywhere"
         : "owner",
   stopSync: "owner",
@@ -2711,7 +2711,7 @@ async function dispatch(
           args: {
             ...request.args,
             request:
-              "appRoot" in input && input.appRoot !== undefined
+              "appRoot" in input && typeof input.appRoot === "string"
                 ? {
                     ...input,
                     appRoot: paths.rebase(input.appRoot, "read"),

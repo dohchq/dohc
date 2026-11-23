@@ -75,6 +75,11 @@ export function createLocalOwnerAppPublicationHandler<
     publicationId: string,
     signal: AbortSignal,
   ): Promise<string>;
+  verifyFrontend?(
+    workspace: Workspace,
+    input: Extract<OwnerAppPublicationRequest, { action: "verifyFrontend" }>,
+    operation: Operation,
+  ): Promise<OwnerAppPublicationResult>;
 }) {
   type Prepared = Awaited<ReturnType<typeof prepareLocalAppPublication>>;
   const pending = new Map<
@@ -102,6 +107,7 @@ export function createLocalOwnerAppPublicationHandler<
       input.action !== "listLocal" &&
       input.action !== "checkLocal" &&
       input.action !== "launchLocal" &&
+      input.action !== "verifyFrontend" &&
       input.action !== "stage" &&
       input.action !== "listStaged" &&
       input.action !== "approveStaged" &&
@@ -268,6 +274,13 @@ export function createLocalOwnerAppPublicationHandler<
       current();
       if (!stage) throw new Error("dohc could not capture this app. Restart dohc and try again.");
       return OwnerAppPublicationResult.parse({ kind: "staged", stage });
+    }
+    if (input.action === "verifyFrontend") {
+      if (!deps.verifyFrontend)
+        throw new Error("App frontend verification is unavailable. Restart dohc and try again.");
+      const result = await deps.verifyFrontend(operation.workspace, input, operation);
+      current();
+      return OwnerAppPublicationResult.parse(result);
     }
     if (input.action === "withdraw" || input.action === "revokeCollection") {
       const local = await deps.datasetForWorkspace(operation.workspace, operation.signal);

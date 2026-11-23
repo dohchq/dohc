@@ -63,7 +63,7 @@ export interface LocalAppLaunchHost {
   launchSession(
     publicationId: string,
     signal: AbortSignal,
-    options?: { keepAlive?: boolean },
+    options?: { keepAlive?: boolean; observeBroker?: boolean },
   ): Promise<LocalAppLaunchSession>;
   close(): Promise<void>;
 }
@@ -228,6 +228,9 @@ export async function createLocalAppLaunchHost(options: {
         const browserLifetime = launchOptions?.keepAlive
           ? ""
           : `const poll=async()=>{if(stopped)return;try{const r=await fetch('/status',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal});if(!r.ok){stop();return;}}catch{stop();return;}setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${SESSION_MS});`;
+        const observe = launchOptions?.observeBroker
+          ? ",(event)=>{try{globalThis.__dohcVerifyObserve?.(JSON.stringify(event));}catch{}}"
+          : "";
         const script = `(()=>{
           const handoff=location.hash.slice(1),key='dohc-local-app-proof';history.replaceState(null,'','/bootstrap');
           const lifetime=new AbortController();let frame,proof,stopped=false;
@@ -240,7 +243,7 @@ export async function createLocalAppLaunchHost(options: {
           const request=proof?fetch('/resume',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal}):fetch('/session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handoff}),signal:lifetime.signal});
           request.then(async r=>{if(!r.ok)throw Error();const value=await r.json();if(stopped)return;proof=value.proof;saveProof(proof);
             frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';
-            (${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal}),lifetime.signal);
+            (${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal}),lifetime.signal${observe});
             addEventListener('message',event=>{const scheme=event.data?.kind==='dohc-color-scheme'?event.data.scheme:null;if(event.source===frame.contentWindow&&(scheme==='light'||scheme==='dark'))frame.style.colorScheme=scheme;},{signal:lifetime.signal});
             frame.srcdoc=value.html;document.body.append(frame);const status=document.getElementById('status');status.textContent='';status.style.margin='0';
             ${browserLifetime}

@@ -154,6 +154,7 @@ export function createOwnerAppPublicationHandler<
         input.action === "listLocal" ||
         input.action === "checkLocal" ||
         input.action === "launchLocal" ||
+        input.action === "verifyFrontend" ||
         input.action === "stage" ||
         input.action === "listStaged" ||
         input.action === "approveStaged" ||

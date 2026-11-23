@@ -8,9 +8,9 @@ import { describe, expect, it } from "vitest";
 import { cliResultSchemas } from "@dohc/cli/protocol";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { createDohcMcpServer } from "../src/server";
-import type { DatasetSnapshot, EvalCase, RunRecord } from "./case";
+import type { DatasetSnapshot, EvalCase, FrontendVerificationRecord, RunRecord } from "./case";
 import { CASES } from "./cases";
-import { seedWorkspace, workspaceFiles } from "./claude";
+import { evalServerArgs, readEvalJsonRecord, seedWorkspace, workspaceFiles } from "./claude";
 import { fakeDesktop } from "./desktop";
 import { EVERYDAY_CASES } from "./everydayCases";
 import { createEverydayDesktop } from "./everydayDesktop";
@@ -36,6 +36,7 @@ async function replay(
   const unansweredLog = join(dir, "unanswered.log");
   const misshapen: string[] = [];
   const datasetSnapshots: Record<string, DatasetSnapshot> = {};
+  const frontendVerifications: Record<string, FrontendVerificationRecord> = {};
   try {
     await seedWorkspace(root, evalCase, home);
     const answers = {
@@ -43,6 +44,9 @@ async function replay(
         ? await evalCase.setupDesktop(root, {
             onDatasetSnapshot: (datasetPath, snapshot) => {
               datasetSnapshots[datasetPath] = snapshot;
+            },
+            onFrontendVerified: (appRoot, record) => {
+              frontendVerifications[appRoot] = record;
             },
           })
         : {}),
@@ -97,6 +101,7 @@ async function replay(
         text,
         files: await workspaceFiles(root),
         ...(Object.keys(datasetSnapshots).length > 0 ? { datasetSnapshots } : {}),
+        ...(Object.keys(frontendVerifications).length > 0 ? { frontendVerifications } : {}),
       },
       unanswered: await readFile(unansweredLog, "utf8").catch(() => ""),
       misshapen,
@@ -611,6 +616,563 @@ describe("eval cases", () => {
     };
     const staleChecks = await grade(form.expect, staleFormRun, form.gradeRun);
     expect(staleChecks.some((c) => !c.pass && c.detail?.includes("stale revision"))).toBe(true);
+
+    // Negative counterexamples for frontend verification binding and response handling.
+    const skippedVerifyBooking: RunRecord = {
+      ...bookingSolved.run,
+      frontendVerifications: undefined,
+    };
+    const skippedVerifyChecks = await grade(booking.expect, skippedVerifyBooking, booking.gradeRun);
+    expect(
+      skippedVerifyChecks.some((c) => !c.pass && c.detail?.includes("verifyFrontend was not run")),
+    ).toBe(true);
+
+    const editedAfterVerifyBooking: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/app.js": `${bookingSolved.run.files["apps/booking/app.js"]}\n// edited after verify\n`,
+      },
+    };
+    const editedAfterChecks = await grade(
+      booking.expect,
+      editedAfterVerifyBooking,
+      booking.gradeRun,
+    );
+    expect(
+      editedAfterChecks.some((c) => !c.pass && c.detail?.includes("source changed after")),
+    ).toBe(true);
+
+    const failedVerifyFinance: RunRecord = {
+      ...financeSolved.run,
+      frontendVerifications: {
+        "apps/control-tower": {
+          ...financeSolved.run.frontendVerifications!["apps/control-tower"]!,
+          ok: false,
+          stage: "runtime",
+        },
+      },
+    };
+    const failedVerifyChecks = await grade(finance.expect, failedVerifyFinance, finance.gradeRun);
+    expect(
+      failedVerifyChecks.some((c) => !c.pass && c.detail?.includes("verifyFrontend failed")),
+    ).toBe(true);
+
+    const noStepsBookingVerify: RunRecord = {
+      ...bookingSolved.run,
+      frontendVerifications: {
+        "apps/booking": {
+          ...bookingSolved.run.frontendVerifications!["apps/booking"]!,
+          requestedSteps: [],
+        },
+      },
+    };
+    const noStepsChecks = await grade(booking.expect, noStepsBookingVerify, booking.gradeRun);
+    expect(noStepsChecks.some((c) => !c.pass && c.detail?.includes("click.expectBackend"))).toBe(
+      true,
+    );
+
+    const manifestOnlyEditBooking: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/broken.html": "<!doctype html><p>Broken</p>\n",
+        "apps/booking/app.publish.json": JSON.stringify({
+          ...JSON.parse(bookingSolved.run.files["apps/booking/app.publish.json"]!),
+          entryPath: "broken.html",
+        }),
+      },
+    };
+    const manifestOnlyChecks = await grade(
+      booking.expect,
+      manifestOnlyEditBooking,
+      booking.gradeRun,
+    );
+    expect(
+      manifestOnlyChecks.some((c) => !c.pass && c.detail?.includes("source changed after")),
+    ).toBe(true);
+
+    const commentOnlyBooking: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/app.js":
+          "// dohc-app-channel ports .onmessage backend.invoke bookSeat idempotencyKey addEventListener name seats\n",
+      },
+    };
+    const commentOnlyChecks = await grade(booking.expect, commentOnlyBooking, booking.gradeRun);
+    expect(commentOnlyChecks.some((c) => !c.pass)).toBe(true);
+
+    const syntaxBrokenBooking: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/app.js": `${bookingSolved.run.files["apps/booking/app.js"]}\nconst = ;\n`,
+      },
+    };
+    const syntaxBrokenChecks = await grade(booking.expect, syntaxBrokenBooking, booking.gradeRun);
+    expect(syntaxBrokenChecks.some((c) => !c.pass && c.detail?.includes("syntax error"))).toBe(
+      true,
+    );
+
+    const observedWithoutBookSeat: RunRecord = {
+      ...bookingSolved.run,
+      frontendVerifications: {
+        "apps/booking": {
+          ...bookingSolved.run.frontendVerifications!["apps/booking"]!,
+          mode: "observed",
+          brokerCalls: [],
+          steps: [{ index: 0, kind: "waitFor", ok: true }],
+        },
+      },
+    };
+    const observedWithoutBookChecks = await grade(
+      booking.expect,
+      observedWithoutBookSeat,
+      booking.gradeRun,
+    );
+    expect(
+      observedWithoutBookChecks.some(
+        (c) => !c.pass && c.detail?.includes("observed verifyFrontend"),
+      ),
+    ).toBe(true);
+
+    const fireAndForgetFinance: RunRecord = {
+      ...financeSolved.run,
+      files: {
+        ...financeSolved.run.files,
+        "apps/control-tower/app.js":
+          'window.addEventListener("message", (e) => { if (e.data?.kind === "dohc-app-channel") e.ports[0]?.postMessage({ id: "r1", op: "backend.invoke", operation: "listExpenses", input: {}, idempotencyKey: "r1" }); });\n',
+      },
+    };
+    const fireAndForgetChecks = await grade(finance.expect, fireAndForgetFinance, finance.gradeRun);
+    expect(
+      fireAndForgetChecks.some((c) => !c.pass && c.detail?.includes("port response handler")),
+    ).toBe(true);
+  });
+
+  it("everydayDesktop verifyFrontend validates manifests/inputs without fabricating broker success and supports injected observed verifiers", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dohc-eval-verify-"));
+    const root = join(dir, "workspace");
+    const home = join(dir, "home");
+    const unansweredLog = join(dir, "unanswered.log");
+    const recorded: Record<string, FrontendVerificationRecord> = {};
+    try {
+      await seedWorkspace(
+        root,
+        {
+          ...EVERYDAY_CASES[0]!,
+          files: {
+            "comment-app/index.html":
+              '<!doctype html><form><button type="submit">Go</button></form><div id="status">Booked</div>\n',
+            "comment-app/app.js":
+              "// dohc-app-channel ports .onmessage backend.invoke bookSeat preventDefault\n",
+            "comment-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html", "app.js"],
+              packageMap: {},
+            }),
+            "ts-in-js-app/index.html":
+              '<!doctype html><script type="module" src="./app.js"></script>\n',
+            "ts-in-js-app/app.js": "const x: number = 1;\n",
+            "ts-in-js-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html", "app.js"],
+              packageMap: {},
+            }),
+            "bad-tsx-app/index.html":
+              '<!doctype html><script type="module" src="./app.tsx"></script>\n',
+            "bad-tsx-app/app.tsx": "export function App() { return <div><span></div>; }\n",
+            "bad-tsx-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html", "app.tsx"],
+              packageMap: {},
+            }),
+            "nested-ts-enum-app/ui/index.html":
+              '<!doctype html><div id="booking:status">ok</div><script type="application/json">{"stop":"Kyoto"}</script><script nomodule src="./legacy.js"></script><script>const form = {}; form.onsubmit = (e) => e;</script><script type="module" src="./app.ts"></script>\n',
+            "nested-ts-enum-app/ui/app.ts": "export enum SeatState { Open = 'open' }\n",
+            "nested-ts-enum-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "ui/index.html",
+              inputs: ["ui/index.html", "ui/app.ts"],
+              packageMap: {},
+            }),
+            "inline-handler-app/index.html": '<!doctype html><button onclick="go()">Go</button>\n',
+            "inline-handler-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html"],
+              packageMap: {},
+            }),
+            "syntax-err-app/index.html":
+              '<!doctype html><div id="out">hi</div><script type="module" src="./app.js"></script>\n',
+            "syntax-err-app/app.js": "const = ;\n",
+            "syntax-err-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html", "app.js"],
+              packageMap: {},
+            }),
+            "missing-input-app/index.html":
+              '<!doctype html><script type="module" src="./missing.js"></script>\n',
+            "missing-input-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html", "missing.js"],
+              packageMap: {},
+            }),
+          },
+        },
+        home,
+      );
+      const answers = await createEverydayDesktop(
+        root,
+        { workspaceId: "ws-everyday" },
+        {
+          onFrontendVerified: (appRoot, record) => {
+            recorded[appRoot] = record;
+          },
+        },
+      );
+      const desktop = fakeDesktop({ root, answers, unansweredLog });
+      const server = createDohcMcpServer({
+        root,
+        home,
+        request: async (request) => {
+          const answer = await desktop(request);
+          expect(cliResultSchemas[request.verb].safeParse(answer).success).toBe(true);
+          return answer;
+        },
+      });
+      const client = new Client({ name: "eval-verify", version: "1" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+      const commentRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "comment-app",
+            steps: [
+              {
+                kind: "click",
+                selector: "button",
+                expectBackend: { op: "backend.invoke", operation: "bookSeat", status: 200 },
+              },
+              { kind: "waitFor", selector: "#status", textIncludes: "Booked" },
+            ],
+          },
+        },
+      });
+      expect(commentRes.structuredContent).toMatchObject({
+        kind: "frontendVerified",
+        startupOk: false,
+        stepsOk: false,
+        handshake: { delivered: false, messageCount: 0 },
+        brokerCalls: [],
+        steps: [],
+      });
+      expect(recorded["comment-app"]?.mode).toBe("stand-in");
+      expect(recorded["comment-app"]?.brokerCalls).toEqual([]);
+
+      const nestedTsRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "nested-ts-enum-app",
+            steps: [{ kind: "waitFor", selector: "#booking\\:status", textIncludes: "ok" }],
+          },
+        },
+      });
+      expect(nestedTsRes.isError).not.toBe(true);
+
+      const inlineHandlerRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "inline-handler-app",
+          },
+        },
+      });
+      expect(inlineHandlerRes.isError).toBe(true);
+      expect(JSON.stringify(inlineHandlerRes.structuredContent)).toContain("csp_violation");
+
+      const tsInJsRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "ts-in-js-app",
+          },
+        },
+      });
+      expect(tsInJsRes.isError).toBe(true);
+      expect(JSON.stringify(tsInJsRes.structuredContent)).toContain("compile_error");
+
+      const badTsxRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: { action: "verifyFrontend", workspaceId: "ws-everyday", appRoot: "bad-tsx-app" },
+        },
+      });
+      expect(badTsxRes.isError).toBe(true);
+      expect(JSON.stringify(badTsxRes.structuredContent)).toContain("compile_error");
+
+      // Approving a local publication pins its snapshot so breaking the live working copy does not fail publicationId verification.
+      const prepNested = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "prepareLocal",
+            workspaceId: "ws-everyday",
+            appRoot: "nested-ts-enum-app",
+          },
+        },
+      });
+      const prepBody = prepNested.structuredContent as {
+        approvalId: string;
+        candidateDigest: string;
+      };
+      const approvedNested = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "approve",
+            workspaceId: "ws-everyday",
+            approvalId: prepBody.approvalId,
+            candidateDigest: prepBody.candidateDigest,
+          },
+        },
+      });
+      const pubId = (approvedNested.structuredContent as { publicationId: string }).publicationId;
+      await writeFile(join(root, "nested-ts-enum-app", "ui", "app.ts"), "const = ;\n", "utf8");
+      const pubVerifyAfterEdit = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: { action: "verifyFrontend", workspaceId: "ws-everyday", publicationId: pubId },
+        },
+      });
+      expect(pubVerifyAfterEdit.isError).not.toBe(true);
+
+      const syntaxRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "syntax-err-app",
+          },
+        },
+      });
+      expect(syntaxRes.isError).toBe(true);
+      expect(JSON.stringify(syntaxRes.structuredContent)).toContain("compile_error");
+
+      const missingRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "missing-input-app",
+          },
+        },
+      });
+      expect(missingRes.isError).toBe(true);
+      expect(JSON.stringify(missingRes.structuredContent)).toContain("missing_input");
+
+      const argv = evalServerArgs({
+        caseId: "everyday-booking-capacity-app",
+        root,
+        unansweredLog,
+        home,
+        writesLog: join(dir, "writes.log"),
+        snapshotsFile: join(dir, "datasets.json"),
+        verificationsFile: join(dir, "verifications.json"),
+      });
+      expect(argv[argv.length - 1]).toBe(join(dir, "verifications.json"));
+      await writeFile(join(dir, "verifications.json"), JSON.stringify(recorded), "utf8");
+      expect(
+        await readEvalJsonRecord<FrontendVerificationRecord>(join(dir, "verifications.json")),
+      ).toEqual(recorded);
+
+      await client.close();
+      await server.close();
+
+      // Injected desktop verifier returning an engine-style sourceRevision must pass final-source grading
+      // because everydayDesktop computes sourceRevision with the same canonical hash as the grader.
+      const bookingCase = EVERYDAY_CASES.find((c) => c.id === "everyday-booking-capacity-app")!;
+      const injectedDir = await mkdtemp(join(tmpdir(), "dohc-eval-injected-"));
+      try {
+        const injRoot = join(injectedDir, "workspace");
+        const injHome = join(injectedDir, "home");
+        const injLog = join(injectedDir, "unanswered.log");
+        const injVerifications: Record<string, FrontendVerificationRecord> = {};
+        await seedWorkspace(injRoot, bookingCase, injHome);
+        const injAnswers = await createEverydayDesktop(
+          injRoot,
+          { workspaceId: "ws-everyday" },
+          {
+            onFrontendVerified: (appRoot, record) => {
+              injVerifications[appRoot] = record;
+            },
+            verifyFrontend: async (req) => ({
+              kind: "frontendVerified",
+              ok: true,
+              stage: "complete",
+              target: {
+                kind: "candidate",
+                appRoot: req.appRoot ?? "apps/booking",
+                sourceRevision: "f".repeat(64),
+              },
+              startupOk: true,
+              stepsOk: true,
+              handshake: { delivered: true, messageCount: 2 },
+              brokerCalls: [
+                { op: "backend.invoke", operation: "bookSeat", status: 200, ok: true },
+                {
+                  op: "backend.invoke",
+                  operation: "bookSeat",
+                  status: 409,
+                  ok: false,
+                  rejectedBy: "backend",
+                  reasonCode: "refused",
+                  refusalCode: "workshop_full",
+                },
+              ],
+              steps: (req.steps ?? []).map((step, index) => ({
+                index,
+                kind: step.kind,
+                ok: true,
+              })),
+              diagnostics: [],
+              externalRequestsBlocked: 0,
+            }),
+          },
+        );
+        const injDesktop = fakeDesktop({
+          root: injRoot,
+          answers: injAnswers,
+          unansweredLog: injLog,
+        });
+        const injServer = createDohcMcpServer({
+          root: injRoot,
+          home: injHome,
+          request: injDesktop,
+        });
+        const injClient = new Client({ name: "eval-injected", version: "1" });
+        const [ct, st] = InMemoryTransport.createLinkedPair();
+        await Promise.all([injServer.connect(st), injClient.connect(ct)]);
+        const injCalls: RunRecord["calls"] = [];
+        await bookingCase.solution.run!(async (tool, args) => {
+          const res = await injClient.callTool({ name: tool, arguments: args });
+          injCalls.push({ tool, args, ok: res.isError !== true });
+          return (res.structuredContent as Record<string, unknown> | undefined) ?? {};
+        });
+        await injClient.close();
+        await injServer.close();
+        const injRun: RunRecord = {
+          calls: injCalls,
+          text: bookingCase.solution.text ?? "",
+          files: await workspaceFiles(injRoot),
+          frontendVerifications: injVerifications,
+        };
+        expect(injVerifications["apps/booking"]?.mode).toBe("observed");
+        const injChecks = await grade(bookingCase.expect, injRun, bookingCase.gradeRun);
+        expect(injChecks.filter((c) => !c.pass)).toEqual([]);
+
+        // Inert JSON data blocks in index.html must not trigger JS syntax failures in the booking grader.
+        const withJsonDataBlock: RunRecord = {
+          ...injRun,
+          files: {
+            ...injRun.files,
+            "apps/booking/index.html": `${injRun.files["apps/booking/index.html"]}<script type="application/json">{"stop":"Kyoto"}</script>`,
+          },
+        };
+        const jsonDataChecks = await grade(
+          bookingCase.expect,
+          withJsonDataBlock,
+          bookingCase.gradeRun,
+        );
+        const bookingFrontendCheck = jsonDataChecks.find(
+          (c) =>
+            c.name ===
+            "apps/booking frontend provides booking controls wired to dohc-app-channel bookSeat",
+        );
+        expect(bookingFrontendCheck?.pass).toBe(true);
+
+        // Mid-verify workspace edit must invalidate the observed sourceRevision binding.
+        const raceVerifications: Record<string, FrontendVerificationRecord> = {};
+        const raceAnswers = await createEverydayDesktop(
+          injRoot,
+          { workspaceId: "ws-everyday" },
+          {
+            onFrontendVerified: (appRoot, record) => {
+              raceVerifications[appRoot] = record;
+            },
+            verifyFrontend: async (req) => {
+              await writeFile(
+                join(injRoot, "apps", "booking", "app.js"),
+                `${await readFile(join(injRoot, "apps", "booking", "app.js"), "utf8")}\n// mutated mid-verify\n`,
+                "utf8",
+              );
+              return {
+                kind: "frontendVerified",
+                ok: true,
+                stage: "complete",
+                target: { kind: "candidate", appRoot: req.appRoot ?? "apps/booking" },
+                startupOk: true,
+                stepsOk: true,
+                handshake: { delivered: true, messageCount: 1 },
+                brokerCalls: [],
+                steps: [],
+                diagnostics: [],
+                externalRequestsBlocked: 0,
+              };
+            },
+          },
+        );
+        const raceDesktop = fakeDesktop({
+          root: injRoot,
+          answers: raceAnswers,
+          unansweredLog: injLog,
+        });
+        const raceServer = createDohcMcpServer({
+          root: injRoot,
+          home: injHome,
+          request: raceDesktop,
+        });
+        const raceClient = new Client({ name: "eval-race", version: "1" });
+        const [rct, rst] = InMemoryTransport.createLinkedPair();
+        await Promise.all([raceServer.connect(rst), raceClient.connect(rct)]);
+        await raceClient.callTool({
+          name: "dohc_publish_app",
+          arguments: {
+            request: {
+              action: "verifyFrontend",
+              workspaceId: "ws-everyday",
+              appRoot: "apps/booking",
+            },
+          },
+        });
+        await raceClient.close();
+        await raceServer.close();
+        expect(raceVerifications["apps/booking"]?.sourceRevision).toBeUndefined();
+      } finally {
+        await rm(injectedDir, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("keeps public skill automations.yaml examples valid under parseAutomationsFile", async () => {

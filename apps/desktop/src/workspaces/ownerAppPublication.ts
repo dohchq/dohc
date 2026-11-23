@@ -116,6 +116,7 @@ export interface AppPublicationPreparationDependencies {
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   /** Resolves from the owner's approved catalog. Publication preparation cannot approve a dataset. */
   resolveDatasetRevision?(binding: AppDatasetRevisionLookup): Promise<DatasetRevision>;
+  onCollectionSchema?(text: string): void;
 }
 function describeJsonSyntaxLocation(error: unknown): string | undefined {
   if (!(error instanceof Error)) return undefined;
@@ -656,9 +657,8 @@ async function prepareAppSources(
     const file = selected.files.find((file) => file.path === schemaPath);
     if (!file || file.bytes.byteLength > 65_536)
       throw new Error("The collection schema is unavailable or too large.");
-    const parsed = parseCollectionSchema(
-      new TextDecoder("utf-8", { fatal: true }).decode(file.bytes),
-    );
+    const schemaText = new TextDecoder("utf-8", { fatal: true }).decode(file.bytes);
+    const parsed = parseCollectionSchema(schemaText);
     const versionError = collectionVersionError(parsed.reasons, schemaPath);
     if (versionError) throw new Error(versionError);
     if (
@@ -668,6 +668,7 @@ async function prepareAppSources(
       )
     )
       throw new Error("Collection fields do not match its schema.");
+    dependencies.onCollectionSchema?.(schemaText);
     capabilities.push(
       parseAppCollectionCapability({ ...declared.collection, schemaSha256: file.sha256 }),
     );

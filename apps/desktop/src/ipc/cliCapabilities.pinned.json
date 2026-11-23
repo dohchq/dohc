@@ -210,6 +210,7 @@
       "dataset.operation.cancel"
     ],
     "appPublication": [
+      "app.frontend.verify",
       "app.link.create",
       "app.local.list",
       "app.local.check",
@@ -437,6 +438,7 @@
     "document keep-outside-change": "capture.outside.keep",
     "workspace search": "workspace.search",
     "history agent-run-plan": "history.agent.run.plan",
-    "history undo-agent-run": "history.agent.run.undo"
+    "history undo-agent-run": "history.agent.run.undo",
+    "app verifyFrontend": "app.frontend.verify"
   }
 }

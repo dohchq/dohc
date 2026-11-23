@@ -18,10 +18,17 @@ import {
 } from "@dohc/security-contract/dataset";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import type { Check, EvalCase, RunRecord } from "./case";
-import { createEverydayDesktop } from "./everydayDesktop";
+import {
+  checkEvalScriptSyntax,
+  computeEvalAppSourceRevision,
+  createEverydayDesktop,
+  isEvalExecutableScriptTag,
+} from "./everydayDesktop";
 
 const WS = "ws-everyday";
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+const stripJsComments = (source: string) =>
+  source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 const uuid = (prefix: string, n: number) =>
   `${prefix}-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
@@ -291,6 +298,27 @@ function checkCollectionYamlValid(run: RunRecord, path: string, expectedFields: 
     pass: missing.length === 0,
     ...(missing.length > 0 ? { detail: `missing fields: ${missing.join(", ")}` } : {}),
   };
+}
+
+function checkFrontendVerifiedForFinalSource(
+  run: RunRecord,
+  appRoot: string,
+  extra?: (record: NonNullable<RunRecord["frontendVerifications"]>[string]) => string | null,
+): Check {
+  const record = run.frontendVerifications?.[appRoot];
+  const name =
+    record?.mode === "observed"
+      ? `${appRoot} passed observed verifyFrontend execution on its final source`
+      : `${appRoot} passed stand-in verifyFrontend static check on its final source`;
+  if (!record) return { name, pass: false, detail: "verifyFrontend was not run" };
+  if (!record.ok) return { name, pass: false, detail: `verifyFrontend failed at ${record.stage}` };
+  const expectedRev = computeEvalAppSourceRevision(run.files, appRoot);
+  if (!expectedRev || record.sourceRevision !== expectedRev) {
+    return { name, pass: false, detail: "app source changed after verifyFrontend" };
+  }
+  const reason = extra?.(record);
+  if (reason) return { name, pass: false, detail: reason };
+  return { name, pass: true };
 }
 
 function checkAppPublishDataset(
@@ -717,10 +745,15 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
     workspaceId: WS,
     setupDesktop: (root, options) => createEverydayDesktop(root, { workspaceId: WS }, options),
     prompt:
-      "Build a personal finance and health control tower in this workspace. Create a transactional Collection in `tracker/` with two tables: `expenses` (date, category, amount, note) and `checkins` (date, sleep_hours, workout_minutes). Approve it, add one expense (2026-11-22, Food, 18.5, Lunch) and one check-in (2026-11-22, 7.5 hours sleep, 40 workout minutes), then create a local web app in `apps/control-tower` connected to `tracker/dataset.json` via `app.publish.json` and `dohc-app-channel`, and prepare, approve, and launch it locally.",
+      "Build a personal finance and health control tower in this workspace. Create a transactional Collection in `tracker/` with two tables: `expenses` (date, category, amount, note) and `checkins` (date, sleep_hours, workout_minutes). Approve it, add one expense (2026-11-22, Food, 18.5, Lunch) and one check-in (2026-11-22, 7.5 hours sleep, 40 workout minutes), then create a local web app in `apps/control-tower` connected to `tracker/dataset.json` via `app.publish.json` and `dohc-app-channel` that handles channel responses and renders results in the page, verify the frontend with `dohc_publish_app` `verifyFrontend`, and prepare, approve, and launch it locally.",
     expect: {
       calls: [
         { tool: "dohc_dataset", args: { "request.action": "invoke" }, ok: true },
+        {
+          tool: "dohc_publish_app",
+          args: { "request.action": "verifyFrontend", "request.appRoot": "apps/control-tower" },
+          ok: true,
+        },
         {
           tool: "dohc_publish_app",
           args: { "request.action": "prepareLocal", "request.appRoot": "apps/control-tower" },
@@ -762,16 +795,66 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         checkDatasetJsonValid(run, "tracker/dataset.json"),
         checkAppPublishDataset(run, "apps/control-tower/app.publish.json", "tracker/dataset.json"),
       ];
-      const appText = Object.entries(run.files)
-        .filter(
-          ([path]) => path.startsWith("apps/control-tower/") && !path.endsWith("app.publish.json"),
-        )
-        .map(([, text]) => text)
-        .join("\n");
+      const appScripts = Object.entries(run.files).filter(
+        ([path]) => path.startsWith("apps/control-tower/") && /\.(?:c|m)?[jt]sx?$/i.test(path),
+      );
+      const syntaxProblems = appScripts
+        .map(([path, text]) => {
+          const err = checkEvalScriptSyntax(text, path);
+          return err ? `${path}: ${err}` : null;
+        })
+        .filter((x): x is string => x !== null);
+      const appText = stripJsComments(
+        Object.entries(run.files)
+          .filter(
+            ([path]) =>
+              path.startsWith("apps/control-tower/") && !path.endsWith("app.publish.json"),
+          )
+          .map(([, text]) => text)
+          .join("\n"),
+      );
+      const handlesPortResponses = /\.onmessage\b|addEventListener\s*\(\s*["']message["']/i.test(
+        appText.replace(/window\.addEventListener\s*\(\s*["']message["']/gi, ""),
+      );
       checks.push({
-        name: "apps/control-tower connects to dohc-app-channel and calls backend.invoke",
-        pass: appText.includes("dohc-app-channel") && appText.includes("backend.invoke"),
+        name: "apps/control-tower connects to dohc-app-channel, calls backend.invoke, and handles responses",
+        pass:
+          syntaxProblems.length === 0 &&
+          appText.includes("dohc-app-channel") &&
+          appText.includes("backend.invoke") &&
+          handlesPortResponses,
+        ...(syntaxProblems.length > 0
+          ? { detail: syntaxProblems.join("; ") }
+          : handlesPortResponses
+            ? {}
+            : { detail: "missing port response handler" }),
       });
+      checks.push(
+        checkFrontendVerifiedForFinalSource(run, "apps/control-tower", (record) => {
+          if (record.mode === "observed") {
+            const observedBackend = record.brokerCalls.some(
+              (c) => c.op === "backend.invoke" && c.ok,
+            );
+            const observedUi = (record.steps ?? []).some((s) => s.kind === "waitFor" && s.ok);
+            if (!observedBackend || !observedUi) {
+              return "observed verifyFrontend must record a passing backend.invoke call and waitFor step";
+            }
+            return null;
+          }
+          const requestedSteps = (record.requestedSteps ?? []) as Array<{
+            kind?: string;
+            expectBackend?: unknown;
+          }>;
+          const hasBackendCheck =
+            (record.expectStartupBackend?.length ?? 0) > 0 ||
+            requestedSteps.some((s) => s.kind === "click" && s.expectBackend !== undefined);
+          const hasUiCheck = requestedSteps.some((s) => s.kind === "waitFor");
+          if (!hasBackendCheck || !hasUiCheck) {
+            return "verifyFrontend must check both a backend.invoke call and rendered UI";
+          }
+          return null;
+        }),
+      );
       let def: DatasetDefinition | undefined;
       try {
         def = parseDatasetDefinition(JSON.parse(run.files["tracker/dataset.json"] ?? ""));
@@ -941,12 +1024,41 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         await callTool("dohc_write_file", {
           path: "apps/control-tower/index.html",
           content:
-            '<!doctype html><html><body><h1>Control Tower</h1><script type="module" src="./app.js"></script></body></html>\n',
+            '<!doctype html><html><body><h1>Control Tower</h1><section id="expenses-summary">Loading…</section><section id="checkins-summary"></section><script type="module" src="./app.js"></script></body></html>\n',
         });
         await callTool("dohc_write_file", {
           path: "apps/control-tower/app.js",
-          content:
-            'window.addEventListener("message", (e) => { if (e.data?.kind === "dohc-app-channel") e.ports[0]?.postMessage({ id: "r1", op: "backend.invoke", operation: "listExpenses", input: {}, idempotencyKey: "r1" }); });\n',
+          content: [
+            "let channelPort;",
+            "const pending = new Map();",
+            "function send(message) {",
+            "  return new Promise((resolve, reject) => {",
+            "    const id = crypto.randomUUID();",
+            "    pending.set(id, { resolve, reject });",
+            "    channelPort.postMessage({ id, ...message });",
+            "  });",
+            "}",
+            'window.addEventListener("message", async (event) => {',
+            '  if (channelPort || event.source !== window.parent || event.data?.kind !== "dohc-app-channel" || event.ports.length !== 1) return;',
+            "  channelPort = event.ports[0];",
+            "  channelPort.onmessage = ({ data }) => {",
+            "    const req = pending.get(data?.id);",
+            "    if (!req) return;",
+            "    pending.delete(data.id);",
+            '    if (data.ok) req.resolve(data.value); else req.reject(new Error(data.error?.message ?? "Request failed"));',
+            "  };",
+            "  channelPort.start();",
+            '  const summary = document.getElementById("expenses-summary");',
+            "  try {",
+            '    const { result } = await send({ op: "backend.invoke", operation: "listExpenses", input: {}, idempotencyKey: crypto.randomUUID() });',
+            "    const rows = Array.isArray(result?.rows) ? result.rows : [];",
+            "    if (summary) summary.textContent = `Expenses loaded: ${rows.length}`;",
+            "  } catch (error) {",
+            "    if (summary) summary.textContent = error instanceof Error ? error.message : String(error);",
+            "  }",
+            "});",
+            "",
+          ].join("\n"),
         });
         await callTool("dohc_write_file", {
           path: "apps/control-tower/app.publish.json",
@@ -968,6 +1080,17 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
               null,
               2,
             ) + "\n",
+        });
+        await callTool("dohc_publish_app", {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: WS,
+            appRoot: "apps/control-tower",
+            expectStartupBackend: [
+              { op: "backend.invoke", operation: "listExpenses", status: 200 },
+            ],
+            steps: [{ kind: "waitFor", selector: "#expenses-summary" }],
+          },
         });
         const prepared = (await callTool("dohc_publish_app", {
           request: { action: "prepareLocal", workspaceId: WS, appRoot: "apps/control-tower" },
@@ -1089,11 +1212,16 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
     workspaceId: WS,
     setupDesktop: (root, options) => createEverydayDesktop(root, { workspaceId: WS }, options),
     prompt:
-      'I run a weekend pottery workshop with 8 seats. Create a transactional Collection in `workshop/` (`dataset.json`, `schema.sql`, `backend.ts`) with a `bookings` table (`id`, `name`, `seats`), a public `bookSeat` operation (`access: "link"`) taking `{ name, seats }` that refuses via `ctx.refuse` when total seats would exceed 8, and an owner-only `listBookings` read. Prepare and approve the Collection, build `apps/booking` with `app.publish.json` exposing ONLY `bookSeat` (never `listBookings`), create a share link, and prepare and approve the shared publication.',
+      'I run a weekend pottery workshop with 8 seats. Create a transactional Collection in `workshop/` (`dataset.json`, `schema.sql`, `backend.ts`) with a `bookings` table (`id`, `name`, `seats`), a public `bookSeat` operation (`access: "link"`) taking `{ name, seats }` that refuses via `ctx.refuse` when total seats would exceed 8, and an owner-only `listBookings` read. Prepare and approve the Collection, build `apps/booking` with `app.publish.json` exposing ONLY `bookSeat` (never `listBookings`), verify the frontend end to end with `dohc_publish_app` `verifyFrontend` (including submitting a booking and confirming UI feedback), create a share link, and prepare and approve the shared publication.',
     expect: {
       calls: [
         { tool: "dohc_dataset", args: { "request.action": "prepare" }, ok: true },
         { tool: "dohc_dataset", args: { "request.action": "approve" }, ok: true },
+        {
+          tool: "dohc_publish_app",
+          args: { "request.action": "verifyFrontend", "request.appRoot": "apps/booking" },
+          ok: true,
+        },
         {
           tool: "dohc_publish_app",
           args: { "request.action": "createLink", "request.appRoot": "apps/booking" },
@@ -1275,6 +1403,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           for (const match of entryHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
             const attrs = match[1] ?? "";
             const body = match[2] ?? "";
+            if (!isEvalExecutableScriptTag(attrs)) continue;
             const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
             if (srcMatch?.[1]) {
               const rawSrc = srcMatch[1].trim();
@@ -1288,16 +1417,23 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
                 }
               }
             } else if (body.trim()) {
+              const syntaxErr = checkEvalScriptSyntax(body, entryPath);
+              if (syntaxErr)
+                problems.push(`syntax error in apps/booking/${entryPath}: ${syntaxErr}`);
               scriptParts.push(body);
             }
           }
           for (const item of normalizedInputs) {
             if (/\.(?:c|m)?[jt]sx?$/i.test(item)) {
               const content = run.files[`apps/booking/${item}`];
-              if (content && !scriptParts.includes(content)) scriptParts.push(content);
+              if (content) {
+                const syntaxErr = checkEvalScriptSyntax(content, item);
+                if (syntaxErr) problems.push(`syntax error in apps/booking/${item}: ${syntaxErr}`);
+                if (!scriptParts.includes(content)) scriptParts.push(content);
+              }
             }
           }
-          const scriptText = scriptParts.join("\n");
+          const scriptText = stripJsComments(scriptParts.join("\n"));
           if (!scriptText.trim()) {
             problems.push("no published frontend script found");
           } else {
@@ -1313,6 +1449,13 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
             if (!/(?:addEventListener|onsubmit|onclick)/i.test(scriptText)) {
               problems.push("frontend script wires no submit or click handler");
             }
+            if (
+              !/\.onmessage\b|addEventListener\s*\(\s*["']message["']/i.test(
+                scriptText.replace(/window\.addEventListener\s*\(\s*["']message["']/gi, ""),
+              )
+            ) {
+              problems.push("frontend script does not handle dohc-app-channel responses");
+            }
             if (!/\bname\b/.test(scriptText) || !/\bseats\b/.test(scriptText)) {
               problems.push("frontend script does not pass name and seats inputs");
             }
@@ -1326,6 +1469,32 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
             ...(problems.length > 0 ? { detail: problems.join("; ") } : {}),
           };
         })(),
+      );
+      checks.push(
+        checkFrontendVerifiedForFinalSource(run, "apps/booking", (record) => {
+          if (record.mode === "observed") {
+            const observedBook = record.brokerCalls.some(
+              (c) => c.op === "backend.invoke" && c.operation === "bookSeat" && c.ok,
+            );
+            const observedUi = (record.steps ?? []).some((s) => s.kind === "waitFor" && s.ok);
+            if (!observedBook || !observedUi) {
+              return "observed verifyFrontend must record a passing bookSeat call and waitFor step";
+            }
+            return null;
+          }
+          const steps = (record.requestedSteps ?? []) as Array<{
+            kind?: string;
+            expectBackend?: { operation?: string };
+          }>;
+          const clickedBackend = steps.some(
+            (s) => s.kind === "click" && s.expectBackend?.operation === "bookSeat",
+          );
+          const waitedUi = steps.some((s) => s.kind === "waitFor");
+          if (!clickedBackend || !waitedUi) {
+            return "verifyFrontend must submit bookSeat via click.expectBackend and verify UI with waitFor";
+          }
+          return null;
+        }),
       );
       return checks;
     },
@@ -1437,6 +1606,36 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
               null,
               2,
             ) + "\n",
+        });
+        await callTool("dohc_publish_app", {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: WS,
+            appRoot: "apps/booking",
+            steps: [
+              { kind: "fill", selector: "#guest-name", value: "Ada" },
+              { kind: "fill", selector: "#seat-count", value: "5" },
+              {
+                kind: "click",
+                selector: 'button[type="submit"]',
+                expectBackend: { op: "backend.invoke", operation: "bookSeat", status: 200 },
+              },
+              { kind: "waitFor", selector: "#status", textIncludes: "Booked" },
+              { kind: "fill", selector: "#guest-name", value: "Bob" },
+              { kind: "fill", selector: "#seat-count", value: "4" },
+              {
+                kind: "click",
+                selector: 'button[type="submit"]',
+                expectBackend: {
+                  op: "backend.invoke",
+                  operation: "bookSeat",
+                  status: 409,
+                  refusalCode: "workshop_full",
+                },
+              },
+              { kind: "waitFor", selector: "#status", textIncludes: "8" },
+            ],
+          },
         });
         const link = (await callTool("dohc_publish_app", {
           request: {
