@@ -25,6 +25,8 @@ async function signUpHeaders(next: string, stored: string | null, storageThrows 
     document: {
       body: { dataset: { page: "sign-up", next } },
       getElementById: (id: string) => elements[id] ?? null,
+      // No fields to fit with a Show button: this test reads the sign-up request only.
+      querySelectorAll: () => [],
     },
     location: { host: "server.example.test", assign: () => {} },
     sessionStorage: {
