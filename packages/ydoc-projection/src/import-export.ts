@@ -926,7 +926,15 @@ export function plainTextToYDoc(markdown: string): Y.Doc {
 }
 
 export function yDocToMarkdown(doc: Y.Doc): string {
-  const body = yDocBodyToMarkdown(doc).trimEnd();
+  return markdownWithBody(doc, yDocBodyToMarkdown(doc).trimEnd());
+}
+
+/** The properties block a note is written with, as a file that holds nothing else. */
+export function yDocPropertiesToMarkdown(doc: Y.Doc): string {
+  return markdownWithBody(doc, "");
+}
+
+function markdownWithBody(doc: Y.Doc, body: string): string {
   const frontmatter = orderFrontmatter(getDohcYDocFrontmatter(doc));
   const internalMeta = doc.getMap(META_FIELD);
   const usesCrlf =

@@ -3,6 +3,7 @@ export {
   createLiveMarkdownJournalValidator,
   createLiveMarkdownRegistrationValidator,
   liveEditFitsCopy,
+  liveEditRefusal,
 } from "./liveDocumentValidation.js";
 export type { LiveMarkdownJournalTiming } from "./liveDocumentValidation.js";
 export type { OrderedLiveUpdateCutPolicy } from "./orderedLiveUpdateCut.js";

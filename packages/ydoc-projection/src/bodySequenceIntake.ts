@@ -5,11 +5,13 @@ import {
   BODY_SEQUENCE_FIELD,
   CONTAINER_ID,
 } from "./bodySequenceGrammar.js";
+import { holdsBodySequence } from "./bodySequenceYjs.js";
 import { getDohcProseMirrorSchema } from "./import-export.js";
 import {
   readLiveUpdateAsTheCutDoes,
   type LiveUpdateAsRead,
   type OrderedLiveUpdateCutPolicy,
+  type OrderedLiveUpdateCutRefusalReason,
 } from "./orderedLiveUpdateCut.js";
 
 export interface BodySequenceIntakeRules {
@@ -21,7 +23,17 @@ export interface BodySequenceIntakeRules {
   readonly metadata: (key: string, shown?: { readonly value: unknown }) => boolean;
 }
 
+/** How many structs, delete ranges and index lookups one check went through. */
+export interface BodySequenceIntakeWork {
+  steps: number;
+}
+
 type Stored = ReturnType<Y.Doc["get"]>;
+type Read = Extract<LiveUpdateAsRead, { kind: "read" }>;
+interface ClockRange {
+  readonly start: number;
+  readonly end: number;
+}
 
 const FRONTMATTER_FIELD = "frontmatter";
 const META_FIELD = "meta";
@@ -33,7 +45,6 @@ const ROOTS: ReadonlySet<string> = new Set([
   META_FIELD,
 ]);
 const MAX_VALUE_DEPTH = 128;
-const MAX_VALUE_NODES = 262_144;
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 const wellFormed = (text: string) => !LONE_SURROGATE.test(text);
 
@@ -81,31 +92,26 @@ function recordKey(key: string): boolean {
 
 /**
  * Whether a value is one a note can hold: null, a boolean, a finite number, an int64, a string,
- * an array or a plain object of these, with no lone surrogate and no key named `__proto__`.
- * `asJson` is for a value Yjs stores as JSON text, where a negative zero or an int64 does not
- * come back as it went in.
+ * an array or a plain object of these, at most 128 levels deep, with no lone surrogate and no key
+ * named `__proto__`. `asJson` is for a value Yjs stores as JSON text, where a negative zero or an
+ * int64 does not come back as it went in. It has no limit on how many values one change holds:
+ * the room saves several changes as one, and a limit on the sum would refuse a save of changes
+ * each of which the room took.
  */
-function jsonLike(
-  value: unknown,
-  depth: number,
-  seen: { nodes: number },
-  asJson: boolean,
-): boolean {
-  if (depth > MAX_VALUE_DEPTH || ++seen.nodes > MAX_VALUE_NODES) return false;
+function jsonLike(value: unknown, depth: number, asJson: boolean): boolean {
+  if (depth > MAX_VALUE_DEPTH) return false;
   if (value === null || typeof value === "boolean") return true;
   if (typeof value === "string") return wellFormed(value);
   if (typeof value === "number") return Number.isFinite(value) && !(asJson && Object.is(value, -0));
   if (typeof value === "bigint") return !asJson;
   if (Array.isArray(value))
-    return Array.from(value as unknown[]).every((child) =>
-      jsonLike(child, depth + 1, seen, asJson),
-    );
+    return Array.from(value as unknown[]).every((child) => jsonLike(child, depth + 1, asJson));
   if (typeof value !== "object" || value instanceof Uint8Array) return false;
   return Object.keys(value).every(
     (key) =>
       key !== "__proto__" &&
       wellFormed(key) &&
-      jsonLike((value as Record<string, unknown>)[key], depth + 1, seen, asJson),
+      jsonLike((value as Record<string, unknown>)[key], depth + 1, asJson),
   );
 }
 
@@ -136,13 +142,82 @@ function insideAPairTheNoteHolds(note: Y.Doc, client: number, clock: number): bo
   );
 }
 
-/** What can be told from the change alone and the note before it. */
-function fitsAsSent(note: Y.Doc, read: LiveUpdateAsRead): boolean {
-  const seen = { nodes: 0 };
+/** The last of one client's sorted, disjoint ranges that starts at or before `clock`. */
+function rangeAtOrBefore(
+  ranges: readonly ClockRange[] | undefined,
+  clock: number,
+  work: BodySequenceIntakeWork,
+): ClockRange | undefined {
+  if (!ranges) return undefined;
+  let low = 0;
+  let high = ranges.length;
+  while (low < high) {
+    work.steps += 1;
+    const middle = (low + high) >>> 1;
+    if (ranges[middle]!.start <= clock) low = middle + 1;
+    else high = middle;
+  }
+  return ranges[low - 1];
+}
+
+function holdsPoint(
+  points: readonly number[] | undefined,
+  point: number,
+  work: BodySequenceIntakeWork,
+): boolean {
+  if (!points) return false;
+  let low = 0;
+  let high = points.length - 1;
+  while (low <= high) {
+    work.steps += 1;
+    const middle = (low + high) >>> 1;
+    const held = points[middle]!;
+    if (held === point) return true;
+    if (held < point) low = middle + 1;
+    else high = middle - 1;
+  }
+  return false;
+}
+
+/** What a change sends, by client, for lookups that halve: its items and its delete ranges. */
+interface Sent {
+  readonly read: Read;
+  readonly items: ReadonlyMap<number, readonly ClockRange[]>;
+  readonly deletes: ReadonlyMap<number, readonly ClockRange[]>;
+}
+
+function indexed(read: Read, work: BodySequenceIntakeWork): Sent {
+  const items = new Map<number, ClockRange[]>();
+  const deletes = new Map<number, ClockRange[]>();
+  const add = (into: Map<number, ClockRange[]>, client: number, range: ClockRange) => {
+    work.steps += 1;
+    const held = into.get(client);
+    if (held) held.push(range);
+    else into.set(client, [range]);
+  };
+  for (const struct of read.structs)
+    if (struct instanceof Y.Item)
+      add(items, struct.id.client, {
+        start: struct.id.clock,
+        end: struct.id.clock + struct.length,
+      });
+    else work.steps += 1;
+  for (const range of read.deletes)
+    add(deletes, range.clientId, { start: range.startClock, end: range.endClock });
+  return { read, items, deletes };
+}
+
+/**
+ * What can be told from the change alone and the note before it. A whole state has no note
+ * before it, and every pair it could cut is one it sends.
+ */
+function fitsAsSent(before: Y.Doc | undefined, sent: Sent, work: BodySequenceIntakeWork): boolean {
+  const { read } = sent;
   const insideAPair = (client: number, clock: number) =>
-    insideAPairTheNoteHolds(note, client, clock) ||
-    (read.insidePairs.get(client)?.includes(clock) ?? false);
+    (before !== undefined && insideAPairTheNoteHolds(before, client, clock)) ||
+    holdsPoint(read.insidePairs.get(client), clock, work);
   for (const struct of read.structs) {
+    work.steps += 1;
     if (struct instanceof Y.Skip) return false;
     const { client, clock } = struct.id;
     if (insideAPair(client, clock) || insideAPair(client, clock + struct.length)) return false;
@@ -156,9 +231,9 @@ function fitsAsSent(note: Y.Doc, read: LiveUpdateAsRead): boolean {
     if (struct.parentSub !== null && !wellFormed(struct.parentSub)) return false;
     const content = struct.content;
     if (content instanceof Y.ContentAny) {
-      if (!content.arr.every((value) => jsonLike(value, 0, seen, false))) return false;
+      if (!content.arr.every((value) => jsonLike(value, 0, false))) return false;
     } else if (content instanceof Y.ContentFormat) {
-      if (!wellFormed(content.key) || !jsonLike(content.value, 0, seen, true)) return false;
+      if (!wellFormed(content.key) || !jsonLike(content.value, 0, true)) return false;
     } else if (content instanceof Y.ContentType) {
       const type = content.type as Stored;
       if (!plainType(type, Y.XmlElement) && !plainType(type, Y.Map) && !plainType(type, Y.Array))
@@ -167,31 +242,55 @@ function fitsAsSent(note: Y.Doc, read: LiveUpdateAsRead): boolean {
       if (!wellFormed(content.str)) return false;
     } else if (!(content instanceof Y.ContentDeleted)) return false;
   }
-  return read.deletes.every(
-    (range) =>
-      !insideAPair(range.clientId, range.startClock) &&
-      !insideAPair(range.clientId, range.endClock),
-  );
+  for (const range of read.deletes) {
+    work.steps += 1;
+    if (
+      insideAPair(range.clientId, range.startClock) ||
+      insideAPair(range.clientId, range.endClock)
+    )
+      return false;
+  }
+  return true;
 }
 
-/** Whether each struct the change added sits where a format-2 note can hold it. */
+/**
+ * Whether each struct the transaction added sits where a format-2 note can hold it. A `state` is
+ * a note's first entry, which is where its format marker is written.
+ */
 function fitsAsPlaced(
   note: Y.Doc,
   transaction: Y.Transaction,
-  read: LiveUpdateAsRead,
+  sent: Sent,
   rules: BodySequenceIntakeRules,
+  kind: "state" | "change",
+  work: BodySequenceIntakeWork,
 ): boolean {
   const allowed = bodySequenceNames();
   const roots = new Map<unknown, string>();
   for (const [name, type] of note.share) roots.set(type, name);
-  const sentAsAnItem = (client: number, from: number, to: number) =>
-    read.structs.some(
-      (struct) =>
-        struct instanceof Y.Item &&
-        struct.id.client === client &&
-        struct.id.clock < to &&
-        struct.id.clock + struct.length > from,
-    );
+  const under = new Map<Stored, string | undefined>();
+  /** The root a nested type hangs from. Each type on the way up is looked at once. */
+  const rootOf = (type: Stored): string | undefined => {
+    const passed: Stored[] = [];
+    let root: string | undefined;
+    for (let at: Stored | null = type; at !== null;) {
+      root = roots.get(at) ?? under.get(at);
+      if (root !== undefined || under.has(at)) break;
+      work.steps += 1;
+      passed.push(at);
+      at = (at._item?.parent as Stored | null | undefined) ?? null;
+    }
+    for (const each of passed) under.set(each, root);
+    return root;
+  };
+  const sentAsAnItem = (client: number, from: number, to: number) => {
+    const last = rangeAtOrBefore(sent.items.get(client), to - 1, work);
+    return last !== undefined && last.end > from;
+  };
+  const deletedByTheChange = (client: number, from: number, to: number) => {
+    const range = rangeAtOrBefore(sent.deletes.get(client), from, work);
+    return range !== undefined && range.end >= to;
+  };
   const keyedValue = (item: Y.Item, key: (name: string) => boolean) =>
     item.parentSub !== null &&
     (item.content instanceof Y.ContentDeleted ||
@@ -219,7 +318,10 @@ function fitsAsPlaced(
     if (root === BODY_CONTAINERS_FIELD) return keyedValue(item, recordKey);
     if (root === FRONTMATTER_FIELD) return key !== null && (gone || holdsValue(content));
     if (root === META_FIELD) {
-      if (key === null || !rules.metadata(key)) return false;
+      if (key === null) return false;
+      if (key === FORMAT_MARKER)
+        return kind === "state" && (gone || content instanceof Y.ContentAny);
+      if (!rules.metadata(key)) return false;
       if (gone) return true;
       if (!(content instanceof Y.ContentAny)) return false;
       return (
@@ -234,6 +336,7 @@ function fitsAsPlaced(
         name === BLOCK_ELEMENT ? allowed.boundaryAttributes : allowed.itemAttributes.get(name);
       return keyedValue(item, (attribute) => attributes?.has(attribute) === true);
     }
+    if (rootOf(type) !== FRONTMATTER_FIELD) return false;
     if (plainType(type, Y.Map)) return key !== null && (gone || holdsValue(content));
     if (plainType(type, Y.Array)) return key === null && (gone || holdsValue(content));
     return false;
@@ -243,6 +346,7 @@ function fitsAsPlaced(
     if (from >= to) continue;
     const structs = note.store.clients.get(client)!;
     for (let index = Y.findIndexSS(structs, from); index < structs.length; index += 1) {
+      work.steps += 1;
       const struct = structs[index]!;
       if (struct instanceof Y.Item) {
         if (!fits(struct)) return false;
@@ -250,40 +354,87 @@ function fitsAsPlaced(
         return false;
     }
   }
-  return read.structs.every((struct) => {
-    if (!(struct instanceof Y.Item) || struct.length < 2) return true;
-    const placed = structAt(note, struct.id.client, struct.id.clock);
-    if (!(placed instanceof Y.Item) || placed.parentSub === null) return true;
-    const lastButOne = struct.id.clock + struct.length - 1;
-    return read.deletes.some(
-      (range) =>
-        range.clientId === struct.id.client &&
-        range.startClock <= struct.id.clock &&
-        range.endClock >= lastButOne,
-    );
-  });
+  for (const struct of sent.read.structs) {
+    work.steps += 1;
+    if (!(struct instanceof Y.Item) || struct.length < 2) continue;
+    const { client, clock } = struct.id;
+    const placed = structAt(note, client, clock);
+    if (!(placed instanceof Y.Item) || placed.parentSub === null) continue;
+    if (!deletedByTheChange(client, clock, clock + struct.length - 1)) return false;
+  }
+  return true;
 }
 
 const formatMarker = (note: Y.Doc) => note.share.get(META_FIELD)?._map.get(FORMAT_MARKER);
+const nothingPending = (note: Y.Doc) =>
+  note.store.pendingStructs === null && note.store.pendingDs === null;
+const refusalOf = (reason: OrderedLiveUpdateCutRefusalReason) =>
+  reason === "capacity-refused" ? reason : "invalid-schema";
 
 /**
  * Section 5's intake for one change to a note whose body is one sequence. `apply` applies the
- * change to `note`, which is the note before it. The answer is whether every struct the change
- * adds is one such a note can hold, where Yjs placed it, and whether the note still says it is
- * one. After false, `note` may hold part of the change. An error `apply` throws is the caller's.
+ * change to `note`, which is the note before it. It answers why the note cannot take the change:
+ * a struct the change adds is not one such a note can hold where Yjs placed it, the note would no
+ * longer say it is one, or reading the change ran past the policy's work, which is a refusal for
+ * capacity. After a refusal `note` may hold part of the change. An error `apply` throws is the
+ * caller's.
  */
-export function bodySequenceChangeFits(
+export function bodySequenceChangeRefusal(
   note: Y.Doc,
   update: Uint8Array,
   apply: () => void,
   rules: BodySequenceIntakeRules,
-): boolean {
+  work: BodySequenceIntakeWork = { steps: 0 },
+): "invalid-schema" | "capacity-refused" | undefined {
   const read = readLiveUpdateAsTheCutDoes(update, rules.policy);
-  if (!read || !fitsAsSent(note, read)) return false;
+  if (read.kind === "refused") return refusalOf(read.reason);
+  const sent = indexed(read, work);
+  if (!fitsAsSent(note, sent, work)) return "invalid-schema";
   const marker = formatMarker(note);
   let fits = true;
   const placed = (transaction: Y.Transaction) => {
-    if (!fitsAsPlaced(note, transaction, read, rules)) fits = false;
+    if (!fitsAsPlaced(note, transaction, sent, rules, "change", work)) fits = false;
+  };
+  note.on("beforeObserverCalls", placed);
+  try {
+    apply();
+  } finally {
+    note.off("beforeObserverCalls", placed);
+  }
+  return fits &&
+    marker !== undefined &&
+    !marker.deleted &&
+    formatMarker(note) === marker &&
+    nothingPending(note)
+    ? undefined
+    : "invalid-schema";
+}
+
+/**
+ * The same rules for a note's first entry, a whole state that `apply` applies to the empty
+ * `note`. A state that does not make the note a body-sequence note is not judged here.
+ */
+export function bodySequenceStateRefusal(
+  note: Y.Doc,
+  state: Uint8Array,
+  apply: () => void,
+  rules: BodySequenceIntakeRules,
+  work: BodySequenceIntakeWork = { steps: 0 },
+): "invalid-schema" | "capacity-refused" | undefined {
+  let refusal: "invalid-schema" | "capacity-refused" | undefined;
+  const placed = (transaction: Y.Transaction) => {
+    if (!holdsBodySequence(note)) return;
+    const read = readLiveUpdateAsTheCutDoes(state, rules.policy);
+    if (read.kind === "refused") {
+      refusal = refusalOf(read.reason);
+      return;
+    }
+    const sent = indexed(read, work);
+    if (
+      !fitsAsSent(undefined, sent, work) ||
+      !fitsAsPlaced(note, transaction, sent, rules, "state", work)
+    )
+      refusal = "invalid-schema";
   };
   note.on("beforeObserverCalls", placed);
   try {
@@ -292,11 +443,6 @@ export function bodySequenceChangeFits(
     note.off("beforeObserverCalls", placed);
   }
   return (
-    fits &&
-    marker !== undefined &&
-    !marker.deleted &&
-    formatMarker(note) === marker &&
-    note.store.pendingStructs === null &&
-    note.store.pendingDs === null
+    refusal ?? (holdsBodySequence(note) && !nothingPending(note) ? "invalid-schema" : undefined)
   );
 }

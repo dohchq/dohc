@@ -517,15 +517,22 @@ export function deliver(
 }
 
 /** One struct as a client could send it, which no editor would. */
-export interface SentStruct {
-  readonly client: number;
-  readonly clock: number;
-  readonly origin?: Y.ID;
-  readonly rightOrigin?: Y.ID;
-  readonly parent?: string | Y.ID;
-  readonly key?: string;
-  readonly content: Y.Item["content"];
-}
+export type SentStruct =
+  | {
+      readonly client: number;
+      readonly clock: number;
+      readonly origin?: Y.ID;
+      readonly rightOrigin?: Y.ID;
+      readonly parent?: string | Y.ID;
+      readonly key?: string;
+      readonly content: Y.Item["content"];
+    }
+  | {
+      readonly client: number;
+      readonly clock: number;
+      /** A struct sent as already collected, this many clocks long. */
+      readonly collected: number;
+    };
 
 /** Content written to the wire as the bytes given, for values no Yjs client writes. */
 export function contentAsWritten(
@@ -555,15 +562,30 @@ export const markAsWritten = (key: string, json: string) =>
     encoding.writeVarString(encoder.restEncoder, json);
   });
 
-/** An update holding exactly these structs and deletes. Each client's structs are in clock order. */
+/**
+ * An update holding exactly these structs and deletes. Each client's structs are in clock order.
+ * A string named in `bytesFor` is written as those bytes, for text no encoder would write.
+ */
 export function updateOf(
   structs: readonly SentStruct[],
   deletes: readonly (readonly [client: number, clock: number, length: number])[] = [],
+  bytesFor: ReadonlyMap<string, readonly number[]> = new Map(),
 ): Uint8Array {
   const encoder = new Y.UpdateEncoderV1();
+  const writeString = encoder.writeString.bind(encoder);
+  const written = (text: string) => {
+    const bytes = bytesFor.get(text);
+    if (bytes) encoding.writeVarUint8Array(encoder.restEncoder, Uint8Array.from(bytes));
+    else writeString(text);
+  };
+  encoder.writeString = written;
+  encoder.writeKey = written;
   const byClient = new Map<number, SentStruct[]>();
-  for (const struct of structs)
-    byClient.set(struct.client, [...(byClient.get(struct.client) ?? []), struct]);
+  for (const struct of structs) {
+    const held = byClient.get(struct.client);
+    if (held) held.push(struct);
+    else byClient.set(struct.client, [struct]);
+  }
   encoding.writeVarUint(encoder.restEncoder, byClient.size);
   for (const client of [...byClient.keys()].sort((a, b) => b - a)) {
     const sent = byClient.get(client)!;
@@ -571,19 +593,26 @@ export function updateOf(
     encoder.writeClient(client);
     encoding.writeVarUint(encoder.restEncoder, sent[0]!.clock);
     for (const struct of sent)
-      new Y.Item(
-        Y.createID(client, struct.clock),
-        null,
-        struct.origin ?? null,
-        null,
-        struct.rightOrigin ?? null,
-        (struct.parent ?? null) as Y.ID | null,
-        struct.key ?? null,
-        struct.content,
-      ).write(encoder, 0);
+      if ("collected" in struct)
+        new Y.GC(Y.createID(client, struct.clock), struct.collected).write(encoder, 0);
+      else
+        new Y.Item(
+          Y.createID(client, struct.clock),
+          null,
+          struct.origin ?? null,
+          null,
+          struct.rightOrigin ?? null,
+          (struct.parent ?? null) as Y.ID | null,
+          struct.key ?? null,
+          struct.content,
+        ).write(encoder, 0);
   }
   const deletedBy = new Map<number, (readonly [number, number, number])[]>();
-  for (const range of deletes) deletedBy.set(range[0], [...(deletedBy.get(range[0]) ?? []), range]);
+  for (const range of deletes) {
+    const held = deletedBy.get(range[0]);
+    if (held) held.push(range);
+    else deletedBy.set(range[0], [range]);
+  }
   encoding.writeVarUint(encoder.restEncoder, deletedBy.size);
   for (const [client, ranges] of deletedBy) {
     encoder.resetDsCurVal();
@@ -628,3 +657,211 @@ export function changeMadeBy(
   doc.destroy();
   return sent;
 }
+
+type Page = { doc: Y.Doc; sequence: Y.Text; records: Y.Map<unknown> };
+
+/** One place in a note where a change can put a value, such as an attribute of a node. */
+export interface Place {
+  readonly name: string;
+  /** Places that change what kind a node is; putting a value there changes what the others mean. */
+  readonly changesKinds: boolean;
+  put(page: Page, value: unknown): void;
+}
+
+const CONTAINERS_TO_HOLD: readonly (readonly [id: string, kind: string])[][] = [
+  [["q", "blockquote"]],
+  [["c", "callout"]],
+  [
+    ["bl", "bulletList"],
+    ["bi", "listItem"],
+  ],
+  [
+    ["ol", "orderedList"],
+    ["oi", "listItem"],
+  ],
+  [
+    ["tl", "taskList"],
+    ["ti", "taskItem"],
+  ],
+  [
+    ["t", "table"],
+    ["r", "tableRow"],
+    ["d", "tableCell"],
+  ],
+  [
+    ["t2", "table"],
+    ["r2", "tableRow"],
+    ["h", "tableHeader"],
+  ],
+];
+
+/**
+ * A format-2 note with no properties that holds one of every node and mark the schema has, and
+ * every place a change can put a value in it: each attribute of each node and mark, each
+ * container's kind, a line's kind and path, and the letters of each kind of line.
+ */
+export function noteWithEveryNode(): { note: Uint8Array; places: readonly Place[] } {
+  const attributesOf = (name: string) =>
+    Object.keys((schema.nodes[name] ?? schema.marks[name])?.spec.attrs ?? {});
+  const leafKinds = Object.values(schema.nodes)
+    .filter(
+      (type) => type.isBlock && type !== schema.topNodeType && (type.isTextblock || type.isLeaf),
+    )
+    .map((type) => type.name);
+  const inlineKinds = Object.values(schema.nodes)
+    .filter((type) => type.isInline && type.isLeaf && !type.isText)
+    .map((type) => type.name);
+  const doc = new Y.Doc({ gc: false });
+  doc.clientID = 1;
+  doc.getMap("meta").set("schemaVersion", 2);
+  doc.getMap("frontmatter");
+  const sequence = doc.getText(BODY_SEQUENCE_FIELD);
+  const records = doc.getMap<unknown>(BODY_CONTAINERS_FIELD);
+  const line = (attrs: Record<string, unknown>, text: string) => {
+    sequence.insertEmbed(sequence.length, element(BLOCK_ELEMENT, { path: [], ...attrs }), {});
+    sequence.insert(sequence.length, text, {});
+  };
+  for (const kind of leafKinds) line({ type: kind }, "text");
+  line({ type: "paragraph" }, "items ");
+  for (const kind of inlineKinds) sequence.insertEmbed(sequence.length, new Y.XmlElement(kind), {});
+  line({ type: "paragraph" }, "marked letters");
+  for (const path of CONTAINERS_TO_HOLD) {
+    for (const [id, type] of path)
+      for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
+        records.set(key, value);
+    line({ type: "paragraph", path: path.map(([id]) => id) }, `in ${path.at(-1)![1]}`);
+  }
+  const note = Y.encodeStateAsUpdate(doc);
+  doc.destroy();
+
+  const boundary = (page: Page, index: number) =>
+    tokensOf(page.sequence).filter((token) => token.kind === "boundary")[index] as Extract<
+      Token,
+      { element: Y.XmlElement }
+    >;
+  const startOfLine = (page: Page, index: number) => {
+    const all = tokensOf(page.sequence);
+    let seen = -1;
+    return all.findIndex((token) => token.kind === "boundary" && ++seen === index) + 1;
+  };
+  const inlineItem = (page: Page, kind: string) =>
+    tokensOf(page.sequence).find(
+      (token) => token.kind === "item" && token.element.nodeName === kind,
+    ) as Extract<Token, { element: Y.XmlElement }>;
+  const places: Place[] = [];
+  const place = (name: string, put: Place["put"], changesKinds = false) =>
+    places.push({ name, put, changesKinds });
+  leafKinds.forEach((kind, index) => {
+    for (const attribute of attributesOf(kind))
+      place(`${kind}.${attribute}`, (page, value) =>
+        boundary(page, index).element.setAttribute(attribute, value as string),
+      );
+    place(`the letters of a ${kind}`, (page, value) => {
+      if (typeof value === "string" && value !== "")
+        page.sequence.insert(startOfLine(page, index), value);
+    });
+  });
+  for (const kind of inlineKinds)
+    for (const attribute of attributesOf(kind))
+      place(`${kind}.${attribute}`, (page, value) =>
+        inlineItem(page, kind).element.setAttribute(attribute, value as string),
+      );
+  const marked = leafKinds.length + 1;
+  Object.keys(schema.marks).forEach((mark, index) => {
+    const attributes = attributesOf(mark);
+    const on = (page: Page, value: unknown) =>
+      page.sequence.format(startOfLine(page, marked) + index, 3, { [mark]: value });
+    if (attributes.length === 0) place(`the mark ${mark}`, on);
+    for (const attribute of attributes)
+      place(`${mark}.${attribute}`, (page, value) => on(page, { [attribute]: value }));
+  });
+  for (const [id, kind] of CONTAINERS_TO_HOLD.flat()) {
+    for (const attribute of attributesOf(kind))
+      place(`${kind}.${attribute}`, (page, value) => page.records.set(`${id}.${attribute}`, value));
+    place(`the kind of a ${kind}`, (page, value) => page.records.set(id, value), true);
+  }
+  place(
+    "the kind of a line",
+    (page, value) => boundary(page, 0).element.setAttribute("type", value as string),
+    true,
+  );
+  place(
+    "the path of a line",
+    (page, value) =>
+      boundary(page, 1).element.setAttribute("path", [value, "q", value] as unknown as string),
+    true,
+  );
+  return { note, places };
+}
+
+/** Text a Markdown writer or reader could trip on, for every place a note can hold a string. */
+export const HOSTILE_STRINGS: readonly string[] = [
+  "\n",
+  "\r",
+  "\r\n",
+  "a\nb",
+  "a\r\nb",
+  "a\n\n\nb",
+  "\n# not a heading",
+  "`",
+  "``",
+  "```",
+  "`".repeat(40),
+  "~~~",
+  "```\ncode\n```",
+  "[",
+  "]",
+  "[[",
+  "]]",
+  "](",
+  "![",
+  "[x](y)",
+  "[^1]",
+  "|",
+  "a | b",
+  "| a | b |\n| - | - |",
+  ">",
+  ">".repeat(130),
+  "> ".repeat(130),
+  `\n${"> ".repeat(130)}x`,
+  "\\",
+  "*",
+  "**bold**",
+  "_",
+  "$",
+  "$$",
+  "$$\nx\n$$",
+  "<",
+  "<script>alert(1)</script>",
+  "</div>",
+  "<!--",
+  "&amp;",
+  "#",
+  "---",
+  "---\na: b\n---",
+  "***",
+  ":::",
+  "==",
+  "~~",
+  "- [ ] x",
+  "1. x",
+  "> [!note] x",
+  "\u0000",
+  "\u2028",
+  "\u2029",
+  "a\u2028b",
+  "\u0085",
+  "\v",
+  "\f",
+  "\t",
+  " ",
+  "  two spaces each side  ",
+  "\uE000",
+  "\uE001",
+  "\uE000DOHCCHARACTER0\uE001",
+  "\uE000DOHC_CODE_BLOCK_0\uE001",
+  "\uE000DOHCBLOCK_ESCAPE_0\uE001",
+  "\uE000DOHC_PARSE_0\uE001",
+  "😀",
+  "x".repeat(50_000),
+];

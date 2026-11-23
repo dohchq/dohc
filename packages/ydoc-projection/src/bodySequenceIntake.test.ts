@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prosemirrorJSONToYXmlFragment } from "y-prosemirror";
 import * as Y from "yjs";
 import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
-import { bodySequenceNames } from "./bodySequenceIntake.js";
+import { bodySequenceChangeRefusal, bodySequenceNames } from "./bodySequenceIntake.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import {
   anyAsWritten,
@@ -12,7 +12,9 @@ import {
   contentAsWritten,
   deliver,
   element,
+  HOSTILE_STRINGS,
   markAsWritten,
+  noteWithEveryNode,
   openPerson,
   random,
   randomChange,
@@ -21,6 +23,7 @@ import {
   storedReading,
   updateOf,
   type Change,
+  type Place,
 } from "./bodySequenceChecksTestSupport.js";
 import { getDohcProseMirrorSchema, markdownToYDoc, yDocToMarkdown } from "./import-export.js";
 import {
@@ -29,6 +32,7 @@ import {
   createLiveMarkdownJournalValidator,
   createLiveMarkdownRegistrationValidator,
   liveEditFitsCopy,
+  liveEditRefusal,
 } from "./liveDocumentValidation.js";
 import { WORKER_LIVE_VALIDATION_POLICY } from "./liveValidationPolicy.js";
 
@@ -320,16 +324,6 @@ describe("a format-2 note that people edit as section 4 says, on a relay that ad
     600_000,
   );
 
-  it("is refused at registration when it also holds a paragraph under body", () => {
-    const doc = new Y.Doc({ gc: false });
-    Y.applyUpdate(doc, seededNote());
-    doc.clientID = 5;
-    doc.getXmlFragment("body").insert(0, [new Y.XmlElement("paragraph")]);
-    const state = Y.encodeStateAsUpdate(doc);
-    doc.destroy();
-    expect(registered(state)).toBe(REFUSED_AT_REGISTRATION);
-  });
-
   it("is read, and written as Markdown, without its sequence or its records being declared", () => {
     const note = new Y.Doc({ gc: false });
     Y.applyUpdate(note, seededNote());
@@ -407,11 +401,15 @@ function idsIn(note: Uint8Array) {
     } else if (item.content instanceof Y.ContentType) boundary ??= item;
   }
   const record = doc.share.get(BODY_CONTAINERS_FIELD)?._map.values().next().value;
+  const attribute = (boundary?.content as Y.ContentType | undefined)?.type._map
+    .values()
+    .next().value;
   const ids = {
     letters: letters?.id,
     insideAPair: pair,
     boundary: boundary?.id,
     record: record?.id,
+    attribute: attribute?.id,
     last: sequence._start ? lastOf(sequence._start).lastId : undefined,
   };
   doc.destroy();
@@ -419,6 +417,8 @@ function idsIn(note: Uint8Array) {
 }
 const lastOf = (item: Y.Item): Y.Item => (item.right ? lastOf(item.right) : item);
 
+const LONE_SURROGATE_BYTES = [0xed, 0xa0, 0xbd];
+const LONE = new Map([["LONE", LONE_SURROGATE_BYTES]]);
 const deep = (levels: number): unknown => (levels === 0 ? 1 : { in: deep(levels - 1) });
 const made =
   (change: Parameters<typeof changeMadeBy>[2]): Case["change"] =>
@@ -655,24 +655,6 @@ const REFUSED: readonly Case[] = [
     change: made(({ doc }) => doc.getMap("frontmatter").set("deep", deep(200))),
   },
   {
-    name: "a property of 300,000 values",
-    change: made(({ doc }) =>
-      doc.getMap("frontmatter").set(
-        "many",
-        Array.from({ length: 300_000 }, () => null),
-      ),
-    ),
-  },
-  {
-    name: "a path of 300,000 ids",
-    change: made(({ sequence }) =>
-      firstOf(sequence, "block")!.setAttribute(
-        "path",
-        Array.from({ length: 300_000 }, () => "L") as unknown as string,
-      ),
-    ),
-  },
-  {
     name: "a record placed to the left of one the note has",
     change: (note, client) =>
       updateOf([
@@ -751,6 +733,89 @@ const REFUSED: readonly Case[] = [
     change: (_note, client) => updateOf([], [[client, 5, 1]]),
   },
   { name: "bytes that are no update", change: () => new Uint8Array([1, 2, 3, 4, 5]) },
+  {
+    name: "a lone surrogate in a letter run",
+    change: (note, client) =>
+      updateOf(
+        [{ client, clock: 0, origin: idsIn(note).last, content: new Y.ContentString("LONE") }],
+        [],
+        LONE,
+      ),
+  },
+  {
+    name: "a lone surrogate in a key",
+    change: (_note, client) =>
+      updateOf(
+        [
+          {
+            client,
+            clock: 0,
+            parent: "frontmatter",
+            key: "LONE",
+            content: new Y.ContentAny(["x"]),
+          },
+        ],
+        [],
+        LONE,
+      ),
+  },
+  {
+    name: "a lone surrogate in a key of a value",
+    change: (_note, client) =>
+      updateOf([
+        {
+          client,
+          clock: 0,
+          parent: "frontmatter",
+          key: "k",
+          content: anyAsWritten([118, 1, 3, ...LONE_SURROGATE_BYTES, 126]),
+        },
+      ]),
+  },
+  {
+    name: "a lone surrogate in a key of a mark's value",
+    change: (note, client) =>
+      updateOf([
+        {
+          client,
+          clock: 0,
+          origin: idsIn(note).letters,
+          content: markAsWritten("link", '{"\\ud83d":1}'),
+        },
+      ]),
+  },
+  {
+    name: "an item under frontmatter with no key",
+    change: (_note, client) =>
+      updateOf([{ client, clock: 0, parent: "frontmatter", content: new Y.ContentAny(["x"]) }]),
+  },
+  {
+    name: "a keyed item under a list that is a property",
+    change: (_note, client) =>
+      updateOf([
+        {
+          client,
+          clock: 0,
+          parent: "frontmatter",
+          key: "tags",
+          content: new Y.ContentType(new Y.Array()),
+        },
+        {
+          client,
+          clock: 1,
+          parent: Y.createID(client, 0),
+          key: "k",
+          content: new Y.ContentAny(["x"]),
+        },
+      ]),
+  },
+  {
+    name: "a value with nothing named to its left and an attribute of a line named to its right",
+    change: (note, client) =>
+      updateOf([
+        { client, clock: 0, rightOrigin: idsIn(note).attribute, content: new Y.ContentAny(["x"]) },
+      ]),
+  },
   {
     name: "clocks skipped for an editor the note has not heard from",
     change: (_note, client) => skipOf(client, 0, 3),
@@ -903,7 +968,59 @@ const table = (page: { sequence: Y.Text; records: Y.Map<unknown> }, client: numb
   }
 };
 
+const firstLine = (sequence: Y.Text) => firstOf(sequence, "block")!;
+
 const TAKEN: readonly Case[] = [
+  {
+    name: "a path of 300,000 ids",
+    change: made(({ sequence }) =>
+      firstLine(sequence).setAttribute(
+        "path",
+        Array.from({ length: 300_000 }, () => "L") as unknown as string,
+      ),
+    ),
+  },
+  {
+    name: "a letter with nothing named to its left and a letter named to its right",
+    change: (note, client) =>
+      updateOf([
+        { client, clock: 0, rightOrigin: idsIn(note).letters, content: new Y.ContentString("x") },
+      ]),
+  },
+  {
+    name: "a code block whose language holds a line break",
+    change: made(({ sequence }) => {
+      firstLine(sequence).setAttribute("type", "codeBlock");
+      firstLine(sequence).setAttribute("language", "ts\nconsole.log(1)");
+    }),
+  },
+  {
+    name: "a raw block of 130 nested quotes",
+    change: made(({ sequence }) => {
+      firstLine(sequence).setAttribute("type", "rawBlock");
+      firstLine(sequence).setAttribute("source", `${"> ".repeat(130)}deep`);
+    }),
+  },
+  {
+    name: "a callout whose kind and title hold line breaks and deep quotes",
+    change: made(({ records }) => {
+      records.set("Q.calloutType", `note\n${"> ".repeat(130)}x`);
+      records.set("Q.title", "one\ntwo");
+    }),
+  },
+  {
+    name: "CRLF line ends in a code block, a raw block, a math block and a raw inline item",
+    change: made(({ sequence }) => {
+      const line = (attrs: Record<string, unknown>) =>
+        sequence.insertEmbed(sequence.length, element("block", { path: [], ...attrs }), {});
+      line({ type: "codeBlock", language: null });
+      sequence.insert(sequence.length, "a\r\nb");
+      line({ type: "rawBlock", source: "<p>\r\n</p>" });
+      line({ type: "mathBlock", tex: "x\r\ny" });
+      line({ type: "paragraph" });
+      sequence.insertEmbed(sequence.length, element("rawInline", { source: "<b>\r\n</b>" }), {});
+    }),
+  },
   {
     name: "a letter after a letter of the sequence that names a record as the item to its right",
     change: (note, client) =>
@@ -1106,42 +1223,92 @@ describe("single changes no editor would send, on a relay that admits format-2 n
   }, 600_000);
 });
 
-describe("what a later check still refuses of a note whose every change intake took, as it does for a format-1 note", () => {
-  it("a raw block at the top that reads as a properties block, in a note with no properties", () => {
+const shown = (value: string) =>
+  JSON.stringify(
+    value.length > 40 ? `${value.slice(0, 24)}… (${String(value.length)} long)` : value,
+  );
+
+describe("what a format-2 note's body holds never decides a save", () => {
+  it("a raw block at the top that reads as a properties block is taken, where a format-1 note is refused", () => {
     const top: Line = [{ type: "rawBlock", source: "---\na: b\n---" }];
     const { first, second } = inBothFormats([top, [{ type: "paragraph" }, "text"]]);
-    expect(registered(second)).toBe(REFUSED_AT_REGISTRATION);
+    expect(registered(second)).toBe("accepted");
     expect(registered(first)).toBe(REFUSED_AT_REGISTRATION);
 
     const note = inBothFormats([[{ type: "paragraph" }, "text"]]).second;
     const held = room(note);
     const kept = held.offer(
       changeMadeBy(note, 77, ({ sequence }) => {
-        const boundary = firstOf(sequence, "block")!;
-        boundary.setAttribute("type", "rawBlock");
-        boundary.setAttribute("source", "---\na: b\n---");
+        firstLine(sequence).setAttribute("type", "rawBlock");
+        firstLine(sequence).setAttribute("source", "---\na: b\n---");
       })!,
     );
     expect(kept, "the room's check").toBeDefined();
-    expect(held.journal(kept!)).toBe(REFUSED_AT_SAVE);
+    expect(held.laterChecks(kept!)).toEqual(ACCEPTED);
   });
 
-  it("nothing to write, in a note marked as using CRLF line ends", () => {
+  it("a note marked as using CRLF line ends may be emptied, where a format-1 note is refused", () => {
     const { first, second } = inBothFormats([], { dohcMarkdownCrlf: true });
-    expect(registered(second)).toBe(REFUSED_AT_REGISTRATION);
+    expect(registered(second)).toBe("accepted");
     expect(registered(first)).toBe(REFUSED_AT_REGISTRATION);
 
     const note = inBothFormats([[{ type: "paragraph" }, "one"]], { dohcMarkdownCrlf: true }).second;
-    expect(registered(note)).toBe("accepted");
     const held = room(note);
     const kept = held.offer(
       changeMadeBy(note, 77, ({ sequence }) => sequence.delete(0, sequence.length))!,
     );
     expect(kept, "the room's check").toBeDefined();
-    expect(held.journal(kept!)).toBe(REFUSED_AT_SAVE);
+    expect(held.laterChecks(kept!)).toEqual(ACCEPTED);
   });
 
-  it("the file's text kept in the note with no hashes beside it", () => {
+  const every = noteWithEveryNode();
+  const LINE_SEPARATORS = [String.fromCharCode(0x2028), String.fromCharCode(0x2029)];
+  // Writing a code block whose language holds one of these two throws today. The smallest repair
+  // is to count them as line breaks in the rule the format has for that attribute.
+  const cannotBeWritten = (place: Place, value: string) =>
+    place.name === "codeBlock.language" &&
+    LINE_SEPARATORS.some((separator) => value.includes(separator));
+
+  it.each([
+    ["each attribute of each node and mark, and the letters of each kind of line", false],
+    ["each container's kind, and a line's kind and path", true],
+  ] as const)(
+    "%s, holding each hostile string: the note is written as Markdown and every check accepts",
+    (_name, changesKinds) => {
+      for (const value of HOSTILE_STRINGS) {
+        const held = room(every.note);
+        const change = changeMadeBy(every.note, 77, (page) => {
+          for (const place of every.places)
+            if (place.changesKinds === changesKinds && !cannotBeWritten(place, value))
+              place.put(page, value);
+        });
+        const kept = held.offer(change!);
+        expect(kept, `the room's check, for ${shown(value)}`).toBeDefined();
+        expect(held.laterChecks(kept!), shown(value)).toEqual(ACCEPTED);
+        expect(() => yDocToMarkdown(held.note), shown(value)).not.toThrow();
+        held.note.destroy();
+      }
+    },
+    120_000,
+  );
+
+  it("a code block's language that holds U+2028 or U+2029 is the one value that cannot be written", () => {
+    const language = every.places.find((place) => place.name === "codeBlock.language")!;
+    for (const value of LINE_SEPARATORS) {
+      const after = new Y.Doc({ gc: false });
+      Y.applyUpdate(after, every.note);
+      Y.applyUpdate(
+        after,
+        changeMadeBy(every.note, 77, (page) => language.put(page, value))!,
+      );
+      expect(() => yDocToMarkdown(after)).toThrow(/fenced code block/);
+      after.destroy();
+    }
+  });
+});
+
+describe("what a later check still refuses of a note whose every change intake took: capacity, and the rules for properties and metadata", () => {
+  it("the file's text kept in the note with no hashes beside it, as for a format-1 note", () => {
     const alone = (doc: Y.Doc) => doc.getMap("meta").set("dohcMarkdownSource", "Body\n");
     const note = seededNote();
     const held = room(note);
@@ -1153,7 +1320,7 @@ describe("what a later check still refuses of a note whose every change intake t
     expect(first.journal()).toBe(REFUSED_AT_SAVE);
   });
 
-  it("properties text the properties do not match, which the journal check cannot read at all", () => {
+  it("properties text the properties do not match, which the journal check cannot read at all, as for a format-1 note", () => {
     const other = (doc: Y.Doc) =>
       doc.getMap("meta").set("dohcFrontmatterSource", "status: other\n");
     const note = seededNote();
@@ -1166,27 +1333,39 @@ describe("what a later check still refuses of a note whose every change intake t
     expect(first.journal).toThrow(/without rewriting the others/);
   });
 
-  it("properties nested 200 deep as shared maps, which one change can send", () => {
-    const nested = (doc: Y.Doc) => {
-      let map = new Y.Map<unknown>();
-      doc.getMap("frontmatter").set("deep", map);
-      for (let level = 0; level < 200; level++) {
-        const inner = new Y.Map<unknown>();
-        map.set("in", inner);
-        map = inner;
-      }
-    };
+  it.each([
+    [
+      "properties nested 200 deep as shared maps",
+      (doc: Y.Doc) => {
+        let map = new Y.Map<unknown>();
+        doc.getMap("frontmatter").set("deep", map);
+        for (let level = 0; level < 200; level++) {
+          const inner = new Y.Map<unknown>();
+          map.set("in", inner);
+          map = inner;
+        }
+      },
+    ],
+    [
+      "one property of 300,000 values",
+      (doc: Y.Doc) =>
+        doc.getMap("frontmatter").set(
+          "many",
+          Array.from({ length: 300_000 }, () => null),
+        ),
+    ],
+  ] as const)("%s, in one change: capacity, as for a format-1 note", (_name, write) => {
     const note = seededNote();
     const held = room(note);
-    const kept = held.offer(changeMadeBy(note, 77, ({ doc }) => nested(doc))!);
+    const kept = held.offer(changeMadeBy(note, 77, ({ doc }) => write(doc))!);
     expect(kept, "the room's check").toBeDefined();
     expect(held.journal(kept!)).toBe("refused: capacity-refused (final)");
-    const first = offeredToAFormat1Note(nested);
+    const first = offeredToAFormat1Note(write);
     expect(first.room).toBe(true);
     expect(first.journal()).toBe("refused: capacity-refused (final)");
   });
 
-  it("more lines in the whole note than a check will weigh, each change within the limit", () => {
+  it("more lines in the whole note than a check will weigh, each change within the limit: capacity", () => {
     const note = seededNote();
     const held = room(note);
     const after = idsIn(note).last!;
@@ -1211,32 +1390,424 @@ describe("what a later check still refuses of a note whose every change intake t
   }, 120_000);
 });
 
-describe("the relay's setting", () => {
-  it("off, the room's check and registration refuse a format-2 note as they did before", () => {
-    const baseline = seededNote();
-    const typed = changeMadeBy(baseline, 77, ({ sequence }) => sequence.insert(2, "x"))!;
-    const check = () => {
-      const copy = new Y.Doc({ gc: false });
-      Y.applyUpdate(copy, baseline);
-      const fits = liveEditFitsCopy(copy, typed);
-      copy.destroy();
-      return {
-        room: fits,
-        registration: said(
-          register({ document: documentFor(baseline), currentPath: PATH, checkpoint: baseline }),
+describe("several changes the room took, saved as one", () => {
+  it("two changes that each hold 150,000 values pass the journal check together", () => {
+    const note = seededNote();
+    const held = room(note);
+    const kept = ["X.title", "Y.title"].map((key) => {
+      const bytes = held.offer(
+        changeMadeBy(Y.encodeStateAsUpdate(held.note), 77, ({ records }) =>
+          records.set(
+            key,
+            Array.from({ length: 150_000 }, () => null),
+          ),
+        )!,
+      );
+      expect(bytes, "the room's check").toBeDefined();
+      Y.applyUpdate(held.note, bytes!);
+      return bytes!;
+    });
+    expect(held.journal(Y.mergeUpdates(kept))).toBe("accepted");
+  });
+});
+
+describe("what the room keeps of a value no encoder writes", () => {
+  const record =
+    (bytes: readonly number[]): Case["change"] =>
+    (_note, client) =>
+      updateOf([
+        { client, clock: 0, parent: "containers", key: "X", content: anyAsWritten(bytes) },
+      ]);
+  const mark =
+    (json: string): Case["change"] =>
+    (note, client) =>
+      updateOf([
+        { client, clock: 0, origin: idsIn(note).letters, content: markAsWritten("link", json) },
+      ]);
+  const text = (value: string) => [
+    value.length,
+    ...Array.from(value, (unit) => unit.charCodeAt(0)),
+  ];
+  const stored = (kept: Uint8Array) => {
+    const item = Y.decodeUpdate(kept).structs.find(
+      (struct): struct is Y.Item => struct instanceof Y.Item,
+    )!;
+    return item.content instanceof Y.ContentFormat
+      ? (item.content.value as unknown)
+      : (item.content.getContent()[0] as unknown);
+  };
+
+  it.each([
+    ["a record with a key named __proto__", record([118, 1, ...text("__proto__"), 118, 0]), {}],
+    [
+      "a record with a key twice",
+      record([118, 2, ...text("a"), 126, ...text("a"), 120]),
+      { a: true },
+    ],
+    ["a mark's value with a key twice", mark('{"href":"a","href":"b"}'), { href: "b" }],
+    ["a mark's value with a negative zero", mark('{"a":-0}'), { a: 0 }],
+    ["a mark's value with a number too large to keep", mark('{"a":1e400}'), { a: null }],
+  ] as const)(
+    "%s: both checks refuse it as sent, and the room's trim rewrites it to a value it then takes",
+    (_name, change, rewritten) => {
+      const note = seededNote();
+      const held = room(note);
+      const bytes = change(note, 77)!;
+      expect(held.fitsAsSent(bytes)).toBe(false);
+      expect(held.journal(bytes)).not.toBe("accepted");
+      const kept = held.offer(bytes);
+      expect(kept, "the room's check, after its trim").toBeDefined();
+      expect(stored(kept!)).toEqual(rewritten);
+      expect(Object.keys(stored(kept!) as object)).toEqual(Object.keys(rewritten));
+      expect(held.laterChecks(kept!)).toEqual(ACCEPTED);
+    },
+  );
+
+  it("a mark's value with a key named __proto__ comes through the trim as sent, and the room refuses it", () => {
+    const note = seededNote();
+    const held = room(note);
+    const bytes = mark('{"href":"x","__proto__":{"a":1}}')(note, 77)!;
+    expect(held.fitsAsSent(bytes)).toBe(false);
+    expect(held.journal(bytes)).not.toBe("accepted");
+    expect(held.offer(bytes)).toBeUndefined();
+  });
+});
+
+describe("the work intake does for one change", () => {
+  const rules = { policy: POLICY, metadata: () => true };
+  const note = seededNote();
+  const after = idsIn(note).last!;
+  const worked = (change: Uint8Array) => {
+    const copy = new Y.Doc({ gc: false });
+    Y.applyUpdate(copy, note);
+    const work = { steps: 0 };
+    const refusal = bodySequenceChangeRefusal(
+      copy,
+      change,
+      () => Y.applyUpdate(copy, change),
+      rules,
+      work,
+    );
+    copy.destroy();
+    return { refusal, steps: work.steps };
+  };
+
+  it.each([
+    [
+      "25,000 letters, each after a struct that arrives collected",
+      50_000,
+      () =>
+        updateOf(
+          Array.from({ length: 50_000 }, (_, clock) =>
+            clock % 2 === 0
+              ? { client: 77, clock, collected: 1 }
+              : {
+                  client: 77,
+                  clock,
+                  origin: clock === 1 ? after : Y.createID(77, clock - 2),
+                  content: new Y.ContentString("x"),
+                },
+          ),
         ),
-      };
+    ],
+    [
+      "40,000 records, each set twice by the same change",
+      80_000,
+      () =>
+        updateOf(
+          Array.from({ length: 40_000 }, (_, index) => ({
+            client: 77,
+            clock: 2 * index,
+            parent: "containers",
+            key: `k${String(index)}`,
+            content: new Y.ContentAny(["first", "second"]),
+          })),
+          Array.from({ length: 40_000 }, (_, index) => [77, 2 * index, 1] as const),
+        ),
+    ],
+    [
+      "100,000 emoji, and 10,000 of them deleted one by one",
+      10_001,
+      () =>
+        updateOf(
+          [
+            {
+              client: 77,
+              clock: 0,
+              origin: after,
+              content: new Y.ContentString("😀".repeat(100_000)),
+            },
+          ],
+          Array.from({ length: 10_000 }, (_, index) => [77, 4 * index, 2] as const),
+        ),
+    ],
+  ] as const)(
+    "grows with the change and not with its square: %s",
+    (_name, structsAndDeletes, build) => {
+      const { refusal, steps } = worked(build());
+      expect(refusal).toBeUndefined();
+      expect(steps).toBeGreaterThan(structsAndDeletes);
+      expect(steps).toBeLessThan(64 * structsAndDeletes);
+    },
+    60_000,
+  );
+
+  it("says capacity, not a broken change, when reading the change is more work than the policy allows", () => {
+    const tight = { ...POLICY, maxValueNodeVisits: 50 };
+    const change = changeMadeBy(note, 77, ({ records }) =>
+      records.set(
+        "X.title",
+        Array.from({ length: 100 }, () => null),
+      ),
+    )!;
+    const copy = new Y.Doc({ gc: false });
+    Y.applyUpdate(copy, note);
+    expect(
+      bodySequenceChangeRefusal(copy, change, () => Y.applyUpdate(copy, change), {
+        ...rules,
+        policy: tight,
+      }),
+    ).toBe("capacity-refused");
+    copy.destroy();
+    expect(
+      said(
+        createLiveMarkdownJournalValidator(tight)({
+          document: documentFor(note),
+          currentPath: PATH,
+          checkpoint: note,
+          suffix: [],
+          candidate: change,
+        }),
+      ),
+    ).toMatch(/^refused: capacity-refused/);
+    const fresh = new Y.Doc({ gc: false });
+    Y.applyUpdate(fresh, note);
+    expect(liveEditRefusal(fresh, change, tight)).toBe("capacity-refused");
+    expect(liveEditRefusal(fresh, new Uint8Array([1, 2, 3]))).toBe("invalid-update");
+    fresh.destroy();
+    const again = new Y.Doc({ gc: false });
+    Y.applyUpdate(again, note);
+    expect(liveEditRefusal(again, change)).toBeUndefined();
+    again.destroy();
+  });
+});
+
+describe("a whole history, checked at activation", () => {
+  const history = (checkpoint: Uint8Array, rows: readonly Uint8Array[]) =>
+    said(
+      activate(
+        {
+          document: documentFor(checkpoint),
+          currentPath: PATH,
+          checkpoint,
+          suffix: rows.slice(0, -1),
+          candidate: rows.at(-1)!,
+        },
+        { from: 0, visit: () => {} },
+      ),
+    );
+  const rowsOf = (checkpoint: Uint8Array, ...changes: ((doc: Y.Doc) => void)[]) => {
+    const page = new Y.Doc({ gc: false });
+    page.clientID = 77;
+    Y.applyUpdate(page, checkpoint);
+    const rows: Uint8Array[] = [];
+    page.on("update", (update: Uint8Array) => rows.push(update));
+    for (const change of changes) page.transact(() => change(page));
+    page.destroy();
+    return rows;
+  };
+  const property = (doc: Y.Doc) => doc.getMap("frontmatter").set("status", "later");
+
+  it("is refused when an entry before the last makes a format-1 note a format-2 note", () => {
+    const doc = markdownToYDoc("---\nstatus: draft\n---\n\nBody\n", { clientID: 1 });
+    const note = Y.encodeStateAsUpdate(doc);
+    doc.destroy();
+    expect(history(note, rowsOf(note, property))).toBe("accepted");
+    expect(
+      history(
+        note,
+        rowsOf(note, (page) => page.getMap("meta").set("schemaVersion", 2), property),
+      ),
+    ).toBe("refused: invalid-schema (admitted-cut)");
+  });
+
+  it("is refused when an entry before the last breaks an intake rule of a format-2 note", () => {
+    const note = seededNote();
+    expect(history(note, rowsOf(note, property))).toBe("accepted");
+    for (const broken of [
+      (page: Y.Doc) => page.getText(BODY_SEQUENCE_FIELD).insertEmbed(1, { foo: 1 }),
+      (page: Y.Doc) => page.getMap("meta").set("schemaVersion", 1),
+      (page: Y.Doc) => page.getMap(BODY_CONTAINERS_FIELD).set("M", new Y.Map()),
+    ])
+      expect(history(note, rowsOf(note, broken, property))).toBe(
+        "refused: invalid-schema (admitted-cut)",
+      );
+  });
+});
+
+describe("the items a format-2 note is registered with", () => {
+  const withWritten = (write: (doc: Y.Doc) => unknown) => {
+    const doc = new Y.Doc({ gc: false });
+    Y.applyUpdate(doc, seededNote());
+    doc.clientID = 5;
+    doc.transact(() => write(doc));
+    const state = Y.encodeStateAsUpdate(doc);
+    doc.destroy();
+    return state;
+  };
+  const sequenceOf = (doc: Y.Doc) => doc.getText(BODY_SEQUENCE_FIELD);
+  const recordsOf = (doc: Y.Doc) => doc.getMap<unknown>(BODY_CONTAINERS_FIELD);
+
+  const HELD: readonly (readonly [name: string, write: (doc: Y.Doc) => unknown])[] = [
+    ["a map under containers", (doc: Y.Doc) => recordsOf(doc).set("M", new Y.Map())],
+    ["a list under containers", (doc: Y.Doc) => recordsOf(doc).set("M", new Y.Array())],
+    ["a record whose key is no id", (doc: Y.Doc) => recordsOf(doc).set("has space", "callout")],
+    ["an embedded value in the sequence", (doc: Y.Doc) => sequenceOf(doc).insertEmbed(1, { a: 1 })],
+    [
+      "a text nested in the sequence",
+      (doc: Y.Doc) => sequenceOf(doc).insertEmbed(1, new Y.XmlText("x")),
+    ],
+    [
+      "an element of an unknown name in the sequence",
+      (doc: Y.Doc) => sequenceOf(doc).insertEmbed(1, new Y.XmlElement("script")),
+    ],
+    ["a mark the schema lacks", (doc: Y.Doc) => sequenceOf(doc).format(1, 3, { colour: "red" })],
+    [
+      "an attribute a line cannot have",
+      (doc: Y.Doc) => firstLine(sequenceOf(doc)).setAttribute("colour", "red"),
+    ],
+    [
+      "a paragraph under body",
+      (doc: Y.Doc) => doc.getXmlFragment("body").insert(0, [new Y.XmlElement("paragraph")]),
+    ],
+    ["a metadata key no note has", (doc: Y.Doc) => doc.getMap("meta").set("owner", "me")],
+  ];
+
+  it.each(HELD)("registration refuses a note that holds %s", (_name, write) => {
+    expect(registered(withWritten(() => {}))).toBe("accepted");
+    expect(registered(withWritten(write))).toBe(REFUSED_AT_REGISTRATION);
+  });
+
+  it("intake takes no write into a map or a list that hangs under containers", () => {
+    for (const nested of [() => new Y.Map<unknown>(), () => new Y.Array<unknown>()]) {
+      const note = withWritten((doc) => recordsOf(doc).set("M", nested()));
+      const held = room(note);
+      const write = changeMadeBy(note, 77, ({ records }) => {
+        const held = records.get("M");
+        if (held instanceof Y.Map) held.set("k", "v");
+        else (held as Y.Array<unknown>).push(["v"]);
+      })!;
+      expect(held.fitsAsSent(write)).toBe(false);
+      expect(held.offer(write)).toBeUndefined();
+    }
+  });
+});
+
+describe.each([
+  ["off", false],
+  ["on", true],
+] as const)(
+  "the format marker of a format-1 note, with the relay's setting %s",
+  (_name, admitted) => {
+    beforeAll(() => admitBodySequenceNotes(admitted));
+    afterAll(() => admitBodySequenceNotes(true));
+    const fits = (note: Uint8Array, change: Uint8Array) => {
+      const copy = new Y.Doc({ gc: false });
+      Y.applyUpdate(copy, note);
+      const taken = liveEditFitsCopy(copy, change);
+      copy.destroy();
+      return taken;
     };
-    expect(check()).toEqual({ room: true, registration: "accepted" });
+    const sentBy = (note: Uint8Array, change: (page: Y.Doc) => void) => {
+      const page = new Y.Doc({ gc: false });
+      page.clientID = 77;
+      Y.applyUpdate(page, note);
+      let sent: Uint8Array | undefined;
+      page.on("update", (update: Uint8Array) => {
+        sent = update;
+      });
+      page.transact(() => change(page));
+      page.destroy();
+      return sent!;
+    };
+
+    it("no change replaces or deletes it, and other changes are taken as before", () => {
+      expect(
+        offeredToAFormat1Note((page) => page.getMap("frontmatter").set("status", "done")).room,
+      ).toBe(true);
+      for (const change of [
+        (page: Y.Doc) => page.getMap("meta").set("schemaVersion", 2),
+        (page: Y.Doc) => page.getMap("meta").set("schemaVersion", 1),
+        (page: Y.Doc) => page.getMap("meta").delete("schemaVersion"),
+        (page: Y.Doc) => {
+          page.getMap("meta").set("schemaVersion", 2);
+          page.getMap("meta").set("schemaVersion", 1);
+        },
+      ])
+        expect(offeredToAFormat1Note(change).room).toBe(false);
+    });
+
+    it("a note that has none may be given the number 1, as the engine and the importer do, and nothing else", () => {
+      const empty = Y.encodeStateAsUpdate(new Y.Doc());
+      const imported = markdownToYDoc("Body\n", { clientID: 1 });
+      expect(fits(empty, Y.encodeStateAsUpdate(imported))).toBe(true);
+      imported.getMap("meta").delete("schemaVersion");
+      const without = Y.encodeStateAsUpdate(imported);
+      imported.destroy();
+      expect(
+        fits(
+          without,
+          sentBy(without, (page) => page.getMap("meta").set("schemaVersion", 1)),
+        ),
+      ).toBe(true);
+      for (const value of [2, "1", 1n, true, null])
+        expect(
+          fits(
+            without,
+            sentBy(without, (page) => page.getMap("meta").set("schemaVersion", value)),
+          ),
+          String(value),
+        ).toBe(false);
+    });
+  },
+);
+
+describe("the relay's setting", () => {
+  it("off, a format-2 note is not registered and takes no change, and on again it takes them", () => {
+    const note = seededNote();
+    const changes = [
+      changeMadeBy(note, 77, ({ sequence }) => sequence.insert(2, "x"))!,
+      changeMadeBy(note, 77, ({ sequence }) => sequence.delete(2, 1))!,
+      changeMadeBy(note, 77, ({ doc }) => doc.getMap("frontmatter").set("status", "done"))!,
+    ];
+    const answers = () => ({
+      registration: registered(note),
+      room: changes.map((change) => {
+        const copy = new Y.Doc({ gc: false });
+        Y.applyUpdate(copy, note);
+        const refusal = liveEditRefusal(copy, change);
+        copy.destroy();
+        return refusal ?? "taken";
+      }),
+      journal: changes.map((change) => room(note).journal(change)),
+    });
+    const on = {
+      registration: "accepted",
+      room: ["taken", "taken", "taken"],
+      journal: ["accepted", "accepted", "accepted"],
+    };
+    expect(answers()).toEqual(on);
     admitBodySequenceNotes(false);
     try {
-      expect(check()).toEqual({
-        room: false,
-        registration: "refused: invalid-schema (registration-input)",
+      expect(answers()).toEqual({
+        registration: REFUSED_AT_REGISTRATION,
+        room: ["invalid-update", "invalid-update", "invalid-update"],
+        journal: Array.from({ length: 3 }, () => "refused: invalid-schema (admitted-cut)"),
       });
     } finally {
       admitBodySequenceNotes(true);
     }
+    expect(answers()).toEqual(on);
   });
 
   it("on, a format-1 note is checked as before, and no change can make it a format-2 note", () => {

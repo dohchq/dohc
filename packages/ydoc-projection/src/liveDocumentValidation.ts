@@ -15,13 +15,18 @@ import {
   resolveMarkdownSource,
 } from "./artifact-markdown.js";
 import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
-import { bodySequenceChangeFits, type BodySequenceIntakeRules } from "./bodySequenceIntake.js";
+import {
+  bodySequenceChangeRefusal,
+  bodySequenceStateRefusal,
+  type BodySequenceIntakeRules,
+} from "./bodySequenceIntake.js";
 import { holdsBodySequence } from "./bodySequenceYjs.js";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,
   isEmptyShell,
+  yDocPropertiesToMarkdown,
   yDocToMarkdown,
 } from "./import-export.js";
 import {
@@ -82,7 +87,7 @@ let bodySequenceNotesAdmitted = false;
 
 /**
  * The relay's one setting for notes whose body is one sequence. While it is off, which is how
- * every process starts, each check in this module refuses such a note.
+ * every process starts, each check in this module refuses such a note and every change to one.
  */
 export function admitBodySequenceNotes(admitted: boolean): void {
   bodySequenceNotesAdmitted = admitted;
@@ -91,7 +96,6 @@ export function admitBodySequenceNotes(admitted: boolean): void {
 /** Each key's own rule from `validateMetadata`, for one item of a body-sequence note's metadata. */
 function bodySequenceMetadata(engineReader: boolean): BodySequenceIntakeRules["metadata"] {
   return (key, shown) => {
-    if (key === "schemaVersion") return false;
     const kept = key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX);
     if (!kept && !META_KEYS.has(key) && !(engineReader && ENGINE_META_KEYS.has(key))) return false;
     if (!shown) return true;
@@ -105,10 +109,7 @@ function bodySequenceMetadata(engineReader: boolean): BodySequenceIntakeRules["m
   };
 }
 
-const ROOM_BODY_SEQUENCE_RULES: BodySequenceIntakeRules = {
-  policy: WORKER_LIVE_VALIDATION_POLICY,
-  metadata: bodySequenceMetadata(false),
-};
+const ROOM_METADATA = bodySequenceMetadata(false);
 
 function bodySequenceCut(
   policy: OrderedLiveUpdateCutPolicy,
@@ -118,8 +119,13 @@ function bodySequenceCut(
   const rules = { policy, metadata: bodySequenceMetadata(engineReader) };
   return {
     holds: holdsBodySequence,
-    candidateFits: (document, candidate, apply) =>
-      bodySequenceChangeFits(document, candidate, apply, rules),
+    entry(document, bytes, apply, kind) {
+      if (kind === "state") return bodySequenceStateRefusal(document, bytes, apply, rules);
+      if (holdsBodySequence(document))
+        return bodySequenceChangeRefusal(document, bytes, apply, rules);
+      apply();
+      return holdsBodySequence(document) ? "invalid-schema" : undefined;
+    },
   };
 }
 const ByteArray = Uint8Array;
@@ -926,21 +932,38 @@ type Shared = ReturnType<Y.Doc["get"]>;
  * `copy` may hold part of the edit, so the caller builds it again.
  *
  * A note whose body is one sequence gets that format's intake instead, when the relay admits
- * such notes. The copy says which the note is: an edit that would change that is refused.
+ * such notes, and takes no edit at all when it does not. The copy says which the note is. In
+ * either format an edit may give a note that has no `meta.schemaVersion` the number 1, and no
+ * edit may replace or delete the one a note has: the engine writes it once, and a page that
+ * changed it would change what every reader takes the note to be before the save refused it.
  */
 export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
-  if (bodySequenceNotesAdmitted && holdsBodySequence(copy)) {
-    try {
-      return bodySequenceChangeFits(
-        copy,
-        update,
-        () => Y.applyUpdate(copy, update),
-        ROOM_BODY_SEQUENCE_RULES,
-      );
-    } catch {
-      return false;
-    }
+  return liveEditRefusal(copy, update) === undefined;
+}
+
+/**
+ * Why `liveEditFitsCopy` is false: the edit does not fit, or reading it is more work than
+ * `policy` allows. Without a policy it reads the edit under the validation worker's default.
+ */
+export function liveEditRefusal(
+  copy: Y.Doc,
+  update: Uint8Array,
+  policy: OrderedLiveUpdateCutPolicy = WORKER_LIVE_VALIDATION_POLICY,
+): "invalid-update" | "capacity-refused" | undefined {
+  if (!holdsBodySequence(copy)) return editFitsFormat1(copy, update) ? undefined : "invalid-update";
+  if (!bodySequenceNotesAdmitted) return "invalid-update";
+  try {
+    const refusal = bodySequenceChangeRefusal(copy, update, () => Y.applyUpdate(copy, update), {
+      policy,
+      metadata: ROOM_METADATA,
+    });
+    return refusal === "invalid-schema" ? "invalid-update" : refusal;
+  } catch {
+    return "invalid-update";
   }
+}
+
+function editFitsFormat1(copy: Y.Doc, update: Uint8Array): boolean {
   try {
     for (const struct of Y.decodeUpdate(update).structs) {
       // Yjs takes an empty item without moving its editor's clock, so the check would never read it.
@@ -959,6 +982,8 @@ export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
   } catch {
     return false;
   }
+  const version = copy.share.get("meta")?._map.get("schemaVersion");
+  const hadVersion = version !== undefined && !version.deleted;
   let fits = true;
   // Read before the change ends: Yjs then joins each new item to the one before it from the same
   // editor without comparing their parents.
@@ -975,9 +1000,9 @@ export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
   }
   return (
     fits &&
+    !(hadVersion && version.deleted) &&
     copy.store.pendingStructs === null &&
-    copy.store.pendingDs === null &&
-    !(bodySequenceNotesAdmitted && holdsBodySequence(copy))
+    copy.store.pendingDs === null
   );
 }
 
@@ -1018,6 +1043,15 @@ function placedItemsFit(copy: Y.Doc, transaction: Y.Transaction): boolean {
       if (
         typeof parent === "string" &&
         (!PUBLIC_ROOTS.has(parent) || (parent === "body") !== (sub === null))
+      )
+        return false;
+      if (
+        parent === "meta" &&
+        sub === "schemaVersion" &&
+        (item.deleted ||
+          item.length !== 1 ||
+          !(content instanceof Y.ContentAny) ||
+          content.arr[0] !== 1)
       )
         return false;
       // A removed item stays removed, so what it holds never shows.
@@ -1301,7 +1335,7 @@ function validatePublicState(
   if (storedBody) validateBody(body, storedBody, topology.bodyHasActiveItem);
   const projectedMarkdown = yDocToMarkdown(scratch);
   if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse("capacity-refused");
-  if (metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes("\r\n"))
+  if (!bodySequence && metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes("\r\n"))
     refuse("invalid-schema");
   const source = resolveMarkdownSource(scratch, projectedMarkdown, witness, engineReader);
   if (source.kind === "capacity-refused") refuse("capacity-refused");
@@ -1311,7 +1345,16 @@ function validatePublicState(
     (source.kind === "unverified" && unverifiedSource === "refuse")
   )
     refuse("invalid-schema");
-  if (!zeroStructSeed) {
+  if (bodySequence) {
+    // What the body holds never decides this: the properties are written with no body and read back.
+    const written = markdownToYDoc(yDocPropertiesToMarkdown(scratch));
+    try {
+      if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(written)))
+        refuse("invalid-schema");
+    } finally {
+      written.destroy();
+    }
+  } else if (!zeroStructSeed) {
     const reimported = markdownToYDoc(projectedMarkdown);
     try {
       if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(reimported)))
@@ -1325,7 +1368,6 @@ function validatePublicState(
         for (const key of PROJECTION_SOURCE_META_KEYS) delete kept[key];
         for (const key of Object.keys(kept))
           if (key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) delete kept[key];
-        if (bodySequence) delete kept.schemaVersion;
         return kept;
       };
       if (

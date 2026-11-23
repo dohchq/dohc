@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { admitBodySequenceNotes } from "@dohc/ydoc-projection/live-journal-validation";
 import {
+  changeMadeBy,
   openPerson,
   random,
   randomChange,
@@ -19,7 +20,7 @@ import { createLiveRooms } from "./liveRoom.js";
 import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import type { NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { StorageContext } from "./storage/context.js";
-import { liveRoomPaused } from "./storage/liveRoomPauses.js";
+import { liveRoomPauseCopy, liveRoomPaused, liveRoomPauses } from "./storage/liveRoomPauses.js";
 import type { LiveRoomAuthority } from "./storage/types.js";
 
 type Fixture = ReturnType<typeof registered>;
@@ -117,7 +118,8 @@ function join(f: Fixture, room: ReturnType<typeof createLiveRooms>, sender: Live
   } as unknown as NamedFrameRoomHost);
 }
 
-it("a room takes what three people do to a format-2 note, and every save passes the journal's check", async () => {
+/** A format-2 note registered on the relay, and a room for it that saves when its people leave. */
+function noteInARoom(options: { pauseAfterMs?: number } = {}) {
   const baseline = seededNote();
   const f = registered({ deployment: true, baselineBytes: baseline });
   open.push(f);
@@ -127,11 +129,24 @@ it("a room takes what three people do to a format-2 note, and every save passes 
     maxNoteBytes: 1 << 22,
     maxAppliedBytes: 1 << 20,
     saveEveryMs: 3_600_000,
+    ...options,
     log() {},
     openSaver: async () => ownerCapture(f),
   });
   rooms.push(room);
-  const signal = new AbortController().signal;
+  return { baseline, f, room };
+}
+const signal = new AbortController().signal;
+const submitted = (session: NamedFrameHostSession, bytes: Uint8Array) =>
+  session.submit(
+    { deliveryId: randomUUID(), updateDigest: hash(bytes), updateBytes: bytes },
+    signal,
+  );
+const paused = (f: Fixture) =>
+  liveRoomPaused(f.storage as StorageContext, f.input.evidence.document);
+
+it("a room takes what three people do to a format-2 note, and every save passes the journal's check", async () => {
+  const { baseline, f, room } = noteInARoom();
   const people = ["Ana", "Ben", "Olu"].map((name, index) => ({
     person: openPerson(baseline, 10 * (index + 1)),
     session: join(f, room, [{ kind: "human", humanId: name.toLowerCase(), humanName: name }]),
@@ -139,7 +154,7 @@ it("a room takes what three people do to a format-2 note, and every save passes 
   for (const { person, session } of people)
     await session.openSync(Y.encodeStateVector(person.doc), signal);
   const next = random(5);
-  let submitted = 0;
+  let taken = 0;
   for (let round = 0; round < 4; round++) {
     for (const { person } of people)
       for (let changes = 0; changes < 2; changes++) randomChange(person, next);
@@ -147,23 +162,102 @@ it("a room takes what three people do to a format-2 note, and every save passes 
       const from = people.find(({ person }) => person.waiting.length > 0);
       if (!from) break;
       const change = from.person.waiting.shift()!;
-      const answer = await from.session.submit(
-        { deliveryId: randomUUID(), updateDigest: hash(change.bytes), updateBytes: change.bytes },
-        signal,
-      );
-      expect(answer, change.kind).toMatchObject({ result: "success" });
-      submitted++;
+      expect(await submitted(from.session, change.bytes), change.kind).toMatchObject({
+        result: "success",
+      });
+      taken++;
       for (const other of people) if (other !== from) other.person.receive(change.bytes);
     }
   }
-  expect(submitted).toBeGreaterThan(20);
+  expect(taken).toBeGreaterThan(20);
   for (const { session } of people) session.close();
   await room.close();
-  expect(liveRoomPaused(f.storage as StorageContext, f.input.evidence.document)).toBe(false);
+  expect(paused(f)).toBe(false);
   const saves = f.journalRows().journal.map(rowBytes);
   expect(saves.length).toBeGreaterThan(0);
   const saved = new Y.Doc({ gc: false });
   for (const bytes of [baseline, ...saves]) Y.applyUpdate(saved, bytes);
   for (const { person } of people) expect(storedReading(person.doc)).toEqual(storedReading(saved));
   saved.destroy();
+});
+
+it("saves two changes of 150,000 values each as one batch, and the note is not paused", async () => {
+  const { baseline, f, room } = noteInARoom();
+  const session = join(f, room, [{ kind: "human", humanId: "ana", humanName: "Ana" }]);
+  await session.openSync(Y.encodeStateVector(new Y.Doc()), signal);
+  let note = baseline;
+  for (const key of ["X.title", "Y.title"]) {
+    const change = changeMadeBy(note, 77, ({ records }) =>
+      records.set(
+        key,
+        Array.from({ length: 150_000 }, () => null),
+      ),
+    )!;
+    expect(await submitted(session, change)).toMatchObject({ result: "success" });
+    note = Y.mergeUpdates([note, change]);
+  }
+  session.close();
+  await room.close();
+  expect(paused(f)).toBe(false);
+  const saves = f.journalRows().journal.map(rowBytes);
+  expect(saves).toHaveLength(1);
+  const saved = new Y.Doc({ gc: false });
+  for (const bytes of [baseline, ...saves]) Y.applyUpdate(saved, bytes);
+  for (const key of ["X.title", "Y.title"])
+    expect(saved.getMap("containers").get(key)).toHaveLength(150_000);
+  saved.destroy();
+});
+
+it("with the setting turned off, a room refuses each change to a format-2 note at once and does not pause it; on again, it takes them", async () => {
+  const { baseline, f, room } = noteInARoom();
+  const session = join(f, room, [{ kind: "human", humanId: "ana", humanName: "Ana" }]);
+  await session.openSync(Y.encodeStateVector(new Y.Doc()), signal);
+  const changes = [
+    changeMadeBy(baseline, 77, ({ sequence }) => sequence.insert(2, "x"))!,
+    changeMadeBy(baseline, 78, ({ doc }) => doc.getMap("frontmatter").set("status", "done"))!,
+  ];
+  admitBodySequenceNotes(false);
+  try {
+    for (const change of changes)
+      expect(await submitted(session, change)).toEqual({
+        result: "refused",
+        reason: "invalid-update",
+      });
+  } finally {
+    admitBodySequenceNotes(true);
+  }
+  expect(paused(f)).toBe(false);
+  for (const change of changes)
+    expect(await submitted(session, change)).toMatchObject({ result: "success" });
+  session.close();
+  await room.close();
+  expect(paused(f)).toBe(false);
+  expect(f.journalRows().journal).toHaveLength(1);
+});
+
+it("after the setting goes off, a room cannot save the changes it had taken to a format-2 note, and pauses the note with them in its copy", async () => {
+  const { baseline, f, room } = noteInARoom({ pauseAfterMs: 0 });
+  const session = join(f, room, [{ kind: "human", humanId: "ana", humanName: "Ana" }]);
+  await session.openSync(Y.encodeStateVector(new Y.Doc()), signal);
+  const typed = changeMadeBy(baseline, 77, ({ sequence }) => sequence.insert(2, "kept"))!;
+  expect(await submitted(session, typed)).toMatchObject({ result: "success" });
+  admitBodySequenceNotes(false);
+  try {
+    session.close();
+    await vi.waitFor(() => expect(paused(f)).toBe(true));
+  } finally {
+    admitBodySequenceNotes(true);
+  }
+  const storage = f.storage as StorageContext;
+  const [pause] = liveRoomPauses(storage, "workspace");
+  expect(pause).toMatchObject({ cause: "failing", refusal: null });
+  const copy = new Y.Doc({ gc: false });
+  Y.applyUpdate(copy, liveRoomPauseCopy(storage, "workspace", pause!.pauseId)!);
+  const kept = new Y.Doc({ gc: false });
+  Y.applyUpdate(kept, baseline);
+  Y.applyUpdate(kept, typed);
+  expect(storedReading(copy)).toEqual(storedReading(kept));
+  expect(f.journalRows().journal).toHaveLength(0);
+  copy.destroy();
+  kept.destroy();
 });

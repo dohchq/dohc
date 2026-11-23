@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
@@ -15,11 +15,11 @@ import {
   storedReading,
   type Arrive,
   type Change,
-  type ChangeKind,
   type Person,
 } from "./bodySequenceChecksTestSupport.js";
 import { getDohcProseMirrorSchema, markdownToYDoc } from "./import-export.js";
 import {
+  admitBodySequenceNotes,
   createLiveMarkdownHistoryValidator,
   createLiveMarkdownJournalValidator,
   createLiveMarkdownRegistrationValidator,
@@ -51,67 +51,9 @@ const said = (result: { kind: string; reason?: string; source?: string }) =>
 const sameBytes = (left: Uint8Array, right: Uint8Array) =>
   left.length === right.length && left.every((byte, index) => byte === right[index]);
 
-type Adds =
-  | "an item under sequence, which the change names"
-  | "an item under sequence, placed by its neighbour"
-  | "a record under containers, which the change names"
-  | "a record under containers, placed by the value it replaces"
-  | "an attribute of a boundary"
-  | "an attribute of a boundary, deleted as it lands"
-  | "an attribute of an inline item"
-  | "a property or a metadata value"
-  | "a collected struct"
-  | "nothing";
-
-function whatItAdds(room: Y.Doc, before: Map<number, number>, taken: Uint8Array): Adds[] {
-  const named = new Set<string>();
-  for (const struct of Y.decodeUpdate(taken).structs)
-    if (struct instanceof Y.Item && typeof struct.parent === "string")
-      named.add(`${String(struct.id.client)}:${String(struct.id.clock)}`);
-  const roots = new Map<unknown, string>();
-  for (const [name, type] of room.share) roots.set(type, name);
-  const adds = new Set<Adds>();
-  for (const [client, structs] of room.store.clients) {
-    const from = before.get(client) ?? 0;
-    for (const struct of structs) {
-      if (struct.id.clock + struct.length <= from) continue;
-      if (!(struct instanceof Y.Item)) {
-        adds.add("a collected struct");
-        continue;
-      }
-      const root = roots.get(struct.parent);
-      const onWire = named.has(`${String(client)}:${String(Math.max(struct.id.clock, from))}`);
-      if (root === BODY_SEQUENCE_FIELD)
-        adds.add(
-          onWire
-            ? "an item under sequence, which the change names"
-            : "an item under sequence, placed by its neighbour",
-        );
-      else if (root === BODY_CONTAINERS_FIELD)
-        adds.add(
-          onWire
-            ? "a record under containers, which the change names"
-            : "a record under containers, placed by the value it replaces",
-        );
-      else if (root !== undefined) adds.add("a property or a metadata value");
-      else if (struct.parent instanceof Y.XmlElement)
-        adds.add(
-          struct.parent.nodeName !== "block"
-            ? "an attribute of an inline item"
-            : struct.deleted
-              ? "an attribute of a boundary, deleted as it lands"
-              : "an attribute of a boundary",
-        );
-      else adds.add("a property or a metadata value");
-    }
-  }
-  return adds.size === 0 ? ["nothing"] : [...adds].sort();
-}
-
 interface Seen {
   readonly change: Change;
   readonly taken: Uint8Array;
-  readonly adds: Adds[];
   readonly room: boolean;
   readonly earlier: readonly Uint8Array[];
 }
@@ -121,11 +63,9 @@ function relay(baseline: Uint8Array, seen?: (row: Seen) => void) {
   Y.applyUpdate(room, baseline);
   let copy: Y.Doc | undefined;
   const rows: Uint8Array[] = [];
-  const kinds: ChangeKind[] = [];
   return {
     room,
     rows,
-    kinds,
     vector: () => Y.encodeStateVector(room),
     missingFor: (vector: Uint8Array) => Y.encodeStateAsUpdate(room, vector),
     take(change: Change) {
@@ -147,74 +87,40 @@ function relay(baseline: Uint8Array, seen?: (row: Seen) => void) {
       const earlier = rows.slice();
       Y.applyUpdate(room, taken);
       rows.push(taken);
-      kinds.push(change.kind);
-      seen?.({
-        change,
-        taken,
-        adds: whatItAdds(room, Y.decodeStateVector(vector), taken),
-        room: fits,
-        earlier,
-      });
+      seen?.({ change, taken, room: fits, earlier });
       return taken;
     },
   };
 }
 
-const TODAY = {
+const OFF = {
+  room: false,
   cut: "accepted",
   journal: "refused: invalid-schema (admitted-cut)",
   engineReader: "refused: invalid-schema (final)",
   registration: "refused: invalid-schema (registration-input)",
-  activation: "refused: invalid-schema (admitted-cut)",
 };
-const ROOM_REFUSES_TODAY: ReadonlySet<Adds> = new Set<Adds>([
-  "an item under sequence, which the change names",
-  "an item under sequence, placed by its neighbour",
-  "a record under containers, which the change names",
-  "a record under containers, placed by the value it replaces",
-  "an attribute of a boundary",
-]);
-
-const table = new Map<string, Map<string, number>>();
-const count = (row: string, column: string) => {
-  const columns = table.get(row) ?? new Map<string, number>();
-  columns.set(column, (columns.get(column) ?? 0) + 1);
-  table.set(row, columns);
-};
-
-afterAll(() => {
-  const lines = [...table.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(
-      ([row, columns]) =>
-        `${row}\n${[...columns.entries()]
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([column, times]) => `    ${String(times).padStart(6)}  ${column}`)
-          .join("\n")}`,
-    );
-  if (lines.length > 0) console.log(lines.join("\n"));
-});
 
 const COUNTS = [2, 3, 4];
 const SETUPS = COUNTS.flatMap((people) => ARRIVALS.map((arrive) => [people, arrive] as const));
 
-describe("today's checks, given a format-2 note that people edit as section 4 says", () => {
-  it("refuse the seeded note at registration", () => {
+describe("with the relay's setting off, a format-2 note that people edit as section 4 says", () => {
+  it("is refused at registration", () => {
     const baseline = seededNote();
     expect(
       said(register({ document: documentFor(baseline), currentPath: PATH, checkpoint: baseline })),
-    ).toBe(TODAY.registration);
+    ).toBe(OFF.registration);
   });
 
   it.each(SETUPS)(
-    "%i people, changes arriving %s: every change meets every check",
+    "%i people, changes arriving %s: every check but the ordered cut refuses every change",
     (people, arrive) => {
       for (let seed = 1; seed <= SEEDS; seed++)
         for (const gc of [true, false]) {
           const baseline = seededNote();
           const document = documentFor(baseline);
           const next = random(seed * 7919 + people);
-          const hub = relay(baseline, ({ change, taken, adds, room, earlier }) => {
+          const hub = relay(baseline, ({ change, taken, room, earlier }) => {
             const input = {
               document,
               currentPath: PATH,
@@ -237,32 +143,21 @@ describe("today's checks, given a format-2 note that people edit as section 4 sa
             for (const row of [...earlier, taken]) Y.applyUpdate(replay, row);
             const state = Y.encodeStateAsUpdate(replay);
             replay.destroy();
-            const verdicts = {
-              cut:
-                cut.kind === "accepted"
-                  ? "accepted"
-                  : `refused: ${cut.reason} at ${JSON.stringify(cut.stage)}`,
-              journal: said(admit(input)),
-              engineReader: said(engineReaderAdmit(input)),
-              registration: said(
-                register({ document: documentFor(state), currentPath: PATH, checkpoint: state }),
-              ),
-            };
-            const where = `seed ${String(seed)}, gc ${String(gc)}, ${change.kind} from ${String(change.from)}, adding ${adds.join(" + ")}`;
-            expect(verdicts, where).toEqual({
-              cut: TODAY.cut,
-              journal: TODAY.journal,
-              engineReader: TODAY.engineReader,
-              registration: TODAY.registration,
-            });
-            expect(room, where).toBe(!adds.some((added) => ROOM_REFUSES_TODAY.has(added)));
-            count(
-              `the room's check, for a change adding ${adds.join(" + ")}`,
-              room ? "taken" : "refused",
-            );
-            count(`a change of kind: ${change.kind}`, room ? "room: taken" : "room: refused");
-            for (const [check, verdict] of Object.entries(verdicts))
-              count(`a change of kind: ${change.kind}`, `${check}: ${verdict}`);
+            expect(
+              {
+                room,
+                cut:
+                  cut.kind === "accepted"
+                    ? "accepted"
+                    : `refused: ${cut.reason} at ${JSON.stringify(cut.stage)}`,
+                journal: said(admit(input)),
+                engineReader: said(engineReaderAdmit(input)),
+                registration: said(
+                  register({ document: documentFor(state), currentPath: PATH, checkpoint: state }),
+                ),
+              },
+              `seed ${String(seed)}, gc ${String(gc)}, ${change.kind} from ${String(change.from)}`,
+            ).toEqual(OFF);
           });
           const team = Array.from({ length: people }, (_, index) =>
             openPerson(baseline, 10 * (index + 1), { gc }),
@@ -278,18 +173,20 @@ describe("today's checks, given a format-2 note that people edit as section 4 sa
                 stored,
               );
           }
-          const whole = activate(
-            {
-              document,
-              currentPath: PATH,
-              checkpoint: baseline,
-              suffix: hub.rows.slice(0, -1),
-              candidate: hub.rows.at(-1)!,
-            },
-            { from: 0, visit: () => {} },
-          );
-          expect(said(whole)).toBe(TODAY.activation);
-          count("a whole history, at activation", said(whole));
+          expect(
+            said(
+              activate(
+                {
+                  document,
+                  currentPath: PATH,
+                  checkpoint: baseline,
+                  suffix: hub.rows.slice(0, -1),
+                  candidate: hub.rows.at(-1)!,
+                },
+                { from: 0, visit: () => {} },
+              ),
+            ),
+          ).toBe("refused: invalid-schema (admitted-cut)");
           for (const each of team) each.doc.destroy();
           hub.room.destroy();
         }
@@ -608,7 +505,10 @@ function boldAgainstDelete(yjsCleanup: boolean) {
   return { hub, bolder, deleter, typist, reader, bold };
 }
 
-describe("formatting that Yjs deletes on its own when changes meet", () => {
+describe("formatting that Yjs deletes on its own when changes meet, on a relay that admits format-2 notes", () => {
+  beforeAll(() => admitBodySequenceNotes(true));
+  afterAll(() => admitBodySequenceNotes(false));
+
   it.each(EDITS)(
     "%s, by pages that let Yjs clean: a document that never declares the sequence deletes none of it, and every page that sends ends as the stored note",
     (edits) => {

@@ -150,17 +150,29 @@ export interface JournalPrefixProjection {
 /** How a cut treats a note whose body is one sequence. Without it, no note is read as one. */
 export interface BodySequenceCut {
   readonly holds: (document: Y.Doc) => boolean;
-  /** Applies the candidate to the note as it was before it, with `apply`, and says whether it fits. */
-  readonly candidateFits: (document: Y.Doc, candidate: Uint8Array, apply: () => void) => boolean;
+  /**
+   * Applies one entry of the cut to the note as it was before it, with `apply`, and gives the
+   * reason the note cannot take it. A `state` is the note's first entry, a `change` any later one.
+   */
+  readonly entry: (
+    document: Y.Doc,
+    bytes: Uint8Array,
+    apply: () => void,
+    kind: "state" | "change",
+  ) => OrderedLiveUpdateCutRefusalReason | undefined;
 }
 
-/** One update as the cut reads it from the wire. */
-export interface LiveUpdateAsRead {
-  readonly structs: readonly (Y.Item | Y.GC | Y.Skip)[];
-  readonly deletes: readonly LiveUpdateStructRange[];
-  /** Per client, the clocks between the two units of a surrogate pair in a letter run it sends. */
-  readonly insidePairs: ReadonlyMap<number, readonly number[]>;
-}
+/** One update as the cut reads it from the wire, or why the cut refuses its bytes. */
+export type LiveUpdateAsRead =
+  | {
+      readonly kind: "read";
+      readonly structs: readonly (Y.Item | Y.GC | Y.Skip)[];
+      /** Sorted by client and clock, and joined where they touch. */
+      readonly deletes: readonly LiveUpdateStructRange[];
+      /** Per client, the sorted clocks between the two units of a surrogate pair it sends. */
+      readonly insidePairs: ReadonlyMap<number, readonly number[]>;
+    }
+  | { readonly kind: "refused"; readonly reason: OrderedLiveUpdateCutRefusalReason };
 
 const POLICY_FIELDS = [
   "maxStructVisits",
@@ -3596,7 +3608,6 @@ function proveProjectionTopology(
     budget.visitIndexOperation(stage);
     if (!scope(index).compatible) return Object.freeze({ kind: "incompatible" });
   }
-  if (bodySequence && bodyHasActiveItem) return Object.freeze({ kind: "incompatible" });
   return Object.freeze({
     kind: "compatible",
     bodyHasActiveItem,
@@ -3875,15 +3886,19 @@ export function validateJournalCutForProjection(
 }
 
 /**
- * One update read from the wire as the cut reads it, or undefined where the cut refuses its bytes
- * or what it holds before any earlier update is looked at: bytes that don't decode, a value the
- * decoder refuses, a struct or a delete that starts or ends inside a surrogate pair the update
- * itself sends.
+ * One update read from the wire as the cut reads it. The cut refuses its bytes, or what it holds,
+ * before any earlier update is looked at for: bytes that don't decode, a value the decoder
+ * refuses, work past the policy, and a struct or a delete that starts or ends inside a surrogate
+ * pair the update itself sends.
  */
 export function readLiveUpdateAsTheCutDoes(
   bytes: Uint8Array,
   policy: OrderedLiveUpdateCutPolicy,
-): LiveUpdateAsRead | undefined {
+): LiveUpdateAsRead {
+  const refused = (reason: OrderedLiveUpdateCutRefusalReason): LiveUpdateAsRead => ({
+    kind: "refused",
+    reason,
+  });
   try {
     const budget = new ValidationBudget(snapshotPolicy(policy));
     const stage = frozenStage({ kind: "input", role: "candidate" });
@@ -3894,7 +3909,8 @@ export function readLiveUpdateAsTheCutDoes(
       fingerprintOnlyUsage: zeroDecoderUsage(),
     };
     const decoded = Y.decodeUpdateV2(view, strictDecoderConstructor(budget, stage, true, sink));
-    if (sink.decoder === undefined || decoding.hasContent(sink.decoder)) return undefined;
+    if (sink.decoder === undefined || decoding.hasContent(sink.decoder))
+      return refused("invalid-update");
     const normalized = normalizeDecodedInput(
       decoded,
       sink,
@@ -3906,15 +3922,17 @@ export function readLiveUpdateAsTheCutDoes(
     for (const points of [normalized.structBoundaries, normalized.rawDeleteEndpoints])
       for (const [clientId, clocks] of points) {
         const inside = normalized.unsafePoints.get(clientId) ?? [];
-        if (clocks.some((clock) => pointPresent(inside, clock, budget, stage))) return undefined;
+        if (clocks.some((clock) => pointPresent(inside, clock, budget, stage)))
+          return refused("invalid-update");
       }
     return {
+      kind: "read",
       structs: decoded.structs,
       deletes: normalized.deleteRanges,
       insidePairs: normalized.unsafePoints,
     };
-  } catch {
-    return undefined;
+  } catch (error) {
+    return refused(error instanceof CutFailure ? error.reason : "invalid-update");
   }
 }
 
@@ -4023,17 +4041,22 @@ function validateCut(
       const entry = snapshot.entries[index] as InputBytes;
       const apply = () =>
         applyOwnedInput(entry, applyForecasts[index] as DecoderUsage, document, replayBudget);
-      if (
-        bodySequence === undefined ||
-        snapshot.mode !== "journal-candidate" ||
-        index !== snapshot.entries.length - 1
-      )
-        apply();
-      else if (!bodySequence.holds(document)) {
-        apply();
-        if (bodySequence.holds(document)) fail("invalid-schema", entry.stage);
-      } else if (!bodySequence.candidateFits(document, entry.bytes, apply))
-        fail("invalid-schema", entry.stage);
+      // A journal's first entry was registered, and the entries before its candidate were each a
+      // candidate once. A history's entries are all new to this relay.
+      const unchecked =
+        index === 0
+          ? snapshot.mode === "registration"
+          : prefixes !== undefined || index === snapshot.entries.length - 1;
+      if (bodySequence === undefined || !unchecked) apply();
+      else {
+        const reason = bodySequence.entry(
+          document,
+          entry.bytes,
+          apply,
+          index === 0 ? "state" : "change",
+        );
+        if (reason !== undefined) fail(reason, entry.stage);
+      }
       if (prefixes === undefined || index === snapshot.entries.length - 1) continue;
       prefixFrontier.apply(prefixInputs[index] as NormalizedInput, budget, entry.stage);
       if (index < prefixes.from) continue;
