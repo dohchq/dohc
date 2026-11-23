@@ -3041,6 +3041,69 @@ describe("a personal agent in a workspace its person joined", () => {
     expect((await roster(f)).revision).toBe(unchanged);
   });
 
+  it("starts over when its person rejoins by the invite link or by claiming an email invite", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    const reach: Reach = [
+      { workspaceId: WS_A, level: "view" },
+      { workspaceId: COMMUNITY, level: "comment" },
+    ];
+    const agent = await signIn(f, { reach });
+    const leave = async () => {
+      const left = await f.h(request(OWNER, `/sync/${COMMUNITY}/members/leave`, jsonBody({})));
+      expect(left.status, await left.clone().text()).toBe(200);
+    };
+    const rejoins: Array<[string, () => Promise<void>]> = [
+      [
+        "invite link",
+        async () => {
+          const linked = await f.h(
+            request(
+              OTHER,
+              `/sync/${COMMUNITY}/members/invite-link`,
+              jsonBody({ action: "turn-on", workspaceName: "Community" }),
+            ),
+          );
+          const { url } = ((await ok(linked)) as { inviteLink: { url: string } }).inviteLink;
+          const token = url.slice(url.indexOf("#") + 1);
+          await ok(await f.h(request(OWNER, "/sync/members/join", jsonBody({ token }))));
+        },
+      ],
+      [
+        "email invite",
+        async () => {
+          expect(
+            f.storage.inviteWorkspaceMember({
+              workspaceId: COMMUNITY,
+              actorUserId: OTHER,
+              workspaceName: undefined,
+              email: "ada@dohc.test",
+              recipientUserId: null,
+              newMemberId: () => "member-ada-by-email",
+              newGrantId: () => "grant-ada-by-email",
+              newShareId: () => "unused-share",
+              nowMs: 7,
+            }),
+          ).toMatchObject({ ok: true });
+          f.storage.claimPendingSharesForEmail("ada@dohc.test", OWNER);
+        },
+      ],
+    ];
+    for (const [how, rejoin] of rejoins) {
+      await ok(await setReach(f, agent, reach));
+      const reconnect = await approve(f, {
+        clientId: agent.clientId,
+        agent: { kind: "existing", agentId: agent.agentId },
+        reach,
+      });
+      await leave();
+      expect(reachOf(await roster(f), agent.agentId), how).toEqual(reach);
+      await rejoin();
+      expect(reachOf(await roster(f), agent.agentId), how).toEqual([reach[0]]);
+      await expectRefused(await redeem(f, { clientId: agent.clientId, ...reconnect }));
+    }
+  });
+
   it("never takes Edit in a joined workspace, by consent or a reach change, and refuses a Collection write there even from an Edit row", async () => {
     const f = await fixture();
     joinCommunity(f, { level: "edit", role: "admin" });
