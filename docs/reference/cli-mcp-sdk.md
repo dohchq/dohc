@@ -1191,7 +1191,7 @@ dohc members folder <path> [options]
 
 Set or clear access to a workspace folder.
 
-Use a workspace-relative path, or / for the workspace root. Copies already on people's computers stay when access narrows.
+Use a workspace-relative path, or / for the workspace root. Each run sets the whole rule. Repeat --person for everyone the rule keeps. Copies already on people's computers stay when access narrows.
 
 - `--members <view|comment|edit|none>`: Set the member level.
 - `--person <email=level>`: Set one person's level. Repeat for more people.
