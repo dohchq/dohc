@@ -17,9 +17,11 @@ import {
 } from "@dohc/ydoc-projection/body-sequence-editor";
 import { BodySequence } from "@dohc/ydoc-projection/body-sequence-tiptap";
 import {
+  boundary,
   exchange,
   LINES,
   note,
+  noteOf,
   onStop,
   page,
   person,
@@ -226,6 +228,38 @@ describe("what one Tiptap change does to the items of the sequence", () => {
     expect(a.lines()).toEqual(["One one!", "Two two two", "Three?"]);
     a.expectMirror();
     b.expectMirror();
+  });
+
+  it("gives text before the first boundary its boundary in a change of its own, which the undo command leaves", () => {
+    const head = () =>
+      noteOf(({ sequence }) => {
+        sequence.insert(0, "hh", {});
+        sequence.insertEmbed(2, boundary(), {});
+        sequence.insert(3, "ab", {});
+      });
+    const a = desktop(head(), 10);
+    const b = person(head(), 20);
+    const [ab] = a.boundaryIds();
+    a.select([0, 1]);
+    expect(a.editor.commands.setHeading({ level: 2 })).toBe(true);
+    expect(a.blocks()).toEqual(["h2", "paragraph"]);
+    expect(a.sent).toHaveLength(2);
+    expect(a.history.undoStack).toHaveLength(1);
+    const [given] = a.boundaryIds();
+    exchange(a, b);
+    b.typeAt(0, 0, "B");
+    exchange(b, a);
+    expect(a.editor.commands.undo()).toBe(true);
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.blocks()).toEqual(["paragraph", "paragraph"]);
+      expect(each.boundaryLines()).toEqual([
+        { id: given, text: "Bhh" },
+        { id: ab, text: "ab" },
+      ]);
+    }
+    expect(a.editor.commands.undo()).toBe(false);
   });
 
   it("refuses a list, which this step does not write yet", () => {

@@ -9,6 +9,7 @@ import {
   boundary,
   declared,
   note,
+  noteOf,
   page,
   person,
   schema,
@@ -193,6 +194,23 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
         false,
       ),
     ];
+    const headed = noteOf(({ sequence }) => {
+      sequence.insert(0, LINE, {});
+      for (let line = 1; line < 10_000; line++) {
+        sequence.insertEmbed(sequence.length, boundary(), {});
+        sequence.insert(sequence.length, LINE, {});
+      }
+    });
+    const timed = (act: (view: EditorView) => void) => {
+      const { view } = editorWithNoPage(headed, 40);
+      const start = performance.now();
+      act(view);
+      return `${(performance.now() - start).toFixed(1)} ms`;
+    };
+    report.push(
+      `10,000 paragraphs, the first with no boundary: one Enter in its middle, once: ${timed((view) => view.dispatch(view.state.tr.split(30)))}`,
+      `10,000 paragraphs, the first with no boundary: one Enter at its start, which is first written to a copy of the note, once: ${timed((view) => view.dispatch(view.state.tr.split(1)))}`,
+    );
     console.log(report.join("\n"));
   },
   900_000,

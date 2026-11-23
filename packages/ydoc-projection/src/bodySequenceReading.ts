@@ -58,9 +58,13 @@ export type BodyReading = {
 export type SequenceToken = { index: number; block: number; piece: ShownPiece | null };
 
 type SequenceChange = {
-  /** The finished Yjs transaction that changed the note. Without one, only touched lines are read again. */
-  transaction?: Y.Transaction;
-  /** Sequence positions from before the transaction, ascending, to find again after it. */
+  /**
+   * The Yjs transactions whose changes the note's document holds and the reader has not read,
+   * oldest first. Yjs applies a transaction's changes before it tells of them, so there can be
+   * several. Without any, only touched lines are read again.
+   */
+  transactions?: readonly Y.Transaction[];
+  /** Sequence positions from before those transactions, ascending, to find again after them. */
   follow?: readonly number[];
 };
 
@@ -465,8 +469,10 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
     return true;
   };
 
-  /** Marks the lines a finished Yjs transaction changed, to be read again. */
-  const note = (transaction: Y.Transaction): void => {
+  /** Marks the lines some Yjs transactions changed, to be read again. */
+  const note = (transactions: readonly Y.Transaction[]): void => {
+    const first = transactions[0];
+    if (!first) return;
     const seen = (struct: Y.Item | Y.GC) => {
       if (!(struct instanceof Y.Item)) return;
       const parent = struct.parent;
@@ -475,13 +481,16 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
       else if (parent instanceof Y.XmlElement && parent._item?.parent === sequence)
         touchLineHolding(parent._item);
     };
+    const store = sequence.doc!.store;
     const added = Y.createDeleteSet();
-    transaction.afterState.forEach((clock, client) => {
-      const from = transaction.beforeState.get(client) ?? 0;
-      if (clock > from) added.clients.set(client, [{ clock: from, len: clock - from }]);
-    });
-    Y.iterateDeletedStructs(transaction, added, seen);
-    Y.iterateDeletedStructs(transaction, transaction.deleteSet, seen);
+    for (const client of store.clients.keys()) {
+      const from = first.beforeState.get(client) ?? 0;
+      const to = Y.getState(store, client);
+      if (to > from) added.clients.set(client, [{ clock: from, len: to - from }]);
+    }
+    Y.iterateDeletedStructs(first, added, seen);
+    for (const transaction of transactions)
+      Y.iterateDeletedStructs(transaction, transaction.deleteSet, seen);
     stale = true;
   };
 
@@ -496,11 +505,12 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
     return bases;
   };
 
-  const followPositions = (follow: readonly number[], transaction: Y.Transaction) => {
-    const before = transaction.beforeState;
+  const followPositions = (follow: readonly number[], transactions: readonly Y.Transaction[]) => {
+    const before = transactions[0]!.beforeState;
+    const deleted = Y.mergeDeleteSets(transactions.map((transaction) => transaction.deleteSet));
     const added = (item: Y.Item) => item.id.clock >= (before.get(item.id.client) ?? 0);
     const stood = (item: Y.Item) =>
-      !added(item) && (!item.deleted || Y.isDeleted(transaction.deleteSet, item.id));
+      !added(item) && (!item.deleted || Y.isDeleted(deleted, item.id));
     const bases = basesOf(lines);
     const found = follow.map((index) => {
       const order = countBelow(bases, index + 1) - 1;
@@ -582,9 +592,10 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
 
   /** Reads the sequence again. Returns where each followed position went. */
   const read = (change: SequenceChange = NO_CHANGE): Followed[] => {
-    const follow = change.transaction && change.follow?.length ? change.follow : null;
-    const followed = follow ? followPositions(follow, change.transaction!) : null;
-    if (change.transaction) note(change.transaction);
+    const transactions = change.transactions ?? [];
+    const follow = transactions.length > 0 && change.follow?.length ? change.follow : null;
+    const followed = follow ? followPositions(follow, transactions) : null;
+    note(transactions);
     if (!reading || recordsChanged || !rebuildTouched(reading)) rebuildAll();
     touched = [];
     if (recordsChanged) lines.forEach(refit);
@@ -596,7 +607,6 @@ export function createBodyReader(schema: Schema, sequence: Y.Text, containers: Y
 
   return {
     read,
-    note,
     /** What the sequence reads as now. */
     reading(): BodyReading {
       if (stale || reading === null) read();

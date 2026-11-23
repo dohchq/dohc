@@ -8,7 +8,11 @@ import {
   type StepMap,
 } from "@tiptap/pm/transform";
 import * as Y from "yjs";
-import { BLOCK_ELEMENT } from "./bodySequenceGrammar.js";
+import {
+  BLOCK_ELEMENT,
+  BODY_CONTAINERS_FIELD,
+  BODY_SEQUENCE_FIELD,
+} from "./bodySequenceGrammar.js";
 import { storedValue } from "./bodySequenceYjs.js";
 import {
   blockHolding,
@@ -17,6 +21,7 @@ import {
   countBelow,
   boundaryAt,
   boundaryElement,
+  createBodyReader,
   indexAt,
   pathAt,
   tokenBefore,
@@ -27,7 +32,15 @@ import {
   type SequenceElement,
 } from "./bodySequenceReading.js";
 
-export type BodyWriting = { sequence: Y.Text; reader: BodyReader };
+export type BodyWriting = {
+  sequence: Y.Text;
+  reader: BodyReader;
+  /**
+   * Told where a boundary is about to be written and with which path, when it is one for a block
+   * that has none of its own, or for a block start the sequence does not read.
+   */
+  given?: (index: number, path: readonly string[]) => void;
+};
 
 type Token =
   | { letters: string; marks: readonly Mark[] }
@@ -271,36 +284,19 @@ function inserts(tokens: readonly Token[], path: readonly string[], inForce: Att
 
 const retain = (count: number): Change[] => (count > 0 ? [{ retain: count }] : []);
 
-const givenToLines = new WeakMap<Y.Doc, WeakSet<object>>();
-
-/**
- * The boundaries made in this program for lines of a note that had none of their own: text before
- * the first boundary, a paragraph the reader added to a list item, and the paragraph for what a
- * block cannot hold. Undo leaves them, because text someone else typed in such a line since would
- * leave the line with its boundary.
- */
-export function boundariesGivenToLines(doc: Y.Doc): WeakSet<object> {
-  const known = givenToLines.get(doc);
-  if (known) return known;
-  const made = new WeakSet<object>();
-  givenToLines.set(doc, made);
-  return made;
-}
-
 function insertBoundary(
   writing: BodyWriting,
   index: number,
   block: ProseMirrorNode,
   path: readonly string[],
-  forLineThatHadNone: boolean,
 ): void {
-  const boundary = boundaryFor(block, path);
-  const doc = writing.sequence.doc;
-  if (forLineThatHadNone && doc) boundariesGivenToLines(doc).add(boundary);
   writing.reader.touch(index - 1, index);
   apply(writing.sequence, [
     ...retain(index),
-    { insert: boundary, attributes: formattingInForceAfter(writing.sequence, index) },
+    {
+      insert: boundaryFor(block, path),
+      attributes: formattingInForceAfter(writing.sequence, index),
+    },
   ]);
 }
 
@@ -308,6 +304,17 @@ function placeForBoundaryOf(reading: BodyReading, block: number): number {
   const line = reading.lines[block];
   if (!line?.element) return 0;
   return reading.bases[block]! + (reading.blocks[block]!.shown[0]?.index ?? 0);
+}
+
+/**
+ * Gives a block with no boundary of its own a paragraph boundary, in front of what it holds. The
+ * note reads the same after, and the block has the same index.
+ */
+function giveBoundary(writing: BodyWriting, reading: BodyReading, block: number): void {
+  const index = placeForBoundaryOf(reading, block);
+  writing.given?.(index, reading.paths[block]!);
+  const paragraph = reading.doc.type.schema.nodes.paragraph!.create();
+  insertBoundary(writing, index, paragraph, reading.paths[block]!);
 }
 
 function isParagraphAfterItsLeaf(reading: BodyReading, block: number): boolean {
@@ -333,11 +340,38 @@ function needsOwnBoundaryFirst(
   tokens: readonly Token[],
 ): boolean {
   if (holder < 0 || tokens.length === 0 || boundaryAt(reading, holder) >= 0) return false;
-  if (reading.blocks[holder]!.node.content.size === 0) return reading.paths[holder]!.length > 0;
+  const empty = reading.blocks[holder]!.node.content.size === 0;
+  if (empty && reading.paths[holder]!.length > 0) return true;
   if (!atStart) return false;
   if (tokens.some((token) => "block" in token)) return true;
   const own = reading.lines[holder]?.read?.own.node;
   return isParagraphAfterItsLeaf(reading, holder) && own?.isTextblock === true;
+}
+
+/**
+ * The block with no boundary of its own that a replaced range needs to have one, or -1: the block
+ * whose start the range replaces with another block's start, the later block the range ends in
+ * and whose text it keeps, or the block the range writes into.
+ */
+function lineThatNeedsItsBoundary(
+  reading: BodyReading,
+  oldStart: number,
+  oldEnd: number,
+  tokens: readonly Token[],
+): number {
+  const holder = blockHolding(reading, oldStart);
+  const first = tokens[0];
+  const endsIn = oldEnd > oldStart ? blockHolding(reading, oldEnd) : -1;
+  if (oldEnd > oldStart && first !== undefined && "block" in first) {
+    const opened = blockStartingAt(reading, oldStart);
+    if (opened >= 0 && endsIn <= opened && boundaryAt(reading, opened) < 0) return opened;
+  }
+  if (endsIn >= 0 && boundaryAt(reading, endsIn) < 0 && tokens.some((token) => "block" in token)) {
+    const from = holder >= 0 ? holder : (tokenFrom(reading, oldStart)?.block ?? endsIn);
+    if (endsIn > from) return endsIn;
+  }
+  const atStart = holder >= 0 && oldStart === reading.starts[holder]! + 1;
+  return needsOwnBoundaryFirst(reading, holder, atStart, tokens) ? holder : -1;
 }
 
 function writeRange(
@@ -357,9 +391,9 @@ function writeRange(
   const atStart = holder >= 0 && oldStart === reading.starts[holder]! + 1;
   const hasText = holder >= 0 && reading.blocks[holder]!.node.content.size > 0;
 
-  if (needsOwnBoundaryFirst(reading, holder, atStart, tokens)) {
-    const place = placeForBoundaryOf(reading, holder);
-    insertBoundary(writing, place, paragraph, reading.paths[holder]!, true);
+  const needy = lineThatNeedsItsBoundary(reading, oldStart, oldEnd, tokens);
+  if (needy >= 0) {
+    giveBoundary(writing, reading, needy);
     reading = reader.reading();
   }
 
@@ -404,8 +438,9 @@ function writeRange(
   reader.touch(index - 1, index + count);
   const start = rest[0];
   const startsWithBlock = start !== undefined && "block" in start;
-  const ends = replaced && holder < 0 && startsWithBlock ? blockHolding(reading, oldEnd) : -1;
-  const continuesLaterBlock = replaced && ends > first.block;
+  const ends =
+    replaced && (holder < 0 ? startsWithBlock : startsBlock) ? blockHolding(reading, oldEnd) : -1;
+  const continuesLaterBlock = replaced && ends > (holder < 0 ? first.block : holder);
   if (continuesLaterBlock && boundaryAt(reading, ends) >= 0) {
     const kept = boundaryAt(reading, ends);
     const continued = tokens.findLastIndex((token) => "block" in token);
@@ -424,6 +459,11 @@ function writeRange(
       setBoundary(boundaryElement(reading, ends)!, reading.blocks[ends]!.node, block.block, null);
     return;
   }
+  const kept = countBelow(reading.starts, oldEnd);
+  const keptAfterItsBlock = (block: number) =>
+    kept === block + 1 &&
+    isParagraphAfterItsLeaf(reading, kept) &&
+    reading.lines[kept] === reading.lines[block];
   if (
     replaced &&
     first.piece === null &&
@@ -431,6 +471,7 @@ function writeRange(
       ? !continuesLaterBlock
       : readerAddedParagraphBefore(reading, first.block, oldStart))
   ) {
+    if (!startsWithBlock && keptAfterItsBlock(first.block)) giveBoundary(writing, reading, kept);
     const path = pathAt(reading, oldStart);
     setBoundary(
       boundaryElement(reading, first.block)!,
@@ -448,17 +489,9 @@ function writeRange(
       return;
     }
   }
-  const kept = countBelow(reading.starts, oldEnd);
   if (isParagraphAfterItsLeaf(reading, kept) && count > 0) {
     const held = reading.bases[kept]!;
-    if (held >= index && held < index + count)
-      insertBoundary(
-        writing,
-        placeForBoundaryOf(reading, kept),
-        paragraph,
-        reading.paths[kept]!,
-        true,
-      );
+    if (held >= index && held < index + count) giveBoundary(writing, reading, kept);
   }
   const needsInForce = rest.some((token) => !("letters" in token));
   apply(sequence, [
@@ -570,15 +603,9 @@ function writeBlockStartsThatDiffer(writing: BodyWriting, after: ProseMirrorNode
       const depth = $block.depth;
       const path = pathOfSameContainer(reading, after, depth > 0 ? $block.before(depth) : 0, depth);
       if (path === null) return false;
-      const place = stored[edit.before]?.pos ?? a;
-      const block = $block.nodeAfter!;
-      insertBoundary(
-        writing,
-        indexAt(reading, place),
-        block,
-        path,
-        block.type.name === "paragraph",
-      );
+      const index = indexAt(reading, stored[edit.before]?.pos ?? a);
+      writing.given?.(index, path);
+      insertBoundary(writing, index, $block.nodeAfter!, path);
       wrote = true;
     }
     if (!wrote) return false;
@@ -610,7 +637,7 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
   const { sequence, reader } = writing;
   const reading = reader.reading();
   const ranges: Formatting[] = [];
-  const starts: { index: number; block: ProseMirrorNode; path: readonly string[] }[] = [];
+  const starts: { at: number; block: ProseMirrorNode }[] = [];
   let held: Formatting | null = null;
   const takesNoMarks = (index: number) => {
     if (held?.open === index) held.open = index + 1;
@@ -632,8 +659,7 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
     const boundary = boundaryAt(reading, at);
     if (boundary >= 0) takesNoMarks(boundary);
     if (!before.sameMarkup(block)) {
-      if (boundary < 0)
-        starts.push({ index: placeForBoundaryOf(reading, at), block, path: reading.paths[at]! });
+      if (boundary < 0) starts.push({ at, block });
       else {
         reader.touch(boundary, boundary);
         setBoundary(boundaryElement(reading, at)!, reading.blocks[at]!.node, block, null);
@@ -700,8 +726,14 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
     }
     apply(sequence, changes);
   }
-  for (const start of starts.reverse())
-    insertBoundary(writing, start.index, start.block, start.path, false);
+  for (const { at, block } of starts.reverse()) {
+    giveBoundary(writing, reader.reading(), at);
+    const given = reader.reading();
+    const boundary = boundaryAt(given, at);
+    if (boundary < 0) continue;
+    reader.touch(boundary, boundary);
+    setBoundary(boundaryElement(given, at)!, given.blocks[at]!.node, block, null);
+  }
 }
 
 /**
@@ -715,14 +747,19 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  * new boundary carries the formatting in force where it goes, and its path.
  *
  * A step that deletes a block and keeps text that followed it never reuses that block's boundary:
- * the text keeps its own boundary, or is given a new one when it had none.
+ * the text keeps its own boundary. So does the text of a later block that a range starting
+ * inside an earlier block runs into, when the range starts a block.
  *
  * A block with no boundary of its own can come or go when its neighbours change: the paragraph
  * for what stands before the first boundary, the one the reader adds in front of a list item's
- * content, and the one for what a block cannot hold. After each step the sequence is read again,
- * and each block start the editor has and the reading lacks is written as a boundary, in front of
- * the boundary of the text that follows it. No letter and no inline item is written to make the
- * two agree.
+ * content, and the one for what a block cannot hold. A step that needs such a block to have a
+ * boundary gives it a paragraph boundary first, and then meets an ordinary line. After each step
+ * the sequence is read again, and each block start the editor has and the reading lacks is
+ * written as a boundary, in front of the boundary of the text that follows it. No letter and no
+ * inline item is written to make the two agree.
+ *
+ * An editor calls `linesGivenBoundaries` and `giveBoundaries` first, so those boundaries are
+ * written in a change of their own that undo does not record, and this one finds them there.
  *
  * A step that leaves the editor's document as it was writes nothing.
  *
@@ -755,4 +792,149 @@ export function writeTransaction(writing: BodyWriting, transaction: Transaction)
   }
   if (formatted >= 0) writeFormatting(writing, docs[formatted]!, transaction.doc);
   return true;
+}
+
+/**
+ * The blocks with no boundary of their own that some editor transactions can reach: each block
+ * whose start stands in a range a step replaces or at its end, and the block a range starts in
+ * unless the first step starts past that block's first position.
+ */
+function linesNear(reading: BodyReading, transactions: readonly Transaction[]): Set<number> {
+  const near = new Set<number>();
+  const maps: StepMap[] = [];
+  const reach = (block: number) => {
+    if (block >= 0 && block < reading.blocks.length && boundaryAt(reading, block) < 0)
+      near.add(block);
+  };
+  for (const transaction of transactions)
+    for (const step of transaction.steps) {
+      const map = step.getMap();
+      const marks = step instanceof AddMarkStep || step instanceof RemoveMarkStep;
+      let from = step instanceof AttrStep ? step.pos : Infinity;
+      let to = step instanceof AttrStep ? step.pos : -1;
+      if (!marks)
+        map.forEach((oldStart, oldEnd) => {
+          from = Math.min(from, oldStart);
+          to = Math.max(to, oldEnd);
+        });
+      for (let earlier = maps.length - 1; earlier >= 0 && to >= 0; earlier--) {
+        const back = maps[earlier]!.invert();
+        from = back.map(from, -1);
+        to = back.map(to, 1);
+      }
+      if (to >= 0) {
+        const next = countBelow(reading.starts, from);
+        const holder = next - 1;
+        const pastItsStart =
+          maps.length === 0 &&
+          blockHolding(reading, from) === holder &&
+          from > reading.starts[holder]! + 1;
+        if (!pastItsStart) reach(holder);
+        const last = countBelow(reading.starts, to);
+        for (let block = next; block <= last; block++) reach(block);
+      }
+      maps.push(map);
+    }
+  return near;
+}
+
+function soleChangeInsideOneBlock(
+  transactions: readonly Transaction[],
+): { oldStart: number; oldEnd: number; tokens: Token[] } | null {
+  const only = transactions[0]!;
+  if (transactions.length !== 1 || only.steps.length !== 1) return null;
+  const ranges: [number, number, number, number][] = [];
+  only.steps[0]!.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
+    ranges.push([oldStart, oldEnd, newStart, newEnd]);
+  });
+  const range = ranges[0];
+  if (ranges.length !== 1 || !range) return null;
+  const [oldStart, oldEnd, newStart, newEnd] = range;
+  const $start = only.before.resolve(oldStart);
+  if (!$start.parent.isTextblock || oldEnd > $start.end()) return null;
+  const tokens = tokensBetween(only.doc, newStart, newEnd);
+  return tokens.some((token) => "block" in token) ? null : { oldStart, oldEnd, tokens };
+}
+
+function itemAt(sequence: Y.Text, index: number): string | null {
+  if (index < 0) return "start";
+  const id = Y.createRelativePositionFromTypeIndex(sequence, index).item;
+  return id ? `${String(id.client)}:${String(id.clock)}` : null;
+}
+
+/**
+ * The blocks with no boundary of their own that writing some editor transactions would give one,
+ * by their index in what the sequence reads as now: each such block the transactions write into
+ * in a way that needs it to have one, and each whose reading they alter, as the paragraph after a
+ * block they delete, end or change the kind of. The transactions are the ones of one dispatch,
+ * and the first starts from that reading.
+ *
+ * Nothing is written. A change inside one block is answered from the reading. Any other change
+ * that reaches such a block or a neighbour of one is written to a copy of the note's document,
+ * which costs a read of the whole note. A boundary written there is matched to its block by the
+ * item it stands in front of, or else by the item it stands behind, and by its path.
+ */
+export function linesGivenBoundaries(
+  writing: BodyWriting,
+  transactions: readonly Transaction[],
+): number[] {
+  const { sequence, reader } = writing;
+  const reading = reader.reading();
+  const near = linesNear(reading, transactions);
+  if (near.size === 0) return [];
+  const sole = soleChangeInsideOneBlock(transactions);
+  if (sole) {
+    const holder = blockHolding(reading, sole.oldStart);
+    if (holder < 0 || boundaryAt(reading, holder) >= 0) return [];
+    const start = reading.starts[holder]! + 1;
+    const atStart = sole.oldStart === start;
+    if (needsOwnBoundaryFirst(reading, holder, atStart, sole.tokens)) return [holder];
+    const end = start + reading.blocks[holder]!.node.content.size;
+    if (!atStart || sole.oldEnd !== end || sole.tokens.length > 0) return [];
+  }
+
+  const inFrontOf = new Map<string, number>();
+  const behind = new Map<string, number>();
+  for (const block of near) {
+    const place = placeForBoundaryOf(reading, block);
+    const next = itemAt(sequence, place);
+    const last = itemAt(sequence, place - 1);
+    if (next !== null) inFrontOf.set(next, block);
+    if (last !== null) behind.set(last, block);
+  }
+  const copy = new Y.Doc();
+  const copied = copy.getText(BODY_SEQUENCE_FIELD);
+  const records = copy.getMap<unknown>(BODY_CONTAINERS_FIELD);
+  Y.applyUpdate(copy, Y.encodeStateAsUpdate(sequence.doc!));
+  const given = new Set<number>();
+  const trial: BodyWriting = {
+    sequence: copied,
+    reader: createBodyReader(reading.doc.type.schema, copied, records),
+    given(index, path) {
+      const next = itemAt(copied, index);
+      const last = itemAt(copied, index - 1);
+      for (const block of [
+        next === null ? undefined : inFrontOf.get(next),
+        last === null ? undefined : behind.get(last),
+      ])
+        if (block !== undefined && samePath(path, reading.paths[block]!)) {
+          given.add(block);
+          return;
+        }
+    },
+  };
+  copy.transact(() => {
+    for (const transaction of transactions) if (!writeTransaction(trial, transaction)) break;
+  });
+  copy.destroy();
+  return [...given];
+}
+
+/**
+ * Gives each of some blocks with no boundary of their own a paragraph boundary. The note reads
+ * the same after. Section 4 has this written in a change of its own that undo does not record,
+ * just before the change that needs it.
+ */
+export function giveBoundaries(writing: BodyWriting, blocks: readonly number[]): void {
+  for (const block of blocks) giveBoundary(writing, writing.reader.reading(), block);
 }

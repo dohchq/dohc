@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setBlockType } from "@tiptap/pm/commands";
 import { Fragment, Mark, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import {
+  AllSelection,
   EditorState,
   NodeSelection,
   Plugin,
@@ -13,7 +14,7 @@ import {
   type Transaction,
 } from "@tiptap/pm/state";
 import { EditorView } from "@tiptap/pm/view";
-import { recordsOfContainer } from "./bodySequenceGrammar.js";
+import { BLOCK_ELEMENT, recordsOfContainer } from "./bodySequenceGrammar.js";
 import {
   bodySequenceAnchor,
   bodySequenceAnchorPosition,
@@ -28,6 +29,7 @@ import { readBodySequence } from "./bodySequenceYjs.js";
 import {
   boundary,
   declared,
+  editorOn,
   element,
   elementsOf,
   exchange,
@@ -507,7 +509,8 @@ describe("a note with no boundary for some of its blocks", () => {
     expect(a.lines()).toEqual(["ab", "cd"]);
     a.select([0, 1]);
     const retyped = a.effects(() => a.retype("heading", { level: 2 }));
-    expect(retyped.made).toEqual({ ...quiet(), boundaries: 1, attributes: 3 });
+    expect(retyped.made).toEqual({ ...quiet(), boundaries: 1, attributes: 4 });
+    expect(a.sent).toHaveLength(2);
     expect(tokensOf(a.sequence)[0]).toMatchObject({ kind: "boundary" });
     expect(a.blocks()).toEqual(["h2", "paragraph"]);
     a.expectMirror();
@@ -1929,6 +1932,8 @@ const ORACLE_COUNTS = {
     "not offered": 587,
     "range error": 0,
   },
+  undone: 6289,
+  given: 1602,
   excepted: {
     "a mark on an inline item": 467,
     "formatting stored under a code block's letters": 9,
@@ -1993,11 +1998,42 @@ const ORACLE_EXCEPTIONS: {
   },
 ];
 
+/**
+ * For each block with no boundary of its own: the id of the item its boundary would stand in
+ * front of, its path, and whether it shows nothing, as a list item's added paragraph does.
+ */
+function linesWithNoBoundary(a: Person): Map<string, { path: string; empty: boolean }> {
+  const reading = createBodyReader(schema, a.sequence, a.containers).reading();
+  const tokens = tokensOf(a.sequence);
+  const lines = new Map<string, { path: string; empty: boolean }>();
+  reading.blocks.forEach((block, at) => {
+    if (boundaryAt(reading, at) >= 0) return;
+    const place = reading.lines[at]?.element
+      ? reading.bases[at]! + (block.shown[0]?.index ?? 0)
+      : 0;
+    const first = tokens[place];
+    if (first)
+      lines.set(first.id, {
+        path: JSON.stringify(reading.paths[at]),
+        empty: block.shown.length === 0,
+      });
+  });
+  return lines;
+}
+
+const attrsOfBoundary = (token: { attrs: string }) =>
+  Object.fromEntries(JSON.parse(token.attrs) as [string, unknown][]) as {
+    path?: unknown;
+    type?: unknown;
+  };
+
 type Outcome = "applied" | "filtered by keepsContainers" | "not offered" | "range error";
 const oracle = {
   notes: 0,
   outcomes: { applied: 0, "filtered by keepsContainers": 0, "not offered": 0, "range error": 0 },
   excepted: new Map<string, number>(),
+  undone: 0,
+  given: 0,
 };
 
 describe("the note reads as the document ProseMirror computed", () => {
@@ -2013,6 +2049,7 @@ describe("the note reads as the document ProseMirror computed", () => {
     const check = (label: string, act: (a: Person) => void) => {
       const a = person(baseline, 10);
       const before = a.view.state.doc;
+      const lacking = linesWithNoBoundary(a);
       let applied: Transaction | null = null;
       let filtered: Transaction | null = null;
       const dispatch = a.view.dispatch.bind(a.view);
@@ -2052,6 +2089,39 @@ describe("the note reads as the document ProseMirror computed", () => {
               `${label} in ${before.toString()}\n  ProseMirror computed ${wrote.doc.toString()}\n  the note reads as     ${read.toString()}`,
             );
           for (const name of names) oracle.excepted.set(name, (oracle.excepted.get(name) ?? 0) + 1);
+        }
+        expect(a.sent.length, label).toBeLessThanOrEqual(2);
+        if (a.sent.length === 2) oracle.given += 1;
+        const tokens = tokensOf(a.sequence);
+        const givenFirst = a.sent.length === 2 ? boundariesMadeIn(a.sent[0]!) : [];
+        for (const made of a.sent.length > 0 ? boundariesMadeIn(a.sent.at(-1)!) : []) {
+          const at = tokens.findIndex((token) => token.id === made);
+          const next = tokens[at + 1];
+          const own = tokens[at];
+          if (!next || !own || own.kind !== "boundary") continue;
+          const line = lacking.get(next.id);
+          const attrs = attrsOfBoundary(own);
+          let before = at - 1;
+          while (tokens[before]?.kind === "boundary" && !givenFirst.includes(tokens[before]!.id))
+            before -= 1;
+          const wasGivenItsOwn = givenFirst.includes(tokens[before]?.id ?? "");
+          const isItsOwn =
+            !wasGivenItsOwn &&
+            line?.path === JSON.stringify(attrs.path) &&
+            (!line.empty || attrs.type === "paragraph");
+          if (isItsOwn)
+            throw new Error(
+              `${label} in ${before.toString()}: the recorded change wrote the boundary of a line that had none`,
+            );
+        }
+        if (a.undo()) {
+          a.expectMirror();
+          const undone = readBodySequence(schema, a.doc);
+          if (!undone.eq(before))
+            throw new Error(
+              `${label} in ${before.toString()}\n  after its undo the note reads as ${undone.toString()}`,
+            );
+          oracle.undone += 1;
         }
       } else if (refused) {
         const docs = [...refused.docs, refused.doc];
@@ -2110,13 +2180,17 @@ describe("the note reads as the document ProseMirror computed", () => {
     console.log(
       `the oracle run: ${String(oracle.notes)} notes; ${Object.entries(oracle.outcomes)
         .map(([outcome, count]) => `${outcome} ${String(count)}`)
-        .join(", ")}; exceptions: ${
+        .join(
+          ", ",
+        )}; undone and read as before ${String(oracle.undone)}; a line given its boundary first ${String(oracle.given)}; exceptions: ${
         [...oracle.excepted].map(([name, count]) => `${name} (${String(count)})`).join("; ") ||
         "none"
       }`,
     );
     if (oracle.notes !== ORACLE_NOTES.length) return;
     expect(oracle.outcomes).toEqual(ORACLE_COUNTS.outcomes);
+    expect(oracle.undone).toBe(ORACLE_COUNTS.undone);
+    expect(oracle.given).toBe(ORACLE_COUNTS.given);
     expect(Object.fromEntries(oracle.excepted)).toEqual(ORACLE_COUNTS.excepted);
   });
 });
@@ -2254,6 +2328,15 @@ const LIST_NOTE: StoredLine[] = [
   stored({}, "end"),
 ];
 const CODE_NOTE: StoredLine[] = [stored(CODE, "ab", HARD_BREAK, "cdxy"), stored({}, "end")];
+const boundariesMadeIn = (update: Uint8Array) =>
+  Y.decodeUpdate(update).structs.flatMap((struct) =>
+    struct instanceof Y.Item &&
+    struct.content instanceof Y.ContentType &&
+    struct.content.type instanceof Y.XmlElement &&
+    struct.content.type.nodeName === BLOCK_ELEMENT
+      ? [`${String(struct.id.client)}:${String(struct.id.clock)}`]
+      : [],
+  );
 const loneSurrogate = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/u;
 
 describe.each(["bare", "hosted"] as const)(
@@ -2313,18 +2396,253 @@ describe.each(["bare", "hosted"] as const)(
       },
     );
 
-    it("takes back a kind change of such a line with the boundary that carried the kind", () => {
+    it("takes back a kind change of such a line, and leaves the line the boundary it was given", () => {
       const a = person(noteOfLines(CODE_NOTE), 10, shape);
       const before = a.view.state.doc.toJSON();
-      const boundaries = a.boundaryIds().length;
+      const [code, end] = a.boundaryIds();
       a.select([1, 1]);
-      a.retype("heading", { level: 2 });
+      const effects = a.effects(() => a.retype("heading", { level: 2 }));
       expect(a.blocks()).toEqual(["codeBlock", "h2", "paragraph"]);
-      expect(a.boundaryIds()).toHaveLength(boundaries + 1);
+      expect(a.sent).toHaveLength(2);
+      expect(a.history.undoStack).toHaveLength(1);
+      const [given] = effects.madeBoundaries;
+      expect(boundariesMadeIn(a.sent[0]!)).toEqual([given]);
+      expect(boundariesMadeIn(a.sent[1]!)).toEqual([]);
       expect(a.undo()).toBe(true);
       expect(a.view.state.doc.toJSON()).toEqual(before);
-      expect(a.boundaryIds()).toHaveLength(boundaries);
+      expect(a.boundaryIds()).toEqual([code, given, end]);
       a.expectMirror();
+      expect(a.redo()).toBe(true);
+      expect(a.blocks()).toEqual(["codeBlock", "h2", "paragraph"]);
+      expect(a.boundaryIds()).toEqual([code, given, end]);
+      a.expectMirror();
+    });
+
+    it.each([
+      [
+        "changes the kind of",
+        (a: Person) => {
+          a.select([0, 1]);
+          a.retype("paragraph");
+        },
+        'doc(paragraph("ab"), paragraph("B", hardBreak, "cdxy"), paragraph("end"))',
+      ],
+      [
+        "ends with a new line",
+        (a: Person) =>
+          a.view.dispatch(
+            a.view.state.tr.insert(
+              a.view.state.doc.child(0).nodeSize,
+              schema.nodes.paragraph!.create(),
+            ),
+          ),
+        'doc(codeBlock("ab"), paragraph, paragraph("B", hardBreak, "cdxy"), paragraph("end"))',
+      ],
+      [
+        "deletes",
+        (a: Person) =>
+          a.view.dispatch(a.view.state.tr.delete(0, a.view.state.doc.child(0).nodeSize)),
+        'doc(paragraph("B", hardBreak, "cdxy"), paragraph("end"))',
+      ],
+    ])(
+      "gives the paragraph after a code block its boundary before a change that %s the code block, so a peer's letter stays in it through the undo",
+      (_name, act, changed) => {
+        const a = person(noteOfLines(CODE_NOTE), 10, shape);
+        const b = person(noteOfLines(CODE_NOTE), 20, shape);
+        act(a);
+        expect(a.sent).toHaveLength(2);
+        expect(a.history.undoStack).toHaveLength(1);
+        const [given] = boundariesMadeIn(a.sent[0]!);
+        expect(a.boundaryLines().find((line) => line.id === given)?.text).toBe("cdxy");
+        exchange(a, b);
+        b.typeAt(b.lines().indexOf("cdxy"), 0, "B");
+        exchange(b, a);
+        expect(a.view.state.doc.toString()).toBe(changed);
+        expect(a.undo()).toBe(true);
+        exchange(a, b);
+        for (const each of [a, b]) {
+          each.expectMirror();
+          expect(each.view.state.doc.toString()).toBe(
+            'doc(codeBlock("ab"), paragraph("B", hardBreak, "cdxy"), paragraph("end"))',
+          );
+          expect(each.boundaryIds()).toHaveLength(3);
+          expect(each.boundaryIds()).toContain(given);
+        }
+      },
+    );
+
+    it("keeps a peer's letter in the paragraph after a code block when that paragraph's kind change is undone, and when it is redone", () => {
+      const a = person(noteOfLines(CODE_NOTE), 10, shape);
+      const b = person(noteOfLines(CODE_NOTE), 20, shape);
+      a.select([1, 1]);
+      a.retype("heading", { level: 2 });
+      exchange(a, b);
+      b.typeAt(1, 0, "B");
+      exchange(b, a);
+      expect(a.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(codeBlock("ab"), paragraph("B", hardBreak, "cdxy"), paragraph("end"))',
+        );
+      }
+      expect(a.redo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(codeBlock("ab"), heading("B", hardBreak, "cdxy"), paragraph("end"))',
+        );
+      }
+    });
+
+    it("keeps a peer's letter in that paragraph after its boundary was deleted and undo brought it back", () => {
+      const a = person(noteOfLines(CODE_NOTE), 10, shape);
+      const b = person(noteOfLines(CODE_NOTE), 20, shape);
+      a.typeAt(1, 0, "A");
+      a.view.dispatch(a.view.state.tr.setSelection(new AllSelection(a.view.state.doc)));
+      expect(a.press("Backspace")).toBe(true);
+      expect(a.view.state.doc.textContent).toBe("");
+      expect(a.undo()).toBe(true);
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(codeBlock("ab"), paragraph("A", hardBreak, "cdxy"), paragraph("end"))',
+      );
+      exchange(a, b);
+      b.typeAt(1, 1, "B");
+      exchange(b, a);
+      expect(a.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(codeBlock("ab"), paragraph("B", hardBreak, "cdxy"), paragraph("end"))',
+        );
+      }
+      expect(a.redo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(codeBlock("ab"), paragraph("AB", hardBreak, "cdxy"), paragraph("end"))',
+        );
+      }
+    });
+
+    it("keeps a letter there when someone with a history of their own on the same document joined the line away and undid that", () => {
+      const base = page(noteOfLines(CODE_NOTE), 10, shape);
+      const a = editorOn(base, shape, [], [], { origin: { of: "a" } });
+      const b = editorOn(base, shape, [], [], { origin: { of: "b" } });
+      a.typeAt(1, 0, "A");
+      const withA = a.view.state.doc.toString();
+      expect(withA).toBe(
+        'doc(codeBlock("ab"), paragraph("A", hardBreak, "cdxy"), paragraph("end"))',
+      );
+      b.join(1);
+      expect(b.blocks()).toEqual(["codeBlock", "paragraph"]);
+      expect(b.undo()).toBe(true);
+      expect(b.view.state.doc.toString()).toBe(withA);
+      b.typeAt(1, 1, "B");
+      expect(a.undo()).toBe(true);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(codeBlock("ab"), paragraph("B", hardBreak, "cdxy"), paragraph("end"))',
+        );
+      }
+    });
+
+    it("reads a peer's letter as a paragraph of its own, B / hh / ab, when Enter at the start of text before the first boundary is undone", () => {
+      const head = [stored(null, "hh"), stored({}, "ab")];
+      const a = person(noteOfLines(head), 10, shape);
+      const b = person(noteOfLines(head), 20, shape);
+      const [ab] = a.boundaryIds();
+      a.select([0, 0]);
+      expect(a.press("Enter")).toBe(true);
+      expect(a.sent).toHaveLength(2);
+      const [split, given] = a.boundaryIds();
+      expect(boundariesMadeIn(a.sent[0]!)).toEqual([given]);
+      expect(boundariesMadeIn(a.sent[1]!)).toEqual([split]);
+      expect(a.boundaryLines()).toEqual([
+        { id: split, text: "" },
+        { id: given, text: "hh" },
+        { id: ab, text: "ab" },
+      ]);
+      exchange(a, b);
+      b.typeAt(0, 0, "B");
+      exchange(b, a);
+      expect(a.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.lines()).toEqual(["B", "hh", "ab"]);
+        expect(each.boundaryLines()).toEqual([
+          { id: null, text: "B" },
+          { id: given, text: "hh" },
+          { id: ab, text: "ab" },
+        ]);
+      }
+    });
+
+    it("reads as before when a kind change that drops an image and a letter typed in the line after it are both undone", () => {
+      const image: Part = ["image", { src: "/a.png", alt: "A", title: null }];
+      const a = person(noteOfLines([stored({}, "a", image, "b"), stored({}, "z")]), 10, shape);
+      const before = a.view.state.doc.toJSON();
+      expect(a.view.state.doc.toString()).toBe('doc(paragraph("a", image, "b"), paragraph("z"))');
+      a.select([0, 1]);
+      a.retype("codeBlock");
+      expect(a.view.state.doc.toString()).toBe('doc(codeBlock("ab"), paragraph("z"))');
+      a.expectMirror();
+      a.typeAt(1, 0, "X");
+      expect(a.undo()).toBe(true);
+      expect(a.undo()).toBe(true);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      a.expectMirror();
+    });
+
+    it("reads as before when a kind change of a code block and a letter typed at the start of the paragraph after it are both undone", () => {
+      const image: Part = ["image", { src: "/a.png", alt: "A", title: null }];
+      const a = person(noteOfLines([stored(CODE, "a", image, "b")]), 10, shape);
+      const before = a.view.state.doc.toJSON();
+      expect(a.view.state.doc.toString()).toBe('doc(codeBlock("a"), paragraph(image, "b"))');
+      a.select([0, 1]);
+      a.retype("paragraph");
+      expect(a.view.state.doc.toString()).toBe('doc(paragraph("a"), paragraph(image, "b"))');
+      a.expectMirror();
+      a.typeAt(1, 0, "X");
+      expect(a.undo()).toBe(true);
+      expect(a.undo()).toBe(true);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      a.expectMirror();
+    });
+
+    it("puts a peer's letter below a rule that undo brings back, ab / rule / B / cd, with nothing lost or doubled (a known behaviour of Yjs)", () => {
+      const lines = [stored({}, "ab"), stored(RULE, "cd")];
+      const a = person(noteOfLines(lines), 10, shape);
+      const b = person(noteOfLines(lines), 20, shape);
+      expect(a.view.state.doc.toString()).toBe(
+        'doc(paragraph("ab"), horizontalRule, paragraph("cd"))',
+      );
+      a.select([2, 0]);
+      expect(a.press("Backspace")).toBe(true);
+      exchange(a, b);
+      expect(b.view.state.doc.toString()).toBe('doc(paragraph("ab"), paragraph("cd"))');
+      b.typeAt(0, 2, "B");
+      exchange(b, a);
+      expect(a.undo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          'doc(paragraph("ab"), horizontalRule, paragraph("B"), paragraph("cd"))',
+        );
+      }
+      expect(a.redo()).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe('doc(paragraph("abB"), paragraph("cd"))');
+      }
     });
 
     it("takes back the split and keeps the line's own boundary for Enter at the start of the paragraph after a code block", () => {
@@ -2418,6 +2736,166 @@ describe.each(["bare", "hosted"] as const)(
   },
 );
 
+const EMOJI = String.fromCodePoint(0x1f600);
+
+function placeOfText(doc: ProseMirrorNode, text: string): number {
+  let found = -1;
+  doc.descendants((node, pos) => {
+    if (found < 0 && node.isText && node.text!.includes(text))
+      found = pos + node.text!.indexOf(text);
+    return found < 0;
+  });
+  if (found < 0) throw new Error(`no ${text} in ${doc.toString()}`);
+  return found;
+}
+
+describe.each(["bare", "hosted"] as const)(
+  "on a %s page, a change the editor has not shown yet",
+  (shape) => {
+    it("shows two changes of a peer at once, so what a plugin adds while they are shown cuts no letter", () => {
+      let added = false;
+      const addsYBeforeTheEmoji = new Plugin({
+        appendTransaction(transactions, _before, state) {
+          if (added || !transactions.some(isBodySequenceChange)) return null;
+          if (!state.doc.textContent.includes("X")) return null;
+          added = true;
+          return state.tr.insertText("Y", placeOfText(state.doc, EMOJI));
+        },
+      });
+      const lines = ["top", `!a${EMOJI}bc`];
+      const a = person(note(...lines), 10, shape, [addsYBeforeTheEmoji]);
+      const b = person(note(...lines), 20, shape);
+      b.typeAt(0, 0, "X");
+      const mark = placeOfText(b.view.state.doc, "!");
+      b.view.dispatch(b.view.state.tr.delete(mark, mark + 1));
+      const fromPeer = b.sent.splice(0);
+      expect(fromPeer).toHaveLength(2);
+      let delivered = false;
+      a.doc.on("update", () => {
+        if (delivered) return;
+        delivered = true;
+        for (const update of fromPeer) a.receive(update);
+      });
+      a.typeAt(0, 3, "q");
+      expect(added).toBe(true);
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.lines()).toEqual(["Xtopq", `aY${EMOJI}bc`]);
+        expect(loneSurrogate.test(each.sequence.toString())).toBe(false);
+      }
+    });
+
+    it("takes the next key press after a listener of the host threw from Yjs's update callback, and shows a peer's change that Yjs then tells of nowhere", async () => {
+      const a = person(note("abc"), 10, shape);
+      let thrown = false;
+      a.doc.on("update", () => {
+        if (thrown) return;
+        thrown = true;
+        throw new Error("the host's listener");
+      });
+      a.select([0, 0]);
+      expect(() => a.type("A")).toThrow("the host's listener");
+      expect(a.lines()).toEqual(["Aabc"]);
+      a.typeAt(0, 1, "B");
+      expect(a.lines()).toEqual(["ABabc"]);
+      a.expectMirror();
+
+      const peer = page(note("abc"), 20);
+      peer.sequence.insert(peer.sequence.length, "!", {});
+      for (const update of peer.sent.splice(0)) a.receive(update);
+      await vi.waitFor(() => expect(a.lines()).toEqual(["ABabc!"]));
+      a.typeAt(0, 6, "C");
+      expect(a.lines()).toEqual(["ABabc!C"]);
+      a.expectMirror();
+    });
+
+    it("shows a peer's change although a listener registered before the editor's threw in afterTransaction, so the next key press cuts no letter", () => {
+      const start = `a${EMOJI}bc`;
+      const base = page(note(start), 10, shape);
+      let armed = false;
+      base.doc.on("afterTransaction", () => {
+        if (!armed) return;
+        armed = false;
+        throw new Error("the host's listener");
+      });
+      const a = editorOn(base, shape);
+      const b = person(note(start), 20, shape);
+      b.typeAt(0, 0, "!");
+      armed = true;
+      expect(() => exchange(b, a)).toThrow("the host's listener");
+      expect(a.lines()).toEqual([`!${start}`]);
+      a.view.dispatch(
+        a.view.state.tr.insertText("X", placeOfText(a.view.state.doc, EMOJI) + EMOJI.length),
+      );
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.lines()).toEqual([`!a${EMOJI}Xbc`]);
+        expect(loneSurrogate.test(each.sequence.toString())).toBe(false);
+      }
+    });
+
+    it("drops a dispatch when a peer's change arrives between the boundary it gives a line and its own change", () => {
+      const head = [stored(null, `h${EMOJI}h`), stored({}, "ab")];
+      const a = person(noteOfLines(head), 10, shape);
+      const b = person(noteOfLines(head), 20, shape);
+      b.typeAt(0, 1, "!");
+      const fromPeer = b.sent.splice(0);
+      let delivered = false;
+      a.doc.on("update", () => {
+        if (delivered) return;
+        delivered = true;
+        for (const update of fromPeer) a.receive(update);
+      });
+      a.select([0, 0]);
+      a.press("Enter");
+      expect(delivered).toBe(true);
+      expect(a.lines()).toEqual([`h!${EMOJI}h`, "ab"]);
+      expect(a.sent).toHaveLength(1);
+      expect(a.history.undoStack).toHaveLength(0);
+      a.expectMirror();
+      a.select([0, 0]);
+      a.press("Enter");
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.lines()).toEqual(["", `h!${EMOJI}h`, "ab"]);
+        expect(loneSurrogate.test(each.sequence.toString())).toBe(false);
+      }
+    });
+
+    it("shows the note as it stands when the host's guard does not run the change", () => {
+      const base = page(note("abc"), 10, shape);
+      let allowed = false;
+      const a = editorOn(base, shape, [], [], {
+        edit(change) {
+          if (allowed) base.doc.transact(change);
+          return allowed;
+        },
+      });
+      a.typeAt(0, 1, "X");
+      expect(a.lines()).toEqual(["abc"]);
+      expect(a.sent).toEqual([]);
+      a.expectMirror();
+      allowed = true;
+      a.typeAt(0, 1, "X");
+      expect(a.lines()).toEqual(["aXbc"]);
+      expect(a.sent).toHaveLength(1);
+      a.expectMirror();
+    });
+
+    it("refuses a dispatch made inside a Yjs transaction the host opened around it", () => {
+      const a = person(note("abc"), 10, shape);
+      a.select([0, 1]);
+      a.doc.transact(() => a.type("X"));
+      expect(a.lines()).toEqual(["abc"]);
+      expect(a.sent).toEqual([]);
+      a.expectMirror();
+    });
+  },
+);
+
 describe("an anchor in a paragraph that has been typed in", () => {
   it("holds to what stands before it, so a block put after it does not take it", () => {
     const a = person(noteOfLines(LIST_NOTE), 10);
@@ -2503,6 +2981,8 @@ describe.each(["bare", "hosted"] as const)(
               continue;
             }
             counted.compared += 1;
+            const split = action === "Enter" ? boundariesMadeIn(alice.sent.at(-1)!) : [];
+            if (action === "Enter") expect(split, label).toHaveLength(1);
             exchange(alice, bob);
             const caret = alice.view.state.selection.to;
             const own = leaves(bob.view.state.doc).findIndex(
@@ -2520,23 +3000,30 @@ describe.each(["bare", "hosted"] as const)(
             exchange(bob, alice);
             const typed = ["1", "2", "3"].filter((letter) => placeOf(alice.view.state.doc, letter));
             const before = typed.map((letter) => placeOf(alice.view.state.doc, letter)!);
-            const kinds = leaves(alice.view.state.doc).map(({ node: each }) => each.type.name);
+            const boundaries = alice.boundaryIds();
+            const withoutTheSplit = declared(91);
+            Y.applyUpdate(withoutTheSplit.doc, Y.encodeStateAsUpdate(alice.doc));
+            if (action === "Enter")
+              withoutTheSplit.sequence.delete(
+                tokensOf(withoutTheSplit.sequence).findIndex((token) => token.id === split[0]),
+                1,
+              );
+            const expected = readBodySequence(schema, withoutTheSplit.doc).toJSON();
+            withoutTheSplit.doc.destroy();
             alice.undo();
             exchange(alice, bob);
             for (const each of [alice, bob]) each.expectMirror();
             expect(bob.view.state.doc.toJSON(), label).toEqual(alice.view.state.doc.toJSON());
+            if (action === "Enter") expect(alice.view.state.doc.toJSON(), label).toEqual(expected);
+            expect(alice.boundaryIds(), label).toEqual(boundaries.filter((id) => id !== split[0]));
             const now = alice.view.state.doc.textContent;
             for (const letter of typed) expect(now.split(letter), label).toHaveLength(2);
             expect(now.replaceAll(/[123]/gu, ""), label).toBe(text);
-            typed.forEach((letter, at) => {
+            typed.forEach((letter, order) => {
               const after = placeOf(alice.view.state.doc, letter)!;
-              const was = before[at]!;
+              const was = before[order]!;
               if (after.index === was.index && after.kind === was.kind) return;
-              const joined =
-                action === "Enter" &&
-                after.index === was.index - 1 &&
-                (after.kind === was.kind || after.kind === kinds[was.index - 1]);
-              if (!joined)
+              if (action !== "Enter")
                 throw new Error(
                   `${label}: Bob's ${letter} read in block ${String(was.index)} (${was.kind}) and reads in block ${String(after.index)} (${after.kind}) after the undo, in ${alice.view.state.doc.toString()}`,
                 );

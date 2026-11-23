@@ -173,8 +173,9 @@ export function note(...lines: string[]): Uint8Array {
 
 /**
  * How the host runs a person's change: `bare` as the phone does, with no Yjs transaction of its
- * own, or `hosted` as the share page's session does, inside a Yjs transaction with no origin. A
- * hosted page also takes other people's changes inside such a transaction.
+ * own, or `hosted` as the share page's session does, each change the editor asks for inside a
+ * Yjs transaction with no origin. A hosted page also takes other people's changes inside such a
+ * transaction.
  */
 export type HostShape = "bare" | "hosted";
 
@@ -215,27 +216,49 @@ export function person(
   plugins: Plugin[] = [],
   pluginsBefore: Plugin[] = [],
 ) {
-  const base = page(baseline, clientID, shape);
+  return editorOn(page(baseline, clientID, shape), shape, plugins, pluginsBefore);
+}
+
+/**
+ * A plain ProseMirror editor on a page that is already there, so a test can listen to the page's
+ * document before the editor does, or put two editors with their own histories on one document.
+ */
+export function editorOn(
+  base: Page,
+  shape: HostShape = "bare",
+  plugins: Plugin[] = [],
+  pluginsBefore: Plugin[] = [],
+  options: { origin?: object; edit?: (change: () => void) => boolean } = {},
+) {
   const mount = window.document.createElement("div");
   window.document.body.append(mount);
-  const history = createBodySequenceHistory(base.doc, { captureTimeout: 0 });
+  const own = options.origin ? { origin: options.origin } : {};
+  const hosted = (change: () => void) => {
+    base.doc.transact(change);
+    return true;
+  };
+  const edit = options.edit ?? (shape === "hosted" ? hosted : undefined);
+  const history = createBodySequenceHistory(base.doc, { captureTimeout: 0, ...own });
   const shown = { count: 0 };
   const view = new EditorView(mount, {
     state: EditorState.create({
       schema,
       plugins: [
         ...pluginsBefore,
-        bodySequencePlugin({ sequence: base.sequence, containers: base.containers, history }),
+        bodySequencePlugin({
+          sequence: base.sequence,
+          containers: base.containers,
+          history,
+          ...own,
+          ...(edit ? { edit } : {}),
+        }),
         keymap(baseKeymap),
         ...plugins,
       ],
     }),
     dispatchTransaction(this: EditorView, transaction) {
-      const apply = () => this.updateState(this.state.apply(transaction));
       if (isBodySequenceChange(transaction)) shown.count += 1;
-      if (shape === "hosted" && transaction.docChanged && !isBodySequenceChange(transaction))
-        base.doc.transact(apply);
-      else apply();
+      this.updateState(this.state.apply(transaction));
     },
   });
   stops.push(() => {
