@@ -13,6 +13,7 @@ import { isDeepStrictEqual } from "node:util";
 import * as Y from "yjs";
 import { liveEditFitsCopy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import {
   MAX_LIVE_AUTHOR_IDENTITIES,
   type LiveAuthorSnapshot,
@@ -189,6 +190,12 @@ type SaveOutcome =
   | "saved"
   | "retry"
   | { readonly refusal: LiveUpdateRefusal; readonly named: LiveAuthorSnapshot[] };
+/**
+ * The largest note, as the room holds it, whose saves may leave edits out. Such a save holds a note
+ * nobody had, whose Markdown can come out a few bytes past any that was, so near the largest note
+ * saves keep the order edits were taken in. A note's Markdown runs below the room's bytes for it.
+ */
+const REORDERED_NOTE_MAX_BYTES = LIVE_MARKDOWN_MAX_BYTES / 2;
 // A capture that went stale is replaced, and the next save goes through the new one.
 const STALE_CAPTURE: ReadonlySet<LiveUpdateRefusal> = new Set(["stale-session", "stale-binding"]);
 /** Each sender in some edits, once, up to the most one save can name. */
@@ -444,7 +451,11 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
 
   /** One save, of the edits `nextSave` picks. */
   async function saveOnce(room: Room, inOrder = false): Promise<SaveOutcome> {
-    const picked = nextSave(room.unsaved, options.maxAppliedBytes, inOrder);
+    const picked = nextSave(
+      room.unsaved,
+      options.maxAppliedBytes,
+      inOrder || room.bytes > REORDERED_NOTE_MAX_BYTES,
+    );
     const batch = picked.map((index) => room.unsaved[index]!);
     if (!batch.length) return "saved";
     const { sender: authors, authority } = batch[0]!;

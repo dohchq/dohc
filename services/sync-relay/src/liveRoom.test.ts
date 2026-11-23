@@ -34,7 +34,10 @@ import { appendLiveRoomEdit, liveRoomEdits } from "./storage/liveRoomEdits.js";
 import { liveRoomPaused, liveRoomPauses, pauseLiveRoom } from "./storage/liveRoomPauses.js";
 import { liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
 import { readRetiredJournalPage } from "./storage/serviceActivationRetirement.js";
-import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
+import {
+  markdownToYDoc,
+  yDocToMarkdown,
+} from "../../../packages/ydoc-projection/src/import-export.js";
 
 const open: Fixture[] = [];
 const rooms_: { close(): Promise<void> }[] = [];
@@ -687,6 +690,39 @@ it("ends a save at a deletion that would come ahead of someone's edit the save l
   Y.applyUpdate(saved, Y.encodeStateAsUpdate(f.doc));
   for (const row of f.journalRows().journal) Y.applyUpdate(saved, rowBytes(row));
   expect(saved.getXmlFragment("body").toString()).toBe("<paragraph>C</paragraph>");
+});
+
+it("saves in the order edits were taken near the largest note, where a save that left some out could hold one past it", async () => {
+  // A space that starts a paragraph is written as "&#32;", five bytes; one in the middle is one.
+  const words = (fill: number) => markdownToYDoc(`${"a".repeat(fill)}\n\nBee\n`);
+  const markdown = (doc: Y.Doc) => Buffer.byteLength(yDocToMarkdown(doc));
+  const fill = 2 * 1024 * 1024 - 6 - (markdown(words(1)) - 1);
+  const baseline = words(fill);
+  expect(markdown(baseline)).toBe(2 * 1024 * 1024 - 6);
+  const f = note(Y.encodeStateAsUpdate(baseline));
+  const room = rooms(f);
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben),
+    secondTab = editor(f, room, ana);
+  const pages = [a, b, secondTab];
+  for (const page of pages) await page.open();
+  const type = async (page: typeof a, paragraph: number, change: (text: Y.XmlText) => void) => {
+    let bytes: Uint8Array | undefined;
+    page.doc.once("update", (update: Uint8Array) => (bytes = update));
+    const body = page.doc.getXmlFragment("body");
+    page.doc.transact(() => change((body.get(paragraph) as Y.XmlElement).get(0) as Y.XmlText));
+    expect((await page.submit(bytes!)).result).toBe("success");
+    for (const other of pages) if (other !== page) await other.next();
+  };
+  // In the order they were taken, the note is never past the largest one.
+  await type(a, 0, (text) => text.insert(1, "A"));
+  await type(b, 1, (text) => text.insert(0, " "));
+  await type(a, 1, (text) => text.insert(0, "q"));
+  await type(secondTab, 0, (text) => text.insert(2, "xyz"));
+  for (const page of pages) page.session.close();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(pauses(f)).toEqual([]);
+  expect(savedAuthors(f)).toEqual([ana, ben, ana]);
 });
 
 it("counts a committed save whose engine answer never comes, and goes on saving", async () => {
