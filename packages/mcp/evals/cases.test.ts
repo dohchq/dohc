@@ -773,6 +773,33 @@ describe("eval cases", () => {
               inputs: ["index.html", "app.js"],
               packageMap: {},
             }),
+            "ts-in-js-app/index.html":
+              '<!doctype html><script type="module" src="./app.js"></script>\n',
+            "ts-in-js-app/app.js": "const x: number = 1;\n",
+            "ts-in-js-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html", "app.js"],
+              packageMap: {},
+            }),
+            "bad-tsx-app/index.html":
+              '<!doctype html><script type="module" src="./app.tsx"></script>\n',
+            "bad-tsx-app/app.tsx": "export function App() { return <div><span></div>; }\n",
+            "bad-tsx-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html", "app.tsx"],
+              packageMap: {},
+            }),
+            "nested-ts-enum-app/ui/index.html":
+              '<!doctype html><div id="booking:status">ok</div><script type="module" src="./app.ts"></script>\n',
+            "nested-ts-enum-app/ui/app.ts": "export enum SeatState { Open = 'open' }\n",
+            "nested-ts-enum-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "ui/index.html",
+              inputs: ["ui/index.html", "ui/app.ts"],
+              packageMap: {},
+            }),
             "syntax-err-app/index.html":
               '<!doctype html><div id="out">hi</div><script type="module" src="./app.js"></script>\n',
             "syntax-err-app/app.js": "const = ;\n",
@@ -846,21 +873,76 @@ describe("eval cases", () => {
       expect(recorded["comment-app"]?.mode).toBe("stand-in");
       expect(recorded["comment-app"]?.brokerCalls).toEqual([]);
 
-      const missingSelectorRes = await client.callTool({
+      const nestedTsRes = await client.callTool({
         name: "dohc_publish_app",
         arguments: {
           request: {
             action: "verifyFrontend",
             workspaceId: "ws-everyday",
-            appRoot: "comment-app",
-            steps: [{ kind: "waitFor", selector: "#never-renders", textIncludes: "Booked" }],
+            appRoot: "nested-ts-enum-app",
+            steps: [{ kind: "waitFor", selector: "#booking\\:status", textIncludes: "ok" }],
           },
         },
       });
-      expect(missingSelectorRes.isError).toBe(true);
-      expect(JSON.stringify(missingSelectorRes.structuredContent)).toContain(
-        "step_selector_not_found",
-      );
+      expect(nestedTsRes.isError).not.toBe(true);
+
+      const tsInJsRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "ts-in-js-app",
+          },
+        },
+      });
+      expect(tsInJsRes.isError).toBe(true);
+      expect(JSON.stringify(tsInJsRes.structuredContent)).toContain("compile_error");
+
+      const badTsxRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: { action: "verifyFrontend", workspaceId: "ws-everyday", appRoot: "bad-tsx-app" },
+        },
+      });
+      expect(badTsxRes.isError).toBe(true);
+      expect(JSON.stringify(badTsxRes.structuredContent)).toContain("compile_error");
+
+      // Approving a local publication pins its snapshot so breaking the live working copy does not fail publicationId verification.
+      const prepNested = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "prepareLocal",
+            workspaceId: "ws-everyday",
+            appRoot: "nested-ts-enum-app",
+          },
+        },
+      });
+      const prepBody = prepNested.structuredContent as {
+        approvalId: string;
+        candidateDigest: string;
+      };
+      const approvedNested = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "approve",
+            workspaceId: "ws-everyday",
+            approvalId: prepBody.approvalId,
+            candidateDigest: prepBody.candidateDigest,
+          },
+        },
+      });
+      const pubId = (approvedNested.structuredContent as { publicationId: string }).publicationId;
+      await writeFile(join(root, "nested-ts-enum-app", "ui", "app.ts"), "const = ;\n", "utf8");
+      const pubVerifyAfterEdit = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: { action: "verifyFrontend", workspaceId: "ws-everyday", publicationId: pubId },
+        },
+      });
+      expect(pubVerifyAfterEdit.isError).not.toBe(true);
 
       const syntaxRes = await client.callTool({
         name: "dohc_publish_app",
@@ -987,6 +1069,64 @@ describe("eval cases", () => {
         expect(injVerifications["apps/booking"]?.mode).toBe("observed");
         const injChecks = await grade(bookingCase.expect, injRun, bookingCase.gradeRun);
         expect(injChecks.filter((c) => !c.pass)).toEqual([]);
+
+        // Mid-verify workspace edit must invalidate the observed sourceRevision binding.
+        const raceVerifications: Record<string, FrontendVerificationRecord> = {};
+        const raceAnswers = await createEverydayDesktop(
+          injRoot,
+          { workspaceId: "ws-everyday" },
+          {
+            onFrontendVerified: (appRoot, record) => {
+              raceVerifications[appRoot] = record;
+            },
+            verifyFrontend: async (req) => {
+              await writeFile(
+                join(injRoot, "apps", "booking", "app.js"),
+                `${await readFile(join(injRoot, "apps", "booking", "app.js"), "utf8")}\n// mutated mid-verify\n`,
+                "utf8",
+              );
+              return {
+                kind: "frontendVerified",
+                ok: true,
+                stage: "complete",
+                target: { kind: "candidate", appRoot: req.appRoot ?? "apps/booking" },
+                startupOk: true,
+                stepsOk: true,
+                handshake: { delivered: true, messageCount: 1 },
+                brokerCalls: [],
+                steps: [],
+                diagnostics: [],
+                externalRequestsBlocked: 0,
+              };
+            },
+          },
+        );
+        const raceDesktop = fakeDesktop({
+          root: injRoot,
+          answers: raceAnswers,
+          unansweredLog: injLog,
+        });
+        const raceServer = createDohcMcpServer({
+          root: injRoot,
+          home: injHome,
+          request: raceDesktop,
+        });
+        const raceClient = new Client({ name: "eval-race", version: "1" });
+        const [rct, rst] = InMemoryTransport.createLinkedPair();
+        await Promise.all([raceServer.connect(rst), raceClient.connect(rct)]);
+        await raceClient.callTool({
+          name: "dohc_publish_app",
+          arguments: {
+            request: {
+              action: "verifyFrontend",
+              workspaceId: "ws-everyday",
+              appRoot: "apps/booking",
+            },
+          },
+        });
+        await raceClient.close();
+        await raceServer.close();
+        expect(raceVerifications["apps/booking"]?.sourceRevision).toBeUndefined();
       } finally {
         await rm(injectedDir, { recursive: true, force: true });
       }

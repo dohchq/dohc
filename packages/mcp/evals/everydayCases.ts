@@ -304,8 +304,11 @@ function checkFrontendVerifiedForFinalSource(
   appRoot: string,
   extra?: (record: NonNullable<RunRecord["frontendVerifications"]>[string]) => string | null,
 ): Check {
-  const name = `${appRoot} passed verifyFrontend on its final source`;
   const record = run.frontendVerifications?.[appRoot];
+  const name =
+    record?.mode === "observed"
+      ? `${appRoot} passed observed verifyFrontend execution on its final source`
+      : `${appRoot} passed stand-in verifyFrontend static check on its final source`;
   if (!record) return { name, pass: false, detail: "verifyFrontend was not run" };
   if (!record.ok) return { name, pass: false, detail: `verifyFrontend failed at ${record.stage}` };
   const expectedRev = computeEvalAppSourceRevision(run.files, appRoot);
