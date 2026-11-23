@@ -252,6 +252,30 @@ test("@server-copy-follows-owner a link shows the owner's latest save of a note 
       await page.keyboard.press("ControlOrMeta+End");
     };
 
+    const stopLive = () =>
+      expect
+        .poll(
+          () =>
+            page
+              .evaluate(
+                ({ workspaceId, path }) =>
+                  (window as unknown as { dohcDesktop: Api }).dohcDesktop.stopOwnerLiveDocument({
+                    workspaceId,
+                    path,
+                  }),
+                { workspaceId, path: live },
+              )
+              .then(
+                () => true,
+                (error: unknown) => {
+                  if (String(error).includes("is open in an editor in dohc")) return false;
+                  throw error;
+                },
+              ),
+          { message: "the Stop is taken once the closed tab lets go of the note", timeout: 30_000 },
+        )
+        .toBe(true);
+
     await test.step("after a Stop with a link editor typing through it, the link follows the owner's saves", async () => {
       const box = await openLinkEditor();
       await box.getByText(body, { exact: false }).click({ timeout: 15_000 });
@@ -333,59 +357,12 @@ test("@server-copy-follows-owner a link shows the owner's latest save of a note 
         .toBe(true);
     });
 
-    await test.step("the owner's last words before a Stop show on the link, with a link editor typing through it, and a later save follows", async () => {
-      await openOnDesktop();
-      const owner = typeNumberedWordsUntilStopped(page, "last");
-      await expect.poll(async () => owner.words.length, { timeout: 30_000 }).toBeGreaterThan(10);
-      await owner.stop();
-      const linkTypist = typeNumberedWordsUntilStopped(linkEditor, "late");
-      await page.keyboard.press("ControlOrMeta+w");
-      await expect(editor(page)).toHaveCount(0);
-      await expect
-        .poll(
-          () =>
-            page
-              .evaluate(
-                ({ workspaceId, path }) =>
-                  (window as unknown as { dohcDesktop: Api }).dohcDesktop.stopOwnerLiveDocument({
-                    workspaceId,
-                    path,
-                  }),
-                { workspaceId, path: live },
-              )
-              .then(
-                () => true,
-                (error: unknown) => {
-                  if (String(error).includes("is open in an editor in dohc")) return false;
-                  throw error;
-                },
-              ),
-          { message: "the Stop is taken once the closed tab lets go of the note", timeout: 30_000 },
-        )
-        .toBe(true);
-      await linkTypist.stop();
-      await linkFollows(
-        "the owner's last words before a Stop",
-        view.url,
-        live,
-        owner.words.join(" "),
-      );
-      await openOnDesktop();
-      await page.keyboard.type(" A later save after the Stop.");
-      await linkFollows(
-        "a later save after the Stop",
-        view.url,
-        live,
-        "A later save after the Stop.",
-      );
-    });
-
     await test.step("a note stopped, deleted and restored from History goes live again after Resume, with the owner typing through it and a link editor's edit reaching the owner", async () => {
-      await page.keyboard.press("ControlOrMeta+w");
-      await expect(editor(page)).toHaveCount(0);
+      await stopLive();
       await expect
         .poll(() => status(live), { timeout: 120_000, intervals: [1000] })
         .toBe("retired");
+      let saved = "";
       const api = (
         name: "deleteWorkspacePath" | "listEngineMoments" | "restoreEngineMomentFile",
         payload: Record<string, unknown>,
@@ -399,7 +376,21 @@ test("@server-copy-follows-owner a link shows the owner's latest save of a note 
             )(payload),
           { name, payload },
         );
-      await api("deleteWorkspacePath", { workspaceId, relativePath: live });
+      await expect
+        .poll(
+          async () => {
+            saved = await ownerFileOrEmptyMidRename(live);
+            return api("deleteWorkspacePath", { workspaceId, relativePath: live }).then(
+              () => true,
+              (error: unknown) => {
+                if (String(error).includes("while it has live editing on")) return false;
+                throw error;
+              },
+            );
+          },
+          { message: "the delete is taken once the Stop finishes", timeout: 120_000 },
+        )
+        .toBe(true);
       await expect.poll(() => ownerFileOrEmptyMidRename(live), { timeout: 30_000 }).toBe("");
       const deletion = async () =>
         (
@@ -409,9 +400,7 @@ test("@server-copy-follows-owner a link shows the owner's latest save of a note 
         ).moments?.find((moment) => moment.path === live && moment.operation === "delete")?.id;
       await expect.poll(deletion, { timeout: 30_000 }).toBeTruthy();
       await api("restoreEngineMomentFile", { workspaceId, momentId: await deletion() });
-      await expect
-        .poll(() => ownerFileOrEmptyMidRename(live), { timeout: 30_000 })
-        .toContain("A later save after the Stop.");
+      await expect.poll(() => ownerFileOrEmptyMidRename(live), { timeout: 30_000 }).toBe(saved);
 
       await openOnDesktop();
       const typist = typeNumberedWordsUntilStopped(page, "restored");
@@ -454,6 +443,32 @@ test("@server-copy-follows-owner a link shows the owner's latest save of a note 
           intervals: [1000],
         })
         .toBe(true);
+    });
+
+    await test.step("the owner's last words before a Stop show on the link, with a link editor typing through it, and a later save follows", async () => {
+      await openOnDesktop();
+      const owner = typeNumberedWordsUntilStopped(page, "last");
+      await expect.poll(async () => owner.words.length, { timeout: 30_000 }).toBeGreaterThan(10);
+      await owner.stop();
+      const linkTypist = typeNumberedWordsUntilStopped(linkEditor, "late");
+      await page.keyboard.press("ControlOrMeta+w");
+      await expect(editor(page)).toHaveCount(0);
+      await stopLive();
+      await linkTypist.stop();
+      await linkFollows(
+        "the owner's last words before a Stop",
+        view.url,
+        live,
+        owner.words.join(" "),
+      );
+      await openOnDesktop();
+      await page.keyboard.type(" A later save after the Stop.");
+      await linkFollows(
+        "a later save after the Stop",
+        view.url,
+        live,
+        "A later save after the Stop.",
+      );
     });
 
     console.log(`[server-copy-follows-owner] timings:\n${timings.join("\n")}`);
