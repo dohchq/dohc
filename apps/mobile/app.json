@@ -19,7 +19,12 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store",
+      [
+        "expo-secure-store",
+        {
+          "faceIDPermission": false
+        }
+      ],
       "./plugins/apsEnvironmentPerBuild",
       "expo-notifications",
       "./plugins/iosCameraWithoutBarcodeCompanion",
