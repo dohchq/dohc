@@ -352,12 +352,12 @@ function grantedListing(
       return { grants: null, problem: { kind: "unusable-listing" } };
     if (!revoked) grants.push(grant.data);
     // A folder rule can lower a member's reach while the grant stays Edit, so
-    // every member who wrote automations is also checked as a former editor.
+    // such a member who wrote automations is also checked as a former editor.
     const files = rosterGrantOf(grant.data).files;
-    if (
-      generation !== null &&
-      (revoked || files?.access !== "edit" || files.memberReach !== undefined)
-    ) {
+    const lowered =
+      files?.memberReach?.role === "member" &&
+      files.memberReach.rules.some(([, level]) => level !== "edit");
+    if (generation !== null && (revoked || files?.access !== "edit" || lowered)) {
       formerGrants.push({ grant: grant.data, automationsGeneration: generation });
     }
   }
