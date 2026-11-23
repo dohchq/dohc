@@ -9,7 +9,7 @@ const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
   conflict: "Conflict",
   "sync-failed": "Sync failed",
   "not-connected": "Connect server to sync",
-  "account-unconfirmed": "Couldn't confirm account",
+  "account-unconfirmed": "Could not confirm account",
   "sign-in-expired": "Sign in again to sync",
   // The update the title bar names replaces it.
   "update-required": "Sync stopped",
@@ -19,7 +19,7 @@ const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
 // enough.
 const SYNC_DESCRIPTION: Partial<Record<SyncStatusResult["state"], string>> = {
   "not-connected": "Not syncing. Connect your server to sync this workspace.",
-  "account-unconfirmed": "Not syncing. dohc couldn't confirm this workspace's account.",
+  "account-unconfirmed": "Not syncing. dohc could not confirm this workspace's account.",
   "sign-in-expired": "Not syncing. Your sign-in expired.",
 };
 
@@ -105,8 +105,8 @@ function liveDeliveryLabel(
     reason === "live-history-over-budget" ||
     reason === "live-start-failing"
   )
-    return "Live editing can't start";
-  if (reason === "conflict-parent-withheld") return "Live editing can't resume";
+    return "Live editing cannot start";
+  if (reason === "conflict-parent-withheld") return "Live editing cannot resume";
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 
@@ -149,7 +149,7 @@ function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: numbe
   if (failedSaves === 0 || syncStatus?.updateRequired) return null;
   if (syncStatus?.state === "conflict") return null;
   if (syncStatus?.state === "sync-failed" && !syncWaitsOnBusyServer(syncStatus)) return null;
-  return `Couldn't save ${failedSaves} ${failedSaves === 1 ? "file" : "files"}`;
+  return `Could not save ${failedSaves} ${failedSaves === 1 ? "file" : "files"}`;
 }
 
 // The workspace's save and sync state. An editor's own edits in flight show
@@ -158,9 +158,19 @@ function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: numbe
 export function WorkspaceSyncStatus({
   syncStatus,
   failedSaves,
+  onOpenConflicts,
+  onOpenSyncSettings,
+  onConnectServer,
+  onSignInAgain,
+  onOpenNotices,
 }: {
   syncStatus: SyncStatusResult | null;
   failedSaves: number;
+  onOpenConflicts?: () => void;
+  onOpenSyncSettings?: () => void;
+  onConnectServer?: () => void;
+  onSignInAgain?: () => void;
+  onOpenNotices?: () => void;
 }) {
   const state = syncStatus?.state;
   const conflictCount = state === "conflict" ? (syncStatus?.conflictCount ?? 0) : 0;
@@ -176,7 +186,7 @@ export function WorkspaceSyncStatus({
           : null;
   const label = stateLabel
     ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
-    : "Checking status";
+    : "Checking status…";
   const saveFailed = saveFailedLabel(syncStatus, failedSaves);
   const shownLabel =
     saveFailed ??
@@ -202,6 +212,19 @@ export function WorkspaceSyncStatus({
   // A state that needs the person, or waits on the person to connect, says
   // so in words beside the mark.
   const worded = dot === "attention" || dot === "off";
+  const action = saveFailed
+    ? onOpenNotices
+    : state === "conflict"
+      ? onOpenConflicts
+      : state === "not-connected"
+        ? (onConnectServer ?? onOpenSyncSettings)
+        : state === "sign-in-expired"
+          ? (onSignInAgain ?? onOpenSyncSettings)
+          : state === "account-unconfirmed" ||
+              state === "update-required" ||
+              (state === "sync-failed" && !busy)
+            ? onOpenSyncSettings
+            : undefined;
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either. Live editing waits on a server the
   // title bar already names.
@@ -221,11 +244,27 @@ export function WorkspaceSyncStatus({
         role="status"
         aria-label={description}
         title={description}
-        // The dot's box keeps a 20x24 hover target for its tooltip.
-        className={`flex h-6 shrink-0 items-center gap-1.5 text-[11px] text-muted ${worded ? "px-1" : "w-5 justify-center"}`}
+        className={
+          action
+            ? "flex h-6 shrink-0 items-center"
+            : `flex h-6 shrink-0 items-center gap-1.5 text-[12px] text-muted ${worded ? "px-1" : "w-5 justify-center"}`
+        }
       >
-        <Dot kind={dot} />
-        <span className={worded ? undefined : "sr-only"}>{shownLabel}</span>
+        {action ? (
+          <button
+            type="button"
+            onClick={action}
+            className={`titlebar-no-drag flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink ${worded ? "px-1.5" : "w-5 justify-center"}`}
+          >
+            <Dot kind={dot} />
+            <span className={worded ? undefined : "sr-only"}>{shownLabel}</span>
+          </button>
+        ) : (
+          <>
+            <Dot kind={dot} />
+            <span className={worded ? undefined : "sr-only"}>{shownLabel}</span>
+          </>
+        )}
       </span>
       {liveDelivery && liveLabel ? (
         <span
@@ -235,7 +274,7 @@ export function WorkspaceSyncStatus({
           aria-label={liveLabel}
           title={liveLabel}
           // Shorten live delivery before local save status; retain its full tooltip.
-          className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted"
+          className="flex min-w-0 items-center gap-1.5 text-[12px] text-muted"
         >
           {liveDialling ? (
             <Dot kind="working" />

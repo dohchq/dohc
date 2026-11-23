@@ -83,7 +83,7 @@ describe("JoinSyncedWorkspace", () => {
     );
     expect(screen.queryByTestId("join-error")).toBeNull();
     expect(screen.getByTestId("join-used-folder").textContent).toBe(
-      "Files stay in /home/sam/dohc/notes.",
+      "Files from the last attempt stay in /home/sam/dohc/notes.",
     );
     expect(screen.getByTestId("join-choose-folder").textContent).toContain(
       "Choose another empty folder",

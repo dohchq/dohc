@@ -195,18 +195,26 @@ fn markdown_witness_real_pipe_agrees_with_the_commonmark_meaning_controls() {
         "../../../packages/ydoc-projection/src/fixtures/commonmark-edit-meaning.json"
     ))
     .unwrap();
-    let mut sources = vec![("# Safe\n\nPlain paragraph.\n".to_owned(), true)];
-    sources.extend([148, 161, 192, 193, 572, 575, 577].map(|number| {
-        let example = examples["examples"]
+    let example = |number: u64| {
+        examples["examples"]
             .as_array()
             .unwrap()
             .iter()
             .find(|row| row["example"] == number)
-            .unwrap();
-        (example["markdown"].as_str().unwrap().to_owned(), false)
-    }));
+            .unwrap()["markdown"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let mut sources = vec![("# Safe\n\nPlain paragraph.\n".to_owned(), true, true)];
+    sources
+        .extend([213, 270, 556, 572, 575, 587, 619].map(|number| (example(number), false, false)));
+    // Raw HTML and a link through a definition keep their meaning as dohc
+    // reads them today, but not in a document read before dohc kept them as
+    // the file spells them.
+    sources.extend([148, 192].map(|number| (example(number), true, false)));
     let mut reader = Reader::new(Some(config));
-    for (source, expected) in sources {
+    for (source, expected, older_expected) in sources {
         let mut input = request("note.md");
         input.document.main_version_id = "main".into();
         input.document.object_id = "fixture".into();
@@ -230,17 +238,18 @@ fn markdown_witness_real_pipe_agrees_with_the_commonmark_meaning_controls() {
         };
         assert_eq!(keeps_meaning, expected);
         assert_eq!(Some(checker_identity), reader.checker_identity());
-        let wrong = CheckMarkdownWitness {
+        // A projection an older writer recorded doesn't change the verdict:
+        // the source's meaning in today's projection decides.
+        let older = CheckMarkdownWitness {
             projection_sha256: wire::sha(b"different projection"),
             ..input
         };
-        assert!(matches!(
-            run(reader.check_markdown_witness(wrong)),
-            Ok(Outcome::WitnessChecked {
-                keeps_meaning: false,
-                ..
-            })
-        ));
+        let Outcome::WitnessChecked { keeps_meaning, .. } =
+            run(reader.check_markdown_witness(older)).unwrap()
+        else {
+            panic!("the real pipe must answer the witness request");
+        };
+        assert_eq!(keeps_meaning, older_expected);
     }
     finish(&mut reader);
 }
@@ -600,7 +609,7 @@ fn drop_reaps_active_child() {
 fn timeouts_queue_replacement_and_shutdown() {
     let (_dir, c) = fixture("ok");
     let d = Deadlines {
-        request: Duration::from_secs(2),
+        request_floor: Duration::from_secs(2),
         queue: Duration::from_millis(200),
         ..Deadlines::default()
     };
@@ -628,6 +637,35 @@ fn timeouts_queue_replacement_and_shutdown() {
     finish(&mut reader);
     fail(run(active), Failure::Unavailable);
     fail(run(queued), Failure::Unavailable);
+}
+#[test]
+fn a_larger_note_gets_longer_to_answer_up_to_the_cap() {
+    let (_dir, c) = fixture("ok");
+    let d = Deadlines {
+        request_floor: Duration::from_millis(200),
+        ..Deadlines::default()
+    };
+    let mut reader = Reader::with_deadlines(Some(c), d);
+    assert!(run(reader.request(request("ok"))).is_ok());
+    fail(run(reader.request(request("slow"))), Failure::TimedOut);
+    let mut large = request("slow");
+    large.source = vec![b'a'; 64 * 1024];
+    assert!(run(reader.request(large.clone())).is_ok());
+    assert_eq!(
+        Deadlines::default().request(2 * 1024 * 1024 + wire::UPDATE),
+        Duration::from_secs(60)
+    );
+    finish(&mut reader);
+    let (_dir, c) = fixture("ok");
+    let capped = Deadlines {
+        request_cap: Duration::from_millis(300),
+        ..d
+    };
+    let mut reader = Reader::with_deadlines(Some(c), capped);
+    assert!(run(reader.request(request("ok"))).is_ok());
+    fail(run(reader.request(large)), Failure::TooLarge);
+    fail(run(reader.request(request("slow"))), Failure::TimedOut);
+    finish(&mut reader);
 }
 #[test]
 fn startup_timeout_idle_and_cancel() {

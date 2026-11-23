@@ -85,7 +85,7 @@ export function chatRowMenuItems(
     if (target.canLeave) {
       bottom.push({
         id: "leave",
-        label: "Leave group",
+        label: "Leave Group",
         icon: <LogOut size={ICON} aria-hidden />,
         danger: true,
         onSelect: actions.leave,

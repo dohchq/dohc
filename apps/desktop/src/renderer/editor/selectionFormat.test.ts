@@ -7,7 +7,7 @@ import { TaskList } from "@tiptap/extension-list";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { DohcTaskItem } from "@dohc/ydoc-projection/markdown-extensions";
 import { desktopMarkdownExtensions } from "./extensions";
-import { NO_SELECTION_FORMAT, selectionFormat } from "./selectionFormat";
+import { hasFormattableSelection, NO_SELECTION_FORMAT, selectionFormat } from "./selectionFormat";
 
 const extensions = [
   StarterKit.configure({ trailingNode: false }),
@@ -150,5 +150,17 @@ describe("selectionFormat", () => {
     expect(format.block).toBe("paragraph");
     expect(walk).not.toHaveBeenCalled();
     expect(child).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses the bubble menu when selection is entirely inside a code block", () => {
+    const editor = makeEditor("```\nconst x = 1;\n```\n\nProse text");
+    const codePos = positionOf(editor, "const");
+    editor.commands.setTextSelection({ from: codePos, to: codePos + 5 });
+    expect(hasFormattableSelection(editor.state.selection)).toBe(false);
+
+    // Cross-boundary into prose remains formattable.
+    const prosePos = positionOf(editor, "Prose");
+    editor.commands.setTextSelection({ from: codePos, to: prosePos + 3 });
+    expect(hasFormattableSelection(editor.state.selection)).toBe(true);
   });
 });

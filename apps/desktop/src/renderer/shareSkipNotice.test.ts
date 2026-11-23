@@ -42,7 +42,9 @@ describe("what a share's skipped ops say", () => {
     expect(
       line?.text,
       "a boundary refusal that stops naming the share hides the one cause the reader can act on",
-    ).toBe("dohc skipped 1 update outside what this share covers. Ask granter@dohc.test.");
+    ).toBe(
+      "dohc skipped 1 update outside this share. Ask granter@dohc.test to check what is shared.",
+    );
   });
 
   it("claims no cause and no next step for a malformed refusal", () => {
@@ -55,9 +57,9 @@ describe("what a share's skipped ops say", () => {
     expect(
       line?.text,
       "telling the reader to ask the granter about a malformed envelope is a false cause and a false instruction",
-    ).toBe("dohc couldn't apply 1 update this share sent.");
+    ).toBe("dohc could not apply 1 update this share sent.");
     expect(line?.text).not.toContain("granter@dohc.test");
-    expect(line?.text).not.toContain("this share covers");
+    expect(line?.text).not.toContain("outside this share");
     expect(
       line?.detail,
       "the persisted detail claims the op was outside the share, contradicting the notice it is attached to",
@@ -74,9 +76,9 @@ describe("what a share's skipped ops say", () => {
       line?.kind,
       "classifying an unusable versionId as a boundary refusal tells the reader the share excluded an update it may cover, and sends them to a granter who cannot fix it",
     ).toBe("malformed");
-    expect(line?.text).toBe("dohc couldn't apply 1 update this share sent.");
+    expect(line?.text).toBe("dohc could not apply 1 update this share sent.");
     expect(line?.text).not.toContain("granter@dohc.test");
-    expect(line?.text).not.toContain("this share covers");
+    expect(line?.text).not.toContain("outside this share");
     expect(
       line?.detail,
       "the persisted detail says the moment was outside the share boundary, contradicting the notice it is attached to and the code that classifies it",
@@ -111,8 +113,8 @@ describe("what a share's skipped ops say", () => {
   it("says both when both happened", () => {
     const lines = shareSkipNoticeLines({ ops: [boundary, malformed], more: 0 }, null);
     expect(lines.map((line) => line.kind)).toEqual(["boundary", "malformed"]);
-    expect(lines[0]?.text).toContain("1 update outside what this share covers");
-    expect(lines[1]?.text).toContain("couldn't apply 1 update");
+    expect(lines[0]?.text).toContain("1 update outside this share");
+    expect(lines[1]?.text).toContain("could not apply 1 update");
   });
 
   it("claims no cause for the overflow, whatever the retained ops are", () => {
@@ -125,9 +127,9 @@ describe("what a share's skipped ops say", () => {
       overflow?.text,
       "the overflow inherits the retained sample's cause and the reader is sent to the granter about it",
     ).toBe("dohc skipped 1 more update from this share.");
-    expect(overflow?.text).not.toContain("this share covers");
+    expect(overflow?.text).not.toContain("outside this share");
     expect(overflow?.text).not.toContain("granter@dohc.test");
-    expect(allBoundary[0]?.text).toContain("2 updates outside what this share covers");
+    expect(allBoundary[0]?.text).toContain("2 updates outside this share");
 
     const allMalformed = shareSkipNoticeLines(
       { ops: [malformed, malformed], more: 1 },
@@ -151,6 +153,6 @@ describe("what a share's skipped ops say", () => {
   it("says the overflow is a lower bound when the count is incomplete", () => {
     const lines = shareSkipNoticeLines({ ops: [boundary], more: 4, inexact: true }, null);
     expect(lines[1]?.text).toBe("dohc skipped at least 4 more updates from this share.");
-    expect(lines[0]?.text).toContain("1 update outside what this share covers");
+    expect(lines[0]?.text).toContain("1 update outside this share");
   });
 });

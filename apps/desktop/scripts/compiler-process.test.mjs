@@ -325,7 +325,8 @@ test(
     bytes.fill(0);
     request.entryPath = "changed.js";
     const result = await pending;
-    assert.equal(result.compiler.recipe, "dohc-closed-app-v3");
+    assert.equal(result.compiler.recipe, "dohc-closed-app-v4");
+    assert.match(result.compiler.version, /^0\.28\.1\+kit-[0-9a-f]{64}$/);
     assert.equal(result.files[0].path, "bundle.js");
     assert.match(Buffer.from(result.files[0].bytes).toString(), /before/);
   },
@@ -436,6 +437,9 @@ test(
       },
       (value) => {
         value.dependencyLock[0].path = "private.js";
+      },
+      (value) => {
+        value.compiler.version = `0.28.1+kit-${"0".repeat(64)}`;
       },
     ]) {
       const forged = structuredClone(original);

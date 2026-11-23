@@ -193,7 +193,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
       const credentials = requireCredentials(currentCredentials());
       if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
         if (normalizeServerUrl(credentials.serverUrl) !== normalizeServerUrl(remote.serverUrl)) {
-          throw new Error("Sign in to the cloud server this workspace uses.");
+          throw new Error("Sign in to the server this workspace uses.");
         }
         throw new Error("Sign in to the account that synced this workspace.");
       }
@@ -297,7 +297,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
           typeof shareRelayUrl === "string" &&
           !relayUrlsMatch(credentials.relayUrl, shareRelayUrl)
         ) {
-          throw new Error("Sign in to the cloud server this share came from.");
+          throw new Error("Sign in to the server this share came from.");
         }
         return {
           workspaceId: workspace.workspaceId,

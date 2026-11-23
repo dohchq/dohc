@@ -41,7 +41,6 @@ import {
   LINK_INVENTORY_PAGE_SIZE,
   LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT,
 } from "./limits";
-import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 import {
   retireUncoveredServiceActivations,
   serviceHostEnrollmentsCoveredByShare,
@@ -399,6 +398,67 @@ export function retuneShareGrant(
   });
 }
 
+export function retuneNamedShareGrant(
+  storage: StorageContext,
+  input: {
+    shareId: string;
+    grantId: string;
+    access: string;
+    changedAtMs: number;
+    guard: () => void;
+  },
+): ShareGrantTransitionResult {
+  return storage.tx(() => {
+    input.guard();
+    const grant = storage.getShareGrant(input.grantId);
+    const share = grant && storage.getShare(grant.shareId);
+    const selector = share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null;
+    const levels = selector && !("kind" in selector) ? linkAccessLevels(selector) : [];
+    const from = grant ? levels.indexOf(grant.access) : -1;
+    const to = levels.indexOf(input.access);
+    if (
+      !grant ||
+      !share ||
+      grant.shareId !== input.shareId ||
+      grant.principalKind === "link" ||
+      grant.status !== "active" ||
+      grant.revokedAtMs !== null ||
+      from < 0 ||
+      to < 0 ||
+      from === to
+    ) {
+      return { ok: false };
+    }
+    if (grant.parentGrantId !== null) {
+      const parent = storage.getShareGrant(grant.parentGrantId);
+      if (
+        !parent ||
+        parent.shareId !== grant.shareId ||
+        parent.principalKind !== "link" ||
+        parent.status !== "active" ||
+        parent.revokedAtMs !== null ||
+        to > levels.indexOf(parent.access)
+      ) {
+        return { ok: false };
+      }
+    }
+    const narrowing = to < from;
+    const covered = narrowing ? serviceHostEnrollmentsCoveredByShare(storage, grant.shareId) : [];
+    storage.db
+      .prepare(
+        `UPDATE sync_relay_share_grants
+           SET access = ?, generation = generation + 1
+           WHERE grant_id = ? AND status = 'active'`,
+      )
+      .run(input.access, grant.grantId);
+    if (narrowing) {
+      nextShareDiscussionRevision(storage, grant.shareId);
+      retireUncoveredServiceActivations(storage, covered, Math.trunc(input.changedAtMs));
+    }
+    return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
+  });
+}
+
 type RevokeShareGrantInput = {
   shareId: string;
   grantId: string;
@@ -471,7 +531,6 @@ export function revokeShareGrantInTransaction(
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
     .run(grant.shareId, grant.shareId);
   retireUncoveredServiceActivations(storage, covered, revokedAtMs, keep);
-  forgetReplicaCurrentViewCaches(storage, storage.getShare(input.shareId)!.workspaceId);
   return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
 }
 
@@ -1164,7 +1223,7 @@ export function listReceivedShareIdsPage(
   cursor?: SyncRelayReceivedInventoryCursor,
 ): SyncRelayReceivedInventoryPage {
   const removedIds = storage
-    .listRemovedSharesForRecipient(recipientUserId)
+    .listRemovedSharesInRecipientList(recipientUserId)
     .map((row) => row.shareId);
   const rows = storage.db
     .prepare(`SELECT share_id FROM (SELECT DISTINCT g.share_id
@@ -1242,7 +1301,6 @@ export function revokeShareInTransaction(
     .run(Math.trunc(revokedAtMs), shareId);
   retireAgentConnectionsInTransaction(storage, { shareId }, revokedAtMs);
   retireUncoveredServiceActivations(storage, covered, Math.trunc(revokedAtMs));
-  forgetReplicaCurrentViewCaches(storage, String(existing.workspace_id));
   storage.db
     .prepare(`UPDATE sync_relay_share_removals SET voided = 1
         WHERE share_id = ? AND (removed_grant_id IS NOT NULL OR ? > 0)`)

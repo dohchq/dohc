@@ -24,6 +24,7 @@ import {
   YDocPathNotInVersionError,
   YDocRemovalInProgressError,
   YDocSessionUnreleasedError,
+  type WorkspaceEngineYDocOpenedSession,
   type WorkspaceEngineYDocProviderSession,
 } from "./workspaceEngineCapture";
 import {
@@ -38,6 +39,7 @@ import {
 import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { DOCUMENT_TOO_DENSE_WORDS } from "../ipc/errorWords";
 import { isPrivacyDenial } from "./privacyDenial";
+import { resolveWorkspaceDocument } from "./workspaceAssets";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./physicalWorkspaceRemoval";
 import type { RegistryEntry } from "./registryStore";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
@@ -112,13 +114,14 @@ function asset(id: string, ref = `assets/${id}.png`): ArtifactAssetDescriptor {
 }
 
 function providerSession(
-  input: Partial<WorkspaceEngineYDocProviderSession> = {},
-): WorkspaceEngineYDocProviderSession {
+  input: Partial<WorkspaceEngineYDocOpenedSession> = {},
+): WorkspaceEngineYDocOpenedSession {
   const base = {
     doc: new Y.Doc(),
     initialUpdate: new Uint8Array(),
     path: "notes/a.md",
     contentKind: "richdoc",
+    lineageAtOpen: "absent",
     settleNow: vi.fn(async () => {
       throw new Error("settleNow is not used by this IPC adapter fixture");
     }),
@@ -129,7 +132,7 @@ function providerSession(
       bytes: new Uint8Array([1, 2, 3]),
     })),
     close: vi.fn(async () => undefined),
-  } satisfies WorkspaceEngineYDocProviderSession;
+  } satisfies WorkspaceEngineYDocOpenedSession;
   return Object.assign(base, input);
 }
 
@@ -150,12 +153,14 @@ interface TestHarnessOptions {
   resolveDocumentPath?: (
     workspace: { workspaceId: string; rootPath: string; attachmentId: symbol },
     path: string,
+    access: "read" | "write",
   ) => Promise<string | null>;
   rendererWorkspaceId?: string;
   sharedCaptureFor?: Parameters<typeof createEngineYDocSessionIpc>[0]["sharedCaptureFor"];
   ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
   onPendingShareMayChange?: (workspaceId: string) => void;
   onOwnerOpened?: (workspaceId: string, path: string) => void;
+  livePaused?: (workspaceId: string, objectId: string) => boolean;
 }
 
 function rendererSession(
@@ -216,6 +221,7 @@ function harness(session = providerSession(), options: TestHarnessOptions = {}) 
     ownerDraftState: options.ownerDraftState,
     onPendingShareMayChange: options.onPendingShareMayChange,
     onOwnerOpened: options.onOwnerOpened,
+    livePaused: options.livePaused,
     resolveDocumentPath,
     onError,
   });
@@ -304,6 +310,38 @@ describe("engine Y.Doc IPC adapter", () => {
         });
         expect(onOwnerOpened.mock.calls).toEqual(
           ownerBound ? [[DOCUMENT.workspaceId, DOCUMENT.path]] : [],
+        );
+      } finally {
+        await h.ipc.shutdown();
+      }
+    }
+  });
+
+  it("asks the editor to gather typing only while the server has paused the note", async () => {
+    const pausedObjects = new Set(["object-paused"]);
+    for (const objectId of ["object-paused", "object-other"]) {
+      const h = harness(providerSession({ objectId }), {
+        livePaused: (workspaceId, id) =>
+          workspaceId === openPayload.workspaceId && pausedObjects.has(id),
+      });
+      try {
+        const sender = new FakeSender(7);
+        await h.ipc.open(sender, openPayload);
+        expect(
+          h.ipc.applyUpdate(sender, {
+            sessionId: openPayload.sessionId,
+            update: new Uint8Array([0, 0]),
+            seq: 1,
+            lineageGeneration: 1,
+            requestId: "11111111-1111-4111-8111-111111111111",
+          }),
+        ).toEqual(
+          objectId === "object-paused"
+            ? { accepted: true, batchDelayMs: 1_000 }
+            : { accepted: true },
+        );
+        expect(vi.mocked(h.session.applyLocalUpdate).mock.calls[0]?.[2]?.settleDelayMs).toBe(
+          objectId === "object-paused" ? 2_000 : undefined,
         );
       } finally {
         await h.ipc.shutdown();
@@ -1654,6 +1692,7 @@ describe("engine Y.Doc IPC adapter", () => {
         attachmentId: AUTHORITY_ID,
       },
       "alias/a.md",
+      "write",
     );
     expect(resolveDocumentPath.mock.calls.map(([, path]) => path)).toEqual([
       "alias/a.md",
@@ -2424,6 +2463,50 @@ describe("engine Y.Doc IPC adapter", () => {
     }
   });
 
+  it.each(["owner-outbox-frozen", "restore-fenced"])(
+    "holds editing when the engine refuses an owner's open with %s, and opens the note once the engine accepts",
+    async (message) => {
+      const h = harness();
+      const sender = new FakeSender(7);
+      vi.mocked(h.capture.openYDocSession).mockRejectedValueOnce(
+        new DaemonRefusalError({ code: "INVALID_PARAMS", message, retry: "no" }, undefined),
+      );
+      await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
+        available: false,
+        engineRefusedOpen: { detail: `INVALID_PARAMS ${message}` },
+      });
+      await expect(
+        h.ipc.open(sender, { ...openPayload, sessionId: "try-again" }),
+      ).resolves.toMatchObject({ available: true });
+      expect(h.capture.openYDocSession).toHaveBeenCalledTimes(2);
+      await h.ipc.shutdown();
+    },
+  );
+
+  // Each of these notes edits its file directly: a note too large to seed, a
+  // path the engine keeps out of live sessions, and answers no retry clears.
+  it.each([
+    ["INVALID_PARAMS", "ydoc-seed-too-large"],
+    ["INVALID_PARAMS", "invalid Y.Doc path"],
+    ["INTERNAL", "document-too-dense"],
+    ["CONFLICT", "markdown-write-held"],
+    ["INTERNAL", "state-corrupt"],
+    ["INTERNAL", "corrupt-lineage"],
+    ["INVALID_PARAMS", "a-refusal-added-later"],
+  ] as const)(
+    "leaves the plain editor to a note whose open the engine refuses with %s %s",
+    async (code, message) => {
+      const h = harness();
+      vi.mocked(h.capture.openYDocSession).mockRejectedValueOnce(
+        new DaemonRefusalError({ code, message, retry: "no" }, undefined),
+      );
+      await expect(h.ipc.open(new FakeSender(7), openPayload)).resolves.toEqual({
+        available: false,
+      });
+      await h.ipc.shutdown();
+    },
+  );
+
   it("refuses shared, unclassified, and invalid paths before opening a session", async () => {
     const sender = new FakeSender(7);
     const shared = harness();
@@ -2882,6 +2965,87 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.shutdown();
     });
 
+    it("starts live editing in the background with no window, and changes nothing", async () => {
+      const trace: string[] = [];
+      const h = harness(editableSession(trace));
+      await expect(h.ipc.startLiveInBackground(DOCUMENT)).resolves.toBe("seeded");
+      expect(h.capturedOpen()).toMatchObject({ path: "notes/a.md", contentKind: "richdoc" });
+      expect(trace).toEqual(["close"]);
+      await h.ipc.shutdown();
+    });
+
+    it("says when the engine already held the note's live history", async () => {
+      const trace: string[] = [];
+      const session = Object.assign(editableSession(trace), { lineageAtOpen: "existing" as const });
+      const h = harness(session);
+      await expect(h.ipc.startLiveInBackground(DOCUMENT)).resolves.toBe("existing");
+      expect(trace).toEqual(["close"]);
+      await h.ipc.shutdown();
+    });
+
+    it("leaves a note an editor holds to that editor", async () => {
+      const h = harness(editableSession());
+      await h.ipc.open(new FakeSender(7), openPayload);
+      await expect(h.ipc.startLiveInBackground(DOCUMENT)).resolves.toBe("held");
+      expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
+      await h.ipc.shutdown();
+    });
+
+    it("leaves a note an editor is opening to that editor", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      const opening = deferred<WorkspaceEngineYDocProviderSession>();
+      vi.mocked(h.capture.openYDocSession).mockImplementationOnce(
+        async () => await opening.promise,
+      );
+      const opened = h.ipc.open(new FakeSender(7), openPayload);
+      await vi.waitFor(() => expect(h.capture.openYDocSession).toHaveBeenCalledOnce());
+      await expect(h.ipc.startLiveInBackground(DOCUMENT)).resolves.toBe("held");
+      opening.resolve(session);
+      await expect(opened).resolves.toMatchObject({ available: true });
+      expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
+      await h.ipc.shutdown();
+    });
+
+    it("keeps an editor that opens during a background start waiting until its session closes", async () => {
+      const trace: string[] = [];
+      const background = editableSession(trace);
+      const released = deferred<void>();
+      const resolveDocumentPath = vi.fn(async (_workspace: unknown, path: string) => path);
+      const h = harness(background, { resolveDocumentPath });
+      vi.mocked(background.close).mockImplementationOnce(async () => {
+        trace.push("close");
+        await released.promise;
+      });
+      vi.mocked(h.capture.openYDocSession)
+        .mockImplementationOnce(async () => background)
+        .mockImplementationOnce(async () => {
+          trace.push("editor-open");
+          return providerSession();
+        });
+      const starting = h.ipc.startLiveInBackground(DOCUMENT);
+      await vi.waitFor(() => expect(trace).toContain("close"));
+
+      const opening = h.ipc.open(new FakeSender(7), openPayload);
+      await vi.waitFor(() => expect(resolveDocumentPath).toHaveBeenCalledTimes(2));
+      await new Promise((drained) => setImmediate(drained));
+      expect(trace).toEqual(["close"]);
+
+      released.resolve();
+      await expect(starting).resolves.toBe("seeded");
+      await expect(opening).resolves.toMatchObject({ available: true });
+      expect(trace).toEqual(["close", "editor-open"]);
+      await h.ipc.shutdown();
+    });
+
+    it("starts nothing in a shared view", async () => {
+      const h = harness(editableSession());
+      h.setReadOnly(true);
+      await expect(h.ipc.startLiveInBackground(DOCUMENT)).rejects.toThrow("shared view");
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+      await h.ipc.shutdown();
+    });
+
     it("refuses with a retryable reason when an editor opens as the edit begins", async () => {
       const session = editableSession();
       const h = harness(session);
@@ -3168,6 +3332,30 @@ describe("engine Y.Doc IPC adapter", () => {
       h.setReadOnly(true);
       await expect(h.ipc.editDocument(append)).rejects.toThrow("shared view");
       expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    });
+
+    it("reads a document in a received share, and still refuses to edit it", async () => {
+      const root = mkdtempSync(join(tmpdir(), "dohc-received-share-"));
+      mkdirSync(join(root, "shared-with-me", "trip"), { recursive: true });
+      writeFileSync(join(root, "shared-with-me", "trip", "notes.md"), "# Notes\n");
+      try {
+        const h = harness(editableSession(), {
+          rootPath: root,
+          resolveDocumentPath: (workspace, path, access) =>
+            resolveWorkspaceDocument(workspace.rootPath, path, access),
+        });
+        const path = "shared-with-me/trip/notes.md";
+        await expect(h.ipc.readDocument({ workspaceId: "workspace-1", path })).resolves.toEqual({
+          path,
+          state: null,
+        });
+        await expect(h.ipc.editDocument({ ...append, path })).rejects.toThrow(
+          `Invalid asset path (reserved): ${path}`,
+        );
+        expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
 
     it("reads the held document's state, or nothing when no editor holds it", async () => {

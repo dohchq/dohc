@@ -5,6 +5,8 @@ import type {
   ShareProposalOperation,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { Overlay } from "../Overlay";
 import { ipcErrorMessage } from "../ipcError";
@@ -13,7 +15,7 @@ import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unif
 // The name the granter reads. A submitter whose email the relay could not
 // state reads the same way the share banner names an unknown account.
 export function proposerName(sent: { proposedByEmail: string | null } | null): string {
-  return sent?.proposedByEmail ?? "another dohc user";
+  return sent?.proposedByEmail ?? "another person";
 }
 
 function operationLabel(operation: ShareProposalOperation): string {
@@ -80,7 +82,7 @@ function ProposalFileSection(props: {
         if (!liveToken.isCurrent(token)) return;
         setContent({
           status: "error",
-          message: ipcErrorMessage(error, "Couldn't load this file."),
+          message: ipcErrorMessage(error, "dohc could not load this file."),
         });
       }
     })();
@@ -110,13 +112,13 @@ function ProposalFileSection(props: {
         className="dohc-focus-row flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-line bg-panel-2 px-3 py-2 text-left hover:bg-hover"
       >
         <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{file.path}</span>
-        {size ? <span className="shrink-0 text-[11px] text-subtle">{size}</span> : null}
-        <span className="shrink-0 text-[11px] text-subtle">{operationLabel(file.operation)}</span>
+        {size ? <span className="shrink-0 text-[12px] text-subtle">{size}</span> : null}
+        <span className="shrink-0 text-[12px] text-subtle">{operationLabel(file.operation)}</span>
       </button>
       {file.drifted ? (
         <p
           data-testid="proposal-review-drift"
-          className="m-0 border-b border-line bg-warning/10 px-3 py-1.5 text-[11px] leading-4 text-warning"
+          className="m-0 border-b border-line bg-warning/10 px-3 py-1.5 text-[12px] leading-4 text-warning"
         >
           This file changed since they sent it.
         </p>
@@ -154,37 +156,25 @@ export function ProposalReviewDialog(props: {
   onClose: () => void;
 }) {
   const { workspaceId, proposalId } = props;
-  const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [settling, setSettling] = useState(false);
   const [settleError, setSettleError] = useState<string | null>(null);
-  // The renderer async-state invariant: an answer may only repaint the window
-  // that asked for it. Every unmount, and every change of workspace or
-  // proposal, retires the window in flight.
-  const liveToken = useRequestSequence();
-
+  const liveToken = useRequestSequence([workspaceId, proposalId]);
+  const read = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([workspaceId, proposalId]),
+    load: () => bridge().readShareProposalChanges({ workspaceId, proposalId }),
+  });
   useEffect(() => {
-    const token = liveToken.next();
-    setLoad({ status: "loading" });
     setSettleError(null);
-    void (async () => {
-      try {
-        // One read, and NO content: the files, their paths, sizes and drift.
-        // A file's two sides are read when its row is opened.
-        const changes = await bridge().readShareProposalChanges({
-          workspaceId,
-          proposalId,
-        });
-        if (!liveToken.isCurrent(token)) return;
-        setLoad({ status: "ready", changes });
-      } catch (error) {
-        if (!liveToken.isCurrent(token)) return;
-        setLoad({
-          status: "error",
-          message: ipcErrorMessage(error, "Couldn't load these changes."),
-        });
-      }
-    })();
   }, [workspaceId, proposalId]);
+  const load: LoadState =
+    read.error !== null
+      ? {
+          status: "error",
+          message: ipcErrorMessage(read.error, "dohc could not load these changes."),
+        }
+      : read.value
+        ? { status: "ready", changes: read.value }
+        : { status: "loading" };
 
   const settle = useCallback(
     async (decision: "accept" | "decline") => {
@@ -198,7 +188,7 @@ export function ProposalReviewDialog(props: {
         props.onClose();
       } catch (error) {
         if (!liveToken.isCurrent(token)) return;
-        setSettleError(ipcErrorMessage(error, "dohc couldn't record your decision."));
+        setSettleError(ipcErrorMessage(error, "dohc could not record your decision."));
         setSettling(false);
       }
     },
@@ -219,7 +209,7 @@ export function ProposalReviewDialog(props: {
       >
         <header className="border-b border-line px-4 py-3">
           <h3 id="proposal-review-title" className="m-0 text-base font-semibold text-ink">
-            Changes from {sender}
+            {load.status === "ready" ? `Changes from ${sender}` : "Review changes"}
           </h3>
         </header>
 

@@ -466,24 +466,46 @@ export function staticPackageSmoke() {
     for (const type of ["text/markdown", "text/plain", "text/csv", "application/json"]) {
       check(config.linux?.mimeTypes?.includes(type), `Linux Open with dohc includes ${type}`);
     }
-    // deb.depends replaces electron-builder's default list (app-builder-lib's
-    // FpmTarget.getDefaultDepends), so it repeats that list and adds the
-    // libraries Electron links that the list does not bring. Without one, the
-    // .deb still installs, then the app does not start.
-    for (const dependency of [
-      "libgtk-3-0",
-      "libnotify4",
-      "libnss3",
-      "libxss1",
-      "libxtst6",
-      "xdg-utils",
-      "libatspi2.0-0",
-      "libuuid1",
-      "libsecret-1-0",
-      "libasound2t64 | libasound2",
-      "libgbm1",
-    ]) {
-      check(config.deb?.depends?.includes(dependency), `the .deb depends on ${dependency}`);
+    // deb.depends and rpm.depends replace electron-builder's default lists
+    // (app-builder-lib's FpmTarget.getDefaultDepends), so each repeats its list
+    // and adds the libraries Electron links that the list does not bring.
+    // Without one, the package still installs, then the app does not start.
+    const packageDepends = {
+      deb: [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
+        "libasound2t64 | libasound2",
+        "libgbm1",
+      ],
+      rpm: [
+        "gtk3",
+        "libnotify",
+        "nss",
+        "libXScrnSaver",
+        "(libXtst or libXtst6)",
+        "xdg-utils",
+        "at-spi2-core",
+        "(libuuid or libuuid1)",
+        "libsecret",
+        "alsa-lib",
+        "mesa-libgbm",
+      ],
+    };
+    for (const [target, dependencies] of Object.entries(packageDepends)) {
+      check(config.linux?.target?.includes(target), `Linux builds the .${target}`);
+      for (const dependency of dependencies) {
+        check(
+          config[target]?.depends?.includes(dependency),
+          `the .${target} depends on ${dependency}`,
+        );
+      }
     }
     check(
       Array.isArray(config.protocols) &&

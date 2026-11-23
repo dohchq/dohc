@@ -266,11 +266,11 @@ describe("useShellError", () => {
       ),
     );
     const notice = result.current.shellErrors[0]!;
-    expect(notice.title).toBe("dohc can't bring back trip.txt, because that could stop sync");
+    expect(notice.title).toBe("dohc cannot bring back trip.txt, because that could stop sync");
     expect(notice.message).toBe("Copy its text from its History into a file with a new name.");
     expect(notice.details).toContainEqual([
       "Reason",
-      "A sync conflict between your machines removes trip.txt. Bringing it back could stop sync between them.",
+      "A sync conflict between your computers removes trip.txt. Bringing it back could stop sync between them.",
     ]);
     expect(notice.seen).toBe(false);
     expect(notice.retry).toBeNull();
@@ -285,20 +285,20 @@ describe("useShellError", () => {
     [
       "a conflict choice",
       new SyncedDeletionRevivalError("tasks/trip.txt"),
-      "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for trip.txt, keep the removal there.",
-      "trip.txt is removed on this machine and was changed on your other machine. Bringing it back could stop sync between your machines.",
+      "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other computer shows a conflict for trip.txt, keep the removal there.",
+      "trip.txt is removed on this computer and was changed on your other computer. Bringing it back could stop sync between your computers.",
     ],
     [
       "a History restore",
       new SyncedDeletionRevivalError("tasks/trip.txt", undefined, true),
       "Copy its text from its History into a file with a new name.",
-      "A sync conflict between your machines removes trip.txt. Bringing it back could stop sync between them.",
+      "A sync conflict between your computers removes trip.txt. Bringing it back could stop sync between them.",
     ],
     [
       "a conflict whose file changed after it appeared",
       new SyncedDeletionStaleError("tasks/trip.txt"),
       "Move your newer lines into the new file, and leave trip.txt and its copies alone. Your other files keep syncing.",
-      "trip.txt changed on this machine after the conflict appeared, so either choice would overwrite the newer lines.",
+      "trip.txt changed on this computer after the conflict appeared, so either choice would overwrite the newer lines.",
     ],
   ])(
     "copies one instruction for a refused synced deletion: %s",
@@ -457,7 +457,7 @@ describe("useShellError", () => {
     );
     const notice = result.current.shellErrors[0]!;
     expect(notice.message).toBe(
-      "dohc could not prepare this Collection change. dohc cannot use \"sources/note.md\" for this change. dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
+      "dohc could not prepare this Collection change. dohc cannot use \"sources/note.md\" for this change. dohc cannot read this file's Markdown. Common causes are nested lists in a synced workspace or deeply nested quotes. Your outside edit is still in the file on disk. Copy it first, then restore the file's earlier contents. If dohc still cannot read the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
     );
     expect(notice.seen).toBe(false);
     expect(notice.retry).toBe(retry);
@@ -568,7 +568,7 @@ describe("useShellError", () => {
     expect(notice.identity).toBe("share-capture:capture-notice-workspace:share-a");
     expect(notice.title).toBe("Changes kept on this computer");
     expect(notice.message).toBe(
-      "dohc couldn't confirm these changes reached the share. They are kept on this computer. Copy these files to another workspace.",
+      "dohc could not confirm these changes reached the share. They are kept on this computer. Copy these files to another workspace.",
     );
     expect(notice.message).not.toContain(paths[0]);
     expect(errorDetails(notice.details!)).toContain(
@@ -592,7 +592,7 @@ describe("useShellError", () => {
     act(() => reopened.result.current.reportShareCapture("share-a", null));
     expect(reopened.result.current.shellErrors).toHaveLength(1);
     expect(reopened.result.current.shellErrors[0]!.message).toBe(
-      "dohc couldn't check this share's files. Copy any files you changed to another workspace now.",
+      "dohc could not check this share's files. Copy any files you changed to another workspace now.",
     );
     expect(reopened.result.current.shellErrors[0]!.details).toBeUndefined();
     act(() =>
@@ -604,7 +604,7 @@ describe("useShellError", () => {
     );
     expect(reopened.result.current.shellErrors).toHaveLength(1);
     expect(reopened.result.current.shellErrors[0]!.message).toBe(
-      "dohc checked only some of this share's files. dohc couldn't confirm these changes reached the share. They are kept on this computer. Copy these files and any others you changed to another workspace now.",
+      "dohc checked only some of this share's files. dohc could not confirm these changes reached the share. They are kept on this computer. Copy these files and any others you changed to another workspace now.",
     );
     expect(reopened.result.current.shellErrors[0]!.details).toEqual([
       ["File", "tasks/draft.md", "tasks/draft.md".length],
@@ -812,7 +812,7 @@ describe("useShellError", () => {
       senderKind: null,
       senderLabel: null,
       title: "Held a change to note.md",
-      body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links.",
+      body: "Saving it would also change parts dohc can't show.",
       target: { path: "note.md" },
       createdAtMs: 1,
       readAtMs: null,
@@ -1339,7 +1339,7 @@ describe("useShellError", () => {
         )}`,
       );
     const unfinished =
-      "This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.";
+      "This Collection did not finish moving to sync.example.test. Its records are kept on this computer.";
     try {
       const { result } = renderHook(() => useShellError("ws-a"));
       now.mockReturnValue(1_000);
@@ -1658,11 +1658,11 @@ it("reports unavailable recovery without replacing unrelated Notices and clears 
 it.each([
   [
     "key-missing",
-    "The workspace secret key file is missing. Restore .dohc/engine/secret.key from a backup, then choose Try again.",
+    "The workspace secret key file is missing. Restore .dohc/engine/secret.key from a backup.",
   ],
   [
     "key-corrupt",
-    "The workspace secret key file is damaged. Restore .dohc/engine/secret.key from a backup, then choose Try again.",
+    "The workspace secret key file is damaged. Restore .dohc/engine/secret.key from a backup.",
   ],
   ["volume-shares-new-files", VOLUME_SHARES_NEW_FILES_WORDS],
   ["decrypt-failed", "dohc could not read the workspace secret key file."],
@@ -1676,7 +1676,7 @@ it.each([
     expect(row).toMatchObject({
       kind: "secret-key-unavailable",
       title: "History could not save protected files",
-      message,
+      message: `${message} Until then, History saves no changes to protected files. Once the key works, it saves only the text they have then.`,
       noDismiss: true,
       seen: false,
     });

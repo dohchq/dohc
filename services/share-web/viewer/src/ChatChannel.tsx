@@ -501,6 +501,7 @@ export function ChannelView({
           <div className="chat-composer-row">
             <textarea
               name="body"
+              placeholder="Message"
               value={draft}
               readOnly={posting}
               rows={1}

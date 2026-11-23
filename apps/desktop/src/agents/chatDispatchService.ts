@@ -196,8 +196,8 @@ function runFailureReason(
         .slice(`${RUNNER_START_FAILURE}: `.length)
         .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
         .trim();
-      const lead = "It couldn't start: ";
-      if (!detail) return "It couldn't start.";
+      const lead = "It could not start: ";
+      if (!detail) return "It could not start.";
       return lead + cutText(detail, NOTICE_BODY_MAX_CHARS - lead.length);
     }
   }
@@ -223,15 +223,12 @@ export const RUN_ID_LOG_TOKEN = "{runId}";
 export const RUN_LOG_SWEEP_MS = 24 * 60 * 60 * 1000;
 export const APP_QUIT_EXIT_CODE = 143;
 
-export const SELF_TEST_RESTRICTED_DETAIL = `${AGENTS_RESTRICTED_MESSAGE} Set Workspace trust to Trusted in Settings → Privacy. Then test again.`;
+export const SELF_TEST_RESTRICTED_DETAIL = `${AGENTS_RESTRICTED_MESSAGE} Set Workspace trust to Trusted in Settings › Privacy. Then test again.`;
 // For the log. The restrict that asked for the stop words what the person reads.
 export const RUNNER_OUTLIVED_STOP = "The agent runner did not exit after dohc stopped it.";
 
 const PRESENCE_HEARTBEAT_MS = 10_000;
-const SELF_TEST_POLL_MS = 250;
-const SELF_TEST_THREAD_TITLE = "dohc runner self-test";
 const SELF_TEST_MARKER_PREFIX = "dohc-runner-self-test:";
-const SELF_TEST_OPENING = "Reply here to check the agent connection.";
 
 function clip(name: string): string {
   return cutText(name, NOTICE_NAME_MAX_CHARS);
@@ -272,11 +269,6 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
   chatStoreFor(workspace: ChatDispatchWorkspace): LinkedChatStore;
-  // Starts the self-test's own thread in the agent DM, apart from its conversation.
-  startSelfTestThread(
-    workspace: ChatDispatchWorkspace,
-    input: { channelId: string; title: string; body: string },
-  ): Promise<string>;
   dispatchStoreFor(workspace: ChatDispatchWorkspace): AwaitableAgentDispatchStore;
   // The person's agents, in the order the settings file lists them.
   readDispatchAgents(): Promise<Agent[]>;
@@ -345,6 +337,7 @@ interface StoppedRun {
 interface ChatDispatchThreadState {
   liveRunId: string | null;
   liveTriggerMessageId: string | null;
+  liveAgent?: { agentId: string; name: string };
   pendingCount: number;
   paused: boolean;
   waiting?: { agentId: string; name: string; triggerMessageIds: string[] };
@@ -391,11 +384,13 @@ interface SelfTestState {
   workspace: ChatDispatchWorkspace;
   child: RunnerProcess;
   runId: string;
+  replyThreadId: string;
+  marker: string;
   settled: boolean;
-  poll: ReturnType<typeof setTimeout> | null;
   timeout: ReturnType<typeof setTimeout>;
   killEscalation: ReturnType<typeof setTimeout> | null;
   resolve(result: RunnerSelfTestResult): void;
+  reply(runAgentId: string | null): Promise<void>;
   // Ends the self-test with this answer and stops its runner.
   cancel(detail: string): Promise<void>;
 }
@@ -496,6 +491,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const runReservations = new Set<string>();
   const selfTests = new Map<string, SelfTestState>();
   const selfTestReservations = new Set<string>();
+  // End records of self-tests whose runner has exited. stop() waits for them.
+  const selfTestEnds = new Set<Promise<void>>();
   const budgetBypassThreads = new Set<string>();
   // What this run of dohc told each restricted workspace's person: the
   // notice that Restricted Mode holds a request, and main's dialog on their
@@ -878,6 +875,25 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return null;
   }
 
+  // The runner self-test's reply, which goes to no chat. `runAgentId` is the
+  // agent of the run whose secret the request carried, or null. Answers the
+  // reply's id, or null when it isn't the self-test's.
+  function selfTestReply(
+    workspaceId: string,
+    input: { threadId: string; body: string; runAgentId: string | null },
+  ): string | null {
+    const test = selfTests.get(workspaceId);
+    if (
+      !test ||
+      test.settled ||
+      test.replyThreadId !== input.threadId ||
+      input.body.trim() !== test.marker
+    )
+      return null;
+    void test.reply(input.runAgentId);
+    return `${test.replyThreadId}_reply`;
+  }
+
   async function timeOutLiveRun(live: LiveRun): Promise<void> {
     if (live.finalized) return;
     live.finalized = true;
@@ -1059,7 +1075,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
         : undefined;
     const words = {
-      lead: `${noticeAgentName(agent?.name)} ${posted ? "stopped before finishing" : "didn't reply"}`,
+      lead: `${noticeAgentName(agent?.name)} ${posted ? "stopped before finishing" : "did not reply"}`,
       reason: runFailureReason(run, outcome, nodeAvailable),
     };
     // A run that couldn't start or needs Node.js has its own next step.
@@ -1398,8 +1414,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       // An agent you run reads its requests itself, so nothing is wrong to tell.
       if (agent && !agent.launch) continue;
       const message = !agent
-        ? "That agent isn't set up on this computer. Set it up in Settings → Agents."
-        : `${clip(agent.name)}'s chat runner is off. Turn it on in Settings → Agents.`;
+        ? "That agent is not set up on this computer. Set it up in Settings › Agents."
+        : `${clip(agent.name)} is off. Turn it on in Settings › Agents.`;
       try {
         options.onDispatchNotice?.(workspace, { reason: "no-runner", threadId, message });
       } catch (error) {
@@ -1891,6 +1907,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     workspaceId: string,
     threadId: string | null,
     postThreadIds: readonly string[] = [],
+    laneThreadIds: readonly string[] = [],
   ): Promise<ChatDispatchThreadState> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) throw new Error("This workspace is not open. Open it again.");
@@ -1902,16 +1919,18 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       threadId === null ? null : failedRunForThread(workspace, threadId, pendingRead),
     ]);
     const live = liveRuns.get(workspaceId);
+    // The conversation, in each of its threads.
+    const lane = new Set([threadId, ...laneThreadIds]);
     const running =
-      live?.claim.run.threadId === threadId && live.finalized === false ? live.claim.run : null;
-    const queued = pending.filter((pending) => pending.threadId === threadId);
+      live && lane.has(live.claim.run.threadId) && !live.finalized ? live.claim.run : null;
+    const queued = pending.filter((pending) => lane.has(pending.threadId));
     // A request to the agent at work waits while that run holds the
     // workspace, which a stopped or timed-out run does until its process
     // exits and its end is saved. A pause holds the request instead, so it
     // isn't waiting on the agent.
     const busy = paused ? undefined : live;
     // The conversation and the earlier posts its chat shows.
-    const shown = new Set([threadId, ...postThreadIds]);
+    const shown = new Set([...lane, ...postThreadIds]);
     const asked = busy
       ? pending.filter(
           (each) => shown.has(each.threadId) && each.agentId === busy.claim.run.agentId,
@@ -1931,6 +1950,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return {
       liveRunId: running?.runId ?? null,
       liveTriggerMessageId: running?.triggerMessageId ?? null,
+      ...(running && live ? { liveAgent: { agentId: running.agentId, name: live.agentName } } : {}),
       pendingCount: queued.length,
       paused: pauseState?.paused ?? false,
       ...(busy && waiting.length > 0
@@ -2061,7 +2081,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           : agent.launch
             ? `${agent.name} is off.`
             : `${agent.name} has no command to start it.`;
-        throw new Error(`${why} Check it in Settings → Agents, then try again.`);
+        throw new Error(`${why} Check it in Settings › Agents, then try again.`);
       }
       const requeued =
         (await options.requeueFailedTrigger?.({
@@ -2086,7 +2106,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (!workspace) return { ok: false, detail: "That workspace is not available." };
     if (shuttingDown) return { ok: false, detail: "dohc is quitting." };
     if (workspaceProcessReserved(workspace)) {
-      return { ok: false, detail: "A runner is already active in this workspace." };
+      return { ok: false, detail: "An agent is already active in this workspace." };
     }
     selfTestReservations.add(workspaceId);
     let reservationHeldByProcess = false;
@@ -2095,7 +2115,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const agent = (await options.readDispatchAgents()).find(
         (candidate) => candidate.id === agentId,
       );
-      if (!agent?.launch) return { ok: false, detail: "Configure a runner command first." };
+      if (!agent?.launch) return { ok: false, detail: "Add an agent command first." };
       const command = launchCommand(agent.launch);
       const assertMayStart = await agentStartCheck(workspace);
       if (!assertMayStart) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
@@ -2110,9 +2130,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         };
       }
 
-      // A self-test spawns a real runner and writes a scratch thread, so it
-      // takes the same run lease and engine gate as a claimed run. A workspace
-      // without a capture refuses here, before chatStoreFor opens the engine.
+      // A self-test spawns a real runner, so it takes the same run lease and
+      // engine gate as a claimed run. A workspace without a capture refuses here.
       try {
         releaseWorkspace = (await options.prepareRunWorkspace?.(workspace)) ?? null;
       } catch (error) {
@@ -2125,30 +2144,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         };
       }
 
-      const chat = options.chatStoreFor(workspace);
-      const agentChannel = await chat.ensureAgentChannel({
-        workspaceId,
-        agentId: agent.id,
-        name: agent.name,
-      });
-      const summaries = await chat.listChannelThreads({
-        workspaceId,
-        channelId: agentChannel.id,
-      });
-      let scratchThreadId: string | null = null;
-      for (const summary of summaries) {
-        if (summary.thread.title !== SELF_TEST_THREAD_TITLE) continue;
-        const messages = await chat.listMessages({
-          workspaceId,
-          threadId: summary.thread.id,
-        });
-        const opening = messages[0];
-        if (opening?.author.kind === "human" && opening.body === SELF_TEST_OPENING) {
-          scratchThreadId = summary.thread.id;
-          break;
-        }
-      }
-      const runId = `run_self_test_${createId()}`;
+      const testId = createId();
+      const runId = `run_self_test_${testId}`;
+      const threadId = `self_test_${testId}`;
       const marker = `${SELF_TEST_MARKER_PREFIX}${runId}`;
       const logPath = join(options.stateDir(), "run-logs", `${runId}.log`);
       try {
@@ -2163,26 +2161,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             ok: false,
             detail: shuttingDown
               ? "dohc is quitting."
-              : "A runner became active before the self-test could start.",
+              : "An agent became active before the test could start.",
           };
         }
         assertMayStart();
-        const threadId =
-          scratchThreadId ??
-          (await options.startSelfTestThread(workspace, {
-            channelId: agentChannel.id,
-            title: SELF_TEST_THREAD_TITLE,
-            body: SELF_TEST_OPENING,
-          }));
-        if (shuttingDown) return { ok: false, detail: "dohc is quitting." };
-        if (
-          liveRuns.has(workspaceId) ||
-          runReservations.has(workspaceId) ||
-          selfTests.has(workspaceId) ||
-          options.runSlotOccupied?.(workspace) === true
-        ) {
-          return { ok: false, detail: "A runner became active before the self-test could start." };
-        }
         // The same reply form as a real run, so passing proves replies work.
         const prompt =
           replyFormFor(profile?.tool) === "mcp"
@@ -2218,7 +2200,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             const test = selfTests.get(workspaceId);
             if (!test || test.settled) return;
             test.settled = true;
-            if (test.poll) clearTimeout(test.poll);
             clearTimeout(test.timeout);
             if (test.killEscalation && test.child.hasExited()) {
               clearTimeout(test.killEscalation);
@@ -2229,7 +2210,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             // so its exit is what lets held requests start.
             const forget = () => {
               if (selfTests.get(workspaceId) !== test) return;
-              void markRunLogEnded(logPath, nowMs()).catch(reportError);
+              const ended = markRunLogEnded(logPath, nowMs())
+                .catch(reportError)
+                .finally(() => selfTestEnds.delete(ended));
+              selfTestEnds.add(ended);
               selfTests.delete(workspaceId);
               if (!selfTestReservations.has(workspaceId) && !stopped) {
                 void scanWorkspace(workspaceId).catch(reportError);
@@ -2256,42 +2240,19 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             }
             resolveResult(result);
           };
-          const check = async () => {
-            const test = selfTests.get(workspaceId);
-            if (!test || test.settled) return;
-            try {
-              const messages = await chat.listMessages({ workspaceId, threadId });
-              const replies = messages.filter(
-                (message) => message.author.kind === "agent" && message.body.trim() === marker,
-              );
-              // Only the run's own reply carries its agent. A reply that lost
-              // the run's secret is the unnamed agent's, so the check ends there.
-              if (replies.some((message) => message.authorAgentId === agent.id)) {
-                await complete({
-                  ok: true,
-                  detail: "Runner self-test passed. The harness reported through dohc chat.",
-                });
-                return;
-              }
-              if (replies.length > 0) {
-                await complete({
-                  ok: false,
-                  unconfirmed: true,
-                  detail: `${agent.name}'s Command started its tools without this check's credential, so its replies show as Agent. Edit the Command in ${agent.name}'s details.`,
-                  logPath,
-                });
-                return;
-              }
-            } catch (error) {
-              reportError(error);
-            }
-            const current = selfTests.get(workspaceId);
-            if (current && !current.settled) {
-              current.poll = setTimeout(() => {
-                void check();
-              }, SELF_TEST_POLL_MS);
-            }
-          };
+          // A reply without the run's secret is the unnamed agent's, so the
+          // check ends there.
+          const reply = (runAgentId: string | null) =>
+            complete(
+              runAgentId === agent.id
+                ? { ok: true, detail: "Test passed. The agent replied through dohc." }
+                : {
+                    ok: false,
+                    unconfirmed: true,
+                    detail: `${agent.name}'s Command started its tools without this check's credential, so its replies show as Agent. Edit the Command in ${agent.name}'s details.`,
+                    logPath,
+                  },
+            );
           const timeout = setTimeout(() => {
             const test = selfTests.get(workspaceId);
             if (test) {
@@ -2299,7 +2260,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             }
             void complete({
               ok: false,
-              detail: "Runner self-test timed out after 120 seconds.",
+              detail: "Test timed out after 120 seconds.",
               logPath,
             });
           }, RUNNER_SELF_TEST_TIMEOUT_MS);
@@ -2307,11 +2268,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             workspace,
             child,
             runId,
+            replyThreadId: threadId,
+            marker,
             settled: false,
-            poll: null,
             timeout,
             killEscalation: null,
             resolve: resolveResult,
+            reply,
             cancel: (detail) => complete({ ok: false, detail }),
           };
           selfTests.set(workspaceId, state);
@@ -2319,24 +2282,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             reportError(error);
             void complete({
               ok: false,
-              detail: "Runner self-test failed to start.",
+              detail: "Test could not start.",
               logPath,
             });
           });
           child.onExit(() => {
-            void (async () => {
-              await check();
-              const current = selfTests.get(workspaceId);
-              if (current && !current.settled) {
-                await complete({
-                  ok: false,
-                  detail: "Runner exited before reporting self-test success.",
-                  logPath,
-                });
-              }
-            })();
+            void complete({
+              ok: false,
+              detail: "The agent exited before replying to the test.",
+              logPath,
+            });
           });
-          void check();
         });
       } catch (error) {
         try {
@@ -2352,7 +2308,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
         return {
           ok: false,
-          detail: `Runner self-test could not start.${
+          detail: `Test could not start.${
             error instanceof Error && error.message ? ` ${error.message}` : ""
           }`,
           logPath,
@@ -2445,7 +2401,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const preRunFailures = [...pendingPreRunFailures.values()];
     for (const test of selfTests.values()) {
       test.settled = true;
-      if (test.poll) clearTimeout(test.poll);
       clearTimeout(test.timeout);
       if (test.killEscalation) clearTimeout(test.killEscalation);
       try {
@@ -2466,7 +2421,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     pendingNoReplyChecks.clear();
     pendingPreRunFailures.clear();
     await Promise.all(quitTerminations);
-    await Promise.all(selfTestLogs.map((log) => markRunLogEnded(log, nowMs()).catch(reportError)));
+    await Promise.all([
+      ...selfTestEnds,
+      ...selfTestLogs.map((log) => markRunLogEnded(log, nowMs()).catch(reportError)),
+    ]);
     await Promise.all([
       ...runWorkspacesToRelease.map(async (live) => {
         try {
@@ -2518,6 +2476,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     dispatchStateForThread,
     retryStoppedRun,
     endRunQuietly,
+    selfTestReply,
     runnerSelfTest,
     setPaused,
     isPaused: () => paused,

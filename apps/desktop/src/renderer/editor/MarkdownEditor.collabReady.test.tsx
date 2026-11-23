@@ -34,7 +34,7 @@ describe("MarkdownEditor collaboration loader", () => {
       // No await: the loading rows would cover the read view's text for the
       // whole editor build.
       render(<LiveEditor ydoc={second} />);
-      expect(screen.queryByText("Loading editor...")).toBeNull();
+      expect(screen.queryByText("Loading editor…")).toBeNull();
       expect(await screen.findByTestId("markdown-editor")).toBeTruthy();
     } finally {
       first.destroy();

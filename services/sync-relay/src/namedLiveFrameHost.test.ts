@@ -493,6 +493,63 @@ it.each(["owner"])("invalidates owner capture when %s changes", async (kind) => 
   expect(f.peer.requests).toEqual([]);
 });
 
+it("gives a room the access each connection's edits come in under, only while it is current", async () => {
+  const f = await setup();
+  const { generation } = f.raw
+    .prepare("SELECT generation FROM sync_relay_share_grants WHERE grant_id=?")
+    .get(scope.grantId) as { generation: number };
+  expect(f.capture.room.authority()).toEqual({
+    principalKind: "named",
+    principalId: scope.userId,
+    grantId: scope.grantId,
+    grantGeneration: generation,
+  });
+  expect(ownerCapture(f).room.authority()).toEqual({
+    principalKind: "owner",
+    principalId: "owner-1",
+    grantId: null,
+    grantGeneration: null,
+  });
+  f.raw
+    .prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id=?")
+    .run(scope.grantId);
+  expect(() => f.capture.room.authority()).toThrow();
+});
+
+it("saves a room's edits on the owner's capture, stored under the sender's access", async () => {
+  const f = await setup(),
+    capture = ownerCapture(f),
+    commit = journal(f);
+  const sender = {
+    principalKind: "named",
+    principalId: scope.userId,
+    grantId: scope.grantId,
+    grantGeneration: 1,
+  } as const;
+  const room = {
+    authors: [{ kind: "human", humanId: scope.userId, humanName: "Reader" }],
+    authority: sender,
+    committed: () => () => {},
+  } as const;
+  expect(
+    await capture.submit(
+      { deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes, room },
+      new AbortController().signal,
+    ),
+  ).toEqual({ result: "success", ack });
+  expect(commit).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ actor: { kind: "owner", userId: "owner-1" }, room }),
+  );
+  // An editor's own capture never saves for a room.
+  expect(
+    await f.capture.submit(
+      { deliveryId: "editor", updateDigest: hash(bytes), updateBytes: bytes, room },
+      new AbortController().signal,
+    ),
+  ).toEqual({ result: "refused", reason: "authority-refused" });
+  expect(commit).toHaveBeenCalledOnce();
+});
+
 it("does not report an owner ACK after restore changes during application", async () => {
   const f = await setup(),
     capture = ownerCapture(f);

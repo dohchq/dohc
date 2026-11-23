@@ -7,9 +7,18 @@ The compiler builds an app for publishing and for local launch.
 
 The desktop captures the app's declared files and sends their bytes to one compiler worker per build.
 The worker parses them with acorn and parse5 and bundles them with esbuild.
-A plugin resolves every import to a captured input.
+A plugin resolves every import either to a captured input or to a pinned built-in kit file under `resources/app-compiler/builtins/`.
 The worker refuses `package.json`, `tsconfig`, `node_modules` and computed imports, and esbuild writes nothing to disk.
 No app code runs.
+
+### Pinned built-in kit
+
+`stage-app-compiler.mjs` pre-bundles React 19 (`react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`) and `@dohc/app-kit` (`dohc/app`, `dohc/ui`, `dohc/charts`) into `resources/app-compiler/builtins/`, inside the compiler root that Seatbelt and Landlock already allow read-only.
+
+- `manifest.json` pins the SHA-256 of every staged file in `builtins/` and its React licenses, and `stage-app-compiler.mjs` embeds those expected hashes into `adapter.mjs` and `worker.mjs` at build time.
+- Both `adapter.mjs` and `worker.mjs` verify every loaded `builtins/*` file against those embedded hashes before compiling, and fold the combined kit digest into `compilerIdentity.version` (`0.28.1+kit-<sha256>`) under recipe `dohc-closed-app-v4`.
+- Built-in modules can import only other allowlisted built-in files (never workspace inputs or external URLs).
+- `react`, `react-dom`, `scheduler`, and `dohc` (and their subpaths) are reserved and cannot be mapped through `packageMap`.
 
 Hostile or broken source can still make parsing expensive.
 An unbounded 60 MB single-file app reached a 7.2 GB footprint on an Apple M2.

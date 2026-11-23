@@ -216,6 +216,23 @@ function fixture(
           undoDelete: async () => undefined,
         }),
     ) as Capture["changePathsAs"],
+    planUndoAgentRun: vi.fn(async (agentRunId: string) => ({
+      agentRunId,
+      agentName: null,
+      planToken: "plan-token",
+      truncated: false,
+      scannedChanges: 0,
+      restorable: [],
+      skipped: [],
+    })),
+    undoAgentRun: vi.fn<Capture["undoAgentRun"]>(async (agentRunId) => ({
+      agentRunId,
+      correlationId: null,
+      truncated: false,
+      restored: [],
+      skipped: [],
+      failed: [],
+    })),
   };
   const requestWorkspace = vi.fn(
     async (_root: string, _id: string, method: string, _input: unknown) =>
@@ -253,6 +270,26 @@ function fixture(
     reads: {
       chatFileMentions: vi.fn(async () => null),
       outsideChanges: vi.fn(async () => ({ outsideChanges: [] })),
+      planUndoAgentRun: vi.fn(async (_workspace, input: { agentRunId: string }) => ({
+        agentRunId: input.agentRunId,
+        agentName: null,
+        planToken: "plan-token",
+        truncated: false,
+        scannedChanges: 0,
+        restorable: [],
+        skipped: [],
+      })),
+      workspaceSearch: vi.fn(async () => ({
+        versionId: "main",
+        results: [],
+        neighbors: [],
+        complete: true,
+        indexBuilding: false,
+        policyDegraded: false,
+        mountsCovered: true,
+        sharedChannelRowsUncovered: 0,
+        truncated: false,
+      })),
       chatLinks: vi.fn(async () => null),
       linksEdges: vi.fn(async () => ({
         versionId: "main",
@@ -342,6 +379,7 @@ function fixture(
       })),
       retryStoppedRun: vi.fn(async () => false),
       endRunQuietly: vi.fn(() => "not-running" as const),
+      selfTestReply: vi.fn(() => null),
     },
     rememberPendingCliRunMessageLink: vi.fn(),
   };
@@ -1154,8 +1192,7 @@ describe("desktop CLI workspace context", () => {
 
   it("reads a lossy note as its file, and refuses to edit it before any session opens", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-cli-lossy-"));
-    const lossy =
-      "# Readme\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n\nSee [the docs][docs].\n\n[docs]: https://example.com/docs\n";
+    const lossy = "# Readme\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n";
     try {
       await writeFile(join(root, "readme.md"), lossy);
       await writeFile(join(root, "plan.md"), "# Plan\n\nText.\n");
@@ -1183,12 +1220,12 @@ describe("desktop CLI workspace context", () => {
       };
       await context.documents!.edit({
         path: "readme.md",
-        edit: { find: "Hidden.", replacement: "Shown." },
+        edit: { find: "Run this:", replacement: "Run these:" },
         origin,
       });
       const [input] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[0]!;
       await expect(input.assertEditable("readme.md")).rejects.toThrow(
-        "dohc can't change readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+        "dohc can't change readme.md without also changing parts it can't show. Edit the file directly instead.",
       );
       await expect(input.assertEditable("plan.md")).resolves.toBeUndefined();
       await mkdir(join(root, "folder.md"));
@@ -1215,7 +1252,7 @@ describe("desktop CLI workspace context", () => {
 
   it("uses the authoritative head for an edited witness and forwards explicit consent with an absent head", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-cli-consent-"));
-    const source = "# Readme\n\n<details>Hidden.</details>\n\nEditable.\n";
+    const source = "# Readme\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n\nEditable.\n";
     const sha = (text: string) => createHash("sha256").update(text).digest("hex");
     const doc = markdownToYDoc(source);
     doc.getMap("meta").set("dohcMarkdownSource", source);
@@ -1267,7 +1304,7 @@ describe("desktop CLI workspace context", () => {
       expect(yDocToMarkdown(doc)).toContain("Changed.");
       expect(await readFile(join(root, "readme.md"), "utf8")).toBe(source);
 
-      await writeFile(join(root, "readme.md"), source.replace("Hidden.", "Another source."));
+      await writeFile(join(root, "readme.md"), source.replace("Run this:", "Another source:"));
       await expect(consented.assertEditable("readme.md")).rejects.toThrow("parts it can't show");
     } finally {
       doc.destroy();
@@ -2306,11 +2343,16 @@ function liveChangeRecord() {
 }
 
 async function liveDocumentsFixture(
-  options: { caller?: string; record?: ReturnType<typeof liveChangeRecord>["record"] } = {},
+  options: {
+    caller?: string;
+    record?: ReturnType<typeof liveChangeRecord>["record"];
+    paused?: "refused" | "failing";
+  } = {},
 ) {
   const f = await keptEditsFixture(options);
   const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan", {
     ownerLiveQuarantines: () => f.kept.workspace ?? [],
+    ...(options.paused ? { resumeOwnerLivePause: async () => options.paused! } : {}),
     ...(options.record
       ? {
           liveChanges: options.record,
@@ -2569,6 +2611,16 @@ describe.each(["mcp"] as const)("who stopped or resumed live editing, through %s
     expect(changes.last.get("object-plan")).toMatchObject({ action: "resumed", author: agent });
     expect(changes.pending.size).toBe(0);
   });
+  it("credits a Resume that ended the server's pause, though the server never stopped hosting the note", async () => {
+    const changes = liveChangeRecord(),
+      f = await liveDocumentsFixture({ record: changes.record, paused: "refused" });
+    f.answer.changed = false;
+    expect(await f.doors[door].resume("notes/plan.md")).toEqual({
+      ok: true,
+      path: "notes/plan.md",
+    });
+    expect(changes.last.get("object-plan")).toMatchObject({ action: "resumed", author: agent });
+  });
   it("never settles a change this dohc is still making, and never credits one an interrupted action left", async () => {
     const changes = liveChangeRecord(),
       f = await liveDocumentsFixture({ record: changes.record });
@@ -2748,4 +2800,178 @@ it("lists and keeps a live note's outside change for the CLI and the MCP, only i
   const refused = await cli("document", "keep-outside-change", "notes.md");
   expect(refused.exitCode).not.toBe(0);
   expect(f.capture.keepOutsideChange).toHaveBeenCalledTimes(3);
+});
+
+it("runs workspace search for CLI and MCP in the original workspace and refuses received shares and mounts", async () => {
+  const f = fixture(await createTestScratch("workspace-search-cli-"));
+  const answer = {
+    versionId: "main",
+    results: [
+      {
+        id: "page:obj-1",
+        kind: "page" as const,
+        title: "Tokyo Trip",
+        path: "Projects/tokyo.md",
+        objectId: "obj-1",
+        snippet: "Booked Shinjuku hotel.",
+        matchedTerms: ["tokyo", "hotel"],
+        related: [
+          {
+            kind: "record" as const,
+            edge: "wikilink" as const,
+            direction: "out" as const,
+            title: "Shinjuku Hotel",
+            path: "Trips/shinjuku.md",
+            objectId: "obj-2",
+            collectionPath: "Trips",
+            recordId: "rec-1",
+          },
+        ],
+      },
+    ],
+    neighbors: [
+      {
+        id: "chat:th-1",
+        kind: "chat" as const,
+        title: "Hotel Budget",
+        threadId: "th-1",
+        via: [
+          {
+            fromId: "page:obj-1",
+            fromTitle: "Tokyo Trip",
+            edge: "chat-linked-file" as const,
+            direction: "in" as const,
+          },
+        ],
+      },
+    ],
+    complete: true,
+    indexBuilding: false,
+    policyDegraded: false,
+    mountsCovered: true,
+    sharedChannelRowsUncovered: 0,
+    truncated: false,
+  };
+  const searchRead = vi.fn(async () => answer);
+  f.dependencies.reads.workspaceSearch = searchRead;
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(
+      JSON.parse(
+        await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options()),
+      ),
+    );
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const cli = (cwd: string, ...argv: string[]) => executeCli({ argv, cwd, env: {}, request: send });
+  const tools = await import("@dohc/mcp/tools");
+
+  const jsonRun = await cli(
+    f.workspace.rootPath,
+    "workspace",
+    "search",
+    "tokyo hotel",
+    "--surface",
+    "page",
+    "--surface",
+    "record",
+    "--path-prefix",
+    "Projects",
+    "--limit",
+    "5",
+    "--no-neighbors",
+    "--json",
+  );
+  expect(jsonRun.exitCode).toBe(0);
+  expect(JSON.parse(jsonRun.stdout)).toMatchObject(answer);
+  expect(searchRead).toHaveBeenLastCalledWith(
+    expect.objectContaining({ workspaceId: f.workspace.workspaceId }),
+    {
+      query: "tokyo hotel",
+      surfaces: ["page", "record"],
+      pathPrefix: "Projects",
+      limit: 5,
+      includeNeighbors: false,
+    },
+  );
+
+  const textRun = await cli(f.workspace.rootPath, "workspace", "search", "tokyo hotel");
+  expect(textRun.exitCode).toBe(0);
+  expect(textRun.stdout).toContain("[page] Tokyo Trip — Projects/tokyo.md");
+  expect(textRun.stdout).toContain("related: → [record] Shinjuku Hotel (wikilink)");
+  expect(textRun.stdout).toContain("Connected:");
+  expect(textRun.stdout).toContain("[chat] Hotel Budget — th-1");
+
+  const mcpResult = await tools.requestDeclaredTool(
+    { root: f.workspace.rootPath, home: "state", request: send },
+    "dohc_search_workspace",
+    { query: "tokyo hotel", collectionPath: "Trips" },
+  );
+  expect(mcpResult).toEqual(answer);
+
+  // Mounted received folder under shared-with-me/ is refused before reaching the reader.
+  const mountDir = join(f.workspace.rootPath, "shared-with-me", "team-share");
+  await mkdir(mountDir, { recursive: true });
+  searchRead.mockClear();
+  const mountRefused = await cli(mountDir, "workspace", "search", "tokyo");
+  expect(mountRefused.exitCode).not.toBe(0);
+  expect(searchRead).not.toHaveBeenCalled();
+
+  // Standalone received share is refused before reaching the reader.
+  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+  const shareRefused = await cli(f.workspace.rootPath, "workspace", "search", "tokyo");
+  expect(shareRefused.exitCode).not.toBe(0);
+  expect(searchRead).not.toHaveBeenCalled();
+});
+
+it("passes open-window state and planToken through CLI agent-run undo", async () => {
+  const f = fixture(await createTestScratch("agent-run-undo-cli-"));
+  let windowOpen = true;
+  f.dependencies.hasOpenWorkspaceWindow = vi.fn(() => windowOpen);
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(
+      JSON.parse(
+        await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options()),
+      ),
+    );
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const cli = (cwd: string, ...argv: string[]) => executeCli({ argv, cwd, env: {}, request: send });
+
+  const openRun = await cli(
+    f.workspace.rootPath,
+    "history",
+    "undo-agent-run",
+    "run-1",
+    "plan-token-1",
+  );
+  expect(openRun.exitCode).toBe(0);
+  const firstCall = vi.mocked(f.capture.undoAgentRun).mock.lastCall;
+  expect(firstCall?.[0]).toBe("run-1");
+  expect(firstCall?.[1]).toEqual({
+    kind: "agent",
+    agentId: "dohc-mcp",
+    onBehalfOf: "person-local",
+  });
+  expect(firstCall?.[2]).toMatchObject({ expectedPlanToken: "plan-token-1" });
+  expect(firstCall?.[2]?.hasOtherWindow?.()).toBe(true);
+
+  windowOpen = false;
+  expect(firstCall?.[2]?.hasOtherWindow?.()).toBe(false);
+  const closedRun = await cli(
+    f.workspace.rootPath,
+    "history",
+    "undo-agent-run",
+    "run-1",
+    "plan-token-2",
+  );
+  expect(closedRun.exitCode).toBe(0);
+  const secondCall = vi.mocked(f.capture.undoAgentRun).mock.lastCall;
+  expect(secondCall?.[2]).toMatchObject({ expectedPlanToken: "plan-token-2" });
+  expect(secondCall?.[2]?.hasOtherWindow?.()).toBe(false);
 });

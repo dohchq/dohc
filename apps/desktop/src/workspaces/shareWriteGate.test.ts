@@ -54,7 +54,7 @@ describe("shareViewTakesLocalWrites", () => {
 describe("workspaceWriteRefusal", () => {
   it("gives the action that can represent a folder in a shared view", () => {
     expect(SHARE_VIEW_EMPTY_FOLDER_REFUSAL).toBe(
-      "A shared view can't hold an empty folder. Make a file in the folder you want.",
+      "A shared view cannot hold an empty folder. Make a file in the folder you want.",
     );
   });
 
@@ -67,7 +67,7 @@ describe("workspaceWriteRefusal", () => {
       expect(
         workspaceWriteRefusal(marker(access)),
         `${access}: a level-aware ordinary-write gate opens every raw-disk writer on a share view`,
-      ).toBe("This is a shared view — ask granter@dohc.test for changes.");
+      ).toBe("This is a shared view. Ask granter@dohc.test for changes.");
     }
   });
 
@@ -75,12 +75,12 @@ describe("workspaceWriteRefusal", () => {
     expect(
       workspaceWriteRefusal(null),
       "`?? null` reads a damaged marker as an ordinary workspace",
-    ).toBe("This is a shared view — ask the person who shared it for changes.");
+    ).toBe("This is a shared view. Ask the person who shared it for changes.");
   });
 
   it("names the granter when it can, and does not invent one when it cannot", () => {
     expect(workspaceWriteRefusal({ ...marker("edit"), granterEmail: null })).toBe(
-      "This is a shared view — ask the person who shared it for changes.",
+      "This is a shared view. Ask the person who shared it for changes.",
     );
   });
 });

@@ -30,13 +30,12 @@ export function operatorSocketPath(env: NodeJS.ProcessEnv = process.env): string
       env.SYNC_RELAY_DB_PATH ??
       join(tmpdir(), "dohc-sync-relay.sqlite"),
   );
-  const key = createHash("sha256").update(identity).digest("hex").slice(0, 24);
-  if (typeof process.getuid !== "function") return `\\\\.\\pipe\\dohc-relay-operator-${key}`;
-  return join(
-    process.platform === "linux" ? "/tmp" : tmpdir(),
-    `dohc-relay-operator-${key}`,
-    "control.sock",
-  );
+  const key = createHash("sha256").update(identity).digest("hex");
+  if (typeof process.getuid !== "function")
+    return `\\\\.\\pipe\\dohc-relay-operator-${key.slice(0, 24)}`;
+  if (process.platform === "linux")
+    return join("/tmp", `dohc-relay-operator-${key.slice(0, 24)}`, "control.sock");
+  return join(tmpdir(), `dohc-relay-${key.slice(0, 16)}`, "control.sock");
 }
 
 export function parseDisableRequest(value: unknown): DisablePublicationRequest {

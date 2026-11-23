@@ -104,11 +104,7 @@ describe("the delete confirmation states where the file goes", () => {
     ).not.toContain("system trash");
     expect(text).not.toContain(".dohc/local/trash");
     expect(text).not.toContain("where you can restore");
-    expect(text).toContain("It goes from your copy now.");
-    expect(
-      text,
-      "the recipient's local copy goes with no trash behind it, and nothing says so before they confirm",
-    ).toContain("There is no trash to restore it from.");
+    expect(text).toContain("This removes it from your copy without using trash.");
     expect(
       text,
       "a delete that describes the granter instead of naming them leaves the reader guessing who to ask",
@@ -123,14 +119,13 @@ describe("the delete confirmation states where the file goes", () => {
     expect(
       text,
       "a singular sentence over a multi-file selection is wrong on the surface that decides a delete",
-    ).toContain("They go from your copy now.");
-    expect(text).toContain("There is no trash to restore them from.");
-    expect(text).toContain("still has them until");
+    ).toContain("This removes them from your copy without using trash.");
+    expect(text).toContain(`The original stays with ${GRANTER} until`);
   });
 
   it("falls back to a description when the grant names no granter", () => {
     render(<Explorer {...explorerProps({ shareView: { granterEmail: null } })} />);
     const text = confirmText("one");
-    expect(text).toContain("The person who shared it still has it");
+    expect(text).toContain("The original stays with the person who shared it");
   });
 });

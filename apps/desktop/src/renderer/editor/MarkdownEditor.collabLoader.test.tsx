@@ -59,7 +59,7 @@ describe("MarkdownEditor collaboration loader", () => {
       expect(screen.queryByTestId("markdown-editor")).toBeNull();
       expect(error.mock.calls.some((call) => call[1] instanceof Error)).toBe(true);
 
-      fireEvent.click(screen.getByRole("button", { name: "Render again" }));
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
 
       expect(await screen.findByTestId("editor-crash-recovery")).toBeTruthy();
       expect(screen.queryByTestId("markdown-editor")).toBeNull();

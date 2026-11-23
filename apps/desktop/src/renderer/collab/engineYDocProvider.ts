@@ -88,6 +88,7 @@ export interface EngineYDocTransport {
     // A session for this document may still be the engine's —
     // This available:false must not fall back to the plain editor.
     engineMayHoldDocument?: boolean;
+    engineRefusedOpen?: { detail: string };
     // The canonical drawing has image records that conflict with storage.
     // This terminal state stays read-only and must not offer a retry.
     artifactAssetsInvalid?: boolean;
@@ -108,13 +109,14 @@ export interface EngineYDocTransport {
   // Resolution acknowledges that main accepted the batch. A refusal main
   // returns as data must surface as EngineYDocDeliveryRefusedError — the one
   // permanent delivery failure — while a transport fault rejects with its own
-  // error and is retried at the head of the queue.
+  // error and is retried at the head of the queue. It may resolve with how
+  // long to gather later edits before the next batch.
   applyLocalUpdate(
     update: Uint8Array,
     sequence: number,
     lineageGeneration: number,
     requestId: string,
-  ): void | Promise<void>;
+  ): void | Promise<number | undefined | void>;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
   // through the engine), with the head their state was read with when main
   // has one. Returns an unsubscribe function.
@@ -154,9 +156,7 @@ export class EngineYDocUpdateTooLargeError extends Error {
     readonly limitBytes: number = ENGINE_YDOC_UPDATE_MAX_BYTES,
   ) {
     super(
-      "dohc could not save this edit. ENGINE_YDOC_UPDATE_MAX_BYTES is " +
-        `${limitBytes} bytes; the update is ${observedBytes} bytes. ` +
-        "Copy the set-aside edit below.",
+      `dohc could not save this edit. The update is ${observedBytes} bytes, over the ${limitBytes}-byte limit. Copy the set-aside edit below.`,
     );
     this.name = "EngineYDocUpdateTooLargeError";
   }
@@ -164,7 +164,7 @@ export class EngineYDocUpdateTooLargeError extends Error {
 
 export class EngineYDocDeliveryRefusedError extends Error {
   constructor(readonly reason: string) {
-    super(`The engine refused the Y.Doc operation: ${reason}.`);
+    super(`dohc could not apply this edit: ${reason}.`);
     this.name = "EngineYDocDeliveryRefusedError";
   }
 }
@@ -175,7 +175,7 @@ export class EngineYDocPendingLimitError extends Error {
     readonly observedRecords: number,
   ) {
     super(
-      "dohc could not save this edit while earlier edits await delivery. " +
+      "dohc could not save this edit while earlier edits are still saving. " +
         "Copy the set-aside edit below.",
     );
     this.name = "EngineYDocPendingLimitError";
@@ -210,7 +210,7 @@ interface EngineYDocBindOptions {
   // Runs right before main is told to accept the winner. Throwing keeps the
   // retired mirror, as a failed onDocumentReplacing does: the retired mirror
   // can take an edit while onDocumentReplacing settles.
-  beforeReplacementAcknowledged?: () => void;
+  beforeReplacementAcknowledged?: () => void | Promise<void>;
   // The retired mirror stays frozen and the winner waits. `retry` runs the
   // same replacement again; it does nothing once that replacement, or a newer
   // one, has installed.
@@ -270,6 +270,7 @@ export interface EngineYDocBinding {
   // caller keeps the document read-only with the reason stated and a retry
   // offered — the same no-downgrade rule as notInVersion.
   readonly engineMayHoldDocument: boolean;
+  readonly engineRefusedOpen: { detail: string } | null;
   readonly artifactAssetsInvalid: boolean;
   // A delete or move owns the path for an interval. The caller keeps the
   // document read-only and offers a fresh open after the interval ends.
@@ -338,6 +339,7 @@ export async function bindEngineYDoc(
       liveHostUnavailable: opened.liveHostUnavailable === true,
       sharedWaiting: opened.sharedWaiting ?? null,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,
+      engineRefusedOpen: opened.engineRefusedOpen ?? null,
       artifactAssetsInvalid: opened.artifactAssetsInvalid === true,
       removalInProgress: opened.removalInProgress ?? null,
       artifactAssets: [],
@@ -392,6 +394,7 @@ export async function bindEngineYDoc(
     sequence: number;
   }> = [];
   let sendChain = Promise.resolve();
+  let batchDelayMs = 0;
   let unacknowledgedBatches = 0;
   let retainedBytes = 0;
   let retainedRecords = 0;
@@ -489,12 +492,13 @@ export async function bindEngineYDoc(
       if (localUpdatesRefused) return;
       if (replacementInProgress || batchGeneration !== lineageGeneration) return;
       try {
-        await transport.applyLocalUpdate(
+        const delay = await transport.applyLocalUpdate(
           new Uint8Array(batch.update),
           batch.sequence,
           batchGeneration,
           batch.requestId,
         );
+        batchDelayMs = typeof delay === "number" ? delay : 0;
         return;
       } catch (error) {
         if (isPermanentDeliveryError(error)) {
@@ -584,7 +588,10 @@ export async function bindEngineYDoc(
         scheduledFlush = null;
         void flushPendingLocalUpdates();
       },
-      doc.share.has(EXCALIDRAW_SCENE_ROOTS.revisions) ? SCENE_UPDATE_FLUSH_DELAY_MS : 0,
+      Math.max(
+        batchDelayMs,
+        doc.share.has(EXCALIDRAW_SCENE_ROOTS.revisions) ? SCENE_UPDATE_FLUSH_DELAY_MS : 0,
+      ),
     );
   };
 
@@ -696,7 +703,8 @@ export async function bindEngineYDoc(
         if (options.onDocumentReplacing) {
           await options.onDocumentReplacing(retired, input.recoveredPaths);
         }
-        options.beforeReplacementAcknowledged?.();
+        const checked = options.beforeReplacementAcknowledged?.();
+        if (checked) await checked;
         bufferedUpdates = await transport.acknowledgeLineageReplacement(input.lineageGeneration);
       } catch (error) {
         replacement.destroy();
@@ -774,6 +782,7 @@ export async function bindEngineYDoc(
     liveHostUnavailable: false,
     sharedWaiting: null,
     engineMayHoldDocument: false,
+    engineRefusedOpen: null,
     artifactAssetsInvalid: false,
     removalInProgress: null,
     get artifactAssets() {

@@ -16,14 +16,45 @@ import { basename, dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
+import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import type { SavedCollections } from "./collectionsHome";
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./ownerDatasetCopyRegistry";
 const mocks = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("./ownerDatasetCopy", () => ({ createOwnerDatasetCopy: mocks.open }));
-const files = vi.hoisted(() => ({ removed: [] as string[], busy: new Set<string>() }));
+const files = vi.hoisted(() => ({
+  removed: [] as string[],
+  busy: new Set<string>(),
+  unreadable: new Set<string>(),
+  // Holds the next read of a file whose name ends so, until the test lets it go.
+  hold: null as { name: string; reached(): void; until: Promise<void> } | null,
+  // Holds the next folder made inside this one, until the test lets it go.
+  holdFolderIn: null as { parent: string; reached(): void; until: Promise<void> } | null,
+}));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
+    readFile: (async (...args: Parameters<typeof actual.readFile>) => {
+      if (files.unreadable.has(String(args[0])))
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      const text = await actual.readFile(...args);
+      const hold = files.hold;
+      if (hold && String(args[0]).endsWith(hold.name)) {
+        files.hold = null;
+        hold.reached();
+        await hold.until;
+      }
+      return text;
+    }) as typeof actual.readFile,
+    mkdir: (async (...args: Parameters<typeof actual.mkdir>) => {
+      const hold = files.holdFolderIn;
+      if (hold && basename(dirname(String(args[0]))) === hold.parent) {
+        files.holdFolderIn = null;
+        hold.reached();
+        await hold.until;
+      }
+      return actual.mkdir(...args);
+    }) as typeof actual.mkdir,
     rm: async (...args: Parameters<typeof actual.rm>) => {
       if (files.busy.has(String(args[0]))) {
         throw Object.assign(
@@ -39,6 +70,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   files.busy.clear();
+  files.unreadable.clear();
   for (const close of cleanups.splice(0).reverse()) await close();
   vi.clearAllMocks();
 });
@@ -69,7 +101,7 @@ async function fixture({ opened = true, workspaces = (rootPath: string) => [root
     await rm(rootPath, { recursive: true, force: true });
     await rm(state, { recursive: true, force: true });
   });
-  await registry.credentialsChanged(ownerKey);
+  await registry.credentialsChanged(ownerKey, "https://relay");
   mocks.open.mockImplementation(async (options) => {
     await writeFile(join(options.directory, "owned.sqlite"), "copy");
     return {
@@ -89,16 +121,101 @@ async function fixture({ opened = true, workspaces = (rootPath: string) => [root
   };
   return { registry, input, lifetime, record, onLeftover };
 }
-it("invalidates access before logout cleanup and removes copies from closed workspaces", async () => {
+const other = datasetCopyOwnerKey({ serverUrl: "https://account", userId: "other" });
+it("keeps an account's copies through a sign-out, and opens them signed out for that account alone", async () => {
+  const f = await fixture();
+  await f.registry.get(f.input);
+  const { directory, signedOut } = mocks.open.mock.calls[0]![0];
+  expect(signedOut).toBe(false);
+  // A sign-out by Disconnect and one after a 401 both clear the session, which says this.
+  await f.registry.credentialsChanged(null);
+  expect(await readdir(directory)).toEqual(["owned.sqlite"]);
+  expect(await f.registry.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
+  await f.registry.get({ ...f.input, lifetime: new AbortController().signal });
+  expect(mocks.open.mock.calls[1]![0]).toMatchObject({ directory, signedOut: true });
+  // Another account never reads them.
+  expect(await f.registry.signedOutOrigin(other)).toBeNull();
+  await expect(
+    f.registry.get({ ...f.input, ownerKey: other, lifetime: new AbortController().signal }),
+  ).rejects.toThrow(/owner changed/);
+  // A Collection this computer never kept stays closed, and nothing is made for it.
+  await expect(
+    f.registry.get({
+      ...f.input,
+      datasetId: "00000000-0000-4000-8000-000000000002",
+      lifetime: new AbortController().signal,
+    }),
+  ).rejects.toThrow("Sign in to your server first.");
+  expect(await readdir(dirname(directory))).toEqual([basename(directory)]);
+  expect(mocks.open).toHaveBeenCalledTimes(2);
+});
+it("opens no copy signed out while a session starts, and opens it again if that sign-in fails", async () => {
+  const f = await fixture();
+  await f.registry.get(f.input);
+  await f.registry.credentialsChanged(null);
+  const kept = await f.registry.get({ ...f.input, lifetime: new AbortController().signal });
+  const authorize = mocks.open.mock.calls[1]![0].assertOwner as () => void;
+  // Another account starts signing in. Main has cleared the session but not
+  // yet said whose the next one is.
+  const signIn = f.registry.sessionChange();
+  await expect(f.registry.signedOutOrigin(f.input.ownerKey)).rejects.toThrow(
+    "Your server session is changing. Try again.",
+  );
+  await expect(
+    f.registry.get({ ...f.input, lifetime: new AbortController().signal }),
+  ).rejects.toThrow(/owner changed/);
+  // The copy already open refuses each read too.
+  expect(authorize).toThrow(/owner changed/);
+  // The sign-in fails, so no account change follows: the copy reads again.
+  signIn();
+  expect(await f.registry.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
+  expect(authorize).not.toThrow();
+  expect(await f.registry.get({ ...f.input, lifetime: new AbortController().signal })).toBeTruthy();
+  expect(kept).toBeTruthy();
+});
+it("opens no copy signed out until a sign-in ends, whatever other session event ends first", async () => {
+  const f = await fixture();
+  await f.registry.get(f.input);
+  await f.registry.credentialsChanged(null);
+  // Another account starts signing in, and an expired session's change starts and ends during it.
+  const signIn = f.registry.sessionChange(),
+    expired = f.registry.sessionChange();
+  expired();
+  expired();
+  await expect(f.registry.signedOutOrigin(f.input.ownerKey)).rejects.toThrow(
+    "Your server session is changing. Try again.",
+  );
+  signIn();
+  expect(await f.registry.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
+});
+it("after a restart while signed out, opens the copies of the account signed in last", async () => {
+  const f = await fixture();
+  await f.registry.get(f.input);
+  const { directory } = mocks.open.mock.calls[0]![0];
+  await f.registry.credentialsChanged(null);
+  const next = restart(f.record, [f.input.rootPath]);
+  expect(await next.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
+  expect(await next.signedOutOrigin(other)).toBeNull();
+  await next.get({ ...f.input, lifetime: new AbortController().signal });
+  expect(mocks.open.mock.calls[1]![0]).toMatchObject({ directory, signedOut: true });
+});
+it("removes the copies when a different account signs in, so no one reads them signed out again", async () => {
   const f = await fixture();
   const copy = await f.registry.get(f.input);
   const options = mocks.open.mock.calls[0]![0];
   f.lifetime.abort();
   await copy.close();
-  const removal = f.registry.credentialsChanged(null);
+  await f.registry.credentialsChanged(null);
+  const removal = f.registry.credentialsChanged(other, "https://relay");
   expect(() => options.assertOwner()).toThrow();
   await removal;
   expect(await readdir(join(f.input.rootPath, ".dohc", "local", "dataset-copies"))).toEqual([]);
+  await expect(
+    f.registry.get({ ...f.input, lifetime: new AbortController().signal }),
+  ).rejects.toThrow(/owner changed/);
+  await f.registry.credentialsChanged(null);
+  expect(await f.registry.signedOutOrigin(f.input.ownerKey)).toBeNull();
+  expect(await f.registry.signedOutOrigin(other)).toBe("https://relay");
   await expect(
     f.registry.get({ ...f.input, lifetime: new AbortController().signal }),
   ).rejects.toThrow(/owner changed/);
@@ -115,7 +232,7 @@ it("waits for an opening copy to close before the previous account can reopen it
   const first = f.registry.get(f.input),
     refused = expect(first).rejects.toThrow(/owner changed|closed/);
   await entered.promise;
-  const switching = f.registry.credentialsChanged("other");
+  const switching = f.registry.credentialsChanged(other);
   const back = f.registry.credentialsChanged(f.input.ownerKey);
   const reopened = f.registry.get(f.input);
   expect(mocks.open).toHaveBeenCalledOnce();
@@ -146,7 +263,7 @@ it("keeps each copy in .dohc/local/dataset-copies, private, and ignores the old 
   await mkdir(store);
   await writeFile(join(store, "state.sqlite"), "the Collections");
   const removedBefore = files.removed.length;
-  await f.registry.credentialsChanged(null);
+  await f.registry.credentialsChanged(other);
   expect(await readdir(dirname(directory))).toEqual([]);
   expect(await readdir(join(f.input.rootPath, ".dohc"))).toEqual(["local"]);
   expect(await readFile(join(store, "state.sqlite"), "utf8")).toBe("the Collections");
@@ -180,21 +297,22 @@ it.skipIf(process.platform === "win32").each(["writable by others", "hard-linked
   },
 );
 
-async function failedSignOut() {
+async function failedAccountChange() {
   const f = await fixture();
   await f.registry.get(f.input);
   const { directory } = mocks.open.mock.calls[0]![0] as { directory: string };
   files.busy.add(directory);
-  await expect(f.registry.credentialsChanged(null)).rejects.toThrow("EBUSY");
+  await expect(f.registry.credentialsChanged(other)).rejects.toThrow("EBUSY");
   return { ...f, directory, root: await realpath(f.input.rootPath) };
 }
 const nothing = { workspaces: [], recordUnreadable: false, sweepPending: false },
   tag = expect.stringMatching(/^[0-9a-f]{16}$/);
 it("records a folder it could not remove, and the next start removes it before another account's copy opens", async () => {
-  const f = await failedSignOut();
+  const f = await failedAccountChange();
   expect(JSON.parse(await readFile(f.record, "utf8"))).toEqual({
     folders: [f.directory],
     departed: [tag],
+    account: tag,
   });
   files.busy.clear();
   const next = restart(f.record),
@@ -224,7 +342,7 @@ it("records a folder it could not remove, and the next start removes it before a
 it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   "says when it cannot read its record, writes nothing over it, and reads it again on Try again",
   async () => {
-    const f = await failedSignOut();
+    const f = await failedAccountChange();
     files.busy.clear();
     const text = await readFile(f.record, "utf8"),
       elsewhere = await mkdtemp(join(tmpdir(), "dohc-copy-registry-elsewhere-"));
@@ -236,7 +354,7 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     await expect(next.credentialsChanged(null)).rejects.toThrow("EACCES");
     expect(next.leftover()).toEqual({ ...nothing, recordUnreadable: true });
     expect(onLeftover).toHaveBeenCalledOnce();
-    await next.credentialsChanged(f.input.ownerKey).catch(() => undefined);
+    await next.credentialsChanged(other).catch(() => undefined);
     await expect(next.credentialsChanged(null)).rejects.toThrow("EACCES");
     await chmod(f.record, 0o600);
     expect(await readFile(f.record, "utf8")).toBe(text);
@@ -244,10 +362,134 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     expect(await readdir(dirname(f.directory))).toEqual([]);
     expect(next.leftover()).toEqual(nothing);
     expect(onLeftover).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(await readFile(f.record, "utf8"))).toEqual({ folders: [], departed: [tag] });
+    expect(JSON.parse(await readFile(f.record, "utf8"))).toEqual({
+      folders: [],
+      departed: [tag],
+      account: tag,
+    });
   },
 );
-it("records what a sign-out will remove before any copy closes, so a stop part way leaves it for the next start", async () => {
+it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "keeps the copies of an account that signed in and out while its record could not be read",
+  async () => {
+    const f = await failedAccountChange();
+    files.busy.clear();
+    await chmod(f.record, 0o000);
+    cleanups.push(() => chmod(f.record, 0o600).catch(() => undefined));
+    const next = restart(f.record, [f.input.rootPath]);
+    // The record names the other account, and says the first one left.
+    await next.credentialsChanged(f.input.ownerKey, "https://relay").catch(() => undefined);
+    await next.credentialsChanged(null).catch(() => undefined);
+    await chmod(f.record, 0o600);
+    await next.removeLeftover();
+    expect(await readdir(f.directory)).toEqual(["owned.sqlite"]);
+    expect(await next.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
+  },
+);
+it("removes every other account's copies when one signs in while the record cannot be read", async () => {
+  const f = await fixture();
+  await f.registry.get(f.input);
+  const { directory } = mocks.open.mock.calls[0]![0];
+  await f.registry.credentialsChanged(null);
+  await f.registry.closeAll();
+  files.unreadable.add(f.record);
+  const next = restart(f.record, [f.input.rootPath]);
+  await next.credentialsChanged(other, "https://relay").catch(() => undefined);
+  expect(await readdir(dirname(directory))).toEqual([]);
+  // The record still names the first account, whose copies are gone.
+  await next.credentialsChanged(null).catch(() => undefined);
+  files.unreadable.clear();
+  const after = restart(f.record, [f.input.rootPath]);
+  // As the app does: whose copies open signed out, then the copy.
+  expect(await after.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
+  await expect(after.get({ ...f.input, lifetime: new AbortController().signal })).rejects.toThrow(
+    "Sign in to your server first.",
+  );
+});
+it("gives a signed-out list read nothing once another account has signed in during it", async () => {
+  const f = await fixture();
+  const input = { ...f.input, origin: "https://relay" };
+  await f.registry.savedList(input).update(() => ({ datasets: [], through: null }));
+  await f.registry.credentialsChanged(null);
+  const reached = deferred<void>(),
+    release = deferred<void>();
+  files.hold = { name: "list.json", reached: reached.resolve, until: release.promise };
+  const reading = f.registry.savedList(input).read();
+  await reached.promise;
+  await f.registry.credentialsChanged(other, "https://relay");
+  release.resolve();
+  await expect(reading).rejects.toThrow(/owner changed/);
+});
+it("leaves no list a save was writing when a different account signed in", async () => {
+  const f = await fixture();
+  const reached = deferred<void>(),
+    release = deferred<void>();
+  files.holdFolderIn = {
+    parent: "dataset-copies",
+    reached: reached.resolve,
+    until: release.promise,
+  };
+  const saving = f.registry.savedList(f.input).update(() => ({ datasets: [], through: null }));
+  // The save has checked its account and is about to make its folder.
+  await reached.promise;
+  await f.registry.credentialsChanged(other, "https://relay");
+  release.resolve();
+  await expect(saving).rejects.toThrow(/owner changed/);
+  expect(await readdir(join(f.input.rootPath, ".dohc", "local", "dataset-copies"))).toEqual([]);
+});
+it.each([
+  [
+    "a sign-in starts",
+    (registry: ReturnType<typeof createOwnerDatasetCopyRegistry>) => {
+      registry.sessionChange();
+    },
+  ],
+  [
+    "dohc stops",
+    (registry: ReturnType<typeof createOwnerDatasetCopyRegistry>) => registry.closeAll(),
+  ],
+])("keeps the signed-out account's saved list when %s during a save", async (_, interrupt) => {
+  const f = await fixture();
+  const input = { ...f.input, origin: "https://relay" };
+  await f.registry.savedList(input).update(() => ({ datasets: [], through: null }));
+  await f.registry.credentialsChanged(null);
+  const reached = deferred<void>(),
+    release = deferred<void>();
+  files.holdFolderIn = {
+    parent: "dataset-copies",
+    reached: reached.resolve,
+    until: release.promise,
+  };
+  const saving = f.registry.savedList(input).update(() => ({ datasets: [], through: null }));
+  await reached.promise;
+  await interrupt(f.registry);
+  release.resolve();
+  await saving.catch(() => undefined);
+  // Neither replaced the account, whose list still reads offline and after a restart.
+  expect(await readdir(join(f.input.rootPath, ".dohc", "local", "dataset-copies"))).toHaveLength(1);
+});
+it("keeps both of two changes made to a saved list at once", async () => {
+  const f = await fixture();
+  const input = { ...f.input, origin: "https://relay" };
+  await f.registry.savedList(input).update(() => ({ datasets: [], through: null }));
+  // Each change reads the list, adds to it, and writes it, as two pages read at once do.
+  const add = (datasetId: string) =>
+    f.registry.savedList(input).update((value) => {
+      const saved = value as SavedCollections;
+      return { ...saved, datasets: [...saved.datasets, { datasetId } as DatasetDescription] };
+    });
+  const reached = deferred<void>(),
+    release = deferred<void>();
+  files.hold = { name: "list.json", reached: reached.resolve, until: release.promise };
+  const first = add("first");
+  await reached.promise;
+  const second = add("second");
+  release.resolve();
+  await Promise.all([first, second]);
+  const saved = (await f.registry.savedList(input).read()) as SavedCollections;
+  expect(saved.datasets.map((dataset) => dataset.datasetId).sort()).toEqual(["first", "second"]);
+});
+it("records what an account change will remove before any copy closes, so a stop part way leaves it for the next start", async () => {
   const f = await fixture(),
     copy = await f.registry.get(f.input),
     { directory } = mocks.open.mock.calls[0]![0] as { directory: string };
@@ -257,7 +499,7 @@ it("records what a sign-out will remove before any copy closes, so a stop part w
     closeCalled.resolve();
     return closing.promise;
   });
-  const removal = f.registry.credentialsChanged(null);
+  const removal = f.registry.credentialsChanged(other);
   try {
     await closeCalled.promise;
     await restart(f.record).credentialsChanged(null);
@@ -270,7 +512,7 @@ it("records what a sign-out will remove before any copy closes, so a stop part w
 it.skipIf(process.platform === "win32")(
   "follows no link swapped in for a recorded folder, and removes nothing a record names outside a workspace's copies",
   async () => {
-    const f = await failedSignOut();
+    const f = await failedAccountChange();
     files.busy.clear();
     const outside = await mkdtemp(join(tmpdir(), "dohc-copy-registry-outside-")),
       stray = await mkdtemp(join(tmpdir(), "dohc-copy-registry-stray-"));
@@ -315,7 +557,6 @@ it("removes only the copies of accounts that left in a look still owed, never th
     await mkdir(copy, { recursive: true });
     await writeFile(join(copy, "replica.sqlite"), "A's data");
   }
-  await expect(f.registry.credentialsChanged(null)).rejects.toThrow("workspace list");
   const b = datasetCopyOwnerKey({ serverUrl: "https://account", userId: "b" });
   await expect(f.registry.credentialsChanged(b)).rejects.toThrow("workspace list");
   await openedLocalState({ workspaceId: "e", rootPath: earlier });

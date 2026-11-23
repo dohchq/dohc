@@ -515,7 +515,7 @@ async fn markdown_hold_commonmark_sources_keep_their_edited_paragraph_after_reop
     .unwrap();
     let config: dohc_engine_reader::Config =
         serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
-    for number in [148, 161, 192, 193, 572, 575, 577] {
+    for number in [213, 270, 556, 572, 575, 587, 619] {
         let example = examples["examples"]
             .as_array()
             .unwrap()

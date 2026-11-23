@@ -6,8 +6,8 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { ChevronsRight, Maximize2 } from "lucide-react";
-import { IconButton, SecondaryButton } from "../ui/controls";
+import { ChevronDown, ChevronsRight, ChevronUp, Maximize2, Plus } from "lucide-react";
+import { GhostButton, IconButton, SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
 import { Menu, type MenuItem } from "../ui/Menu";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -84,6 +84,14 @@ export interface RecordPanelProps {
   nameNote?: ReactNode;
   /** Opens the record as a page. Absent, the record has no page. */
   onOpenAsPage?: () => void;
+  /** Steps to the previous record in the current view. */
+  onPrevious?: () => void;
+  /** Steps to the next record in the current view. */
+  onNext?: () => void;
+  canPrevious?: boolean;
+  canNext?: boolean;
+  /** Opens field authoring from the bottom of the properties block. */
+  onAddField?: () => void;
   /** The host's commands for the record, in the panel's menu. */
   commands?: readonly RecordPanelCommand[];
   /** The panel is reading the record, so it shows no name and no fields yet. */
@@ -356,6 +364,26 @@ export function RecordPanel(props: RecordPanelProps) {
             <Maximize2 size={13} strokeWidth={1.9} aria-hidden />
           </IconButton>
         ) : null}
+        {(props.onPrevious || props.onNext) && unavailable === undefined ? (
+          <div className="flex items-center">
+            <IconButton
+              aria-label="Previous record"
+              title="Previous record"
+              disabled={!props.onPrevious || props.canPrevious === false}
+              onClick={props.onPrevious}
+            >
+              <ChevronUp size={14} strokeWidth={1.9} aria-hidden />
+            </IconButton>
+            <IconButton
+              aria-label="Next record"
+              title="Next record"
+              disabled={!props.onNext || props.canNext === false}
+              onClick={props.onNext}
+            >
+              <ChevronDown size={14} strokeWidth={1.9} aria-hidden />
+            </IconButton>
+          </div>
+        ) : null}
         <span className="min-w-0 flex-1 truncate px-1 text-[12px] text-muted">
           {collectionName}
         </span>
@@ -370,7 +398,7 @@ export function RecordPanel(props: RecordPanelProps) {
         ) : null}
       </div>
       {unavailable !== undefined ? (
-        <div className="flex flex-col items-start gap-3 px-3 py-2">
+        <div className="flex flex-col items-start gap-3 px-6 py-2">
           <p role="status" className="m-0 text-[13px] text-muted">
             {unavailable}
           </p>
@@ -380,7 +408,7 @@ export function RecordPanel(props: RecordPanelProps) {
         <SkeletonRows label="Opening record…" layout="panel" />
       ) : (
         <>
-          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-4">
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-6">
             <div className="flex flex-col gap-1 pb-3 pt-1">
               {/* Another field as the name is another name: an input open on the first goes with it. */}
               <PanelName
@@ -396,12 +424,22 @@ export function RecordPanel(props: RecordPanelProps) {
               {props.nameNote}
             </div>
             {props.properties}
+            {props.onAddField ? (
+              <GhostButton
+                size="toolbar"
+                className="mt-2 self-start text-[12px] text-muted hover:text-ink"
+                onClick={props.onAddField}
+              >
+                <Plus size={13} strokeWidth={1.9} aria-hidden />
+                Add field
+              </GhostButton>
+            ) : null}
             {props.body === undefined || props.body === null ? null : (
-              // The body scrolls in the room under the fields, and keeps room when they are many. Its side margin is
-              // narrower than a page's, so its text starts near the fields' and a narrow panel keeps its width for text.
+              // The body scrolls in the room under the fields, and keeps room when they are many. Its side gutter matches
+              // the panel's 24px content edge so headings, properties, and document text share one left axis.
               <div
                 data-record-body=""
-                className="-mx-3 mt-3 flex min-h-60 flex-1 flex-col [--dohc-editor-gutter:32px]"
+                className="-mx-6 mt-4 flex min-h-60 flex-1 flex-col border-t border-line pt-3 [--dohc-editor-gutter:24px]"
                 onKeyDown={(event) => {
                   if (event.key === "Escape" && typesText(event.target))
                     bodyTextKeys.add(event.nativeEvent);
@@ -412,14 +450,14 @@ export function RecordPanel(props: RecordPanelProps) {
             )}
           </div>
           {props.footer ? (
-            <footer className="shrink-0 border-t border-line px-3 py-2 text-[12px] text-muted">
+            <footer className="shrink-0 border-t border-line px-6 py-2 text-[12px] text-muted">
               {props.footer}
             </footer>
           ) : null}
           {props.actions ? (
             <div
               data-record-actions=""
-              className="flex shrink-0 flex-col gap-2 border-t border-line px-3 py-3"
+              className="flex shrink-0 flex-col gap-2 border-t border-line px-6 py-3"
             >
               {props.actions}
             </div>

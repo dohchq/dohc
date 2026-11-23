@@ -162,9 +162,9 @@ function replaceRows(
 }
 
 // A cell's rows as an intent or accepted write leaves them. The write covers
-// rows under its author's name, rows main ever listed under that name, and
-// the row an earlier write by the same author painted here, whatever name it
-// shows under. A row a read already holds for them stays as it is.
+// the person's rows under its author's name, rows main ever listed under that
+// name, and the row an earlier write by the same author painted here, whatever
+// name it shows under. A row a read already holds for them stays as it is.
 function withWrite(
   rows: ChatReactionRecord[],
   threadId: string,
@@ -175,9 +175,10 @@ function withWrite(
   // Named for the author who chose it, not the name it shows under.
   const painted = `optimistic:${cell.messageId}:${cell.emoji}:${write.author}`;
   const covers = (row: ChatReactionRecord) =>
-    row.authorId === write.author ||
     row.reactionId === painted ||
-    thread.listed.get(row.reactionId)?.names.has(write.author) === true;
+    (row.authorKind === "human" &&
+      (row.authorId === write.author ||
+        thread.listed.get(row.reactionId)?.names.has(write.author) === true));
   if (rows.some(covers))
     return write.state === "removed" ? rows.filter((row) => !covers(row)) : rows;
   if (write.state === "removed") return rows;

@@ -2,10 +2,16 @@ import { useState } from "react";
 import { X } from "lucide-react";
 import type { CollectionFieldType, CollectionSchema, OptionColor } from "@dohc/workspace-contracts";
 import { OptionColorPicker } from "@dohc/collection-views/color-picker";
-import { OptionPill, optionColor } from "@dohc/collection-views/values";
+import { FieldTypeIcon, OptionPill, optionColor } from "@dohc/collection-views/values";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { Overlay } from "../Overlay";
-import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import {
+  FieldError,
+  IconButton,
+  PrimaryButton,
+  SecondaryButton,
+  SectionLabel,
+} from "../ui/controls";
 import {
   draftToField,
   emptyFieldDraft,
@@ -115,7 +121,7 @@ export function FieldsDialog(props: {
     <Overlay onClose={props.onClose}>
       <div
         data-testid="collection-fields-dialog"
-        className="dohc-elevated flex w-130 max-w-[85vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
+        className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-130 max-w-[85vw] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex items-center gap-2">
           <h2 className="m-0 flex-1 text-base font-semibold text-ink">Fields</h2>
@@ -126,7 +132,7 @@ export function FieldsDialog(props: {
         <div className="flex flex-col gap-1">
           {props.schema.fields.length === 0 ? (
             <span className="text-sm text-muted">
-              No fields in this collection yet. Add one below.
+              No fields in this Collection yet. Add one below.
             </span>
           ) : null}
           {props.schema.fields.map((field) =>
@@ -191,19 +197,20 @@ export function FieldsDialog(props: {
               </div>
             ) : (
               <div key={field.name} className="flex h-8 items-center gap-2 rounded-md px-2">
+                <FieldTypeIcon type={field.type} />
                 <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{field.name}</span>
-                <span className="shrink-0 text-[11px] text-subtle">
+                <span className="shrink-0 text-[12px] text-subtle">
                   {FIELD_TYPE_LABELS[field.type]}
                 </span>
                 {field.type === "button" &&
                 props.onChooseButtonAutomation &&
                 props.buttonStates?.get(field.name)?.kind === "no-automation" ? (
                   <SecondaryButton
-                    aria-label={`Choose what it does: ${field.name}`}
+                    aria-label={`Choose action: ${field.name}`}
                     disabled={pending}
                     onClick={() => props.onChooseButtonAutomation?.(field.name)}
                   >
-                    Choose what it does
+                    Choose action
                   </SecondaryButton>
                 ) : null}
                 {field.type === "select" || field.type === "multi-select" ? (
@@ -238,7 +245,7 @@ export function FieldsDialog(props: {
             Add field
           </SecondaryButton>
         </div>
-        {error ? <p className="m-0 text-xs text-danger">{error}</p> : null}
+        {error ? <FieldError id="collection-fields-error">{error}</FieldError> : null}
       </div>
     </Overlay>
   );

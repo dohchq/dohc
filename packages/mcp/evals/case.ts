@@ -1,31 +1,81 @@
 // The shape of an eval case and of what a run records. README.md says how to add a case.
 
+import type { DatasetBoundApp } from "@dohc/cli/dataset";
+
 /**
  * A JSON value the dohc app answers with, or a function of the request's arguments and the
  * workspace folder. A function that throws stands for a request whose answer never arrived.
  */
 export type DesktopAnswer = unknown | ((args: Record<string, unknown>, root: string) => unknown);
 
+export type EvalSuite = "tool-use" | "everyday";
+
+export interface DatasetSnapshot {
+  revision: number;
+  revisionSha256: string;
+  databaseBase64: string;
+  boundApps?: DatasetBoundApp[];
+}
+
+export interface FrontendVerificationRecord {
+  mode: "observed" | "stand-in";
+  sourceRevision?: string;
+  ok: boolean;
+  stage: "compile" | "runtime" | "steps" | "complete";
+  expectStartupBackend?: unknown[];
+  requestedSteps?: unknown[];
+  steps?: Array<{ index: number; kind: string; ok: boolean }>;
+  brokerCalls: Array<{
+    op: string;
+    operation?: string;
+    status: number | null;
+    ok: boolean;
+    refusalCode?: string;
+  }>;
+}
+
 export interface EvalCase {
   id: string;
-  /** `bad` reproduces a mistake, `guard` protects correct behavior, `control` is ordinary work. */
-  kind: "bad" | "guard" | "control";
+  /** `tool-use` is focused single-flow tool selection; `everyday` is multi-step user jobs. */
+  suite?: EvalSuite;
+  /** `bad` reproduces a mistake, `guard` protects correct behavior, `control` is ordinary work, `everyday` is a full user job. */
+  kind: "bad" | "guard" | "control" | "everyday";
   /** The real experience, in a sentence. */
   experience: string;
-  /** Where it happened: a pull request, an issue, or a commit. */
+  /** Where it happened: a pull request, an issue, a commit, or a tracked eval category. */
   source: string;
+  /** Workspace ID registered in the sample's desktop registry and .dohc/manifest.json. */
+  workspaceId?: string;
   /** The workspace's files, by path. */
   files?: Record<string, string>;
   /** What the dohc app answers, by request verb. An unlisted verb ends the sample as an error. */
   desktop?: Record<string, DesktopAnswer>;
+  /** Builds fresh per-sample stateful desktop handlers (for example, SQLite-backed datasets). */
+  setupDesktop?: (
+    root: string,
+    options?: {
+      onWrite?: (path: string, contentSha256: string) => void;
+      onDatasetSnapshot?: (datasetPath: string, snapshot: DatasetSnapshot) => void;
+      onFrontendVerified?: (appRoot: string, record: FrontendVerificationRecord) => void;
+    },
+  ) => Record<string, DesktopAnswer> | Promise<Record<string, DesktopAnswer>>;
   /** What the person asks the agent. */
   prompt: string;
   expect: Expectation;
+  /** Optional deterministic checks on the finished workspace, calls, and final answer. */
+  gradeRun?: (run: RunRecord) => Check[] | Promise<Check[]>;
   /**
    * Calls that meet `expect`, and the answer that goes with them. cases.test.ts replays them
    * against the real server with no model, so a case that cannot pass fails in CI.
+   * Multi-step stateful cases can provide `run` to chain dynamic IDs from earlier calls.
    */
-  solution: { calls: { tool: string; args: Record<string, unknown> }[]; text?: string };
+  solution: {
+    calls?: { tool: string; args: Record<string, unknown> }[];
+    run?: (
+      callTool: (tool: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>,
+    ) => Promise<string | void>;
+    text?: string;
+  };
 }
 
 /** One tool call to look for. `args` match partially; see `matchesArgs` in grade.ts. */
@@ -73,6 +123,10 @@ export interface RunRecord {
   text: string;
   /** The workspace's files after the run, by path. */
   files: Record<string, string>;
+  /** Final approved SQLite checkpoints recorded by stateful eval desktops, by datasetPath. */
+  datasetSnapshots?: Record<string, DatasetSnapshot>;
+  /** Latest verifyFrontend outcomes recorded by stateful eval desktops, by appRoot. */
+  frontendVerifications?: Record<string, FrontendVerificationRecord>;
 }
 
 export interface Check {

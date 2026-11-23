@@ -19,6 +19,7 @@ import {
   usableShareMountRecord,
   withoutShareMountRecords,
 } from "./shareMounts";
+import { readableShareLevel } from "./shareViewMarker";
 import { receivedReferencePin, refreshReceivedReferencePin } from "./workspaceFileReferenceScopes";
 import type { ShareViewInfo } from "./shareViewInfo";
 import {
@@ -78,6 +79,8 @@ export interface ShareMountCommandDependencies<WorkspaceSummary> {
   // mount the owner may have restored, so the mount resumes. Decides for
   // itself whether the recheck is due; a refresh only says it saw one.
   recheckRemovedShares?(workspaceId: string): Promise<void>;
+  /** A copy whose record said its share ended has left a workspace. */
+  endedMountRemoved?(): void;
 }
 
 type ShareMountFilesLifecycleProjectionFactory = (
@@ -97,6 +100,7 @@ export interface ShareMountCommands<WorkspaceSummary> {
   }): Promise<{
     workspace: WorkspaceSummary;
     mount: ShareMountStatusRow;
+    alreadyAdded?: true;
   }>;
   refresh(input: {
     workspace: ShareMountCommandWorkspace;
@@ -272,8 +276,29 @@ export function createShareMountCommands<WorkspaceSummary>(
           );
         }
         const existing = dependencies.readMounts(workspace.workspaceId);
-        if (shareMountRecordsForId(existing, parsed.shareId).length > 0) {
-          throw new Error("This share is already added to this workspace.");
+        const [added] = shareMountRecordsForId(existing, parsed.shareId);
+        if (added !== undefined) {
+          const listedAlone = usableShareMountRecord(existing, added);
+          const row =
+            listedAlone && readableShareLevel(added.grantedSelector) !== null
+              ? shareMountResultRow({
+                  shareId: added.shareId,
+                  label: added.label,
+                  status: added.ended === true ? "ended" : "unchanged",
+                  changedPaths: 0,
+                })
+              : null;
+          if (row === null) {
+            throw new Error(
+              "This share is already in this workspace, but dohc could not read its record." +
+                (listedAlone ? " Remove it from Sharing, then add it again." : ""),
+            );
+          }
+          return {
+            workspace: dependencies.workspaceSummary(workspace.workspaceId),
+            mount: row,
+            alreadyAdded: true as const,
+          };
         }
         const relay = { baseUrl: relayUrl, token: credentials.token };
         let info: Pick<ShareViewInfo, "granterEmail" | "selector" | "receivedIdentity">;
@@ -382,7 +407,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               );
             }
             throw new Error(
-              "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
+              "dohc could not add the share. Nothing was added to this workspace. Check your connection and try again.",
             );
           }
         });
@@ -543,6 +568,9 @@ export function createShareMountCommands<WorkspaceSummary>(
           if (removal.kind === "missing") {
             throw new Error("This share is not added to this workspace.");
           }
+          const ended = registeredMounts.some(
+            (mount) => record(mount) && mount.shareId === shareId && mount.ended === true,
+          );
           if (removal.kind === "registry-only") {
             await dependencies
               .closeRelayWorkspace(mountStoreWorkspaceIdFor(workspace.workspaceId, shareId))
@@ -554,6 +582,7 @@ export function createShareMountCommands<WorkspaceSummary>(
             await dependencies.updateMounts(workspace.workspaceId, (mounts) =>
               withoutShareMountRecords(mounts, shareId),
             );
+            if (ended) dependencies.endedMountRemoved?.();
             presentWorkspace(workspace.workspaceId, `after unmount for ${shareId}`, {
               refreshNativeSurfaces: true,
             });
@@ -567,6 +596,7 @@ export function createShareMountCommands<WorkspaceSummary>(
             workspaceId: workspace.workspaceId,
             shareId: removal.mount.shareId,
           });
+          if (ended) dependencies.endedMountRemoved?.();
           presentWorkspace(workspace.workspaceId, `after unmount for ${shareId}`, {
             refreshNativeSurfaces: true,
           });

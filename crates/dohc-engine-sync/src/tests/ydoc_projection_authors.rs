@@ -14,8 +14,27 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_joined(false)
+}
+
+fn fixture_joined(joined: bool) -> Fixture {
     let (scratch, _path, mut store) = open_store();
     seed_replication_version(&mut store, "main", "main");
+    if joined {
+        adopt_join_identity(
+            &mut store, "ws", "local", "epoch-1", "stream-1", 1, &NoFaults,
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_relay_push_state VALUES ('ws','local',-1)",
+                    [],
+                )
+                .map_err(SyncError::persist)
+            })
+            .unwrap();
+    }
     let doc = Ydoc::wire();
     let base_sha = store.put_binary_blob(&doc.encode_full_state()).unwrap();
     let key = DocKey::new("ws", "main", "projection-object").unwrap();
@@ -266,4 +285,124 @@ fn actorless_projection_audit_requests_are_bounded_and_expire() {
         0,
         "pruning its moment removes the outstanding audit"
     );
+}
+
+#[test]
+fn a_pulled_edit_over_the_owners_unsaved_edit_of_a_stopped_note_sends_the_owners_save() {
+    for (stopped, deferred, owner) in [
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+        (true, false, false),
+        (true, true, false),
+    ] {
+        let mut f = fixture_joined(true);
+        if stopped {
+            f.store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO owner_live_stops VALUES ('ws','main',?1,'','released','{}',1,1,NULL)",
+                        [&f.key.object_id],
+                    )
+                    .map_err(SyncError::persist)
+                })
+                .unwrap();
+        }
+        if owner {
+            let doc = dohc_engine_collab::load_persisted(&f.store, &f.key)
+                .unwrap()
+                .unwrap()
+                .doc;
+            dohc_engine_collab::record_local_update(
+                &mut f.store,
+                &mut f.cache,
+                &f.key,
+                &doc.plaintext_insert(0, "owner"),
+                LocalAppend::default(),
+                &NoFaults,
+                2000,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        }
+        let update = f.doc.plaintext_insert(0, "link");
+        remote(&mut f, 1, &update, deferred, false);
+        if deferred {
+            assert_eq!(
+                drain_deferred_ydoc_for_key(&mut f.store, &mut f.cache, &f.key, &NoFaults)
+                    .unwrap()
+                    .drained,
+                1,
+            );
+        }
+        let sent: i64 = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log r JOIN snapshots s \
+                     ON s.latest_moment_id=json_extract(r.payload_json,'$.momentId') \
+                     WHERE r.imported=0 AND r.op_kind='moment.append' AND s.object_id=?1",
+                    [&f.key.object_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            sent,
+            i64::from(stopped && owner),
+            "stopped: {stopped}, deferred: {deferred}, owner: {owner}"
+        );
+    }
+}
+
+#[test]
+fn an_owner_save_with_a_link_editor_keeps_local_authors_and_records_no_refusal() {
+    let mut f = fixture_joined(true);
+    let link = r#"[{"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"}]"#;
+    let dohc_engine_storage::TxnOutcome::Committed((payload, local, refusals)) = f
+        .store
+        .write_with(&NoFaults, |tx| {
+            let head: String = tx
+                .query_row(
+                    "SELECT latest_moment_id FROM snapshots WHERE object_id=?1",
+                    [&f.key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            tx.execute(
+                "UPDATE moments SET author_json=?1 WHERE moment_id=?2",
+                params![link, head],
+            )
+            .map_err(SyncError::persist)?;
+            crate::enrolment::journal_owner_save_in_tx(tx, &f.key, &head)?;
+            Ok::<(String, Option<String>, i64), SyncError>((
+                tx.query_row(
+                    "SELECT payload_json FROM replication_log WHERE imported=0 AND op_kind='moment.append' \
+                     AND json_extract(payload_json,'$.momentId')=?1",
+                    [&head],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+                tx.query_row(
+                    "SELECT author_json FROM moments WHERE moment_id=?1",
+                    [&head],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+                tx.query_row("SELECT COUNT(*) FROM replication_pending_refusals", [], |row| {
+                    row.get(0)
+                })
+                .map_err(SyncError::corrupt)?,
+            ))
+        })
+        .unwrap()
+    else {
+        panic!("the save commits");
+    };
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["authors"], json!([{"kind":"unattributed"}]));
+    assert!(payload.get("attributionUnavailable").is_none());
+    assert_eq!(local.as_deref(), Some(link));
+    assert_eq!(refusals, 0);
 }

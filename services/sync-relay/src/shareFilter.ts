@@ -23,7 +23,10 @@ import { asRecord } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { RELAY_ERRORS } from "./errors";
 import { pathCollisionKey } from "./pathCollisionKey";
-import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import {
+  GENERAL_CHANNEL_WIRE_ID,
+  isFixedChatChannelId,
+} from "@dohc/security-contract/chat-wire-ids";
 import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 
 // Share grants: the server-side filter that decides which replicated ops (and
@@ -783,7 +786,7 @@ function servedChatPayload(
 ): Record<string, unknown> {
   const served = pickServed(record, SERVED_CHAT_FIELDS[opKind]);
   if (
-    opKind === "chat.message.append" &&
+    (opKind === "chat.message.append" || opKind === "chat.reaction.set") &&
     typeof record.authorAgentId === "string" &&
     record.authorAgentId.startsWith(PERSONAL_AGENT_ID_PREFIX)
   ) {
@@ -1380,6 +1383,14 @@ export function filterOpForShareAppend(
     return { allowed: false };
   }
   if (opKind === "chat.decision.set" && !decisionPollFieldsValid(payload)) {
+    return { allowed: false };
+  }
+  const channelId = asRecord(payload)?.channelId;
+  if (
+    opKind === "chat.channel.create" &&
+    typeof channelId === "string" &&
+    isFixedChatChannelId(channelId)
+  ) {
     return { allowed: false };
   }
   if (isGroupSelector(selector)) {

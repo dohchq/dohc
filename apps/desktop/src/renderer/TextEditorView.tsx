@@ -114,7 +114,7 @@ export function TextEditorView({
         truncated={truncated}
         readOnly={readOnly}
       />
-      <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor..." />}>
+      <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor…" />}>
         <LazySourceCodeEditor
           testId={`${testId}-editor`}
           value={editor.draft}

@@ -159,6 +159,95 @@ it("forwards to fixed backend routes with launch authority and no browser creden
   }
 });
 
+it("forwards an optional dataset alias on invoke, attempt, upload, and file and rejects malformed aliases", async () => {
+  for (const [body, action, expected, reply] of [
+    [
+      {
+        id: "one",
+        op: "backend.attempt",
+        dataset: "expenses",
+        operation: "register",
+        request: { action: "get" },
+      },
+      "attempt",
+      { authorityRevision: 7, dataset: "expenses", operation: "register", action: "get" },
+      { attempt: null },
+    ],
+    [
+      { ...invoke, dataset: "expenses" },
+      "invoke",
+      {
+        authorityRevision: 7,
+        dataset: "expenses",
+        operation: "register",
+        idempotencyKey: "attempt-1",
+        input: { quantity: 2 },
+      },
+      { result: { registrationId: "registration-1" }, revision: 1, replayed: false },
+    ],
+    [
+      { ...upload, dataset: "expenses" },
+      "upload",
+      {
+        authorityRevision: 7,
+        dataset: "expenses",
+        idempotencyKey: "upload-1",
+        name: file.name,
+        contentType: file.contentType,
+        bytesBase64: "JVBERg==",
+      },
+      { file, replayed: false },
+    ],
+    [
+      { ...readFile, dataset: "expenses" },
+      "file",
+      {
+        authorityRevision: 7,
+        dataset: "expenses",
+        fileId: file.fileId,
+        operation: "receipt.read",
+        input: readFile.input,
+      },
+      { file, bytesBase64: "JVBERg==" },
+    ],
+  ] as const) {
+    const response = await forward(body, async (request) => {
+      expect(request.url).toBe(
+        `https://relay.example.org/sync/link/app-publications/${"a".repeat(64)}/backend/${action}`,
+      );
+      expect(await request.json()).toEqual(expected);
+      return Response.json(reply);
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(reply);
+  }
+  let calls = 0;
+  const relay = async () => {
+    calls++;
+    return Response.json({ result: null, revision: 1, replayed: false });
+  };
+  for (const bad of ["", "Bad Alias", "constructor", "prototype", 123, null]) {
+    expect((await forward({ ...invoke, dataset: bad }, relay)).status).toBe(404);
+    expect((await forward({ ...upload, dataset: bad }, relay)).status).toBe(404);
+    expect((await forward({ ...readFile, dataset: bad }, relay)).status).toBe(404);
+    expect(
+      (
+        await forward(
+          {
+            id: "one",
+            op: "backend.attempt",
+            dataset: bad,
+            operation: "register",
+            request: { action: "get" },
+          },
+          relay,
+        )
+      ).status,
+    ).toBe(404);
+  }
+  expect(calls).toBe(0);
+});
+
 it("rejects caller identities, authority revisions, paths, and other extra input before relay access", async () => {
   let calls = 0;
   const relay = async () => {

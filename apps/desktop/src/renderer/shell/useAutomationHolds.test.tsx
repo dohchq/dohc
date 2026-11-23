@@ -170,7 +170,7 @@ it("keeps Try again after a retry fails, and names a path again when it returns"
   renderHook(() => useAutomationHolds("Trip", true, report, ""));
   await act(async () => undefined);
   expect(report.mock.calls[0]?.[0]).toBe(
-    'Automation steps in "Ops" wait because dohc cannot tell which Collection "Ops/automations.yaml" belongs to in one version of the workspace. Fix its collection.yaml or dataset.json in that version.',
+    'Automation steps in "Ops" are waiting because dohc cannot match "Ops/automations.yaml" to a Collection in one version of this workspace. Fix collection.yaml or dataset.json in that version.',
   );
   await act(async () => (report.mock.calls[0]![2] as () => void)());
   expect(report).toHaveBeenCalledTimes(2);

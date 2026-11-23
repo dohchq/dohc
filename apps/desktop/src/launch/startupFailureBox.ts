@@ -14,7 +14,7 @@ export function startupFailureBox(error: unknown): { title: string; content: str
   }
   const message = error instanceof Error ? error.message : "Unknown desktop startup error.";
   return {
-    title: "dohc failed to start",
+    title: "dohc could not start",
     content: `${message}\n\nRestart dohc. If it fails again, review the desktop logs.`,
   };
 }

@@ -6,6 +6,7 @@ import {
   SyncedDeletionRevivalError,
 } from "../workspaces/syncedDeletionRefusal";
 import type { FailureCode, FailureFacts } from "../notices/failure";
+import { engineStoreRefusalCopy } from "./bridgeContract";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
@@ -58,10 +59,10 @@ export const PRIVACY_DENIED_WORDS =
  * note's weight never goes down: only new notes clear it.
  */
 export const DOCUMENT_TOO_DENSE_WORDS =
-  "This note has grown too large for dohc to save, counting its past edits as well as what it holds now, so removing text won't bring it back under the limit. dohc still has the latest text and shows it in the note, but the file on disk has an older version, which is what other programs and agents see. Move its text into new, smaller notes and continue there.";
+  "This note has grown too large for dohc to save, counting its past edits as well as what it holds now, so removing text will not bring it back under the limit. dohc still has the latest text and shows it in the note, but the file on disk has an older version, which is what other programs and agents see. Move its text into new, smaller notes and continue there.";
 
 export const VOLUME_SHARES_NEW_FILES_WORDS =
-  "The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.";
+  "The disk this workspace is on adds sharing permissions to new files, so dohc cannot keep this file private. Move the workspace to a disk on this Mac.";
 
 /**
  * The engine's refusal to open a workspace whose `.dohc`, engine folder, a
@@ -86,21 +87,21 @@ const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>(
   [
     "unchecked-volume",
     [
-      "is on a disk dohc can't check",
+      "is on a disk dohc cannot check",
       "Move the workspace to a disk formatted as APFS, then try again.",
     ],
   ],
   [
     "not-changeable",
     [
-      "has permissions dohc can't use",
+      "has permissions dohc cannot use",
       "Give your account full control of this folder and everything in it, then try again.",
     ],
   ],
   [
     "unchecked-system",
     [
-      "is on a system where dohc can't check it",
+      "is on a system where dohc cannot check it",
       "Run dohc where it can read its own /proc/self/fd, then try again.",
     ],
   ],
@@ -131,7 +132,7 @@ function engineFolderNotPrivateWords(message: string): string | null {
   // A store file another user owns keeps the words a Mac sends for it.
   else if (STORE_FILE.test(path) && reason === "other-owner") fixed = fix;
   const kept = path.startsWith(".dohc/local") ? "this computer's own data" : "its History";
-  return `This workspace's ${path} ${fact}, so dohc can't keep ${kept} private. ${fixed}`;
+  return `This workspace's ${path} ${fact}, so dohc cannot keep ${kept} private. ${fixed}`;
 }
 
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
@@ -170,11 +171,11 @@ const ENGINE_CODE_WORDS = {
   PRESENCE_CAPACITY: "Too many people are connected right now. Try again later.",
   SELF_SHARE: "You cannot share with yourself.",
   AMBIGUOUS_SELECTOR: null,
-  INVALID_CHANNEL: "This channel cannot be shared.",
+  INVALID_CHANNEL: "This Group cannot be shared.",
   RELAY_METHOD_NOT_ALLOWED: "The server does not support this.",
   RELAY_INVALID_RESPONSE: UNREADABLE_ANSWER,
   RELAY_HTTPS_REQUIRED:
-    "Your server's address does not use https. Disconnect, then connect your server again with its https address.",
+    "Your server's address does not use HTTPS. Disconnect, then connect your server again with its HTTPS address.",
   INTERNAL: null,
 } as const satisfies Record<DaemonErrorCode, Words>;
 
@@ -202,6 +203,8 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "History is still updating. Try again.": UPDATING,
     "dohc has not read this file yet. Open it again once dohc has read it.": NOT_READ,
     "file-locked": "Another program has this file open. Close it there, then try again.",
+    "disk-full": "The disk is full. Free up space, then try again.",
+    "state-corrupt": engineStoreRefusalCopy("state-corrupt"),
     "ydoc-session-busy": "This file is open for editing. Close its tabs, then try again.",
     "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
     "workspace-owned":
@@ -261,11 +264,12 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   // message leads with the files dohc can't read, then the parser's own text,
   // which only Copy details carry. "It" is dohc, the caller's sentence's actor.
   RestorePolicyRefusalError: {
-    ".dohc/files.toml": "It can't read .dohc/files.toml. Fix the file, then try again.",
-    ".dohc/visibility.toml": "It can't read .dohc/visibility.toml. Fix the file, then try again.",
+    ".dohc/files.toml": "dohc cannot read .dohc/files.toml. Fix the file, then try again.",
+    ".dohc/visibility.toml":
+      "dohc cannot read .dohc/visibility.toml. Fix the file, then try again.",
     ".dohc/files.toml and .dohc/visibility.toml":
-      "It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
-    ".dohc": "It can't read this workspace's .dohc folder. Fix the folder, then try again.",
+      "dohc cannot read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
+    ".dohc": "dohc cannot read this workspace's .dohc folder. Fix the folder, then try again.",
     "path-not-admitted":
       "History no longer tracks this file. Track it in .dohc/files.toml, then try again.",
     "*": null,
@@ -274,7 +278,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   // parser's reason, for Copy details only. "Its" and "it" are the folder
   // the caller's sentence names.
   WorkspaceManifestError: {
-    unreadable: "dohc can't read its .dohc/manifest.json. Fix the file, then try again.",
+    unreadable: "dohc cannot read its .dohc/manifest.json. Fix the file, then try again.",
     "newer-version": NEWER_DOHC,
     "*": null,
   },
@@ -288,7 +292,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     EACCES: "dohc does not have permission to use this file or folder.",
     EPERM: "dohc does not have permission to use this file or folder.",
     ENOENT: "The file or folder is not there anymore.",
-    EBUSY: "Another program is using this file or folder.",
+    EBUSY: "Another program is using this file or folder. Close it there, then try again.",
     // Import to SQLite never replaces a file. The caller's sentence names
     // the database's path.
     "Database already exists": "That file already exists. Rename or move it, then try again.",
@@ -588,6 +592,12 @@ export function isGroupNameTaken(error: unknown): boolean {
   return parse(error).name === GROUP_NAME_TAKEN_ERROR;
 }
 
+export const CLOUD_SYNC_CANCELLED_ERROR = "CloudSyncFolderCancelledError";
+
+export function isCloudSyncFolderCancelled(error: unknown): boolean {
+  return parse(error).name === CLOUD_SYNC_CANCELLED_ERROR;
+}
+
 /** A Collection that waits before it reopens, because reopening it kept failing: the supervisor's words and its wait. */
 export function readCollectionReopenWait(error: unknown): { words: string; waitMs: number } | null {
   const { name, code, retryAfterMs, message } = parse(error);
@@ -666,7 +676,7 @@ export class CollectionMoveUnfinishedError extends Error {
   readonly code: "waited" | undefined;
   constructor(host: string, options: { cause: unknown; waited?: boolean }) {
     super(
-      `This Collection didn't finish moving to ${host}. Its records are kept on this computer.`,
+      `This Collection did not finish moving to ${host}. Its records are kept on this computer.`,
       { cause: options.cause },
     );
     this.code = options.waited ? "waited" : undefined;
@@ -911,7 +921,7 @@ export function isLivePageOwnedRefusal(error: unknown): boolean {
 export type LivePageAction = "move" | "rename" | "delete" | "restore" | "replace" | "archive";
 
 export function livePageTitle(path: string, action: LivePageAction): string {
-  return `dohc can't ${action} "${path}" while it has live editing on`;
+  return `dohc cannot ${action} "${path}" while it has live editing on`;
 }
 
 /** The body for an Undo, and for a move that would replace the page. */
@@ -933,7 +943,7 @@ export function namedList(names: readonly string[]): string {
 
 /** Several pages one move or delete could not change, for live editing. */
 export function livePagesTitle(paths: readonly string[], action: "move" | "delete"): string {
-  return `dohc can't ${action} ${namedList(paths)} while they have live editing on`;
+  return `dohc cannot ${action} ${namedList(paths)} while they have live editing on`;
 }
 
 export function livePagesBody(action: "move" | "delete"): string {
@@ -944,18 +954,18 @@ export function livePagesBody(action: "move" | "delete"): string {
 export type LivePageUndone = "renaming" | "moving" | "creating";
 
 export function livePageUndoTitle(path: string, undone: LivePageUndone): string {
-  return `dohc can't undo ${undone} "${path}" while it has live editing on`;
+  return `dohc cannot undo ${undone} "${path}" while it has live editing on`;
 }
 
 // Without capture, dohc can't check a page or folder for live editing.
 export function historyOffTitle(path: string, action: "move" | "rename" | "delete"): string {
-  return `dohc can't ${action} "${path}" while History is off`;
+  return `dohc cannot ${action} "${path}" while History is off`;
 }
 
 export const HISTORY_OFF_PAGE_BODY =
-  "Without History, dohc can't check whether this page has live editing on. Restart dohc to try again.";
+  "Without History, dohc cannot check whether this page has live editing on. Restart dohc to try again.";
 export const HISTORY_OFF_FOLDER_BODY =
-  "Without History, dohc can't check whether a page in it has live editing on. Restart dohc to try again.";
+  "Without History, dohc cannot check whether a page in it has live editing on. Restart dohc to try again.";
 
 /** The engine refuses to move, delete or restore a shared live file this way. */
 export function isSharedLiveFileRefusal(error: unknown): boolean {
@@ -964,7 +974,7 @@ export function isSharedLiveFileRefusal(error: unknown): boolean {
 
 /** A restore History refuses for a shared live file: a title, then what to do. */
 export const sharedLiveRestoreTitle = (path: string): string =>
-  `dohc can't restore "${path}" because it has been shared live`;
+  `dohc cannot restore "${path}" because it has been shared live`;
 export const SHARED_LIVE_RESTORE_BODY = "Copy the text you want from History into the file.";
 
 /** Stop and restore's two lines for that file, within its 500-character detail. A long path keeps its end. */
@@ -1002,7 +1012,7 @@ export function outsideVersionWaitingMessage(path: string): string {
 // Capture holds every refused outside edit with one reason, so these words
 // name each form it refuses. Restoring the file's earlier bytes lets capture record it again.
 export const CAPTURE_HELD_WORDS =
-  "dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.";
+  "dohc cannot read this file's Markdown. Common causes are nested lists in a synced workspace or deeply nested quotes. Your outside edit is still in the file on disk. Copy it first, then restore the file's earlier contents. If dohc still cannot read the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.";
 
 export function captureHeldLiveMessage(path: string): string {
   return `dohc cannot open "${path}" for live editing. ${CAPTURE_HELD_WORDS}`;

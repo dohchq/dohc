@@ -43,7 +43,11 @@ import {
 } from "./useAutosavedTextDraft";
 import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
-import { captureHeldLiveMessage, outsideVersionWaitingMessage } from "../ipc/errorWords";
+import {
+  captureHeldLiveMessage,
+  isPathTaken,
+  outsideVersionWaitingMessage,
+} from "../ipc/errorWords";
 import { sameFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { SkeletonRows } from "./ui/SkeletonRows";
@@ -232,7 +236,7 @@ function ChangedOutsideNotice(props: { onReload: () => void }) {
   return (
     <div
       data-testid="changed-outside-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-warning"
     >
       <span>{CHANGED_OUTSIDE_NOTICE}</span>
       <button
@@ -253,7 +257,7 @@ function DeletedWhileEditingNotice(props: {
   return (
     <div
       data-testid="deleted-while-editing-notice"
-      className="border-b border-line bg-panel px-4 py-1 text-[11px] text-danger"
+      className="border-b border-line bg-panel px-4 py-1 text-[12px] text-danger"
     >
       {goneNotice(props.cause, props.hasSetAsideEdit)}
     </div>
@@ -266,11 +270,7 @@ function PropertiesFallback() {
   return (
     <div className={PROPERTIES_PANEL}>
       <div className={PROPERTIES_LINE}>
-        <SkeletonRows
-          rows={1}
-          label="Loading properties..."
-          className="h-6 w-full justify-center"
-        />
+        <SkeletonRows rows={1} label="Loading properties…" className="h-6 w-full justify-center" />
       </div>
     </div>
   );
@@ -289,7 +289,7 @@ export type PageEditor = {
  * the record's name, its buttons and its fields.
  */
 function TopMatter(props: { hidden?: boolean; children: React.ReactNode }) {
-  return props.hidden ? null : <div className="group/topmatter">{props.children}</div>;
+  return props.hidden ? null : <div className="group/topmatter shrink-0">{props.children}</div>;
 }
 
 function MarkdownRenderCommitted(props: { onRendered: () => void }) {
@@ -957,16 +957,25 @@ export function MarkdownView(props: {
   const linkNavigationNonce = useRef(0);
   const openWikilinkRef = useRef<(target: string) => void>(() => undefined);
   const openWorkspaceLinkRef = useRef<(target: WorkspaceLinkTarget) => void>(() => undefined);
-  const navigationIdentity = useRef({ workspaceId: props.workspaceId, path: props.path });
+  const navigationIdentity = useRef({
+    workspaceId: props.workspaceId,
+    path: props.path,
+    reopenKey: props.reopenKey,
+  });
   if (
     navigationIdentity.current.workspaceId !== props.workspaceId ||
-    navigationIdentity.current.path !== props.path
+    navigationIdentity.current.path !== props.path ||
+    navigationIdentity.current.reopenKey !== props.reopenKey
   ) {
-    navigationIdentity.current = { workspaceId: props.workspaceId, path: props.path };
+    navigationIdentity.current = {
+      workspaceId: props.workspaceId,
+      path: props.path,
+      reopenKey: props.reopenKey,
+    };
   }
   useEffect(
     () => () => {
-      navigationIdentity.current = { workspaceId: "", path: "" };
+      navigationIdentity.current = { workspaceId: "", path: "", reopenKey: undefined };
     },
     [],
   );
@@ -976,12 +985,32 @@ export function MarkdownView(props: {
     const current = () =>
       navigationIdentity.current === identity && linkNavigationNonce.current === nonce;
     void resolveLinkNavigation(props.workspaceId, props.path, literal, kind, nonce)
-      .then((navigation) => {
-        if (current() && navigation) props.onOpenPath?.(navigation.path, navigation.headingTarget);
+      .then(async (navigation) => {
+        if (!current() || !navigation) return;
+        let targetPath = navigation.path;
+        if (navigation.create) {
+          if (props.forceReadOnly) {
+            props.onButtonNotice?.("This linked page does not exist yet.");
+            return;
+          }
+          try {
+            const created = await bridge().createWorkspaceFile({
+              workspaceId: props.workspaceId,
+              relativePath: navigation.path,
+              initialText: "",
+              exclusive: true,
+            });
+            targetPath = created.path;
+          } catch (error) {
+            if (!isPathTaken(error)) throw error;
+          }
+          if (!current()) return;
+        }
+        props.onOpenPath?.(targetPath, navigation.headingTarget);
       })
       .catch((error) => {
         if (current())
-          props.onButtonError?.("This link could not be opened.", error, () =>
+          props.onButtonError?.("dohc could not open this link.", error, () =>
             navigate(literal, kind),
           );
       });
@@ -1010,6 +1039,7 @@ export function MarkdownView(props: {
       <LazyMarkdownReadView
         body={markdownEditorBody(savedBody)}
         resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}`}
+        imageContext={{ workspaceId: props.workspaceId, docPath: props.path }}
         onOpenWorkspaceLink={(target) => openWorkspaceLinkRef.current(target)}
         onRendered={onMarkdownRendered}
       />
@@ -1089,6 +1119,10 @@ export function MarkdownView(props: {
   // Invalid bytes read as U+FFFD can take a note's text past the live limit
   // while its file stays under it, and the check counts that text as lossy.
   const lossy = props.lossyNote === "lossy";
+  const largeForRichEditor = useMemo(
+    () => exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES),
+    [props.body],
+  );
   const tooLarge = useMemo(
     () => lossy && exceedsUtf8Bytes(props.body, WORKSPACE_TEXT_EDITOR_MAX_BYTES),
     [lossy, props.body],
@@ -1114,9 +1148,44 @@ export function MarkdownView(props: {
   const onEditorReadyRef = useRef(onEditorReady);
   onEditorReadyRef.current = onEditorReady;
   const [pageEditor, setPageEditor] = useState<MarkdownEditorHandle | null>(null);
+  // A replaced document mounts a new editor. If the old one had the caret and
+  // focus went nowhere else since, the new one gets it back. Focus left on the
+  // page or on the surface holding this note (focusReturn.ts moves it there
+  // when the old editor goes) went nowhere else.
+  const documentKeyRef = useRef(props.documentKey);
+  documentKeyRef.current = props.documentKey;
+  const refocus = useRef<{ key: string; at: number } | null>(null);
   const attachEditor = useCallback((handle: MarkdownEditorHandle | null) => {
+    const previous = wysiwygRef.current;
     wysiwygRef.current = handle;
     if (onEditorReadyRef.current) setPageEditor(handle);
+    if (handle === null) {
+      const at = previous?.caret() ?? null;
+      if (at !== null) refocus.current = { key: documentKeyRef.current, at };
+      return;
+    }
+    const pending = refocus.current;
+    if (!pending) return;
+    const active = document.activeElement;
+    const view = viewRef.current;
+    const unclaimed =
+      !active ||
+      active === document.body ||
+      (active.hasAttribute("data-focus-surface") && view !== null && active.contains(view));
+    if (pending.key !== documentKeyRef.current || !unclaimed) {
+      refocus.current = null;
+      return;
+    }
+    handle.focus(pending.at);
+    if (handle.caret() !== null) refocus.current = null;
+  }, []);
+  useEffect(() => {
+    // A click while the editor rebuilds puts focus where the user chose.
+    const drop = () => {
+      refocus.current = null;
+    };
+    document.addEventListener("pointerdown", drop, true);
+    return () => document.removeEventListener("pointerdown", drop, true);
   }, []);
   useEffect(() => {
     if (!onEditorReady || opening) return;
@@ -1817,7 +1886,7 @@ export function MarkdownView(props: {
           if (!unmounted.current)
             setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
           if (options.rejectOnError) {
-            throw new Error("dohc cannot save this draft without a content hash.");
+            throw new Error("dohc cannot save this draft without the current file version.");
           }
           return;
         }
@@ -2266,7 +2335,7 @@ export function MarkdownView(props: {
         message={
           engine.permanentFailureWhileEditing
             ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
-            : "This document became read-only. Copy your edits to keep them."
+            : "This file became read-only before your edits saved. Copy your edits to keep them."
         }
         messageDraftId={
           engine.permanentFailureWhileEditing
@@ -2338,7 +2407,7 @@ export function MarkdownView(props: {
                 label: showSource ? "Editor" : "Source",
                 testId: "markdown-source-toggle",
                 pressed: showSource,
-                title: `Toggle markdown source (${shortcutTitle("toggle-markdown-source", window.dohcDesktop?.platform)})`,
+                title: `Toggle Markdown source (${shortcutTitle("toggle-markdown-source", window.dohcDesktop?.platform)})`,
                 onClick: toggleSourceView,
               }}
               menu={{
@@ -2355,6 +2424,15 @@ export function MarkdownView(props: {
           }
         />
         {props.truncatedNotice}
+        {largeForRichEditor && !props.truncated && !props.recordBody ? (
+          <div
+            data-testid="large-note-notice"
+            role="status"
+            className="border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-muted"
+          >
+            This note is over 256 KB.
+          </div>
+        ) : null}
         {documentNotices}
         {showSource ? (
           // Raw markdown, monospaced and read-only — frontmatter included, so
@@ -2365,14 +2443,14 @@ export function MarkdownView(props: {
               words={
                 readOnly
                   ? readOnlyWords
-                  : "Read-only markdown source — switch back to Editor to make changes."
+                  : "Read-only Markdown source. Switch back to Editor to make changes."
               }
               getText={() => sourceMarkdown}
             />
             {sourceMarkdown === null ? (
-              <SkeletonRows layout="panel" label="Loading source..." />
+              <SkeletonRows layout="panel" label="Loading source…" />
             ) : (
-              <Suspense fallback={<SkeletonRows layout="panel" label="Loading source..." />}>
+              <Suspense fallback={<SkeletonRows layout="panel" label="Loading source…" />}>
                 <LazySourceCodeEditor
                   testId="markdown-source-view"
                   value={sourceMarkdown}
@@ -2405,7 +2483,9 @@ export function MarkdownView(props: {
           data-testid="view-markdown"
           data-dohc-doc-pane=""
           hidden={showSource}
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          className={`min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable] ${
+            showSource ? "hidden" : "flex flex-col"
+          }`}
         >
           {/* Title + inline properties are one top-matter zone (hovering it
               reveals the quiet "Add a property" + on empty docs). */}
@@ -2500,7 +2580,7 @@ export function MarkdownView(props: {
           <DocumentControls
             toggle={{
               label:
-                surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
+                surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "Editor",
               testId: "markdown-edit-toggle",
               disabled: readOnly || opening,
               title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
@@ -2547,6 +2627,15 @@ export function MarkdownView(props: {
         }
       />
       {props.truncatedNotice}
+      {largeForRichEditor && !opening && !props.truncated && !lossy ? (
+        <div
+          data-testid="large-note-notice"
+          role="status"
+          className="border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-muted"
+        >
+          This note is over 256 KB. Edits open in Markdown source.
+        </div>
+      ) : null}
       {/* "Try again" after a timed-out open. It retries and nothing
           else: the retry changes the request key, so `opening` flips true in
           that same render and the capture above sets a draft typed before the
@@ -2581,6 +2670,7 @@ export function MarkdownView(props: {
           onRetry={props.onRetryEngineOpen}
           contentShown
           message={engine.openRefusal ?? engine.sharedWaiting?.message}
+          details={engine.openRefusalDetail}
         />
       ) : null}
       {engine.removalInProgress ? (
@@ -2591,7 +2681,7 @@ export function MarkdownView(props: {
       ) : null}
       {documentNotices}
       {surfaceMode === "source" ? (
-        <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor..." />}>
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor…" />}>
           <LazySourceCodeEditor
             testId="markdown-editor"
             value={draft}
@@ -2619,7 +2709,7 @@ export function MarkdownView(props: {
           ref={localDocPaneRef}
           data-testid="view-markdown"
           data-dohc-doc-pane=""
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          className="flex min-h-0 flex-1 flex-col overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           <TopMatter hidden={props.recordBody}>
             <PageIdentity
@@ -2677,7 +2767,7 @@ export function MarkdownView(props: {
         // rich document. Keep view-markdown: callers use it as the mounted
         // document surface regardless of which read representation owns it.
         <div data-testid="view-markdown" className="flex min-h-0 flex-1 flex-col">
-          <Suspense fallback={<SkeletonRows layout="panel" label="Loading source..." />}>
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading source…" />}>
             <LazySourceCodeEditor
               testId="markdown-source-view"
               value={props.body}
@@ -2695,7 +2785,7 @@ export function MarkdownView(props: {
         <div
           ref={localDocPaneRef}
           data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          className="flex min-h-0 flex-1 flex-col overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
           onScroll={(event) => {
             readScroll.current = {
               key: props.documentKey,

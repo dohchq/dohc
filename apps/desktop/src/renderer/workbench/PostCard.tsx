@@ -1,11 +1,13 @@
 import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
+import { extractChatWorkReferenceTokens } from "@dohc/workspace-contracts/chat-mentions";
 import type {
   ChannelThreadRecord,
   ChatBookmarkRecord,
   ChatReactionRecord,
 } from "../../ipc/bridgeContract";
+import { stripMarkdown } from "../markdown/stripMarkdown";
 import { formatChatTime, formatShortTime } from "../time";
 import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
@@ -71,10 +73,16 @@ export function postText(title: string, body: string): { heading: string; excerp
   return { heading: firstLine, excerpt: newline === -1 ? "" : body.slice(newline + 1).trim() };
 }
 
-// A feed row: a hairline under each row but the last, and on hover the
-// hover fill with the hairline gone. PostFeedList marks the last row.
+export function stripPostMarkdown(text: string): string {
+  if (!text) return "";
+  const atoms = extractChatWorkReferenceTokens(text);
+  return stripMarkdown(text, atoms).text.trim();
+}
+
+// A feed row: an inset hairline under each row except the last, hidden on
+// hover so the rounded hover fill never collides with adjacent hairlines.
 export const FEED_ROW =
-  "group relative border-b border-line px-2 py-3 transition-colors duration-75 hover:rounded-lg hover:border-transparent hover:bg-hover in-data-[feed-last]:border-transparent";
+  "group relative px-2 py-3 transition-colors duration-75 hover:rounded-lg hover:bg-hover after:pointer-events-none after:absolute after:inset-x-2 after:bottom-0 after:h-px after:bg-line after:transition-opacity after:duration-75 hover:after:opacity-0 has-[+:hover]:after:opacity-0 in-data-[feed-last]:after:hidden";
 // Where a feed row's toolbar floats: level with the name line and clear of
 // the unread count. The list paints each row in its own box, so the
 // toolbar stays inside the row rather than over its top edge.
@@ -82,7 +90,7 @@ export const FEED_TOOLBAR = "top-1 right-9";
 // Home's rows have no unread count, so their toolbar sits at the row's edge.
 export const HOME_TOOLBAR = "top-1 right-2";
 export const FEED_META =
-  "mt-1.5 flex flex-wrap items-center gap-3 text-[11px] tabular-nums text-subtle";
+  "mt-1.5 flex flex-wrap items-center gap-3 text-[12px] tabular-nums text-subtle";
 
 export function ActionButton(props: {
   testId?: string;
@@ -139,7 +147,11 @@ export function FeedReactionPill(props: {
         event.stopPropagation();
         props.onClick(event);
       }}
-      className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 font-sans text-[11px] leading-5 text-muted hover:border-accent/60 disabled:cursor-default aria-disabled:cursor-default aria-disabled:opacity-50"
+      className={`inline-flex h-6 items-center gap-1 rounded-full border px-1.5 font-sans text-[11px] leading-none transition-colors disabled:cursor-default aria-disabled:cursor-default aria-disabled:opacity-50 ${
+        props.mine
+          ? "border-accent/60 bg-accent/15 text-ink"
+          : "border-line bg-bg text-muted hover:border-accent/60 hover:text-ink"
+      }`}
     >
       <span aria-hidden>{props.emoji}</span>
       <span className="tabular-nums">{props.count}</span>
@@ -204,9 +216,11 @@ export function PostCard(props: {
   const createdAtMs = message?.createdAtMs ?? props.thread.createdAtMs;
   const time = formatChatTime(createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
-  const { heading, excerpt } = message
+  const rawText = message
     ? postText(props.thread.title, message.bodySnippet)
     : { heading: props.thread.title, excerpt: "" };
+  const heading = stripPostMarkdown(rawText.heading) || rawText.heading;
+  const excerpt = stripPostMarkdown(rawText.excerpt);
   const plain = message !== null && excerpt === "";
   const openDecision = (props.thread.openDecisionCount ?? 0) > 0;
   const work = props.thread.work;
@@ -305,7 +319,7 @@ export function PostCard(props: {
               />
             ) : null}
             {props.groupLabel ? (
-              <span className="truncate text-[11px] tabular-nums text-subtle">
+              <span className="truncate text-[12px] tabular-nums text-subtle">
                 {props.groupLabel}
               </span>
             ) : null}
@@ -313,7 +327,7 @@ export function PostCard(props: {
               data-testid="chats-post-time"
               dateTime={time.iso}
               title={time.label}
-              className="shrink-0 text-[11px] tabular-nums text-subtle"
+              className="shrink-0 text-[12px] tabular-nums text-subtle"
             >
               {formatShortTime(createdAtMs)}
             </time>
@@ -340,6 +354,7 @@ export function PostCard(props: {
                 <WorkStatus
                   testIdPrefix="chats-post"
                   work={work}
+                  className="mt-0"
                   reportedBy={{
                     name: work.authorDisplayName,
                     owner: work.authorOwnerDisplayName,
@@ -351,7 +366,9 @@ export function PostCard(props: {
                 />
               ) : null}
               {[...byEmoji.entries()].map(([emoji, records]) => {
-                const mine = records.some((r) => r.authorId === props.data.viewerAuthorId);
+                const mine = records.some(
+                  (r) => r.authorKind === "human" && r.authorId === props.data.viewerAuthorId,
+                );
                 return (
                   <FeedReactionPill
                     key={emoji}

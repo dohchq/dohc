@@ -1,5 +1,6 @@
+import { withErrorWords } from "../ipc/errorWords";
 import { ipcErrorMessage } from "./ipcError";
-import { ChevronRight, MessageSquare, Plus, Sparkles } from "lucide-react";
+import { ChevronRight, X } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
@@ -21,22 +22,38 @@ import {
 import {
   DangerButton,
   GhostButton,
+  IconButton,
   PrimaryButton,
   SecondaryButton,
   SectionLabel,
 } from "./ui/controls";
-import { Menu } from "./ui/Menu";
-import { MoreMenu } from "./ui/MoreMenu";
-import { CopyButton, type CopySecret } from "./ui/CopyButton";
-import { AgentLinkAppMenu } from "./agentLinkApps";
+import { MENU_SEPARATOR, type MenuEntry } from "./ui/Menu";
+import { CopyButton, useCopy, type CopySecret } from "./ui/CopyButton";
+import { agentLinkSetups } from "./agentLinkApps";
 import {
   AGENT_ADDRESS_SECRET,
   LinkAgentsList,
   agentAddressFor,
   useLinkAgentDisconnects,
 } from "./shareLinkAgents";
-import { SegmentedControl } from "./ui/SegmentedControl";
-import { SHARE_ACCESS_WORDS, ShareAccessMenu, SharePersonRow } from "./shareAccess";
+import {
+  SHARE_ACCESS_DESCRIPTIONS,
+  SHARE_ACCESS_WORDS,
+  SHARE_ROW_INSET,
+  ShareAccessLevel,
+  ShareAccessMenu,
+  ShareLinkRow,
+  ShareOptionsMenu,
+  SharePersonRow,
+} from "./shareAccess";
+import {
+  isShareAccess,
+  PersonAccessRow,
+  PersonRemovalError,
+  removePersonAccess,
+  type AnsweredPerson,
+  type ListedPerson,
+} from "./sharePerson";
 import { SkeletonRows } from "./ui/SkeletonRows";
 
 // The relay keeps a sealed copy of each link for its owner, so Share can
@@ -96,6 +113,8 @@ type MintedLinkResult = {
   url: string;
 };
 
+type MintedLink = MintedLinkResult & { access: LinkAccess | null };
+
 type LinkGroup = {
   shareId: string;
   rows: RelayShareLinkRow[];
@@ -141,6 +160,10 @@ type OwnerMutationBusy = {
   actionKey: string;
 };
 
+type OwnerMutationError = OwnerMutationBusy & { message?: string };
+
+type OwnerRemoval = { message: string; retry: () => void };
+
 const OWNER_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
 const OWNER_DISCUSSION_ACTIVITY_LIMIT = 100;
 const OWNER_DISCUSSION_ACTIVITY_RETRY_BASE_MS = 250;
@@ -169,14 +192,16 @@ type OwnerConfirmation =
       name: string;
     };
 
-const LINK_ACCESS_OPTIONS: ReadonlyArray<{
-  value: LinkAccess;
-  label: string;
-}> = [
-  { value: "view", label: "View" },
-  { value: "comment", label: "Comment" },
-  { value: "edit", label: "Edit" },
-];
+function newLinkReach(target: RelayShareTarget): string {
+  const reach =
+    target.kind === "version"
+      ? "The link shows this version as it is now."
+      : "The link includes files added later.";
+  return `${reach} The sync relay can read this content.`;
+}
+
+const LINKS_BUSY = "Wait for the current change to finish.";
+const waits = (busy: boolean) => (busy ? { disabled: true, description: LINKS_BUSY } : {});
 
 function normalizedPathSet(paths: readonly string[]): string[] {
   const normalized = paths.map((path) => {
@@ -203,10 +228,21 @@ function pathsEqual(left: readonly string[], right: readonly string[]): boolean 
   );
 }
 
-// The selection as the dialog names it, for notices about its links.
-function targetLabel(target: RelayShareTarget): string {
+function targetKeyOf(target: RelayShareTarget): string {
   return target.kind === "version"
-    ? `version “${target.versionName ?? target.versionId}”`
+    ? JSON.stringify(["version", target.versionId])
+    : JSON.stringify(["paths", ...normalizedPathSet(target.paths)]);
+}
+
+/** One workspace's shares of one selection: what Share reads, and what its pending work belongs to. */
+export function shareScope(workspaceId: string, target: RelayShareTarget): string {
+  return JSON.stringify([workspaceId, targetKeyOf(target)]);
+}
+
+// The selection as the dialog names it, for notices about its shares.
+export function targetLabel(target: RelayShareTarget): string {
+  return target.kind === "version"
+    ? `version "${target.versionName ?? target.versionId}"`
     : (target.label ?? target.paths.join(", "));
 }
 
@@ -355,12 +391,14 @@ function applyDiscussionPrincipalOverrides(
 }
 
 function namedGrantName(grant: RelayShareLinkIndependentGrant): string {
-  return grant.recipientEmail ?? grant.recipientUserId ?? "Unknown recipient";
+  return grant.recipientEmail ?? grant.recipientUserId ?? "Unnamed person";
 }
 
 function dependentName(dependent: RelayShareLinkDependent): string {
-  return dependent.recipientEmail ?? dependent.recipientUserId ?? "Unknown recipient";
+  return dependent.recipientEmail ?? dependent.recipientUserId ?? "Unnamed person";
 }
+
+const isActive = (row: RelayShareLinkRow) => row.status === "active";
 
 function isDiscussionMutationAction(actionKey: string): boolean {
   return (
@@ -398,75 +436,86 @@ function accessWords(access: string): string {
   return known === null ? access : SHARE_ACCESS_WORDS[known];
 }
 
-function LinkAccessChoice(props: {
-  supported: readonly LinkAccess[];
-  access: LinkAccess;
-  ariaLabel: string;
-  disabled: boolean;
-  onChange: (access: LinkAccess) => void;
+const AGENT_COPY_WORDS = { copied: "Copied for an agent" };
+
+function LinkRowActions(props: {
+  grantId: string;
+  url: string | null;
+  everyday: readonly MenuEntry[];
+  lifecycle: readonly MenuEntry[];
 }) {
+  const { url } = props;
+  const address = url === null ? null : agentAddressFor(url);
+  const setups = address === null ? [] : agentLinkSetups(address, "dohc-share");
+  const agentCopy = useCopy<string | null>({
+    getText: (setupId) =>
+      setupId === null ? address : (setups.find((setup) => setup.id === setupId)?.text ?? null),
+    words: AGENT_COPY_WORDS,
+    sensitive: AGENT_ADDRESS_SECRET,
+  });
+  const forAgent: MenuEntry[] =
+    address === null
+      ? []
+      : [
+          {
+            id: "agent",
+            label: "Copy for an agent",
+            testId: "share-link-agent-copy",
+            onSelect: () => agentCopy.copy(null),
+          },
+          ...setups.map((setup) => ({
+            id: `agent-${setup.id}`,
+            label: `Copy ${setup.label.charAt(0).toLowerCase()}${setup.label.slice(1)}`,
+            testId: `share-link-agent-apps-${setup.id}`,
+            onSelect: () => agentCopy.copy(setup.id),
+          })),
+        ];
+  const items: MenuEntry[] = [props.everyday, forAgent, props.lifecycle]
+    .filter((group) => group.length > 0)
+    .flatMap((group, index) => (index === 0 ? group : [MENU_SEPARATOR, ...group]));
   return (
-    <SegmentedControl
-      label={props.ariaLabel}
-      value={props.access}
-      options={LINK_ACCESS_OPTIONS.filter((option) => props.supported.includes(option.value))}
-      disabled={props.disabled}
-      onChange={props.onChange}
-    />
+    <>
+      <span
+        className={`min-w-0 flex-1 truncate text-right text-[12px] ${agentCopy.feedback === "failed" ? "text-danger" : "text-muted"}`}
+      >
+        {agentCopy.feedback ? agentCopy.words[agentCopy.feedback] : null}
+        <span role="status" aria-live="polite" className="sr-only">
+          {agentCopy.announcement}
+        </span>
+      </span>
+      {url !== null ? (
+        <CopyButton
+          size="button"
+          label="Copy link"
+          getText={() => url}
+          sensitive={SHARE_LINK_SECRET}
+          testId="share-link-copy"
+        />
+      ) : null}
+      {items.length > 0 ? (
+        <ShareOptionsMenu
+          label="Link options"
+          testId={`share-link-options-${props.grantId}`}
+          width={240}
+          items={items}
+        />
+      ) : null}
+    </>
   );
 }
 
-// Another link to the same share: same files, same comments. Picking its
-// access adds it; an Edit link that stops automations asks once more.
-function AddLinkMenu(props: {
-  supported: readonly LinkAccess[];
-  disabled: boolean;
-  busyLabel: string | null;
-  warned: boolean;
-  onPick: (access: LinkAccess) => void;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  if (props.busyLabel !== null) {
-    return (
-      <SecondaryButton size="compact" disabled>
-        {props.busyLabel}
-      </SecondaryButton>
-    );
-  }
-  if (props.warned) {
-    return (
-      <div className="flex items-center gap-2">
-        <SecondaryButton size="compact" disabled={props.disabled} onClick={props.onCancel}>
-          Cancel
-        </SecondaryButton>
-        <SecondaryButton size="compact" disabled={props.disabled} onClick={props.onConfirm}>
-          Add link anyway
-        </SecondaryButton>
-      </div>
-    );
-  }
-  return (
-    <Menu
-      label="Access for the new link"
-      open={open}
-      onOpenChange={setOpen}
-      width={224}
-      topLayer
-      items={props.supported.map((access) => ({
-        id: access,
-        label: SHARE_ACCESS_WORDS[access],
-        onSelect: () => props.onPick(access),
-      }))}
-      trigger={(trigger) => (
-        <GhostButton {...trigger} disabled={props.disabled}>
-          <Plus size={13} aria-hidden />
-          Add link
-        </GhostButton>
-      )}
-    />
-  );
+const SEPARATE_DRAFT = "share-link-create-section";
+const addDraft = (shareId: string) => `share-link-add-${shareId}`;
+
+function personOfGrant(grant: RelayShareLinkIndependentGrant): ListedPerson {
+  return {
+    shareId: grant.shareId,
+    grantId: grant.grantId,
+    name: namedGrantName(grant),
+    email: grant.recipientEmail,
+    access: isShareAccess(grant.access) ? grant.access : null,
+    generation: null,
+  };
 }
 
 export function useRelayShareLinkPane(props: {
@@ -482,13 +531,20 @@ export function useRelayShareLinkPane(props: {
   shareRemovals?: ShareRemovalNotices;
   // The shell's useDisconnectedLinkAgents set.
   disconnectedAgents?: ReadonlySet<string>;
+  // What the dialog knows about the people who no longer depend on a link:
+  // their access from the newest of the relay's answers and the Sharing
+  // listing, kept by the rule the invited people follow.
+  people: {
+    answered: (listed: readonly ListedPerson[]) => ListedPerson[];
+    changed: (person: AnsweredPerson) => void;
+    removed: (grantId: string) => void;
+  };
 }): {
   content: ReactNode;
   // The people who joined through these links, for the dialog's People list.
   people: ReactNode;
-  // The shares whose people `people` lists.
-  peopleShareIds: ReadonlySet<string>;
-  scope: string;
+  // The grants of the people `people` lists.
+  peopleGrantIds: ReadonlySet<string>;
   close: () => void;
 } {
   const agentDisconnects = useLinkAgentDisconnects(props.shareRemovals, props.disconnectedAgents);
@@ -506,20 +562,28 @@ export function useRelayShareLinkPane(props: {
   const automationCheck = useAutomationShareCheck(props.workspaceId, props.target);
   const newLinkNote = automationCheck.noteFor({ recipientEmail: null, access: linkAccess });
   const [addAccessByShareId, setAddAccessByShareId] = useState<Record<string, LinkAccess>>({});
-  const [linkError, setLinkError] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<{ message: string; shareId: string | null } | null>(
+    null,
+  );
+  const [linksReadOnce, setLinksReadOnce] = useState(false);
+  const [openDetails, setOpenDetails] = useState<ReadonlySet<string>>(() => new Set());
+  const [sharesAddingLink, setSharesAddingLink] = useState<ReadonlySet<string>>(() => new Set());
   const [separateOpen, setSeparateOpen] = useState(false);
   // The links past the first share, and a separate link, open from one line.
   const [moreOpen, setMoreOpen] = useState(false);
-  // The share whose links show, kept while it has a working link.
+  // The share whose link shows, kept while it has a working link, and the
+  // link of it that shows, kept while it works.
   const shownShareId = useRef<string | null>(null);
+  const shownGrantId = useRef<string | null>(null);
+  const draftOpeners = useRef(new Map<string, string>());
   // Links whose last change may have landed without its answer: no URL
   // shows for them until the list reads again.
   const [unsureUrls, setUnsureUrls] = useState<ReadonlySet<string>>(() => new Set());
   // Where focus goes once a render has it: a new link's Copy link, or the
-  // access choice of the separate link just opened. A new link shows first
-  // on its own and then in its row, so its focus follows it there.
+  // access of the link just asked for. A new link shows first on its own and
+  // then in its row, so its focus follows it there.
   const focusAfterRender = useRef<
-    { kind: "copy"; grantId: string; shown: boolean } | { kind: "separate" } | null
+    { kind: "copy"; grantId: string; shown: boolean } | { kind: "draft"; testId: string } | null
   >(null);
   useLayoutEffect(() => {
     const target = focusAfterRender.current;
@@ -528,13 +592,13 @@ export function useRelayShareLinkPane(props: {
       focusAfterRender.current = null;
       return;
     }
-    if (target.kind === "separate") {
-      const radio = document.querySelector<HTMLElement>(
-        '[data-testid="share-link-create-section"] [role="radio"][aria-checked="true"]',
+    if (target.kind === "draft") {
+      const access = document.querySelector<HTMLElement>(
+        `[data-testid=${JSON.stringify(target.testId)}]`,
       );
-      if (radio) {
+      if (access) {
         focusAfterRender.current = null;
-        radio.focus();
+        access.focus();
       }
       return;
     }
@@ -550,7 +614,7 @@ export function useRelayShareLinkPane(props: {
     if (free && document.activeElement !== copy) copy.focus();
     focusAfterRender.current = inRow ? null : { ...target, shown: true };
   });
-  const [minted, setMinted] = useState<{ grantId: string; url: string } | null>(null);
+  const [minted, setMinted] = useState<MintedLink | null>(null);
   const [links, setLinks] = useState<RelayShareLinkRow[]>([]);
   // A read of the links that changes them reads each link's agents again. A
   // list reads once when it mounts.
@@ -567,7 +631,7 @@ export function useRelayShareLinkPane(props: {
   const [independentGrants, setIndependentGrants] = useState<RelayShareLinkIndependentGrant[]>([]);
   const [ownerAppendBusy, setOwnerAppendBusy] = useState<string | null>(null);
   const [ownerMutationBusy, setOwnerMutationBusy] = useState<OwnerMutationBusy | null>(null);
-  const [ownerMutationError, setOwnerMutationError] = useState<OwnerMutationBusy | null>(null);
+  const [ownerMutationError, setOwnerMutationError] = useState<OwnerMutationError | null>(null);
   const [ownerConfirmation, setOwnerConfirmation] = useState<OwnerConfirmation | null>(null);
   const linkScopeGeneration = useRef(0);
   const latestMintRequest = useRef(0);
@@ -586,11 +650,8 @@ export function useRelayShareLinkPane(props: {
   const activeOwnerMutationShareId = useRef<string | null>(null);
   const eligibleShareIdsRef = useRef<Set<string>>(new Set());
 
-  const targetKey =
-    props.target.kind === "version"
-      ? JSON.stringify(["version", props.target.versionId])
-      : JSON.stringify(["paths", ...normalizedPathSet(props.target.paths)]);
-  const linkScope = JSON.stringify([props.workspaceId, targetKey]);
+  const targetKey = targetKeyOf(props.target);
+  const linkScope = shareScope(props.workspaceId, props.target);
 
   const visibleLinks = useMemo(() => {
     const readable = links.filter((row) => rowMatchesTarget(row, props.target));
@@ -602,9 +663,6 @@ export function useRelayShareLinkPane(props: {
   }, [links, targetKey]);
 
   const visibleLinkGroups = useMemo(() => groupLinksByShareId(visibleLinks), [visibleLinks]);
-  const hasMatchingShare = visibleLinkGroups.some((group) =>
-    group.rows.some((row) => rowMatchesTarget(row, props.target)),
-  );
   const activeRootGrantShareIds = useMemo(
     () => new Set(independentGrants.map((grant) => grant.shareId)),
     [independentGrants],
@@ -689,12 +747,16 @@ export function useRelayShareLinkPane(props: {
     setLinkAccess("view");
     setMoreOpen(false);
     setSeparateOpen(false);
+    setLinksReadOnce(false);
+    setOpenDetails(new Set());
+    setSharesAddingLink(new Set());
     setSupportedLinkAccess(["view", "comment"]);
     setAddAccessByShareId({});
     setLinkError(null);
     setMinted(null);
     setUnsureUrls(new Set());
     focusAfterRender.current = null;
+    draftOpeners.current.clear();
     setLinks([]);
     linksKey.current = null;
     setLinksLoading(false);
@@ -1222,6 +1284,7 @@ export function useRelayShareLinkPane(props: {
     actionKey: string,
     request: () => Promise<unknown>,
     refresh: "discussion" | "inventories",
+    removal?: OwnerRemoval,
   ) {
     if (ownerMutationBusy !== null || !eligibleShareIdsRef.current.has(shareId)) {
       return;
@@ -1242,15 +1305,24 @@ export function useRelayShareLinkPane(props: {
       } else {
         void refreshLinks(scopeGeneration);
       }
-    } catch {
+    } catch (cause) {
       if (!isCurrentOwnerRequest(scopeGeneration, requestId, latestOwnerMutationRequest, shareId)) {
+        if (removal) {
+          props.shareRemovals?.failed({
+            workspaceId: props.workspaceId,
+            message: removal.message,
+            cause,
+            retry: removal.retry,
+          });
+        }
         return;
       }
       setOwnerConfirmation(null);
-      // A refused removal is already in the shell's notices, with Try again.
-      if (!(props.shareRemovals && actionKey.startsWith("revoke:"))) {
-        setOwnerMutationError({ shareId, actionKey });
-      }
+      setOwnerMutationError({
+        shareId,
+        actionKey,
+        ...(removal ? { message: withErrorWords(removal.message, cause) } : {}),
+      });
       if (refresh === "discussion") {
         pendingDiscussionReconciliationByShareId.current.add(shareId);
         updateOwnerDiscussion(shareId, (current) => ({
@@ -1316,56 +1388,42 @@ export function useRelayShareLinkPane(props: {
       );
       return;
     }
-    const scopeGeneration = linkScopeGeneration.current;
-    void runOwnerMutation(
-      action.shareId,
-      `revoke:${action.grantId}`,
-      () => endNamedAccess(action, scopeGeneration),
-      "inventories",
-    );
+    endNamedAccess(action);
   }
 
-  // Ends one person's access and reports it to the shell. Try again on a
-  // refusal runs this directly: the dialog may be gone by then, and the
-  // owner mutation gate only admits shares the open dialog still lists.
-  async function endNamedAccess(
-    action: Extract<OwnerConfirmation, { kind: "revoke" }>,
-    scopeGeneration: number,
-  ) {
+  // A refusal shows under the person's row while the dialog can show it. Once
+  // it cannot, the shell files it, and its Try again ends the access directly:
+  // the owner mutation gate only admits shares the open dialog still lists.
+  function endNamedAccess(action: Extract<OwnerConfirmation, { kind: "revoke" }>) {
+    const { workspaceId, shareRemovals } = props;
+    const scopeGeneration = linkScopeGeneration.current;
     const subject = `${action.name}'s access to ${targetLabel(props.target)}`;
-    try {
-      const result = await bridge().revokeRelayShareGrant({
-        workspaceId: props.workspaceId,
-        shareId: action.shareId,
-        grantId: action.grantId,
+    const message = `dohc could not end ${subject}.`;
+    const readAgain = () => {
+      if (isCurrentLinkScope(scopeGeneration)) void refreshLinks(scopeGeneration);
+    };
+    const end = async () => {
+      await removePersonAccess({
+        workspaceId,
+        person: action,
+        subject,
+        shareRemovals,
+        restored: readAgain,
       });
-      props.shareRemovals?.removed({
-        workspaceId: props.workspaceId,
-        shareId: action.shareId,
-        undo: result.undo,
-        message: `Ended ${subject}.`,
-        restoredMessage: `Restored ${subject}.`,
-        restored: () => {
-          if (isCurrentLinkScope(scopeGeneration)) void refreshLinks(scopeGeneration);
-        },
-      });
-      return result;
-    } catch (cause) {
-      props.shareRemovals?.failed({
-        workspaceId: props.workspaceId,
-        message: `dohc could not end ${subject}.`,
-        cause,
-        retry: () => {
-          void endNamedAccess(action, scopeGeneration).then(
-            () => {
-              if (isCurrentLinkScope(scopeGeneration)) void refreshLinks(scopeGeneration);
-            },
-            () => undefined,
-          );
-        },
-      });
-      throw cause;
-    }
+      if (isCurrentLinkScope(scopeGeneration))
+        setIndependentGrants((current) =>
+          current.filter((grant) => grant.grantId !== action.grantId),
+        );
+      props.people.removed(action.grantId);
+    };
+    const retry = () =>
+      void end().then(readAgain, (cause: unknown) =>
+        shareRemovals?.failed({ workspaceId, message, cause, retry }),
+      );
+    void runOwnerMutation(action.shareId, `revoke:${action.grantId}`, end, "inventories", {
+      message,
+      retry,
+    });
   }
 
   async function refreshLinks(
@@ -1405,7 +1463,7 @@ export function useRelayShareLinkPane(props: {
             return;
           }
           if (advertisedAccess && advertisedAccess.join() !== result.supportedLinkAccess.join())
-            throw new Error("dohc could not load consistent link permissions. Retry.");
+            throw new Error("dohc could not load consistent link access.");
           advertisedAccess = result.supportedLinkAccess;
           if (independentGrantCursor === undefined) {
             inventory.push(...result.links);
@@ -1476,7 +1534,6 @@ export function useRelayShareLinkPane(props: {
       if (!isCurrentLinkScope(scopeGeneration) || latestInventoryRequest.current !== requestId) {
         return;
       }
-      setIndependentGrants([]);
       setSupportedLinkAccess(["view", "comment"]);
       setLinkAccess("view");
       setAddAccessByShareId({});
@@ -1484,11 +1541,16 @@ export function useRelayShareLinkPane(props: {
     } finally {
       if (isCurrentLinkScope(scopeGeneration) && latestInventoryRequest.current === requestId) {
         setLinksLoading(false);
+        setLinksReadOnce(true);
       }
     }
   }
 
-  async function mintLink(action: LinkRequestBusy, request: () => Promise<MintedLinkResult>) {
+  async function mintLink(
+    action: LinkRequestBusy,
+    access: LinkAccess,
+    request: () => Promise<MintedLinkResult>,
+  ) {
     if (linkBusy || mutationBusy !== null || confirmation !== null) return;
     const scopeGeneration = linkScopeGeneration.current;
     const requestId = ++latestMintRequest.current;
@@ -1504,22 +1566,28 @@ export function useRelayShareLinkPane(props: {
       if (!isCurrentLinkScope(scopeGeneration) || latestMintRequest.current !== requestId) {
         return;
       }
-      setMinted({ grantId: result.grantId, url: result.url });
+      setMinted({ grantId: result.grantId, url: result.url, access });
       focusAfterRender.current = { kind: "copy", grantId: result.grantId, shown: false };
       if (action.kind === "create") {
         setSeparateOpen(false);
         // A separate link joins the links past the first share, so they show.
         setMoreOpen(true);
+      } else if (action.kind === "add") {
+        closeAdd(action.shareId);
+        if (shownShareId.current === action.shareId) setMoreOpen(true);
       }
       void refreshLinks(scopeGeneration);
     } catch (cause) {
       if (!isCurrentLinkScope(scopeGeneration) || latestMintRequest.current !== requestId) {
         return;
       }
-      setLinkError(ipcErrorMessage(cause));
+      setLinkError({
+        message: ipcErrorMessage(cause),
+        shareId: action.kind === "add" ? action.shareId : null,
+      });
       // The error shows beside the separate link, which may sit in that list.
       // A separate link made all the same shows there too.
-      if (action.kind === "create" || createInMore) setMoreOpen(true);
+      if (action.kind === "create") setMoreOpen(true);
       void refreshLinks(scopeGeneration);
     } finally {
       if (isCurrentLinkScope(scopeGeneration) && latestMintRequest.current === requestId) {
@@ -1564,18 +1632,61 @@ export function useRelayShareLinkPane(props: {
       payload = { workspaceId: props.workspaceId, paths: props.target.paths, access: linkAccess };
     }
     if (!(await checkAutomations({ recipientEmail: null, access: linkAccess }))) return;
-    await mintLink({ kind: "create" }, () => bridge().createRelayShareLink(payload));
+    await mintLink({ kind: "create" }, payload.access, () =>
+      bridge().createRelayShareLink(payload),
+    );
   }
 
   async function addLink(shareId: string, access: LinkAccess) {
     if (!(await checkAutomations({ recipientEmail: null, access, shareId }))) return;
-    await mintLink({ kind: "add", shareId }, () =>
+    await mintLink({ kind: "add", shareId }, access, () =>
       bridge().addRelayShareLink({
         workspaceId: props.workspaceId,
         shareId,
         access,
       }),
     );
+  }
+
+  function closeAdd(shareId: string) {
+    setSharesAddingLink((current) => {
+      if (!current.has(shareId)) return current;
+      const next = new Set(current);
+      next.delete(shareId);
+      return next;
+    });
+  }
+
+  function openAdd(shareId: string, openerGrantId: string) {
+    draftOpeners.current.set(addDraft(shareId), openerGrantId);
+    focusAfterRender.current = { kind: "draft", testId: `share-link-add-access-${shareId}` };
+    setSharesAddingLink((current) => new Set(current).add(shareId));
+  }
+
+  function openSeparate(openerGrantId: string) {
+    draftOpeners.current.set(SEPARATE_DRAFT, openerGrantId);
+    focusAfterRender.current = { kind: "draft", testId: "share-link-create-access" };
+    setSeparateOpen(true);
+    if (createInMore) setMoreOpen(true);
+  }
+
+  function focusDraftOpener(draft: string, shareId?: string) {
+    const opener = draftOpeners.current.get(draft);
+    draftOpeners.current.delete(draft);
+    const named = (testId: string) => `[data-testid=${JSON.stringify(testId)}]`;
+    const options = '[aria-label="Link options"]';
+    const places = [
+      ...(opener === undefined ? [] : [named(`share-link-options-${opener}`)]),
+      ...(shareId === undefined ? [] : [`${named(`share-link-group-${shareId}`)} ${options}`]),
+      options,
+    ];
+    for (const place of places) {
+      const button = document.querySelector<HTMLElement>(place);
+      if (button) {
+        button.focus();
+        return;
+      }
+    }
   }
 
   function openConfirmation(kind: LinkConfirmation["kind"], row: RelayShareLinkRow) {
@@ -1658,14 +1769,18 @@ export function useRelayShareLinkPane(props: {
         );
         setConfirmation(null);
         setLifecycleError(
-          "Who has access through this link changed. Check the updated names and confirm again.",
+          "Access through this link changed. Check the updated names and confirm again.",
         );
         void refreshLinks(scopeGeneration);
         return;
       }
 
       if (result.outcome === "rotated" || result.outcome === "widened") {
-        setMinted({ grantId: row.grantId, url: result.url });
+        setMinted({
+          grantId: row.grantId,
+          url: result.url,
+          access: action.kind === "retune" ? action.access : linkAccessOf(row.access),
+        });
         // The answer names the current URL, so it is no longer in doubt.
         setUnsureUrls((current) => {
           if (!current.has(row.grantId)) return current;
@@ -1760,6 +1875,13 @@ export function useRelayShareLinkPane(props: {
     return (
       <div
         data-testid="share-link-confirmation"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (mutationBusy === null) setConfirmation(null);
+          }
+        }}
         className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3"
       >
         <p className="m-0 text-[13px] leading-relaxed text-ink">
@@ -1786,14 +1908,14 @@ export function useRelayShareLinkPane(props: {
                     ? "Turn off editing for this link? The same link keeps working, for viewing only."
                     : "Turn off comments for this link? The same link keeps working, for viewing only."
                   : row.access === "edit"
-                    ? "Turn off editing for this link? The same link keeps working. Holders can view and comment."
-                    : "Use Comment access for this link? The same link keeps working. Holders can view and comment."}
+                    ? "Turn off editing for this link? The same link keeps working. Anyone with the link can view and comment."
+                    : "Use Comment access for this link? The same link keeps working. Anyone with the link can view and comment."}
                 {narrowerDependents.length > 0 ? (
                   <>
                     {" "}
                     These people drop to {confirmation.access === "comment"
                       ? "Comment"
-                      : "view"}{" "}
+                      : "View"}{" "}
                     too: <DependentNames dependents={narrowerDependents} />.
                   </>
                 ) : null}
@@ -1825,7 +1947,11 @@ export function useRelayShareLinkPane(props: {
           )}
         </p>
         <div className="flex justify-end gap-2">
-          <SecondaryButton disabled={mutationBusy !== null} onClick={() => setConfirmation(null)}>
+          <SecondaryButton
+            autoFocus
+            disabled={mutationBusy !== null}
+            onClick={() => setConfirmation(null)}
+          >
             Cancel
           </SecondaryButton>
           <LinkConfirm
@@ -1841,52 +1967,137 @@ export function useRelayShareLinkPane(props: {
     );
   }
 
-  function renderLinkUrl(url: string, grantId: string) {
-    const agentAddress = agentAddressFor(url);
+  function renderDraftLink(draft: {
+    name: string;
+    detail?: string;
+    testId: string;
+    accessTestId: string;
+    submitTestId: string;
+    supported: readonly LinkAccess[];
+    access: LinkAccess;
+    onAccess: (access: LinkAccess) => void;
+    submit: string;
+    onSubmit: () => void;
+    onCancel?: () => void;
+    note: { warning: string | null; failed: boolean } | null;
+    error: string | null;
+  }) {
     return (
-      <div data-link-url-for={grantId} className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 min-w-0 flex-1 items-center rounded-lg border border-line bg-bg px-3 font-mono text-[12px] text-muted">
-            <code data-testid="share-link-url" title={url} className="min-w-0 select-text truncate">
-              {url}
-            </code>
-          </div>
-          {/* Keyed by the link, so a reset link is a new control. */}
-          <CopyButton
-            key={url}
-            size="button"
-            label="Copy link"
-            getText={() => url}
-            sensitive={SHARE_LINK_SECRET}
-            testId="share-link-copy"
+      <section
+        key={draft.testId}
+        aria-label={draft.name}
+        data-testid={draft.testId}
+        className="flex flex-col gap-1"
+      >
+        <ShareLinkRow>
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span className="truncate text-[13px] text-muted">{draft.name}</span>
+            {draft.detail ? (
+              <span className="truncate text-[12px] leading-4 text-muted">{draft.detail}</span>
+            ) : null}
+          </span>
+          <ShareAccessMenu
+            label="Link access"
+            access={draft.access}
+            options={draft.supported.map((value) => ({
+              value,
+              description: SHARE_ACCESS_DESCRIPTIONS[value],
+            }))}
+            note={newLinkReach(props.target)}
+            disabled={linkControlsBusy}
+            testId={draft.accessTestId}
+            width={288}
+            align="end"
+            onPick={draft.onAccess}
           />
-        </div>
-        {/* The same link, at the address an agent signs in with. */}
-        {agentAddress !== null ? (
-          <div className="flex items-center gap-1">
-            <CopyButton
-              key={`agent:${url}`}
-              size="header"
-              icon={Sparkles}
-              label="Copy for an agent"
-              getText={() => agentAddressFor(url)}
-              sensitive={AGENT_ADDRESS_SECRET}
-              testId="share-link-agent-copy"
-            />
-            <AgentLinkAppMenu
-              key={`apps:${url}`}
-              link={agentAddress}
-              server="dohc-share"
-              sensitive={AGENT_ADDRESS_SECRET}
-              testId="share-link-agent-apps"
-            />
+          {/* The dialog's one filled button is Invite. */}
+          <SecondaryButton
+            type="button"
+            data-testid={draft.submitTestId}
+            className="shrink-0"
+            disabled={linkControlsBusy}
+            onClick={draft.onSubmit}
+          >
+            {draft.submit}
+          </SecondaryButton>
+          {draft.onCancel ? (
+            <IconButton
+              aria-label={`Cancel ${draft.name.toLowerCase()}`}
+              title="Cancel"
+              disabled={linkBusy}
+              onClick={draft.onCancel}
+            >
+              <X size={13} aria-hidden />
+            </IconButton>
+          ) : null}
+        </ShareLinkRow>
+        {draft.note?.warning || draft.note?.failed || draft.error ? (
+          <div className={`flex flex-col gap-1 ${SHARE_ROW_INSET}`}>
+            <AutomationShareNote note={draft.note} />
+            {draft.error ? (
+              <p
+                data-testid="share-link-error"
+                role="alert"
+                className="m-0 text-[12px] text-danger"
+              >
+                {draft.error}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
+  function renderLinkUrl(url: string) {
+    return (
+      <div className="flex h-8 min-w-0 items-center rounded-lg border border-line bg-bg px-3 text-[12px] text-muted">
+        <code
+          data-testid="share-link-url"
+          title={url}
+          className="min-w-0 select-text truncate font-sans"
+        >
+          {url}
+        </code>
+      </div>
+    );
+  }
+
+  function renderLinkDetails(grantId: string, details: ReactNode) {
+    const detailsId = `share-link-details-list-${grantId}`;
+    const detailsOpen = openDetails.has(grantId);
+    return (
+      <div className={`flex flex-col gap-2 ${SHARE_ROW_INSET}`}>
+        <GhostButton
+          className="-ml-2 self-start"
+          data-testid={`share-link-details-${grantId}`}
+          aria-expanded={detailsOpen}
+          aria-controls={detailsId}
+          onClick={() =>
+            setOpenDetails((current) => {
+              const next = new Set(current);
+              if (!next.delete(grantId)) next.add(grantId);
+              return next;
+            })
+          }
+        >
+          <ChevronRight
+            size={13}
+            aria-hidden
+            className={`transition-transform duration-150 ${detailsOpen ? "rotate-90" : ""}`}
+          />
+          Link details
+        </GhostButton>
+        {detailsOpen ? (
+          <div id={detailsId} className="flex flex-col gap-2 pb-2">
+            {details}
           </div>
         ) : null}
       </div>
     );
   }
 
-  function renderLinkRow(group: LinkGroup, row: RelayShareLinkRow) {
+  function renderLinkRow(group: LinkGroup, row: RelayShareLinkRow, carriesShareActions = false) {
     const damaged = row.selector === null;
     const active = row.status === "active";
     const access = linkAccessOf(row.access);
@@ -1914,112 +2125,161 @@ export function useRelayShareLinkPane(props: {
         ? ` · Link reset ${shortDate.format(row.urlIssuedAtMs)}`
         : "";
     const confirming = confirmation !== null && confirmationRow?.grantId === row.grantId;
+    const busy = linkBusy || mutationBusy !== null;
+    const lifecycle: MenuEntry[] = !active
+      ? []
+      : [
+          ...(canReset
+            ? [
+                {
+                  id: "reset",
+                  label: "Reset link",
+                  ...waits(busy),
+                  onSelect: () => openConfirmation("reset", row),
+                },
+              ]
+            : []),
+          {
+            id: "end",
+            label: "End link",
+            danger: true,
+            ...waits(busy),
+            onSelect: () => openConfirmation("end", row),
+          },
+        ];
+    const ofShare: MenuEntry[] = [
+      ...(carriesShareActions
+        ? [
+            {
+              id: "comments",
+              label: ownerDiscussionByShareId[group.shareId]?.expanded
+                ? "Hide comments"
+                : "Comments",
+              onSelect: () => toggleOwnerDiscussion(group.shareId),
+            },
+            {
+              id: "add",
+              label: "Add another link",
+              ...waits(linkControlsBusy),
+              onSelect: () => openAdd(group.shareId, row.grantId),
+            },
+          ]
+        : []),
+      ...(isWorking(row)
+        ? [
+            {
+              id: "separate",
+              label: "New separate link",
+              ...waits(linkControlsBusy),
+              onSelect: () => openSeparate(row.grantId),
+            },
+          ]
+        : []),
+    ];
+    const items: MenuEntry[] =
+      ofShare.length > 0 && lifecycle.length > 0
+        ? [...ofShare, MENU_SEPARATOR, ...lifecycle]
+        : [...ofShare, ...lifecycle];
+    const options =
+      items.length > 0 ? (
+        <ShareOptionsMenu
+          label="Link options"
+          testId={`share-link-options-${row.grantId}`}
+          items={items}
+        />
+      ) : null;
     return (
       <article
         key={row.grantId}
         data-testid={`share-link-row-${row.grantId}`}
         data-status={row.status}
-        className="flex flex-col gap-2 border-t border-line px-3 py-3 first:border-t-0"
+        className="flex flex-col gap-1"
       >
-        {damaged ? (
-          <div className="flex min-h-7 items-center gap-2">
-            <p className="m-0 min-w-0 flex-1 text-[12px] leading-relaxed text-muted">
-              Unreadable link. dohc can't read what this link shares.
+        <ShareLinkRow linkUrlFor={row.grantId}>
+          {damaged ? (
+            <p className="m-0 min-w-0 flex-1 text-[12px] leading-4 text-muted">
+              Unreadable link. dohc cannot read what this link shares.
             </p>
-            {active ? (
-              <MoreMenu
-                label="Link options"
-                topLayer
-                testId={`share-link-options-${row.grantId}`}
-                items={[
-                  {
-                    label: "End link",
-                    danger: true,
-                    disabled: linkBusy || mutationBusy !== null,
-                    onSelect: () => openConfirmation("end", row),
-                  },
-                ]}
-              />
-            ) : null}
-          </div>
-        ) : (
-          <div className="flex min-h-7 items-center gap-2">
-            {active && access !== null && retuneTo.length > 1 ? (
-              // Picking a level opens the row's confirmation.
-              <ShareAccessMenu
-                label="Access for this link"
-                access={access}
-                options={retuneTo.map((value) => ({ value }))}
-                disabled={linkBusy || mutationBusy !== null}
-                testId={`share-link-access-${row.grantId}`}
-                onPick={(next) => pickLinkAccess(row, next)}
-              />
-            ) : (
-              <span className="flex h-7 shrink-0 items-center rounded-md px-2 text-[12px] font-medium text-ink">
-                {access === null ? row.access : SHARE_ACCESS_WORDS[access]}
+          ) : (
+            <div className="-ml-2 flex shrink-0">
+              {active && access !== null && retuneTo.length > 1 ? (
+                // Picking a level opens the row's confirmation.
+                <ShareAccessMenu
+                  label="Access for this link"
+                  access={access}
+                  options={retuneTo.map((value) => ({ value }))}
+                  disabled={busy}
+                  testId={`share-link-access-${row.grantId}`}
+                  onPick={(next) => pickLinkAccess(row, next)}
+                />
+              ) : (
+                <ShareAccessLevel>
+                  {access === null ? row.access : SHARE_ACCESS_WORDS[access]}
+                </ShareAccessLevel>
+              )}
+            </div>
+          )}
+          {!active ? (
+            <>
+              <span className="min-w-0 flex-1 truncate text-[12px] text-subtle">
+                Ended {shortDate.format(row.revokedAtMs ?? row.createdAtMs)}
               </span>
-            )}
-            <span className="min-w-0 flex-1 truncate text-[12px] text-subtle">
-              {active
-                ? `${used} · Created ${shortDate.format(row.createdAtMs)}${issued}`
-                : `Ended ${shortDate.format(row.revokedAtMs ?? row.createdAtMs)}`}
-            </span>
-            {active ? (
-              <MoreMenu
-                label="Link options"
-                topLayer
-                testId={`share-link-options-${row.grantId}`}
-                items={[
-                  ...(canReset
-                    ? [
-                        {
-                          label: "Reset link",
-                          disabled: linkBusy || mutationBusy !== null,
-                          onSelect: () => openConfirmation("reset", row),
-                        },
-                      ]
-                    : []),
-                  {
-                    label: "End link",
-                    danger: true,
-                    disabled: linkBusy || mutationBusy !== null,
-                    onSelect: () => openConfirmation("end", row),
-                  },
-                ]}
-              />
-            ) : null}
-          </div>
-        )}
+              {damaged ? null : options}
+            </>
+          ) : damaged ? (
+            options
+          ) : (
+            // Keyed by the link, so a reset link is a new control.
+            <LinkRowActions
+              key={url ?? ""}
+              grantId={row.grantId}
+              url={url}
+              everyday={ofShare}
+              lifecycle={lifecycle}
+            />
+          )}
+        </ShareLinkRow>
 
-        {url !== null ? (
-          renderLinkUrl(url, row.grantId)
-        ) : active && !damaged && unsure ? (
-          <p data-testid="share-link-unsure" className="m-0 text-[12px] leading-relaxed text-muted">
+        {!active || damaged || url !== null ? null : unsure ? (
+          <p
+            data-testid="share-link-unsure"
+            className={`m-0 text-[12px] leading-4 text-muted ${SHARE_ROW_INSET}`}
+          >
             dohc could not load the current link.
           </p>
-        ) : active && !damaged ? (
+        ) : (
           <p
             data-testid="share-link-no-copy"
-            className="m-0 text-[12px] leading-relaxed text-muted"
+            className={`m-0 text-[12px] leading-4 text-muted ${SHARE_ROW_INSET}`}
           >
             {canReset
               ? "dohc has no copy of this link. Reset it to get a link you can copy."
               : "dohc has no copy of this link."}
           </p>
-        ) : null}
+        )}
 
-        {confirming ? renderLinkConfirmation(row) : null}
+        {confirming ? <div className={SHARE_ROW_INSET}>{renderLinkConfirmation(row)}</div> : null}
 
-        {active && !damaged ? (
-          <LinkAgentsList
-            key={`${props.workspaceId}:${group.shareId}:${row.grantId}`}
-            workspaceId={props.workspaceId}
-            shareId={group.shareId}
-            grantId={row.grantId}
-            revision={linksRevision}
-            disconnects={agentDisconnects}
-          />
-        ) : null}
+        {active && !damaged
+          ? renderLinkDetails(
+              row.grantId,
+              <>
+                {url !== null ? renderLinkUrl(url) : null}
+                <p className="m-0 text-[12px] leading-4 text-subtle">
+                  {used} · Created {shortDate.format(row.createdAtMs)}
+                  {issued}
+                </p>
+                <LinkAgentsList
+                  key={`${props.workspaceId}:${group.shareId}:${row.grantId}`}
+                  workspaceId={props.workspaceId}
+                  shareId={group.shareId}
+                  grantId={row.grantId}
+                  revision={linksRevision}
+                  disconnects={agentDisconnects}
+                />
+              </>,
+            )
+          : null}
       </article>
     );
   }
@@ -2028,19 +2288,27 @@ export function useRelayShareLinkPane(props: {
     return (
       <div
         data-testid="owner-comments-confirmation"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (ownerMutationBusy === null) setOwnerConfirmation(null);
+          }
+        }}
         className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3"
       >
         <p className="m-0 text-[13px] leading-relaxed text-ink">
           {pending.kind === "delete"
-            ? "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted."
+            ? "Delete this comment? This cannot be undone. Readers see that a comment was deleted."
             : pending.kind === "block"
-              ? `Block ${pending.name}? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
+              ? `Block ${pending.name}? They cannot comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
               : pending.kind === "promote"
                 ? `Make ${pending.name}'s access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.`
-                : `End ${pending.name}'s access? They lose access right away. Copies they already made stay with them.`}
+                : `Remove ${pending.name}'s access? They lose access right away. Copies they already made stay with them.`}
         </p>
         <div className="flex justify-end gap-2">
           <SecondaryButton
+            autoFocus
             disabled={ownerMutationBusy !== null}
             onClick={() => setOwnerConfirmation(null)}
           >
@@ -2057,33 +2325,49 @@ export function useRelayShareLinkPane(props: {
                 ? "Block"
                 : pending.kind === "promote"
                   ? "Make independent"
-                  : "End access"}
+                  : "Remove access"}
           </OwnerConfirm>
         </div>
       </div>
     );
   }
 
-  function renderPeople(group: LinkGroup) {
+  function peopleOf(group: LinkGroup) {
     const displayedDependentIds = new Set(
       group.rows.flatMap((row) =>
         row.status === "active" ? row.dependents.map((dependent) => dependent.grantId) : [],
       ),
     );
-    const shareIndependentGrants = independentGrants.filter(
-      (grant) =>
-        grant.shareId === group.shareId &&
-        grant.recipientUserId !== null &&
-        !displayedDependentIds.has(grant.grantId),
-    );
-    const linkedPeople = group.rows.flatMap((row) =>
-      row.status === "active"
-        ? row.dependents
-            .filter((dependent) => dependent.recipientUserId !== null)
-            .map((dependent) => ({ row, dependent }))
-        : [],
-    );
-    if (linkedPeople.length === 0 && shareIndependentGrants.length === 0) return null;
+    return {
+      independent: independentGrants.filter(
+        (grant) =>
+          grant.shareId === group.shareId &&
+          grant.recipientUserId !== null &&
+          !displayedDependentIds.has(grant.grantId),
+      ),
+      linked: group.rows.flatMap((row) =>
+        row.status === "active"
+          ? row.dependents
+              .filter((dependent) => dependent.recipientUserId !== null)
+              .map((dependent) => ({ row, dependent }))
+          : [],
+      ),
+    };
+  }
+
+  function renderPeople(group: LinkGroup) {
+    const drawn = peopleOf(group);
+    const independentPeople = props.people.answered(drawn.independent.map(personOfGrant));
+    const linkedPeople = drawn.linked;
+    if (linkedPeople.length === 0 && independentPeople.length === 0) return null;
+    const scopeGeneration = linkScopeGeneration.current;
+    const refused = (actionKey: string) =>
+      ownerMutationError?.shareId === group.shareId &&
+      ownerMutationError.actionKey === actionKey ? (
+        <p role="alert" className="m-0 text-[12px] text-danger">
+          dohc could not complete that change.
+        </p>
+      ) : null;
     return (
       <div
         key={group.shareId}
@@ -2091,74 +2375,87 @@ export function useRelayShareLinkPane(props: {
         className="flex flex-col gap-1"
       >
         {linkedPeople.map(({ row, dependent }) => {
-          const actionKey = `promote:${dependent.grantId}`;
+          const name = dependentName(dependent);
+          const error = refused(`promote:${dependent.grantId}`);
           return (
             <div
               key={`${row.grantId}:${dependent.grantId}`}
               data-testid={`share-dependent-${dependent.grantId}`}
               className="flex flex-col gap-1"
             >
-              <SharePersonRow
-                name={dependentName(dependent)}
-                detail={`${accessWords(dependent.access)} · Joined through a link`}
-              >
-                <SecondaryButton
-                  size="compact"
-                  disabled={ownerMutationBusy !== null}
-                  onClick={() => {
-                    setOwnerConfirmation({
-                      kind: "promote",
-                      shareId: group.shareId,
-                      grantId: dependent.grantId,
-                      parentGrantId: row.grantId,
-                      parentGeneration: row.generation,
-                      name: dependentName(dependent),
-                    });
-                  }}
-                >
-                  Make independent
-                </SecondaryButton>
+              <SharePersonRow name={name} detail="Joined through a link">
+                <ShareAccessLevel>{accessWords(dependent.access)}</ShareAccessLevel>
+                <ShareOptionsMenu
+                  label={`Options for ${name}`}
+                  testId={`share-person-options-${dependent.grantId}`}
+                  width={176}
+                  items={[
+                    {
+                      id: "promote",
+                      label: "Make independent",
+                      ...waits(ownerMutationBusy !== null),
+                      onSelect: () =>
+                        setOwnerConfirmation({
+                          kind: "promote",
+                          shareId: group.shareId,
+                          grantId: dependent.grantId,
+                          parentGrantId: row.grantId,
+                          parentGeneration: row.generation,
+                          name,
+                        }),
+                    },
+                  ]}
+                />
               </SharePersonRow>
-              {ownerMutationError?.shareId === group.shareId &&
-              ownerMutationError.actionKey === actionKey ? (
-                <p role="alert" className="m-0 text-[12px] text-danger">
-                  dohc could not complete that change.
-                </p>
-              ) : null}
+              {error ? <div className={SHARE_ROW_INSET}>{error}</div> : null}
             </div>
           );
         })}
-        {shareIndependentGrants.map((grant) => {
-          const actionKey = `revoke:${grant.grantId}`;
+        {independentPeople.map((person) => {
+          const removal: Extract<OwnerConfirmation, { kind: "revoke" }> = {
+            kind: "revoke",
+            shareId: group.shareId,
+            grantId: person.grantId,
+            name: person.name,
+          };
+          const removeError =
+            ownerMutationError?.shareId === group.shareId &&
+            ownerMutationError.actionKey === `revoke:${person.grantId}`
+              ? ownerMutationError.message
+              : undefined;
           return (
-            <div
-              key={grant.grantId}
-              data-testid={`share-independent-${grant.grantId}`}
-              className="flex flex-col gap-1"
+            <PersonAccessRow
+              key={person.grantId}
+              testId={`share-independent-${person.grantId}`}
+              workspaceId={props.workspaceId}
+              target={props.target}
+              person={person}
+              busy={ownerMutationBusy !== null}
+              actions={[
+                {
+                  id: "remove",
+                  label: "Remove access",
+                  danger: true,
+                  testId: `share-remove-${person.grantId}`,
+                  onSelect: () => setOwnerConfirmation(removal),
+                },
+              ]}
+              onAccessChanged={(changed) => {
+                if (!isCurrentLinkScope(scopeGeneration)) return;
+                props.people.changed({ ...person, ...changed });
+                void refreshLinks(scopeGeneration);
+              }}
             >
-              <SharePersonRow name={namedGrantName(grant)} detail={accessWords(grant.access)}>
-                <SecondaryButton
-                  size="compact"
-                  disabled={ownerMutationBusy !== null}
-                  onClick={() => {
-                    setOwnerConfirmation({
-                      kind: "revoke",
-                      shareId: group.shareId,
-                      grantId: grant.grantId,
-                      name: namedGrantName(grant),
-                    });
-                  }}
+              {removeError ? (
+                <PersonRemovalError
+                  grantId={person.grantId}
+                  busy={ownerMutationBusy !== null}
+                  onRetry={() => endNamedAccess(removal)}
                 >
-                  End access
-                </SecondaryButton>
-              </SharePersonRow>
-              {ownerMutationError?.shareId === group.shareId &&
-              ownerMutationError.actionKey === actionKey ? (
-                <p role="alert" className="m-0 text-[12px] text-danger">
-                  dohc could not complete that change.
-                </p>
+                  {removeError}
+                </PersonRemovalError>
               ) : null}
-            </div>
+            </PersonAccessRow>
           );
         })}
         {ownerConfirmation?.shareId === group.shareId &&
@@ -2177,7 +2474,10 @@ export function useRelayShareLinkPane(props: {
     const showOwnerAppendRetry = ownerDiscussion.appendError && !ownerDraftInvalid;
     const ownerDraftErrorId = `share-comment-body-error-${group.shareId}`;
     return (
-      <div className="flex flex-col gap-3 border-t border-line px-3 py-3">
+      <div
+        data-testid={`share-comments-${group.shareId}`}
+        className={`flex flex-col gap-3 pb-2 ${SHARE_ROW_INSET}`}
+      >
         <div className="flex items-center gap-2">
           <p className="m-0 min-w-0 flex-1 text-[12px] leading-relaxed text-muted">
             {ownerDiscussion.linkCommentsPaused
@@ -2429,172 +2729,81 @@ export function useRelayShareLinkPane(props: {
   }
 
   function renderLinkGroup(group: LinkGroup, rows: readonly RelayShareLinkRow[] = group.rows) {
-    const canAdd = eligibleShareIds.has(group.shareId);
-    const addAccess = addAccessByShareId[group.shareId] ?? "view";
-    const addNote = automationCheck.noteFor({
-      recipientEmail: null,
-      access: addAccess,
-      shareId: group.shareId,
-    });
-    const ownerDiscussion = ownerDiscussionByShareId[group.shareId] ?? emptyOwnerDiscussion();
+    const { shareId } = group;
+    const canAdd = eligibleShareIds.has(shareId);
+    const addAccess = addAccessByShareId[shareId] ?? "view";
+    const addNote = automationCheck.noteFor({ recipientEmail: null, access: addAccess, shareId });
+    const adding =
+      linkRequestBusy !== null &&
+      linkRequestBusy.kind !== "create" &&
+      linkRequestBusy.shareId === shareId
+        ? linkRequestBusy.kind
+        : null;
     const addSupported = group.rows.some((row) => row.selector?.versionId !== null)
       ? availableLinkAccess.filter((access) => access !== "edit")
       : availableLinkAccess;
     return (
       <div
-        key={group.shareId}
-        data-testid={`share-link-group-${group.shareId}`}
-        className="flex flex-col rounded-lg border border-line bg-panel"
+        key={shareId}
+        data-testid={`share-link-group-${shareId}`}
+        className="flex flex-col gap-1"
       >
-        {rows.map((row) => renderLinkRow(group, row))}
+        {rows.map((row) =>
+          renderLinkRow(
+            group,
+            row,
+            canAdd && (row.status === "active" || (row === rows[0] && !rows.some(isActive))),
+          ),
+        )}
 
-        {canAdd ? (
-          <div className="flex flex-col gap-2 border-t border-line px-3 py-2">
-            <div className="flex items-center gap-2">
-              <GhostButton
-                aria-expanded={ownerDiscussion.expanded}
-                onClick={() => toggleOwnerDiscussion(group.shareId)}
-              >
-                <MessageSquare size={13} aria-hidden />
-                Comments
-              </GhostButton>
-              <span className="flex-1" />
-              <AddLinkMenu
-                supported={addSupported}
-                disabled={linkControlsBusy}
-                busyLabel={
-                  linkRequestBusy?.kind === "check" && linkRequestBusy.shareId === group.shareId
-                    ? "Checking automations…"
-                    : linkRequestBusy?.kind === "add" && linkRequestBusy.shareId === group.shareId
-                      ? "Adding link…"
-                      : null
-                }
-                warned={Boolean(addNote?.warning)}
-                onPick={(nextAccess) => {
-                  if (nextAccess !== addAccess) {
-                    setAddAccessByShareId((current) => ({
-                      ...current,
-                      [group.shareId]: nextAccess,
-                    }));
-                  }
-                  void addLink(group.shareId, nextAccess);
-                }}
-                onConfirm={() => void addLink(group.shareId, addAccess)}
-                onCancel={() =>
-                  setAddAccessByShareId((current) => ({ ...current, [group.shareId]: "view" }))
-                }
-              />
-            </div>
-            <AutomationShareNote note={addNote} />
-          </div>
-        ) : null}
+        {canAdd && (sharesAddingLink.has(shareId) || adding !== null)
+          ? renderDraftLink({
+              name: "Another link",
+              detail: "Same comments",
+              testId: addDraft(shareId),
+              accessTestId: `share-link-add-access-${shareId}`,
+              submitTestId: `share-link-add-submit-${shareId}`,
+              supported: addSupported,
+              access: addAccess,
+              onAccess: (access) =>
+                setAddAccessByShareId((current) => ({ ...current, [shareId]: access })),
+              submit:
+                adding === "check"
+                  ? "Checking automations…"
+                  : adding === "add"
+                    ? "Adding link…"
+                    : addNote?.warning
+                      ? "Add link anyway"
+                      : "Add link",
+              onSubmit: () => void addLink(shareId, addAccess),
+              onCancel: () => {
+                focusDraftOpener(addDraft(shareId), shareId);
+                closeAdd(shareId);
+                setAddAccessByShareId((current) => ({ ...current, [shareId]: "view" }));
+                setLinkError((current) => (current?.shareId === shareId ? null : current));
+              },
+              note: addNote,
+              error: linkError?.shareId === shareId ? linkError.message : null,
+            })
+          : null}
 
-        {canAdd && ownerDiscussion.expanded ? renderOwnerDiscussion(group) : null}
+        {canAdd && ownerDiscussionByShareId[shareId]?.expanded
+          ? renderOwnerDiscussion(group)
+          : null}
       </div>
     );
   }
-
-  const createLabel =
-    linkRequestBusy?.kind === "check" && linkRequestBusy.shareId === null
-      ? "Checking automations…"
-      : linkRequestBusy?.kind === "create"
-        ? "Creating link…"
-        : newLinkNote?.warning
-          ? "Create link anyway"
-          : hasMatchingShare
-            ? "Create separate link"
-            : "Create link";
-
-  // Once this selection has a share, another link is added to it from its
-  // card; a separate share is the rarer choice, one step further away.
-  const separateHidden =
-    hasMatchingShare &&
-    !separateOpen &&
-    !newLinkNote?.warning &&
-    linkRequestBusy?.kind !== "create" &&
-    linkError === null;
-
-  const createSection = separateHidden ? (
-    <GhostButton
-      className="self-start"
-      disabled={linkControlsBusy}
-      onClick={() => {
-        focusAfterRender.current = { kind: "separate" };
-        setSeparateOpen(true);
-      }}
-    >
-      <Plus size={13} aria-hidden />
-      Create separate link
-    </GhostButton>
-  ) : (
-    <section
-      aria-label="New link"
-      data-testid="share-link-create-section"
-      className="flex flex-col gap-2"
-    >
-      {hasMatchingShare ? (
-        <div className="flex flex-col gap-1">
-          <SectionLabel as="h3" className="m-0">
-            Separate link
-          </SectionLabel>
-          <p className="m-0 text-[12px] leading-relaxed text-muted">
-            Starts a new share with its own comments.
-          </p>
-        </div>
-      ) : null}
-      <div className="flex items-center gap-2">
-        <div className="min-w-0 flex-1">
-          <LinkAccessChoice
-            supported={availableLinkAccess}
-            access={linkAccess}
-            ariaLabel="Link access"
-            disabled={linkControlsBusy}
-            onChange={setLinkAccess}
-          />
-        </div>
-        {/* The dialog's one filled button is Invite. */}
-        <SecondaryButton
-          type="button"
-          data-testid="share-link-create"
-          className="shrink-0"
-          disabled={linkControlsBusy}
-          onClick={() => void createLink()}
-        >
-          {createLabel}
-        </SecondaryButton>
-      </div>
-      {linkAccess === "edit" ? (
-        <p className="m-0 text-[12px] leading-relaxed text-subtle">
-          People who can edit can see the full History.
-        </p>
-      ) : null}
-      <AutomationShareNote note={newLinkNote} />
-      {linkError ? (
-        <p data-testid="share-link-error" role="alert" className="m-0 text-[12px] text-danger">
-          {linkError}
-        </p>
-      ) : null}
-      {hasMatchingShare ? null : (
-        <p className="m-0 text-[12px] leading-relaxed text-muted">
-          Anyone with the link can open it without an account.{" "}
-          {props.target.kind === "version"
-            ? "The link shows this version as it is now."
-            : "If files are added to this selection later, the link includes them."}{" "}
-          The sync relay serves the link, so it can read this content.
-        </p>
-      )}
-    </section>
-  );
 
   // A new link shows at once, before the list that holds it reads again.
   const mintedElsewhere =
     minted !== null &&
     !visibleLinks.some((row) => row.grantId === minted.grantId && row.status === "active");
 
-  // One share's working links show. The first to show is the share whose
-  // working link is oldest, so a new link never moves it, and it keeps its
-  // place while it has a working link. Every other share of this selection,
-  // with its own comments, and every other link waits under one line.
+  // One link shows. The first to show is the oldest working link, so a new
+  // link never moves it, and it keeps its place while it works. When it stops
+  // working, its share's oldest working link takes its place. Every other
+  // link, of that share or of another share of this selection with its own
+  // comments, waits under one line.
   const isWorking = (row: RelayShareLinkRow) =>
     row.status === "active" && rowMatchesTarget(row, props.target);
   const firstWorkingLink = (group: LinkGroup) =>
@@ -2619,13 +2828,77 @@ export function useRelayShareLinkPane(props: {
         : oldest;
     }, null);
   shownShareId.current = primaryGroup?.shareId ?? null;
-  const primaryRows = primaryGroup?.rows.filter(isWorking) ?? [];
-  const primaryRest = primaryGroup?.rows.filter((row) => !isWorking(row)) ?? [];
+  const primaryRow = primaryGroup
+    ? (primaryGroup.rows.find((row) => row.grantId === shownGrantId.current && isWorking(row)) ??
+      firstWorkingLink(primaryGroup)!)
+    : null;
+  shownGrantId.current = primaryRow?.grantId ?? null;
+  const primaryRows = primaryRow ? [primaryRow] : [];
+  const primaryRest = primaryGroup?.rows.filter((row) => row !== primaryRow) ?? [];
   const moreGroups = visibleLinkGroups.filter((group) => group !== primaryGroup);
   const moreLinkCount =
     primaryRest.length + moreGroups.reduce((count, group) => count + group.rows.length, 0);
   // A separate link is made beside the other separate links, once there are any.
   const createInMore = primaryGroup !== null && moreLinkCount > 0;
+
+  const createError = linkError !== null && linkError.shareId === null ? linkError.message : null;
+  const creating =
+    linkRequestBusy?.kind === "create" ||
+    (linkRequestBusy?.kind === "check" && linkRequestBusy.shareId === null);
+  // While a link works, another link is added to its share from its menu. A
+  // separate share is the rarer choice, asked for from the same menu.
+  const separateHidden =
+    primaryGroup !== null &&
+    !separateOpen &&
+    !newLinkNote?.warning &&
+    !creating &&
+    createError === null;
+  const createHidden =
+    separateHidden ||
+    (primaryGroup === null &&
+      !creating &&
+      createError === null &&
+      !newLinkNote?.warning &&
+      (!linksReadOnce || (mintedElsewhere && linksLoading)));
+
+  const createSection = createHidden
+    ? null
+    : renderDraftLink({
+        name:
+          primaryGroup !== null
+            ? "Separate link"
+            : mintedElsewhere || linksError
+              ? "New link"
+              : "No link",
+        ...(primaryGroup !== null ? { detail: "Its own comments" } : {}),
+        testId: SEPARATE_DRAFT,
+        accessTestId: "share-link-create-access",
+        submitTestId: "share-link-create",
+        supported: availableLinkAccess,
+        access: linkAccess,
+        onAccess: setLinkAccess,
+        submit:
+          linkRequestBusy?.kind === "check" && linkRequestBusy.shareId === null
+            ? "Checking automations…"
+            : linkRequestBusy?.kind === "create"
+              ? "Creating link…"
+              : newLinkNote?.warning
+                ? "Create link anyway"
+                : "Create link",
+        onSubmit: () => void createLink(),
+        ...(primaryGroup !== null
+          ? {
+              onCancel: () => {
+                focusDraftOpener(SEPARATE_DRAFT);
+                setSeparateOpen(false);
+                setLinkAccess("view");
+                setLinkError((current) => (current?.shareId === null ? null : current));
+              },
+            }
+          : {}),
+        note: newLinkNote,
+        error: createError,
+      });
 
   // What sits under the closed list stops with it: its comments stop reading,
   // and a question open on one of its links no longer holds the links that
@@ -2649,26 +2922,46 @@ export function useRelayShareLinkPane(props: {
     setMoreOpen(!moreOpen);
   }
 
-  const peopleGroups = props.visible
-    ? visibleLinkGroups
-        .filter((group) => eligibleShareIds.has(group.shareId))
-        .map((group) => renderPeople(group))
-        .filter((group) => group !== null)
+  const groupsWithPeople = props.visible
+    ? visibleLinkGroups.filter((group) => eligibleShareIds.has(group.shareId))
     : [];
+  const peopleGroups = groupsWithPeople
+    .map((group) => renderPeople(group))
+    .filter((group) => group !== null);
+  const peopleGrantIds = new Set(
+    groupsWithPeople.flatMap((group) => {
+      const drawn = peopleOf(group);
+      return [
+        ...drawn.independent.map((grant) => grant.grantId),
+        ...drawn.linked.map(({ dependent }) => dependent.grantId),
+      ];
+    }),
+  );
 
   return {
     content: props.visible ? (
-      <section className="flex flex-col gap-2" aria-labelledby="share-links-heading">
+      <section className="flex flex-col gap-1" aria-labelledby="share-links-heading">
         <SectionLabel as="h3" id="share-links-heading" className="m-0">
           Anyone with the link
         </SectionLabel>
 
         {mintedElsewhere ? (
-          <div
-            data-testid="share-link-new"
-            className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-3"
-          >
-            {renderLinkUrl(minted.url, minted.grantId)}
+          <div data-testid="share-link-new" className="flex flex-col gap-1">
+            <ShareLinkRow linkUrlFor={minted.grantId}>
+              {minted.access ? (
+                <div className="-ml-2 flex shrink-0">
+                  <ShareAccessLevel>{SHARE_ACCESS_WORDS[minted.access]}</ShareAccessLevel>
+                </div>
+              ) : null}
+              <LinkRowActions
+                key={minted.url}
+                grantId={minted.grantId}
+                url={minted.url}
+                everyday={[]}
+                lifecycle={[]}
+              />
+            </ShareLinkRow>
+            {renderLinkDetails(minted.grantId, renderLinkUrl(minted.url))}
           </div>
         ) : null}
 
@@ -2680,7 +2973,7 @@ export function useRelayShareLinkPane(props: {
               Loading links…
             </p>
           ) : (
-            <SkeletonRows rows={2} label="Loading links…" />
+            <SkeletonRows rows={2} label="Loading links…" className="py-2" />
           )
         ) : null}
 
@@ -2708,7 +3001,7 @@ export function useRelayShareLinkPane(props: {
         {moreLinkCount > 0 ? (
           <>
             <GhostButton
-              className="self-start"
+              className="-ml-2 self-start"
               data-testid="share-links-more"
               aria-expanded={moreOpen}
               aria-controls="share-links-more-list"
@@ -2722,13 +3015,19 @@ export function useRelayShareLinkPane(props: {
               {moreLinkCount} more {moreLinkCount === 1 ? "link" : "links"}
             </GhostButton>
             {moreOpen ? (
-              <div id="share-links-more-list" className="flex flex-col gap-2">
+              <div id="share-links-more-list" className="flex flex-col gap-3">
                 {primaryGroup && primaryRest.length > 0 ? (
                   <div
                     data-testid={`share-link-rest-${primaryGroup.shareId}`}
-                    className="flex flex-col rounded-lg border border-line bg-panel"
+                    className="flex flex-col gap-1"
                   >
-                    {primaryRest.map((row) => renderLinkRow(primaryGroup, row))}
+                    {primaryRest.map((row) =>
+                      renderLinkRow(
+                        primaryGroup,
+                        row,
+                        isWorking(row) && eligibleShareIds.has(primaryGroup.shareId),
+                      ),
+                    )}
                   </div>
                 ) : null}
                 {moreGroups.map((group) => renderLinkGroup(group))}
@@ -2740,8 +3039,7 @@ export function useRelayShareLinkPane(props: {
       </section>
     ) : null,
     people: peopleGroups.length > 0 ? <>{peopleGroups}</> : null,
-    peopleShareIds: eligibleShareIds,
-    scope: linkScope,
+    peopleGrantIds,
     close: closeDialog,
   };
 }

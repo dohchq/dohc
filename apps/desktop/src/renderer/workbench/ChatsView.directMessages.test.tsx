@@ -741,7 +741,7 @@ describe("ChatsView direct messages", () => {
       const dialog = await screen.findByTestId("chats-leave-dm-dialog");
       expect(dialog.textContent).toContain("Leave your conversation with alice@example.com?");
       expect(dialog.textContent).toContain(
-        "The conversation leaves Work. It appears again as a message request, so you can add it to a workspace later. Your messages are kept.",
+        "The conversation leaves Work and returns as a message request, so you can add it to a workspace later. Your messages are kept.",
       );
 
       await user.click(screen.getByTestId("chats-leave-dm-cancel"));

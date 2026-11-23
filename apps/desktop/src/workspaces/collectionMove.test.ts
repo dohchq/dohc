@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import { CollectionMoveUnfinishedError } from "../ipc/errorWords";
 import {
   collectionPlace,
+  createAttachmentCollectionsSendUp,
   createCollectionsSendUp,
   finishedTransfer,
   movedTransfer,
@@ -161,7 +162,7 @@ it("stops waiting when the read is cancelled, and leaves the move running", asyn
 });
 
 const unfinished =
-  "This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.";
+  "This Collection did not finish moving to sync.example.test. Its records are kept on this computer.";
 
 it("fails a read that waited for the move this app is running with the server's name, marked as waited, when the move stops", async () => {
   const stopped = Error("The server stopped answering.");
@@ -367,4 +368,134 @@ it("starts a send that couldn't open this computer's store once more before a re
   await expect(stuck.start()).rejects.toBe(unreadable);
   await expect(stuck.sent("a", new AbortController().signal)).resolves.toBeUndefined();
   expect(broken).toHaveBeenCalledTimes(2);
+});
+
+it("stops an attachment's send when the workspace closes, and never sends the reopened workspace's Collections", async () => {
+  const attachmentId = Symbol("first opening");
+  let opened = { rootPath: "/first" };
+  let current = attachmentId;
+  const retirement = new AbortController();
+  const asked: string[] = [];
+  let refuse!: (error: Error) => void;
+  const store = {
+    keptDatasetIds: () => ["a", "b"],
+    transferStatus: () => null,
+    transferInFlight: () => null,
+    transferToShared() {},
+  } as never;
+  const reported = vi.fn();
+  const sendUp = createAttachmentCollectionsSendUp(
+    { workspaceId: "workspace-a", attachmentId },
+    {
+      findWorkspace: () => opened,
+      retirementSignal: (_workspaceId, id) => {
+        if (id !== current) throw new Error("This workspace was closed. Open it again.");
+        return retirement.signal;
+      },
+      storeExists: async () => true,
+      localHost: async (_workspace, signal) => {
+        signal.throwIfAborted();
+        return store;
+      },
+      transferSession: (workspace, signal) =>
+        ({ workspaceId: "workspace-a", rootPath: workspace.rootPath, signal }) as never,
+      server: (workspace) => {
+        asked.push(workspace.rootPath);
+        // Only the first question waits; the test answers it once the workspace has opened again.
+        if (asked.length > 1) return Promise.reject(Error("The server refused."));
+        return new Promise<never>((_resolve, reject) => (refuse = reject));
+      },
+      reported,
+    },
+  );
+  const done = sendUp.start();
+  await vi.waitFor(() => expect(asked).toEqual(["/first"]));
+  // The workspace closes and opens again while the server hasn't answered for "a".
+  retirement.abort();
+  current = Symbol("second opening");
+  opened = { rootPath: "/second" };
+  refuse(Error("The server didn't answer."));
+  const outcome = await done.then(
+    () => "finished",
+    () => "stopped",
+  );
+  expect(asked).toEqual(["/first"]);
+  expect(outcome).toBe("stopped");
+  expect(reported).not.toHaveBeenCalled();
+});
+
+it("sends a Collection kept after a running send looked, once that send ends", async () => {
+  const kept = ["a"];
+  const asked: string[] = [];
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  const sendUp = createCollectionsSendUp({
+    open: async () =>
+      ({
+        keptDatasetIds: () => [...kept],
+        transferStatus: () => null,
+        transferInFlight: () => null,
+        transferToShared() {},
+      }) as never,
+    session: () =>
+      ({
+        // Each Collection asks the server once; "a" waits until the test answers.
+        server: async () => {
+          asked.push(kept[asked.length]!);
+          if (asked.length === 1) await answered;
+          throw Error("The server refused.");
+        },
+        signal: new AbortController().signal,
+      }) as never,
+    reported() {},
+  });
+  void sendUp.start().catch(() => undefined);
+  await vi.waitFor(() => expect(asked).toEqual(["a"]));
+  // "b" is kept here after the running send read its list, as a Collection
+  // made just as the workspace starts syncing is.
+  kept.push("b");
+  void sendUp.start().catch(() => undefined);
+  const read = sendUp.sent("b", new AbortController().signal);
+  answer();
+  await expect(read).rejects.toThrow("The server refused.");
+  expect(asked).toContain("b");
+});
+
+it("lets reads of Collections a running send took or never needs go on while a later send waits for it", async () => {
+  const kept = ["a", "b", "gone"];
+  const looks = new Map<string, number>();
+  let stop!: (error: Error) => void;
+  const stuck = new Promise<never>((_resolve, reject) => (stop = reject));
+  const sendUp = createCollectionsSendUp({
+    open: async () =>
+      ({
+        keptDatasetIds: () => [...kept],
+        // "gone" went up before; "a" arrives as soon as the send reaches it;
+        // "b" waits for a server that doesn't answer.
+        transferStatus(datasetId: string) {
+          const seen = looks.get(datasetId) ?? 0;
+          looks.set(datasetId, seen + 1);
+          if (datasetId === "gone") return transfer("imported");
+          return datasetId === "a" && seen > 0 ? transfer("imported") : null;
+        },
+        transferInFlight: () => null,
+        transferToShared() {},
+      }) as never,
+    session: () => ({ server: () => stuck, signal: new AbortController().signal }) as never,
+    reported() {},
+  });
+  const done = sendUp.start();
+  await expect(sendUp.sent("a", new AbortController().signal)).resolves.toBeUndefined();
+  // "c" is kept after the running send looked, so another send waits for it.
+  kept.push("c");
+  const later = sendUp.start();
+  const read = new Set<string>();
+  for (const datasetId of ["a", "gone", "elsewhere"])
+    void sendUp.sent(datasetId, new AbortController().signal).then(() => read.add(datasetId));
+  await vi.waitFor(() => expect([...read].sort()).toEqual(["a", "elsewhere", "gone"]));
+  const c = sendUp.sent("c", new AbortController().signal);
+  stop(Error("stopped"));
+  await expect(c).rejects.toThrow("stopped");
+  await done;
+  await later;
 });

@@ -19,3 +19,14 @@ export function agentIdForChannelWireId(wireId: string): string | null {
   const agentId = wireId.slice(prefix.length);
   return AGENT_ID.test(agentId) && agentId !== DEFAULT_AGENT_ID ? agentId : null;
 }
+
+export const GENERAL_CHANNEL_ID = "channel-general";
+
+/** Whether a channel id is one only General or an agent's chat may hold. The engine reads it the same way. */
+export function isFixedChatChannelId(channelId: string): boolean {
+  return (
+    channelId === GENERAL_CHANNEL_ID ||
+    channelId.startsWith("channel-agent-") ||
+    channelId.startsWith("personal-dm:")
+  );
+}

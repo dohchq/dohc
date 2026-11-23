@@ -16,7 +16,8 @@
 //! row — which fails closed (returns nothing) while degraded. Any new reader of
 //! `engine_search_files_fts` Must apply the same re-check, or it will serve
 //! frozen rows a broken policy is supposed to hide. `query_search_index_keyset`
-//! is currently the sole reader and does this; keep it that way.
+//! and `crate::retrieval` are the readers and both enforce this check; keep it
+//! that way.
 
 use crate::search::policy::{path_is_search_indexed, read_engine_search_policy};
 use crate::search::{

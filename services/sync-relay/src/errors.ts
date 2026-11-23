@@ -25,6 +25,7 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   "host-moved": 409,
   "host-start-failed": 409,
   "host-not-loaded": 409,
+  "proposal-file-live": 409,
   dependents_changed: 409,
   discussion_limit_reached: 413,
   discussion_rate_limited: 429,
@@ -105,19 +106,21 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   collection_write_rate_limited: "too many direct writes",
   conflict: "conflict",
   "restore-in-progress": "Stop live editing is waiting. You can keep editing.",
-  "edits-pending": "Live editing didn't stop. Recent edits haven't reached the server yet.",
+  "edits-pending": "Live editing did not stop. Recent edits have not reached the server yet.",
   "host-diverged":
-    "Live editing didn't stop. The server's copy of this workspace no longer matches the synced one. Contact the server's operator.",
+    "Live editing did not stop. The server's copy of this workspace no longer matches the synced one. Contact the server's operator.",
   "host-paused":
-    "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.",
+    "Live editing did not stop. Recent edits have not reached the server yet. Resume live editing to send them, then stop it.",
   "host-no-edit-grant":
-    "Live editing didn't stop. The server may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again.",
+    "Live editing did not stop. The server may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again.",
   "host-moved":
-    "Live editing didn't stop. The server may hold recent edits, but it only loads this document from {path}. Put it back there, then try again.",
+    "Live editing did not stop. The server may hold recent edits, but it only loads this document from {path}. Put it back there, then try again.",
   "host-start-failed":
-    "Live editing didn't stop. The server couldn't load this document and may hold recent edits. Contact the server's operator, then try again.",
+    "Live editing did not stop. The server could not load this document and may hold recent edits. Contact the server's operator, then try again.",
   "host-not-loaded":
-    "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.",
+    "Live editing did not stop. The server has not loaded this document yet and may hold recent edits to it. Try again in a moment.",
+  "proposal-file-live":
+    "dohc could not accept these changes because a file in them is being edited live. Stop live editing for it in Live documents, then accept them.",
   dependents_changed: "active dependent grants changed",
   discussion_limit_reached: "discussion message limit reached",
   discussion_rate_limited: "discussion message rate limit reached",
@@ -254,7 +257,7 @@ export function errorResponse(error: unknown): Response {
   // A client that closed its request is not a server fault, and nobody reads this answer.
   // guardRelayResponses logs it after all when the close was another request's.
   if (error instanceof ClientClosedRequest) return clientClosedResponse();
-  // The server already sent its refusal of this request's body, and nobody reads this answer.
+  // The server sends its own refusal of this request's body, and nobody reads this answer.
   if (error instanceof RefusedRequest) return errorBody("internal_error");
   console.error("[sync-relay] unhandled error", serverLogLine(error));
   return errorBody("internal_error");

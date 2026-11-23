@@ -212,6 +212,34 @@ describe("PostCard as a feed row", () => {
     expect(screen.getByRole("img", { name: "1 comment" })).toBeTruthy();
   });
 
+  it("styles the viewer's own reaction pill as active and strips raw markdown from heading and excerpt", () => {
+    row(
+      { title: "### **Release** plan" },
+      "### **Release** plan\nCheck `notes.md` and **ship** @[work:" + "A".repeat(43) + "]",
+      [
+        {
+          reactionId: "reaction-mine",
+          messageId: "message-sam",
+          threadId: "thread-1",
+          emoji: "👍",
+          authorId: "ice",
+          authorKind: "human",
+          authorDisplayName: "Ice",
+        },
+      ],
+    );
+    const pill = screen.getByTestId("chats-post-reaction-pill");
+    expect(pill.className).toContain("border-accent/60");
+    expect(pill.className).toContain("bg-accent/15");
+    expect(pill.className).toContain("text-ink");
+    expect(screen.getByTestId("chats-post-title").textContent).toBe("Release plan");
+    const excerpt = screen.getByTestId("chats-post-excerpt");
+    expect(excerpt.textContent).not.toContain("**");
+    expect(excerpt.textContent).not.toContain("`");
+    expect(excerpt.textContent).toContain("notes.md");
+    expect(screen.getByTestId("chats-post-excerpt-work-link")).toBeTruthy();
+  });
+
   it("keeps its toolbar in the Tab order, ending with Save as file", async () => {
     const user = userEvent.setup();
     row({}, "Launch checklist");

@@ -1,3 +1,4 @@
+import { accountWords } from "@dohc/interface-words/account";
 import { fetch } from "expo/fetch";
 import {
   createContext,
@@ -8,7 +9,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { AppState, View } from "react-native";
+import { AppState, Platform, View } from "react-native";
 import {
   appTeardown,
   createAppRunner,
@@ -17,8 +18,14 @@ import {
   type WorkspaceApps,
 } from "../apps/appStore";
 import { canOpenApps } from "../apps/canOpenApps";
+import {
+  createWorkspaceCollections,
+  type WorkspaceCollections,
+} from "../collections/collectionStore";
 import { createChatWakes, type ChatWakes } from "../conversation/chatWakeState";
-import { createLivePages, type LivePages } from "../pages/pageLive";
+import { DamagedKept } from "../conversation/DamagedKept";
+import { useOutboxState } from "../conversation/useOutbox";
+import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheRows } from "../server/cacheRows";
 import { createCacheDatabase, createKeptDatabase } from "../server/keptDatabase";
@@ -30,6 +37,9 @@ import {
 import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
 import { createOutbox, type Outbox, type OutboxState } from "../server/outbox";
 import { phoneWrites } from "../server/phoneWrites";
+import { pendingSignOuts } from "../server/pushRegistration";
+import { createAlerts, type Alerts } from "../push/alerts";
+import { clearAlertsAtSignOut, nativeAlerts } from "../push/nativeAlerts";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
 import {
   createWorkspaceList,
@@ -38,6 +48,7 @@ import {
 } from "../server/workspaceList";
 import { useTheme } from "../theme";
 import { Connect } from "./Connect";
+import { ProblemLine } from "./ProblemLine";
 import { secureSignInStore } from "./secureSignInStore";
 
 interface AccountValue {
@@ -59,8 +70,13 @@ interface AccountValue {
   readonly runner: AppRunner;
   /** The open workspace's published apps. */
   readonly apps: WorkspaceApps | null;
+  /** The open workspace's transactional Collections, read into memory only. */
+  readonly collections: WorkspaceCollections | null;
   /** Pages edited live, which end with their sign-in and workspace, as a running app does. */
-  readonly livePages: LivePages;
+  readonly livePages: ScopedEnds;
+  /** The sign-in's alerts on an iPhone, or null. */
+  readonly alerts: Alerts | null;
+  readonly workspaceList: WorkspaceListStore | null;
   chooseWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
@@ -94,12 +110,14 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // asks again at once. Only where its Sign out delete stands reaches the screen, so the rest of its changes render
 // nothing.
 //
-// A running app (src/apps/appStore.ts) and a page edited live (src/pages/pageLive.ts) end before anything else happens
-// at Sign out, a sign-in change (a 401 included), a workspace switch and Show on phone off.
+// A running app (src/apps/appStore.ts), a page edited live (src/pages/pageLive.ts) and the Collections read
+// (src/collections/collectionStore.ts) end before anything else happens at Sign out, a sign-in change (a 401 included),
+// a workspace switch and Show on phone off.
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [runner] = useState(createAppRunner);
-  const [livePages] = useState(createLivePages);
-  const [teardown] = useState(() => appTeardown(runner, livePages));
+  const [livePages] = useState(createScopedEnds);
+  const [collectionStores] = useState(createScopedEnds);
+  const [teardown] = useState(() => appTeardown(runner, livePages, collectionStores));
   // Sign out deletes the account's kept.db rows: the sign-in ends, and its token goes, once that delete has committed.
   // With phone writes off it sends nothing, not even records an earlier build kept. Both files open once per install.
   const [kept] = useState(createKeptDatabase);
@@ -108,7 +126,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     createAccount({
       store: secureSignInStore,
       fetch,
-      onSignOut: teardown.signOut((leave) => outbox.signOut(leave)),
+      onSignOut: teardown.signOut((leave, ending) => outbox.signOut(leave, ending)),
+      pendingSignOuts: pendingSignOuts(kept),
     }),
   );
   const state = useSyncExternalStore(account.subscribe, account.state);
@@ -169,6 +188,14 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     [signIn, currentWorkspaceId, runner],
   );
   useEffect(() => () => apps?.stop(), [apps]);
+  const collections = useMemo(
+    () =>
+      signIn && currentWorkspaceId
+        ? createWorkspaceCollections(signIn, currentWorkspaceId, collectionStores)
+        : null,
+    [signIn, currentWorkspaceId, collectionStores],
+  );
+  useEffect(() => () => collections?.stop(), [collections]);
   useEffect(() => clearNoticeListsOnSignInChange(account, kept), [account, kept]);
   // As the open workspace's store: making one starts nothing, and the effect runs it.
   const notices = useMemo(
@@ -226,6 +253,31 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     };
   }, [wakes]);
 
+  const alerts = useMemo(
+    () =>
+      signIn && Platform.OS === "ios"
+        ? createAlerts({
+            signIn,
+            store: kept,
+            native: nativeAlerts,
+            environment: __DEV__ ? "sandbox" : "production",
+          })
+        : null,
+    [signIn, kept],
+  );
+  useEffect(() => {
+    if (!alerts) return;
+    void alerts.sync();
+    const subscription = AppState.addEventListener("change", (next) => {
+      if (next === "active") void alerts.sync();
+    });
+    return () => {
+      subscription.remove();
+      alerts.stop();
+    };
+  }, [alerts]);
+  useEffect(() => (Platform.OS === "ios" ? clearAlertsAtSignOut(account) : undefined), [account]);
+
   const value = useMemo<AccountValue>(
     () => ({
       account,
@@ -239,7 +291,10 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       wakes,
       runner,
       apps,
+      collections,
       livePages,
+      alerts,
+      workspaceList: list,
       chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
       reloadWorkspaces: () => list?.reload(),
       setShowOnPhone: (workspaceId, showOnPhone) => {
@@ -260,7 +315,9 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       runner,
       teardown,
       apps,
+      collections,
       livePages,
+      alerts,
       list,
       open,
     ],
@@ -283,13 +340,23 @@ export function useSignIn(): SignIn {
 
 export function AccountGate({ children }: { children: ReactNode }) {
   const theme = useTheme();
-  const { state, deletion } = useAccount();
+  const { account, state, deletion, outbox } = useAccount();
+  const damaged = useOutboxState(outbox)?.status === "damaged";
   // Once Connect shows, it stays while a Sign out's delete has failed, even if a sign-in finishes meanwhile, so the
   // failure and Try again stay in sight. A Sign out that fails while signed in stays in Settings.
   const [onConnect, setOnConnect] = useState(false);
   const showConnect = state.status === "signed-out" || (onConnect && deletion !== "none");
   if (showConnect !== onConnect) setOnConnect(showConnect);
   if (state.status === "loading") return <View style={{ flex: 1, backgroundColor: theme.bg }} />;
+  if (state.status === "unreadable")
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.bg, justifyContent: "center", padding: 24 }}>
+        <ProblemLine text={accountWords.savedUnreadable} onRetry={() => void account.restore()} />
+        {damaged ? (
+          <DamagedKept outbox={outbox} live={() => true} onDeleted={() => void account.restore()} />
+        ) : null}
+      </View>
+    );
   if (showConnect) return <Connect />;
   return children;
 }

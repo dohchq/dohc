@@ -28,7 +28,7 @@ describe("ChatsView expand-to-tab", () => {
     });
     expect(await screen.findByText("Engine unavailable")).toBeTruthy();
     const retry = screen.getByRole("button", { name: "Try again" });
-    expect(screen.queryByText("Loading Chats...")).toBeNull();
+    expect(screen.queryByText("Loading Chats…")).toBeNull();
     const before = bridgeMock.listChatChannels.mock.calls.length;
     await userEvent.click(retry);
     await waitFor(() =>
@@ -44,7 +44,7 @@ describe("ChatsView expand-to-tab", () => {
       editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
     });
     await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalled());
-    expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.getByText("Loading Chats…")).toBeTruthy();
     expect(screen.queryByTestId("chats-page-empty")).toBeNull();
     bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
     await act(async () => emitWorkspaceActivity());
@@ -59,7 +59,7 @@ describe("ChatsView expand-to-tab", () => {
       editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
     });
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalled());
-    expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.getByText("Loading Chats…")).toBeTruthy();
     expect(screen.queryByTestId("chats-page-empty")).toBeNull();
     await act(async () => pending.resolve({ available: true, dms: [dm()] }));
     expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();

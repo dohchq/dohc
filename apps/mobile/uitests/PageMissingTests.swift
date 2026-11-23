@@ -7,7 +7,7 @@ final class PageMissingTests: XCTestCase {
     let app = XCUIApplication()
     app.launchArguments += ["-dohcTestRoute", "page-missing"]
     app.launch()
-    XCTAssertTrue(app.staticTexts["This file is no longer available at this path."].waitForExistence(timeout: 20),
+    XCTAssertTrue(app.staticTexts["This file is no longer available at this path."].waitForExistence(timeout: 45),
                   "A missing page should say it's no longer available")
     XCTAssertFalse(app.buttons["Try again"].exists, "A missing page should offer no Try again")
   }

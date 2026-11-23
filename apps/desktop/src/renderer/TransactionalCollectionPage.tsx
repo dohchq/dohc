@@ -44,6 +44,7 @@ import {
   TableView,
   type CollectionCellChange,
   type TableAbandonedDraft,
+  type TableCellStatus,
   type TableFieldMark,
   type TableHostCell,
   type TableNewRecord,
@@ -219,7 +220,7 @@ const LAYOUT_TABS: readonly CollectionFrameTab[] = [
 const NEW_RECORD_OPEN = "Create or cancel the new record first.";
 const RECORDS_LOADING = "Wait for the records to load.";
 const FILE_UPLOADING = "Wait for the file to upload.";
-const RECORDS_FAILED = "dohc could not load the records. Refresh first.";
+const RECORDS_FAILED = "dohc could not load the records. Refresh to try again.";
 type Query = {
   after: TransactionalCursor | null;
   search: string;
@@ -240,10 +241,11 @@ type Undo = {
 /** A field of the new record in the panel: its definition now, or the one its value was typed under once it is gone, and whether its value no longer fits. */
 type FormField = { field: TransactionalField; value: AppBackendJson; changed: boolean };
 const VALUE_CHANGED =
-  "This field changed, so this value can't be saved. Copy it if you need it, then clear it.";
+  "This field changed, so dohc cannot save this value. Copy it if you need it, then clear it.";
 const CHANGE_GONE =
   "The Collection's rules no longer allow this change. Copy what you need, then choose Cancel.";
 const SAVE_OFFLINE = "You can save this once the Collection is back online.";
+const SAVE_NOT_UPDATED = "You can save this once dohc can update this Collection on this device.";
 const EDIT_LEFT_OPEN = "This edit was still open, so dohc did not save it.";
 
 function undoFromReceipt(
@@ -344,6 +346,15 @@ function jsonValue(value: CollectionValue): AppBackendJson | undefined {
     items.push(item);
   }
   return items;
+}
+/** What a cell shows: a change's value, or for one the Collection refused, the stored value. */
+function cellValue(
+  status: TableCellStatus | undefined,
+  stored: AppBackendJson | undefined,
+): AppBackendJson | undefined {
+  if (!status) return stored;
+  if (status.state !== "refused" || !status.stored) return status.value as AppBackendJson;
+  return status.stored === true ? stored : (status.stored.value as AppBackendJson);
 }
 /** Whether a cell already holds a value. Nothing typed is the same nothing, however the field stores it. */
 const sameValue = (a: AppBackendJson, b: AppBackendJson) =>
@@ -754,7 +765,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (alive.current && sequence.current === mine && !abort.signal.aborted) {
         setPage(null);
         setDetails(null);
-        failLoad(`dohc could not load ${table?.name ?? "this collection"}.`, cause, () => {
+        failLoad(`dohc could not load ${table?.name ?? "this Collection"}.`, cause, () => {
           if (alive.current) void load(next, history);
         });
       }
@@ -880,7 +891,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       setPrevious([]);
     }
     if (page === null) void load(next, []);
-    else void reread(`dohc could not load ${table?.name ?? "this collection"}.`);
+    else void reread(`dohc could not load ${table?.name ?? "this Collection"}.`);
   }, [contractKey]);
   // A new record in the panel, with changes, when the page closes opens again once the page shows its records.
   const keptKey = JSON.stringify([workspaceId, dataset.datasetId, tableId]);
@@ -1171,7 +1182,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     }
     readWanted.current = false;
     if (visual) setVisualChanged((value) => value + 1);
-    else void reread(`dohc could not load ${table?.name ?? "this collection"}.`);
+    else void reread(`dohc could not load ${table?.name ?? "this Collection"}.`);
   }
   useEffect(() => {
     if (readWanted.current && !busy && !visualBusy) readForQueue();
@@ -1519,8 +1530,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (unseen > 0)
       props.onNotice?.(
         unseen === 1
-          ? "Created a record. It is not among the records on screen."
-          : `Created ${unseen} records. They are not among the records on screen.`,
+          ? "Created 1 record. It is not shown in this view."
+          : `Created ${unseen} records. They are not shown in this view.`,
       );
   }, [records]);
   const editableIds = fields
@@ -1584,8 +1595,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!now || !row || !field) return queue.skip();
       const shown = view.statuses.get(recordKey, fieldId),
         refused = shown?.state === "refused";
+      // A held draft compares with the record, not with its own text.
       const current =
-        shown && !refused ? (shown.value as AppBackendJson) : (row.values[fieldId] ?? null);
+        (refused && !shown.stored ? row.values[fieldId] : cellValue(shown, row.values[fieldId])) ??
+        null;
       // The same value saves nothing, and takes back a value dohc did not save.
       if (value !== undefined && sameValue(value, current)) {
         if (refused) queue.dismiss(recordKey, fieldId);
@@ -1631,16 +1644,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!field) return;
       const shown = view.statuses.get(draft.recordId, draft.field);
       // Text the cell shows already is no change to keep.
-      if (
-        row &&
-        draft.text ===
-          display(
-            shown && !(shown.state === "refused" && shown.stored)
-              ? (shown.value as AppBackendJson)
-              : row.values[draft.field],
-          )
-      )
-        return;
+      if (row && draft.text === display(cellValue(shown, row.values[draft.field]))) return;
       queue.hold(
         { id: JSON.parse(draft.recordId) as string | number },
         field,
@@ -1723,7 +1727,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
           `dohc did not save what you typed in the ${field} field of the new record. The field changed, or a new record no longer takes it.`,
           row.values,
         );
-        return `${field} changed, or a new record no longer takes it, so its value left this row. A notice has what you typed.`;
+        return `The ${field} field changed or a new record no longer takes it, so its value was cleared. Check Notices for what you typed.`;
       },
     };
   }, [creatableKey]);
@@ -1767,10 +1771,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
               // A record that does not exist yet has no file to download, and takes a value in each field its create does.
               const unmade = record.id === NEW_RECORD;
               const status = view.statuses.get(record.id, field.fieldId);
-              const value =
-                status && !(status.state === "refused" && status.stored)
-                  ? (status.value as AppBackendJson)
-                  : now.rows.get(record.id)?.values[field.fieldId];
+              const value = cellValue(status, now.rows.get(record.id)?.values[field.fieldId]);
               const readFile = now.resources.readFile;
               return (
                 <ResourceCell
@@ -1851,11 +1852,18 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   if (!table || !read)
     return (
       <section aria-label="Collection" className="p-4 text-sm text-muted">
-        This collection is unavailable. Ask its owner for access.
+        This Collection is unavailable. Ask its owner for access.
       </section>
     );
   // Why the panel's new record can't be made, or why its buttons wait, over them.
-  const formBlocked = editor && !formOperation ? (offline ? SAVE_OFFLINE : CHANGE_GONE) : null;
+  const formBlocked =
+    editor && !formOperation
+      ? offline
+        ? props.copy?.updateFailed
+          ? SAVE_NOT_UPDATED
+          : SAVE_OFFLINE
+        : CHANGE_GONE
+      : null;
   const formProblem = formBlocked === SAVE_OFFLINE ? null : (formBlocked ?? formRefusal);
   const formNote =
     formProblem !== null ? (
@@ -2018,8 +2026,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         : {}),
       ...(kind === "calendar" ? { dateField: dateFields[0]?.fieldId } : {}),
     });
+  const groupableRank = (fieldType: string): number =>
+    fieldType === "select" ? 0 : fieldType === "checkbox" ? 1 : 2;
   const frameViews: CollectionFrameViews | undefined = saved && {
-    groupFields: groupable.map((field) => ({ id: field.fieldId, name: field.name })),
+    groupFields: [...groupable]
+      .sort((a, b) => groupableRank(a.type) - groupableRank(b.type))
+      .map((field) => ({ id: field.fieldId, name: field.name })),
     dateFields: dateFields.map((field) => ({ id: field.fieldId, name: field.name })),
     onAddDateField: props.onAddDateField,
     nameMaxLength: 100,
@@ -2066,11 +2078,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     const nameText = !details
       ? undefined
       : nameField
-        ? display(
-            nameStatus && !(nameStatus.state === "refused" && nameStatus.stored)
-              ? (nameStatus.value as AppBackendJson)
-              : details.values[nameField.fieldId],
-          )
+        ? display(cellValue(nameStatus || undefined, details.values[nameField.fieldId]))
         : "";
     // An offline copy lists no action, as it takes no change.
     const recordActions =
@@ -2156,7 +2164,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
               {recordActions.length ? (
                 <div className="mt-4 flex flex-col gap-2">
                   <p className="m-0 text-[12px] text-muted">
-                    Open an action to review its inputs before running it.
+                    Choose an action to review its inputs before running it.
                   </p>
                   <div className="flex flex-wrap gap-2">
                     {recordActions.map((operation) => (
@@ -2176,7 +2184,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         }
         footer={
           offline
-            ? "Offline copy · Read-only"
+            ? props.copy?.updateFailed
+              ? "Copy on this device · Read-only"
+              : "Offline copy · Read-only"
             : editableIds.length === 0 && recordActions.length === 0
               ? "No edit action is available for this record."
               : undefined
@@ -2260,9 +2270,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
           <span role="status" className="truncate text-[12px] text-muted">
             {savedPages
               ? "Offline · Saved pages only"
-              : props.copy.offline
-                ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
-                : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`}{" "}
+              : props.copy.signedOut
+                ? "Offline copy · Read-only until you connect your server"
+                : props.copy.updateFailed
+                  ? "Copy on this device · Read-only until dohc can update it"
+                  : props.copy.offline
+                    ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
+                    : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`}{" "}
             · {new Date(props.copy.savedAtMs).toLocaleString()}
           </span>
         ) : undefined
@@ -2282,7 +2296,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         value: search,
         onChange: setSearch,
         disabled: paused,
-        onSubmit: () => void load({ ...query, after: null, search }, []),
+        onSubmit: (nextSearch = search) =>
+          void load({ ...query, after: null, search: nextSearch }, []),
       }}
       actions={[
         ...(undo && !offline
@@ -2561,8 +2576,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
                 page.rows.length > 0 || (!query.search && canCreate)
                   ? undefined
                   : query.search
-                    ? "No records match. Try a shorter search."
-                    : "No records yet. Refresh to check for new submissions."
+                    ? "No records match your search."
+                    : "No records yet. Refresh to check for updates."
               }
             />
           </div>
@@ -2599,7 +2614,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
 }
 
 type LoadFailure = { words: string; retry(): void; wait: { ms: number; ended: boolean } | null };
-const WAIT_ENDED = "The wait has ended.";
+const WAIT_ENDED = "Ready to try again.";
 /** Records that could not load: why, and Try again, which reads them as the toast's Try again does. A Collection waiting to reopen shows a clock. */
 export function CollectionUnavailable({
   waiting,

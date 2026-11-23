@@ -186,6 +186,9 @@ it.each([
   expect(document.querySelector('[data-download-asset="linux-appimage"]').textContent).toBe(
     "No Linux AppImage yet",
   );
+  expect(document.querySelector('[data-download-asset="linux-rpm"]').textContent).toBe(
+    "No Linux .rpm yet",
+  );
   expect(
     document.querySelector('[data-download-card="mac"] .download-card-action').textContent.trim(),
   ).toBe("No build yet");
@@ -209,6 +212,20 @@ it("sends an unrecognized device to the platform list, not to GitHub", async () 
   primary.dispatchEvent(click);
   expect(navigate).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
+});
+
+it("sends a Linux visitor to the platform list, since it can't tell .deb from .rpm", async () => {
+  vi.stubGlobal("navigator", {
+    userAgent: "Mozilla/5.0 (X11; Fedora; Linux x86_64)",
+    platform: "Linux x86_64",
+    maxTouchPoints: 0,
+  });
+  document.body.append(fixture.querySelector("#downloads").cloneNode(true));
+  await mount(".hero");
+  const primary = document.querySelector("[data-download-primary]");
+  await vi.waitFor(() => expect(primary.getAttribute("href")).toBe("#downloads"));
+  expect(primary.textContent.trim()).toBe("Download dohc");
+  expect(document.querySelector(".is-preferred")).toBeNull();
 });
 
 it("shows progress for a slow download lookup and navigates only once after repeated activation", async () => {

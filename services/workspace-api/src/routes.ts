@@ -1,5 +1,12 @@
 import type { EmailMessage } from "@dohc/workspace-auth/smtp";
-import { ACCOUNT_CSS, ACCOUNT_CSS_PATH, ACCOUNT_JS, ACCOUNT_JS_PATH } from "./assets";
+import {
+  ACCOUNT_CSS,
+  ACCOUNT_CSS_PATH,
+  ACCOUNT_FONT,
+  ACCOUNT_FONT_PATH,
+  ACCOUNT_JS,
+  ACCOUNT_JS_PATH,
+} from "./assets";
 import type { EmailTransport, ServerDescriptor } from "./config";
 import { CRASH_REPORT_PATH, type CrashReportIntake } from "./crashReports";
 import {
@@ -72,7 +79,7 @@ const PAGE_HEADERS: Record<string, string> = {
   "referrer-policy": "no-referrer",
   "x-content-type-options": "nosniff",
   "content-security-policy":
-    "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
 };
 
 export function createRouter(options: RouterOptions): (request: Request) => Promise<Response> {
@@ -142,7 +149,8 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
     }
 
     if (request.method === "GET" || request.method === "HEAD") {
-      if (path === ACCOUNT_CSS_PATH || path === ACCOUNT_JS_PATH) mark("/account/assets/:asset");
+      if (path === ACCOUNT_CSS_PATH || path === ACCOUNT_JS_PATH || path === ACCOUNT_FONT_PATH)
+        mark("/account/assets/:asset");
       else if (PAGE_ROUTES.has(path)) mark(path as (typeof PAGE_PATTERNS)[number]);
       switch (path) {
         case "/health":
@@ -155,6 +163,8 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
           return asset(ACCOUNT_CSS, "text/css; charset=utf-8");
         case ACCOUNT_JS_PATH:
           return asset(ACCOUNT_JS, "text/javascript; charset=utf-8");
+        case ACCOUNT_FONT_PATH:
+          return asset(ACCOUNT_FONT, "font/woff2");
         case "/":
           return redirect("/account");
         case "/account/sign-in":
@@ -342,7 +352,7 @@ function page(body: string, status = 200): Response {
   return new Response(body, { status, headers: PAGE_HEADERS });
 }
 
-function asset(body: string, contentType: string): Response {
+function asset(body: string | Uint8Array<ArrayBuffer>, contentType: string): Response {
   return new Response(body, {
     headers: {
       "content-type": contentType,

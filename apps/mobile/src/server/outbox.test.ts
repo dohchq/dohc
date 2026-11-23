@@ -17,8 +17,9 @@ import { createServerClient } from "./client";
 import { StoreError, type KeptStore } from "./keptStore";
 import { clearNoticeListsOnSignInChange } from "./noticeStore";
 import { createOutbox, OutboxError, type Outbox } from "./outbox";
+import { pendingSignOuts, readRegistration } from "./pushRegistration";
 import { keptDisk, type KeptDisk as Disk } from "./testKeptDisk";
-import { deferred, memoryStore, testServer, type Answer } from "./testServer";
+import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 import { createReadCache } from "./workspaceData";
 import type { ChatMessage } from "./workspaceReads";
 
@@ -155,7 +156,13 @@ function fakeAccount(onSignOut: (leave: () => Promise<void>) => Promise<void>) {
           onSignedOut: () => {
             if (id !== generation) return;
             advance();
-            set({ status: "signed-out", origin: server.origin, ended: true, forgetFailed: false });
+            set({
+              status: "signed-out",
+              origin: server.origin,
+              ended: true,
+              forgetFailed: false,
+              pendingSignOut: null,
+            });
           },
         }),
       };
@@ -166,7 +173,13 @@ function fakeAccount(onSignOut: (leave: () => Promise<void>) => Promise<void>) {
     signOut() {
       return onSignOut(async () => {
         advance();
-        set({ status: "signed-out", origin: null, ended: false, forgetFailed: false });
+        set({
+          status: "signed-out",
+          origin: null,
+          ended: false,
+          forgetFailed: false,
+          pendingSignOut: null,
+        });
       });
     },
   };
@@ -217,14 +230,15 @@ const SIGNED_IN: StoredSignIn = {
   email: "ice@example.com",
 };
 
-/** One run of the app with the real account over `store`, whose Sign out runs the outbox's delete. */
+/** One run of the app as production wires it over `store`: the real account, the outbox, and the registration rows. */
 function launchReal(disk: Disk, server: Server, store: SignInStore, kept = disk.launch()) {
   const outbox = createOutbox({ store: kept, sleep: waits().sleep });
   const account = createAccount({
     store,
     fetch: server.fetch,
     sleep: async () => {},
-    onSignOut: (leave) => outbox.signOut(leave),
+    onSignOut: (leave, ending) => outbox.signOut(leave, ending),
+    pendingSignOuts: pendingSignOuts(kept),
   });
   const stop = outbox.follow(account);
   return { outbox, account, stop };
@@ -1601,7 +1615,7 @@ describe("a damaged kept.db", () => {
 });
 
 describe("a Sign out that failed", () => {
-  it("deletes on Try again the rows of the account it was for, even after another account signed in", async () => {
+  it("deletes on Try again the rows of the account it was for, and of the account that signed in since", async () => {
     const disk = keptDisk();
     const server = testServer();
     server.on("POST", path("post"), held);
@@ -1623,8 +1637,7 @@ describe("a Sign out that failed", () => {
     disk.failWrites = null;
 
     await account.signOut();
-    expect(records(disk)).toEqual([1]);
-    expect(onDisk(disk, 1)).toMatchObject({ operationId: "op-b", accountId: "u-2" });
+    expect(records(disk)).toEqual([]);
     expect(outbox.state().deletion).toBe("none");
     expect(requests(server, "post")).not.toContainEqual(
       expect.objectContaining({ operationId: "op-b" }),
@@ -2558,6 +2571,7 @@ describe("signing out with the account's token store", () => {
   /** A signed-in run with one queued record whose request the server holds. */
   async function signedInWithRecord(disk: Disk, server: Server, store: SignInStore) {
     server.on("POST", path("post"), held);
+    serveSessionEnd(server);
     const run = launchReal(disk, server, store);
     await run.account.restore();
     await ready(run.outbox);
@@ -2628,7 +2642,7 @@ describe("signing out with the account's token store", () => {
     first.stop();
   });
 
-  it("keeps only the sign-in when the app closes after the delete's commit and before the token goes", async () => {
+  it("finishes Sign out at the next launch when the app closes after the delete's commit and before the token goes", async () => {
     const disk = keptDisk();
     const server = testServer();
     const tokens = memoryStore(SIGNED_IN);
@@ -2650,12 +2664,90 @@ describe("signing out with the account's token store", () => {
 
     const second = launchReal(disk, server, tokens.store);
     await second.account.restore();
-    expect(second.account.state().status).toBe("signed-in");
+    expect(second.account.state()).toMatchObject({
+      status: "signed-out",
+      pendingSignOut: "running",
+    });
+    await vi.waitFor(() => expect(tokens.current()).toBeNull());
     await ready(second.outbox);
     expect(records(disk)).toEqual([]);
-    await settled();
     expect(requests(server, "post")).toHaveLength(1);
     second.stop();
+  });
+
+  it("deletes the rows at the next launch when the app closes after the mark and before the delete, then revokes", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    const tokens = memoryStore(SIGNED_IN);
+    const first = await signedInWithRecord(disk, server, tokens.store);
+    const releaseMark = disk.holdCommits();
+    void first.account.signOut().catch(() => undefined);
+    await vi.waitFor(() => expect(disk.waiting()).toBe(1));
+    releaseMark();
+    disk.holdCommits();
+    await vi.waitFor(() =>
+      expect(disk.sql("SELECT signing_out FROM push_registrations")).toEqual([{ signing_out: 1 }]),
+    );
+    await vi.waitFor(() => expect(disk.waiting()).toBe(1));
+    disk.crash();
+    expect(records(disk)).toEqual([1]);
+
+    const revoke = deferred<Answer>();
+    server.on("POST", "/sync/account/sessions/s-phone/revoke", () => revoke.promise);
+    const second = launchReal(disk, server, tokens.store);
+    await second.account.restore();
+    await vi.waitFor(() =>
+      expect(server.paths()).toContain("POST /sync/account/sessions/s-phone/revoke"),
+    );
+    expect(records(disk)).toEqual([]);
+    revoke.resolve({ status: 200, body: { ok: true, sessionId: "s-phone" } });
+    await vi.waitFor(() => expect(tokens.current()).toBeNull());
+
+    serveSignIn(server);
+    expect(await second.account.signIn(ORIGIN, () => {})).toBe("signed-in");
+    await ready(second.outbox);
+    await settled();
+    expect(second.outbox.state().records).toEqual([]);
+    expect(requests(server, "post")).toHaveLength(1);
+    second.stop();
+  });
+
+  it("deletes a damaged kept.db the sheet warned of, then marks the Sign out on the new file before it revokes", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    const tokens = memoryStore(SIGNED_IN);
+    const base = disk.launch();
+    const kept: KeptStore = {
+      ...base,
+      destroy: async () => {
+        disk.damaged = false;
+        await base.destroy();
+      },
+    };
+    server.on("POST", path("post"), held);
+    const revoke = deferred<Answer>();
+    serveSessionEnd(server);
+    server.on("POST", "/sync/account/sessions/s-phone/revoke", () => revoke.promise);
+    const run = launchReal(disk, server, tokens.store, kept);
+    await run.account.restore();
+    await ready(run.outbox);
+    await run.outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    disk.damaged = true;
+    await run.outbox.enqueue({ workspaceId: "ws-1", write: post("No") }).catch(() => undefined);
+    expect(run.outbox.state().status).toBe("damaged");
+
+    const signingOut = run.account.signOut();
+    await vi.waitFor(() =>
+      expect(server.paths()).toContain("POST /sync/account/sessions/s-phone/revoke"),
+    );
+    expect(records(disk)).toEqual([]);
+    expect(await readRegistration(kept, ME)).toMatchObject({ signingOut: true });
+    revoke.resolve({ status: 200, body: { ok: true, sessionId: "s-phone" } });
+    await signingOut;
+    expect(run.account.state()).toMatchObject({ status: "signed-out", pendingSignOut: null });
+    expect(tokens.current()).toBeNull();
+    expect(await readRegistration(kept, ME)).toBeNull();
+    run.stop();
   });
 
   it("shows the cautious sheet text when the records couldn't be read", async () => {
@@ -2700,6 +2792,7 @@ describe("signing out with the account's token store", () => {
         origin: ORIGIN,
         ended: true,
         forgetFailed: false,
+        pendingSignOut: null,
       });
       await vi.waitFor(() => expect(tokens.current()).toBeNull());
       expect(records(disk)).toEqual([1]);
@@ -2775,7 +2868,7 @@ describe("signing out with the account's token store", () => {
       const disk = keptDisk();
       const server = testServer();
       const run = await signedInWithRecord(disk, server, memoryStore(SIGNED_IN).store);
-      disk.failWrites = ALL;
+      disk.failWrites = /DELETE FROM (outbox|notice)/;
       await expect(run.account.signOut()).rejects.toEqual(new OutboxError("not-deleted"));
       expect(run.account.state().status).toBe("signed-in");
       await endedByServer(run, server);

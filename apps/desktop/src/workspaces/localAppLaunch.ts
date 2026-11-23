@@ -47,7 +47,13 @@ export interface LocalAppLaunchBackend {
   ): Promise<unknown>;
   readBrowserFile(
     publicationId: string,
-    input: { authorityRevision: number; fileId: string; operation: string; input: unknown },
+    input: {
+      authorityRevision: number;
+      fileId: string;
+      operation: string;
+      input: unknown;
+      dataset?: string;
+    },
     signal?: AbortSignal,
   ): Promise<unknown>;
 }
@@ -57,7 +63,7 @@ export interface LocalAppLaunchHost {
   launchSession(
     publicationId: string,
     signal: AbortSignal,
-    options?: { keepAlive?: boolean },
+    options?: { keepAlive?: boolean; observeBroker?: boolean },
   ): Promise<LocalAppLaunchSession>;
   close(): Promise<void>;
 }
@@ -79,11 +85,17 @@ const MAX_SESSIONS = 16,
   IDLE_MS = 90_000;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
-const exact = (value: unknown, keys: string[]): value is Record<string, unknown> => {
+const exact = (
+  value: unknown,
+  keys: string[],
+  optional: string[] = [],
+): value is Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const actual = Object.keys(value).sort(),
-    expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+  const actual = Object.keys(value);
+  return (
+    keys.every((key) => Object.hasOwn(value, key)) &&
+    actual.every((key) => keys.includes(key) || optional.includes(key))
+  );
 };
 
 async function readJson(
@@ -216,6 +228,9 @@ export async function createLocalAppLaunchHost(options: {
         const browserLifetime = launchOptions?.keepAlive
           ? ""
           : `const poll=async()=>{if(stopped)return;try{const r=await fetch('/status',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal});if(!r.ok){stop();return;}}catch{stop();return;}setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${SESSION_MS});`;
+        const observe = launchOptions?.observeBroker
+          ? ",(event)=>{try{globalThis.__dohcVerifyObserve?.(JSON.stringify(event));}catch{}}"
+          : "";
         const script = `(()=>{
           const handoff=location.hash.slice(1),key='dohc-local-app-proof';history.replaceState(null,'','/bootstrap');
           const lifetime=new AbortController();let frame,proof,stopped=false;
@@ -228,7 +243,7 @@ export async function createLocalAppLaunchHost(options: {
           const request=proof?fetch('/resume',{method:'POST',headers:{'x-dohc-app-proof':proof},signal:lifetime.signal}):fetch('/session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handoff}),signal:lifetime.signal});
           request.then(async r=>{if(!r.ok)throw Error();const value=await r.json();if(stopped)return;proof=value.proof;saveProof(proof);
             frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';
-            (${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal}),lifetime.signal);
+            (${attachAppCollectionBroker.toString()})(frame,(body,signal,request)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof,'x-dohc-app-activated':request.activated?'1':'0'},body:JSON.stringify(body),signal}),lifetime.signal${observe});
             addEventListener('message',event=>{const scheme=event.data?.kind==='dohc-color-scheme'?event.data.scheme:null;if(event.source===frame.contentWindow&&(scheme==='light'||scheme==='dark'))frame.style.colorScheme=scheme;},{signal:lifetime.signal});
             frame.srcdoc=value.html;document.body.append(frame);const status=document.getElementById('status');status.textContent='';status.style.margin='0';
             ${browserLifetime}
@@ -390,30 +405,37 @@ export async function createLocalAppLaunchHost(options: {
               );
             } else if (
               row.op === "backend.attempt" &&
-              exact(row, ["id", "op", "operation", "request"])
+              exact(row, ["id", "op", "operation", "request"], ["dataset"])
             ) {
-              const operation = parseAppBackendInvokeRequest({
+              const identity = parseAppBackendInvokeRequest({
                 authorityRevision,
                 operation: row.operation,
                 idempotencyKey: "attempt",
                 input: {},
-              }).operation;
+                ...(Object.hasOwn(row, "dataset") ? { dataset: row.dataset } : {}),
+              });
               result = await options.backend.request(
                 publicationId,
                 "attempt",
-                { authorityRevision, operation, ...parseDatasetAttemptRequest(row.request) },
+                {
+                  authorityRevision,
+                  operation: identity.operation,
+                  ...(identity.dataset === undefined ? {} : { dataset: identity.dataset }),
+                  ...parseDatasetAttemptRequest(row.request),
+                },
                 activeSignal,
                 activated,
               );
             } else if (
               row.op === "backend.invoke" &&
-              exact(row, ["id", "op", "operation", "idempotencyKey", "input"])
+              exact(row, ["id", "op", "operation", "idempotencyKey", "input"], ["dataset"])
             ) {
               const input = parseAppBackendInvokeRequest({
                 authorityRevision: authorityRevision,
                 operation: row.operation,
                 idempotencyKey: row.idempotencyKey,
                 input: row.input,
+                ...(Object.hasOwn(row, "dataset") ? { dataset: row.dataset } : {}),
               });
               result = await options.backend.request(
                 publicationId,
@@ -424,7 +446,11 @@ export async function createLocalAppLaunchHost(options: {
               );
             } else if (
               row.op === "backend.upload" &&
-              exact(row, ["id", "op", "idempotencyKey", "name", "contentType", "bytesBase64"])
+              exact(
+                row,
+                ["id", "op", "idempotencyKey", "name", "contentType", "bytesBase64"],
+                ["dataset"],
+              )
             ) {
               const input = parseAppBackendUploadRequest({
                 authorityRevision: authorityRevision,
@@ -432,6 +458,7 @@ export async function createLocalAppLaunchHost(options: {
                 name: row.name,
                 contentType: row.contentType,
                 bytesBase64: row.bytesBase64,
+                ...(Object.hasOwn(row, "dataset") ? { dataset: row.dataset } : {}),
               });
               result = await options.backend.request(
                 publicationId,
@@ -442,7 +469,7 @@ export async function createLocalAppLaunchHost(options: {
               );
             } else if (
               row.op === "backend.file" &&
-              exact(row, ["id", "op", "fileId", "operation", "input"])
+              exact(row, ["id", "op", "fileId", "operation", "input"], ["dataset"])
             ) {
               if (
                 typeof row.fileId !== "string" ||
@@ -455,6 +482,7 @@ export async function createLocalAppLaunchHost(options: {
                 idempotencyKey: "file-read",
                 operation: row.operation,
                 input: row.input,
+                ...(Object.hasOwn(row, "dataset") ? { dataset: row.dataset } : {}),
               });
               result = await options.backend.readBrowserFile(
                 publicationId,
@@ -463,6 +491,7 @@ export async function createLocalAppLaunchHost(options: {
                   fileId: row.fileId,
                   operation: input.operation,
                   input: input.input,
+                  ...(input.dataset === undefined ? {} : { dataset: input.dataset }),
                 },
                 activeSignal,
               );

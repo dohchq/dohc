@@ -1,5 +1,5 @@
 // The page script the app's web views load, bundled by scripts/build-editor.mjs. The app injects the page as
-// `__dohcPage` before the script runs; the hidden warm web view gets `__dohcWarm` instead and shows nothing.
+// `__dohcPage`; the hidden warm web view gets `__dohcWarm` instead and shows nothing.
 import { post } from "./bridge";
 import { mountDocument, type PageConfig } from "./document";
 
@@ -14,8 +14,7 @@ const fontsLoaded = Promise.race([
   document.fonts.load('1rem "Inter Variable"', "aĀạ").then((faces) => faces.length === 3),
   new Promise<boolean>((done) => setTimeout(() => done(false), 5000)),
 ]).catch(() => false);
-if (!host.__dohcWarm && host.__dohcPage) {
-  const page = host.__dohcPage;
+function start(page: PageConfig) {
   if (page.large) mountDocument(page);
   else
     void fontsLoaded.then((loaded) => {
@@ -26,4 +25,17 @@ if (!host.__dohcWarm && host.__dohcPage) {
       post("fonts", { at: Date.now() });
       mountDocument(page);
     });
+}
+// iOS injects the page before this script runs. Android's web view may inject it after, so the page starts when it
+// arrives.
+if (host.__dohcPage) {
+  if (!host.__dohcWarm) start(host.__dohcPage);
+} else {
+  Object.defineProperty(host, "__dohcPage", {
+    configurable: true,
+    set(page: PageConfig) {
+      Object.defineProperty(host, "__dohcPage", { value: page, configurable: true });
+      if (!host.__dohcWarm) start(page);
+    },
+  });
 }

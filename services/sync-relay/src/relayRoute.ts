@@ -278,6 +278,7 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts.length === 3) return { route: "share", shareId };
     if (parts.length === 4 && parts[3] === "access") return { route: "share-access", shareId };
     if (parts.length === 4 && parts[3] === "undo") return { route: "share-undo", shareId };
+    if (parts.length === 4 && parts[3] === "leave") return { route: "share-leave", shareId };
     if (parts.length === 4 && parts[3] === "revoke") return { route: "share-revoke", shareId };
     if (parts.length === 6 && parts[3] === "links" && parts[5] === "rotate") {
       return {
@@ -300,9 +301,23 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
         grantId: parseShareId(parts[4]),
       };
     }
+    if (parts.length === 6 && parts[3] === "grants" && parts[5] === "retune") {
+      return {
+        route: "share-grant-retune",
+        shareId,
+        grantId: parseShareId(parts[4]),
+      };
+    }
     if (parts.length === 6 && parts[3] === "grants" && parts[5] === "revoke") {
       return {
         route: "share-grant-revoke",
+        shareId,
+        grantId: parseShareId(parts[4]),
+      };
+    }
+    if (parts.length === 6 && parts[3] === "grants" && parts[5] === "invitation-email") {
+      return {
+        route: "share-grant-invitation-email",
         shareId,
         grantId: parseShareId(parts[4]),
       };
@@ -341,6 +356,9 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   }
   if (parts.length === 4 && parts[2] === "ops") return parseAccountOperationRoute(parts);
   const workspaceId = parseWorkspaceId(parts[1]);
+  if (parts.length === 3 && parts[2] === "local-apps") {
+    return { route: "dataset", workspaceId, action: "local-app" };
+  }
   if (parts[2] === "datasets") {
     if (parts.length === 3) return { route: "dataset", workspaceId, action: "list" };
     const datasetId = parts[3];

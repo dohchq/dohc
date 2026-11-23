@@ -72,7 +72,7 @@ describe("DatasetCsvTransferDialog", () => {
       target: { value: "Name,Amount\nAlice,3" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Preview CSV" }));
-    expect(screen.getByText("1 rows · 0 rows with input errors")).toBeTruthy();
+    expect(screen.getByText("1 row · 0 rows with input errors")).toBeTruthy();
     expect(invoke).not.toHaveBeenCalled();
     expect(onSave).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Save retry report and import" }));

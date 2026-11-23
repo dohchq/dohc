@@ -59,7 +59,7 @@ export type UpdateEvent =
 
 export const initialUpdateState: UpdateState = {
   status: "idle",
-  message: "Updates have not been checked yet.",
+  message: "dohc has not checked for updates yet.",
 };
 
 const CHECKING: UpdateState = {
@@ -121,7 +121,10 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
       if (state.status === "ready") return state;
       if (state.status === "downloading") return available(state.version);
       return event.type === "offline"
-        ? { status: "offline", message: "You're offline. dohc checks for updates again later." }
+        ? {
+            status: "offline",
+            message: "You are offline. dohc will check for updates again later.",
+          }
         : { status: "error", message: event.message };
   }
 }

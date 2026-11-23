@@ -72,7 +72,7 @@ export function useSharingSearch(
         ),
       );
       if (answers.every((answer) => answer === null))
-        throw new Error("No sharing list could be read.");
+        throw new Error("dohc could not read the sharing lists.");
       return answers.flatMap((answer) => answer ?? []);
     },
   });

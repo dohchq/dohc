@@ -303,22 +303,22 @@ export const holdsUnsent = (state: PageLiveState) => state.phase !== "ended" && 
 export const holdsPage = (state: PageLiveState) =>
   state.phase !== "ended" && (state.phase !== "refused" || state.shown || state.unsent);
 
-/** One sign-in's and workspace's page screens, which the account ends with its apps (appTeardown). */
-export interface PageScope {
+/** What one sign-in and workspace hold open, which the account ends with its apps (appTeardown). */
+export interface WorkspaceScope {
   readonly signIn: object;
   readonly workspaceId: string;
 }
-export function createLivePages() {
-  const open = new Map<{ end(): void }, PageScope>();
+export function createScopedEnds() {
+  const open = new Map<{ end(): void }, WorkspaceScope>();
   return {
-    /** Holds a page screen, with or without a session yet, until the returned removal. */
-    add(scope: PageScope, page: { end(): void }) {
-      open.set(page, scope);
-      return () => void open.delete(page);
+    /** Holds `held` until the returned removal: a page screen with or without a session yet, or a store. */
+    add(scope: WorkspaceScope, held: { end(): void }) {
+      open.set(held, scope);
+      return () => void open.delete(held);
     },
-    end(match: (scope: PageScope) => boolean = () => true) {
-      for (const [page, scope] of [...open]) if (match(scope)) page.end();
+    end(match: (scope: WorkspaceScope) => boolean = () => true) {
+      for (const [held, scope] of [...open]) if (match(scope)) held.end();
     },
   };
 }
-export type LivePages = ReturnType<typeof createLivePages>;
+export type ScopedEnds = ReturnType<typeof createScopedEnds>;

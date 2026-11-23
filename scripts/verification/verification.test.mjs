@@ -39,6 +39,7 @@ import {
   desktopProofTags,
   postgres,
   readSelfHostNativeProof,
+  takeRunnerDatabase,
 } from "./verify.mjs";
 import { selectedGates } from "./selection.mjs";
 import { repoRoot, run } from "./process.mjs";
@@ -1975,6 +1976,25 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a runner's own Postgres is taken from the environment and used without Docker", async () => {
+  const url = "postgres://dohc:dohc@127.0.0.1:5432/dohc";
+  const env = { DOHC_VERIFY_POSTGRES_URL: url, PATH: "kept" };
+  const runnerDatabase = takeRunnerDatabase(env);
+  assert.deepEqual(env, { PATH: "kept" });
+  assert.equal(takeRunnerDatabase({}), null);
+  const database = await postgres(
+    "unused-output",
+    async (executable) => {
+      throw new Error(`${executable} must not run`);
+    },
+    undefined,
+    undefined,
+    runnerDatabase,
+  );
+  assert.equal(database.url, url);
+  await database.stop();
 });
 
 test("Postgres startup rejection cleans its created container and preserves startup and cleanup failures", async () => {

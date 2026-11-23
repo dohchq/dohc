@@ -16,7 +16,7 @@ import { automationAgent, type DesktopUserSettings } from "../settings/userSetti
 // chose another agent, so the message wakes only the agent whose chat has it.
 
 export const AUTOMATION_NO_RUNNER =
-  "No agent runner is set up. Set one up in Settings → Agents, then try again.";
+  "No agent runner is set up. Set one up in Settings › Agents, then try again.";
 
 /** Where a wake's message is: its thread, in this agent's chat. */
 export interface WakePlace {

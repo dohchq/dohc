@@ -217,10 +217,10 @@ describe("combine by hand", () => {
     // is what this box will edit, not what the engine will apply, and a
     // `toContain` on the digits cannot tell the two apart.
     expect(screen.getByTestId("version-conflict-combined-too-large").textContent).toBe(
-      `That change would make the combined copy ${paste.length.toLocaleString(
+      `That change makes the combined copy ${paste.length.toLocaleString(
         "en-US",
-      )} bytes. Combining by hand works up to ` +
-        `${CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")} bytes. ` +
+      )} bytes, which exceeds the ` +
+        `${CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString("en-US")}-byte limit for combining by hand. ` +
         `Add less text.`,
     );
 
@@ -271,7 +271,7 @@ describe("combine by hand", () => {
       (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
     ).toBe("");
     expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
-      "Main doesn't have this file. This starts empty.",
+      "Main does not have this file. This starts empty.",
     );
   });
 

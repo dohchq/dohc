@@ -29,7 +29,7 @@ export function CollectionRecoveryExportDialog(props: {
       }
     } catch (error) {
       if (!signal.aborted)
-        props.onError("Could not export this Collection.", error, () => {
+        props.onError("dohc could not export this Collection.", error, () => {
           void save();
         });
     } finally {
@@ -50,10 +50,9 @@ export function CollectionRecoveryExportDialog(props: {
           Export {props.collectionName}?
         </h2>
         <p className="text-[13px] text-muted">
-          This recovery file includes every table, private records, uploads, source, history, and
-          retry credentials. Store it privately.
+          This recovery file includes every table, private record, upload, source file, history
+          entry, and retry credential. Save it outside shared folders.
         </p>
-        <p className="text-[13px] text-muted">Choose a location outside shared folders.</p>
         <div className="flex justify-end gap-2">
           <SecondaryButton disabled={busy} onClick={props.onClose}>
             Cancel

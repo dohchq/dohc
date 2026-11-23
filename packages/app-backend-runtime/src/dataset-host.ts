@@ -321,7 +321,10 @@ function synchronous<T>(run: () => T): T {
  * `undo`, the input its reverse action takes, within DATASET_UNDO_BYTES, so
  * every change it makes has a way back.
  */
-function missingUndo(operation: DatasetOperation, result: JsonValue): AppOperationRefusal | null {
+export function missingUndo(
+  operation: DatasetOperation,
+  result: JsonValue,
+): AppOperationRefusal | null {
   const undo =
     result !== null &&
     typeof result === "object" &&
@@ -1764,45 +1767,76 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       raw: DatasetScope & { appId: string; binding: AppDatasetBinding | null },
       commitPublication?: () => void,
     ): void {
-      const key = scope(raw),
-        appId = text(raw.appId);
+      host.setBindings(
+        context,
+        {
+          workspaceId: raw.workspaceId,
+          operations: [{ datasetId: raw.datasetId, appId: raw.appId, binding: raw.binding }],
+        },
+        commitPublication,
+      );
+    },
+    setBindings(
+      context: Context,
+      raw: {
+        workspaceId: string;
+        operations: ReadonlyArray<{
+          datasetId: string;
+          appId: string;
+          binding: AppDatasetBinding | null;
+        }>;
+      },
+      commitPublication?: () => void,
+    ): void {
+      const workspaceId = text(raw.workspaceId);
+      const operations = raw.operations.map((entry) => ({
+        key: scope({ workspaceId, datasetId: entry.datasetId }),
+        appId: text(entry.appId),
+        binding: entry.binding,
+      }));
+      if (operations.length === 0)
+        throw new DatasetHostError("invalid", "Choose at least one Collection binding.");
       transaction(() => {
-        owner(context, key);
-        if (raw.binding !== null) live(key);
-        const approved = revision(key);
-        const existing = db
-          .prepare(
-            "SELECT binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
-          )
-          .get(key.workspaceId, key.datasetId, appId);
-        const previousBytes = existing
-          ? Buffer.byteLength(String(existing.binding_json)) + Buffer.byteLength(appId) + 256
-          : 0;
-        if (raw.binding === null) {
-          if (options.accountMetadata)
-            synchronous(() => options.accountMetadata!(context, { ...key, bytes: -previousBytes }));
-          db.prepare(
-            "DELETE FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
-          ).run(key.workspaceId, key.datasetId, appId);
-        } else {
-          if (!existing && hasUncommittedDatasetAttempts(db, key, appId)) {
-            throw new DatasetBindingPendingAttemptError();
+        for (const { key, appId, binding: rawBinding } of operations) {
+          owner(context, key);
+          if (rawBinding !== null) live(key);
+          const approved = revision(key);
+          const existing = db
+            .prepare(
+              "SELECT binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+            )
+            .get(key.workspaceId, key.datasetId, appId);
+          const previousBytes = existing
+            ? Buffer.byteLength(String(existing.binding_json)) + Buffer.byteLength(appId) + 256
+            : 0;
+          if (rawBinding === null) {
+            if (options.accountMetadata)
+              synchronous(() =>
+                options.accountMetadata!(context, { ...key, bytes: -previousBytes }),
+              );
+            db.prepare(
+              "DELETE FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+            ).run(key.workspaceId, key.datasetId, appId);
+          } else {
+            if (!existing && hasUncommittedDatasetAttempts(db, key, appId)) {
+              throw new DatasetBindingPendingAttemptError();
+            }
+            const binding = parseDatasetBinding(rawBinding, approved, generatedRevision);
+            const json = JSON.stringify(binding);
+            if (options.accountMetadata)
+              synchronous(() =>
+                options.accountMetadata!(context, {
+                  ...key,
+                  bytes: Buffer.byteLength(json) + Buffer.byteLength(appId) + 256 - previousBytes,
+                }),
+              );
+            db.prepare(
+              "INSERT INTO dohc_dataset_bindings VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,dataset_id,app_id) DO UPDATE SET binding_json=excluded.binding_json,token=excluded.token",
+            ).run(key.workspaceId, key.datasetId, appId, json, randomUUID());
           }
-          const binding = parseDatasetBinding(raw.binding, approved, generatedRevision);
-          const json = JSON.stringify(binding);
-          if (options.accountMetadata)
-            synchronous(() =>
-              options.accountMetadata!(context, {
-                ...key,
-                bytes: Buffer.byteLength(json) + Buffer.byteLength(appId) + 256 - previousBytes,
-              }),
-            );
-          db.prepare(
-            "INSERT INTO dohc_dataset_bindings VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,dataset_id,app_id) DO UPDATE SET binding_json=excluded.binding_json,token=excluded.token",
-          ).run(key.workspaceId, key.datasetId, appId, json, randomUUID());
         }
         if (commitPublication) synchronous(commitPublication);
-        owner(context, key);
+        for (const { key } of operations) owner(context, key);
       });
     },
     setDataGrant(
@@ -1985,6 +2019,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         ...artifacts(key),
         active: current.active && !lifecycle(key).archived,
         cursor: current.cursor,
+        checkpointSha256: current.checkpointSha256,
       };
     },
     history(

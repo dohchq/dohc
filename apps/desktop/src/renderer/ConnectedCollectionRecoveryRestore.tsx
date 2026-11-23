@@ -16,8 +16,7 @@ export function ConnectedCollectionRecoveryRestore(props: ConnectedCollectionRec
   const sourceError = useRef<string | undefined>(undefined);
   async function discard(transferId: string) {
     const result = await bridge().dataset({ action: "discardRecovery", workspaceId, transferId });
-    if (result.kind !== "recovery-discarded")
-      throw Error("dohc could not cancel this recovery. Try again.");
+    if (result.kind !== "recovery-discarded") throw Error("dohc could not cancel this recovery.");
   }
   return (
     <CollectionRecoveryRestoreDialog
@@ -28,7 +27,7 @@ export function ConnectedCollectionRecoveryRestore(props: ConnectedCollectionRec
         signal.throwIfAborted();
         const result = await bridge().dataset({ action: "prepareRecovery", workspaceId });
         if (result.kind !== "recovery-prepared")
-          throw Error("dohc could not read this recovery file. Try again.");
+          throw Error("dohc could not read this recovery file.");
         if (!result.recovery) return null;
         const recovery = DatasetRecoveryPreparation.parse(result.recovery);
         if (
@@ -66,7 +65,7 @@ export function ConnectedCollectionRecoveryRestore(props: ConnectedCollectionRec
           result.targetCursor.datasetId !== recovery.revision.datasetId ||
           result.targetCursor.approvedRevisionHash !== recovery.revision.revisionSha256
         ) {
-          throw Error("dohc could not confirm this restore. Retry recovery.");
+          throw Error("dohc could not confirm this restore.");
         }
         restoredPath.current = result.datasetPath;
         sourceError.current = result.sourceError;

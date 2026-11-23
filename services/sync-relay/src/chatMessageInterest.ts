@@ -7,9 +7,10 @@ import { authorizeShareAction } from "./shareAuthorization";
 import { linkChatOrigin } from "./relayLogInputs";
 import { filterOpForShare, type ChatShareThreadResolver } from "./shareFilter";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
+import { threadShownOnPhone } from "./storage/accountFeed";
 import type { StorageContext } from "./storage/context";
 
-export type ChatMessageReason = "mention" | "dm" | "reply";
+export type ChatMessageReason = "mention" | "dm" | "reply" | "agent";
 export interface PushMessage {
   workspaceId: string;
   threadId: string;
@@ -17,6 +18,7 @@ export interface PushMessage {
   relaySeq: number;
   payloadJson: string;
   authorUserId: string | null;
+  linkPrincipalId: string | null;
   authorKind: string;
   senderLabel: string;
   body: string;
@@ -73,6 +75,7 @@ export function readPushMessage(storage: StorageContext, relaySeq: number): Push
     body: payload.body,
     authorKind: String(payload.authorKind),
     authorUserId: payload.authorKind === "link" ? null : String(payload.authorUserId),
+    linkPrincipalId: payload.authorKind === "link" ? String(payload.linkPrincipalId) : null,
     senderLabel: pushPlainText(payload.authorDisplayName, "Someone"),
   };
 }
@@ -90,12 +93,31 @@ export function pushChatResolver(
   };
 }
 
+export function phoneCanShow(
+  storage: StorageContext,
+  userId: string,
+  workspaceId: string,
+  threadId: string,
+): boolean {
+  return (
+    !accountIsFenced(storage, userId) &&
+    !workspaceIsDeleted(storage, workspaceId) &&
+    storage.workspaceIsOwnedBy(workspaceId, userId) &&
+    storage.showsOnPhone(userId, workspaceId) &&
+    threadShownOnPhone(storage, workspaceId, threadId)
+  );
+}
+
+export function isOwnAgentMessage(message: PushMessage, userId: string): boolean {
+  return message.authorKind === "agent" && message.authorUserId === userId;
+}
+
 /** Returns a place label only through the recipient's current read authority. */
 export function pushMessageAccess(
   storage: StorageContext,
   message: PushMessage,
   userId: string,
-): { place: string; dm: boolean } | null {
+): { place: string; channelKind: string | null } | null {
   const { workspaceId, threadId } = message;
   if (accountIsFenced(storage, userId) || workspaceIsDeleted(storage, workspaceId)) return null;
   const resolver = pushChatResolver(storage, workspaceId);
@@ -121,7 +143,7 @@ export function pushMessageAccess(
       : undefined;
     return {
       place: pushPlainText(name ?? filePath?.split("/").at(-1)?.replace(/\.md$/iu, ""), "a chat"),
-      dm: Boolean(channel && resolver.channelKind(channel) === "dm"),
+      channelKind: (channel && resolver.channelKind(channel)) || null,
     };
   }
   for (const row of storage.db
@@ -150,7 +172,7 @@ export function pushMessageAccess(
         storage.getShareLabels(authority.share.shareId, "member").subjectName,
         "a chat",
       ),
-      dm: Boolean(channel && resolver.channelKind(channel) === "dm"),
+      channelKind: (channel && resolver.channelKind(channel)) || null,
     };
   }
   return null;
@@ -176,7 +198,7 @@ export function chatMessageInterest(
     chatMentionTokens(message.body).some((token) => normalizeHandle(token.handle) === handle)
   )
     return "mention";
-  if (access.dm) return "dm";
+  if (access.channelKind === "dm") return "dm";
   const prior = storage.db
     .prepare(`SELECT 1 FROM sync_relay_log WHERE workspace_id = ?
     AND op_kind = 'chat.message.append' AND json_valid(payload_json)
@@ -184,5 +206,8 @@ export function chatMessageInterest(
     AND json_extract(payload_json, '$.authorKind') = 'human' AND json_extract(payload_json, '$.authorUserId') = ?
     AND relay_admission IS NULL AND settlement_admission_json IS NULL LIMIT 1`)
     .get(message.workspaceId, message.threadId, message.relaySeq, recipient.userId);
-  return prior ? "reply" : null;
+  if (prior) return "reply";
+  return isOwnAgentMessage(message, recipient.userId) && access.channelKind === "agent"
+    ? "agent"
+    : null;
 }

@@ -683,9 +683,11 @@ export function createCaptureLiveStores(
   // one must not answer for.
   async function runRawRead<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
+    options: { endRetriesAtQuit?: boolean } = {},
   ): Promise<T> {
     return await sessions.run(workspace, async (binding) => await operation(adapterFor(binding)), {
       retryTransportErrors: true,
+      ...options,
     });
   }
 
@@ -724,8 +726,11 @@ export function createCaptureLiveStores(
     }
   }
 
-  async function runRead<T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>): Promise<T> {
-    return await withDomainErrors(async () => await runRawRead(operation));
+  async function runRead<T>(
+    operation: (adapter: VersionedLiveAdapter) => Promise<T>,
+    options: { endRetriesAtQuit?: boolean } = {},
+  ): Promise<T> {
+    return await withDomainErrors(async () => await runRawRead(operation, options));
   }
 
   async function runMutation<T>(
@@ -1027,6 +1032,9 @@ export function createCaptureLiveStores(
       path: string;
       requestId?: string;
       expectedSha256?: string;
+      expectedPathClearSinceOrder?: number;
+      expectedPathClearObjectId?: string;
+      expectedPathClearHeadMomentId?: string;
       text: string;
       publish?: boolean;
       createOnly?: boolean;
@@ -1034,18 +1042,19 @@ export function createCaptureLiveStores(
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       momentId?: string;
+      beforeSend?: () => void;
     }) {
-      const { metadata, author, ...writeInput } = input;
+      const { metadata, author, beforeSend, ...writeInput } = input;
       const requestId = input.requestId ?? randomUUID();
-      const raw = await runMutation(
-        async (adapter) =>
-          await adapter.writeTextFile({
-            ...writeInput,
-            requestId,
-            ...(author ? { author: adapterAuthor(author) } : {}),
-            metadata: adapterMetadata(metadata),
-          }),
-      );
+      const raw = await runMutation(async (adapter) => {
+        beforeSend?.();
+        return await adapter.writeTextFile({
+          ...writeInput,
+          requestId,
+          ...(author ? { author: adapterAuthor(author) } : {}),
+          metadata: adapterMetadata(metadata),
+        });
+      });
       return {
         materialized: raw.materialized,
         deduped: raw.deduped,
@@ -1062,23 +1071,27 @@ export function createCaptureLiveStores(
       path: string;
       requestId?: string;
       expectedSha256?: string;
+      expectedPathClearSinceOrder?: number;
+      expectedPathClearObjectId?: string;
+      expectedPathClearHeadMomentId?: string;
       bytes: Uint8Array;
       createOnly?: boolean;
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       momentId?: string;
+      beforeSend?: () => void;
     }) {
-      const { metadata, author, ...writeInput } = input;
+      const { metadata, author, beforeSend, ...writeInput } = input;
       const requestId = input.requestId ?? randomUUID();
-      const raw = await runMutation(
-        async (adapter) =>
-          await adapter.writeBinaryFile({
-            ...writeInput,
-            requestId,
-            ...(author ? { author: adapterAuthor(author) } : {}),
-            metadata: adapterMetadata(metadata),
-          }),
-      );
+      const raw = await runMutation(async (adapter) => {
+        beforeSend?.();
+        return await adapter.writeBinaryFile({
+          ...writeInput,
+          requestId,
+          ...(author ? { author: adapterAuthor(author) } : {}),
+          metadata: adapterMetadata(metadata),
+        });
+      });
       const value: VersionedTextReadValue = {
         workspaceId: input.workspaceId,
         versionId: input.versionId,
@@ -1114,22 +1127,26 @@ export function createCaptureLiveStores(
       path: string;
       expectedObjectId?: string;
       expectedSha256?: string;
+      expectedPathClearSinceOrder?: number;
+      expectedPathClearObjectId?: string;
+      expectedPathClearHeadMomentId?: string;
       onlyIfAbsentOnDisk?: boolean;
       requestId?: string;
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       momentId?: string;
       captureHoldId?: string;
+      beforeSend?: () => void;
     }) {
-      const { metadata, author, ...deleteInput } = input;
-      const raw = await runMutation(
-        async (adapter) =>
-          await adapter.deleteTextFile({
-            ...deleteInput,
-            ...(author ? { author: adapterAuthor(author) } : {}),
-            metadata: adapterMetadata(metadata),
-          }),
-      );
+      const { metadata, author, beforeSend, ...deleteInput } = input;
+      const raw = await runMutation(async (adapter) => {
+        beforeSend?.();
+        return await adapter.deleteTextFile({
+          ...deleteInput,
+          ...(author ? { author: adapterAuthor(author) } : {}),
+          metadata: adapterMetadata(metadata),
+        });
+      });
       if (!raw.moment.beforePresent) {
         throw new VersionedTextStoreError(
           "state-corrupt",
@@ -1228,7 +1245,9 @@ export function createCaptureLiveStores(
       limit?: number;
       beforeMomentOrder?: number;
     }) {
-      const page = await runRead(async (adapter) => await adapter.listMoments(input));
+      const page = await runRead(
+        async (adapter) => await adapter.listMoments({ ...input, metadataOnly: true }),
+      );
       return {
         ...page,
         moments: page.moments.map((moment) =>
@@ -1248,7 +1267,9 @@ export function createCaptureLiveStores(
       limit?: number;
       cursor?: HistoryCursor;
     }) {
-      const page = await runRead(async (adapter) => await adapter.readHistoryPage(input));
+      const page = await runRead(async (adapter) => await adapter.readHistoryPage(input), {
+        endRetriesAtQuit: true,
+      });
       return {
         ...page,
         moments: page.moments.map((moment) => momentSummaryFromWire(input.workspaceId, moment)),
@@ -1425,6 +1446,7 @@ export function createCaptureLiveStores(
         return {
           kind: "resolved",
           conflict,
+          placed: raw.placed,
           write: {
             object: fileObjectFromWire(write.object),
             // One reader for both: a settled body and the moment’s `afterText`
@@ -1450,6 +1472,7 @@ export function createCaptureLiveStores(
         return {
           kind: "resolved",
           conflict,
+          placed: raw.placed,
           delete: {
             object: fileObjectFromWire(deletion.object),
             before: snapshotFromWire(deletion.before, input.metadata),
@@ -1461,7 +1484,7 @@ export function createCaptureLiveStores(
           },
         };
       }
-      return { kind: "resolved", conflict };
+      return { kind: "resolved", conflict, placed: raw.placed };
     },
 
     async flushCapture(options: { signal?: AbortSignal } = {}) {
@@ -1535,7 +1558,9 @@ export function createCaptureLiveStores(
     },
 
     async listPendingCollectionAdoptions(input = {}) {
-      return await runRead(async (adapter) => await adapter.listPendingCollectionAdoptions(input));
+      return await runRead(async (adapter) => await adapter.listPendingCollectionAdoptions(input), {
+        endRetriesAtQuit: true,
+      });
     },
 
     async reconcileCapture() {
@@ -1557,7 +1582,9 @@ export function createCaptureLiveStores(
     },
 
     async listKeptCopies() {
-      return await runRead(async (adapter) => await adapter.listKeptCopies());
+      return await runRead(async (adapter) => await adapter.listKeptCopies(), {
+        endRetriesAtQuit: true,
+      });
     },
 
     async saveKeptCopy(id: number) {

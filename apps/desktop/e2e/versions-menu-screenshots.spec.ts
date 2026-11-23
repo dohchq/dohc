@@ -341,6 +341,13 @@ test("@ui-audit the versions menu and what it opens", async () => {
 
     await writeCaptured(page, temp.rootPath, "Draft", "plan.md", "# Plan\n\nSecond draft.\n");
     await openMenu(page);
+    await page.getByTestId("version-compare").click();
+    await expect(page.getByTestId("version-compare-page")).toBeVisible();
+    await expect(
+      page.locator('[data-testid="version-compare-file"][data-compare-path="plan.md"]'),
+    ).toBeVisible({ timeout: 20_000 });
+    await shootWindow(page, "compare-draft");
+    await openMenu(page);
     await page.getByTestId("version-merge").click();
     await page.getByTestId("version-merge-confirm").click();
     await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, {

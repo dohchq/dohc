@@ -224,7 +224,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   function reportActivationFailure(workspace: WorkspaceSummary, error: unknown): void {
     console.error(`[desktop] could not open ${workspace.rootPath}:`, error);
     dialog.showErrorBox(
-      "Open workspace",
+      "dohc could not open this workspace",
       `dohc could not open ${workspace.rootPath}. Open it again from the workspace manager.`,
     );
   }
@@ -338,7 +338,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
               // e.g. an unreadable settings file, named with its way out —
               // must reach the user here.
               dialog.showErrorBox(
-                "Zoom",
+                "dohc could not change the window zoom",
                 error instanceof Error ? error.message : "dohc could not change the window zoom.",
               );
             });

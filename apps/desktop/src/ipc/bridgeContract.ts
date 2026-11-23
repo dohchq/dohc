@@ -1,7 +1,9 @@
 import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLimits";
 import { ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
+import type { agentRunHistoryOperations } from "./agentRunHistoryOperations";
 import type { captureOperations } from "./captureOperations";
 import type { linksOperations } from "./linksOperations";
+import type { retrievalOperations } from "./retrievalOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
@@ -170,7 +172,11 @@ import type {
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { explorerMenuOperations } from "./explorerMenuOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
-import type { protectedCopyOperations, stoppedRunOperations } from "./writeOperations";
+import type {
+  agentRunUndoOperations,
+  protectedCopyOperations,
+  stoppedRunOperations,
+} from "./writeOperations";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   AgentId,
@@ -381,6 +387,7 @@ export const WorkspaceSummary = z.object({
       // grant could not be read. The banner states the level; it never
       // decides anything with it.
       access: SHARE_ACCESS.optional(),
+      editingNotReady: z.literal(true).optional(),
       genericChatWritable: z.boolean().optional(),
       // The stored grant is unreadable. The marker still stands, because a
       // share view whose grant cannot be read must not present as an ordinary
@@ -564,6 +571,18 @@ export const SaveOwnerLiveRecoveryCopyResult = z
   })
   .strict();
 export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecoveryCopyResult>;
+// Packages Save recovery copy kept on this computer with no readable copy in
+// the workspace. `path` is the note, or null when the package can't be read.
+export const ListOwnerLiveRecoveryPackagesResult = z
+  .object({
+    packages: z.array(
+      z.object({ path: SAFE_RELATIVE_PATH.nullable(), packagePath: SAFE_RELATIVE_PATH }).strict(),
+    ),
+  })
+  .strict();
+export type ListOwnerLiveRecoveryPackagesResult = z.infer<
+  typeof ListOwnerLiveRecoveryPackagesResult
+>;
 
 export const OwnerLiveDocument = z
   .object({
@@ -576,6 +595,7 @@ export const OwnerLiveDocument = z
         "session-host-refused",
         "session-host-diverged",
         "live-document-without-lineage",
+        "live-document-too-large",
         "live-edit-unadmitted",
         "conflict-parent-withheld",
         "live-history-over-budget",
@@ -639,8 +659,9 @@ export const StopOwnerLiveDocumentResult = z
   .strict();
 export type StopOwnerLiveDocumentResult = z.infer<typeof StopOwnerLiveDocumentResult>;
 // `already` when the server says the document was already live, so this Resume changed nothing.
+// `ended`: the note's file was moved, deleted or replaced, so the server's pause ended and nothing started.
 export const ResumeOwnerLiveDocumentResult = z
-  .object({ already: z.literal(true).optional() })
+  .object({ already: z.literal(true).optional(), ended: z.literal(true).optional() })
   .strict();
 export type ResumeOwnerLiveDocumentResult = z.infer<typeof ResumeOwnerLiveDocumentResult>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
@@ -1568,6 +1589,7 @@ export const databaseImportOperations = {
 const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
+  "state-corrupt",
   "migration-failed",
   "migrated-by-newer-build",
 ] as const satisfies readonly EngineStoreRefusal[];
@@ -1643,6 +1665,16 @@ const SYNC_STATUS_BASE_FIELDS = {
   // True when the workspace is on a network share, whose server, not dohc,
   // decides who can read its History. Omitted otherwise.
   onNetworkShare: z.boolean().optional(),
+  // Present when a Windows workspace sits inside a cloud-synced folder such as
+  // OneDrive, Google Drive, or Dropbox, which can corrupt `.dohc/engine`.
+  // `acknowledged` is true when the person already confirmed this folder at
+  // pick or open time, so the shell records it without toasting again.
+  cloudSyncFolder: z
+    .object({
+      service: z.string().min(1).nullable(),
+      acknowledged: z.boolean().optional(),
+    })
+    .optional(),
   recoveryUnavailable: z.boolean().optional(),
   // Why protected files such as `.env` wait on the workspace secret key, as
   // the engine's code, such as `key-missing`. Omitted while the key works.
@@ -1704,6 +1736,21 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLivePausedPaths: z.array(SAFE_RELATIVE_PATH).optional(),
   ownerLiveStopFailures: z
     .array(z.object({ objectId: z.string().min(1), path: SAFE_RELATIVE_PATH, detail: z.string() }))
+    .optional(),
+  // Notes the server paused for good, each with its copy written next to it.
+  ownerLivePauses: z
+    .array(
+      z.object({
+        pauseId: z.string().min(1),
+        objectId: z.string().min(1),
+        path: SAFE_RELATIVE_PATH,
+        cause: z.enum(["refused", "failing", "ended"]),
+        names: z.array(z.string()).max(256),
+        copyPath: SAFE_RELATIVE_PATH.nullable(),
+        leftOut: z.boolean(),
+      }),
+    )
+    .max(64)
     .optional(),
   ownerLiveQuarantines: z
     .array(OwnerLiveQuarantine)
@@ -1945,6 +1992,8 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
       return "This workspace's data store is not in the format this version of dohc uses.";
     case "foreign-database":
       return "dohc cannot read this workspace's data store.";
+    case "state-corrupt":
+      return "This workspace's data store is damaged.";
     case "migration-failed":
       return "dohc could not update this workspace's data store to this version.";
     case "migrated-by-newer-build":
@@ -1952,14 +2001,15 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
   }
 }
 
-// What the refusal needs. A store from another format, or a file that is not
-// a dohc database, is rebuilt from the workspace files. A store this build
+// What the refusal needs. A store from another format, a file that is not a
+// dohc database, or a damaged one, is rebuilt from the workspace files. A store this build
 // could not migrate, or one a newer build migrated, is intact and waits for a
 // build that can open it.
 export function engineStoreRefusalRecovery(cause: EngineStoreRefusal): "rebuild" | "update" {
   switch (cause) {
     case "unsupported-fingerprint":
     case "foreign-database":
+    case "state-corrupt":
       return "rebuild";
     case "migration-failed":
     case "migrated-by-newer-build":
@@ -4724,18 +4774,37 @@ export const CreateRelaySharePayload = z.object({
 });
 export type CreateRelaySharePayload = z.infer<typeof CreateRelaySharePayload>;
 
+export const InvitationEmail = z.enum(["sent", "unavailable", "limit", "failed"]);
+export const InvitationEmailLimit = z.object({
+  limit: z.number().int().positive(),
+  windowHours: z.number().int().positive(),
+  sent: z.number().int().nonnegative(),
+});
+
 export const CreateRelayShareResult = z.object({
   shareId: OPAQUE_ID,
   grantId: OPAQUE_ID,
   browserInvitationUrl: z.string().url().max(4096).optional(),
   shareCode: z.string().min(1).max(4096),
   recipientEmail: EMAIL_STRING,
+  invitationEmail: InvitationEmail,
+  invitationEmailLimit: InvitationEmailLimit.optional(),
 });
 export type CreateRelayShareResult = z.infer<typeof CreateRelayShareResult>;
 
 export const RevokeRelaySharePayload = z.object({
   shareId: OPAQUE_ID,
 });
+
+export const LeaveRelaySharePayload = z.object({ shareId: OPAQUE_ID, ended: z.boolean() }).strict();
+export type LeaveRelaySharePayload = z.infer<typeof LeaveRelaySharePayload>;
+
+export const LeaveRelayShareResult = z.object({ left: z.boolean() }).strict();
+export type LeaveRelayShareResult = z.infer<typeof LeaveRelayShareResult>;
+
+export const RelayShareLeaveResponse = LeaveRelayShareResult.extend({
+  ok: z.literal(true),
+}).strict();
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
 
 // The relay's receipt for a removal it can put back. It restores the grants
@@ -5316,6 +5385,58 @@ export const RevokeRelayShareGrantPayload = z
   .strict();
 export type RevokeRelayShareGrantPayload = z.infer<typeof RevokeRelayShareGrantPayload>;
 
+export const RetuneRelayShareGrantPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: OPAQUE_ID,
+    grantId: OPAQUE_ID,
+    access: SHARE_ACCESS,
+  })
+  .strict();
+export type RetuneRelayShareGrantPayload = z.infer<typeof RetuneRelayShareGrantPayload>;
+
+export const RetuneRelayShareGrantResult = z
+  .object({
+    grantId: OPAQUE_ID,
+    access: SHARE_ACCESS,
+    generation: z.number().int().min(1),
+    status: z.literal("active"),
+    revokedAtMs: z.null(),
+    parentGrantId: OPAQUE_ID.nullable(),
+  })
+  .strict();
+export type RetuneRelayShareGrantResult = z.infer<typeof RetuneRelayShareGrantResult>;
+
+export const RelayShareGrantRetuneResponse = RetuneRelayShareGrantResult.extend({
+  ok: z.literal(true),
+}).strict();
+
+export const ResendRelayShareInvitationPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: OPAQUE_ID,
+    grantId: OPAQUE_ID,
+  })
+  .strict();
+export type ResendRelayShareInvitationPayload = z.infer<typeof ResendRelayShareInvitationPayload>;
+
+export const ResendRelayShareInvitationResult = z.union([
+  z.object({ invitationEmail: z.enum(["sent", "unavailable", "recent", "failed"]) }).strict(),
+  z
+    .object({
+      invitationEmail: z.literal("limit"),
+      invitationEmailLimit: InvitationEmailLimit.strict(),
+    })
+    .strict(),
+]);
+export type ResendRelayShareInvitationResult = z.infer<typeof ResendRelayShareInvitationResult>;
+
+export const RelayShareInvitationResendResponse = z
+  .object({ ok: z.literal(true) })
+  .passthrough()
+  .transform(({ ok: _ok, ...answer }) => answer)
+  .pipe(ResendRelayShareInvitationResult);
+
 const RelayShareNamedGrantTransitionBase = {
   grantId: OPAQUE_ID,
   access: SHARE_ACCESS,
@@ -5335,6 +5456,7 @@ export type PromoteRelayShareGrantResult = z.infer<typeof PromoteRelayShareGrant
 export const RevokeRelayShareGrantResult = z
   .object({
     ...RelayShareNamedGrantTransitionBase,
+    parentGrantId: OPAQUE_ID.nullable(),
     status: z.literal("revoked"),
     revokedAtMs: z.number().int().nonnegative(),
     undo: RelayShareUndoReceipt,
@@ -6118,6 +6240,75 @@ export const LiveDraftRecoveryRecord = z
 export type LiveDraftRecoveryRecord = z.infer<typeof LiveDraftRecoveryRecord>;
 export const LiveDraftRecoveryChangedEvent = z.object({ workspaceId: WORKSPACE_ID }).strict();
 export type LiveDraftRecoveryChangedEvent = z.infer<typeof LiveDraftRecoveryChangedEvent>;
+const SET_ASIDE_DRAFT_KEY = z
+  .string()
+  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+export const SetAsideDraftFile = z.object({ key: SET_ASIDE_DRAFT_KEY, raw: z.string() }).strict();
+export type SetAsideDraftFile = z.infer<typeof SetAsideDraftFile>;
+export const SetAsideDraftFiles = z.array(SetAsideDraftFile);
+export const SetAsideDraftChange = z
+  .object({ key: SET_ASIDE_DRAFT_KEY, raw: z.string().nullable() })
+  .strict();
+export type SetAsideDraftChange = z.infer<typeof SetAsideDraftChange>;
+export const setAsideDraftOperations = {
+  listSetAsideDrafts: {
+    capabilityId: "document.aside.list",
+    scope: "device",
+    channel: "desktop:list-set-aside-drafts",
+    payload: z.object({}).strict(),
+    result: z.array(SetAsideDraftFile),
+    guard: "trusted-sender",
+  },
+  writeSetAsideDraft: {
+    capabilityId: "document.aside.write",
+    scope: "device",
+    channel: "desktop:write-set-aside-draft",
+    payload: z
+      .object({ key: SET_ASIDE_DRAFT_KEY, raw: z.string(), ifCurrent: z.string().nullable() })
+      .strict(),
+    result: z.boolean(),
+    guard: "trusted-sender",
+  },
+  removeSetAsideDraft: {
+    capabilityId: "document.aside.remove",
+    scope: "device",
+    channel: "desktop:remove-set-aside-draft",
+    payload: z.object({ key: SET_ASIDE_DRAFT_KEY, ifCurrent: z.string() }).strict(),
+    result: z.boolean(),
+    guard: "trusted-sender",
+  },
+  moveSetAsideDrafts: {
+    capabilityId: "document.aside.move",
+    scope: "device",
+    channel: "desktop:move-set-aside-drafts",
+    payload: z
+      .object({
+        workspaceId: WORKSPACE_ID,
+        changes: z.array(
+          z.union([
+            z
+              .object({
+                id: z.string(),
+                kind: z.enum(["file", "folder"]),
+                fromPath: PATH_STRING,
+                toPath: PATH_STRING,
+              })
+              .strict(),
+            z
+              .object({
+                id: z.string(),
+                kind: z.enum(["create-file", "create-folder", "delete-file", "delete-folder"]),
+                path: PATH_STRING,
+              })
+              .strict(),
+          ]),
+        ),
+      })
+      .strict(),
+    result: z.null(),
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
 export const DiscardLiveDraftRecoveryPayload = z
   .object({
     workspaceId: WORKSPACE_ID,
@@ -6609,6 +6800,9 @@ const RefreshSharedViewSuccessResult = z.object({
   refusedDetail: z.string().nullable(),
 });
 
+export const SHARE_EDITING_NOT_READY_MESSAGE =
+  "dohc could not turn on editing for this share. Choose Refresh, or return to this window, to try again.";
+
 const RefreshSharedViewFailureResult = z.object({
   ok: z.literal(false),
   probed: z.literal(true).optional(),
@@ -6623,6 +6817,7 @@ const RefreshSharedViewFailureResult = z.object({
   // This refresh set the record aside before it failed, so the person hears
   // of it all the same.
   collisionRecordQuarantined: z.boolean().optional(),
+  editingNotReady: z.literal(true).optional(),
 });
 
 export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
@@ -6636,6 +6831,7 @@ export type CheckSharedViewAccessPayload = z.infer<typeof CheckSharedViewAccessP
 export const CheckSharedViewAccessResult = z.object({
   status: z.enum(["current", "ended", "unverified", "needs-reopen"]),
   access: z.enum(["view", "comment", "edit"]).optional(),
+  relayStatesMore: z.literal(true).optional(),
 });
 export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
 
@@ -6718,6 +6914,7 @@ export type ShareMountStatusRow = z.infer<typeof ShareMountStatusRow>;
 export const MountShareResult = z.object({
   workspace: WorkspaceSummary,
   mount: ShareMountStatusRow,
+  alreadyAdded: z.literal(true).optional(),
 });
 export type MountShareResult = z.infer<typeof MountShareResult>;
 
@@ -6843,6 +7040,9 @@ export const ChatDispatchStateForThreadPayload = z
     threadId: OPAQUE_ID.nullable(),
     // An agent's chat's earlier posts, where a reply can wait for the agent too.
     postThreadIds: z.array(OPAQUE_ID).max(CHAT_DISPATCH_POST_THREADS_MAX).optional(),
+    // The conversation's other threads, when two devices started it before
+    // they synced. A run there is the conversation's too.
+    laneThreadIds: z.array(OPAQUE_ID).max(CHAT_DISPATCH_POST_THREADS_MAX).optional(),
   })
   .strict();
 export type ChatDispatchStateForThreadPayload = z.infer<typeof ChatDispatchStateForThreadPayload>;
@@ -6908,6 +7108,11 @@ export const ChatDispatchStateForThreadResult = z
     liveRunId: OPAQUE_ID.nullable(),
     // The message the live run answers, so its working line sits under it.
     liveTriggerMessageId: OPAQUE_ID.nullable(),
+    // The agent at work in the live run, so a group's chat can name it.
+    liveAgent: z
+      .object({ agentId: AgentId, name: z.string().min(1).max(1_000) })
+      .strict()
+      .optional(),
     pendingCount: z.number().int().nonnegative(),
     paused: z.boolean(),
     // The messages here and in the earlier posts asked for that wait for the
@@ -7058,7 +7263,7 @@ export const UpdateStateEvent = z.object({
   canInstall: z.boolean().optional(),
   version: z.string().min(1).max(200).optional(),
   percent: z.number().finite().min(0).max(100).optional(),
-  // A Linux .deb that did not install: the terminal command that installs it. Its
+  // A Linux .deb or .rpm that did not install: the terminal command that installs it. Its
   // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
   installCommand: z
     .string()
@@ -8879,6 +9084,7 @@ export const OpenEngineYDocSessionResult = z.object({
   // the file. The caller stays read-only, states the reason, and offers a retry —
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: z.boolean().optional(),
+  engineRefusedOpen: z.object({ detail: z.string().min(1).max(500) }).optional(),
   // The engine committed the drawing, but its image records conflict with
   // authoritative storage. The drawing stays read-only. Retrying cannot
   // repair this terminal state.
@@ -8931,7 +9137,11 @@ export const ApplyEngineYDocUpdatePayload = z.object({
 export type ApplyEngineYDocUpdatePayload = z.infer<typeof ApplyEngineYDocUpdatePayload>;
 
 export const ApplyEngineYDocUpdateResult = z.discriminatedUnion("accepted", [
-  z.object({ accepted: z.literal(true) }),
+  z.object({
+    accepted: z.literal(true),
+    // How long the editor may gather later typing into its next update.
+    batchDelayMs: z.number().int().nonnegative().max(10_000).optional(),
+  }),
   z.object({
     accepted: z.literal(false),
     reason: z.enum([
@@ -9164,7 +9374,9 @@ export interface DohcDesktopBridge
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof linksOperations>,
+    OperationBridge<typeof retrievalOperations>,
     OperationBridge<typeof captureOperations>,
+    OperationBridge<typeof agentRunHistoryOperations>,
     OperationBridge<typeof heldChangeOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,
@@ -9191,6 +9403,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof protectedCopyOperations>,
+    OperationBridge<typeof agentRunUndoOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof agentThreadOperations>,
     OperationBridge<typeof agentsListeningOperations>,
@@ -9199,6 +9412,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
     OperationBridge<typeof liveDraftRecoveryOperations>,
+    OperationBridge<typeof setAsideDraftOperations>,
     OperationBridge<typeof stopAndRestoreRecoveryOperations>,
     OperationBridge<typeof engineYDocSaveOperations>,
     OperationBridge<typeof appViewOperations> {
@@ -9445,6 +9659,7 @@ export interface DohcDesktopBridge
   // workspace, so listLiveDraftRecovery answers differently. A poke, not the
   // drafts. Returns an unsubscribe function.
   onLiveDraftRecoveryChanged(listener: (event: LiveDraftRecoveryChangedEvent) => void): () => void;
+  onSetAsideDraftChanged(listener: (change: SetAsideDraftChange) => void): () => void;
   // Which computer runs a workspace's schedules changed, as when a handover
   // finished in the background.
   onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;

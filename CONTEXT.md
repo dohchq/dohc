@@ -59,7 +59,7 @@ A Markdown file in a workspace, shown with its title and icon. The Explorer's Ho
 _Avoid_: document (in the interface), doc
 
 **Lossy note**:
-A Markdown note that dohc's editor cannot save without changing its meaning, because it cannot hold parts such as raw HTML or link reference definitions. dohc checks each note's current bytes when it opens, and opens a lossy note read-only.
+A Markdown note that dohc's editor cannot save without changing its meaning, because it cannot hold some of its parts as written, such as code indented under a list item. dohc checks each note's current bytes when it opens, and opens a lossy note read-only.
 _Avoid_: reader-built note (a note the engine's reader built, marked by `dohcMarkdownSourceReader`), unsupported note
 
 ### Collections
@@ -255,20 +255,6 @@ _Avoid_: app backend, private app database
 **Dataset operation**:
 A named action in an approved dataset revision with declared caller access and read or write authority. Forms, apps, owner views, and agents use the same operation to enforce its rules.
 _Avoid_: raw database edit (for a governed data change)
-
-## Replica current view
-
-A replica current view is the relay-owned view of a shared workspace after the passive engine drains both replication lanes.
-It contains a complete file manifest, current text, and the applied ordinary and journal cursors.
-The union of current share selectors limits collection. It grants no recipient access.
-The relay replaces the stored view atomically and removes text with no remaining references.
-Settlement cuts remain a separate concept.
-
-## History pin
-
-An immutable recipient History version of one shared object, sampled from a stored replica current view.
-Only an Edit grant reads pins, including pins sampled before the grant began. A pin stays readable while its object is a current file in the share, at a path the share's selector shows. The relay serves pins only after the stored view reaches the log and journal positions recorded when the grant began, in the same replication epoch. Until then a read reports that the view is updating.
-Pins do not enter the owner's replication log or count against the owner's quota.
 
 ## History operation
 

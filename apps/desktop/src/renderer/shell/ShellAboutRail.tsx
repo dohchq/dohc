@@ -122,7 +122,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   const published = useAboutConversation(workspaceId, conversationTab ? focusedTabPath : null);
   const conversation = conversationTab ? published : null;
   const [conversationSections, setConversationSections] = useState(CONVERSATION_SECTIONS_OPEN);
-  const loading = <SkeletonRows inSlot layout="panel" label="Loading About..." />;
+  const loading = <SkeletonRows inSlot layout="panel" label="Loading About…" />;
   return (
     <AboutRail
       width={wb.aboutWidth}

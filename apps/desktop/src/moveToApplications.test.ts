@@ -71,7 +71,7 @@ describe("installedAppVersion", () => {
           installedVersion: async () => installed,
           move: vi.fn(),
         }),
-      ).rejects.toThrow("dohc cannot read the version of the dohc already in Applications.");
+      ).rejects.toThrow("dohc could not read the version of the copy in Applications.");
     }
     expect(readVersion).not.toHaveBeenCalled();
     await expect(
@@ -98,7 +98,7 @@ describe("guardedMoveToApplications", () => {
     );
     installed = "";
     await expect(attempt()).rejects.toThrow(
-      "dohc cannot read the version of the dohc already in Applications.",
+      "dohc could not read the version of the copy in Applications.",
     );
     expect(installedVersion).toHaveBeenCalledTimes(4);
     expect(move).toHaveBeenCalledTimes(2);
@@ -127,7 +127,7 @@ describe("offerMoveToApplications", () => {
       type: "question",
       message: "Move dohc to Applications?",
       detail:
-        "dohc is running from a disk image or a temporary copy. dohc moves itself to Applications and opens again. " +
+        "dohc is running from a disk image or a temporary copy. dohc will move to Applications and reopen. " +
         "It replaces the older dohc 0.1.0 already there.",
       buttons: ["Move to Applications", "Don't move"],
       defaultId: 0,
@@ -143,7 +143,7 @@ describe("offerMoveToApplications", () => {
     await offerMoveToApplications(deps);
     expect(deps.showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({
-        detail: "dohc moves itself to Applications and opens again.",
+        detail: "dohc will move to Applications and reopen.",
       }),
     );
     expect(deps.recordDecline).toHaveBeenCalledTimes(1);

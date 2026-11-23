@@ -40,6 +40,7 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { EngineRelayWorkspaceClient } from "../workspaces/engineRelayClient";
+import { cloudSyncFolderCancelledError } from "../workspaces/cloudSyncFolder";
 import type { createJoinedWorkspaceRunner } from "../workspaces/createJoinedWorkspace";
 import type { probeRelayWorkspace } from "../workspaces/relayWorkspaceProbe";
 import type {
@@ -79,7 +80,11 @@ export function registerCloudIpcHandlers<
   syncPauseFor(workspace: RegistryEntry): SyncStatusResult["syncPause"];
   reconcileCloud(): void;
   notifyCloudSessionChanged(phase: "changing" | "ready"): void;
-  notifyCloudSessionChangedWithKey(key: string | null, phase: "changing" | "ready"): void;
+  // One session change's two broadcasts. `sessionKey`: the incoming session's.
+  cloudSessionChange(sessionKey: () => string | null): {
+    notifySessionChanging(): void;
+    notifyCloudSessionChanged(): void;
+  };
   notifyRenderer(): void;
   findWorkspace(workspaceId: string): RegistryEntry | null;
   engineDaemonStartup(): Promise<unknown>;
@@ -116,6 +121,7 @@ export function registerCloudIpcHandlers<
   /** Sends, in the background, the Collections this computer still keeps once the workspace syncs. */
   sendCollectionsUpLater(workspace: RegistryEntry): void;
   usableRoot(rootPath: string): string;
+  confirmNewWorkspaceFolder?(rootPath: string, event: Event): Promise<boolean>;
   readdir(rootPath: string): Promise<string[]>;
   mkdir(rootPath: string, options: { recursive: true }): Promise<unknown>;
   probeRelayWorkspace: typeof probeRelayWorkspace;
@@ -145,7 +151,7 @@ export function registerCloudIpcHandlers<
     syncPauseFor,
     reconcileCloud,
     notifyCloudSessionChanged,
-    notifyCloudSessionChangedWithKey,
+    cloudSessionChange,
     notifyRenderer,
     findWorkspace,
     engineDaemonStartup,
@@ -163,6 +169,7 @@ export function registerCloudIpcHandlers<
     sendCollectionsUp,
     sendCollectionsUpLater,
     usableRoot,
+    confirmNewWorkspaceFolder,
     readdir,
     mkdir,
     probeRelayWorkspace,
@@ -204,8 +211,7 @@ export function registerCloudIpcHandlers<
         reconcileCloud: () => {
           reconcileCloud();
         },
-        notifySessionChanging: () => notifyCloudSessionChangedWithKey(incomingKey, "changing"),
-        notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+        ...cloudSessionChange(() => incomingKey),
       });
     }
     return CloudLoginPollResult.parse(result);
@@ -291,7 +297,7 @@ export function registerCloudIpcHandlers<
     return withRendererWorkspaceOperation(
       event.sender,
       input.workspaceId,
-      "Cloud enrollment stopped because this window changed workspaces.",
+      "Sync setup stopped because this window changed workspaces.",
       (operation) =>
         withWorkspaceSyncTransition(input.workspaceId, async () => {
           operation.assertCurrent();
@@ -302,9 +308,9 @@ export function registerCloudIpcHandlers<
           assertWritableWorkspace(workspace);
           const credentials = await loadAndCacheCurrentCredentials();
           operation.assertCurrent();
-          if (!credentials) throw new Error("Sign in to your server first");
+          if (!credentials) throw new Error("Sign in to your server first.");
           if (!credentials.relayUrl) {
-            throw new Error("Cloud sync requires a relay URL");
+            throw new Error("Sync requires a relay URL.");
           }
           assertSyncEnrollmentCredentials(workspace, credentials);
           const relay = {
@@ -389,7 +395,7 @@ export function registerCloudIpcHandlers<
     const parsed = parseSyncCode(input.syncCode);
     if (!parsed) {
       throw new Error(
-        "That doesn't look like a workspace code. Copy it again from the other machine.",
+        "That does not look like a workspace code. Copy it again from the other computer.",
       );
     }
     const credentials = requireCredentials(await loadAndCacheCurrentCredentials());
@@ -398,12 +404,12 @@ export function registerCloudIpcHandlers<
       // the relay this machine signed in with — never to a URL that arrived
       // inside a pasted code.
       throw new Error(
-        "This workspace syncs through a different server than the one you're signed in to. " +
+        "This workspace syncs through a different server than the one you are signed in to. " +
           "Connect to the server that hosts this workspace, then join again.",
       );
     }
     if (findWorkspace(parsed.workspaceId)) {
-      throw new Error("This workspace is already on this machine.");
+      throw new Error("This workspace is already on this computer.");
     }
     const rootPath = usableRoot(input.rootPath);
     const existingEntries = await readdir(rootPath).catch((error: unknown) => {
@@ -412,8 +418,11 @@ export function registerCloudIpcHandlers<
     });
     if (existingEntries.length > 0) {
       throw new Error(
-        "Choose an empty folder — the synced workspace's files will be placed inside it.",
+        "Choose an empty folder. The synced workspace's files will be placed inside it.",
       );
+    }
+    if (confirmNewWorkspaceFolder && !(await confirmNewWorkspaceFolder(rootPath, event))) {
+      throw cloudSyncFolderCancelledError();
     }
 
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
@@ -425,17 +434,17 @@ export function registerCloudIpcHandlers<
       });
       if (!probe.hasContent) {
         throw new Error(
-          "That workspace hasn't synced anything yet. Make sure sync is on for it on the other machine, then try again.",
+          "That workspace has not synced anything yet. Check that sync is on for it on the other computer, then try again.",
         );
       }
     } catch (error) {
       if (error instanceof RelayWorkspaceUnavailableError) {
         throw new Error(
-          "No synced workspace matches that code for your account. Check the code and that you're signed in with the same account.",
+          "No synced workspace matches that code for your account. Check the code and that you are signed in with the same account.",
         );
       }
       if (error instanceof RelayUnauthorizedError) {
-        throw new Error("Your server session expired. Sign in again, then retry.");
+        throw new Error("Your server session expired. Sign in again, then try again.");
       }
       throw error;
     }
@@ -499,7 +508,7 @@ export function registerCloudIpcHandlers<
       failure: (error) => {
         if (error instanceof SecretFileStoreError && error.code === "key-install-unsupported") {
           return new Error(
-            `This drive can't store the workspace's secret key safely. Files stay in ${rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`,
+            `This drive cannot store the workspace's secret key safely. Files stay in ${rootPath}. Choose an empty folder on an NTFS, APFS, or ext4 drive to try again.`,
           );
         }
         if (

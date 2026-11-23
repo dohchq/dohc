@@ -17,6 +17,8 @@
 //!    on, apply the *persistent* pragmas (`journal_mode = WAL`,
 //!    `synchronous = NORMAL`), then run the migration ledger
 //!    (`migration.rs`), then validate the required tables and `quick_check`.
+//!    An actor's open (`open_engine_db_serving_first`) leaves `quick_check`,
+//!    a pending migration's too, to the check that runs after the open.
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, NoFaults};
@@ -106,6 +108,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_restore_fences",
     "live_restore_cancellations",
     "ydoc_owner_applied_frames",
+    "ydoc_owner_taken_rows",
     "ydoc_owner_bindings",
     "owner_pending_settlements",
     "owner_pending_settlement_blobs",
@@ -175,6 +178,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "materialization_retained",
     "materialization_displacement_reads",
     "materialization_staging_locations",
+    "materialization_staged_dacls",
     // Secret-backed-file tables.
     "secret_files",
     "secret_fork_bases",
@@ -387,8 +391,9 @@ pub(crate) fn open_engine_db_for_actor(
 }
 
 /// An actor's open of an owner or passive store that leaves the pages of an
-/// existing store unchecked, for a check that runs while the store serves. A
-/// store whose pages failed such a check is checked here, before it serves.
+/// existing store unchecked, for a check that runs while the store serves. Its
+/// pending migrations commit without that check too. A store whose pages
+/// failed such a check is checked here, before it serves or migrates.
 pub(crate) fn open_engine_db_serving_first(
     path: &Path,
     now_ms: i64,
@@ -448,6 +453,7 @@ fn open_engine_db_configured(
     if checked_first {
         integrity_check(&conn)?;
     }
+    let pages_unchecked = pages_later && disposition != Disposition::Fresh && !marked;
 
     if disposition == Disposition::ExistingV2 {
         if store_is_passive(&conn)? != passive {
@@ -482,6 +488,7 @@ fn open_engine_db_configured(
     if disposition == Disposition::Fresh {
         ctx.initial_root_token = root_token.map(str::to_owned);
     }
+    ctx.pages_checked_after_open = pages_unchecked;
     let no_faults = NoFaults;
     // Migrations must not originate operations or queue work for passive stores.
     // Fresh passive stores migrate as owner before the role switch below. They
@@ -510,7 +517,6 @@ fn open_engine_db_configured(
     validate_v2(&conn)?;
     // A fresh store has no pages to wait for. A marked store was checked
     // above, and is checked again only if a migration has written since.
-    let pages_unchecked = pages_later && disposition != Disposition::Fresh && !marked;
     if !pages_unchecked {
         if !checked_first || newly_applied > 0 {
             integrity_check(&conn)?;
@@ -842,8 +848,9 @@ mod tests {
     /// `DOHC_MEASURE_STORE` names the store file and `DOHC_MEASURE_STEP` the step:
     /// `build` writes a store of `DOHC_MEASURE_MB` megabytes as the build before
     /// the last `DOHC_MEASURE_PENDING` migrations left it, `fill` adds that many
-    /// megabytes to a store an engine made, `check` times one `quick_check`, and
-    /// `open` times the open an engine does.
+    /// megabytes to a store an engine made, `check` times one `quick_check`,
+    /// `open` times an open that checks the pages first, and `open-serving`
+    /// the open an engine's actor does, which leaves them to a later check.
     #[test]
     #[ignore = "manual store-open cost measurement"]
     fn store_open_cost_on_a_sized_store() {
@@ -934,18 +941,25 @@ mod tests {
                     pages(&conn)
                 );
             }
-            Some("open") => {
+            Some(step @ ("open" | "open-serving")) => {
                 let before = applied(&rusqlite::Connection::open(&path).unwrap());
                 let start = std::time::Instant::now();
-                let opened = super::open_engine_db(&path, 2, None).unwrap();
+                let opened = if step == "open" {
+                    super::open_engine_db(&path, 2, None)
+                } else {
+                    super::open_engine_db_serving_first(&path, 2, None, None, false)
+                }
+                .unwrap();
                 let open_ms = start.elapsed().as_millis();
                 println!(
-                    "STORE_OPEN_MEASUREMENT {{\"step\":\"open\",\"openMs\":{open_ms},\"migrationsRun\":{},\"pages\":{}}}",
+                    "STORE_OPEN_MEASUREMENT {{\"step\":\"{step}\",\"openMs\":{open_ms},\"migrationsRun\":{},\"pages\":{}}}",
                     applied(&opened.conn) - before,
                     pages(&opened.conn)
                 );
             }
-            other => panic!("DOHC_MEASURE_STEP is build, fill, check or open, not {other:?}"),
+            other => panic!(
+                "DOHC_MEASURE_STEP is build, fill, check, open or open-serving, not {other:?}"
+            ),
         }
     }
 

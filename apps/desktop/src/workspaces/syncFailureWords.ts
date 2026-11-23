@@ -25,9 +25,9 @@ export function syncFailureWords(failure: Pick<CloudSyncFailure, "cause" | "deta
     code: failure.cause,
     message:
       failure.cause === "server-busy"
-        ? "The server is busy. dohc keeps trying to sync this workspace."
+        ? "The server is busy. dohc will keep trying to sync this workspace."
         : failure.cause === "server-unreachable"
-          ? "dohc could not reach the server."
-          : "dohc could not sync this workspace.",
+          ? "dohc could not reach the server. Check your connection."
+          : "dohc could not sync this workspace. Try again.",
   };
 }

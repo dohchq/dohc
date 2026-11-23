@@ -1,0 +1,18 @@
+# Sends iPhone alerts through Apple Push Notification service (APNs). The setup and recovery
+# commands add it when any DOHC_RELAY_APNS_ setting is set.
+# The relay reads the APNs auth key through a read-only bind of the file that DOHC_RELAY_APNS_KEY_FILE
+# names. A deployment archive leaves that file out, so keep your own copy of the key.
+services:
+  sync-relay:
+    environment:
+      DOHC_RELAY_APNS_TOPIC: ${DOHC_RELAY_APNS_TOPIC:?Set DOHC_RELAY_APNS_TOPIC}
+      DOHC_RELAY_APNS_ENVIRONMENTS: ${DOHC_RELAY_APNS_ENVIRONMENTS:?Set DOHC_RELAY_APNS_ENVIRONMENTS}
+      DOHC_RELAY_APNS_KEY_ID: ${DOHC_RELAY_APNS_KEY_ID:?Set DOHC_RELAY_APNS_KEY_ID}
+      DOHC_RELAY_APNS_TEAM_ID: ${DOHC_RELAY_APNS_TEAM_ID:?Set DOHC_RELAY_APNS_TEAM_ID}
+      DOHC_RELAY_APNS_KEY_FILE: /etc/dohc/apns-key.p8
+    volumes:
+      - type: bind
+        source: ${DOHC_RELAY_APNS_KEY_FILE:?Set DOHC_RELAY_APNS_KEY_FILE}
+        target: /etc/dohc/apns-key.p8
+        read_only: true
+        bind: {create_host_path: false}

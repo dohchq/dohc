@@ -9,6 +9,7 @@ import {
   type ServiceActivationTarget,
   type ServiceCatchUp,
 } from "./serviceActivationDriver";
+import { passPlan } from "./servicePassOrder";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery";
 import { liveHostSignal, withDeadline, withLiveHostSignal } from "./liveHostSignal.js";
 import { untilAborted } from "./namedLiveFrameHost.js";
@@ -66,7 +67,13 @@ import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.j
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
 import { settlementPending } from "./liveSettlement.js";
-import { childStderrLog, codeWord, serverLogLine, ServerLogError } from "./serverLogWords.js";
+import {
+  childStderrLog,
+  codeWord,
+  serverLogLine,
+  ServerLogError,
+  shortObjectId,
+} from "./serverLogWords.js";
 import { snapshotStopRestoreLookup } from "./liveRestoreDelivery.js";
 import { relayError } from "./errors.js";
 import type { StopRestoreLookup } from "./storage/liveRestoreOperation.js";
@@ -417,6 +424,7 @@ const HELD_READ_CANCEL_GRACE_MS = 15_000;
 const held = new WeakSet<SyncRelayStorage>();
 // An earlier store's recovery handle closes after this long without a page read.
 const RECOVERY_IDLE_MS = 60_000;
+const OPEN_AWAITS_VISIT_MS = 10_000;
 // An engine refusal of an open with one of these codes proves it holds no
 // handle for the store. Any other failure, an overloaded or expired request
 // included, may follow an open that made one.
@@ -659,6 +667,31 @@ export async function startServiceLiveHost(options: {
     idle = new Map<string, { due: number; generation: number }>();
   // Hosted documents whose idle unload is running, or was sent and got no reply.
   const unloading = new Set<string>();
+  // Notes an open asked for before the host had made them ready. A pass takes them first. See `passOrder`.
+  const wanted = new Set<string>();
+  const opensAwaitingVisit = new Map<string, Set<() => void>>();
+  const endOpensAwaitingVisit = (key: string) => {
+    for (const end of [...(opensAwaitingVisit.get(key) ?? [])]) end();
+  };
+  const untilVisited = (key: string, callerSignal?: AbortSignal) =>
+    new Promise<void>((resolve) => {
+      const opens = opensAwaitingVisit.get(key) ?? new Set();
+      opensAwaitingVisit.set(key, opens);
+      const end = () => {
+        clearTimeout(longestWait);
+        opens.delete(end);
+        if (opens.size === 0) opensAwaitingVisit.delete(key);
+        callerSignal?.removeEventListener("abort", end);
+        signal.removeEventListener("abort", end);
+        resolve();
+      };
+      const longestWait = setTimeout(end, OPEN_AWAITS_VISIT_MS);
+      longestWait.unref();
+      opens.add(end);
+      callerSignal?.addEventListener("abort", end, { once: true });
+      signal.addEventListener("abort", end, { once: true });
+      if (callerSignal?.aborted || signal.aborted) end();
+    });
   let generation = 0;
   const hostedKey = (document: { workspaceId: string; objectId: string }) => {
     for (const [key, row] of hosted)
@@ -873,7 +906,7 @@ export async function startServiceLiveHost(options: {
           if (repeated !== undefined) {
             try {
               console.error("Live document waited for its lock.", {
-                object: document.objectId.slice(0, 8),
+                object: shortObjectId(document.objectId),
                 waiter,
                 waitedMs,
                 ...(repeated ? { repeated } : {}),
@@ -1514,6 +1547,8 @@ export async function startServiceLiveHost(options: {
           parking.delete(key);
           idle.delete(key);
           unloading.delete(key);
+          wanted.delete(key);
+          endOpensAwaitingVisit(key);
           keeping.delete(key);
           grantsEnded.delete(key);
           heldOf.delete(key);
@@ -1859,6 +1894,7 @@ export async function startServiceLiveHost(options: {
           const document = { workspaceId: row.target.workspaceId, objectId: row.objectId };
           const open = storage.serviceActivationRetirement(document);
           if (!open) return null;
+          endOpensAwaitingVisit(key);
           // An unfinished restore can change the generation whose held heads retirement reads.
           if (storage.serviceRestoreInProgress(document)) {
             if (!grantsEnded.has(key)) {
@@ -2225,11 +2261,18 @@ export async function startServiceLiveHost(options: {
         const wake = async (
           document: { workspaceId: string; objectId: string },
           callerSignal?: AbortSignal,
-        ) => {
+        ): Promise<"a pass will visit it" | "no visit to wait for"> => {
           const key = hostedKey(document);
-          if (!key) return;
+          if (!key) return "no visit to wait for";
           touch(key);
-          if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) return;
+          if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) {
+            if (activation!.completed(hosted.get(key)!.target)) return "no visit to wait for";
+            if (!wanted.has(key)) {
+              wanted.add(key);
+              nudgePass();
+            }
+            return "a pass will visit it";
+          }
           await exclusive(
             () =>
               withLiveHostSignal(signal, callerSignal, async (joined) => {
@@ -2259,6 +2302,7 @@ export async function startServiceLiveHost(options: {
               }),
             callerSignal,
           );
+          return "no visit to wait for";
         };
         // A held-document read asks the engine for a workspace this daemon replicates,
         // and answers only while this registration and that attachment still stand.
@@ -3219,61 +3263,83 @@ export async function startServiceLiveHost(options: {
               });
               // Targets with no owner share one catch-up pull of their workspace a pass.
               const catchUp: ServiceCatchUp = new Map();
-              await step(async () => {
-                for (
-                  let visited = 0;
-                  visited < Math.min(bounds.maxDocumentsPerPass, targets.length);
-                  visited++
-                ) {
-                  index %= targets.length;
-                  const target = targets[index]!;
-                  index = (index + 1) % targets.length;
-                  const timed: SlowPassTarget = {
-                      object:
-                        hosted
-                          .get(JSON.stringify([target.workspaceId, target.path]))
-                          ?.objectId.slice(0, 8) ?? null,
-                      ms: 0,
-                      outcome: "error",
-                      settle: "none",
-                      materialized: null,
-                    },
-                    startedAt = now();
-                  slowTargets.push(timed);
-                  try {
-                    // Settlement runs in the activation's own document work. A restore
-                    // fence during it leaves the pass pending rather than ready.
-                    const outcome = await activation!.activate(
-                      target,
-                      passSignal,
-                      settleTarget &&
-                        (async (consumer, document, joined) => {
-                          timed.object ??= document.objectId.slice(0, 8);
-                          const sent = consumer.settlesSent;
-                          try {
-                            const settled = await consumer.settleDrained(document, joined);
-                            timed.materialized =
-                              !settlementPending(settled) && settled.materialized;
-                            return settled;
-                          } finally {
-                            // A settlement the engine was asked for counts as sent even when it then failed.
-                            timed.settle =
-                              consumer.settlesSent > sent
-                                ? "sent"
-                                : timed.materialized === null
-                                  ? "none"
-                                  : "reused";
-                          }
-                        }),
-                      catchUp,
-                    );
-                    timed.outcome = outcome.kind === "done" ? "done" : "pending";
-                    noteWaiting(target, outcome);
-                  } finally {
-                    timed.ms = Math.round(now() - startedAt);
-                  }
+              const targetKey = (target: ServiceActivationTarget) =>
+                JSON.stringify([target.workspaceId, target.path]);
+              // A mark also ends when its note is hosted no longer, or became ready some other way.
+              for (const key of [...wanted]) {
+                const row = hosted.get(key);
+                if (!row || activation!.completed(row.target)) wanted.delete(key);
+              }
+              const visitable = new Set(targets.map(targetKey));
+              for (const key of [...opensAwaitingVisit.keys()])
+                if (!visitable.has(key)) endOpensAwaitingVisit(key);
+              const plan = passPlan(targets, index, bounds.maxDocumentsPerPass, (target) =>
+                wanted.has(targetKey(target)),
+              );
+              const visit = async (target: ServiceActivationTarget) => {
+                const spentMark = wanted.delete(targetKey(target));
+                const timed: SlowPassTarget = {
+                    object: shortObjectId(
+                      hosted.get(JSON.stringify([target.workspaceId, target.path]))?.objectId,
+                    ),
+                    ms: 0,
+                    outcome: "error",
+                    settle: "none",
+                    materialized: null,
+                  },
+                  startedAt = now();
+                slowTargets.push(timed);
+                try {
+                  // Settlement runs in the activation's own document work. A restore
+                  // fence during it leaves the pass pending rather than ready.
+                  const outcome = await activation!.activate(
+                    target,
+                    passSignal,
+                    settleTarget &&
+                      (async (consumer, document, joined) => {
+                        timed.object ??= shortObjectId(document.objectId);
+                        const sent = consumer.settlesSent;
+                        try {
+                          const settled = await consumer.settleDrained(document, joined);
+                          timed.materialized = !settlementPending(settled) && settled.materialized;
+                          return settled;
+                        } finally {
+                          // A settlement the engine was asked for counts as sent even when it then failed.
+                          timed.settle =
+                            consumer.settlesSent > sent
+                              ? "sent"
+                              : timed.materialized === null
+                                ? "none"
+                                : "reused";
+                        }
+                      }),
+                    catchUp,
+                  );
+                  timed.outcome = outcome.kind === "done" ? "done" : "pending";
+                  noteWaiting(target, outcome);
+                  const catchUpOfThisPass = await catchUp
+                    .get(target.workspaceId)
+                    ?.catch(() => undefined);
+                  const visitCouldDoNothing = outcome.kind !== "done" && catchUpOfThisPass?.hasMore;
+                  if (spentMark && visitCouldDoNothing) wanted.add(targetKey(target));
+                } finally {
+                  timed.ms = Math.round(now() - startedAt);
+                  endOpensAwaitingVisit(targetKey(target));
                 }
-              });
+              };
+              let turnVisitFailed = false;
+              for (let next = plan.next(); next && !turnVisitFailed; next = plan.next()) {
+                const { target, turn } = next;
+                if (turn === undefined) await step(() => visit(target));
+                else {
+                  index = turn;
+                  turnVisitFailed = true;
+                  await step(async () => {
+                    await visit(target);
+                    turnVisitFailed = false;
+                  });
+                }
+              }
               // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
               // recovery probe. One with no documents still pulls while its replica has departures to finish. One held back
               // only by documents waiting out a backoff pushes and pulls the same way.
@@ -3821,6 +3887,8 @@ export async function startServiceLiveHost(options: {
             callerSignal?: AbortSignal,
           ): Promise<T | "waiting"> {
             available();
+            const stopping = hostedKey(document);
+            if (stopping !== undefined) endOpensAwaitingVisit(stopping);
             const candidate = storage.retirableServiceActivation(document),
               attached = checked(document.workspaceId),
               driver = activation;
@@ -3998,7 +4066,17 @@ export async function startServiceLiveHost(options: {
             // at once, so the relay frees what it holds for that open. The reload keeps its turn until it ends.
             const waitFor = <T>(work: Promise<T>) =>
               callerSignal ? untilAborted(work, callerSignal) : work;
-            await waitFor(wake(document, callerSignal));
+            const woke = await waitFor(wake(document, callerSignal));
+            const key = hostedKey(document),
+              target = key === undefined ? undefined : hosted.get(key)?.target;
+            const stillAwakeAndNotReady =
+              key !== undefined &&
+              target !== undefined &&
+              !activation!.dormant(target) &&
+              !unloading.has(key) &&
+              !activation!.completed(target);
+            if (woke === "a pass will visit it" && stillAwakeAndNotReady)
+              await waitFor(untilVisited(key, callerSignal));
             await waitFor(drain(document, callerSignal));
             callerSignal?.throwIfAborted();
             check();

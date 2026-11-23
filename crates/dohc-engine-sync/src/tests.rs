@@ -687,6 +687,7 @@ struct PagedShareRelay {
     reference_pulls: Mutex<Vec<(bool, Option<String>)>>,
     shared_pushes: Mutex<Vec<ShareLogPushRequest>>,
     view_pulls: Mutex<Vec<(i64, usize)>>,
+    after_view_pull: Option<Box<dyn Fn()>>,
     view_blobs: BTreeMap<String, Vec<u8>>,
     /// What the transport answers for a blob instead of serving it. The real
     /// HTTP transport stops reading at its own bound and reports
@@ -694,6 +695,8 @@ struct PagedShareRelay {
     /// nothing else in this file can produce that shape.
     view_blob_errors: BTreeMap<String, RelayError>,
     share_blob_calls: Mutex<Vec<String>>,
+    share_blob_batches: Mutex<Vec<usize>>,
+    view_blobs_answered_per_batch: usize,
     /// `proposal_calls` records the ORDER the submit lane touches
     /// the transport in, which is the property the blob ordering test needs
     /// and neither typed vector can state on its own.
@@ -722,9 +725,12 @@ impl PagedShareRelay {
             reference_pulls: Mutex::new(Vec::new()),
             shared_pushes: Mutex::new(Vec::new()),
             view_pulls: Mutex::new(Vec::new()),
+            after_view_pull: None,
             view_blobs: BTreeMap::new(),
             view_blob_errors: BTreeMap::new(),
             share_blob_calls: Mutex::new(Vec::new()),
+            share_blob_batches: Mutex::new(Vec::new()),
+            view_blobs_answered_per_batch: crate::MAX_SHARE_BLOB_BATCH,
             proposal_calls: Mutex::new(Vec::new()),
             blob_uploads: Mutex::new(Vec::new()),
             proposal_submits: Mutex::new(Vec::new()),
@@ -851,6 +857,9 @@ impl RelayTransport for PagedShareRelay {
             .lock()
             .expect("view pull calls")
             .push((req.cursor, req.limit));
+        if let Some(after_view_pull) = &self.after_view_pull {
+            after_view_pull();
+        }
         self.view_pages
             .get(&req.cursor)
             .cloned()
@@ -870,6 +879,21 @@ impl RelayTransport for PagedShareRelay {
             .cloned()
             .map(|bytes| BlobDownloadResponse { bytes })
             .ok_or(RelayError::InvalidResponse)
+    }
+
+    fn share_blobs(
+        &self,
+        requests: Vec<ShareBlobRequest>,
+    ) -> Result<Vec<Result<BlobDownloadResponse, RelayError>>, RelayError> {
+        self.share_blob_batches
+            .lock()
+            .expect("share blob batches")
+            .push(requests.len());
+        Ok(requests
+            .into_iter()
+            .take(self.view_blobs_answered_per_batch)
+            .map(|request| self.share_blob(request))
+            .collect())
     }
 
     fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError> {
@@ -1281,7 +1305,7 @@ fn one_message_registers_more_than_one_reference_page_without_resending_acknowle
     ]).unwrap();
     body.push_str(&format!("@[work:{}]", "Z".repeat(43)));
     let channel = LinkedChatStore::new(&mut engine)
-        .ensure_general_channel("ws", "general", 2, &NoFaults)
+        .ensure_general_channel("ws", 2, &NoFaults)
         .unwrap();
     LinkedChatStore::new(&mut engine)
         .start_channel_thread(

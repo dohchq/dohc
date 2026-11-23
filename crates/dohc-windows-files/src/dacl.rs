@@ -14,8 +14,9 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::{
-    CREATE_NEW, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
+    CREATE_NEW, CreateFileW, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FileBasicInfo, GetFileInformationByHandleEx, READ_CONTROL,
 };
 
 use crate::private_dir::{Local, current_user, keeps_dacl, open, unsupported};
@@ -99,6 +100,37 @@ impl Dacl {
         }
         Ok(Some(Self(Local(descriptor))))
     }
+}
+
+/// When the file at `path` last changed, its DACL and attributes included,
+/// read without following a link. Nothing there gives `None`.
+pub fn change_time_at(path: &Path) -> io::Result<Option<i64>> {
+    let file = match std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let mut info = FILE_BASIC_INFO::default();
+    // SAFETY: The handle is open and the output is writable for this
+    // synchronous call, which retains neither.
+    #[allow(unsafe_code)]
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileBasicInfo,
+            std::ptr::from_mut(&mut info).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Some(info.ChangeTime))
 }
 
 /// Create a file at `path`, open for writing, with `dacl` from the moment it

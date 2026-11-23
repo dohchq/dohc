@@ -69,7 +69,7 @@ describe("a listed workspace dohc can't open", () => {
     );
 
     const recovery = await screen.findByTestId("workspace-open-failed");
-    expect(recovery.textContent).toContain("Couldn’t open this workspace");
+    expect(recovery.textContent).toContain("dohc could not open this workspace");
     expect(recovery.textContent).toContain(INSIDE_SETTINGS);
     const remove = within(recovery).getByRole("button", { name: "Remove from list" });
     expect(document.activeElement).toBe(remove);

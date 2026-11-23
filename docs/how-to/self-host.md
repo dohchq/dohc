@@ -30,6 +30,7 @@ To turn it on, follow [Publish apps](#publish-apps).
 
 Install Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.16 or newer.
 Have an SMTP service ready for verification and password reset emails.
+The server emails share invitations through it too.
 The SMTP service must support TLS.
 
 ## Build the deployment bundle
@@ -502,20 +503,62 @@ The synced workspace files remain in the relay.
 At the owner's next desktop check-in, schedules move back to that computer.
 Set `DOHC_RELAY_AUTOMATIONS=1` and restart to enable server automations again.
 
+## Send iPhone alerts
+
+The server can send alerts to the dohc phone app on iPhone through Apple Push Notification service (APNs).
+Alerts stay off until you set all five APNs settings. Without them the server starts as before.
+
+APNs delivers alerts for the phone app only when they are signed with an APNs auth key that belongs to the Apple Developer team that publishes the app.
+
+1. In that Apple Developer account, create an APNs auth key and download its `.p8` file.
+   Apple lets you download the file only once.
+2. Keep a copy of the `.p8` file away from the server, for example in your password manager.
+   A deployment archive leaves the key out, so the server's backups do not hold it.
+3. Install the key on the server.
+   The relay runs as UID 1000 and needs to read it:
+
+   ```sh
+   sudo install -D -o root -g 1000 -m 0640 AuthKey_ABC123DEFG.p8 /etc/dohc/apns-key.p8
+   ```
+
+4. Set the APNs settings in `.env.self-host`:
+
+   ```dotenv
+   DOHC_RELAY_APNS_TOPIC=app.dohc.mobile
+   DOHC_RELAY_APNS_ENVIRONMENTS=production
+   DOHC_RELAY_APNS_KEY_FILE=/etc/dohc/apns-key.p8
+   DOHC_RELAY_APNS_KEY_ID=ABC123DEFG
+   DOHC_RELAY_APNS_TEAM_ID=XYZ987WVUT
+   ```
+
+   | Setting | Value |
+   | --- | --- |
+   | `DOHC_RELAY_APNS_TOPIC` | The phone app's bundle ID, `app.dohc.mobile`. |
+   | `DOHC_RELAY_APNS_ENVIRONMENTS` | `production` for TestFlight and App Store builds. `production,sandbox` to also send to development builds. |
+   | `DOHC_RELAY_APNS_KEY_FILE` | The absolute path of the APNs auth key (`.p8`) on the server. |
+   | `DOHC_RELAY_APNS_KEY_ID` | The key's 10-character Key ID, which Apple shows with the key. |
+   | `DOHC_RELAY_APNS_TEAM_ID` | The Apple Developer team's 10-character Team ID, which Apple shows under Membership details. |
+
+5. Stop and start the deployment.
+
+With any APNs setting set, the setup and recovery commands add the APNs Compose overlay.
+They refuse to run unless all five are set in the formats above and the key file exists.
+They also refuse a key file inside `DOHC_DATA_DIRECTORY`, and an archive refuses a key file inside any deployment volume, because the archive copies those folders.
+The overlay binds the key file read-only into the relay at `/etc/dohc/apns-key.p8`.
+Docker refuses to start the relay when the file is missing, and never creates it.
+The relay refuses to start when the file is not a P-256 private key.
+
+To check the setup, open **Settings** in the phone app while signed in to this server.
+**Alerts** offers a switch. On a server without APNs, it says the server isn't set up to send alerts.
+
+To turn alerts off, clear all five settings, then stop and start the deployment.
+To replace the key, install the new file at the same path, update `DOHC_RELAY_APNS_KEY_ID`, then stop and start the deployment.
+
 ## Replace the Markdown reader
 
 The amd64 and arm64 images include the Markdown reader. The relay refuses to start without it, because Edit shares need it.
 To override `DOHC_ENGINE_READER_CONFIG`, point its `node`, `bundle` and `manifest` fields at the absolute paths of root-owned regular files.
 Keep those files and their parent directories unwritable by the service user and other accounts.
-
-## Development read replicas
-
-Replicas remain disabled by default.
-Development read replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled.
-Other hosts refuse replicas. The relay must run under Docker's default seccomp profile or an equivalent outer filter.
-Replicas refuse startup when `/proc/self/status` reports no seccomp filter.
-`node scripts/check-self-host.mjs --running` reports whether the running container can apply the sandbox.
-Replicas use the separate `/replicas` volume. Backups and deployment archives skip this disposable data.
 
 ## Live editing limits
 
@@ -581,7 +624,18 @@ Each server release serves a range of relay API versions, and `GET /ready` on th
 A desktop newer than that range tells its user that the server runs an older version of dohc.
 Upgrade the server to serve that desktop again.
 
-For an upgrade, stop the deployment and save a snapshot and private archive.
+An upgrade needs one stop.
+Stop the deployment first, then save a relay snapshot and a private archive:
+
+```sh
+node tools/self-host/bootstrap.mjs stop
+node scripts/self-host/recovery.mjs backup /srv/dohc-backups/relay-before-upgrade
+node scripts/self-host/recovery.mjs archive /srv/dohc-backups/deployment-before-upgrade
+```
+
+Both recovery commands leave a stopped deployment stopped.
+If the deployment is running, each of them stops it and starts it again, so the server goes away three times instead of once.
+
 Replace the shipped Compose files, scripts, and documentation with the new release bundle.
 Keep your `.env.self-host`, including `DOHC_DEPLOYMENT_NAME`, and all existing data volumes.
 Do not rerun `init`.
@@ -591,7 +645,8 @@ Load the new release image, then select it:
 node tools/self-host/bootstrap.mjs upgrade --image dohc-self-host:NEW_VERSION
 ```
 
-The upgrade preserves volumes and secrets and saves the previous configuration privately.
+The upgrade starts the deployment and checks readiness.
+It preserves volumes and secrets and saves the previous configuration privately.
 If the configuration has no `DOHC_SHARE_WEB_SESSION_SEAL_KEY`, the upgrade adds one. With it, open share pages go on working when the server restarts.
 It can apply database migrations. If it fails, preserve the data and follow the recovery procedure.
 On a large relay log, the first start after an upgrade can take several minutes.
@@ -682,7 +737,7 @@ Use Compose's `--env-file`, `-f`, or `--project-name` options when selecting a c
 Exit codes are 0 for success, 2 for bad input, 3 for not found, and 1 for connection or operation failures.
 The operator socket requires a secret from `/continuity/publication-operator.secret`, beside the deployment configuration.
 The relay creates this file with mode 0600. The takedown command reads it automatically.
-Run the command with access to the continuity volume. Replica children cannot read the secret.
+Run the command with access to the continuity volume.
 
 The client times out after 10 seconds. Retries preserve the first takedown record.
 A retry after a lift holds the owner's app publishing again.

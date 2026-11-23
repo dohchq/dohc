@@ -32,6 +32,53 @@ export function segment(value: string): string {
   return encodeURIComponent(value);
 }
 
+/** One workspace's account operations, each result checked by its `read`. A request ends when its signal aborts. */
+export function accountOperations(client: ServerClient, workspaceId: string, signal: AbortSignal) {
+  const run = <T>(name: string, args: object, read: (result: unknown) => T | null, own = signal) =>
+    client.send(
+      "POST",
+      `/sync/${segment(workspaceId)}/ops/${name}`,
+      (body) => {
+        const answer = okAnswer(body);
+        return answer ? read(answer.result) : null;
+      },
+      args,
+      { signal: own },
+    );
+  return {
+    run,
+    // Every item of a list read a page at a time, each page listing them under the operation's name. A cursor seen
+    // before, or more than `pages` pages, fails the read.
+    async all<T>(
+      name: string,
+      pages: number,
+      item: (value: unknown) => T | null,
+      isCursor: (value: unknown) => value is string,
+    ): Promise<T[]> {
+      const items: T[] = [];
+      const seen = new Set<string>();
+      let cursor: string | null = null;
+      for (let page = 0; page < pages; page++) {
+        const answer: { items: T[]; next: string | null } = await run(
+          name,
+          cursor === null ? {} : { cursor },
+          (result) => {
+            const listed = isFields(result) ? each(result[name], item) : null;
+            const next = isFields(result) ? result.nextCursor : undefined;
+            return listed && (next === null || isCursor(next)) ? { items: listed, next } : null;
+          },
+        );
+        items.push(...answer.items);
+        if (answer.next === null) return items;
+        if (seen.has(answer.next)) break;
+        seen.add(answer.next);
+        cursor = answer.next;
+      }
+      throw new ServerError("invalid");
+    },
+  };
+}
+
 export interface SignedInAccount {
   readonly userId: string;
   readonly email: string;

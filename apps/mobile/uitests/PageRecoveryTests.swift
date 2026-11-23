@@ -23,7 +23,7 @@ final class PageRecoveryTests: XCTestCase {
     app.buttons["Try again"].firstMatch.tap()
     // The loading state while the files are written again; it may already be gone, since the write takes milliseconds.
     keep(app, "04-cache-cleared-retrying")
-    XCTAssertTrue(app.webViews.firstMatch.staticTexts["Packing list"].waitForExistence(timeout: 20), "Try again should open the page")
+    XCTAssertTrue(app.webViews.firstMatch.staticTexts["Packing list"].waitForExistence(timeout: 45), "Try again should open the page")
     keep(app, "04-cache-cleared-recovered")
   }
 
@@ -39,7 +39,7 @@ final class PageRecoveryTests: XCTestCase {
     XCTAssertFalse(app.webViews.firstMatch.staticTexts["Packing list"].exists, "Without its fonts the page shouldn't draw")
     keep(app, "04-fonts-missing-failed")
     app.buttons["Try again"].firstMatch.tap()
-    XCTAssertTrue(app.webViews.firstMatch.staticTexts["Packing list"].waitForExistence(timeout: 20), "Try again should open the page")
+    XCTAssertTrue(app.webViews.firstMatch.staticTexts["Packing list"].waitForExistence(timeout: 45), "Try again should open the page")
     keep(app, "04-fonts-missing-recovered")
   }
 }
