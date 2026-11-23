@@ -208,6 +208,7 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
     member = await launchDesktopApp({ workspace: memberTemp });
     await openWorkspaceFromFirstRun(member.page, memberTemp);
     await member.page.getByTestId(activityPin("sharing")).click();
+    await member.page.getByTestId("sharing-lane-received").click();
     const received = member.page
       .getByTestId("sharing-received-row")
       .filter({ hasText: workspaceName });
