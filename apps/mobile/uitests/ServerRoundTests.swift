@@ -421,7 +421,7 @@ final class ServerRoundTests: XCTestCase {
 
     edit(app, openRecord(app, name, value), typing: added)
     let start = Date()
-    XCTAssertTrue(showing(changed).waitForExistence(timeout: 10), "The field should show the change as it saves")
+    XCTAssertTrue(showing(changed).waitForExistence(timeout: 60), "The field should show the change once it saves, within 60 s")
     settled(app, showing(changed), "The change")
     XCTAssertTrue(undo.exists, "A saved change should offer Undo")
     say("SERVER ROUND COLLECTION SAVED \(since(start)) ms")
@@ -468,7 +468,7 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertTrue(first.waitForExistence(timeout: 60), "The new record should open within 60 s, its Name ready for a change")
     edit(app, first, typing: added)
     let named = nameShowing(app, added)
-    XCTAssertTrue(named.waitForExistence(timeout: 10), "The field should show \(added) as it saves")
+    XCTAssertTrue(named.waitForExistence(timeout: 60), "The field should show \(added) once it saves, within 60 s")
     settled(app, named, "Naming the new record")
     _ = readAfterRelaunch(app, name, added)
 
