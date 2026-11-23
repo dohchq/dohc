@@ -578,7 +578,10 @@ export interface BodySequenceChangeSize {
 
 /**
  * Counts what a change holds from a plain decode of it, which checks nothing and copies no value.
- * It throws for bytes that do not decode.
+ * The decode gives an object the prototype its `__proto__` key names, so the count goes by an
+ * object's own keys and tells bytes from an object by what they are. A key written twice is one
+ * key once decoded, and its copies are not counted: the strict read refuses such a change at the
+ * second copy. It throws for bytes that do not decode.
  */
 export function bodySequenceChangeSize(
   update: Uint8Array,
@@ -607,8 +610,8 @@ export function bodySequenceChangeSize(
       const holder = open.pop()!;
       if (Array.isArray(holder))
         for (let index = 0; index < holder.length; index += 1) count(holder[index]);
-      else if (!(holder instanceof Uint8Array))
-        for (const key in holder) count((holder as Record<string, unknown>)[key]);
+      else if (!ArrayBuffer.isView(holder))
+        for (const key of Object.keys(holder)) count((holder as Record<string, unknown>)[key]);
     }
   }
   work.steps += structs.length + values + deletes;

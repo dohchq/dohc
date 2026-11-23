@@ -1966,6 +1966,61 @@ describe("the room's check of one change, by itself", () => {
     expect(saved(bytes)).toBe("accepted");
   }, 120_000);
 
+  const recordAsWritten = (
+    keys: number,
+    write: (wire: encoding.Encoder, index: number) => void,
+  ) => {
+    const wire = encoding.createEncoder();
+    encoding.writeUint8(wire, 118);
+    encoding.writeVarUint(wire, keys);
+    for (let index = 0; index < keys; index += 1) write(wire, index);
+    return updateOf([
+      {
+        client: 77,
+        clock: 0,
+        parent: "containers",
+        key: "X",
+        content: anyAsWritten(Array.from(encoding.toUint8Array(wire))),
+      },
+    ]);
+  };
+
+  it("an object on the wire whose __proto__ key holds bytes, and 150,000 keys after it: every key is counted, and the change is refused for capacity before it is read", () => {
+    const bytes = recordAsWritten(150_001, (wire, index) => {
+      if (index === 0) {
+        encoding.writeVarString(wire, "__proto__");
+        encoding.writeUint8(wire, 116);
+        encoding.writeVarUint8Array(wire, new Uint8Array([0]));
+        return;
+      }
+      encoding.writeVarString(wire, `k${index.toString(36)}`);
+      encoding.writeUint8(wire, 126);
+    });
+    expect(bodySequenceChangeSize(bytes)).toMatchObject({ structs: 1, values: 150_001 });
+    const { refusal, work } = checked(bytes);
+    expect(refusal).toEqual({
+      reason: "capacity-refused",
+      limit: past("values", 100_000, 150_001),
+    });
+    expect(work).toEqual({ steps: 1 + 150_001 });
+  });
+
+  it("an object on the wire with one key 350,000 times is one key once decoded: the count cannot see the copies, and the read refuses the change at the second", () => {
+    const bytes = recordAsWritten(350_000, (wire) => {
+      encoding.writeVarString(wire, "a");
+      encoding.writeUint8(wire, 126);
+    });
+    expect(bodySequenceChangeSize(bytes)).toMatchObject({ structs: 1, values: 2 });
+    const { refusal, work } = checked(bytes);
+    expect(refusal).toEqual({ reason: "invalid-update" });
+    expect(work).toEqual({ steps: 1 + 2 });
+    const read = readLiveUpdateAsTheCutDoes(bytes, {
+      ...POLICY,
+      maxValueNodeVisits: 3,
+    });
+    expect(read).toEqual({ kind: "refused", reason: "invalid-update" });
+  });
+
   it("a small change is not counted, and is read once", () => {
     const bytes = changeMadeBy(note, 77, ({ sequence }) => sequence.insert(2, "x"))!;
     const { refusal, work } = checked(bytes);
