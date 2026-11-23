@@ -2851,7 +2851,8 @@ describe("a personal agent in a workspace its person joined", () => {
     await groupRule(f, "wire-team", "none");
     expect(await ok(await answered)).toMatchObject({ messages: [], more: false });
     expect(f.activity.stats().waiters).toBe(0);
-  });
+    // Under the waiter's own 25-second timer, so only the rule's wake can answer in time.
+  }, 10_000);
 
   it("spans owned and joined workspaces, and once its person is removed answers not-found there and ends a running wait", async () => {
     const f = await fixture();
