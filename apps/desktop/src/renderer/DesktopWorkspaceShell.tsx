@@ -8685,6 +8685,7 @@ function WorkspaceShell(props: {
                                       // only on an active-version change: versionEpoch alone, not
                                       // history growth (which must not churn the live session).
                                       engineVersionKey={versionEpoch}
+                                      sharePullKey={shareContentEpoch}
                                       onOpenPath={openPathWithHeading}
                                       drawingCollaboration={chatCollaboration}
                                       // A search or heading jump opens the file's tab, never a record's body.

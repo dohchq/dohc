@@ -536,7 +536,7 @@ describe("ui-state merge-on-load", () => {
     ).toBeNull();
   });
 
-  it("keeps an open note's live session through a pull that changed files", async () => {
+  function liveShareBridge(openEngineYDocSession: () => Promise<unknown>) {
     const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["b.md"], "b.md")));
     const changed: RefreshSharedViewResult = {
       ok: true,
@@ -548,11 +548,6 @@ describe("ui-state merge-on-load", () => {
       refusedDetail: null,
     };
     bridge.refreshSharedView = vi.fn(async () => changed);
-    const openEngineYDocSession = vi.fn(async () => ({
-      available: true,
-      initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc("# Doc\n")),
-      lineageGeneration: 1,
-    }));
     const closeEngineYDocSession = vi.fn(async () => undefined);
     Object.assign(bridge, {
       openEngineYDocSession,
@@ -572,20 +567,50 @@ describe("ui-state merge-on-load", () => {
         access: "edit",
       },
     });
+    const pull = async () => {
+      await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(
+          false,
+        ),
+      );
+      const reads = bridge.readWorkspaceText.mock.calls.length;
+      await userEvent.click(screen.getByTestId("shared-view-refresh"));
+      await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2));
+      await waitFor(() =>
+        expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads),
+      );
+    };
+    return { closeEngineYDocSession, pull };
+  }
+  const boundNote = () => ({
+    available: true,
+    initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc("# Doc\n")),
+    lineageGeneration: 1,
+  });
 
+  it("keeps an open note's live session through a pull that changed files", async () => {
+    const openEngineYDocSession = vi.fn(async () => boundNote());
+    const { closeEngineYDocSession, pull } = liveShareBridge(openEngineYDocSession);
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
-    await waitFor(() =>
-      expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(false),
-    );
-    const reads = bridge.readWorkspaceText.mock.calls.length;
 
-    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+    await pull();
 
-    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
     expect(closeEngineYDocSession).not.toHaveBeenCalled();
     expect(openEngineYDocSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a note again when a pull brings back a file its open missed", async () => {
+    const openEngineYDocSession = vi
+      .fn<() => Promise<unknown>>()
+      .mockResolvedValueOnce({ available: false, documentUnavailable: true })
+      .mockImplementation(async () => boundNote());
+    const { pull } = liveShareBridge(openEngineYDocSession);
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+
+    await pull();
+
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
   });
 
   // A shared view has no recorder, so its refresh is what meets a store a
