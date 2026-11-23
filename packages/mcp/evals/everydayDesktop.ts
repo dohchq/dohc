@@ -149,7 +149,7 @@ export function computeEvalAppSourceRevision(
     for (const entry of parsed.inputs) {
       if (typeof entry !== "string") return null;
       const rel = posix.normalize(posix.join(normalizedRoot, entry));
-      if (rel.startsWith("..") || files[rel] === undefined) return null;
+      if (rel === ".." || rel.startsWith("../") || files[rel] === undefined) return null;
       entries.push([rel, files[rel]!]);
     }
     return hashEvalAppSources(normalizedRoot, manifestRaw, entries);
@@ -1579,13 +1579,11 @@ export async function createEverydayDesktop(
             const stored = datasetsByPath.get(datasetPath);
             if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
             const cap = resolveAppDatasetCapability(
-              {
-                kind: "dataset",
-                datasetId: stored.revision.datasetId,
-                revision: manifest.dataset.revision,
-                revisionSha256: manifest.dataset.revisionSha256,
-                operationIds: manifest.dataset.operationIds,
-              },
+              resolveAppDatasetReferenceBinding(
+                manifest.dataset,
+                stored.revision.datasetId,
+                stored.revision,
+              ),
               stored.revision,
               () => stored.generated,
             );

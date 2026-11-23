@@ -28,6 +28,7 @@ import {
 import {
   parseAppCollectionCreateRequest,
   type AppCollectionReceipt,
+  type AppDatasetCapability,
   type AppPublicationCandidate,
 } from "@dohc/security-contract/app-publication";
 import type { DatasetRevision } from "@dohc/security-contract/dataset";
@@ -46,6 +47,7 @@ import {
   type LocalAppLaunchBackend,
 } from "./localAppLaunch";
 import type { LocalAppKind } from "./localAppStore";
+import { selectDatasetCapability } from "./localDatasetApps";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 
 type VerifyFrontendRequest = Extract<OwnerAppPublicationRequest, { action: "verifyFrontend" }>;
@@ -135,6 +137,15 @@ function classifyCompileDiagnostic(
   }
   const detail = scrub(raw);
   const detailField = detail ? { detail } : {};
+  if (locFields.path && locFields.line) {
+    return {
+      code: "compile_error",
+      severity: "error",
+      ...locFields,
+      ...detailField,
+      remedy: "Fix the frontend syntax or bundle error reported above and verify again.",
+    };
+  }
   const manifestPath = `${appRoot}/app.publish.json`;
   const rules: Array<
     [RegExp, AppFrontendDiagnostic["code"], string, Partial<AppFrontendDiagnostic>]
@@ -191,9 +202,10 @@ export async function verifyLocalAppFrontend(
   let files: ClosedAppBuild["files"];
   let publicationId: string;
   let authorityRevision: number;
-  let resolvedDataset:
-    | Awaited<ReturnType<VerifyLocalAppFrontendDeps["approvedArtifacts"]>>
-    | undefined;
+  type ApprovedDatasetArtifacts = Awaited<
+    ReturnType<VerifyLocalAppFrontendDeps["approvedArtifacts"]>
+  >;
+  const resolvedDatasets = new Map<string, ApprovedDatasetArtifacts>();
   let collectionSchemaText: string | undefined;
 
   if (input.publicationId !== undefined) {
@@ -201,27 +213,28 @@ export async function verifyLocalAppFrontend(
     current();
     ({ publicationId, authorityRevision, candidate, files } = pub);
     target = { kind: "publication", publicationId, appRoot: pub.appRoot, authorityRevision };
-    const cap = candidate.capabilities[0];
-    if (cap?.kind === "dataset") {
-      resolvedDataset = await deps.approvedArtifacts(cap.datasetId);
-      current();
-      if (!resolvedDataset.active)
-        throw new Error("This Collection is unavailable on this device.");
-    } else if (cap?.kind === "collection-create") {
-      const schemaBytes = await deps.withAdapter(async (adapter) => {
-        const meta = await adapter.captureSourceMetadata({
-          workspaceId: deps.workspaceId,
-          versionId: "main",
-          paths: [`${cap.collectionPath}/collection.yaml`],
-          bounds: { maxInputFiles: 1, maxInputBytes: APP_COLLECTION_MAX_SCHEMA_BYTES },
-          signal: deps.signal,
+    for (const cap of candidate.capabilities) {
+      if (cap.kind === "dataset" && !resolvedDatasets.has(cap.datasetId)) {
+        const approved = await deps.approvedArtifacts(cap.datasetId);
+        current();
+        if (!approved.active) throw new Error("This Collection is unavailable on this device.");
+        resolvedDatasets.set(cap.datasetId, approved);
+      } else if (cap.kind === "collection-create") {
+        const schemaBytes = await deps.withAdapter(async (adapter) => {
+          const meta = await adapter.captureSourceMetadata({
+            workspaceId: deps.workspaceId,
+            versionId: "main",
+            paths: [`${cap.collectionPath}/collection.yaml`],
+            bounds: { maxInputFiles: 1, maxInputBytes: APP_COLLECTION_MAX_SCHEMA_BYTES },
+            signal: deps.signal,
+          });
+          return (await adapter.hydrateCapturedSources(meta, deps.signal))[0]?.bytes ?? null;
         });
-        return (await adapter.hydrateCapturedSources(meta, deps.signal))[0]?.bytes ?? null;
-      });
-      current();
-      if (!schemaBytes || sha256(schemaBytes) !== cap.schemaSha256)
-        throw new Error("The Collection schema changed. Prepare the app again.");
-      collectionSchemaText = new TextDecoder("utf-8", { fatal: true }).decode(schemaBytes);
+        current();
+        if (!schemaBytes || sha256(schemaBytes) !== cap.schemaSha256)
+          throw new Error("The Collection schema changed. Prepare the app again.");
+        collectionSchemaText = new TextDecoder("utf-8", { fatal: true }).decode(schemaBytes);
+      }
     }
   } else {
     const appRoot = input.appRoot!;
@@ -248,7 +261,7 @@ export async function verifyLocalAppFrontend(
               current();
               if (!approved.active)
                 throw new Error("This Collection is unavailable on this device.");
-              resolvedDataset = approved;
+              resolvedDatasets.set(binding.datasetId, approved);
               return approved.revision;
             },
           },
@@ -317,46 +330,94 @@ export async function verifyLocalAppFrontend(
     return first;
   };
 
-  const capability = candidate.capabilities[0];
-  let compiledDatasetSource = "";
-  let currentDb: Uint8Array | undefined;
-  let dbRevision = 0;
-  const nextRequestId = orderedRequestIds();
-  let datasetChain: Promise<void> = Promise.resolve();
-  const datasetReceipts = new Map<
-    string,
-    { payloadSha256: string; response: { result: JsonValue; revision: number; replayed: boolean } }
-  >();
-
-  if (capability?.kind === "dataset") {
-    if (!resolvedDataset) throw new Error("This Collection is unavailable on this device.");
-    compiledDatasetSource = await deps.compileDataset(
-      resolvedDataset.operationSource,
-      resolvedDataset.revision.definition.operationsPath,
-      deps.signal,
-    );
-    current();
-    currentDb = await initializeAppDatabase(
+  const datasetCapabilities = candidate.capabilities.filter(
+    (cap): cap is AppDatasetCapability => cap.kind === "dataset",
+  );
+  const collectionCapability = candidate.capabilities.find(
+    (cap) => cap.kind === "collection-create",
+  );
+  type DryDatasetState = {
+    resolved: ApprovedDatasetArtifacts;
+    compiledSource: string;
+    currentDb: Uint8Array;
+    dbRevision: number;
+    chain: Promise<void>;
+    receipts: Map<
+      string,
       {
-        schemaSql: resolvedDataset.schemaSql,
-        tables: resolvedDataset.revision.definition.tables.map((table) => table.sqlName),
+        payloadSha256: string;
+        response: { result: JsonValue; revision: number; replayed: boolean };
+      }
+    >;
+  };
+  const dryDatasets = new Map<string, DryDatasetState>();
+  const nextRequestId = orderedRequestIds();
+  const scrub = createDiagnosticScrubber(deps.workspaceRoot);
+
+  for (const cap of datasetCapabilities) {
+    if (dryDatasets.has(cap.datasetId)) continue;
+    const resolved = resolvedDatasets.get(cap.datasetId);
+    if (!resolved) throw new Error("This Collection is unavailable on this device.");
+    let compiledSource: string;
+    try {
+      compiledSource = await deps.compileDataset(
+        resolved.operationSource,
+        resolved.revision.definition.operationsPath,
+        deps.signal,
+      );
+      current();
+    } catch (error) {
+      current();
+      const detail = scrub(error instanceof Error ? error.message : String(error));
+      return OwnerAppPublicationResult.parse({
+        kind: "frontendVerified",
+        ok: false,
+        stage: "compile",
+        target,
+        startupOk: false,
+        stepsOk: false,
+        handshake: { delivered: false, messageCount: 0 },
+        brokerCalls: [],
+        steps: [],
+        diagnostics: [
+          {
+            code: "dataset_binding_error",
+            severity: "error",
+            ...(detail ? { detail } : {}),
+            remedy: "Fix the Collection operations source or approval before verifying this app.",
+          },
+        ],
+        externalRequestsBlocked: 0,
+      }) as VerifyFrontendResult;
+    }
+    const currentDb = await initializeAppDatabase(
+      {
+        schemaSql: resolved.schemaSql,
+        tables: resolved.revision.definition.tables.map((table) => table.sqlName),
         signal: deps.signal,
       },
       deps.datasetRuntime,
     );
     current();
+    dryDatasets.set(cap.datasetId, {
+      resolved,
+      compiledSource,
+      currentDb,
+      dbRevision: 0,
+      chain: Promise.resolve(),
+      receipts: new Map(),
+    });
   }
 
-  const checkedCollection =
-    capability?.kind === "collection-create"
-      ? (() => {
-          if (!collectionSchemaText)
-            throw new Error("The Collection schema is unavailable. Prepare the app again.");
-          const res = validateAppCollectionSchema(collectionSchemaText, capability, "dohc");
-          if (!res.ok) throw new Error(res.message);
-          return res.value;
-        })()
-      : undefined;
+  const checkedCollection = collectionCapability
+    ? (() => {
+        if (!collectionSchemaText)
+          throw new Error("The Collection schema is unavailable. Prepare the app again.");
+        const res = validateAppCollectionSchema(collectionSchemaText, collectionCapability, "dohc");
+        if (!res.ok) throw new Error(res.message);
+        return res.value;
+      })()
+    : undefined;
   const dryRecords: Array<{ path: string; bytes: Uint8Array }> = [];
   const dryCollectionReceipts = new Map<
     string,
@@ -389,7 +450,7 @@ export async function verifyLocalAppFrontend(
         raw && typeof raw === "object" && "operation" in raw && typeof raw.operation === "string"
           ? raw.operation
           : undefined;
-      if (!capability) {
+      if (datasetCapabilities.length === 0 && !collectionCapability) {
         failBackend(
           op,
           rawOpName,
@@ -399,7 +460,7 @@ export async function verifyLocalAppFrontend(
           "This app is not approved for workspace data.",
         );
       }
-      if (capability.kind === "dataset") {
+      if (datasetCapabilities.length > 0) {
         if (action === "upload" || action === "attempt") {
           failBackend(
             op,
@@ -421,7 +482,27 @@ export async function verifyLocalAppFrontend(
           );
         }
         const parsed = parseAppBackendInvokeRequest(raw);
-        const operation = capability.operations.find((item) => item.name === parsed.operation);
+        let selectedCapability: AppDatasetCapability;
+        try {
+          selectedCapability = selectDatasetCapability(datasetCapabilities, parsed.dataset);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "This Collection is not approved for the app.";
+          failBackend(
+            "backend.invoke",
+            parsed.operation,
+            "operation_not_approved",
+            parsed.dataset
+              ? `Collection alias "${parsed.dataset}" is not approved in app.publish.json.`
+              : "Multi-Collection apps must pass a declared dataset alias on backend.invoke.",
+            "Pass a declared dataset alias in backend.invoke or check datasets in app.publish.json.",
+            message,
+          );
+        }
+        const datasetState = dryDatasets.get(selectedCapability.datasetId)!;
+        const operation = selectedCapability.operations.find(
+          (item) => item.name === parsed.operation,
+        );
         if (!operation) {
           failBackend(
             "backend.invoke",
@@ -432,7 +513,7 @@ export async function verifyLocalAppFrontend(
             "This action is not approved for the app.",
           );
         }
-        const restricted = capability.createFields?.find(
+        const restricted = selectedCapability.createFields?.find(
           (entry) => entry.operationId === operation.operationId,
         );
         if (restricted) {
@@ -458,12 +539,14 @@ export async function verifyLocalAppFrontend(
             );
           }
         }
-        const runSerialized = datasetChain
+        const runSerialized = datasetState.chain
           .catch(() => {})
           .then(async () => {
             const receiptKey = parsed.idempotencyKey;
             const payloadHash = sha256(JSON.stringify([operation.operationId, parsed.input]));
-            const existing = !operation.readOnly ? datasetReceipts.get(receiptKey) : undefined;
+            const existing = !operation.readOnly
+              ? datasetState.receipts.get(receiptKey)
+              : undefined;
             if (existing) {
               if (existing.payloadSha256 !== payloadHash) {
                 failBackend(
@@ -480,21 +563,23 @@ export async function verifyLocalAppFrontend(
             try {
               const evaluated = await evaluateAppOperation(
                 {
-                  source: compiledDatasetSource,
+                  source: datasetState.compiledSource,
                   operation: operation.name,
                   caller: { kind: "owner", userId: "verify-owner" },
                   input: parsed.input,
                   nowMs: Date.now(),
                   requestId: nextRequestId(),
-                  database: currentDb!,
-                  tables: resolvedDataset!.revision.definition.tables.map((table) => table.sqlName),
+                  database: datasetState.currentDb,
+                  tables: datasetState.resolved.revision.definition.tables.map(
+                    (table) => table.sqlName,
+                  ),
                   readOnly: operation.readOnly,
                   files: [],
                   signal,
                 },
                 deps.datasetRuntime,
               );
-              const definedOperation = resolvedDataset!.revision.definition.operations.find(
+              const definedOperation = datasetState.resolved.revision.definition.operations.find(
                 (item) => item.operationId === operation.operationId,
               );
               const undoRefusal =
@@ -503,12 +588,16 @@ export async function verifyLocalAppFrontend(
                   : null;
               if (undoRefusal) throw new AppBackendRuntimeError(undoRefusal);
               if (!operation.readOnly && evaluated.changed) {
-                currentDb = evaluated.database;
-                dbRevision++;
+                datasetState.currentDb = evaluated.database;
+                datasetState.dbRevision++;
               }
-              const response = { result: evaluated.result, revision: dbRevision, replayed: false };
-              if (!operation.readOnly && datasetReceipts.size < 256)
-                datasetReceipts.set(receiptKey, { payloadSha256: payloadHash, response });
+              const response = {
+                result: evaluated.result,
+                revision: datasetState.dbRevision,
+                replayed: false,
+              };
+              if (!operation.readOnly && datasetState.receipts.size < 256)
+                datasetState.receipts.set(receiptKey, { payloadSha256: payloadHash, response });
               return response;
             } catch (error) {
               if (isAppBackendRuntimeError(error)) throw error;
@@ -521,7 +610,7 @@ export async function verifyLocalAppFrontend(
               throw new LocalAppUnavailableError("Dry-run backend operation failed.");
             }
           });
-        datasetChain = runSerialized.then(
+        datasetState.chain = runSerialized.then(
           () => {},
           () => {},
         );
@@ -530,7 +619,7 @@ export async function verifyLocalAppFrontend(
 
       if (action === "list") {
         const listReq = raw as { limit?: unknown; afterPath?: unknown };
-        if (!capability.readFields.length) {
+        if (!collectionCapability!.readFields.length) {
           failBackend(
             "collection.list",
             undefined,
@@ -556,7 +645,7 @@ export async function verifyLocalAppFrontend(
             record: projectAppCollectionRecord(
               item.path,
               item.bytes,
-              capability,
+              collectionCapability!,
               checkedCollection!,
             ),
           })),
@@ -580,7 +669,7 @@ export async function verifyLocalAppFrontend(
         }
         const checked = validateAppCollectionCreateFields(
           parsed.fields,
-          capability,
+          collectionCapability!,
           checkedCollection!,
         );
         if (!checked.ok) {
@@ -599,7 +688,7 @@ export async function verifyLocalAppFrontend(
             .digest();
         const acceptanceId = `accepted_${derive("acceptance").toString("hex").slice(0, 32)}`;
         const createdAt = Date.now();
-        const path = `${capability.collectionPath}/${acceptanceId}.md`;
+        const path = `${collectionCapability!.collectionPath}/${acceptanceId}.md`;
         dryRecords.push({
           path,
           bytes: new TextEncoder().encode(

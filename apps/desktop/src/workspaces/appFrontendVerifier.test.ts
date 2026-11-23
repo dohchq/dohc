@@ -277,6 +277,288 @@ describe("verifyLocalAppFrontend", () => {
     expect(syntaxErr.diagnostics[0]?.path).toBe("apps/bad/app.js");
     expect(syntaxErr.diagnostics[0]?.line).toBe(1);
     expect(runBrowser).not.toHaveBeenCalled();
+
+    const datasetPathSyntaxErr = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/dataset-dashboard" },
+      baseDeps({
+        "apps/dataset-dashboard/app.publish.json": JSON.stringify({
+          version: 1,
+          entryPath: "index.html",
+          inputs: ["index.html", "app.js"],
+          packageMap: {},
+        }),
+        "apps/dataset-dashboard/index.html":
+          '<!doctype html><script type="module" src="./app.js"></script>',
+        "apps/dataset-dashboard/app.js": "const x = ;\n",
+      }),
+    );
+    expect(datasetPathSyntaxErr.ok).toBe(false);
+    expect(datasetPathSyntaxErr.diagnostics[0]?.code).toBe("compile_error");
+    expect(datasetPathSyntaxErr.diagnostics[0]?.path).toBe("apps/dataset-dashboard/app.js");
+
+    const datasetCompileErr = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/broken-ds" },
+      {
+        ...baseDeps({
+          "workshop/dataset.json": JSON.stringify(WORKSHOP_DEF),
+          "apps/broken-ds/app.publish.json": JSON.stringify({
+            version: 1,
+            entryPath: "index.html",
+            inputs: ["index.html"],
+            packageMap: {},
+            dataset: {
+              kind: "dataset",
+              datasetPath: "workshop/dataset.json",
+              revision: 1,
+              revisionSha256: WORKSHOP_REVISION.revisionSha256,
+              operationIds: [BOOK_OP_ID],
+            },
+          }),
+          "apps/broken-ds/index.html": "<!doctype html><h1>Hi</h1>",
+        }),
+        compileDataset: async () => {
+          throw new Error("Compile failed at C:\\workspace\\workshop\\backend.ts");
+        },
+      },
+    );
+    expect(datasetCompileErr.ok).toBe(false);
+    expect(datasetCompileErr.stage).toBe("compile");
+    expect(datasetCompileErr.diagnostics[0]?.code).toBe("dataset_binding_error");
+    expect(datasetCompileErr.diagnostics[0]?.detail).not.toContain("C:\\workspace");
+  });
+
+  it("isolates multi-Collection dry-run databases by dataset alias and rejects missing or unknown aliases", async () => {
+    const controller = new AbortController();
+    const notesIdField = uuid("b9300000", 3);
+    const notesTextField = uuid("b9300000", 4);
+    const addNoteOp = uuid("b9300000", 6);
+    const listNotesOp = uuid("b9300000", 7);
+    const notesDef: DatasetDefinition = {
+      formatVersion: 1,
+      datasetId: uuid("b9300000", 1),
+      name: "Notes",
+      schemaPath: "notes/schema.sql",
+      operationsPath: "notes/backend.ts",
+      tables: [
+        {
+          tableId: uuid("b9300000", 2),
+          name: "Notes",
+          sqlName: "notes",
+          primaryKey: "id",
+          fields: [
+            {
+              fieldId: notesIdField,
+              name: "ID",
+              sqlColumn: "id",
+              type: "text",
+              required: true,
+              unique: true,
+            },
+            {
+              fieldId: notesTextField,
+              name: "Body",
+              sqlColumn: "body",
+              type: "text",
+              required: true,
+              unique: false,
+            },
+          ],
+        },
+      ],
+      operations: [
+        {
+          operationId: addNoteOp,
+          name: "addNote",
+          label: "Add note",
+          tableId: uuid("b9300000", 2),
+          kind: "action",
+          access: "owner",
+          readOnly: false,
+          fieldIds: [],
+        },
+        {
+          operationId: listNotesOp,
+          name: "listNotes",
+          label: "List notes",
+          tableId: uuid("b9300000", 2),
+          kind: "read",
+          access: "owner",
+          readOnly: true,
+          fieldIds: [notesIdField, notesTextField],
+        },
+      ],
+    };
+    const notesSchema = `CREATE TABLE "notes" ("id" TEXT PRIMARY KEY NOT NULL, "body" TEXT NOT NULL);`;
+    const notesBackend = `globalThis.operations = {
+      addNote(ctx, input) {
+        ctx.db.execute("INSERT INTO notes(id, body) VALUES(?, ?)", [ctx.requestId, String(input?.body ?? "")]);
+        return { id: ctx.requestId };
+      },
+      listNotes(ctx) {
+        return { rows: ctx.db.query("SELECT id, body FROM notes ORDER BY id") };
+      },
+    };`;
+    const notesRev: DatasetRevision = (() => {
+      const draft: DatasetRevision = {
+        datasetId: notesDef.datasetId,
+        revision: 1,
+        revisionSha256: "0".repeat(64),
+        definitionSha256: sha(datasetDefinitionDigestContent(notesDef)),
+        schemaSha256: sha(notesSchema),
+        operationsSha256: sha(notesBackend),
+        definition: notesDef,
+      };
+      draft.revisionSha256 = sha(datasetRevisionDigestContent(draft));
+      return draft;
+    })();
+    const files: Record<string, string> = {
+      "workshop/dataset.json": JSON.stringify(WORKSHOP_DEF),
+      "notes/dataset.json": JSON.stringify(notesDef),
+      "apps/multi/app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "index.html",
+        inputs: ["index.html"],
+        packageMap: {},
+        datasets: {
+          bookings: {
+            kind: "dataset",
+            datasetPath: "workshop/dataset.json",
+            revision: 1,
+            revisionSha256: WORKSHOP_REVISION.revisionSha256,
+            operationIds: [BOOK_OP_ID, LIST_OP_ID],
+          },
+          notes: {
+            kind: "dataset",
+            datasetPath: "notes/dataset.json",
+            revision: 1,
+            revisionSha256: notesRev.revisionSha256,
+            operationIds: [addNoteOp, listNotesOp],
+          },
+        },
+      }),
+      "apps/multi/index.html": "<!doctype html><h1>Multi</h1>",
+    };
+
+    const result = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/multi" },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: async (work) => work(makeMemoryAdapter(files)),
+        compile: (req) => compileClosedApp(req),
+        compileDataset: (src, path) => compileDatasetOperations(src, path),
+        datasetRuntime: {},
+        approvedArtifacts: async (datasetId) =>
+          datasetId === WORKSHOP_DEF.datasetId
+            ? {
+                revision: WORKSHOP_REVISION,
+                schemaSql: WORKSHOP_SCHEMA,
+                operationSource: WORKSHOP_BACKEND,
+                active: true,
+              }
+            : {
+                revision: notesRev,
+                schemaSql: notesSchema,
+                operationSource: notesBackend,
+                active: true,
+              },
+        verificationPublication: vi.fn(),
+        runBrowser: async (browserInput) => {
+          const started = await browserInput.startSession();
+          try {
+            const { backend } = await exchangeLaunchProof(started.url);
+
+            const noAlias = await backend({
+              id: "m1",
+              op: "backend.invoke",
+              operation: "bookSeat",
+              idempotencyKey: "m-k1",
+              input: { name: "Ada", seats: 1 },
+            });
+            expect(noAlias.status).toBe(404);
+            expect(browserInput.consumeBackendHint("backend.invoke", "bookSeat")).toMatchObject({
+              reasonCode: "operation_not_approved",
+              diagnosticCode: "broker_operation_not_approved",
+            });
+
+            const badAlias = await backend({
+              id: "m2",
+              op: "backend.invoke",
+              dataset: "unknown",
+              operation: "bookSeat",
+              idempotencyKey: "m-k2",
+              input: { name: "Ada", seats: 1 },
+            });
+            expect(badAlias.status).toBe(404);
+            expect(browserInput.consumeBackendHint("backend.invoke", "bookSeat")).toMatchObject({
+              reasonCode: "operation_not_approved",
+              diagnosticCode: "broker_operation_not_approved",
+            });
+
+            const bookRes = await backend({
+              id: "m3",
+              op: "backend.invoke",
+              dataset: "bookings",
+              operation: "bookSeat",
+              idempotencyKey: "m-k3",
+              input: { name: "Ada", seats: 2 },
+            });
+            expect(bookRes.status).toBe(200);
+
+            const noteRes = await backend({
+              id: "m4",
+              op: "backend.invoke",
+              dataset: "notes",
+              operation: "addNote",
+              idempotencyKey: "m-k4",
+              input: { body: "Bring laptop" },
+            });
+            expect(noteRes.status).toBe(200);
+
+            const listBookingsRes = await backend({
+              id: "m5",
+              op: "backend.invoke",
+              dataset: "bookings",
+              operation: "listBookings",
+              idempotencyKey: "m-k5",
+              input: {},
+            });
+            expect(await listBookingsRes.json()).toMatchObject({
+              result: { rows: [{ name: "Ada", seats: 2 }] },
+            });
+
+            const listNotesRes = await backend({
+              id: "m6",
+              op: "backend.invoke",
+              dataset: "notes",
+              operation: "listNotes",
+              idempotencyKey: "m-k6",
+              input: {},
+            });
+            expect(await listNotesRes.json()).toMatchObject({
+              result: { rows: [{ body: "Bring laptop" }] },
+            });
+          } finally {
+            await started.stop();
+          }
+          return {
+            ok: true,
+            stage: "complete",
+            startupOk: true,
+            stepsOk: true,
+            handshake: { delivered: true, messageCount: 6 },
+            brokerCalls: [],
+            steps: [],
+            diagnostics: [],
+            externalRequestsBlocked: 0,
+          };
+        },
+      },
+    );
+    expect(result.ok).toBe(true);
   });
 
   it("runs ephemeral dataset dry-run against real launch host with capacity refusal and unapproved op rejection", async () => {
