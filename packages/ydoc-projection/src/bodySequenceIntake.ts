@@ -625,7 +625,8 @@ export function bodySequenceChangeSize(
  * it starts in and the one it ends in, so each counts as two items the change can leave in the
  * note. A value takes at least one byte of a change, an item and a delete range two each and an
  * element five, so a change of no more bytes than the most values one may hold is past none of
- * these and is not counted.
+ * these and is not counted. A change the count cannot decode, such as a value nested deeper than
+ * the decoder's stack, is past none here either: the read says why it cannot be taken.
  */
 export function bodySequenceChangeLimit(
   update: Uint8Array,
@@ -633,7 +634,12 @@ export function bodySequenceChangeLimit(
   work: BodySequenceIntakeWork = { steps: 0 },
 ): string | undefined {
   if (update.byteLength <= BODY_SEQUENCE_CHANGE_MAX_VALUES) return undefined;
-  const size = bodySequenceChangeSize(update, work);
+  let size: BodySequenceChangeSize;
+  try {
+    size = bodySequenceChangeSize(update, work);
+  } catch {
+    return undefined;
+  }
   const said = (count: number) => count.toLocaleString("en-US");
   const past = (most: number, unit: string, held: number) =>
     `One change to a note holds at most ${said(most)} ${unit}. This one holds ${said(held)}.`;

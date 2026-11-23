@@ -2021,6 +2021,27 @@ describe("the room's check of one change, by itself", () => {
     expect(read).toEqual({ kind: "refused", reason: "invalid-update" });
   });
 
+  it.each([
+    ["40,000 levels deep, in a change small enough not to be counted", 40_000, false],
+    ["50,000 levels deep, in a change the count cannot decode", 50_000, true],
+  ] as const)("a value nested %s: refused for capacity", (_name, levels, counted) => {
+    const wire: number[] = [];
+    for (let level = 0; level < levels; level += 1) wire.push(117, 1);
+    wire.push(126);
+    const bytes = updateOf([
+      { client: 77, clock: 0, parent: "containers", key: "X", content: anyAsWritten(wire) },
+    ]);
+    expect(bytes.length > BODY_SEQUENCE_CHANGE_MAX_VALUES).toBe(counted);
+    if (counted) expect(() => bodySequenceChangeSize(bytes)).toThrow(RangeError);
+    expect(checked(bytes).refusal).toEqual({ reason: "capacity-refused" });
+  });
+
+  it("bytes that are no change, large enough to be counted: refused as a broken change", () => {
+    const bytes = new Uint8Array(150_000).fill(255);
+    expect(() => bodySequenceChangeSize(bytes)).toThrow();
+    expect(checked(bytes).refusal).toEqual({ reason: "invalid-update" });
+  });
+
   it("a small change is not counted, and is read once", () => {
     const bytes = changeMadeBy(note, 77, ({ sequence }) => sequence.insert(2, "x"))!;
     const { refusal, work } = checked(bytes);
