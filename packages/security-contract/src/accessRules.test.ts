@@ -27,7 +27,6 @@ const plain = (parsed: AccessRule | null): VectorRule =>
     people: Object.fromEntries([...parsed.people].sort(([a], [b]) => (a < b ? -1 : 1))),
   };
 
-// The engine's twin (crates/dohc-engine-files/src/access_rules.rs) reads the same vectors.
 describe("shared vectors", () => {
   it.each(vectors.parsed)("parses $name", ({ text, rule: expected }) => {
     expect(plain(parseAccessRule(text))).toEqual(expected);
