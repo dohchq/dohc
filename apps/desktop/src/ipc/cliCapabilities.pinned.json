@@ -446,8 +446,6 @@
     "members link": "members.link.change",
     "members folder": "members.folder.rule",
     "members remove-folder-marker": "members.folder.marker.remove",
-    "members folder": "members.folder.rule",
-    "members remove-folder-marker": "members.folder.marker.remove",
     "members end": "members.end",
     "members group": "members.group.rule"
   }
