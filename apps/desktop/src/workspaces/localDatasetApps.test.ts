@@ -775,6 +775,366 @@ it("keeps local form uploads, submissions and selected fields working through re
   );
 });
 
+it("runs a multi-Collection local app with alias routing, cross-Collection file isolation, archive deactivation, and delete cleanup", async () => {
+  const f = await fixture();
+  const secondDef: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: id(101),
+    name: "Workouts",
+    schemaPath: "workouts/schema.sql",
+    operationsPath: "workouts/operations.js",
+    tables: [
+      {
+        tableId: id(102),
+        name: "Sessions",
+        sqlName: "sessions",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: id(103),
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: id(104),
+            name: "Activity",
+            sqlColumn: "activity",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+          {
+            fieldId: id(105),
+            name: "Proof",
+            sqlColumn: "proof",
+            type: "attachment",
+            required: false,
+            unique: false,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: id(106),
+        name: "submit",
+        label: "Log workout",
+        tableId: id(102),
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [id(104), id(105)],
+      },
+      {
+        operationId: id(107),
+        name: "list",
+        label: "List workouts",
+        tableId: id(102),
+        kind: "read",
+        access: "owner",
+        readOnly: true,
+        fieldIds: [id(103), id(104), id(105)],
+      },
+      {
+        operationId: id(108),
+        name: "fileRead",
+        label: "Read proof",
+        tableId: id(102),
+        kind: "read",
+        access: "owner",
+        readOnly: true,
+        fieldIds: [id(105)],
+      },
+    ],
+  };
+  const secondGen = generateDatasetSources(secondDef);
+  for (const [path, content] of Object.entries(secondGen.files)) f.files.set(path, content);
+  f.files.set(
+    secondDef.operationsPath,
+    f.files.get(secondDef.operationsPath) +
+      `\nglobalThis.operations.fileRead=(ctx,input)=>({fileId:input.fileId});`,
+  );
+  const adapter = sourceAdapter(f.files);
+  const secondPrepared = await f.host.prepare({
+    descriptorPath: "workouts/dataset.json",
+    adapter,
+  });
+  await f.host.approve({
+    preparationId: secondPrepared.preparationId,
+    revisionSha256: secondPrepared.revision.revisionSha256,
+  });
+
+  f.files.set("tower/main.tsx", "export default function App() { return null; }");
+  f.files.set(
+    "tower/app.publish.json",
+    JSON.stringify({
+      version: 1,
+      entryPath: "main.tsx",
+      datasets: {
+        expenses: {
+          kind: "dataset",
+          datasetPath: "data/dataset.json",
+          operations: ["submit", "list", "fileRead"],
+        },
+        workouts: {
+          kind: "dataset",
+          datasetPath: "workouts/dataset.json",
+          operations: ["submit", "list", "fileRead"],
+        },
+      },
+    }),
+  );
+  const multiPrepared = await prepareLocalAppPublication(
+    { workspaceId: "w", appRoot: "tower" },
+    {
+      deferredWrites: [],
+      adapter,
+      compile: compileClosedApp,
+      signal: new AbortController().signal,
+      assertCurrent() {},
+      async resolveDatasetRevision(binding) {
+        return f.host.approvedArtifacts(binding.datasetId).revision;
+      },
+    },
+  );
+  const activated = await f.host.apps.activate(multiPrepared, new AbortController().signal);
+  expect(f.host.apps.list("tower")).toMatchObject([
+    {
+      publicationId: activated.publicationId,
+      active: true,
+      approved: true,
+      datasetCapabilities: [
+        { alias: "expenses", datasetId: id(1) },
+        { alias: "workouts", datasetId: id(101) },
+      ],
+    },
+  ]);
+
+  await expect(
+    f.host.apps.request(activated.publicationId, "invoke", {
+      authorityRevision: activated.authorityRevision,
+      operation: "list",
+      idempotencyKey: "no-alias",
+      input: {},
+    }),
+  ).rejects.toThrow(/Choose which Collection/);
+  await expect(
+    f.host.apps.request(activated.publicationId, "invoke", {
+      authorityRevision: activated.authorityRevision,
+      dataset: "unknown",
+      operation: "list",
+      idempotencyKey: "bad-alias",
+      input: {},
+    }),
+  ).rejects.toThrow(/not approved/);
+
+  const uploaded = (await f.host.apps.request(activated.publicationId, "upload", {
+    authorityRevision: activated.authorityRevision,
+    dataset: "expenses",
+    idempotencyKey: "exp-receipt",
+    name: "receipt.pdf",
+    contentType: "application/pdf",
+    bytesBase64: "JVBERi0=",
+  })) as { file: { fileId: string } };
+  await f.host.apps.request(activated.publicationId, "invoke", {
+    authorityRevision: activated.authorityRevision,
+    dataset: "expenses",
+    operation: "submit",
+    idempotencyKey: "exp-1",
+    input: { values: { [id(4)]: "Coffee", [id(5)]: uploaded.file.fileId } },
+  });
+  await f.host.apps.request(activated.publicationId, "invoke", {
+    authorityRevision: activated.authorityRevision,
+    dataset: "workouts",
+    operation: "submit",
+    idempotencyKey: "wrk-1",
+    input: { values: { [id(104)]: "Run 5k" } },
+  });
+
+  expect(
+    await f.host.apps.readBrowserFile(activated.publicationId, {
+      authorityRevision: activated.authorityRevision,
+      dataset: "expenses",
+      fileId: uploaded.file.fileId,
+      operation: "fileRead",
+      input: { fileId: uploaded.file.fileId },
+    }),
+  ).toMatchObject({ bytesBase64: "JVBERi0=" });
+
+  await expect(
+    f.host.apps.readBrowserFile(activated.publicationId, {
+      authorityRevision: activated.authorityRevision,
+      dataset: "workouts",
+      fileId: uploaded.file.fileId,
+      operation: "fileRead",
+      input: { fileId: uploaded.file.fileId },
+    }),
+  ).rejects.toThrow();
+
+  await f.host.archive({ datasetId: id(101) });
+  await expect(
+    f.host.apps.request(activated.publicationId, "invoke", {
+      authorityRevision: activated.authorityRevision,
+      dataset: "expenses",
+      operation: "list",
+      idempotencyKey: "after-archive",
+      input: {},
+    }),
+  ).rejects.toThrow();
+
+  const preview = await f.host.deletePreview({ datasetId: id(101) });
+  await f.host.deleteDataset({
+    datasetId: id(101),
+    expected: preview.cursor,
+    reviewToken: preview.reviewToken,
+    acknowledge: true,
+  });
+  expect(f.host.apps.list("tower")).toEqual([]);
+  const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/local/datasets/state.sqlite"));
+  try {
+    expect(
+      db
+        .prepare("SELECT 1 FROM dohc_dataset_bindings WHERE dataset_id=? AND app_id=?")
+        .get(id(1), activated.publicationId),
+    ).toBeUndefined();
+    expect(
+      db.prepare("SELECT bytes FROM local_collection_app_usage WHERE singleton=1").get()!.bytes,
+    ).toBe(0);
+  } finally {
+    db.close();
+  }
+});
+
+it("reclaims a withdrawn multi-Collection app on Collection deletion and allows approving a replacement at the same root", async () => {
+  const f = await fixture();
+  const secondDefinition: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: id(201),
+    name: "Workouts",
+    schemaPath: "workouts/schema.sql",
+    operationsPath: "workouts/operations.js",
+    tables: [
+      {
+        tableId: id(202),
+        name: "Workouts",
+        sqlName: "workouts",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: id(203),
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: id(204),
+            name: "Title",
+            sqlColumn: "title",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: id(205),
+        name: "list",
+        label: "List",
+        tableId: id(202),
+        kind: "read",
+        access: "owner",
+        readOnly: true,
+        fieldIds: [id(203), id(204)],
+      },
+    ],
+  };
+  const secondSchema = "CREATE TABLE workouts(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL);";
+  const secondSource = `globalThis.operations={list(ctx){return ctx.db.query("SELECT * FROM workouts");}};`;
+  f.files.set("workouts/dataset.json", JSON.stringify(secondDefinition));
+  f.files.set("workouts/schema.sql", secondSchema);
+  f.files.set("workouts/operations.js", secondSource);
+  const adapter = sourceCaptureAdapter(f.files);
+  const preparedSecond = await f.host.prepare({
+    descriptorPath: "workouts/dataset.json",
+    adapter,
+  });
+  await f.host.approve({
+    preparationId: preparedSecond.preparationId,
+    revisionSha256: preparedSecond.revision.revisionSha256,
+  });
+
+  f.files.set("tower-withdrawn/main.js", "console.log('tower-withdrawn')");
+  f.files.set(
+    "tower-withdrawn/app.publish.json",
+    JSON.stringify({
+      version: 1,
+      entryPath: "main.js",
+      inputs: ["main.js"],
+      datasets: {
+        expenses: {
+          kind: "dataset",
+          datasetPath: "data/dataset.json",
+          operations: ["list"],
+        },
+        workouts: {
+          kind: "dataset",
+          datasetPath: "workouts/dataset.json",
+          operations: ["list"],
+        },
+      },
+    }),
+  );
+  const preparedMulti = await prepareLocalAppPublication(
+    { workspaceId: "w", appRoot: "tower-withdrawn" },
+    {
+      deferredWrites: [],
+      adapter,
+      assertCurrent() {},
+      resolveDatasetRevision: async (binding) =>
+        f.host.approvedArtifacts(binding.datasetId).revision,
+      compile: compileClosedApp,
+      signal: new AbortController().signal,
+    },
+  );
+  const activated = await f.host.apps.activate(preparedMulti, new AbortController().signal);
+  await f.host.apps.withdraw(activated.publicationId, activated.authorityRevision);
+  expect(f.host.apps.list("tower-withdrawn")).toMatchObject([
+    { publicationId: activated.publicationId, active: false },
+  ]);
+
+  await f.host.archive({ datasetId: id(201) });
+  const preview = await f.host.deletePreview({ datasetId: id(201) });
+  await f.host.deleteDataset({
+    datasetId: id(201),
+    expected: preview.cursor,
+    reviewToken: preview.reviewToken,
+    acknowledge: true,
+  });
+  expect(f.host.apps.list("tower-withdrawn")).toEqual([]);
+  const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/local/datasets/state.sqlite"));
+  try {
+    expect(
+      db.prepare("SELECT bytes FROM local_collection_app_usage WHERE singleton=1").get()!.bytes,
+    ).toBe(0);
+  } finally {
+    db.close();
+  }
+
+  const replacement = await f.prepareApp("tower-withdrawn");
+  const replaced = await f.host.apps.activate(replacement, new AbortController().signal);
+  expect(replaced.authorityRevision).toBeGreaterThan(activated.authorityRevision);
+  expect(f.host.apps.list("tower-withdrawn")).toMatchObject([
+    { publicationId: replaced.publicationId, active: true },
+  ]);
+});
+
 describe("local app write attribution", () => {
   const watcher = "collection:registrations#tally";
   async function attributed() {

@@ -89,6 +89,39 @@ A Collection binding can name operations directly and omit `revision` and `revis
 }
 ```
 
+## Multi-Collection owner apps (`datasets`)
+
+An owner desktop app can bind between 1 and 16 Collections on the same host by replacing `dataset` with a `datasets` map keyed by lowercase alias (`^[a-z][a-z0-9_-]{0,63}$`, excluding the reserved names `constructor` and `prototype`). Each alias maps to one Collection reference and cannot share a `datasetId` with another alias. Shared links, named shares, and phone apps stay at one Collection.
+
+```json
+{
+  "version": 1,
+  "entryPath": "main.tsx",
+  "datasets": {
+    "expenses": {
+      "kind": "dataset",
+      "datasetPath": "expenses/dataset.json",
+      "operations": ["listExpenses", "addExpense"]
+    },
+    "workouts": {
+      "kind": "dataset",
+      "datasetPath": "workouts/dataset.json",
+      "operations": ["listWorkouts", "logWorkout"]
+    }
+  }
+}
+```
+
+Pass the alias to `useDatasetQuery`, `useDatasetMutation`, or `client.dataset(alias)`:
+
+```tsx
+const expenses = useDatasetQuery("listExpenses", {}, { dataset: "expenses" });
+const logWorkout = useDatasetMutation("logWorkout", { dataset: "workouts" });
+const workoutsClient = useApp().dataset("workouts");
+```
+
+Each Collection keeps its own permissions, idempotency keys, file storage, and per-Collection rate limit. Owner requests to all bound Collections also share one budget. When that budget is empty, calls to any bound Collection are refused. Archiving or deleting any bound Collection stops the app until you restore or re-approve it.
+
 ## Slug-based `dataset.json` (`formatVersion: 2`)
 
 Collection definitions can use `formatVersion: 2` to declare tables, fields, and operations by SQL name instead of hand-writing UUIDs. `schemaPath` and `operationsPath` resolve relative to the `dataset.json` folder (defaulting to `schema.sql` and `operations.js`), and `schemaPath` must stay in that folder or a generated `revisions/` subfolder. Operation `access` defaults to `"owner"`. dohc derives stable RFC 4122 UUIDv5 identifiers from `datasetId` and the SQL names (or button display names) and validates the normalized definition under the same rules and 256 KB limit as `formatVersion: 1`. Before renaming a table, column, button, or operation on an existing Collection, pin its explicit `tableId`, `fieldId`, or `operationId` (renaming a table's `sqlName` also changes derived `fieldId`s for every column and button in that table, so pin those `fieldId`s too), and update any name-based `app.publish.json` bindings that reference renamed operations or fields. When passing a `formatVersion: 2` definition to `dohc dataset create`, include explicit workspace-relative `schemaPath` and `operationsPath`.

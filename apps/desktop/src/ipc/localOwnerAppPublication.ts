@@ -190,7 +190,7 @@ export function createLocalOwnerAppPublicationHandler<
     try {
       const capture = await deps.flushCapture(operation.workspace);
       current();
-      let dataset: { revision: DatasetRevision; schemaSql: string } | undefined;
+      const datasets = new Map<string, { revision: DatasetRevision; schemaSql: string }>();
       const prepared = await deps.withAdapter(operation.workspace, (adapter) =>
         prepareLocalAppPublication(input, {
           adapter,
@@ -206,7 +206,7 @@ export function createLocalOwnerAppPublicationHandler<
             );
             current();
             if (!approved.active) throw new Error("This Collection is unavailable on this device.");
-            dataset = approved;
+            datasets.set(binding.datasetId, approved);
             return approved.revision;
           },
         }),
@@ -235,15 +235,17 @@ export function createLocalOwnerAppPublicationHandler<
       });
       operation.signal.addEventListener("abort", clear, { once: true });
       // The digest binds the candidate. Review app also gets what each operation does, from the revision the candidate names.
-      const shown = candidate.capabilities.map((capability) =>
-        capability.kind === "dataset" && dataset
+      const shown = candidate.capabilities.map((capability) => {
+        const dataset =
+          capability.kind === "dataset" ? datasets.get(capability.datasetId) : undefined;
+        return capability.kind === "dataset" && dataset
           ? displayAppDatasetCapability(
               capability,
               dataset.revision,
               hasGeneratedDatasetSources(dataset.revision, dataset.schemaSql),
             )
-          : capability,
-      );
+          : capability;
+      });
       return OwnerAppPublicationResult.parse({
         kind: "prepared",
         approvalId,

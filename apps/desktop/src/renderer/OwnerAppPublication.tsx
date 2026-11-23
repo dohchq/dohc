@@ -99,12 +99,13 @@ const sourceCheckFailed =
 
 /** An approval of an app that reaches no workspace data has no capability. */
 const approvedCapabilities = (row: LocalPublication): AppCapability[] =>
-  "datasetCapability" in row
-    ? [row.datasetCapability]
-    : "collectionCapability" in row
-      ? [row.collectionCapability]
-      : [];
-
+  "datasetCapabilities" in row
+    ? row.datasetCapabilities
+    : "datasetCapability" in row
+      ? [row.datasetCapability]
+      : "collectionCapability" in row
+        ? [row.collectionCapability]
+        : [];
 function StateLine({
   icon: Icon,
   tone,
@@ -1056,7 +1057,7 @@ function PublicationDialog(
                         </SecondaryButton>
                       </div>
                     ) : null
-                  ) : "datasetCapability" in row ? (
+                  ) : "datasetCapability" in row || "datasetCapabilities" in row ? (
                     <p key={row.publicationId} className="m-0 text-[12px] text-warning">
                       This app's data is not active here. If you moved it to a share link, open that
                       publication.

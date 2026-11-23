@@ -18,9 +18,12 @@ import {
 } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import {
+  APP_DATASET_MAX_BINDINGS,
   parseAppDatasetReference,
+  parseDatasetAlias,
   parseDatasetDefinition,
   resolveAppDatasetReferenceBinding,
+  type AppDatasetReference,
   type AppDatasetRevisionLookup,
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
@@ -145,7 +148,7 @@ export function parseAppPublicationDeclaration(
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(
-      `${manifestPath} must hold entryPath, optional inputs and packageMap, and at most one of collection or dataset.`,
+      `${manifestPath} must hold entryPath, optional inputs and packageMap, and at most one of collection, dataset, or datasets.`,
     );
   }
   const row = value as Record<string, unknown>;
@@ -153,15 +156,26 @@ export function parseAppPublicationDeclaration(
   if (versionError) throw new Error(versionError);
   const unknownKey = Object.keys(row).find(
     (key) =>
-      !["version", "entryPath", "inputs", "packageMap", "collection", "dataset"].includes(key),
+      ![
+        "version",
+        "entryPath",
+        "inputs",
+        "packageMap",
+        "collection",
+        "dataset",
+        "datasets",
+      ].includes(key),
   );
   if (unknownKey !== undefined) {
     throw new Error(
       `${manifestPath} has an unknown key: ${unknownKey}. Remove it or correct its name.`,
     );
   }
-  if (Object.hasOwn(row, "collection") && Object.hasOwn(row, "dataset")) {
-    throw new Error(`${manifestPath} must hold at most one of collection or dataset.`);
+  const dataBindings = ["collection", "dataset", "datasets"].filter((key) =>
+    Object.hasOwn(row, key),
+  );
+  if (dataBindings.length > 1) {
+    throw new Error(`${manifestPath} must hold at most one of collection, dataset, or datasets.`);
   }
   const resolve = (path: unknown, field: string): string => {
     if (typeof path !== "string" || path === "")
@@ -246,12 +260,32 @@ export function parseAppPublicationDeclaration(
     });
   }
   const dataset = Object.hasOwn(row, "dataset") ? parseAppDatasetReference(row.dataset) : undefined;
+  let datasets: ReadonlyArray<{ alias: string; reference: AppDatasetReference }> | undefined;
+  if (Object.hasOwn(row, "datasets")) {
+    if (!row.datasets || typeof row.datasets !== "object" || Array.isArray(row.datasets)) {
+      throw new Error(`${manifestPath} has a datasets field that is not an object.`);
+    }
+    const rawEntries = Object.entries(row.datasets as Record<string, unknown>);
+    if (rawEntries.length === 0) {
+      throw new Error(`${manifestPath} must list at least one Collection in datasets.`);
+    }
+    if (rawEntries.length > APP_DATASET_MAX_BINDINGS) {
+      throw new Error(
+        `${manifestPath} lists ${rawEntries.length} Collections in datasets, exceeding the limit of ${APP_DATASET_MAX_BINDINGS}.`,
+      );
+    }
+    datasets = rawEntries.map(([alias, reference]) => ({
+      alias: parseDatasetAlias(alias),
+      reference: parseAppDatasetReference(reference),
+    }));
+  }
   return {
     entryPath,
     inputs,
     packageMap: Object.fromEntries(entries) as Record<string, string>,
     collection,
     dataset,
+    datasets,
   };
 }
 
@@ -275,7 +309,14 @@ function staticDeclaration(
     throw new Error(
       `${appRoot} has more than ${inputBounds.maxInputFiles - 1} files to publish. List the files to publish in an app.publish.json.`,
     );
-  return { entryPath, inputs, packageMap: {}, collection: undefined, dataset: undefined };
+  return {
+    entryPath,
+    inputs,
+    packageMap: {},
+    collection: undefined,
+    dataset: undefined,
+    datasets: undefined,
+  };
 }
 
 /** Source capture grants no publication authority. The relay repeats the grant check at commit. */
@@ -324,7 +365,7 @@ export async function prepareLocalAppPublication(
   input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
   dependencies: AppPublicationPreparationDependencies,
 ): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
-  return prepareAppSources(input, "main", localAllowed, dependencies, true);
+  return prepareAppSources(input, "main", localAllowed, dependencies, true, true);
 }
 
 /** Selects the files local preparation would capture, without compiling them. Its sourceRevision matches an unchanged approval's. */
@@ -541,6 +582,7 @@ async function prepareAppSources(
   allowed: (path: string) => boolean,
   dependencies: AppPublicationPreparationDependencies,
   requireManifest = false,
+  allowMultiDataset = false,
 ): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
   const { adapter, signal, assertCurrent } = dependencies;
   const { declared, schemaPath, metadata } = await selectAppSources(
@@ -553,39 +595,62 @@ async function prepareAppSources(
   const selected = { metadata, files: await adapter.hydrateCapturedSources(metadata, signal) };
   assertCurrent();
   const capabilities: AppPublicationCandidate["capabilities"] = [];
-  if (declared.dataset) {
+  const datasetBindings: ReadonlyArray<{ alias?: string; reference: AppDatasetReference }> =
+    declared.datasets ?? (declared.dataset ? [{ reference: declared.dataset }] : []);
+  if (datasetBindings.length > 0) {
+    if (!allowMultiDataset && datasetBindings.length > 1) {
+      throw new Error(
+        "Shared links support at most one Collection. Use a single Collection or approve this app on your device.",
+      );
+    }
     if (!dependencies.resolveDatasetRevision)
       throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
-    const datasetPath = declared.dataset.datasetPath;
-    assertSourcePathsNotDeferred(dependencies.deferredWrites, [datasetPath]);
-    const datasetId = await resolveDatasetAddress(
-      adapter,
-      input.workspaceId,
-      datasetPath,
-      signal,
-      versionId,
+    assertSourcePathsNotDeferred(
+      dependencies.deferredWrites,
+      datasetBindings.map((entry) => entry.reference.datasetPath),
     );
-    assertCurrent();
-    signal.throwIfAborted();
-    const { datasetPath: _path, ...rest } = declared.dataset;
-    const lookup: AppDatasetRevisionLookup =
-      "operationIds" in rest && rest.revision !== undefined
-        ? { ...rest, datasetId }
-        : {
-            datasetId,
-            ...(declared.dataset.revision !== undefined
-              ? {
-                  revision: declared.dataset.revision,
-                  revisionSha256: declared.dataset.revisionSha256,
-                }
-              : {}),
-          };
-    const approved = await dependencies.resolveDatasetRevision(lookup);
-    assertCurrent();
-    signal.throwIfAborted();
-    const resolved = resolveAppDatasetReferenceBinding(declared.dataset, datasetId, approved);
-    const { linkReads: _requestedReads, ...binding } = resolved;
-    capabilities.push(resolveAppDatasetCapability(binding, approved));
+    const seenDatasetIds = new Set<string>();
+    for (const { alias, reference } of datasetBindings) {
+      const datasetId = await resolveDatasetAddress(
+        adapter,
+        input.workspaceId,
+        reference.datasetPath,
+        signal,
+        versionId,
+      );
+      assertCurrent();
+      signal.throwIfAborted();
+      if (seenDatasetIds.has(datasetId)) {
+        throw new Error(
+          `${input.appRoot}/app.publish.json binds the same Collection more than once.`,
+        );
+      }
+      seenDatasetIds.add(datasetId);
+      const { datasetPath: _path, ...rest } = reference;
+      const lookup: AppDatasetRevisionLookup =
+        "operationIds" in rest && rest.revision !== undefined
+          ? { ...rest, datasetId }
+          : {
+              datasetId,
+              ...(reference.revision !== undefined
+                ? {
+                    revision: reference.revision,
+                    revisionSha256: reference.revisionSha256,
+                  }
+                : {}),
+            };
+      const approved = await dependencies.resolveDatasetRevision(lookup);
+      assertCurrent();
+      signal.throwIfAborted();
+      const resolved = resolveAppDatasetReferenceBinding(reference, datasetId, approved);
+      const { linkReads: _requestedReads, ...binding } = resolved;
+      capabilities.push(
+        resolveAppDatasetCapability(
+          alias === undefined ? binding : { ...binding, alias },
+          approved,
+        ),
+      );
+    }
   }
   if (declared.collection && schemaPath) {
     const file = selected.files.find((file) => file.path === schemaPath);

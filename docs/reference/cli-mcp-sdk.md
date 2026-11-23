@@ -2105,7 +2105,7 @@ List an app's publications on this computer.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active })[] }`.
+Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapabilities } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active })[] }`.
 
 #### `dohc app checkLocal`
 

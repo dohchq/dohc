@@ -1610,3 +1610,61 @@ it.each([false, true])(
     }
   },
 );
+
+it("shows every bound Collection and its alias in the local review dialog for a multi-Collection app", async () => {
+  vi.stubGlobal("dohcDesktop", api);
+  const expensesCap = {
+    ...datasetCapability,
+    alias: "expenses",
+    name: "Expenses",
+    datasetId: "00000000-0000-4000-8000-000000000010",
+  };
+  const workoutsCap = {
+    ...datasetCapability,
+    alias: "workouts",
+    name: "Workouts",
+    datasetId: "00000000-0000-4000-8000-000000000020",
+  };
+  api.publishOwnerApp.mockImplementation(async (request) => {
+    if (request.action === "listLocal") {
+      return {
+        kind: "localListed",
+        publications: [
+          {
+            publicationId: published.publicationId,
+            authorityRevision: 1,
+            appRoot: "control-tower",
+            sourceRevision: prepared.sourceRevision,
+            datasetCapabilities: [expensesCap, workoutsCap],
+            approved: true,
+            active: true,
+          },
+        ],
+      };
+    }
+    if (request.action === "checkLocal") {
+      return {
+        kind: "localChecked",
+        appRoot: "control-tower",
+        sourceRevision: prepared.sourceRevision,
+        sourcePaths: ["control-tower/main.tsx"],
+      };
+    }
+    return answer(request);
+  });
+  try {
+    render(
+      <OwnerAppPublication workspaceId="ws-trip" appRoot="control-tower" localApproval="browser" />,
+    );
+    await userEvent.setup().click(screen.getByRole("button", { name: "Review app" }));
+    const accessBox = await screen.findByTestId("app-access");
+    expect(accessBox.textContent).toContain("Expenses");
+    expect(accessBox.textContent).toContain("expenses");
+    expect(accessBox.textContent).toContain("Workouts");
+    expect(accessBox.textContent).toContain("workouts");
+  } finally {
+    cleanup();
+    vi.unstubAllGlobals();
+    api.publishOwnerApp.mockImplementation(answer);
+  }
+});

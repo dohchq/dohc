@@ -91,20 +91,36 @@ export function attachAppCollectionBroker(
       return;
     }
     const keys = Object.keys(body).sort().join();
+    const validAlias =
+      !Object.hasOwn(body, "dataset") ||
+      (typeof body.dataset === "string" &&
+        /^[a-z][a-z0-9_-]{0,63}$/.test(body.dataset) &&
+        body.dataset !== "prototype" &&
+        body.dataset !== "constructor");
     const valid =
-      body.op === "collection.list"
+      validAlias &&
+      (body.op === "collection.list"
         ? ["id,limit,op", "afterPath,id,limit,op"].includes(keys)
         : body.op === "collection.create"
           ? keys === "fields,id,idempotencyKey,op"
           : body.op === "backend.invoke"
-            ? keys === "id,idempotencyKey,input,op,operation"
+            ? [
+                "id,idempotencyKey,input,op,operation",
+                "dataset,id,idempotencyKey,input,op,operation",
+              ].includes(keys)
             : body.op === "backend.attempt"
-              ? keys === "id,op,operation,request"
+              ? ["id,op,operation,request", "dataset,id,op,operation,request"].includes(keys)
               : body.op === "backend.upload"
-                ? keys === "bytesBase64,contentType,id,idempotencyKey,name,op"
+                ? [
+                    "bytesBase64,contentType,id,idempotencyKey,name,op",
+                    "bytesBase64,contentType,dataset,id,idempotencyKey,name,op",
+                  ].includes(keys)
                 : body.op === "backend.file"
-                  ? keys === "fileId,id,input,op,operation"
-                  : false;
+                  ? [
+                      "fileId,id,input,op,operation",
+                      "dataset,fileId,id,input,op,operation",
+                    ].includes(keys)
+                  : false);
     if (!valid) {
       reject(400);
       return;

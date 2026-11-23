@@ -203,6 +203,8 @@ export function createOwnerAppPublicationRoutes(options: {
     } catch {
       throw badRequest("Invalid publication candidate.");
     }
+    if (candidate.capabilities.length > 1)
+      throw badRequest("Shared links support at most one Collection.");
     let agent;
     try {
       agent = parseApprovalAgent(input.agent);

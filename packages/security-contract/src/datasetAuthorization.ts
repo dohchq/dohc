@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseAppBackendCaller, type AppBackendCaller } from "./appBackend";
 import {
+  parseDatasetAlias,
   parseDatasetRevision,
   parseDatasetBindingReference,
   parseAppDatasetCapability,
@@ -97,10 +98,23 @@ export function resolveAppDatasetCapability(
   lookup?: GeneratedDatasetVerdictLookup,
 ): AppDatasetCapability {
   const approved = parseDatasetRevision(approvedRevision);
-  const binding = parseDatasetBinding(value, approved, lookup);
+  let alias: string | undefined;
+  let rawBinding = value;
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.hasOwn(value, "alias")
+  ) {
+    const { alias: rawAlias, ...rest } = value as Record<string, unknown>;
+    alias = parseDatasetAlias(rawAlias);
+    rawBinding = rest;
+  }
+  const binding = parseDatasetBinding(rawBinding, approved, lookup);
   const selected = new Set(binding.operationIds);
   return parseAppDatasetCapability({
     ...binding,
+    ...(alias === undefined ? {} : { alias }),
     name: approved.definition.name,
     operations: approved.definition.operations
       .filter((operation) => selected.has(operation.operationId))

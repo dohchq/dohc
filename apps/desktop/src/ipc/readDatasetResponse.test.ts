@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { readDatasetResponse } from "./readDatasetResponse";
+import { datasetResponseAction, readDatasetResponse } from "./readDatasetResponse";
 
 it("preserves an operation correction but never confuses an authorization error with one", async () => {
   const signal = new AbortController().signal;
@@ -33,5 +33,19 @@ it("allows file and artifact bodies without relaxing operation or error response
   );
   await expect(
     readDatasetResponse(new Response(body, { status: 500 }), "file", signal),
+  ).rejects.toThrow(/limit/);
+});
+
+it("recognizes workspace local-apps routes so error codes and response bounds apply", async () => {
+  const signal = new AbortController().signal;
+  expect(datasetResponseAction("/sync/w/local-apps")).toBe("local-app");
+  expect(datasetResponseAction("/sync/w/local-apps/extra")).toBeNull();
+  const missing = { ok: false, code: "not_found", error: "not found" };
+  expect(
+    await readDatasetResponse(Response.json(missing, { status: 404 }), "local-app", signal),
+  ).toEqual(missing);
+  const oversized = JSON.stringify({ bytes: "a".repeat(2 * 1024 * 1024) });
+  await expect(
+    readDatasetResponse(new Response(oversized, { status: 200 }), "local-app", signal),
   ).rejects.toThrow(/limit/);
 });

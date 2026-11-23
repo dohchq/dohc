@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -90,6 +91,7 @@ export interface AppClient {
   upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply>;
   file(fileId: string, operation: string, input?: unknown): Promise<FileReply>;
   attempt(operation: string, request: AttemptRequest): Promise<AttemptResult>;
+  dataset(alias: string): AppClient;
   close(): void;
 }
 
@@ -104,6 +106,19 @@ const VALID_STATUSES: readonly number[] = [400, 404, 409, 413, 429, 503];
 const DEFAULT_INVOKE_TIMEOUT_MS = 30_000;
 const DEFAULT_TRANSFER_TIMEOUT_MS = 90_000;
 const DEFAULT_MAX_IN_FLIGHT = 3;
+const DATASET_ALIAS_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
+
+function assertDatasetAlias(alias: string): string {
+  if (
+    typeof alias !== "string" ||
+    !DATASET_ALIAS_PATTERN.test(alias) ||
+    alias === "prototype" ||
+    alias === "constructor"
+  ) {
+    throw new Error(`Invalid Collection alias "${String(alias)}".`);
+  }
+  return alias;
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -325,67 +340,87 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
       pump();
     });
 
-  return {
-    invoke<T = unknown>(
-      operation: string,
-      input: unknown = {},
-      idempotencyKey = `read:${crypto.randomUUID()}`,
-    ): Promise<InvokeReply<T>> {
-      return send(
-        { op: "backend.invoke", operation, idempotencyKey, input },
-        invokeTimeoutMs,
-        (value) =>
-          isRecord(value) &&
-          "result" in value &&
-          typeof value.revision === "number" &&
-          typeof value.replayed === "boolean",
-      ) as Promise<InvokeReply<T>>;
-    },
-    async read<T = unknown>(operation: string, input: unknown = {}): Promise<T> {
-      const reply = await this.invoke<T>(operation, input, `read:${crypto.randomUUID()}`);
-      return reply.result;
-    },
-    async upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply> {
-      const payload = await normalizeUpload(file);
-      return send(
-        {
-          op: "backend.upload",
-          idempotencyKey,
-          name: payload.name,
-          contentType: payload.contentType,
-          bytesBase64: payload.bytesBase64,
-        },
-        transferTimeoutMs,
-        (value) => isRecord(value) && isFileMeta(value.file) && typeof value.replayed === "boolean",
-      ) as Promise<UploadReply>;
-    },
-    file(fileId: string, operation: string, input: unknown = {}): Promise<FileReply> {
-      return send(
-        { op: "backend.file", fileId, operation, input },
-        transferTimeoutMs,
-        (value) =>
-          isRecord(value) && isFileMeta(value.file) && typeof value.bytesBase64 === "string",
-      ) as Promise<FileReply>;
-    },
-    attempt(operation: string, request: AttemptRequest): Promise<AttemptResult> {
-      return send(
-        { op: "backend.attempt", operation, request },
-        invokeTimeoutMs,
-        isAttemptResult,
-      ) as Promise<AttemptResult>;
-    },
-    close() {
-      if (shared || closed) return;
-      closed = true;
-      hostPortWaiters.delete(bindPort);
-      port?.close();
-      for (const item of [...sent.values(), ...waiting]) {
-        fail(item, 503);
-      }
-      sent.clear();
-      waiting.length = 0;
-    },
+  const scopedViews = new Map<string, AppClient>();
+  const closeRoot = () => {
+    if (shared || closed) return;
+    closed = true;
+    hostPortWaiters.delete(bindPort);
+    port?.close();
+    for (const item of [...sent.values(), ...waiting]) {
+      fail(item, 503);
+    }
+    sent.clear();
+    waiting.length = 0;
   };
+  const viewFor = (datasetAlias?: string): AppClient => {
+    const scope = datasetAlias === undefined ? {} : { dataset: datasetAlias };
+    return {
+      invoke<T = unknown>(
+        operation: string,
+        input: unknown = {},
+        idempotencyKey = `read:${crypto.randomUUID()}`,
+      ): Promise<InvokeReply<T>> {
+        return send(
+          { op: "backend.invoke", ...scope, operation, idempotencyKey, input },
+          invokeTimeoutMs,
+          (value) =>
+            isRecord(value) &&
+            "result" in value &&
+            typeof value.revision === "number" &&
+            typeof value.replayed === "boolean",
+        ) as Promise<InvokeReply<T>>;
+      },
+      async read<T = unknown>(operation: string, input: unknown = {}): Promise<T> {
+        const reply = await this.invoke<T>(operation, input, `read:${crypto.randomUUID()}`);
+        return reply.result;
+      },
+      async upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply> {
+        const payload = await normalizeUpload(file);
+        return send(
+          {
+            op: "backend.upload",
+            ...scope,
+            idempotencyKey,
+            name: payload.name,
+            contentType: payload.contentType,
+            bytesBase64: payload.bytesBase64,
+          },
+          transferTimeoutMs,
+          (value) =>
+            isRecord(value) && isFileMeta(value.file) && typeof value.replayed === "boolean",
+        ) as Promise<UploadReply>;
+      },
+      file(fileId: string, operation: string, input: unknown = {}): Promise<FileReply> {
+        return send(
+          { op: "backend.file", ...scope, fileId, operation, input },
+          transferTimeoutMs,
+          (value) =>
+            isRecord(value) && isFileMeta(value.file) && typeof value.bytesBase64 === "string",
+        ) as Promise<FileReply>;
+      },
+      attempt(operation: string, request: AttemptRequest): Promise<AttemptResult> {
+        return send(
+          { op: "backend.attempt", ...scope, operation, request },
+          invokeTimeoutMs,
+          isAttemptResult,
+        ) as Promise<AttemptResult>;
+      },
+      dataset(alias: string): AppClient {
+        const checked = assertDatasetAlias(alias);
+        let view = scopedViews.get(checked);
+        if (!view) {
+          view = viewFor(checked);
+          scopedViews.set(checked, view);
+        }
+        return view;
+      },
+      close() {
+        if (datasetAlias !== undefined) return;
+        closeRoot();
+      },
+    };
+  };
+  return viewFor();
 }
 
 let sharedHostClient: AppClient | null = null;
@@ -439,6 +474,11 @@ export function useApp(): AppClient {
 
 export interface DatasetQueryOptions {
   readonly enabled?: boolean;
+  readonly dataset?: string;
+}
+
+export interface DatasetMutationOptions {
+  readonly dataset?: string;
 }
 
 export interface DatasetQueryState<T> {
@@ -468,12 +508,23 @@ function clientIdOf(client: AppClient): number {
   return id;
 }
 
+function resolveTargetClient(client: AppClient, dataset: string | undefined): AppClient | null {
+  if (dataset === undefined) return client;
+  try {
+    return client.dataset(dataset);
+  } catch {
+    return null;
+  }
+}
+
 export function useDatasetQuery<T = unknown>(
   operation: string,
   input?: unknown,
   options?: DatasetQueryOptions,
 ): DatasetQueryState<T> {
   const client = useApp();
+  const datasetAlias = options?.dataset;
+  const target = useMemo(() => resolveTargetClient(client, datasetAlias), [client, datasetAlias]);
   const enabled = options?.enabled ?? true;
   let serializedInput: string | null = null;
   if (enabled) {
@@ -489,7 +540,8 @@ export function useDatasetQuery<T = unknown>(
     }
   }
   const invalidInput = enabled && serializedInput === null;
-  const scope = `${clientIdOf(client)}:${operation}:${
+  const invalidRequest = enabled && (target === null || invalidInput);
+  const scope = `${target ? clientIdOf(target) : "invalid"}:${datasetAlias ?? ""}:${operation}:${
     !enabled ? "disabled" : invalidInput ? "invalid" : `s:${serializedInput}`
   }`;
 
@@ -497,8 +549,8 @@ export function useDatasetQuery<T = unknown>(
     scope,
     data: undefined,
     revision: null,
-    loading: enabled && !invalidInput,
-    error: invalidInput ? new AppBackendError(400) : null,
+    loading: enabled && !invalidRequest,
+    error: invalidRequest ? new AppBackendError(400) : null,
   }));
   const [version, setVersion] = useState(0);
   const generation = useRef(0);
@@ -512,7 +564,7 @@ export function useDatasetQuery<T = unknown>(
       setState({ scope, data: undefined, revision: null, loading: false, error: null });
       return;
     }
-    if (serializedInput === null) {
+    if (!target || serializedInput === null) {
       setState((current) =>
         current.scope === scope && current.error?.status === 400 && !current.loading
           ? current
@@ -534,7 +586,7 @@ export function useDatasetQuery<T = unknown>(
         ? { ...current, loading: true, error: null }
         : { scope, data: undefined, revision: null, loading: true, error: null },
     );
-    client.invoke<T>(operation, parsedInput).then(
+    target.invoke<T>(operation, parsedInput).then(
       (reply) => {
         if (!alive || token !== generation.current) return;
         setState({
@@ -559,14 +611,15 @@ export function useDatasetQuery<T = unknown>(
     return () => {
       alive = false;
     };
-  }, [client, enabled, operation, scope, serializedInput, version]);
+  }, [enabled, operation, scope, serializedInput, target, version]);
 
   const matched = state.scope === scope;
+  const invalidRequestError = invalidRequest ? new AppBackendError(400) : null;
   return {
     data: matched ? state.data : undefined,
     revision: matched ? state.revision : null,
-    loading: matched ? state.loading : enabled && !invalidInput,
-    error: matched ? state.error : null,
+    loading: matched ? state.loading : enabled && !invalidRequest,
+    error: matched ? state.error : invalidRequestError,
     reload,
   };
 }
@@ -582,6 +635,7 @@ export interface DatasetMutationState<TInput, TResult> {
 
 type RetainedSubmission = {
   readonly id: number;
+  readonly scopeKey: string;
   readonly client: AppClient;
   readonly operation: string;
   readonly key: string;
@@ -590,14 +644,20 @@ type RetainedSubmission = {
 
 export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   operation: string,
+  options?: DatasetMutationOptions,
 ): DatasetMutationState<TInput, TResult> {
   const client = useApp();
-  const [inFlightCount, setInFlightCount] = useState(0);
-  const [error, setError] = useState<AppBackendError | null>(null);
-  const [retained, setRetained] = useState<readonly RetainedSubmission[]>([]);
-  const retainedRef = useRef<readonly RetainedSubmission[]>([]);
+  const datasetAlias = options?.dataset;
+  const target = useMemo(() => resolveTargetClient(client, datasetAlias), [client, datasetAlias]);
+  const scopeKey = `${clientIdOf(client)}:${datasetAlias ?? ""}`;
+  const [inFlightByScope, setInFlightByScope] = useState<Record<string, number>>({});
+  const [errorByScope, setErrorByScope] = useState<Record<string, AppBackendError | null>>({});
+  const [retainedByScope, setRetainedByScope] = useState<
+    Record<string, readonly RetainedSubmission[]>
+  >({});
+  const retainedByScopeRef = useRef<Record<string, readonly RetainedSubmission[]>>({});
   const nextAttemptId = useRef(1);
-  const discardFloor = useRef(0);
+  const discardFloorByScope = useRef(new Map<string, number>());
   const inFlightRetries = useRef(new Map<number, Promise<InvokeReply<TResult>>>());
   const mounted = useRef(true);
 
@@ -608,12 +668,17 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
     };
   }, []);
 
-  const updateRetained = useCallback(
-    (updater: (current: readonly RetainedSubmission[]) => readonly RetainedSubmission[]) => {
-      const next = updater(retainedRef.current);
-      retainedRef.current = next;
+  const updateRetainedForScope = useCallback(
+    (
+      targetScope: string,
+      updater: (current: readonly RetainedSubmission[]) => readonly RetainedSubmission[],
+    ) => {
+      const existing = retainedByScopeRef.current[targetScope] ?? [];
+      const nextList = updater(existing);
+      const nextMap = { ...retainedByScopeRef.current, [targetScope]: nextList };
+      retainedByScopeRef.current = nextMap;
       if (mounted.current) {
-        setRetained(next);
+        setRetainedByScope(nextMap);
       }
     },
     [],
@@ -621,50 +686,74 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
 
   const execute = useCallback(
     async (submission: RetainedSubmission): Promise<InvokeReply<TResult>> => {
+      const targetScope = submission.scopeKey;
       let payload: unknown;
       try {
         payload = JSON.parse(submission.payloadJson);
       } catch {
         const badInput = new AppBackendError(400);
-        if (mounted.current && submission.id >= discardFloor.current) setError(badInput);
-        updateRetained((current) => current.filter((item) => item.id !== submission.id));
+        const floor = discardFloorByScope.current.get(targetScope) ?? 0;
+        if (mounted.current && submission.id >= floor) {
+          setErrorByScope((current) => ({ ...current, [targetScope]: badInput }));
+        }
+        updateRetainedForScope(targetScope, (current) =>
+          current.filter((item) => item.id !== submission.id),
+        );
         throw badInput;
       }
-      setInFlightCount((count) => count + 1);
-      setError(null);
+      setInFlightByScope((current) => ({
+        ...current,
+        [targetScope]: (current[targetScope] ?? 0) + 1,
+      }));
+      setErrorByScope((current) => ({ ...current, [targetScope]: null }));
       try {
         const reply = await submission.client.invoke<TResult>(
           submission.operation,
           payload,
           submission.key,
         );
-        updateRetained((current) => current.filter((item) => item.id !== submission.id));
+        updateRetainedForScope(targetScope, (current) =>
+          current.filter((item) => item.id !== submission.id),
+        );
         return reply;
       } catch (caught) {
         const backendError = caught instanceof AppBackendError ? caught : new AppBackendError(503);
-        const eligible = submission.id >= discardFloor.current;
+        const floor = discardFloorByScope.current.get(targetScope) ?? 0;
+        const eligible = submission.id >= floor;
         if (mounted.current && eligible) {
-          setError(backendError);
+          setErrorByScope((current) => ({ ...current, [targetScope]: backendError }));
         }
         if (backendError.uncertain && eligible) {
-          updateRetained((current) =>
+          updateRetainedForScope(targetScope, (current) =>
             current.some((item) => item.id === submission.id) ? current : [...current, submission],
           );
         } else {
-          updateRetained((current) => current.filter((item) => item.id !== submission.id));
+          updateRetainedForScope(targetScope, (current) =>
+            current.filter((item) => item.id !== submission.id),
+          );
         }
         throw backendError;
       } finally {
         if (mounted.current) {
-          setInFlightCount((count) => Math.max(0, count - 1));
+          setInFlightByScope((current) => ({
+            ...current,
+            [targetScope]: Math.max(0, (current[targetScope] ?? 0) - 1),
+          }));
         }
       }
     },
-    [updateRetained],
+    [updateRetainedForScope],
   );
 
   const mutate = useCallback(
     async (input: TInput, idempotencyKey?: string) => {
+      if (!target) {
+        const badAlias = new AppBackendError(400);
+        if (mounted.current) {
+          setErrorByScope((current) => ({ ...current, [scopeKey]: badAlias }));
+        }
+        throw badAlias;
+      }
       let payloadJson: string | undefined;
       try {
         payloadJson = input === undefined ? "{}" : JSON.stringify(input);
@@ -673,23 +762,29 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
       }
       if (payloadJson === undefined) {
         const badInput = new AppBackendError(400);
-        if (mounted.current) setError(badInput);
+        if (mounted.current) {
+          setErrorByScope((current) => ({ ...current, [scopeKey]: badInput }));
+        }
         throw badInput;
       }
       const submission: RetainedSubmission = {
         id: nextAttemptId.current++,
-        client,
+        scopeKey,
+        client: target,
         operation,
         key: idempotencyKey ?? mutationKey(operation),
         payloadJson,
       };
       return execute(submission);
     },
-    [client, execute, operation],
+    [execute, operation, scopeKey, target],
   );
 
+  const retainedForScope = retainedByScope[scopeKey] ?? [];
+
   const retry = useCallback(async () => {
-    const next = retainedRef.current.find((item) => item.id >= discardFloor.current);
+    const floor = discardFloorByScope.current.get(scopeKey) ?? 0;
+    const next = (retainedByScopeRef.current[scopeKey] ?? []).find((item) => item.id >= floor);
     if (!next) return null;
     const active = inFlightRetries.current.get(next.id);
     if (active) return active;
@@ -700,22 +795,23 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
     });
     inFlightRetries.current.set(next.id, promise);
     return promise;
-  }, [execute]);
+  }, [execute, scopeKey]);
 
   const discardPending = useCallback(() => {
-    discardFloor.current = nextAttemptId.current;
-    inFlightRetries.current.clear();
-    retainedRef.current = [];
-    setRetained([]);
-    setError(null);
-  }, []);
+    discardFloorByScope.current.set(scopeKey, nextAttemptId.current);
+    for (const item of retainedByScopeRef.current[scopeKey] ?? []) {
+      inFlightRetries.current.delete(item.id);
+    }
+    updateRetainedForScope(scopeKey, () => []);
+    setErrorByScope((current) => ({ ...current, [scopeKey]: null }));
+  }, [scopeKey, updateRetainedForScope]);
 
   return {
     mutate,
     retry,
     discardPending,
-    pending: inFlightCount > 0,
-    uncertain: retained.length > 0,
-    error,
+    pending: (inFlightByScope[scopeKey] ?? 0) > 0,
+    uncertain: retainedForScope.length > 0,
+    error: errorByScope[scopeKey] ?? null,
   };
 }
