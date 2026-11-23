@@ -1,16 +1,19 @@
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
-import { accessRuleFolder, isAccessRuleRelatedPath } from "./accessRuleFiles";
+import { accessRuleFolder, isFolderMarkerPath } from "./accessRuleFiles";
 import { SHARE_ACCESS_VALUES, type ShareAccess } from "./shareSelector";
 
 export {
-  ACCESS_RULE_FILE,
+  FOLDER_MARKER_FILE,
+  FOLDER_MARKER_MAX_BYTES,
   accessRuleFolder,
-  isAccessRulePath,
-  isAccessRuleRelatedPath,
+  folderMarkerText,
+  isFolderMarkerPath,
+  isFolderRuleId,
+  parseFolderMarker,
 } from "./accessRuleFiles";
 
 /**
- * A folder's access rule, read from the `access.yaml` inside it
+ * A folder's access rule, which the relay keeps and the folder's marker names
  * (ADR 0017, docs/engineering/adr/0017-access-rules-live-in-the-folder.md).
  * `members` is the level for anyone with the Member role whom no person
  * entry names; null leaves them out, which hides the folder from them.
@@ -274,13 +277,13 @@ export function folderLevel(
   return level;
 }
 
-/** The level a viewer has on a file: its folder's, except that members never reach a rule file. */
+/** The level a viewer has on a file: its folder's, except that members never reach a marker. */
 export function fileLevel(
   rules: AccessRuleSet,
   viewer: ReachViewer,
   path: string,
 ): ShareAccess | null {
   if (viewer.role !== "member") return "edit";
-  if (isAccessRuleRelatedPath(path)) return null;
+  if (isFolderMarkerPath(path)) return null;
   return folderLevel(rules, viewer, accessRuleFolder(path));
 }

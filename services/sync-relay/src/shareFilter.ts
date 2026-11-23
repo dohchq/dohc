@@ -30,7 +30,6 @@ import {
 import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 import {
   workspaceFileReach,
-  workspaceFileWriteReach,
   workspaceGroupReach,
   workspaceGroupReachable,
   type StoredWorkspaceShareSelector,
@@ -87,7 +86,6 @@ export interface WorkspaceFileSelector extends StoredShareSelector {
   // it has judged an op's object, so the rest of the filter judges paths alone.
   reach?: import("./storage/memberReach").MemberReach;
   wholeWorkspace: true;
-  ruleFiles?: true;
   levelAt(path: string): ShareAccess | null;
 }
 
@@ -214,11 +212,6 @@ export function fileSideOf(selector: AnyShareSelector): ShareSelector | null {
   if (isGroupSelector(selector)) return fileHalfOfGroup(selector);
   if (isWorkspaceSelector(selector)) return workspaceFileReach(selector);
   return isChatChannelSelector(selector) ? null : selector;
-}
-
-/** The file side an edit is judged against. An admin reads rule files but writes none. */
-export function fileWriteSideOf(selector: AnyShareSelector): ShareSelector | null {
-  return isWorkspaceSelector(selector) ? workspaceFileWriteReach(selector) : fileSideOf(selector);
 }
 
 // A selector with ONE chat side: a chat grant, or a group's channel. A
@@ -1266,8 +1259,8 @@ export type ShareLabelReader = "owner" | "member" | "link";
 // with only the file links its share's files cover, as the name reads in
 // the chat, and a link reader reads those as its files show them. A selector
 // that does not parse covers none. A workspace label covers what its reader's
-// own file side reaches, `readerFiles` from that reader's authorization, less
-// rule files. Without it, it covers no file link.
+// own file side reaches, `readerFiles` from that reader's authorization.
+// Without it, it covers no file link.
 export function shareLabelFor(
   selectorJson: string,
   label: string | null,
@@ -1281,7 +1274,7 @@ export function shareLabelFor(
     selector?.kind === "group"
       ? { paths: selector.paths, versionId: null, access: "view" }
       : selector?.kind === "workspace" && readerFiles
-        ? { ...readerFiles, ruleFiles: undefined }
+        ? readerFiles
         : null;
   const covered = withheldLinkText(label, files);
   if (reader === "member" || files === null) return covered;
@@ -1760,7 +1753,7 @@ export function filterProposedChangeForShare(
         selector.reach.nearestRule(record.afterPath)
     )
       return { allowed: false };
-    return filterProposedChangeForShare(workspaceFileWriteReach(selector), raw, chat);
+    return filterProposedChangeForShare(workspaceFileReach(selector), raw, chat);
   }
   if (isGroupSelector(selector)) {
     if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };
@@ -1915,7 +1908,7 @@ export function collectionEditSelector(
       : null;
   }
   if (isWorkspaceSelector(selector))
-    return collectionEditSelector(workspaceFileWriteReach(selector), chat);
+    return collectionEditSelector(workspaceFileReach(selector), chat);
   if (
     ("access" in selector && selector.access !== "edit") ||
     selector.versionId !== null ||

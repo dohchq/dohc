@@ -1158,7 +1158,7 @@ it("stops each step outside any Collection editor's evaluated folder reach", () 
   member.files!.memberReach!.rules = [["Budget", "view"]];
   expect(check(owner(member), find(budget))).toEqual(allowed);
   expect(check(owner(member), change(budget))).toMatchObject({ allowed: false });
-  expect(check(owner(member), change(trip), trip, ["Trip/access.yaml~"])).toMatchObject({
+  expect(check(owner(member), change(trip), trip, ["Trip/.DOHC-ACCESS"])).toMatchObject({
     allowed: false,
   });
 });

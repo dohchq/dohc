@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { afterAll, describe, expect, it } from "vitest";
-import { folderLevel, isAccessRulePath } from "@dohc/security-contract/access-rules";
+import { folderMarkerText, isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import { pathCollisionKey as contractCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { pathCollisionKey } from "../pathCollisionKey";
 import { closeTestStorages, moment, testStorage } from "../testing";
-import { currentAccessRuleSet, initializeAccessRuleSchema } from "./accessRules";
 import {
   applyCurrentFileOp,
   currentFileStatements,
@@ -25,6 +24,11 @@ afterAll(closeTestStorages);
 const { DatabaseSync } = createRequire(import.meta.url)(
   "node:sqlite",
 ) as typeof import("node:sqlite");
+
+const R = `fr_${"1".repeat(32)}`;
+const S = `fr_${"2".repeat(32)}`;
+const VIEW = "members: view\n";
+const EDIT = "members: edit\n";
 
 function relay() {
   const db = new DatabaseSync(":memory:");
@@ -93,6 +97,8 @@ function relay() {
     heads.set(path, sha);
     return seq;
   };
+  const mark = (folder: string, ruleId: string) =>
+    write(`${folder}/.dohc-access`, folderMarkerText(ruleId, 1));
   const remove = (path: string) => {
     const seq = moment("delete", path, null, null);
     heads.delete(path);
@@ -105,6 +111,12 @@ function relay() {
     heads.set(to, sha);
     return seq;
   };
+  const rule = (ruleId: string, text: string | null) =>
+    db
+      .prepare(
+        "INSERT INTO sync_relay_folder_rules(workspace_id,rule_id,revision,rule_text,changed_at_ms) VALUES ('ws',?,1,?,1)",
+      )
+      .run(ruleId, text);
   const rows = () =>
     db
       .prepare(
@@ -112,14 +124,20 @@ function relay() {
       )
       .all()
       .map((row) => ({ ...row }));
-  return { db, storageDb, statements, heads, append, blob, write, remove, rename, rows };
+  const bindings = () =>
+    db
+      .prepare("SELECT rule_id, folder FROM sync_relay_folder_rule_bindings ORDER BY folder")
+      .all()
+      .map((row) => [row.rule_id, row.folder]);
+  return { db, storageDb, blob, append, write, mark, remove, rename, rule, rows, bindings };
 }
 
-describe("the relay's access rule index", () => {
+describe("a member's reach through folder rules", () => {
   it("fails closed on unknown identity and matches a person entry only through a verified email", () => {
     const r = relay();
     try {
-      r.write("People/access.yaml", "members: edit\npeople:\n  sam@example.com: view\n");
+      r.rule(R, "members: edit\npeople:\n  sam@example.com: view\n");
+      r.mark("People", R);
       const reach = () => memberReach(r.storageDb, "ws", "sam", "member", "comment");
       expect(reach().levelAt("People/note.md")).toBeNull();
       expect(reach().levelAt("Public/note.md")).toBe("comment");
@@ -129,7 +147,7 @@ describe("the relay's access rule index", () => {
       refreshAccountEmail(r.storageDb, "sam", { verifiedEmail: null }, 2);
       expect(reach().levelAt("People/note.md")).toBe("edit");
       expect(
-        memberReach(r.storageDb, "ws", "admin", "admin", "view").levelAt("People/access.yaml"),
+        memberReach(r.storageDb, "ws", "admin", "admin", "view").levelAt("People/note.md"),
       ).toBe("edit");
     } finally {
       r.db.close();
@@ -139,10 +157,11 @@ describe("the relay's access rule index", () => {
   it("keeps deleted objects hidden if hidden at deletion", () => {
     const r = relay();
     try {
-      r.write("Hidden/access.yaml", "");
+      r.rule(R, "");
+      r.mark("Hidden", R);
       r.write("Hidden/note.md", "secret");
       r.remove("Hidden/note.md");
-      r.remove("Hidden/access.yaml");
+      r.remove("Hidden/.dohc-access");
       r.write("Public/note.md", "hello");
       r.remove("Public/note.md");
       const reach = () => memberReach(r.storageDb, "ws", "sam", "member", "edit");
@@ -156,7 +175,8 @@ describe("the relay's access rule index", () => {
   it("serves boundary renames as content-free departures or visible arrivals and withholds hidden object history", () => {
     const r = relay();
     try {
-      r.write("Hidden/access.yaml", "");
+      r.rule(R, "");
+      r.mark("Hidden", R);
       const sha = r.blob(Buffer.from("content"));
       const write = {
         objectId: "moving",
@@ -217,7 +237,8 @@ describe("the relay's access rule index", () => {
   it("keys the signature a member is served to the relay and the member", () => {
     const r = relay();
     try {
-      r.write("Private/access.yaml", "");
+      r.rule(R, "");
+      r.mark("Private", R);
       const sam = () => memberReach(r.storageDb, "ws", "sam", "member", "edit");
       const served = sam().keyedSignature("relay-key");
       expect(served).toMatch(/^[0-9a-f]{64}$/);
@@ -242,7 +263,8 @@ describe("the relay's access rule index", () => {
       const first = revision();
       r.write("Public/note.md", "hello");
       expect(revision()).toBe(first);
-      r.write("Private/access.yaml", "people:\n  sam@example.com: edit\n");
+      r.rule(R, "people:\n  sam@example.com: edit\n");
+      r.mark("Private", R);
       const hidden = revision();
       expect(hidden).not.toBe(first);
       refreshAccountEmail(r.storageDb, "sam", { verifiedEmail: "sam@example.com" }, 1);
@@ -253,142 +275,183 @@ describe("the relay's access rule index", () => {
       r.db.close();
     }
   });
-  it("keeps each folder's rule by the span it held for", () => {
+
+  it("lets no case twin folder widen a hidden one", () => {
     const r = relay();
     try {
-      const first = r.write("Drafts/access.yaml", "# Drafts\nmembers: view\n");
+      r.rule(R, "");
+      r.rule(S, EDIT);
+      r.mark("Team", R);
+      r.mark("team", S);
+      const sam = memberReach(r.storageDb, "ws", "sam", "member", "edit");
+      expect(sam.levelAt("team/note.md")).toBeNull();
+    } finally {
+      r.db.close();
+    }
+  });
+});
+
+describe("the relay's folder rule spans", () => {
+  it("binds a folder whose marker names a rule it keeps", () => {
+    const r = relay();
+    try {
+      r.rule(R, VIEW);
+      const marked = r.mark("Drafts", R);
       r.write("Drafts/notes.md", "hello");
-      const edited = r.write("Drafts/access.yaml", "members: edit\n");
-      const unreadable = r.write("Drafts/access.yaml", "members: everyone\n");
-      const removed = r.remove("Drafts/access.yaml");
       expect(r.rows()).toEqual([
-        { folder: "Drafts", rule_text: "members: view\n", from_seq: first, to_seq: edited },
-        { folder: "Drafts", rule_text: "members: edit\n", from_seq: edited, to_seq: unreadable },
-        { folder: "Drafts", rule_text: null, from_seq: unreadable, to_seq: removed },
+        { folder: "Drafts", rule_text: VIEW, from_seq: marked, to_seq: null },
+      ]);
+      expect(r.bindings()).toEqual([[R, "Drafts"]]);
+    } finally {
+      r.db.close();
+    }
+  });
+
+  it("hides a folder whose marker names no rule it keeps, can't be read, or has a twin", () => {
+    const r = relay();
+    try {
+      r.rule(R, VIEW);
+      r.mark("A", S);
+      r.write("B/.dohc-access", folderMarkerText(R, 1), "binary");
+      r.write("C/.dohc-access", new Uint8Array([0x72, 0xff, 0x0a]));
+      r.write("D/.dohc-access", `${folderMarkerText(R, 1)}#${"x".repeat(1024)}\n`);
+      r.write("E/.dohc-access", VIEW);
+      r.mark("F", R);
+      r.write("F/.DOHC-ACCESS", folderMarkerText(R, 1));
+      expect(r.rows().map((row) => [row.folder, row.rule_text, row.to_seq])).toEqual([
+        ["A", null, null],
+        ["B", null, null],
+        ["C", null, null],
+        ["D", null, null],
+        ["E", null, null],
+        ["F", VIEW, expect.any(Number)],
+        ["F", null, null],
+      ]);
+      const back = r.remove("F/.DOHC-ACCESS");
+      expect(r.rows().filter((row) => row.to_seq === null && row.folder === "F")).toEqual([
+        { folder: "F", rule_text: VIEW, from_seq: back, to_seq: null },
       ]);
     } finally {
       r.db.close();
     }
   });
 
-  it("reads a binary, non-UTF-8 or oversized rule as unreadable", () => {
+  it("adds nothing for a marker naming a cleared rule", () => {
     const r = relay();
     try {
-      r.write("A/access.yaml", "members: view\n", "binary");
-      r.write("B/access.yaml", new Uint8Array([0x6d, 0xff, 0x0a]));
-      r.write("C/access.yaml", `members: view\n#${"x".repeat(64 * 1024)}\n`);
-      // The engine strips one byte order mark, so a second one makes the rule
-      // unreadable there. The relay must read the same bytes the same way.
-      const bom = [0xef, 0xbb, 0xbf];
-      const edit = [...Buffer.from("members: edit\n")];
-      r.write("D/access.yaml", new Uint8Array([...bom, ...bom, ...edit]));
-      r.write("E/access.yaml", new Uint8Array([...bom, ...edit]));
-      expect(r.rows().map((row) => [row.folder, row.rule_text])).toEqual([
-        ["A", null],
-        ["B", null],
-        ["C", null],
-        ["D", null],
-        ["E", "members: edit\n"],
-      ]);
+      r.rule(R, null);
+      r.mark("Drafts", R);
+      expect(r.rows()).toEqual([]);
+      expect(r.bindings()).toEqual([]);
     } finally {
       r.db.close();
     }
   });
 
-  it("reads two spellings of one rule in a folder as unreadable, and its own folder's rule only", () => {
+  it("hides a folder two rules cover, and never unbinds one for an edited marker", () => {
     const r = relay();
     try {
-      r.write("Team/access.yaml", "");
-      const twin = r.write("Team/ACCESS.yaml", "members: edit\n");
-      // A rule in a folder spelled differently is that folder's own rule.
-      r.write("team/access.yaml", "members: edit\n");
-      expect(r.rows().filter((row) => row.to_seq === null)).toEqual([
-        { folder: "Team", rule_text: null, from_seq: twin, to_seq: null },
-        {
-          folder: "team",
-          rule_text: "members: edit\n",
-          from_seq: expect.any(Number),
-          to_seq: null,
-        },
-      ]);
-      const back = r.remove("Team/ACCESS.yaml");
-      expect(r.rows().filter((row) => row.folder === "Team" && row.to_seq === null)).toEqual([
-        { folder: "Team", rule_text: "", from_seq: back, to_seq: null },
-      ]);
-      // The case twin "team" can't widen the hidden "Team".
-      const viewer = { role: "member" as const, level: "edit" as const, verifiedEmail: null };
-      expect(folderLevel(currentAccessRuleSet(r.storageDb, "ws"), viewer, "team")).toBeNull();
-    } finally {
-      r.db.close();
-    }
-  });
-
-  it("moves a renamed rule between folders, and keeps nothing for a rename within one op", () => {
-    const r = relay();
-    try {
-      const first = r.write("A/access.yaml", "members: view\n");
-      const moved = r.rename("A/access.yaml", "B/access.yaml");
-      const twin = r.write("B/ACCESS.yaml", "members: edit\n");
-      // Between its delete and its put, the respell leaves one readable rule
-      // for a moment that no reader saw.
-      const respelled = r.rename("B/ACCESS.yaml", "B/Access.yaml");
+      r.rule(R, VIEW);
+      r.rule(S, EDIT);
+      const first = r.mark("Team", R);
+      const edited = r.write("Team/.dohc-access", folderMarkerText(S, 1));
       expect(r.rows()).toEqual([
-        { folder: "A", rule_text: "members: view\n", from_seq: first, to_seq: moved },
-        { folder: "B", rule_text: "members: view\n", from_seq: moved, to_seq: twin },
-        { folder: "B", rule_text: null, from_seq: twin, to_seq: respelled },
-        { folder: "B", rule_text: null, from_seq: respelled, to_seq: null },
+        { folder: "Team", rule_text: VIEW, from_seq: first, to_seq: edited },
+        { folder: "Team", rule_text: null, from_seq: edited, to_seq: null },
+      ]);
+      expect(r.bindings()).toEqual([
+        [R, "Team"],
+        [S, "Team"],
       ]);
     } finally {
       r.db.close();
     }
   });
 
-  it("keeps main's rules only, at the root too", () => {
+  it("follows a moved folder, and releases the old path once its last file has left", () => {
     const r = relay();
     try {
-      const sha = r.blob(Buffer.from("members: view\n"));
-      const root = r.write("access.yaml", "members: view\n");
+      r.rule(R, VIEW);
+      const first = r.mark("A", R);
+      r.write("A/x.md", "x");
+      // The owner's computer sends the new marker first and the old one's delete last.
+      const moved = r.mark("B", R);
+      r.rename("A/x.md", "B/x.md");
+      const gone = r.remove("A/.dohc-access");
+      expect(r.rows()).toEqual([
+        { folder: "A", rule_text: VIEW, from_seq: first, to_seq: gone },
+        { folder: "B", rule_text: VIEW, from_seq: moved, to_seq: null },
+      ]);
+      expect(r.bindings()).toEqual([[R, "B"]]);
+    } finally {
+      r.db.close();
+    }
+  });
+
+  it("keeps a copied folder's rule on both paths, and a path ruled while a file is left in it", () => {
+    const r = relay();
+    try {
+      r.rule(R, VIEW);
+      r.mark("A", R);
+      r.write("A/x.md", "x");
+      r.mark("B", R);
+      r.write("B/x.md", "x");
+      expect(r.bindings()).toEqual([
+        [R, "A"],
+        [R, "B"],
+      ]);
+      // A marker deleted before its folder's files keeps the folder ruled.
+      r.remove("A/.dohc-access");
+      expect(r.bindings()).toEqual([
+        [R, "A"],
+        [R, "B"],
+      ]);
+      expect(
+        r
+          .rows()
+          .filter((row) => row.to_seq === null)
+          .map((row) => row.folder),
+      ).toEqual(["A", "B"]);
+    } finally {
+      r.db.close();
+    }
+  });
+
+  it("keeps a deleted folder's rule when no other folder holds its marker", () => {
+    const r = relay();
+    try {
+      r.rule(R, VIEW);
+      const first = r.mark("A", R);
+      r.write("A/x.md", "x");
+      r.remove("A/x.md");
+      r.remove("A/.dohc-access");
+      expect(r.rows()).toEqual([{ folder: "A", rule_text: VIEW, from_seq: first, to_seq: null }]);
+      expect(r.bindings()).toEqual([[R, "A"]]);
+    } finally {
+      r.db.close();
+    }
+  });
+
+  it("reads markers in main only, at the root too", () => {
+    const r = relay();
+    try {
+      r.rule(R, VIEW);
+      const sha = r.blob(Buffer.from(folderMarkerText(R, 1)));
+      const root = r.write(".dohc-access", folderMarkerText(R, 1));
       r.append("version.create", {
         versionId: "draft",
         forkSnapshots: [
-          { path: "access.yaml", blobSha256: sha, contentKind: "text" },
-          { path: "Drafts/access.yaml", blobSha256: sha, contentKind: "text" },
+          { path: ".dohc-access", blobSha256: sha, contentKind: "text" },
+          { path: "Drafts/.dohc-access", blobSha256: sha, contentKind: "text" },
         ],
       });
-      expect(
-        r.db
-          .prepare(
-            "SELECT path FROM sync_relay_current_files WHERE version_id = 'draft' ORDER BY path",
-          )
-          .all()
-          .map((row) => row.path),
-      ).toEqual(["Drafts/access.yaml", "access.yaml"]);
-      expect(r.rows()).toEqual([
-        { folder: "", rule_text: "members: view\n", from_seq: root, to_seq: null },
-      ]);
+      expect(r.rows()).toEqual([{ folder: "", rule_text: VIEW, from_seq: root, to_seq: null }]);
     } finally {
       r.db.close();
     }
   });
 
-  it("fills the table from rule files written before it existed", () => {
-    const r = relay();
-    try {
-      const seq = r.write("Drafts/access.yaml", "members: comment\n");
-      r.write("Drafts/notes.md", "hello");
-      r.db.exec(
-        "DROP TABLE sync_relay_access_rules; DELETE FROM sync_relay_migrations WHERE migration_id = 'access-rules-v1'",
-      );
-      initializeAccessRuleSchema(r.storageDb);
-      expect(r.rows()).toEqual([
-        { folder: "Drafts", rule_text: "members: comment\n", from_seq: seq, to_seq: null },
-      ]);
-    } finally {
-      r.db.close();
-    }
-  });
-
-  it("charges the workspace for each rule row it keeps", () => {
+  it("charges the workspace for each rule, binding and span it keeps", () => {
     const r = relay();
     try {
       const usage = () =>
@@ -396,71 +459,58 @@ describe("the relay's access rule index", () => {
           r.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage").get()!.usage_bytes,
         );
       const start = usage();
+      r.rule(R, VIEW);
+      expect(usage() - start).toBe(VIEW.length);
       r.db
-        .prepare("INSERT INTO sync_relay_access_rules VALUES ('ws', 'Team', ?, 1, NULL)")
-        .run("members: view\n");
+        .prepare("UPDATE sync_relay_folder_rules SET rule_text = ? WHERE rule_id = ?")
+        .run(null, R);
+      expect(usage()).toBe(start);
       r.db
-        .prepare("INSERT INTO sync_relay_access_rules VALUES ('ws', 'Team', NULL, 2, NULL)")
-        .run();
-      expect(usage() - start).toBe(2 * "Team".length + "members: view\n".length);
-      r.write("Drafts/access.yaml", "members: view\n");
-      r.write("Drafts/access.yaml", "members: edit\n");
-      const kept = usage();
-      r.db.exec("DELETE FROM sync_relay_access_rules");
-      expect(kept - usage()).toBe(
-        2 * "Team".length +
-          2 * "Drafts".length +
-          "members: view\n".length * 2 +
-          "members: edit\n".length,
+        .prepare("UPDATE sync_relay_folder_rules SET rule_text = ? WHERE rule_id = ?")
+        .run(EDIT, R);
+      r.mark("Team", R);
+      const markerRow = usage();
+      r.db.exec(
+        "DELETE FROM sync_relay_access_rules; DELETE FROM sync_relay_folder_rule_bindings; DELETE FROM sync_relay_folder_rules",
       );
+      expect(markerRow - usage()).toBe(2 * "Team".length + 2 * EDIT.length);
     } finally {
       r.db.close();
     }
   });
 
-  it("writes a rule whose keys need quoting so it reads back as the same rule", () => {
-    const r = relay();
-    try {
-      r.write("Drafts/access.yaml", 'members: edit\npeople:\n  "#sam@example.com": view\n');
-      const set = currentAccessRuleSet(r.storageDb, "ws");
-      const sam = { role: "member", level: "edit", verifiedEmail: "#sam@example.com" } as const;
-      expect(folderLevel(set, sam, "Drafts")).toBe("view");
-    } finally {
-      r.db.close();
-    }
-  });
-
-  // The relay's key finds a folder's rule files; the contract's decides what
+  // The relay's key finds a folder's markers; the contract's decides what
   // counts as one. They must fold every spelling the same way.
-  it.each([
-    "access.yaml",
-    "ACCESS.YAML",
-    "Access.yaml.",
-    "ａccess.yaml",
-    "Team/ACCESS.yaml",
-    "Team/access.yaml~",
-  ])("folds %s the same way in the relay and the contract", (path) => {
-    expect(pathCollisionKey(path)).toBe(contractCollisionKey(path));
-    expect(isAccessRulePath(path)).toBe(path.endsWith("~") ? false : true);
-  });
+  it.each([".dohc-access", ".DOHC-ACCESS", "Team/.Dohc-Access", "Team/.dohc-access~"])(
+    "folds %s the same way in the relay and the contract",
+    (path) => {
+      expect(pathCollisionKey(path)).toBe(contractCollisionKey(path));
+      expect(isFolderMarkerPath(path)).toBe(!path.endsWith("~"));
+    },
+  );
 });
 
-// The log's quota check counts the log row before the rule row exists, so the
-// batch checks again once applied.
-it("refuses a rule write whose rule row would take the workspace over its quota", async () => {
+// The log's quota check counts the log row before the span and binding exist,
+// so the batch checks again once applied.
+it("refuses a marker write whose span would take the workspace over its quota", async () => {
   const storage = await testStorage(),
     context = storage as unknown as StorageContext;
   expect(storage.claimWorkspace({ workspaceId: "ws", ownerUserId: "owner", createdAtMs: 1 })).toBe(
     "created",
   );
-  const text = "members: view\n";
+  context.db
+    .prepare(
+      "INSERT INTO sync_relay_folder_rules(workspace_id,rule_id,revision,rule_text,changed_at_ms) VALUES ('ws',?,1,?,1)",
+    )
+    .run(R, VIEW);
+  const text = folderMarkerText(R, 1);
   storage.putBlob({
     workspaceId: "ws",
     sha256: createHash("sha256").update(text).digest("hex"),
     content: Buffer.from(text),
     createdAtMs: 1,
   });
-  const op = moment("Team/access.yaml", text, { payload: { payloadAfterContentKind: "text" } });
+  const op = moment("Team/.dohc-access", text, { payload: { payloadAfterContentKind: "text" } });
   const payloadJson = JSON.stringify(op.payload);
   const append = () =>
     storage.appendLogBatch({
@@ -471,15 +521,15 @@ it("refuses a rule write whose rule row would take the workspace over its quota"
       ],
     });
   const before = workspaceUsageBytes(context, "ws");
-  // Room for the log row, not for the rule row it adds.
+  // Room for the log row, not for the span and binding it adds.
   context.options.workspaceQuotaBytes = before + Buffer.byteLength(payloadJson);
   expect(append).toThrow(/quota exceeded/);
   expect(workspaceUsageBytes(context, "ws")).toBe(before);
   expect(context.db.prepare("SELECT COUNT(*) AS n FROM sync_relay_access_rules").get()!.n).toBe(0);
-  context.options.workspaceQuotaBytes += "Team".length + text.length;
+  context.options.workspaceQuotaBytes += 2 * "Team".length + VIEW.length;
   append();
   expect(context.db.prepare("SELECT folder, rule_text FROM sync_relay_access_rules").all()).toEqual(
-    [{ folder: "Team", rule_text: text }],
+    [{ folder: "Team", rule_text: VIEW }],
   );
   expect(workspaceUsageBytes(context, "ws")).toBe(context.options.workspaceQuotaBytes);
 });
