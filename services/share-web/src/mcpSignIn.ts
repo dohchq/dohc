@@ -150,8 +150,8 @@ export function mcpChallenge(
 // The pages' one style block, allowed by its hash. The pages run no script.
 // The agent hues are the desktop's, so an agent keeps its color here.
 const CONSENT_STYLE = `
-:root{color-scheme:light dark;--bg:#faf9f5;--panel:#f3f1ea;--raised:#fff;--line:#e4e1d8;--ink:#1c1b18;--muted:#55524a;--subtle:#7f7b6e;--accent:#2d342e;--on-accent:#faf9f5;--danger:#9d3c28;--mark:#2d342e;--hue-olive:#666d2e;--hue-rust:#88412c;--hue-amber:#705012;--hue-teal:#22645a;--hue-blue:#285884;--hue-indigo:#4c528f;--hue-plum:#764580;--hue-rose:#8e3f5a;--agent:var(--hue-olive)}
-@media (prefers-color-scheme:dark){:root{--bg:#131211;--panel:#181715;--raised:#1f1e1b;--line:#2a2925;--ink:#f6f4ee;--muted:#aba79b;--subtle:#7d7a6e;--accent:#d7d0c0;--on-accent:#131211;--danger:#e1866c;--mark:#e4e1d8;--hue-olive:#c0c585;--hue-rust:#dc9378;--hue-amber:#d9b05a;--hue-teal:#82c9bb;--hue-blue:#8fb8e2;--hue-indigo:#a7abee;--hue-plum:#d09fd9;--hue-rose:#e39bb2}}
+:root{color-scheme:light dark;--bg:#faf9f5;--panel:#f3f1ea;--raised:#fff;--line:#e4e1d8;--ink:#1c1b18;--muted:#55524a;--subtle:#656155;--accent:#2d342e;--on-accent:#faf9f5;--danger:#9d3c28;--mark:#2d342e;--hue-olive:#666d2e;--hue-rust:#88412c;--hue-amber:#705012;--hue-teal:#22645a;--hue-blue:#285884;--hue-indigo:#4c528f;--hue-plum:#764580;--hue-rose:#8e3f5a;--agent:var(--hue-olive)}
+@media (prefers-color-scheme:dark){:root{--bg:#131211;--panel:#181715;--raised:#1f1e1b;--line:#2a2925;--ink:#f6f4ee;--muted:#aba79b;--subtle:#9e9a8d;--accent:#d7d0c0;--on-accent:#131211;--danger:#e1866c;--mark:#e4e1d8;--hue-olive:#c0c585;--hue-rust:#dc9378;--hue-amber:#d9b05a;--hue-teal:#82c9bb;--hue-blue:#8fb8e2;--hue-indigo:#a7abee;--hue-plum:#d09fd9;--hue-rose:#e39bb2}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
 .brand{display:flex;align-items:center;gap:8px;padding:16px 20px;font-weight:600}
@@ -217,6 +217,7 @@ button,input{font:inherit;color:inherit}
 .btns{display:flex;gap:8px;margin-left:auto}
 .i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
 .tile .i{width:22px;height:22px}
+@media (pointer:coarse),(max-width:720px){.text{font-size:16px;height:44px}.btn{min-height:44px;height:auto}.seg label{display:inline-flex;min-height:44px;align-items:center;padding:0 10px}.link{display:inline-flex;min-height:44px;align-items:center}.opt{min-height:44px}}
 `;
 const CONSENT_STYLE_HASH = createHash("sha256").update(CONSENT_STYLE).digest("base64");
 
@@ -258,6 +259,17 @@ const ACCESS_LABELS: Readonly<Record<string, string>> = {
   comment: "Can comment",
   edit: "Can edit",
 };
+
+function linkAccessMeaning(access: string, liveDocuments: boolean): string {
+  if (access === "view") return "Can read shared files, comments, and chat.";
+  if (access === "comment") return "Can read shared files and post comments or chat messages.";
+  if (access === "edit") {
+    return liveDocuments
+      ? "Can read shared files, post comments or chat messages, and edit shared pages and Collections."
+      : "Can read shared files, post comments or chat messages, and edit shared Collections.";
+  }
+  return "";
+}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/gu, (character) => `&#${character.charCodeAt(0)};`);
@@ -308,7 +320,7 @@ function page(
   headers: HeadersInit = {},
 ): Response {
   const html =
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">` +
     `<meta name="referrer" content="${policy.referrerPolicy}"><title>${escapeHtml(head.title)}</title><style>${CONSENT_STYLE}</style></head>` +
     `<body><header class="brand"><span aria-hidden="true">${DOHC_MARK}</span>dohc <span class="host">${escapeHtml(new URL(origin).host)}</span></header>` +
     `<main><div class="card"><div class="head"><div class="pair" aria-hidden="true">${tiles(head.agent)}</div>` +
@@ -714,7 +726,9 @@ function consentContent(
     : '<label class="sec" for="name">Name</label>' +
       `<input id="name" class="text" name="name" value="${escapeHtml(view.name)}" maxlength="${String(AGENT_NAME_CHAR_LIMIT)}" autocomplete="off"` +
       `${invalid("name", errors.name)}${focus("name")}>` +
-      (handle ? `<p class="cap">@${escapeHtml(handle)}</p>` : "") +
+      (handle
+        ? `<p class="cap">Current handle: @${escapeHtml(handle)}. Changes to the name update it on Allow.</p>`
+        : "") +
       fieldError("name", errors.name);
   // Each choice posts the choose form, which draws the page again for that agent.
   const option = (value: string, label: string) =>
@@ -840,7 +854,8 @@ function signInPage(
     '<input id="password" class="text" name="password" type="password" autocomplete="current-password"' +
     `${invalid("password", errors.password)}${focused === "password" ? " autofocus" : ""}>${fieldError("password", errors.password)}` +
     (errors.form ? `<p class="error" role="alert">${escapeHtml(errors.form)}</p>` : "") +
-    '<div class="acts"><button type="submit" class="btn primary wide">Sign in</button></div></form>';
+    '<div class="acts"><button type="submit" class="btn primary wide">Sign in</button></div></form>' +
+    '<p class="cap"><a class="link" href="/account/forgot-password">Forgot your password?</a></p>';
   // The agent's name comes with its sign-in request, which begins after this sign-in.
   return page(
     origin,
@@ -1154,11 +1169,13 @@ export function createMcpSignIn(options: {
     const maxAge = Math.max(1, Math.ceil((value.expiresAtMs - options.nowMs()) / 1_000));
     const agentName =
       typeof value.reportedClientName === "string" ? value.reportedClientName : null;
+    const accessMeaning = linkAccessMeaning(value.access, liveDocuments);
     const content =
       '<dl class="box">' +
       `<div class="row"><dt>Share</dt><dd class="k">${escapeHtml(typeof value.subjectName === "string" ? value.subjectName : "Untitled share")}</dd></div>` +
       `<div class="row"><dt>Access</dt><dd class="k">${escapeHtml(ACCESS_LABELS[value.access] ?? value.access)}</dd></div>` +
       "</dl>" +
+      (accessMeaning ? `<p class="cap">${escapeHtml(accessMeaning)}</p>` : "") +
       outsideDohcNote(agentName) +
       `<form method="post" action="${DECISION}">${hidden("request", requestId)}${hidden("secret", secret)}` +
       actions(

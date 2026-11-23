@@ -179,6 +179,13 @@ export function LinkDocumentEditor({
                 </button>
               )}
               {otherWay}
+              <button
+                type="button"
+                className="handoff-button secondary"
+                onClick={() => (session ? setError(null) : leave(onClose))}
+              >
+                Dismiss
+              </button>
             </div>
           </div>
         </div>

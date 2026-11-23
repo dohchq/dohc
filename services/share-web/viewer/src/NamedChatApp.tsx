@@ -11,6 +11,7 @@ import {
   type NamedChatChannel,
 } from "./namedChat";
 import { ChannelView, ended, type ChatChannelClient, type Ended } from "./ChatChannel";
+import { DohcMark } from "./icons";
 import "./namedRecipient.css";
 import "./namedChat.css";
 
@@ -133,7 +134,10 @@ export default function NamedChatApp({ grantId }: { grantId: string | null }) {
     <div className="viewer named-recipient named-chat" ref={shell}>
       <header>
         <div>
-          <p className="eyebrow">dohc</p>
+          <div className="named-brand">
+            <DohcMark size={18} />
+            <p className="eyebrow">dohc</p>
+          </div>
           <h1>{channel?.name ?? "Shared channel"}</h1>
         </div>
         {account && (

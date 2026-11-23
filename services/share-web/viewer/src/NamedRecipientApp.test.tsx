@@ -472,3 +472,53 @@ it("tells the named recipient the owner removed access", async () => {
   expect(container.textContent).toContain("The owner removed your access.");
   expect(container.textContent).not.toContain("docs/a.md");
 });
+
+it("collapses the file list behind a toggle after picking a file on narrow viewports", async () => {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: query.includes("max-width: 720px"),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })),
+  );
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/account/session"
+        ? jsonResponse({ user: { id: "alice", name: "Alice" } })
+        : jsonResponse(files()),
+    ),
+  );
+  await render();
+  expect(container.querySelector(".named-files-toggle")).toBeNull();
+  await click("docs/a.md");
+  const toggle = container.querySelector<HTMLButtonElement>(".named-files-toggle");
+  const panelNode = container.querySelector<HTMLElement>("#named-files-panel");
+  expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+  expect(panelNode?.hidden).toBe(true);
+  expect(document.activeElement).toBe(toggle);
+  await act(async () => toggle!.click());
+  expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+  expect(panelNode?.hidden).toBe(false);
+});
+
+it("tells a signed-in recipient when their session ends on refresh", async () => {
+  let signedIn = true;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/account/session"
+        ? jsonResponse({ user: signedIn ? { id: "alice", name: "Alice" } : null })
+        : jsonResponse(files()),
+    ),
+  );
+  await render();
+  expect(container.textContent).toContain("Alice");
+  signedIn = false;
+  await click("Refresh files");
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+    "Your session ended. Sign in again.",
+  );
+});
