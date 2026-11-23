@@ -1588,6 +1588,7 @@ export function App() {
     appToOpen === null &&
     files.length > 0 &&
     !editing &&
+    surface !== "apps" &&
     sessionApps.length === 1 &&
     !publishedApps.hasMore
       ? sessionApps[0]!

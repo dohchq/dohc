@@ -757,6 +757,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!alive.current || sequence.current !== mine || abort.signal.aborted) return;
       const loaded = parsePage(response.result, read.fieldIds);
       setPage(loaded);
+      setPageReadVersion((value) => value + 1);
       setQuery(next);
       setPrevious(history);
       settle();
@@ -1010,6 +1011,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!alive.current || sequence.current !== mine || abort.signal.aborted) return;
       const loaded = parsePage(response.result, read.fieldIds);
       setPage(loaded);
+      setPageReadVersion((value) => value + 1);
       settle();
       showOpenRecord(loaded.rows);
       showRead(shows, loaded.rows);
@@ -1762,6 +1764,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     byField: ReadonlyMap<string, ReadonlyMap<string, string>>;
   }>({ scope: "", version: 0, byField: new Map() });
   const [relationRetry, setRelationRetry] = useState(0);
+  const [pageReadVersion, setPageReadVersion] = useState(0);
   const resolveRelationRef = useRef(props.resolveRelation);
   resolveRelationRef.current = props.resolveRelation;
   const relationOnErrorRef = useRef(onError);
@@ -1884,6 +1887,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     hasResolveRelation,
     props.recordsVersion,
     props.recordsChanged,
+    pageReadVersion,
     relationRetry,
   ]);
   const resourceKey = JSON.stringify([

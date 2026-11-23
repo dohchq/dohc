@@ -926,7 +926,10 @@ describe("SitePreviewPage", () => {
   it("runs a governed index.html + app.publish.json app in AppView instead of static preview", async () => {
     const appViewBridge = {
       ...bridgeMock,
-      appView: vi.fn(async () => ({ kind: "unapproved" as const, viewId: "v-1" })),
+      appView: vi.fn(async (request: { viewId: string }) => ({
+        kind: "unapproved" as const,
+        viewId: request.viewId,
+      })),
       onAppViewEvent: vi.fn(() => () => undefined),
       publishOwnerApp: vi.fn(async () => ({ kind: "localListed" as const, publications: [] })),
     };
@@ -946,6 +949,7 @@ describe("SitePreviewPage", () => {
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="weekly-goals" />);
 
     expect(await screen.findByTestId("app-view-review")).toBeTruthy();
+    expect(await screen.findByText("Review this app to open it here.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
     expect(screen.queryByTestId("site-preview-options")).toBeNull();
     expect(appViewBridge.startSitePreview).not.toHaveBeenCalled();

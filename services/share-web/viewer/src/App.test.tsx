@@ -5,6 +5,7 @@ import {
 } from "@dohc/workspace-contracts/relay-values";
 // App discovery has its own request, cancellation, and rendering tests.
 let mockPublishedApps: Array<{ publicationId: string; name: string }> | null = null;
+let mockPublishedAppsHasMore = false;
 vi.mock("./PublishedApps", async () => {
   const { useEffect } = await import("react");
   return {
@@ -13,11 +14,14 @@ vi.mock("./PublishedApps", async () => {
       onPublications,
     }: {
       onState?: (state: "loading" | "some" | "none") => void;
-      onPublications?: (items: readonly { publicationId: string; name: string }[]) => void;
+      onPublications?: (
+        items: readonly { publicationId: string; name: string }[],
+        hasMore: boolean,
+      ) => void;
     }) => {
       useEffect(() => {
         if (!mockPublishedApps) return;
-        onPublications?.(mockPublishedApps);
+        onPublications?.(mockPublishedApps, mockPublishedAppsHasMore);
         onState?.(mockPublishedApps.length > 0 ? "some" : "none");
       }, [onState, onPublications]);
       return mockPublishedApps && mockPublishedApps.length > 0 ? (
@@ -255,6 +259,7 @@ describe("App", () => {
     vi.useRealTimers();
     exposeHeldLogQuery = false;
     mockPublishedApps = null;
+    mockPublishedAppsHasMore = false;
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -5513,6 +5518,42 @@ describe("App", () => {
       expect(container.querySelector("h1.page-title")?.textContent).toBe("README");
       expect(container.textContent).toContain("Trip Poll");
       expect(buttonNamed("Open app")).toBeDefined();
+
+      const appsButton = container.querySelector<HTMLButtonElement>("button[aria-label='Apps']");
+      expect(appsButton).not.toBeNull();
+      act(() => {
+        appsButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await settle(
+        () => container.querySelector(".column section[aria-label='Shared app']") === null,
+      );
+      expect(container.querySelector(".column section[aria-label='Shared app']")).toBeNull();
+    });
+
+    it("does not show a single-app banner when more published apps remain paginated", async () => {
+      const files: SharedFile[] = [
+        { path: "note.md", blobSha256: "c".repeat(64), contentKind: "text" },
+      ];
+      mockPublishedApps = [{ publicationId: PUBLICATION_ID, name: "Trip poll" }];
+      mockPublishedAppsHasMore = true;
+      const fallback = viewerFetch(() => {
+        throw new Error("Unexpected handoff");
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const route = requestPath(input);
+          if (route === "/api/view/current") return currentPage(files, 0);
+          if (route === "/api/view/log?since=0&limit=500") return logPage(files);
+          if (route.startsWith("/api/view/blob/")) return new Response("# Shared note");
+          return fallback(input, init);
+        }),
+      );
+
+      await renderApp();
+      await settle(() => container.textContent.includes("Shared note"));
+
+      expect(container.querySelector(".column section[aria-label='Shared app']")).toBeNull();
     });
 
     it("does not show a single-app banner when a share has multiple published apps", async () => {
