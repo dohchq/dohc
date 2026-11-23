@@ -2661,6 +2661,9 @@ it("deletes from an added first paragraph into the paragraph after the item's fi
     `paragraph L/I/C:${OBJECT}de`,
     "paragraph :z",
   ]);
+  const upTo = open(codeNote(), 30);
+  expect(written(upTo, deleteRange(schema, upTo, 0, 1, 2, 0, String))).toBe(true);
+  expect(rowsRead(upTo)).toEqual(["paragraph :t", `paragraph :${OBJECT}de`, "paragraph :z"]);
 });
 
 it("stores every attribute a line's kind has, with the default for one not asked for", () => {
