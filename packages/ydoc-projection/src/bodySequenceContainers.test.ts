@@ -249,8 +249,7 @@ it("takes one person's whole path when one indents and another outdents a to-do"
     const lifted = {
       content: [{ type: "taskList", content: [todo(false, paragraph("one"))] }, paragraph("two")],
     };
-    expect({ content: top }).toMatchObject(top.length === 1 ? nested : lifted);
-    expect(top.length === 1 ? 1 : top.length).toBeLessThanOrEqual(2);
+    expect({ content: top }).toMatchObject((stored[0] as unknown[]).length > 0 ? nested : lifted);
   }
 });
 

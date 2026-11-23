@@ -222,6 +222,34 @@ it("reads what is stored, not what a key named __proto__ or an embedded string m
   reopened.destroy();
 });
 
+it("keeps a link whose value holds a key named __proto__, however the note was encoded", () => {
+  const made = note(11);
+  made.line({ type: "paragraph", path: [] });
+  made.text("x", {
+    link: JSON.parse('{"__proto__":{"extra":1},"href":"https://example.com/kept"}') as unknown,
+  });
+  const reopened = (encode: (doc: Y.Doc) => Uint8Array, apply: typeof Y.applyUpdate) => {
+    const doc = new Y.Doc({ gc: false });
+    doc.getText(BODY_SEQUENCE_FIELD);
+    apply(doc, encode(made.doc));
+    return doc;
+  };
+  const first = reopened(Y.encodeStateAsUpdate, Y.applyUpdate);
+  const second = reopened(Y.encodeStateAsUpdateV2, Y.applyUpdateV2);
+  for (const doc of [made.doc, first, second])
+    expect(shown(doc)).toMatchObject({
+      content: [
+        {
+          content: [
+            { text: "x", marks: [{ type: "link", attrs: { href: "https://example.com/kept" } }] },
+          ],
+        },
+      ],
+    });
+  first.destroy();
+  second.destroy();
+});
+
 it("takes an attribute or a record only from an item that holds plain values", () => {
   const made = note(10);
   const keyed = (holder: Y.XmlElement | Y.Map<unknown>, key: string, content: Y.Item["content"]) =>

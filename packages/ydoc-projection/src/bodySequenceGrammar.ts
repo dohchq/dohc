@@ -32,17 +32,28 @@ export type SequencePiece = { boundary: SequenceAttrs } | SequenceInline;
  */
 export type ContainerRecords = { get(key: string): unknown };
 
-const record = (value: unknown): SequenceAttrs | null => {
-  if (typeof value !== "object" || value === null) return null;
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  return prototype === Object.prototype || prototype === null ? (value as SequenceAttrs) : null;
+const record = (value: unknown): SequenceAttrs | null =>
+  typeof value === "object" &&
+  value !== null &&
+  Object.prototype.toString.call(value) === "[object Object]"
+    ? (value as SequenceAttrs)
+    : null;
+
+const own = (holder: object, key: string): unknown => {
+  const held = Object.getOwnPropertyDescriptor(holder, key);
+  return held && "value" in held ? (held.value as unknown) : undefined;
 };
 
-const filled = (value: unknown): unknown[] | null =>
-  Array.isArray(value) && Object.keys(value).length === value.length ? (value as unknown[]) : null;
-
-const own = (holder: SequenceAttrs, key: string): unknown =>
-  Object.hasOwn(holder, key) ? holder[key] : undefined;
+const filled = (value: unknown): unknown[] | null => {
+  if (!Array.isArray(value)) return null;
+  const items: unknown[] = [];
+  for (let at = 0; at < value.length; at++) {
+    const held = Object.getOwnPropertyDescriptor(value, at);
+    if (!held || !("value" in held)) return null;
+    items.push(held.value);
+  }
+  return items;
+};
 
 const whole = (value: unknown): unknown =>
   typeof value === "bigint" &&
@@ -63,11 +74,15 @@ const finite = (value: unknown) => typeof value === "number" && Number.isFinite(
 const integerIn = (least: number, most: number) => (value: unknown) =>
   typeof value === "number" && Number.isInteger(value) && value >= least && value <= most;
 const span = integerIn(1, MAX_SPAN);
-const widths = (value: unknown) =>
-  value === null ||
-  (filled(value) !== null &&
-    (value as unknown[]).length <= MAX_SPAN &&
-    (value as unknown[]).every((width) => finite(width) && (width as number) >= 0));
+const widths = (value: unknown) => {
+  const held = filled(value);
+  return (
+    value === null ||
+    (held !== null &&
+      held.length <= MAX_SPAN &&
+      held.every((width) => finite(width) && (width as number) >= 0))
+  );
+};
 const side = (value: unknown) =>
   value === null || value === "left" || value === "right" || value === "center";
 const plain = (value: unknown) =>

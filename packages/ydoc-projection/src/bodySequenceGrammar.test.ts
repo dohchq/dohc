@@ -293,6 +293,11 @@ describe("reading any sequence", () => {
     sparse[1] = 20;
     const overAPrototype = Object.setPrototypeOf(sparse, Object.assign([], { 0: 100 })) as unknown;
     expect(cell([["c.colwidth", overAPrototype]]).colwidth).toBeNull();
+    const named = Object.assign(overAPrototype as object, { label: "x" });
+    expect(cell([["c.colwidth", named]]).colwidth).toBeNull();
+    expect(cell([["c.colwidth", Object.assign([20], { label: "x" })]]).colwidth).toEqual([20]);
+    const noMap = Object.defineProperty([20], "map", { value: 0 });
+    expect(cell([["c.colwidth", noMap]]).colwidth).toEqual([20]);
     const start = (value: unknown) =>
       read([["l.start", value]], ["l", "i"]).firstChild!.attrs.start as unknown;
     expect(start(7)).toBe(7);
@@ -378,6 +383,23 @@ describe("reading any sequence", () => {
     expect(marksOn({ bold: new Uint8Array([1]) })).toEqual([]);
     expect(marksOn({ bold: [] })).toEqual([]);
     expect(marksOn({ bold: new Map() })).toEqual([]);
+    expect(marksOn({ bold: Object.setPrototypeOf([], null) as unknown })).toEqual([]);
+  });
+
+  it("reads a mark's own values, whatever its prototype is and whatever a value does when read", () => {
+    const href = (link: unknown) =>
+      readBodyLeaves(schema, [
+        { type: "paragraph", attrs: {}, path: [], inline: [{ text: "x", marks: { link } }] },
+      ]).firstChild!.firstChild!.marks.map((mark) => mark.attrs.href as unknown);
+    expect(href(Object.setPrototypeOf({ href: "kept" }, { extra: 1 }))).toEqual(["kept"]);
+    expect(href(Object.setPrototypeOf({ href: "kept" }, [1]))).toEqual(["kept"]);
+    const throwing = Object.defineProperty({}, "href", {
+      enumerable: true,
+      get: () => {
+        throw new Error("read");
+      },
+    });
+    expect(href(throwing)).toEqual([null]);
   });
 
   it("ends a path at an id used twice, an id with no record, or one past 64 deep", () => {
@@ -394,6 +416,9 @@ describe("reading any sequence", () => {
     expect(depthOf(["q", "q", "l"])).toEqual(["q"]);
     expect(depthOf(["q", "missing", "l"])).toEqual(["q"]);
     expect(depthOf("q")).toEqual([]);
+    expect(depthOf(Object.defineProperty(["q"], "slice", { value: 0 }))).toEqual(["q"]);
+    const borrowed = Object.setPrototypeOf(Array(1), Object.assign([], { 0: "q" })) as object;
+    expect(depthOf(Object.assign(borrowed, { label: "x" }))).toEqual([]);
     const deep = new Map<string, unknown>();
     const ids = Array.from({ length: 70 }, (_, at) => `q${String(at)}`);
     for (const id of ids) deep.set(id, "blockquote");
