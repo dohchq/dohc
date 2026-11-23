@@ -1826,8 +1826,21 @@ const SPLIT_KINDS: (SequenceAttrs | undefined)[] = [
   { type: "codeBlock" },
 ];
 
-type Weights = { wraps: number; kindsOfTheFirstLine: number; inlines: number; undos: number };
-const EVEN: Weights = { wraps: 1, kindsOfTheFirstLine: 0, inlines: 1, undos: 0.16 };
+type Weights = {
+  wraps: number;
+  kindsOfTheFirstLine: number;
+  kindsOfBlocksWithMore: number;
+  inlines: number;
+  undos: number;
+};
+const EVEN: Weights = {
+  wraps: 1,
+  kindsOfTheFirstLine: 0,
+  kindsOfBlocksWithMore: 0,
+  inlines: 1,
+  undos: 0.16,
+};
+const WITH_MORE: Weights = { ...EVEN, kindsOfBlocksWithMore: 30 };
 const ONE_LINE: Weights = { ...EVEN, kindsOfTheFirstLine: 600, undos: 0.4 };
 const INLINES: Weights = { ...EVEN, inlines: 12, undos: 0.3 };
 
@@ -1836,7 +1849,7 @@ function change(
   next: () => number,
   letter: () => string,
   log: string[],
-  { wraps, kindsOfTheFirstLine, inlines }: Weights,
+  { wraps, kindsOfTheFirstLine, kindsOfBlocksWithMore, inlines }: Weights,
 ) {
   const pick = (below: number) => Math.floor(next() * below);
   const tried = (what: unknown[], run: () => boolean) => {
@@ -1919,6 +1932,7 @@ function change(
         return tried(["erase", at, offset, at, end], () => each.erase(at, offset, at, end));
       },
     ],
+    [3, () => tried(["erase", at, 0, at, length], () => each.erase(at, 0, at, length))],
     [
       4,
       () => {
@@ -2052,7 +2066,7 @@ function change(
       },
     ],
     [
-      6 + kindsOfTheFirstLine,
+      6 + kindsOfTheFirstLine + kindsOfBlocksWithMore,
       () => {
         const level = 1 + pick(3);
         const kind = [
@@ -2063,7 +2077,10 @@ function change(
           { type: "codeBlock" },
           { type: "codeBlock", language: "ts" },
         ][pick(6)]!;
-        const which = next() * (6 + kindsOfTheFirstLine) < 6 ? at : 0;
+        const roll = next() * (6 + kindsOfTheFirstLine + kindsOfBlocksWithMore);
+        const withMore = lines.findIndex((_, index) => lines[index + 1]?.bare === "spill");
+        const loaded = roll < 6 + kindsOfTheFirstLine || withMore < 0 ? 0 : withMore;
+        const which = roll < 6 ? at : loaded;
         return tried(["kind", which, json(kind)], () => each.kind(which, kind));
       },
     ],
@@ -2205,41 +2222,51 @@ it.each(SETUPS)(
   600_000,
 );
 
-const BREAKAGE_SEEDS = Number(process.env.BODY_CONTAINERS_BREAKAGE_SEEDS ?? 5);
-const BREAKAGES: [Fault, string, Weights?, number?][] = [
-  [FAULT.defaultMapUndo, "[3 undo]"],
-  [FAULT.noDeleteFilter, "[5 records] the record"],
-  [FAULT.recordsOnlyFilter, "[7 kind] a", ONE_LINE],
-  [FAULT.inlineAttributesKept, "[3 undo] undo passed over", INLINES],
-  [FAULT.typeRecordOnly, "[3 undo] or [4 settings]"],
-  [FAULT.defaultFirst, "[4 settings]"],
-  [FAULT.noLooseRecord, "[4 settings] asked for a"],
-  [FAULT.oldBoundaryAbove, "[writer] after a split"],
-  [FAULT.splitAlwaysParagraph, "[7 kind] after a split"],
-  [FAULT.oneRecordForTwins, "[writer] a setting changed on a container it was not made on"],
-  [FAULT.noKindDefaults, "[7 kind] after a"],
-  [FAULT.splitInsideLetter, "[2 letters] a letter changed"],
-  [FAULT.alwaysLowerBoundary, "[writer] after a join"],
+const BREAKAGE_SCALE = Number(process.env.BODY_CONTAINERS_BREAKAGE_SEEDS ?? 1);
+const NESTED = STARTS.indexOf(nestedNote);
+const TWINS = STARTS.indexOf(twinNote);
+type Breakage = [Fault, string, { seeds: number; weights?: Weights; start?: number }];
+const BREAKAGES: Breakage[] = [
+  [FAULT.defaultMapUndo, "[3 undo]", { seeds: 12 }],
+  [FAULT.noDeleteFilter, "[5 records] the record", { seeds: 3 }],
+  [FAULT.recordsOnlyFilter, "[7 kind] a", { seeds: 15, weights: ONE_LINE }],
+  [FAULT.inlineAttributesKept, "[3 undo] undo passed over", { seeds: 5, weights: INLINES }],
+  [FAULT.typeRecordOnly, "[3 undo] or [4 settings]", { seeds: 10 }],
+  [FAULT.defaultFirst, "[4 settings]", { seeds: 5 }],
+  [FAULT.noLooseRecord, "[4 settings] asked for a", { seeds: 2 }],
+  [FAULT.oldBoundaryAbove, "[writer] after a split", { seeds: 2 }],
+  [FAULT.splitAlwaysParagraph, "[7 kind] after a split", { seeds: 3 }],
+  [
+    FAULT.oneRecordForTwins,
+    "[writer] a setting changed on a container it was not made on",
+    { seeds: 5 },
+  ],
+  [FAULT.noKindDefaults, "[7 kind] after a", { seeds: 3 }],
+  [FAULT.splitInsideLetter, "[2 letters] a letter changed", { seeds: 8 }],
+  [FAULT.alwaysLowerBoundary, "[writer] after a join", { seeds: 12 }],
   [
     FAULT.twinsJoined,
     "[writer] a change made two containers that share an id read as one",
-    EVEN,
-    STARTS.indexOf(twinNote),
+    { seeds: 6, start: TWINS },
   ],
-  [FAULT.wrongSetting, "[4 settings] asked for"],
-  [FAULT.deleteAndRecreate, "[5 records] a writer deleted a record"],
-  [FAULT.copyKnownAttributes, "[4 settings] the fresh id"],
-  [FAULT.typingInheritsMarks, "[2 letters] letters typed with the marks"],
-  [FAULT.spillLeftBare, "[writer] after a change of kind", EVEN, STARTS.indexOf(nestedNote)],
-  [FAULT.addedParagraphBare, "[writer] after typing"],
+  [FAULT.wrongSetting, "[4 settings] asked for", { seeds: 2 }],
+  [FAULT.deleteAndRecreate, "[5 records] a writer deleted a record", { seeds: 2 }],
+  [FAULT.copyKnownAttributes, "[4 settings] the fresh id", { seeds: 3 }],
+  [FAULT.typingInheritsMarks, "[2 letters] letters typed with the marks", { seeds: 2 }],
+  [
+    FAULT.spillLeftBare,
+    "[writer] after a change of kind",
+    { seeds: 3, weights: WITH_MORE, start: NESTED },
+  ],
+  [FAULT.addedParagraphBare, "[writer] after typing", { seeds: 2 }],
 ];
 
 it.each(BREAKAGES)(
   "fails when broken on purpose with %s, at check %s",
-  (fault, check, weights, start) => {
+  (fault, check, { seeds: few, weights, start }) => {
     const fired = new Map<string, number>();
     let asExpected = 0;
-    const seeds = BREAKAGE_SEEDS * (weights === ONE_LINE ? 3 : 1);
+    const seeds = Math.ceil(few * BREAKAGE_SCALE);
     for (let seed = 1; seed <= seeds; seed++)
       for (const [count, arrive, rounds, busiest] of SETUPS) {
         try {
