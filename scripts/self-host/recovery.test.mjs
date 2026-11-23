@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { parseRecoveryArguments, runRecovery } from "./recovery.mjs";
+import { readFileSync } from "node:fs";
+import { parseEnv } from "node:util";
+import { initialSettings } from "../../tools/self-host/bootstrap.mjs";
+import { apnsKeyTarget } from "../../tools/self-host/config.mjs";
+import { archiveDeployment } from "./archive.mjs";
+import { parseRecoveryArguments, recoveryComposeArgs, runRecovery } from "./recovery.mjs";
 
 const config = {
   name: "recovery-test",
@@ -48,6 +53,7 @@ function runner({
   missingVolume = false,
   mounts = [{ Type: "volume", Name: "recovery_data", RW: true }],
   volumes = {},
+  served = config,
   running = "sync-relay\nshare-web\n",
 } = {}) {
   const calls = [];
@@ -56,7 +62,7 @@ function runner({
     calls,
     run(args) {
       calls.push(args);
-      if (args.includes("config")) return JSON.stringify(config);
+      if (args.includes("config")) return JSON.stringify(served);
       if (args[0] === "volume" && args[1] === "inspect") {
         if (missingVolume) throw new Error("missing deployment volume");
         return JSON.stringify(
@@ -503,4 +509,128 @@ test("a same-project orphan writer is refused after stop", async (t) => {
     mock.calls.some((args) => args.includes("run")),
     false,
   );
+});
+
+test("an archive keeps bound configuration files but leaves out the APNs auth key", async (t) => {
+  const root = await fixture(t);
+  const ca = join(root, "postgres-ca.pem"),
+    key = join(root, "AuthKey_KEY1234567.p8"),
+    envFile = join(root, ".env.self-host");
+  await writeFile(ca, "provider CA");
+  await writeFile(key, "apple signing key");
+  await writeFile(envFile, `DOHC_RELAY_APNS_KEY_FILE=${key}\n`);
+  const bind = (source, target) => ({ type: "bind", source, target, read_only: true });
+  const archived = {
+    name: "archive-test",
+    services: {
+      "sync-relay": {
+        image: "image",
+        volumes: [bind(ca, "/etc/dohc/postgres-ca.pem"), bind(key, apnsKeyTarget)],
+      },
+      "workspace-api": {
+        image: "image",
+        volumes: [bind(ca, "/etc/dohc/postgres-ca.pem"), bind(key, "/run/override/apns.p8")],
+      },
+    },
+    volumes: {},
+  };
+  const directory = join(root, "archive");
+  await archiveDeployment({ directory, envFile }, archived, () => "[]");
+  const manifest = JSON.parse(await readFile(join(directory, "archive.json"), "utf8"));
+  assert.deepEqual(
+    manifest.files.filter((file) => file.source).map((file) => file.source),
+    [ca],
+  );
+  for (const name of await readdir(directory))
+    assert.ok(!(await readFile(join(directory, name), "utf8")).includes("apple signing key"), name);
+  assert.ok(
+    manifest.limitations.includes(
+      `Leaves out the APNs auth key ${key}. Keep your own copy: Apple lets you download it only once.`,
+    ),
+  );
+});
+
+test("an archive refuses an APNs auth key inside the deployment's storage before it stops anything", async (t) => {
+  const root = await fixture(t),
+    key = "/mnt/disk/dohc/sync-relay/apns-key.p8";
+  const mock = runner({
+    served: {
+      ...config,
+      services: {
+        "sync-relay": {
+          ...config.services["sync-relay"],
+          volumes: [{ type: "bind", source: key, target: apnsKeyTarget, read_only: true }],
+        },
+      },
+    },
+  });
+  await assert.rejects(
+    runRecovery(parseRecoveryArguments(["archive", join(root, "archive")]), mock.run, () => {}, [
+      "compose",
+    ]),
+    new RegExp(`The APNs auth key ${key} is inside the deployment's storage`),
+  );
+  assert.equal(
+    mock.calls.some((args) => args.includes("stop")),
+    false,
+  );
+});
+
+test(
+  "an archive refuses a link to an APNs auth key inside the deployment's storage",
+  { skip: process.platform === "win32" && "Links need administrator rights on Windows." },
+  async (t) => {
+    const root = await fixture(t),
+      folder = join(root, "disk", "sync-relay"),
+      link = join(root, "apns-key.p8");
+    await mkdir(folder, { recursive: true });
+    await writeFile(join(folder, "apns-key.p8"), "apple signing key");
+    await symlink(join(folder, "apns-key.p8"), link);
+    const mock = runner({
+      volumes: { recovery_data: bound(folder) },
+      served: {
+        ...config,
+        services: {
+          "sync-relay": {
+            ...config.services["sync-relay"],
+            volumes: [{ type: "bind", source: link, target: apnsKeyTarget, read_only: true }],
+          },
+        },
+      },
+    });
+    await assert.rejects(
+      runRecovery(parseRecoveryArguments(["archive", join(root, "archive")]), mock.run, () => {}, [
+        "compose",
+      ]),
+      /is inside the deployment's storage/,
+    );
+  },
+);
+
+test("offline verify needs no APNs auth key, and every other command does", async (t) => {
+  const root = await fixture(t),
+    envFile = join(root, "drive.env");
+  const settings = {
+    ...parseEnv(readFileSync(".env.self-host.example", "utf8")),
+    ...initialSettings({ origin: "https://dohc.team.invalid", image: "dohc-self-host:v1" }),
+    DOHC_SMTP_HOST: "mail.team.invalid",
+    DOHC_SMTP_FROM: "dohc@team.invalid",
+    DOHC_RELAY_APNS_TOPIC: "app.dohc.mobile",
+    DOHC_RELAY_APNS_ENVIRONMENTS: "production",
+    DOHC_RELAY_APNS_KEY_FILE: "/etc/dohc/missing-apns-key.p8",
+    DOHC_RELAY_APNS_KEY_ID: "KEY1234567",
+    DOHC_RELAY_APNS_TEAM_ID: "TEAM123456",
+  };
+  await writeFile(
+    envFile,
+    Object.entries(settings)
+      .map(([name, value]) => `${name}='${value}'\n`)
+      .join(""),
+  );
+  const options = (action, ...args) =>
+    parseRecoveryArguments([action, join(root, "out"), ...args, "--env-path", envFile]);
+  const verify = recoveryComposeArgs(options("verify", "--snapshot", join(root, "taken")));
+  assert.ok(!verify.includes("tools/self-host/compose.apns.yml"));
+  for (const action of ["backup", "archive", "snapshot"])
+    assert.throws(() => recoveryComposeArgs(options(action)), /DOHC_RELAY_APNS_KEY_FILE/, action);
 });

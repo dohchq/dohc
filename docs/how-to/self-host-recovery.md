@@ -284,6 +284,8 @@ This includes authentication, relay, live-host, continuity and TLS data declared
 With an [external database](self-host.md#keep-accounts-in-an-external-postgres), the archive does not include accounts.
 It also saves the environment, resolved Compose configuration, bound configuration files and image identities.
 Bound directories are refused because this procedure does not define their backup scope.
+It leaves out the [APNs auth key](self-host.md#send-iphone-alerts), and `archive.json` names the file it left out.
+Keep your own copy of the key: Apple lets you download it only once.
 The command resumes previously running services after success.
 
 Restrict the archive to the server operator.
@@ -400,6 +402,7 @@ Also remove the old host's address from your provider's allowlist, or change the
 
 1. Prepare the new host as described in [Set up a dohc server](self-host.md#prepare-the-host).
 2. Copy the release bundle and `.env.self-host` to the new host, then load the release image.
+   If `DOHC_RELAY_APNS_KEY_FILE` is set, restore the APNs auth key from your own copy to that path, as in [Send iPhone alerts](self-host.md#send-iphone-alerts), with root as owner, group 1000, and mode 0640.
 3. With an external database, copy its CA certificate to the path that `DOHC_POSTGRES_CA_FILE` names, and skip the rest of this step.
    If your provider limits which addresses can connect, allow the new host's address.
    Otherwise, from the folder that holds `dohc-accounts`, restore the accounts volume under the same name:
