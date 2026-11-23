@@ -251,7 +251,7 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["path", "sourceVersionId", "targetVersionId"],
     optionalStrings: ["workspaceId"],
   },
-  [VERSIONED_METHOD.orderFileSteps]: {},
+  [VERSIONED_METHOD.orderFileSteps]: { optionalJson: ["steps"] },
   [VERSIONED_METHOD.versionsCompareFiles]: {
     requiredStrings: ["sourceVersionId", "targetVersionId"],
     optionalStrings: ["workspaceId", "afterPath"],

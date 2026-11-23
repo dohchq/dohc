@@ -250,6 +250,36 @@ async function fixture(
 }
 
 describe("agent moves and deletes", () => {
+  it("puts the access marker first when rolling back a folder move", async () => {
+    const renames: string[] = [];
+    const f = await fixture({
+      beforeRequest(request) {
+        if (request.method !== VERSIONED_METHOD.textRename) return;
+        const { fromPath, toPath } = request.params as { fromPath: string; toPath: string };
+        if (fromPath === "source/z.md") throw new Error("Move stopped");
+        renames.push(toPath);
+      },
+    });
+    try {
+      await write(f.rootPath, "source/.dohc-access", "rule fr_1\n");
+      await write(f.rootPath, "source/a.md", "first");
+      await write(f.rootPath, "source/z.md", "last");
+      await f.start();
+      expect(await f.move("source", "target")).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("Move stopped"),
+      });
+      expect(renames).toEqual([
+        "target/.dohc-access",
+        "target/a.md",
+        "source/.dohc-access",
+        "source/a.md",
+      ]);
+    } finally {
+      await f.engine().stop();
+    }
+  });
+
   it("stages the source when the filesystem refuses an exclusive rename", async () => {
     const requests: string[] = [];
     const f = await fixture({

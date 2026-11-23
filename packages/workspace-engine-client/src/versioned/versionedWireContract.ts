@@ -208,8 +208,6 @@ type VersionsCompareParams = JsonObject & {
   targetVersionId: string;
 };
 
-type OrderFileStepsParams = JsonObject & { steps: { path: string; delete: boolean }[] };
-
 type VersionsCompareFilesParams = JsonObject & {
   workspaceId?: string;
   sourceVersionId: string;
@@ -479,7 +477,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.versionsMerge]: VersionsMergeParams;
   [VERSIONED_METHOD.versionsCompare]: VersionsCompareParams;
   [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesParams;
-  [VERSIONED_METHOD.orderFileSteps]: OrderFileStepsParams;
+  [VERSIONED_METHOD.orderFileSteps]: JsonObject & { steps: { path: string; delete: boolean }[] };
   [VERSIONED_METHOD.secretsWrite]: SecretsWriteParams;
   [VERSIONED_METHOD.secretsList]: SecretsListParams;
   [VERSIONED_METHOD.secretsStateExists]: WorkspaceOnlyParams;

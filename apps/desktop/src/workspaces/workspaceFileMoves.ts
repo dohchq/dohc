@@ -1172,8 +1172,9 @@ async function undoMove(
     const notBack = await placeBack(rootPath, trashed, source);
     where = () => (notBack.length ? "trash" : "source");
   }
-  for (const file of [...fromFiles].reverse()) {
-    if (!recorded.has(file)) continue;
+  const restored = [...recorded].filter((file) => where(file) !== "trash");
+  const retired = [...recorded].reverse().filter((file) => where(file) === "trash");
+  for (const file of [...restored, ...retired]) {
     const renamed = change.renamed.includes(file);
     const now = where(file);
     if (now === "source" && renamed)
