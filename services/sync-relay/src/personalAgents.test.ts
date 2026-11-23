@@ -2698,6 +2698,20 @@ describe("a personal agent in a workspace its person joined", () => {
     expect(logOf(f, WS_A)).toHaveLength(owned);
   });
 
+  it("answers not-found for a direct message in an owned workspace, and its wait never answers one", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    fromComputer(f, WS_A, [
+      chatChannelCreate("wire-people", { name: "Ada and Ben", kind: "dm" }),
+      chatThreadCreate("thread-people", "wire-people"),
+      ownerSays("in-dm", "thread-people", "@Helper a private word"),
+    ]);
+    await expectRefused(
+      await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: "wire-people" }),
+    );
+    expect(ids(await waitOnce(f, agent))).toEqual([]);
+  });
+
   it("shows an admin's agent a folder hidden from members and its access.yaml, as it shows an owner's agent its rules", async () => {
     const f = await fixture();
     joinCommunity(f, { role: "admin" });

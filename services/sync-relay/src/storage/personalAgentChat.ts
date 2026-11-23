@@ -174,9 +174,10 @@ export type ChannelCreateKind = ReturnType<typeof findChannelCreateKind>;
 
 /**
  * A channel's level for the agent, or null where it reaches no such channel.
- * A Group takes the agent's capped reach. In an owned workspace General and
- * the agent's own chat take its level, and any other channel, a person's DM
- * or another agent's chat, View. A joined workspace has no other channel.
+ * A Group takes the agent's capped reach. A direct message stays private to
+ * its two people, so no agent reaches one. In an owned workspace General and
+ * the agent's own chat take its level, and another agent's chat View. A
+ * joined workspace has no other channel.
  */
 export function personalChannelLevel(
   reach: PersonalReach,
@@ -184,7 +185,7 @@ export function personalChannelLevel(
   kind: ChannelCreateKind,
   agentId: string,
 ): ShareAccess | null {
-  if (!kind) return null;
+  if (!kind || kind === "dm") return null;
   if (isWorkspaceGroup(channelWireId, kind)) return reach.selector.reach.groupLevel(channelWireId);
   if (!reach.owned) return null;
   return channelWireId === GENERAL_CHANNEL_WIRE_ID ||
