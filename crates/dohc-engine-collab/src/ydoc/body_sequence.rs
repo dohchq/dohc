@@ -405,10 +405,10 @@ impl Budget<'_> {
     ) -> ProjectionResult<MarkdownMark> {
         self.node(depth)?;
         let attrs = self.attributes(name, depth, |key| stored.get(key).cloned())?;
-        Ok(MarkdownMark {
+        Ok(MarkdownMark::new(
             kind,
-            attrs: Value::Object(attrs.into_iter().collect()),
-        })
+            Value::Object(attrs.into_iter().collect()),
+        ))
     }
 
     fn marks(&mut self, stored: &Formatting, depth: usize) -> ProjectionResult<Marks> {
@@ -1058,10 +1058,10 @@ mod tests {
             MarkKind::Strike => "strike",
             MarkKind::Underline => "underline",
         };
-        if mark.attrs == json!({}) {
+        if *mark.attrs == json!({}) {
             json!({ "type": name })
         } else {
-            json!({ "type": name, "attrs": mark.attrs })
+            json!({ "type": name, "attrs": *mark.attrs })
         }
     }
 
