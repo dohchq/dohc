@@ -533,7 +533,7 @@ export function createPersonalAgentToolRoutes(input: {
   }
 
   // The workspace's current files on its main version that the reach reads.
-  // Rule files reach only an owner's or an admin's agent.
+  // Folder markers reach no agent.
   function files(authority: PersonalAuthority, body: Record<string, unknown>): Response {
     fields(body, ["workspaceId"], []);
     const workspaceId = parseWorkspaceId(body.workspaceId);
