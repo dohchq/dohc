@@ -93,6 +93,11 @@ describe("parseAccessRule", () => {
     expect(parseAccessRule(`members: view\n#${"x".repeat(64 * 1024)}\n`)).toBeNull();
   });
 
+  it("refuses an email that grows past the length cap when lowercased", () => {
+    // "İ" lowercases to "i" and a combining dot, so 162 characters become 322.
+    expect(parseAccessRule(`people:\n  ${"İ".repeat(160)}@x: view\n`)).toBeNull();
+  });
+
   it("reads back what it formats, quoting a key that would read as something else", () => {
     const parsed = rule("people:\n  sam@example.com: edit\nmembers: comment\n");
     expect(parseAccessRule(formatAccessRule(parsed)!)).toEqual(parsed);
