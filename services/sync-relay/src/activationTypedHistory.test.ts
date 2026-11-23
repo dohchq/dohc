@@ -24,6 +24,7 @@ import {
   ServiceActivationStaleCut,
 } from "./storage/ordinaryActivationSource.js";
 import { SERVICE_ACTIVATIONS } from "./storage/serviceActivationSchema.js";
+import { pauseLiveRoom } from "./storage/liveRoomPauses.js";
 import { releaseRetiredLiveDelivery } from "./storage/liveDeliveryReservations.js";
 import { serverLogLine } from "./serverLogWords.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
@@ -419,10 +420,7 @@ const liveDocumentRows = (note: TypedRelayNote) =>
     )
     .all();
 
-it("a note whose text was replaced while it was off goes live on its new lineage", async () => {
-  const note = await typedRelayNote(100);
-  const validate = validation();
-  expect((await activate(note, validate)).outcome).toMatchObject({ replayed: false });
+function retire(note: Awaited<ReturnType<typeof typedRelayNote>>) {
   note.raw
     .prepare(
       `UPDATE ${SERVICE_ACTIVATIONS} SET retire_requested_at_ms=3,retire_restore_generation=1,retire_accepted_cursor=0,
@@ -434,6 +432,13 @@ it("a note whose text was replaced while it was off goes live on its new lineage
     note.document,
     note.host.hostId,
   );
+}
+
+it("a note whose text was replaced while it was off goes live on its new lineage", async () => {
+  const note = await typedRelayNote(100);
+  const validate = validation();
+  expect((await activate(note, validate)).outcome).toMatchObject({ replayed: false });
+  retire(note);
   const replaced = replacedLineage(note);
   expect((await activate(note, validate, replaced.capture)).outcome).toEqual({
     document: replaced.document,
@@ -463,6 +468,26 @@ it("a note on a new lineage waits while its last live session is still open", as
   const before = liveDocumentRows(note);
   const replaced = replacedLineage(note);
   expect((await activate(note, validate, replaced.capture)).outcome).toBeInstanceOf(
+    ServiceActivationLineageEnding,
+  );
+  expect(liveDocumentRows(note)).toEqual(before);
+});
+
+it("a paused note on a new lineage waits until its owner resumes the pause", async () => {
+  const note = await typedRelayNote(100);
+  const validate = validation();
+  expect((await activate(note, validate)).outcome).toMatchObject({ replayed: false });
+  retire(note);
+  pauseLiveRoom(note.deployment.storage as unknown as StorageContext, {
+    document: note.document,
+    cause: "failing",
+    refusal: null,
+    named: [],
+    copy: new Uint8Array([1]),
+    pausedAtMs: 4,
+  });
+  const before = liveDocumentRows(note);
+  expect((await activate(note, validate, replacedLineage(note).capture)).outcome).toBeInstanceOf(
     ServiceActivationLineageEnding,
   );
   expect(liveDocumentRows(note)).toEqual(before);

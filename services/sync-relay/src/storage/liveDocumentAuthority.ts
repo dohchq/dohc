@@ -17,6 +17,7 @@ import {
 } from "./ordinaryActivationSource";
 import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { LIVE_ROOM_EDITS } from "./liveRoomEdits";
+import { LIVE_ROOM_PAUSES } from "./liveRoomPauses";
 import { readOrdinaryActivationBasis } from "./ordinaryActivationBasis";
 import {
   allowsServiceActivation,
@@ -1592,8 +1593,12 @@ function lastLineageEnding(storage: StorageContext, document: LiveDocumentKey): 
     storage.db
       .prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND retired_at_ms IS NULL
         UNION ALL SELECT 1 FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=? AND object_id=?
+        UNION ALL SELECT 1 FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=? AND object_id=?
         UNION ALL SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND state<>'starting' LIMIT 1`)
       .get(
+        workspaceId,
+        mainVersionId,
+        objectId,
         workspaceId,
         mainVersionId,
         objectId,
