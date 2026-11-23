@@ -64,6 +64,18 @@ function hashEvalAppSources(
   );
 }
 
+const EVAL_JAVASCRIPT_SCRIPT_TYPE =
+  /^(?:text\/(?:javascript|ecmascript|jscript|x-javascript|x-ecmascript)|application\/(?:javascript|ecmascript))$/i;
+
+/** Matches desktop closedAppPage scriptKind so inert data blocks and nomodule scripts are skipped. */
+export function isEvalExecutableScriptTag(attrs: string): boolean {
+  const typeMatch = /\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i.exec(attrs);
+  const type = (typeMatch?.[1] ?? typeMatch?.[2] ?? typeMatch?.[3] ?? "").trim();
+  if (type.toLowerCase() === "module") return true;
+  if (type !== "" && !EVAL_JAVASCRIPT_SCRIPT_TYPE.test(type.split(";", 1)[0]!.trim())) return false;
+  return !/\bnomodule(?:\s*=|\s|$)/i.test(attrs);
+}
+
 /** Checks script syntax using file-extension-specific JS/JSX/TS/TSX parsing matching desktop esbuild loaders. */
 export function checkEvalScriptSyntax(source: string, path: string): string | null {
   const lower = path.toLowerCase();
@@ -1609,6 +1621,7 @@ export async function createEverydayDesktop(
         for (const match of entryHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
           const attrs = match[1] ?? "";
           const body = match[2] ?? "";
+          if (!isEvalExecutableScriptTag(attrs)) continue;
           const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
           if (srcMatch?.[1]) {
             const rawSrc = srcMatch[1].trim();

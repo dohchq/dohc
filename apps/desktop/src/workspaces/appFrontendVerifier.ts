@@ -7,6 +7,7 @@ import {
   type AppBackendRuntimeOptions,
   type JsonValue,
 } from "@dohc/app-backend-runtime";
+import { orderedRequestIds } from "@dohc/app-backend-runtime/supervisor";
 import {
   OwnerAppPublicationRequest,
   OwnerAppPublicationResult,
@@ -318,7 +319,7 @@ export async function verifyLocalAppFrontend(
   let compiledDatasetSource = "";
   let currentDb: Uint8Array | undefined;
   let dbRevision = 0;
-  let opSeq = 0;
+  const nextRequestId = orderedRequestIds();
   let datasetChain: Promise<void> = Promise.resolve();
   const datasetReceipts = new Map<
     string,
@@ -429,6 +430,32 @@ export async function verifyLocalAppFrontend(
             "This action is not approved for the app.",
           );
         }
+        const restricted = capability.createFields?.find(
+          (entry) => entry.operationId === operation.operationId,
+        );
+        if (restricted) {
+          const reqInput = parsed.input;
+          if (
+            !reqInput ||
+            typeof reqInput !== "object" ||
+            Array.isArray(reqInput) ||
+            Object.keys(reqInput).length !== 1 ||
+            !Object.hasOwn(reqInput, "values") ||
+            !reqInput.values ||
+            typeof reqInput.values !== "object" ||
+            Array.isArray(reqInput.values) ||
+            Object.keys(reqInput.values).some((fieldId) => !restricted.fieldIds.includes(fieldId))
+          ) {
+            failBackend(
+              "backend.invoke",
+              parsed.operation,
+              "operation_not_approved",
+              `Operation "${parsed.operation}" submitted fields outside app.publish.json dataset.createFields.`,
+              "Submit only the approved fieldIds under input.values, or update dataset.createFields in app.publish.json.",
+              "This form cannot submit those fields.",
+            );
+          }
+        }
         const runSerialized = datasetChain
           .catch(() => {})
           .then(async () => {
@@ -456,7 +483,7 @@ export async function verifyLocalAppFrontend(
                   caller: { kind: "owner", userId: "verify-owner" },
                   input: parsed.input,
                   nowMs: Date.now(),
-                  requestId: `verify-${++opSeq}`,
+                  requestId: nextRequestId(),
                   database: currentDb!,
                   tables: resolvedDataset!.revision.definition.tables.map((table) => table.sqlName),
                   readOnly: operation.readOnly,

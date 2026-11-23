@@ -22,6 +22,7 @@ import {
   checkEvalScriptSyntax,
   computeEvalAppSourceRevision,
   createEverydayDesktop,
+  isEvalExecutableScriptTag,
 } from "./everydayDesktop";
 
 const WS = "ws-everyday";
@@ -1402,6 +1403,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           for (const match of entryHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
             const attrs = match[1] ?? "";
             const body = match[2] ?? "";
+            if (!isEvalExecutableScriptTag(attrs)) continue;
             const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
             if (srcMatch?.[1]) {
               const rawSrc = srcMatch[1].trim();

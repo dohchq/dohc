@@ -545,6 +545,221 @@ describe("verifyLocalAppFrontend", () => {
     expect(unconnectedResult.ok).toBe(false);
   });
 
+  it("enforces dataset createFields restrictions and monotonic UUIDv7 request IDs in dry-run", async () => {
+    const controller = new AbortController();
+    const idField = uuid("b9100000", 3);
+    const nameField = uuid("b9100000", 4);
+    const notesField = uuid("b9100000", 5);
+    const createOpId = uuid("b9100000", 6);
+    const listOpId = uuid("b9100000", 7);
+    const formDef: DatasetDefinition = {
+      formatVersion: 1,
+      datasetId: uuid("b9100000", 1),
+      name: "Signups",
+      schemaPath: "signups/schema.sql",
+      operationsPath: "signups/backend.ts",
+      tables: [
+        {
+          tableId: uuid("b9100000", 2),
+          name: "Guests",
+          sqlName: "guests",
+          primaryKey: "id",
+          fields: [
+            {
+              fieldId: idField,
+              name: "ID",
+              sqlColumn: "id",
+              type: "text",
+              required: true,
+              unique: true,
+            },
+            {
+              fieldId: nameField,
+              name: "Name",
+              sqlColumn: "name",
+              type: "text",
+              required: true,
+              unique: false,
+            },
+            {
+              fieldId: notesField,
+              name: "Notes",
+              sqlColumn: "notes",
+              type: "text",
+              required: false,
+              unique: false,
+            },
+          ],
+        },
+      ],
+      operations: [
+        {
+          operationId: createOpId,
+          name: "createGuest",
+          label: "Create guest",
+          tableId: uuid("b9100000", 2),
+          kind: "create",
+          access: "link",
+          readOnly: false,
+          fieldIds: [nameField, notesField],
+        },
+        {
+          operationId: listOpId,
+          name: "listGuests",
+          label: "List guests",
+          tableId: uuid("b9100000", 2),
+          kind: "read",
+          access: "owner",
+          readOnly: true,
+          fieldIds: [idField, nameField, notesField],
+        },
+      ],
+    };
+    const formSchema = `CREATE TABLE "guests" ("id" TEXT PRIMARY KEY NOT NULL, "name" TEXT NOT NULL, "notes" TEXT);`;
+    const formBackend = `globalThis.operations = {
+      createGuest(ctx, input) {
+        const values = input?.values ?? {};
+        const name = String(values[${JSON.stringify(nameField)}] ?? "");
+        const notes = values[${JSON.stringify(notesField)}] ?? null;
+        ctx.db.execute("INSERT INTO guests(id, name, notes) VALUES(?, ?, ?)", [ctx.requestId, name, notes]);
+        return { id: ctx.requestId };
+      },
+      listGuests(ctx) {
+        return { rows: ctx.db.query("SELECT id, name, notes FROM guests ORDER BY id") };
+      },
+    };`;
+    const formRev: DatasetRevision = (() => {
+      const draft: DatasetRevision = {
+        datasetId: formDef.datasetId,
+        revision: 1,
+        revisionSha256: "0".repeat(64),
+        definitionSha256: sha(datasetDefinitionDigestContent(formDef)),
+        schemaSha256: sha(formSchema),
+        operationsSha256: sha(formBackend),
+        definition: formDef,
+      };
+      draft.revisionSha256 = sha(datasetRevisionDigestContent(draft));
+      return draft;
+    })();
+    const files: Record<string, string> = {
+      "signups/dataset.json": JSON.stringify(formDef),
+      "apps/signup/app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "index.html",
+        inputs: ["index.html"],
+        packageMap: {},
+        dataset: {
+          kind: "dataset",
+          datasetPath: "signups/dataset.json",
+          revision: 1,
+          revisionSha256: formRev.revisionSha256,
+          operationIds: [createOpId, listOpId],
+          createFields: [{ operationId: createOpId, fieldIds: [nameField] }],
+        },
+      }),
+      "apps/signup/index.html": "<!doctype html><h1>Signup</h1>",
+    };
+
+    const result = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/signup" },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: async (work) => work(makeMemoryAdapter(files)),
+        compile: (req) => compileClosedApp(req),
+        compileDataset: (src, path) => compileDatasetOperations(src, path),
+        datasetRuntime: {},
+        approvedArtifacts: async () => ({
+          revision: formRev,
+          schemaSql: formSchema,
+          operationSource: formBackend,
+          active: true,
+        }),
+        verificationPublication: vi.fn(),
+        runBrowser: async (browserInput) => {
+          const started = await browserInput.startSession();
+          try {
+            const { backend } = await exchangeLaunchProof(started.url);
+
+            const unapprovedField = await backend({
+              id: "f-bad-1",
+              op: "backend.invoke",
+              operation: "createGuest",
+              idempotencyKey: "bad-field",
+              input: { values: { [nameField]: "Ada", [notesField]: "VIP" } },
+            });
+            expect(unapprovedField.status).toBe(404);
+            expect(browserInput.consumeBackendHint("backend.invoke", "createGuest")).toMatchObject({
+              reasonCode: "operation_not_approved",
+              diagnosticCode: "broker_operation_not_approved",
+            });
+
+            const badShape = await backend({
+              id: "f-bad-2",
+              op: "backend.invoke",
+              operation: "createGuest",
+              idempotencyKey: "bad-shape",
+              input: { [nameField]: "Ada" },
+            });
+            expect(badShape.status).toBe(404);
+            expect(browserInput.consumeBackendHint("backend.invoke", "createGuest")).toMatchObject({
+              reasonCode: "operation_not_approved",
+              diagnosticCode: "broker_operation_not_approved",
+            });
+
+            const expectedNames: string[] = [];
+            for (let i = 1; i <= 12; i++) {
+              const name = `guest-${i}`;
+              expectedNames.push(name);
+              const res = await backend({
+                id: `c-${i}`,
+                op: "backend.invoke",
+                operation: "createGuest",
+                idempotencyKey: `k-${i}`,
+                input: { values: { [nameField]: name } },
+              });
+              expect(res.status).toBe(200);
+            }
+            const listed = await backend({
+              id: "l-all",
+              op: "backend.invoke",
+              operation: "listGuests",
+              idempotencyKey: "k-list",
+              input: {},
+            });
+            expect(listed.status).toBe(200);
+            const body = (await listed.json()) as {
+              result: { rows: Array<{ id: string; name: string }> };
+            };
+            expect(body.result.rows.map((row) => row.name)).toEqual(expectedNames);
+            for (const row of body.result.rows) {
+              expect(row.id).toMatch(
+                /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+              );
+            }
+          } finally {
+            await started.stop();
+          }
+          return {
+            ok: true,
+            stage: "complete",
+            startupOk: true,
+            stepsOk: true,
+            handshake: { delivered: true, messageCount: 15 },
+            brokerCalls: [],
+            steps: [],
+            diagnostics: [],
+            externalRequestsBlocked: 0,
+          };
+        },
+      },
+    );
+    expect(result.ok).toBe(true);
+  });
+
   it("matches overlapping backend expectations using complete one-to-one bipartite matching", () => {
     const calls = [
       { op: "backend.invoke" as const, operation: "load", status: 200, ok: true },

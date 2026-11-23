@@ -792,7 +792,7 @@ describe("eval cases", () => {
               packageMap: {},
             }),
             "nested-ts-enum-app/ui/index.html":
-              '<!doctype html><div id="booking:status">ok</div><script type="module" src="./app.ts"></script>\n',
+              '<!doctype html><div id="booking:status">ok</div><script type="application/json">{"stop":"Kyoto"}</script><script nomodule src="./legacy.js"></script><script type="module" src="./app.ts"></script>\n',
             "nested-ts-enum-app/ui/app.ts": "export enum SeatState { Open = 'open' }\n",
             "nested-ts-enum-app/app.publish.json": JSON.stringify({
               version: 1,
@@ -1069,6 +1069,26 @@ describe("eval cases", () => {
         expect(injVerifications["apps/booking"]?.mode).toBe("observed");
         const injChecks = await grade(bookingCase.expect, injRun, bookingCase.gradeRun);
         expect(injChecks.filter((c) => !c.pass)).toEqual([]);
+
+        // Inert JSON data blocks in index.html must not trigger JS syntax failures in the booking grader.
+        const withJsonDataBlock: RunRecord = {
+          ...injRun,
+          files: {
+            ...injRun.files,
+            "apps/booking/index.html": `${injRun.files["apps/booking/index.html"]}<script type="application/json">{"stop":"Kyoto"}</script>`,
+          },
+        };
+        const jsonDataChecks = await grade(
+          bookingCase.expect,
+          withJsonDataBlock,
+          bookingCase.gradeRun,
+        );
+        const bookingFrontendCheck = jsonDataChecks.find(
+          (c) =>
+            c.name ===
+            "apps/booking frontend provides booking controls wired to dohc-app-channel bookSeat",
+        );
+        expect(bookingFrontendCheck?.pass).toBe(true);
 
         // Mid-verify workspace edit must invalidate the observed sourceRevision binding.
         const raceVerifications: Record<string, FrontendVerificationRecord> = {};
