@@ -779,7 +779,7 @@ it("gives an agent link on Add agent and Sign in again in a joined workspace, na
   );
 });
 
-it("shows a workspace whose membership ended with Remove, and says why in a toast when Remove fails", async () => {
+it("shows a workspace whose membership ended with Remove, and says why in a toast with no Try again when Remove fails", async () => {
   bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [joinedAccount()] });
   const { onError } = renderList();
   await waitFor(() => expect(personalIds().length).toBeGreaterThan(0));
@@ -824,16 +824,17 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
   act(() =>
     answer({
       ok: false,
-      error: "dohc could not remove Old club from Grok Bot's reach. Check your connection.",
+      error: "What Grok Bot can reach changed. Check it and save again.",
     }),
   );
   await waitFor(() => expect(remove.disabled).toBe(false));
   expect(remove.textContent).toBe("Remove");
   expect(document.activeElement).toBe(remove);
+  // The refused change named a stale revision, so trying it again would fail again.
   expect(onError).toHaveBeenCalledWith(
-    "dohc could not remove Old club from Grok Bot's reach. Check your connection.",
+    "What Grok Bot can reach changed. Check it and save again.",
     undefined,
-    expect.any(Function),
+    undefined,
   );
   // Once the relay drops it, the row goes. A Remove the person left keeps no claim on focus.
   remove.focus();

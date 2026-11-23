@@ -1091,10 +1091,18 @@ export function AgentList(props: {
     what: string,
   ): Promise<boolean> => {
     const result = await changePersonalAgent(entry.account, entry.agent, next, what);
+    // A reach change carries the roster revision it was made from, and once the
+    // relay refuses that revision the same change fails again. Its Remove stays.
     if (!result.ok)
-      onError?.(result.error, undefined, async () => {
-        await changePersonal(entry, next, what);
-      });
+      onError?.(
+        result.error,
+        undefined,
+        next.kind === "reach"
+          ? undefined
+          : async () => {
+              await changePersonal(entry, next, what);
+            },
+      );
     return result.ok;
   };
   const removePersonal = async (entry: PersonalEntry) => {
