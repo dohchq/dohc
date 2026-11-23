@@ -1336,13 +1336,17 @@ fn capture_manifest_seeds_a_placed_folder_marker_whoever_wrote_it() {
         .write_with(&NO_FAULTS, |tx| {
             write_text_in_tx(tx, &write("team/.dohc-access", "obj-placed-marker"))?;
             write_text_in_tx(tx, &write("team/notes.md", "obj-synced-note"))?;
-            // Both files reached disk.
+            write_text_in_tx(tx, &write("crew/.DOHC-ACCESS", "obj-waiting-marker"))?;
+            // A merge or restore writes its marker to disk through a job.
             tx.execute(
-                "DELETE FROM materialization_jobs WHERE workspace_id = ?1",
+                "INSERT INTO materialization_jobs (job_id, workspace_id, target_path, \
+                 content_sha256, preimage_present, preimage_sha256, target_generation, status, \
+                 created_at_ms, completed_at_ms, operation) \
+                 SELECT 'mutation-mat_waiting', ?1, 'crew/.DOHC-ACCESS', blob_sha256, 0, NULL, \
+                 1, 'pending', 10, NULL, 'write' FROM snapshots WHERE object_id = 'obj-waiting-marker'",
                 [WS],
             )
             .unwrap();
-            write_text_in_tx(tx, &write("crew/.DOHC-ACCESS", "obj-waiting-marker"))?;
             Ok::<_, DomainError>(())
         })
         .expect("write synced files");
@@ -1353,8 +1357,9 @@ fn capture_manifest_seeds_a_placed_folder_marker_whoever_wrote_it() {
         .map(|entry| entry.path)
         .collect();
     // A folder renamed while dohc was closed must retire its old marker, so
-    // the first scan has to know the marker was on disk. A marker still
-    // waiting to be placed, and other synced files, stay out.
+    // the first scan has to know the marker was on disk. A marker a job has
+    // yet to write, and other synced files, stay out. A pulled marker has no
+    // job, so it counts as placed.
     assert_eq!(seeded, vec!["team/.dohc-access".to_owned()]);
 }
 
