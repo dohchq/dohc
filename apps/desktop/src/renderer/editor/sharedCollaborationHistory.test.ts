@@ -218,9 +218,6 @@ async function desktop(baseline: Uint8Array) {
 }
 
 it("undo brings a deleted heading back at its old level for everyone, after its level changed in the same undo step", async () => {
-  // Yjs joins changes made within 500 ms into one undo step. A stopped clock keeps both
-  // changes in one step however long the test takes.
-  vi.useFakeTimers({ toFake: ["Date"] });
   const note = "first\n\n## title\n\nlast\n";
   const seed = markdownToYDoc(note);
   const baseline = Y.encodeStateAsUpdate(seed);
@@ -260,6 +257,5 @@ it("undo brings a deleted heading back at its old level for everyone, after its 
     reopened.destroy();
     await a.stop();
     await b.stop();
-    vi.useRealTimers();
   }
 });

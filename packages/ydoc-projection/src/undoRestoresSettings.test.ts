@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { EditorView } from "@tiptap/pm/view";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import { mountLiveBodyEditor } from "./browser-editor.js";
@@ -10,15 +10,8 @@ const REMOTE = Symbol("remote");
 const NOTE = "first\n\n## title\n\nlast\n";
 const stops: (() => void)[] = [];
 
-// Yjs joins changes made within 500 ms into one undo step. A stopped clock keeps a person's
-// changes in one step however long the test takes.
-beforeEach(() => {
-  vi.useFakeTimers({ toFake: ["Date"] });
-});
-
 afterEach(() => {
   for (const stop of stops.splice(0).reverse()) stop();
-  vi.useRealTimers();
 });
 
 type Person = ReturnType<typeof person>;
