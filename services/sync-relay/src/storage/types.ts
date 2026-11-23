@@ -2163,7 +2163,10 @@ export interface SyncRelayStorage {
     guard?: () => void;
   }): { proposalId: string; created: boolean };
   getShareProposal(proposalId: string): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null;
-  listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }>;
+  listShareProposalsForShare(
+    shareId: string,
+    proposedByUserId: string,
+  ): Array<ShareProposalRow & { opCount: number }>;
   // The granter's open proposals, as counts rather than op rows. The review
   // surface polls this on a timer and renders a sender and a count from it, so
   // serving every op of every open proposal would resolve a base per op on

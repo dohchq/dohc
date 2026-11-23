@@ -223,7 +223,11 @@ export function memberReach(
   // A hidden folder hides all under it, so reach can only stop at a ruled
   // folder. Reach is the same for every spelling of a folded name, so each
   // edge is named once by its folded name: a rule on a twin moves no edge.
-  const reaches = (folder: string) => atFolder(folder) !== null;
+  // History needs Edit, so an edge is also where Edit starts or stops.
+  const reaches = (folder: string) => {
+    const level = atFolder(folder);
+    return level === null ? "hidden" : level === "edit" ? "history" : "current";
+  };
   const visibilitySignature = () =>
     digest([
       role,
@@ -234,7 +238,7 @@ export function memberReach(
             .filter(
               (folder) => folder !== "" && reaches(folder) !== reaches(accessRuleFolder(folder)),
             )
-            .map(pathCollisionKey),
+            .map((folder) => `${reaches(folder)}:${pathCollisionKey(folder)}`),
         ),
       ].sort(),
       // A Group enters only while its visibility differs from the one it was

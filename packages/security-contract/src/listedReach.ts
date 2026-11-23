@@ -11,7 +11,7 @@ import { SHARE_ACCESS_VALUES, shareAccessRank, type ShareAccess } from "./shareS
  *
  * The relay keys both signatures, so they say only when the reach changed:
  * `signature` whenever the member's levels do, `visibilitySignature` only when
- * what they reach does.
+ * what they reach, or where they read History, does.
  */
 export interface ListedReach {
   readonly signature: string;
