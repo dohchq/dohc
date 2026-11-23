@@ -1,8 +1,12 @@
 import "./tokens.css";
 import "./ui.css";
 import {
+  Fragment,
+  cloneElement,
+  isValidElement,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -240,15 +244,19 @@ export function Tabs({ items, value, onChange, label = "Sections" }: TabsProps) 
           );
         })}
       </div>
-      {active?.content !== undefined ? (
-        <div
-          id={`${baseId}-panel-${active.id}`}
-          role="tabpanel"
-          aria-labelledby={`${baseId}-tab-${active.id}`}
-        >
-          {active.content}
-        </div>
-      ) : null}
+      {items.map((item) =>
+        item.content !== undefined ? (
+          <div
+            key={item.id}
+            id={`${baseId}-panel-${item.id}`}
+            role="tabpanel"
+            aria-labelledby={`${baseId}-tab-${item.id}`}
+            hidden={item.id !== active?.id}
+          >
+            {item.content}
+          </div>
+        ) : null,
+      )}
     </Stack>
   );
 }
@@ -271,12 +279,18 @@ export function ProgressBar({
   tone,
 }: ProgressBarProps) {
   const safeMax = max > 0 ? max : 1;
-  const pct = Math.max(0, Math.min(100, (value / safeMax) * 100));
-  const resolvedTone: Tone = tone ?? (value > safeMax ? "danger" : "neutral");
+  const numericValue = Number.isFinite(value) ? value : 0;
+  const clampedValue = Math.max(0, Math.min(safeMax, numericValue));
+  const pct = (clampedValue / safeMax) * 100;
+  const resolvedTone: Tone = tone ?? (numericValue > safeMax ? "danger" : "neutral");
   const targetPct =
     target !== undefined && safeMax > 0
       ? Math.max(0, Math.min(100, (target / safeMax) * 100))
       : null;
+  const ariaValueText =
+    numericValue > safeMax || numericValue < 0
+      ? (valueLabel ?? `${numericValue} of ${safeMax}`)
+      : undefined;
 
   return (
     <div className="kit-progress">
@@ -290,9 +304,10 @@ export function ProgressBar({
         className="kit-progress-track"
         role="progressbar"
         aria-label={label}
-        aria-valuenow={value}
+        aria-valuenow={clampedValue}
         aria-valuemin={0}
         aria-valuemax={safeMax}
+        aria-valuetext={ariaValueText}
       >
         <div
           className={cx(
@@ -302,7 +317,10 @@ export function ProgressBar({
           style={{ width: `${pct}%` }}
         />
         {targetPct !== null ? (
-          <div className="kit-progress-target" style={{ left: `${targetPct}%` }} />
+          <div
+            className="kit-progress-target"
+            style={{ "--kit-target-pct": `${targetPct}%` } as CSSProperties}
+          />
         ) : null}
       </div>
     </div>
@@ -395,12 +413,27 @@ export interface FieldProps {
 
 export function Field({ label, htmlFor, hint, error, children }: FieldProps) {
   const messageId = useId();
+  const hasMessage = Boolean(error || hint);
+  const describedChildren =
+    hasMessage &&
+    isValidElement<{ "aria-describedby"?: string }>(children) &&
+    children.type !== Fragment
+      ? cloneElement(children, {
+          "aria-describedby": Array.from(
+            new Set([
+              ...(children.props["aria-describedby"]?.split(/\s+/).filter(Boolean) ?? []),
+              messageId,
+            ]),
+          ).join(" "),
+        })
+      : children;
+
   return (
     <div className="kit-field">
       <label className="kit-field-label" htmlFor={htmlFor}>
         {label}
       </label>
-      {children}
+      {describedChildren}
       {error ? (
         <span id={messageId} className="kit-field-error" role="alert">
           {error}
@@ -469,21 +502,30 @@ export interface ModalProps {
   readonly children: ReactNode;
 }
 
+const openModalStack: symbol[] = [];
+
 export function Modal({ open, title, onClose, footer, children }: ModalProps) {
   const titleId = useId();
   const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  useLayoutEffect(() => {
+    onCloseRef.current = onClose;
+  });
   const previousFocus = useRef<HTMLElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    const modalId = Symbol("kit-modal");
+    openModalStack.push(modalId);
+    const isTopModal = () => openModalStack[openModalStack.length - 1] === modalId;
+
     previousFocus.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
     dialog?.focus();
 
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (!isTopModal()) return;
       if (event.key === "Escape") {
         event.preventDefault();
         onCloseRef.current();
@@ -513,7 +555,7 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
     };
 
     const onFocusIn = (event: FocusEvent) => {
-      if (!dialog) return;
+      if (!isTopModal() || !dialog) return;
       if (event.target instanceof Node && !dialog.contains(event.target)) {
         const focusables = [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
           isVisibleFocusable,
@@ -527,7 +569,12 @@ export function Modal({ open, title, onClose, footer, children }: ModalProps) {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("focusin", onFocusIn);
-      previousFocus.current?.focus();
+      const wasTop = isTopModal();
+      const index = openModalStack.lastIndexOf(modalId);
+      if (index >= 0) openModalStack.splice(index, 1);
+      if (wasTop && previousFocus.current?.isConnected) {
+        previousFocus.current.focus();
+      }
     };
   }, [open]);
 
@@ -582,6 +629,9 @@ export interface DataTableProps<T> {
   readonly emptyDescription?: string;
   readonly onRowClick?: (row: T) => void;
 }
+
+const INTERACTIVE_CELL_SELECTOR =
+  'a, button, input, label, select, textarea, summary, [role="button"], [role="link"]';
 
 export function DataTable<T>({
   rows,
@@ -708,7 +758,18 @@ export function DataTable<T>({
                   key={rowKey(row, index)}
                   className={onRowClick ? "kit-table-row-clickable" : undefined}
                   tabIndex={onRowClick ? 0 : undefined}
-                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                  onClick={
+                    onRowClick
+                      ? (event) => {
+                          const interactive =
+                            event.target instanceof Element
+                              ? event.target.closest(INTERACTIVE_CELL_SELECTOR)
+                              : null;
+                          if (interactive && event.currentTarget.contains(interactive)) return;
+                          onRowClick(row);
+                        }
+                      : undefined
+                  }
                   onKeyDown={
                     onRowClick
                       ? (event) => {
@@ -767,11 +828,32 @@ export function formatCompact(value: number): string {
   }).format(value);
 }
 
+const DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
 export function formatDate(
   value: string | number | Date,
   style: "short" | "medium" | "long" = "medium",
 ): string {
-  const date = value instanceof Date ? value : new Date(value);
+  let date: Date;
+  if (value instanceof Date) {
+    date = value;
+  } else if (typeof value === "string") {
+    const match = DATE_ONLY_PATTERN.exec(value);
+    if (match) {
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      const day = Number(match[3]);
+      date = new Date(year, month - 1, day);
+      if (year < 100) date.setFullYear(year);
+      if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+        return value;
+      }
+    } else {
+      date = new Date(value);
+    }
+  } else {
+    date = new Date(value);
+  }
   if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat(undefined, { dateStyle: style }).format(date);
 }

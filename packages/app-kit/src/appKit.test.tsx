@@ -107,6 +107,44 @@ describe("dohc/app", () => {
     expect(mutationKey("save")).toMatch(/^save:/);
     expect(isAppBackendError(new AppBackendError(503))).toBe(true);
     expect(new AppBackendError(503).uncertain).toBe(true);
+
+    const poisonedInput = {
+      name: "receipt.pdf",
+      contentType: "application/pdf",
+      bytesBase64: "JVBERi0=",
+      idempotencyKey: "spoofed-key",
+      op: "backend.invoke",
+      id: "spoofed-id",
+    };
+    const uploadPromise = client.upload(poisonedInput, "explicit-upload-key");
+    await waitFor(() => expect(fake.sent).toHaveLength(3));
+    const uploadMsg = fake.sent[2]!;
+    expect(Object.keys(uploadMsg).sort()).toEqual([
+      "bytesBase64",
+      "contentType",
+      "id",
+      "idempotencyKey",
+      "name",
+      "op",
+    ]);
+    expect(uploadMsg.op).toBe("backend.upload");
+    expect(uploadMsg.idempotencyKey).toBe("explicit-upload-key");
+    expect(uploadMsg.id).not.toBe("spoofed-id");
+    fake.reply({
+      id: uploadMsg.id,
+      ok: true,
+      value: {
+        file: {
+          fileId: "f-1",
+          name: "receipt.pdf",
+          contentType: "application/pdf",
+          byteLength: 5,
+          sha256: "abc",
+        },
+        replayed: false,
+      },
+    });
+    expect((await uploadPromise).file.fileId).toBe("f-1");
     client.close();
   });
 
@@ -184,6 +222,24 @@ describe("dohc/app", () => {
     });
     expect(await reqA).toEqual({ a: 1 });
     expect(await reqB).toEqual({ b: 2 });
+
+    const persistedHide = new Event("pagehide");
+    Object.defineProperty(persistedHide, "persisted", { value: true });
+    window.dispatchEvent(persistedHide);
+    expect(fake.isClosed()).toBe(false);
+    const countAfterBfcache = fake.sent.length;
+    const reqC = createAppClient().read<{ c: number }>("opC");
+    fake.reply({
+      id: fake.sent[countAfterBfcache]!.id,
+      ok: true,
+      value: { result: { c: 3 }, revision: 4, replayed: false },
+    });
+    expect(await reqC).toEqual({ c: 3 });
+
+    const finalHide = new Event("pagehide");
+    Object.defineProperty(finalHide, "persisted", { value: false });
+    window.dispatchEvent(finalHide);
+    expect(fake.isClosed()).toBe(true);
   });
 
   it("clears query data on scope change and guards late replies without refetch loops", async () => {
@@ -239,16 +295,64 @@ describe("dohc/app", () => {
     expect(screen.getByText("rev:none")).toBeTruthy();
     expect(fake.sent).toHaveLength(3);
 
-    // Late reply for the superseded November scope must be ignored.
+    fake.reply({ id: fake.sent[2]!.id, ok: false, status: 404 });
+    await waitFor(() => expect(screen.getByText("err:404")).toBeTruthy());
+    expect(screen.getByText("data:none")).toBeTruthy();
+    expect(screen.getByText("rev:none")).toBeTruthy();
+
     fake.reply({
       id: novId,
       ok: true,
       value: { result: { label: "StaleNov" }, revision: 8, replayed: false },
     });
-    fake.reply({ id: fake.sent[2]!.id, ok: false, status: 404 });
-    await waitFor(() => expect(screen.getByText("err:404")).toBeTruthy());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText("err:404")).toBeTruthy();
     expect(screen.getByText("data:none")).toBeTruthy();
     expect(screen.getByText("rev:none")).toBeTruthy();
+    client.close();
+  });
+
+  it("handles unserializable query inputs without throwing during render", async () => {
+    const fake = makeFakePort();
+    const client = createAppClient({ port: fake.port });
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    function QueryProbe({ input, enabled }: { input: unknown; enabled: boolean }) {
+      const query = useDatasetQuery("probe", input, { enabled });
+      return (
+        <div>
+          <span>loading:{String(query.loading)}</span>
+          <span>err:{query.error?.status ?? "none"}</span>
+        </div>
+      );
+    }
+
+    const { rerender } = render(
+      <AppProvider client={client}>
+        <QueryProbe input={circular} enabled={false} />
+      </AppProvider>,
+    );
+    expect(screen.getByText("loading:false")).toBeTruthy();
+    expect(screen.getByText("err:none")).toBeTruthy();
+    expect(fake.sent).toHaveLength(0);
+
+    rerender(
+      <AppProvider client={client}>
+        <QueryProbe input={circular} enabled />
+      </AppProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("err:400")).toBeTruthy());
+    expect(screen.getByText("loading:false")).toBeTruthy();
+    expect(fake.sent).toHaveLength(0);
+
+    rerender(
+      <AppProvider client={client}>
+        <QueryProbe input={() => {}} enabled />
+      </AppProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("err:400")).toBeTruthy());
+    expect(fake.sent).toHaveLength(0);
     client.close();
   });
 
@@ -263,6 +367,7 @@ describe("dohc/app", () => {
         <div>
           <span>pending:{String(save.pending)}</span>
           <span>uncertain:{String(save.uncertain)}</span>
+          <span>err:{save.error?.status ?? "none"}</span>
           <button
             type="button"
             onClick={() => {
@@ -314,6 +419,20 @@ describe("dohc/app", () => {
                 }}
               >
                 RetryDiscardRetry
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const capturedRetry = save.retry;
+                  void (async () => {
+                    try {
+                      await capturedRetry();
+                    } catch {}
+                    await capturedRetry();
+                  })();
+                }}
+              >
+                RetryTwiceSequentially
               </button>
             </>
           ) : null}
@@ -401,6 +520,40 @@ describe("dohc/app", () => {
     fake.reply({ id: fake.sent[6]!.id, ok: false, status: 503 });
     await waitFor(() => expect(screen.getByText("pending:false")).toBeTruthy());
     expect(screen.getByText("uncertain:false")).toBeTruthy();
+    expect(screen.getByText("err:none")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "SaveB" }));
+    expect(fake.sent).toHaveLength(8);
+    fake.reply({ id: fake.sent[7]!.id, ok: false, status: 503 });
+    const retryTwice = await screen.findByRole("button", { name: "RetryTwiceSequentially" });
+    fireEvent.click(retryTwice);
+    expect(fake.sent).toHaveLength(9);
+    fake.reply({
+      id: fake.sent[8]!.id,
+      ok: true,
+      value: { result: { saved: true }, revision: 6, replayed: true },
+    });
+    await waitFor(() => expect(screen.getByText("uncertain:false")).toBeTruthy());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fake.sent).toHaveLength(9);
+
+    fireEvent.click(screen.getByRole("button", { name: "SaveB" }));
+    expect(fake.sent).toHaveLength(10);
+    fake.reply({ id: fake.sent[9]!.id, ok: false, status: 503 });
+    const retryTwiceRefused = await screen.findByRole("button", {
+      name: "RetryTwiceSequentially",
+    });
+    fireEvent.click(retryTwiceRefused);
+    expect(fake.sent).toHaveLength(11);
+    fake.reply({
+      id: fake.sent[10]!.id,
+      ok: false,
+      status: 409,
+      error: { code: "closed", message: "Closed" },
+    });
+    await waitFor(() => expect(screen.getByText("err:409")).toBeTruthy());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fake.sent).toHaveLength(11);
     client.close();
   });
 });
@@ -540,8 +693,29 @@ describe("dohc/ui and dohc/charts", () => {
 
     expect(formatNumber(1234)).toContain("1");
     expect(formatPercent(0.25)).toContain("25");
-    expect(formatCompact(1500)).toMatch(/1\.5/);
-    expect(formatDate("2026-11-23")).toContain("2026");
+    expect(formatCompact(1500)).toBe(
+      new Intl.NumberFormat(undefined, {
+        notation: "compact",
+        maximumFractionDigits: 1,
+      }).format(1500),
+    );
+    expect(formatDate("2026-11-23")).toBe(
+      new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(2026, 10, 23)),
+    );
+    expect(formatDate("2026-02-31")).toBe("2026-02-31");
+
+    const progress = screen.getByRole("progressbar", { name: "Dining" });
+    expect(progress.getAttribute("aria-valuenow")).toBe("1000");
+    expect(progress.getAttribute("aria-valuetext")).toBe("$1,240 / $1,000");
+    const targetMarker = progress.querySelector<HTMLElement>(".kit-progress-target");
+    expect(targetMarker?.style.getPropertyValue("--kit-target-pct")).toBe("80%");
+
+    const workoutsTab = screen.getByRole("tab", { name: "Workouts" });
+    const workoutsPanelId = workoutsTab.getAttribute("aria-controls");
+    expect(workoutsPanelId).toBeTruthy();
+    const workoutsPanel = document.getElementById(workoutsPanelId!);
+    expect(workoutsPanel?.getAttribute("role")).toBe("tabpanel");
+    expect(workoutsPanel?.hidden).toBe(true);
   });
 
   it("handles NaN gaps, signed bars, grouped horizontal bars, and single-tab-stop chart navigation", () => {
@@ -576,6 +750,7 @@ describe("dohc/ui and dohc/charts", () => {
             { label: "Food", value: 600 },
           ]}
           centerLabel="Monthly"
+          formatValue={(value) => String(value)}
           ariaLabel="Monthly breakdown"
         />
       </div>,
@@ -586,6 +761,7 @@ describe("dohc/ui and dohc/charts", () => {
 
     // Interactive charts expose a single tab stop each and step with ArrowRight.
     const lineGroup = screen.getByRole("group", { name: "Daily spending" });
+    expect(lineGroup.tabIndex).toBe(0);
     expect(lineGroup.querySelectorAll("[tabindex]")).toHaveLength(0);
     fireEvent.focus(lineGroup);
     expect(lineGroup.textContent).toContain("Mon: Spend 40");
@@ -593,6 +769,8 @@ describe("dohc/ui and dohc/charts", () => {
     expect(lineGroup.textContent).toContain("Tue: Spend no data");
 
     const barGroup = screen.getByRole("group", { name: "Signed totals" });
+    expect(barGroup.tabIndex).toBe(0);
+    expect(barGroup.querySelectorAll("[tabindex]")).toHaveLength(0);
     fireEvent.focus(barGroup);
     fireEvent.keyDown(barGroup, { key: "ArrowRight" });
     expect(barGroup.querySelector('[aria-live="polite"]')?.textContent).toContain(
@@ -603,9 +781,11 @@ describe("dohc/ui and dohc/charts", () => {
     expect(barGroup.querySelector('[aria-live="polite"]')?.textContent).toBe("");
 
     const donutGroup = screen.getByRole("group", { name: "Monthly breakdown" });
+    expect(donutGroup.tabIndex).toBe(0);
+    expect(donutGroup.querySelectorAll("[tabindex]")).toHaveLength(0);
     fireEvent.focus(donutGroup);
     expect(donutGroup.querySelector('[aria-live="polite"]')?.textContent).toContain(
-      "Housing: 1,800 (75%)",
+      "Housing: 1800 (75%)",
     );
     fireEvent.mouseEnter(donutGroup.querySelector(".kit-donut-row")!);
     expect(donutGroup.querySelector('[aria-live="polite"]')?.textContent).toBe("");
@@ -709,8 +889,151 @@ describe("dohc/ui and dohc/charts", () => {
       const cellInput = screen.getByLabelText("Cell input");
       fireEvent.keyDown(cellInput, { key: " " });
       fireEvent.keyDown(cellInput, { key: "Enter" });
+      fireEvent.click(cellInput);
     } finally {
       globalThis.ResizeObserver = OriginalResizeObserver;
     }
+  });
+
+  it("handles extreme scales, missing bar values, dense grouped bars, sparkline slot alignment, field descriptions, nested modals, and interactive table cells", () => {
+    const denseLabels = Array.from({ length: 40 }, (_, i) => `D${i + 1}`);
+    const denseSeries = [
+      { name: "A", values: denseLabels.map(() => 10) },
+      { name: "B", values: denseLabels.map(() => 20) },
+      { name: "C", values: denseLabels.map(() => 15) },
+    ];
+    const rowClicks: string[] = [];
+
+    function NestedModals() {
+      const [outerOpen, setOuterOpen] = useState(true);
+      const [innerOpen, setInnerOpen] = useState(false);
+      return (
+        <div>
+          <Button onClick={() => setOuterOpen(true)}>LaunchOuter</Button>
+          <Modal open={outerOpen} title="Outer" onClose={() => setOuterOpen(false)}>
+            <Button onClick={() => setInnerOpen(true)}>OpenInner</Button>
+            <Modal open={innerOpen} title="Inner" onClose={() => setInnerOpen(false)}>
+              <Button>InnerAction</Button>
+            </Modal>
+          </Modal>
+        </div>
+      );
+    }
+
+    const { container } = render(
+      <div>
+        <LineChart
+          labels={["Low", "High"]}
+          series={[{ name: "Max", values: [-Number.MAX_VALUE, Number.MAX_VALUE] }]}
+          formatValue={(v) => String(v)}
+          ariaLabel="Extreme scale"
+        />
+        <BarChart
+          labels={["Present", "Missing"]}
+          series={[{ name: "Metric", values: [10, Number.NaN] }]}
+          formatValue={(v) => String(v)}
+          ariaLabel="Vertical missing"
+        />
+        <BarChart
+          orientation="horizontal"
+          labels={["Present", "Missing"]}
+          series={[{ name: "Metric", values: [10, Number.NaN] }]}
+          formatValue={(v) => String(v)}
+          ariaLabel="Horizontal missing"
+        />
+        <BarChart labels={denseLabels} series={denseSeries} ariaLabel="Dense grouped" />
+        <Sparkline
+          values={[Number.NaN, Number.NaN, 42]}
+          width={120}
+          height={32}
+          ariaLabel="Late lone spark"
+        />
+        <Field label="Budget" htmlFor="budget-in" hint="Monthly cap">
+          <Input id="budget-in" aria-describedby="extra-desc" />
+        </Field>
+        <Field label="Plain" htmlFor="plain-in">
+          <Input id="plain-in" />
+        </Field>
+        <DataTable
+          rows={[{ id: "r1", name: "Coffee" }]}
+          rowKey={(r) => r.id}
+          onRowClick={(r) => rowClicks.push(r.id)}
+          columns={[
+            { key: "name", header: "Name" },
+            {
+              key: "actions",
+              header: "Actions",
+              render: () => <Button size="sm">DeleteRow</Button>,
+            },
+          ]}
+        />
+        <NestedModals />
+      </div>,
+    );
+
+    expect(container.innerHTML).not.toContain("NaN");
+    expect(container.innerHTML).not.toContain("Infinity");
+
+    const verticalMissing = screen.getByRole("group", { name: "Vertical missing" });
+    expect(verticalMissing.querySelectorAll("svg rect")).toHaveLength(1);
+    fireEvent.focus(verticalMissing);
+    fireEvent.keyDown(verticalMissing, { key: "ArrowRight" });
+    expect(verticalMissing.querySelector('[aria-live="polite"]')?.textContent).toBe(
+      "Missing: Metric no data",
+    );
+    expect(verticalMissing.querySelector(".kit-chart-tooltip")?.textContent).toContain("—");
+
+    const horizontalMissing = screen.getByRole("group", { name: "Horizontal missing" });
+    expect(horizontalMissing.querySelectorAll("svg rect")).toHaveLength(1);
+    expect(horizontalMissing.querySelector("svg")?.textContent).toContain("—");
+
+    const denseGroup = screen.getByRole("group", { name: "Dense grouped" });
+    const denseRects = [...denseGroup.querySelectorAll("svg rect")];
+    expect(denseRects).toHaveLength(120);
+    const padLeft = 54;
+    const plotW = 560 - 54 - 16;
+    const groupW = plotW / denseLabels.length;
+    for (let groupIdx = 0; groupIdx < denseLabels.length; groupIdx += 1) {
+      const groupLeft = padLeft + groupIdx * groupW;
+      const groupRight = groupLeft + groupW;
+      let prevRight = groupLeft;
+      for (let seriesIdx = 0; seriesIdx < denseSeries.length; seriesIdx += 1) {
+        const rect = denseRects[groupIdx * denseSeries.length + seriesIdx]!;
+        const x = Number(rect.getAttribute("x"));
+        const w = Number(rect.getAttribute("width"));
+        expect(x).toBeGreaterThanOrEqual(prevRight - 1e-6);
+        expect(x + w).toBeLessThanOrEqual(groupRight + 1e-6);
+        prevRight = x + w;
+      }
+    }
+
+    const lateSpark = screen.getByRole("img", { name: "Late lone spark" });
+    expect(Number(lateSpark.querySelector("circle")?.getAttribute("cx"))).toBe(118);
+
+    const budgetInput = screen.getByLabelText("Budget");
+    const hintNode = screen.getByText("Monthly cap");
+    expect(budgetInput.getAttribute("aria-describedby")).toBe(`extra-desc ${hintNode.id}`);
+    expect(screen.getByLabelText("Plain").getAttribute("aria-describedby")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "DeleteRow" }));
+    expect(rowClicks).toEqual([]);
+    fireEvent.click(screen.getByText("Coffee"));
+    expect(rowClicks).toEqual(["r1"]);
+
+    const openInnerBtn = screen.getByRole("button", { name: "OpenInner" });
+    openInnerBtn.focus();
+    fireEvent.click(openInnerBtn);
+    const dialogs = screen.getAllByRole("dialog");
+    expect(dialogs).toHaveLength(2);
+    const innerAction = screen.getByRole("button", { name: "InnerAction" });
+    innerAction.focus();
+    expect(document.activeElement).toBe(innerAction);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(document.activeElement).toBe(openInnerBtn);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

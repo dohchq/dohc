@@ -10,7 +10,7 @@ dohc's closed app compiler provides a pinned set of browser modules so apps can 
 | `react-dom`, `react-dom/client` | ReactDOM (`createRoot`, `createPortal`) |
 | `dohc/app` | MessageChannel backend client and hooks (`AppProvider`, `useApp`, `useDatasetQuery`, `useDatasetMutation`, `createAppClient`, `mutationKey`, `AppBackendError`) |
 | `dohc/ui` | Light and dark themed layout, data, and form components (`AppShell`, `PageHeader`, `Grid`, `Stack`, `Card`, `StatCard`, `Tabs`, `DataTable`, `Badge`, `ProgressBar`, `Callout`, `EmptyState`, `Skeleton`, `Button`, `Field`, `Input`, `Select`, `Textarea`, `Checkbox`, `Modal`, plus currency/number/percent/date formatters) |
-| `dohc/charts` | Responsive SVG charts (`LineChart`, `BarChart`, `DonutChart`, `Sparkline`) with light and dark tokens and single-tab-stop arrow-key navigation |
+| `dohc/charts` | Responsive SVG charts with light and dark tokens: interactive `LineChart`, `BarChart`, and `DonutChart` (single-tab-stop arrow-key navigation), plus non-interactive `Sparkline` |
 
 The prefixes `react`, `react-dom`, `scheduler`, and `dohc` are reserved. Do not map them in `app.publish.json`'s `packageMap`.
 
@@ -22,20 +22,39 @@ The prefixes `react`, `react-dom`, `scheduler`, and `dohc` are reserved. Do not 
 
 ## Minimal example
 
+This example assumes the app's dataset binding includes an approved `monthlySummary` operation that returns `{ total: number, weekly: { label: string, value: number }[] }`. See the [app backend guide](../how-to/app-backend.md) to configure operations and bindings.
+
 ```tsx
 import { createRoot } from "react-dom/client";
 import { AppProvider, useDatasetQuery } from "dohc/app";
-import { AppShell, Card, PageHeader, StatCard, formatCurrency } from "dohc/ui";
+import { AppShell, Button, Callout, Card, PageHeader, StatCard, formatCurrency } from "dohc/ui";
 import { LineChart } from "dohc/charts";
 
 function Dashboard() {
-  const { data, loading, error } = useDatasetQuery<{ total: number; weekly: { label: string; value: number }[] }>(
-    "monthlySummary",
-  );
+  const { data, loading, error, reload } = useDatasetQuery<{
+    total: number;
+    weekly: { label: string; value: number }[];
+  }>("monthlySummary");
   return (
     <AppShell>
       <PageHeader title="Spending" />
-      <StatCard label="This month" value={loading ? "…" : formatCurrency(data?.total ?? 0)} />
+      {error ? (
+        <Callout
+          tone="danger"
+          title="Could not load spending"
+          action={
+            <Button size="sm" onClick={reload}>
+              Try again
+            </Button>
+          }
+        >
+          {error.message}
+        </Callout>
+      ) : null}
+      <StatCard
+        label="This month"
+        value={loading ? "…" : data ? formatCurrency(data.total) : "—"}
+      />
       {!error && data ? (
         <Card title="Weekly trend">
           <LineChart variant="area" data={data.weekly} formatValue={(v) => formatCurrency(v)} />

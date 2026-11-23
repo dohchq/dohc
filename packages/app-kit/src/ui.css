@@ -413,6 +413,7 @@ body {
   top: 0;
   bottom: 0;
   width: 2px;
+  left: clamp(0px, calc(var(--kit-target-pct, 0%) - 1px), calc(100% - 2px));
   background: var(--kit-ink);
   opacity: 0.55;
 }

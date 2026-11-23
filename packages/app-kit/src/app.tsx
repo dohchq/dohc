@@ -190,7 +190,6 @@ export function mutationKey(kind: string): string {
   return `${kind}:${crypto.randomUUID()}`;
 }
 
-// Capture the host's one-shot channel port at module load so late or remounted providers never miss it.
 let capturedHostPort: MessagePort | null = null;
 const hostPortWaiters = new Set<(port: MessagePort) => void>();
 
@@ -349,7 +348,13 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
     async upload(file: File | FileUploadInput, idempotencyKey: string): Promise<UploadReply> {
       const payload = await normalizeUpload(file);
       return send(
-        { op: "backend.upload", idempotencyKey, ...payload },
+        {
+          op: "backend.upload",
+          idempotencyKey,
+          name: payload.name,
+          contentType: payload.contentType,
+          bytesBase64: payload.bytesBase64,
+        },
         transferTimeoutMs,
         (value) => isRecord(value) && isFileMeta(value.file) && typeof value.replayed === "boolean",
       ) as Promise<UploadReply>;
@@ -370,7 +375,6 @@ function createManagedClient(options: AppClientOptions, shared: boolean): AppCli
       ) as Promise<AttemptResult>;
     },
     close() {
-      // The shared host port belongs to the iframe lifetime; only explicit ports close on demand.
       if (shared || closed) return;
       closed = true;
       hostPortWaiters.delete(bindPort);
@@ -392,18 +396,17 @@ function getSharedAppClient(options: AppClientOptions = {}): AppClient {
     sharedHostClient = createManagedClient(options, true);
     if (!sharedPageHideWired && typeof window !== "undefined") {
       sharedPageHideWired = true;
-      window.addEventListener(
-        "pagehide",
-        () => {
-          const closing = sharedHostClient;
-          sharedHostClient = null;
-          sharedPageHideWired = false;
-          if (closing && capturedHostPort) {
-            capturedHostPort.close();
-          }
-        },
-        { once: true },
-      );
+      const onPageHide = (event: PageTransitionEvent) => {
+        if (event.persisted) return;
+        window.removeEventListener("pagehide", onPageHide);
+        const closing = sharedHostClient;
+        sharedHostClient = null;
+        sharedPageHideWired = false;
+        if (closing && capturedHostPort) {
+          capturedHostPort.close();
+        }
+      };
+      window.addEventListener("pagehide", onPageHide);
     }
   }
   return sharedHostClient;
@@ -472,15 +475,30 @@ export function useDatasetQuery<T = unknown>(
 ): DatasetQueryState<T> {
   const client = useApp();
   const enabled = options?.enabled ?? true;
-  const serializedInput = input === undefined ? "{}" : JSON.stringify(input);
-  const scope = `${clientIdOf(client)}:${operation}:${serializedInput}`;
+  let serializedInput: string | null = null;
+  if (enabled) {
+    if (input === undefined) {
+      serializedInput = "{}";
+    } else {
+      try {
+        const encoded = JSON.stringify(input);
+        serializedInput = encoded === undefined ? null : encoded;
+      } catch {
+        serializedInput = null;
+      }
+    }
+  }
+  const invalidInput = enabled && serializedInput === null;
+  const scope = `${clientIdOf(client)}:${operation}:${
+    !enabled ? "disabled" : invalidInput ? "invalid" : `s:${serializedInput}`
+  }`;
 
   const [state, setState] = useState<ScopedQueryResult<T>>(() => ({
     scope,
     data: undefined,
     revision: null,
-    loading: enabled,
-    error: null,
+    loading: enabled && !invalidInput,
+    error: invalidInput ? new AppBackendError(400) : null,
   }));
   const [version, setVersion] = useState(0);
   const generation = useRef(0);
@@ -492,6 +510,20 @@ export function useDatasetQuery<T = unknown>(
   useEffect(() => {
     if (!enabled) {
       setState({ scope, data: undefined, revision: null, loading: false, error: null });
+      return;
+    }
+    if (serializedInput === null) {
+      setState((current) =>
+        current.scope === scope && current.error?.status === 400 && !current.loading
+          ? current
+          : {
+              scope,
+              data: undefined,
+              revision: null,
+              loading: false,
+              error: new AppBackendError(400),
+            },
+      );
       return;
     }
     let alive = true;
@@ -533,7 +565,7 @@ export function useDatasetQuery<T = unknown>(
   return {
     data: matched ? state.data : undefined,
     revision: matched ? state.revision : null,
-    loading: matched ? state.loading : enabled,
+    loading: matched ? state.loading : enabled && !invalidInput,
     error: matched ? state.error : null,
     reload,
   };
@@ -563,6 +595,7 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   const [inFlightCount, setInFlightCount] = useState(0);
   const [error, setError] = useState<AppBackendError | null>(null);
   const [retained, setRetained] = useState<readonly RetainedSubmission[]>([]);
+  const retainedRef = useRef<readonly RetainedSubmission[]>([]);
   const nextAttemptId = useRef(1);
   const discardFloor = useRef(0);
   const inFlightRetries = useRef(new Map<number, Promise<InvokeReply<TResult>>>());
@@ -575,6 +608,17 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
     };
   }, []);
 
+  const updateRetained = useCallback(
+    (updater: (current: readonly RetainedSubmission[]) => readonly RetainedSubmission[]) => {
+      const next = updater(retainedRef.current);
+      retainedRef.current = next;
+      if (mounted.current) {
+        setRetained(next);
+      }
+    },
+    [],
+  );
+
   const execute = useCallback(
     async (submission: RetainedSubmission): Promise<InvokeReply<TResult>> => {
       let payload: unknown;
@@ -582,7 +626,8 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
         payload = JSON.parse(submission.payloadJson);
       } catch {
         const badInput = new AppBackendError(400);
-        if (mounted.current) setError(badInput);
+        if (mounted.current && submission.id >= discardFloor.current) setError(badInput);
+        updateRetained((current) => current.filter((item) => item.id !== submission.id));
         throw badInput;
       }
       setInFlightCount((count) => count + 1);
@@ -593,23 +638,20 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
           payload,
           submission.key,
         );
-        if (mounted.current) {
-          setRetained((current) => current.filter((item) => item.id !== submission.id));
-        }
+        updateRetained((current) => current.filter((item) => item.id !== submission.id));
         return reply;
       } catch (caught) {
         const backendError = caught instanceof AppBackendError ? caught : new AppBackendError(503);
-        if (mounted.current) {
+        const eligible = submission.id >= discardFloor.current;
+        if (mounted.current && eligible) {
           setError(backendError);
-          if (backendError.uncertain && submission.id >= discardFloor.current) {
-            setRetained((current) =>
-              current.some((item) => item.id === submission.id)
-                ? current
-                : [...current, submission],
-            );
-          } else {
-            setRetained((current) => current.filter((item) => item.id !== submission.id));
-          }
+        }
+        if (backendError.uncertain && eligible) {
+          updateRetained((current) =>
+            current.some((item) => item.id === submission.id) ? current : [...current, submission],
+          );
+        } else {
+          updateRetained((current) => current.filter((item) => item.id !== submission.id));
         }
         throw backendError;
       } finally {
@@ -618,7 +660,7 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
         }
       }
     },
-    [],
+    [updateRetained],
   );
 
   const mutate = useCallback(
@@ -647,8 +689,8 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   );
 
   const retry = useCallback(async () => {
-    const next = retained[0];
-    if (!next || next.id < discardFloor.current) return null;
+    const next = retainedRef.current.find((item) => item.id >= discardFloor.current);
+    if (!next) return null;
     const active = inFlightRetries.current.get(next.id);
     if (active) return active;
     const promise = execute(next).finally(() => {
@@ -658,11 +700,12 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
     });
     inFlightRetries.current.set(next.id, promise);
     return promise;
-  }, [execute, retained]);
+  }, [execute]);
 
   const discardPending = useCallback(() => {
     discardFloor.current = nextAttemptId.current;
     inFlightRetries.current.clear();
+    retainedRef.current = [];
     setRetained([]);
     setError(null);
   }, []);

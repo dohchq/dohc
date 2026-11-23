@@ -39,23 +39,47 @@ function useContainerWidth(fallback = 560) {
   return { ref: setNode, width };
 }
 
+function scaleRatio(value: number, min: number, max: number): number {
+  const span = max - min;
+  if (Number.isFinite(span)) {
+    return span === 0 ? 0 : (value - min) / span;
+  }
+  const halfSpan = max / 2 - min / 2;
+  return halfSpan === 0 ? 0 : (value / 2 - min / 2) / halfSpan;
+}
+
 function niceScale(minValue: number, maxValue: number, ticks = 4) {
+  const safeTicks = Math.max(1, Math.floor(ticks));
   const finiteMin = Number.isFinite(minValue) ? minValue : 0;
   const finiteMax = Number.isFinite(maxValue) ? maxValue : 1;
   const low = Math.min(0, finiteMin);
-  const high = finiteMax <= low ? low + 1 : Math.max(0, finiteMax);
-  const span = high - low || 1;
-  const rawStep = span / ticks;
+  const high = finiteMax <= low ? (Number.isFinite(low + 1) ? low + 1 : 0) : Math.max(0, finiteMax);
+  const rawStep = high / safeTicks - low / safeTicks;
+  if (!Number.isFinite(rawStep) || rawStep <= 0) {
+    return { min: low, max: high, values: low === high ? [low] : [low, high] };
+  }
   const magnitude = 10 ** Math.floor(Math.log10(rawStep));
   const residual = rawStep / magnitude;
   const step = (residual <= 1 ? 1 : residual <= 2 ? 2 : residual <= 5 ? 5 : 10) * magnitude;
   const min = Math.floor(low / step) * step;
   const max = Math.ceil(high / step) * step;
+  if (!Number.isFinite(step) || step <= 0 || !Number.isFinite(min) || !Number.isFinite(max)) {
+    const fallbackValues: number[] = [];
+    for (let index = 0; index <= safeTicks; index += 1) {
+      const ratio = index / safeTicks;
+      const value = low * (1 - ratio) + high * ratio;
+      fallbackValues.push(Number.isFinite(value) ? value : index === 0 ? low : high);
+    }
+    return { min: low, max: high, values: fallbackValues };
+  }
+  const count = Math.min(Math.round((max - min) / step), safeTicks * 3 + 2);
   const values: number[] = [];
-  for (let current = min; current <= max + step * 0.001; current += step) {
+  for (let index = 0; index <= count; index += 1) {
+    const current = min + index * step;
+    if (!Number.isFinite(current)) break;
     values.push(Math.abs(current) < step * 1e-9 ? 0 : Number(current.toPrecision(12)));
   }
-  return { min, max, values };
+  return { min, max, values: values.length > 0 ? values : [min, max] };
 }
 
 function stepIndex(
@@ -153,8 +177,7 @@ export function LineChart({
 
   const xOf = (index: number) =>
     labels.length === 1 ? pad.left + plotW / 2 : pad.left + (index / (labels.length - 1)) * plotW;
-  const yOf = (value: number) =>
-    pad.top + plotH - ((value - scale.min) / (scale.max - scale.min || 1)) * plotH;
+  const yOf = (value: number) => pad.top + plotH - scaleRatio(value, scale.min, scale.max) * plotH;
   const baselineY = yOf(Math.max(scale.min, Math.min(scale.max, 0)));
 
   const maxLabels = Math.max(2, Math.floor(plotW / 52));
@@ -414,12 +437,11 @@ export function BarChart({
   const selected =
     activeIndex !== null && activeIndex >= 0 && activeIndex < labels.length ? activeIndex : null;
 
-  const cleanValues = series.map((entry) =>
-    labels.map((_, index) => finiteOrNull(entry.values[index]) ?? 0),
+  const rawValues = series.map((entry) =>
+    labels.map((_, index) => finiteOrNull(entry.values[index])),
   );
-  const hasAnyFinite = series.some((entry) =>
-    labels.some((_, index) => finiteOrNull(entry.values[index]) !== null),
-  );
+  const cleanValues = rawValues.map((row) => row.map((value) => value ?? 0));
+  const hasAnyFinite = rawValues.some((row) => row.some((value) => value !== null));
 
   if (labels.length === 0 || series.length === 0 || !hasAnyFinite) {
     return (
@@ -457,7 +479,10 @@ export function BarChart({
     !keyboardFocused || selected === null
       ? ""
       : `${labels[selected]}: ${series
-          .map((entry, s) => `${entry.name} ${formatValue(cleanValues[s]![selected]!)}`)
+          .map((entry, s) => {
+            const val = rawValues[s]![selected]!;
+            return `${entry.name} ${val === null ? "no data" : formatValue(val)}`;
+          })
           .join(", ")}`;
 
   if (orientation === "horizontal") {
@@ -467,8 +492,7 @@ export function BarChart({
     const svgHeight = Math.max(height, labels.length * rowHeight + 28);
     const pad = { top: 8, right: 68, bottom: 20, left: 108 };
     const plotW = Math.max(100, width - pad.left - pad.right);
-    const xOf = (value: number) =>
-      pad.left + ((value - scale.min) / (scale.max - scale.min || 1)) * plotW;
+    const xOf = (value: number) => pad.left + scaleRatio(value, scale.min, scale.max) * plotW;
     const zeroX = xOf(0);
 
     return (
@@ -514,6 +538,7 @@ export function BarChart({
             const rowTop = pad.top + index * rowHeight;
             let posCursor = 0;
             let negCursor = 0;
+            const hasRowFinite = rawValues.some((row) => row[index] !== null);
             const total = cleanValues.reduce((sum, row) => sum + row[index]!, 0);
             const maxBarRight = stacked
               ? xOf(cleanValues.reduce((sum, row) => sum + Math.max(0, row[index]!), 0))
@@ -538,7 +563,8 @@ export function BarChart({
                   {label}
                 </text>
                 {series.map((entry, seriesIndex) => {
-                  const val = cleanValues[seriesIndex]![index]!;
+                  const val = rawValues[seriesIndex]![index]!;
+                  if (val === null) return null;
                   const fill =
                     series.length === 1 && data?.[index]?.color
                       ? data[index]!.color
@@ -583,7 +609,7 @@ export function BarChart({
                     textAnchor={labelAnchor}
                     className="kit-chart-axis"
                   >
-                    {formatValue(total)}
+                    {hasRowFinite ? formatValue(total) : "—"}
                   </text>
                 ) : null}
               </g>
@@ -597,18 +623,21 @@ export function BarChart({
             style={{ left: tooltipLeft(pad.left + plotW / 2, width), top: 8 }}
           >
             <strong>{labels[selected]}</strong>
-            {series.map((entry, seriesIndex) => (
-              <div key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
-                <span
-                  className="kit-chart-swatch"
-                  style={{ background: colorAt(seriesIndex, entry.color) }}
-                />
-                <span>
-                  {series.length > 1 ? `${entry.name}: ` : ""}
-                  {formatValue(cleanValues[seriesIndex]![selected]!)}
-                </span>
-              </div>
-            ))}
+            {series.map((entry, seriesIndex) => {
+              const val = rawValues[seriesIndex]![selected]!;
+              return (
+                <div key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
+                  <span
+                    className="kit-chart-swatch"
+                    style={{ background: colorAt(seriesIndex, entry.color) }}
+                  />
+                  <span>
+                    {series.length > 1 ? `${entry.name}: ` : ""}
+                    {val === null ? "—" : formatValue(val)}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         ) : null}
 
@@ -636,8 +665,7 @@ export function BarChart({
   const maxLabels = Math.max(2, Math.floor(plotW / 52));
   const labelStep = Math.max(1, Math.ceil(labels.length / maxLabels));
   const lastRegularLabel = Math.floor((labels.length - 1) / labelStep) * labelStep;
-  const yOf = (value: number) =>
-    pad.top + plotH - ((value - scale.min) / (scale.max - scale.min || 1)) * plotH;
+  const yOf = (value: number) => pad.top + plotH - scaleRatio(value, scale.min, scale.max) * plotH;
   const zeroY = yOf(0);
 
   return (
@@ -693,7 +721,10 @@ export function BarChart({
         {labels.map((label, index) => {
           const groupX = pad.left + index * groupW;
           const innerPad = Math.min(10, groupW * 0.16);
-          const usableW = Math.max(8, groupW - innerPad * 2);
+          const usableW = Math.max(0, groupW - innerPad * 2);
+          const slotW = usableW / series.length;
+          const gap = !stacked && series.length > 1 ? Math.min(2, slotW * 0.2) : 0;
+          const barW = stacked ? usableW : Math.max(0, slotW - gap);
           const showLabel =
             index % labelStep === 0 ||
             (index === labels.length - 1 && index - lastRegularLabel >= Math.ceil(labelStep * 0.6));
@@ -709,13 +740,9 @@ export function BarChart({
               }}
             >
               {series.map((entry, seriesIndex) => {
-                const value = cleanValues[seriesIndex]![index]!;
-                const barW = stacked
-                  ? usableW
-                  : usableW / series.length - (series.length > 1 ? 2 : 0);
-                const x = stacked
-                  ? groupX + innerPad
-                  : groupX + innerPad + seriesIndex * (usableW / series.length);
+                const value = rawValues[seriesIndex]![index]!;
+                if (value === null) return null;
+                const x = stacked ? groupX + innerPad : groupX + innerPad + seriesIndex * slotW;
                 let yTop: number;
                 let yBottom: number;
                 if (stacked) {
@@ -741,7 +768,7 @@ export function BarChart({
                     key={`${seriesIndex}-${entry.name}-${index}`}
                     x={x}
                     y={Math.min(yTop, yBottom)}
-                    width={Math.max(2, barW)}
+                    width={barW}
                     height={Math.max(value === 0 ? 0 : 1, barH)}
                     rx={3}
                     fill={
@@ -777,18 +804,21 @@ export function BarChart({
           }}
         >
           <strong>{labels[selected]}</strong>
-          {series.map((entry, seriesIndex) => (
-            <div key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
-              <span
-                className="kit-chart-swatch"
-                style={{ background: colorAt(seriesIndex, entry.color) }}
-              />
-              <span>
-                {series.length > 1 ? `${entry.name}: ` : ""}
-                {formatValue(cleanValues[seriesIndex]![selected]!)}
-              </span>
-            </div>
-          ))}
+          {series.map((entry, seriesIndex) => {
+            const val = rawValues[seriesIndex]![selected]!;
+            return (
+              <div key={`${seriesIndex}-${entry.name}`} className="kit-chart-legend-item">
+                <span
+                  className="kit-chart-swatch"
+                  style={{ background: colorAt(seriesIndex, entry.color) }}
+                />
+                <span>
+                  {series.length > 1 ? `${entry.name}: ` : ""}
+                  {val === null ? "—" : formatValue(val)}
+                </span>
+              </div>
+            );
+          })}
         </div>
       ) : null}
 
@@ -993,6 +1023,10 @@ export function Sparkline({
           : "var(--kit-danger)";
 
   if (finite.length === 1) {
+    const pad = 2;
+    const onlyIndex = values.findIndex((value) => Number.isFinite(value));
+    const cx =
+      values.length === 1 ? width / 2 : pad + (onlyIndex / (values.length - 1)) * (width - pad * 2);
     return (
       <svg
         width={width}
@@ -1002,7 +1036,7 @@ export function Sparkline({
         aria-label={ariaLabel}
         style={{ display: "block", width, height }}
       >
-        <circle cx={width / 2} cy={height / 2} r={3} fill={stroke} />
+        <circle cx={cx} cy={height / 2} r={3} fill={stroke} />
       </svg>
     );
   }
