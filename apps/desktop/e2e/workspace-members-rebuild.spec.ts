@@ -170,6 +170,7 @@ test("@two-client a rule that hides a folder rebuilds a member's copy without it
     const mine = member.page;
     await openWorkspaceFromFirstRun(mine, memberTemp);
     await mine.getByTestId(activityPin("sharing")).click();
+    await mine.getByTestId("sharing-lane-received").click();
     const received = mine.getByTestId("sharing-received-row").filter({ hasText: workspaceName });
     await expect(received.getByTestId("sharing-row-who")).toContainText("·", { timeout: 60_000 });
     await received.locator("[data-sharing-row-focus]").hover();
