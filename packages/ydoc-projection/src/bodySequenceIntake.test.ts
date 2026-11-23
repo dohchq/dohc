@@ -1300,6 +1300,22 @@ describe("what a format-2 note's body holds never decides a save", () => {
     read.destroy();
   });
 
+  it("a code block whose language holds U+2028 is saved with a plain fence, where a format-1 note that holds one is refused and writing it throws", () => {
+    const language = `a${String.fromCharCode(0x2028)}b`;
+    const { second } = inBothFormats([[{ type: "codeBlock", language }, "code"]]);
+    expect(registered(second)).toBe("accepted");
+    const note = new Y.Doc({ gc: false });
+    Y.applyUpdate(note, second);
+    expect(yDocToMarkdown(note)).toBe("```\ncode\n```\n");
+    note.destroy();
+
+    const first = markdownToYDoc("```js\ncode\n```\n", { clientID: 1 });
+    (first.getXmlFragment("body").get(0) as Y.XmlElement).setAttribute("language", language);
+    expect(registered(Y.encodeStateAsUpdate(first))).toBe(REFUSED_AT_REGISTRATION);
+    expect(() => yDocToMarkdown(first)).toThrow(/fenced code block/);
+    first.destroy();
+  });
+
   it("a note marked as using CRLF line ends may be emptied, where a format-1 note is refused", () => {
     const { first, second } = inBothFormats([], { dohcMarkdownCrlf: true });
     expect(registered(second)).toBe("accepted");
