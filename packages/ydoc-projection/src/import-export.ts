@@ -1021,9 +1021,15 @@ function yDocBodyToMarkdown(doc: Y.Doc): string {
   return serializeRichdocBody(escapeHighlightMarkdown(yDocBodyToJSON(doc)));
 }
 
+/**
+ * Reads the body from the note's sequence when the note says its body is one. Such a note has no
+ * item under `body`, so one that says so and has items there is read from them: they are what
+ * people wrote.
+ */
 function yDocBodyToJSON(doc: Y.Doc): JSONContent {
-  if (holdsBodySequence(doc)) return readBodySequence(schema, doc).toJSON() as JSONContent;
   const bodyFragment = getDohcYDocBodyFragment(doc);
+  if (holdsBodySequence(doc) && bodyFragment._start === null)
+    return readBodySequence(schema, doc).toJSON() as JSONContent;
   return yXmlFragmentToProseMirrorRootNode(bodyFragment, schema).toJSON() as JSONContent;
 }
 
