@@ -93,4 +93,4 @@ path = "tests/integration.rs"
 
 [[test]]
 name = "markdown_memory"
-path = "tests/markdown_memory.rs"
+path = "tests/markdown_memory/main.rs"
