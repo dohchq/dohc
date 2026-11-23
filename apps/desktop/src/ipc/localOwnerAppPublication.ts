@@ -191,6 +191,9 @@ export function createLocalOwnerAppPublicationHandler<
           },
           activateApp: (prepared, signal, approvalAgent) =>
             local.apps.activate(prepared, signal, approvalAgent),
+          withExclusiveDatasets: local.withExclusiveDatasets
+            ? (datasetIds, signal, work) => local.withExclusiveDatasets!(datasetIds, signal, work)
+            : undefined,
         });
       };
       if (input.action === "listStaged") {

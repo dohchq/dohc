@@ -44,6 +44,7 @@ async function loadControlTowerFiles(): Promise<Map<string, string>> {
 
 async function openFixture(overrides?: {
   onBeforeApproveCreate?: (revisionSha256: string) => void | Promise<void>;
+  onBeforePrepareMigration?: (datasetId: string) => void | Promise<void>;
 }) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-staged-apps-"));
   roots.push(workspaceRoot);
@@ -82,10 +83,15 @@ async function openFixture(overrides?: {
       return host.approve(input);
     },
     discardCreate: (id) => host.discard(id),
-    prepareMigrationCandidate: (input) => host.prepareMigrationCandidate(input),
+    prepareMigrationCandidate: async (input) => {
+      await overrides?.onBeforePrepareMigration?.(input.revision.datasetId);
+      return host.prepareMigrationCandidate(input);
+    },
     approveMigrationCandidate: (input) => host.approveMigrationCandidate(input),
     discardMigrationCandidate: (input) => host.discardMigrationCandidate(input),
     activateApp: (prepared, signal, agent) => host.apps.activate(prepared, signal, agent),
+    withExclusiveDatasets: (datasetIds, signal, work) =>
+      host.withExclusiveDatasets(datasetIds, signal, work),
   });
   return { workspaceRoot, host, staged };
 }
@@ -412,6 +418,9 @@ describe("localStagedApps", () => {
     await firstEntered;
 
     await expect(staged.discard(summary.stageId)).rejects.toThrow(/currently being approved/i);
+    await expect(staged.discard(summary.stageId.toUpperCase())).rejects.toThrow(
+      /currently being approved/i,
+    );
     await expect(
       staged.approve({
         stageId: summary.stageId,
@@ -419,6 +428,14 @@ describe("localStagedApps", () => {
         signal,
       }),
     ).rejects.toThrow(/already being approved/i);
+    await expect(
+      staged.stage({
+        appRoot: "personal-control-tower",
+        deferredWrites: [],
+        adapter: sourceCaptureAdapter(files),
+        signal,
+      }),
+    ).rejects.toThrow(/currently being approved/i);
 
     releaseFirst();
     const result = await approving;
@@ -426,6 +443,118 @@ describe("localStagedApps", () => {
     expect(host.list().datasets).toHaveLength(2);
     expect(host.apps.list("personal-control-tower").some((p) => p.active)).toBe(true);
     expect(await staged.list()).toEqual([]);
+  }, 60_000);
+
+  it("refuses approval retry before further writes when a receipted Collection was archived", async () => {
+    let calls = 0;
+    const { host, staged } = await openFixture({
+      onBeforeApproveCreate: () => {
+        calls += 1;
+        if (calls === 2) throw new Error("Simulated crash before second Collection.");
+      },
+    });
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    const summary = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+    await expect(
+      staged.approve({ stageId: summary.stageId, reviewDigest: summary.reviewDigest, signal }),
+    ).rejects.toThrow(/Simulated crash/);
+
+    const created = host.list().datasets;
+    expect(created).toHaveLength(1);
+    host.archive({ datasetId: created[0]!.datasetId });
+
+    await expect(
+      staged.approve({ stageId: summary.stageId, reviewDigest: summary.reviewDigest, signal }),
+    ).rejects.toThrow(/changed or is unavailable/i);
+    expect(host.list({ includeArchived: true }).datasets).toHaveLength(1);
+  }, 60_000);
+
+  it("blocks concurrent live writes during staged migration approval so active apps stay consistent", async () => {
+    let concurrentWriteError: unknown = null;
+    let initialPublicationId = "";
+    let initialAuthorityRevision = 0;
+    let duringApprove = false;
+    let injected = false;
+    let hostRef!: LocalDatasetHost;
+    const { host, staged } = await openFixture({
+      onBeforePrepareMigration: async () => {
+        if (!duringApprove || injected) return;
+        injected = true;
+        try {
+          await hostRef.apps.request(initialPublicationId, "invoke", {
+            authorityRevision: initialAuthorityRevision,
+            dataset: "workouts",
+            operation: "logWorkout",
+            idempotencyKey: "wrk-during-approval",
+            input: {
+              date: "2026-11-23",
+              activity: "Sprint",
+              minutes: 15,
+              effort: "Hard",
+              notes: "",
+            },
+          });
+        } catch (error) {
+          concurrentWriteError = error;
+        }
+      },
+    });
+    hostRef = host;
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    const initialStage = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+    const initialApproved = await staged.approve({
+      stageId: initialStage.stageId,
+      reviewDigest: initialStage.reviewDigest,
+      signal,
+    });
+    initialPublicationId = initialApproved.publicationId;
+    initialAuthorityRevision = initialApproved.authorityRevision;
+    const expensesCol = initialStage.collections.find((c) => c.alias === "expenses")!;
+    const workoutsCol = initialStage.collections.find((c) => c.alias === "workouts")!;
+
+    const updatedFiles = new Map(files);
+    updatedFiles.set(
+      "personal-control-tower/expenses/operations.js",
+      `${files.get("personal-control-tower/expenses/operations.js")!}\n// expense v2\n`,
+    );
+    updatedFiles.set(
+      "personal-control-tower/workouts/operations.js",
+      `${files.get("personal-control-tower/workouts/operations.js")!}\n// workout v2\n`,
+    );
+    const updateStage = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(updatedFiles),
+      signal,
+    });
+
+    duringApprove = true;
+    const migrated = await staged.approve({
+      stageId: updateStage.stageId,
+      reviewDigest: updateStage.reviewDigest,
+      signal,
+    });
+    expect(injected).toBe(true);
+    expect(concurrentWriteError).toBeInstanceOf(JournalError);
+    expect((concurrentWriteError as Error).message).toMatch(/being updated/i);
+    expect(migrated.collectionsApplied).toHaveLength(2);
+    expect(host.approvedArtifacts(expensesCol.datasetId).revision.revision).toBe(2);
+    expect(host.approvedArtifacts(workoutsCol.datasetId).revision.revision).toBe(2);
+    expect(host.apps.list("personal-control-tower").some((p) => p.active)).toBe(true);
   }, 60_000);
 
   it("refuses approval when staged revision.json fields are modified", async () => {

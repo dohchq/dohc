@@ -54,7 +54,12 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const SHA256_RE = /^[0-9a-f]{64}$/;
 
 const activeStageApprovals = new Map<string, { stageId: string; appRoot: string | null }>();
-const activeStageDiscards = new Set<string>();
+const activeStageDiscards = new Map<string, number>();
+
+const normalizeStageId = (stageId: string): string => {
+  if (!UUID_RE.test(stageId)) throw new Error("Invalid staged app id.");
+  return stageId.toLowerCase();
+};
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const decodeUtf8 = (value: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(value);
@@ -126,6 +131,11 @@ export interface LocalStagedAppsDependencies {
     signal: AbortSignal,
     agent?: ApprovalAgent | null,
   ): Promise<{ publicationId: string; authorityRevision: number }>;
+  withExclusiveDatasets?<T>(
+    datasetIds: readonly string[],
+    signal: AbortSignal,
+    work: () => Promise<T>,
+  ): Promise<T>;
 }
 
 interface StoredCollectionStep {
@@ -316,28 +326,52 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
       return await localStateFolder(localState, "staged-apps", guard);
     }
   };
-  const stageDirIn = (root: string, stageId: string) => {
-    if (!UUID_RE.test(stageId)) throw new Error("Invalid staged app id.");
-    return join(root, stageId);
-  };
+  const stageDirIn = (root: string, stageId: string) => join(root, normalizeStageId(stageId));
   const proposalPathIn = (root: string, stageId: string) =>
     join(stageDirIn(root, stageId), "proposal.json");
+  const removeStageDir = async (
+    root: string,
+    rawStageId: string,
+    strict: boolean,
+  ): Promise<void> => {
+    const id = normalizeStageId(rawStageId);
+    if (activeStageApprovals.get(lockKey)?.stageId === id) {
+      if (strict)
+        throw new Error("This staged review is currently being approved and cannot be discarded.");
+      return;
+    }
+    const discardKey = discardKeyFor(id);
+    activeStageDiscards.set(discardKey, (activeStageDiscards.get(discardKey) ?? 0) + 1);
+    try {
+      await rm(stageDirIn(root, id), { recursive: true, force: true });
+    } catch (error) {
+      if (strict) throw error;
+    } finally {
+      const next = (activeStageDiscards.get(discardKey) ?? 1) - 1;
+      if (next <= 0) activeStageDiscards.delete(discardKey);
+      else activeStageDiscards.set(discardKey, next);
+    }
+  };
 
   async function readProposalIn(
     root: string,
-    stageId: string,
+    rawStageId: string,
   ): Promise<StoredStageProposal | null> {
     try {
+      const stageId = normalizeStageId(rawStageId);
       const raw = await readFile(proposalPathIn(root, stageId), "utf8");
       const parsed = JSON.parse(raw) as StoredStageProposal;
       if (
         !parsed ||
         parsed.version !== 1 ||
-        parsed.stageId !== stageId ||
+        typeof parsed.stageId !== "string" ||
+        !UUID_RE.test(parsed.stageId) ||
+        parsed.stageId.toLowerCase() !== stageId ||
         parsed.workspaceId !== deps.workspaceId ||
         !SHA256_RE.test(parsed.reviewDigest)
       )
         return null;
+      parsed.stageId = stageId;
       parseAppPublicationCandidate(parsed.app.candidate, APP_PUBLICATION_LIMITS);
       return parsed;
     } catch {
@@ -378,24 +412,13 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
       return filtered.map(summarizeStage);
     },
 
-    async discard(stageId: string): Promise<void> {
+    async discard(rawStageId: string): Promise<void> {
       deps.assertCurrent();
-      if (!UUID_RE.test(stageId)) throw new Error("Invalid staged app id.");
+      const stageId = normalizeStageId(rawStageId);
       if (activeStageApprovals.get(lockKey)?.stageId === stageId)
         throw new Error("This staged review is currently being approved and cannot be discarded.");
-      const discardKey = discardKeyFor(stageId);
-      activeStageDiscards.add(discardKey);
-      try {
-        const root = await stagedRootForWrite();
-        if (activeStageApprovals.get(lockKey)?.stageId === stageId)
-          throw new Error(
-            "This staged review is currently being approved and cannot be discarded.",
-          );
-        const dir = stageDirIn(root, stageId);
-        await rm(dir, { recursive: true, force: true });
-      } finally {
-        activeStageDiscards.delete(discardKey);
-      }
+      const root = await stagedRootForWrite();
+      await removeStageDir(root, stageId, true);
     },
 
     async stage(input: {
@@ -812,17 +835,11 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
       }
 
       for (const old of previousForRoot) {
-        if (activeStageApprovals.get(lockKey)?.stageId === old.stageId) continue;
-        await rm(stageDirIn(root, old.stageId), { recursive: true, force: true }).catch(
-          () => undefined,
-        );
+        await removeStageDir(root, old.stageId, false);
       }
       const allNow = await listProposalsIn(root);
       for (const overflow of allNow.slice(MAX_STAGE_COUNT)) {
-        if (activeStageApprovals.get(lockKey)?.stageId === overflow.stageId) continue;
-        await rm(stageDirIn(root, overflow.stageId), { recursive: true, force: true }).catch(
-          () => undefined,
-        );
+        await removeStageDir(root, overflow.stageId, false);
       }
       return summarizeStage(proposal);
     },
@@ -845,25 +862,25 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
     }> {
       deps.assertCurrent();
       input.signal.throwIfAborted();
-      if (!UUID_RE.test(input.stageId)) throw new Error("Invalid staged app id.");
+      const stageId = normalizeStageId(input.stageId);
       const running = activeStageApprovals.get(lockKey);
       if (running)
         throw new Error(
-          running.stageId === input.stageId
+          running.stageId === stageId
             ? "This staged review is already being approved."
             : "Another staged review is currently being approved for this workspace. Wait for it to finish.",
         );
-      if (activeStageDiscards.has(discardKeyFor(input.stageId)))
+      if ((activeStageDiscards.get(discardKeyFor(stageId)) ?? 0) > 0)
         throw new Error("This staged review is being discarded. Stage the app again.");
-      activeStageApprovals.set(lockKey, { stageId: input.stageId, appRoot: null });
+      activeStageApprovals.set(lockKey, { stageId, appRoot: null });
       try {
         const agent = parseApprovalAgent(input.agent);
         const root = await stagedRootForWrite(input.signal);
         deps.assertCurrent();
         input.signal.throwIfAborted();
-        const proposal = await readProposalIn(root, input.stageId);
+        const proposal = await readProposalIn(root, stageId);
         if (!proposal) throw new Error("This staged review was not found. Stage the app again.");
-        activeStageApprovals.set(lockKey, { stageId: input.stageId, appRoot: proposal.appRoot });
+        activeStageApprovals.set(lockKey, { stageId, appRoot: proposal.appRoot });
         const recomputedDigest = computeReviewDigest({
           workspaceId: proposal.workspaceId,
           appRoot: proposal.appRoot,
@@ -878,7 +895,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
         )
           throw new Error("This staged review changed or expired. Stage the app again.");
 
-        const dir = stageDirIn(root, input.stageId);
+        const dir = stageDirIn(root, stageId);
         const bundleDir = join(dir, "bundle");
         const collectionsDir = join(dir, "collections");
 
@@ -929,6 +946,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
           let schemaSql: string;
           let operationSource: string;
           let definition: DatasetDefinition;
+          let checked: DatasetRevision;
           try {
             storedRevision = parseDatasetRevision(JSON.parse(decodeUtf8(revisionBytes)));
             schemaSql = decodeUtf8(schemaBytes);
@@ -936,17 +954,17 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
             definition = parseDatasetDefinition(JSON.parse(decodeUtf8(definitionBytes)), {
               descriptorPath: step.datasetPath,
             });
+            checked = parseDatasetRevision(
+              describeDatasetRevision({
+                definition,
+                revision: step.targetRevision,
+                schemaSql,
+                operationSource,
+              }),
+            );
           } catch {
             throw new Error(integrityMessage);
           }
-          const checked = parseDatasetRevision(
-            describeDatasetRevision({
-              definition,
-              revision: step.targetRevision,
-              schemaSql,
-              operationSource,
-            }),
-          );
           if (
             definition.datasetId !== step.datasetId ||
             storedRevision.revisionSha256 !== step.targetRevisionSha256 ||
@@ -979,253 +997,260 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
           });
         }
 
-        for (const step of proposal.collections) {
-          deps.assertCurrent();
-          input.signal.throwIfAborted();
-          const existingReceipt = proposal.receipts[step.datasetId];
-          if (
-            step.action !== "unchanged" &&
-            existingReceipt?.revisionSha256 === step.targetRevisionSha256
-          )
-            continue;
-          const existing = await deps.tryApprovedArtifacts(step.datasetId, input.signal);
-          deps.assertCurrent();
-          input.signal.throwIfAborted();
-          if (step.action === "unchanged") {
-            if (
-              !existing ||
-              !existing.active ||
-              existing.revision.revisionSha256 !== step.targetRevisionSha256
-            )
+        const runCommit = async () => {
+          for (const step of proposal.collections) {
+            deps.assertCurrent();
+            input.signal.throwIfAborted();
+            const existing = await deps.tryApprovedArtifacts(step.datasetId, input.signal);
+            deps.assertCurrent();
+            input.signal.throwIfAborted();
+            const receiptMatches =
+              step.action !== "unchanged" &&
+              proposal.receipts[step.datasetId]?.revisionSha256 === step.targetRevisionSha256;
+            if (step.action === "unchanged" || receiptMatches) {
+              if (
+                !existing ||
+                !existing.active ||
+                existing.revision.revisionSha256 !== step.targetRevisionSha256
+              )
+                throw new Error(
+                  `Collection "${step.name}" changed or is unavailable. Stage the app again.`,
+                );
+              continue;
+            }
+            if (step.action === "create") {
+              if (existing) {
+                if (!existing.active)
+                  throw new Error(
+                    `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
+                  );
+                if (existing.revision.revisionSha256 !== step.targetRevisionSha256)
+                  throw new Error(
+                    `Collection "${step.name}" already exists with different rules. Stage the app again.`,
+                  );
+              }
+              continue;
+            }
+            if (!existing || !existing.active)
+              throw new Error(
+                `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
+              );
+            if (existing.revision.revisionSha256 === step.targetRevisionSha256) continue;
+            if (!step.expectedCursor || !sameCursor(existing.cursor, step.expectedCursor))
               throw new Error(
                 `Collection "${step.name}" changed after staging. Stage the app again.`,
               );
-            continue;
           }
-          if (step.action === "create") {
-            if (existing) {
-              if (!existing.active)
-                throw new Error(
-                  `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
-                );
-              if (existing.revision.revisionSha256 !== step.targetRevisionSha256)
+
+          const persistReceipt = async (datasetId: string, receipt: StoredReceipt) => {
+            proposal.receipts[datasetId] = receipt;
+            await writeAtomicFile(proposalPathIn(root, stageId), JSON.stringify(proposal, null, 2));
+          };
+
+          const collectionsApplied: Array<{
+            datasetId: string;
+            action: "create" | "migrate";
+            revision: number;
+            revisionSha256: string;
+          }> = [];
+
+          for (const step of proposal.collections) {
+            deps.assertCurrent();
+            input.signal.throwIfAborted();
+            if (step.action === "unchanged") continue;
+
+            const existingReceipt = proposal.receipts[step.datasetId];
+            if (existingReceipt?.revisionSha256 === step.targetRevisionSha256) {
+              collectionsApplied.push({
+                datasetId: step.datasetId,
+                action: step.action,
+                revision: existingReceipt.revision,
+                revisionSha256: existingReceipt.revisionSha256,
+              });
+              continue;
+            }
+
+            const blobs = verifiedCollections.get(step.datasetId)!;
+            const existing = await deps.tryApprovedArtifacts(step.datasetId, input.signal);
+            deps.assertCurrent();
+            input.signal.throwIfAborted();
+
+            if (step.action === "create") {
+              if (existing) {
+                if (!existing.active)
+                  throw new Error(
+                    `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
+                  );
+                if (existing.revision.revisionSha256 === step.targetRevisionSha256) {
+                  await persistReceipt(step.datasetId, {
+                    action: "create",
+                    revision: existing.revision.revision,
+                    revisionSha256: existing.revision.revisionSha256,
+                    completedAtMs: Date.now(),
+                  });
+                  collectionsApplied.push({
+                    datasetId: step.datasetId,
+                    action: "create",
+                    revision: existing.revision.revision,
+                    revisionSha256: existing.revision.revisionSha256,
+                  });
+                  continue;
+                }
                 throw new Error(
                   `Collection "${step.name}" already exists with different rules. Stage the app again.`,
                 );
-            }
-            continue;
-          }
-          if (!existing || !existing.active)
-            throw new Error(
-              `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
-            );
-          if (existing.revision.revisionSha256 === step.targetRevisionSha256) continue;
-          if (!step.expectedCursor || !sameCursor(existing.cursor, step.expectedCursor))
-            throw new Error(
-              `Collection "${step.name}" changed after staging. Stage the app again.`,
-            );
-        }
-
-        const persistReceipt = async (datasetId: string, receipt: StoredReceipt) => {
-          proposal.receipts[datasetId] = receipt;
-          await writeAtomicFile(
-            proposalPathIn(root, input.stageId),
-            JSON.stringify(proposal, null, 2),
-          );
-        };
-
-        const collectionsApplied: Array<{
-          datasetId: string;
-          action: "create" | "migrate";
-          revision: number;
-          revisionSha256: string;
-        }> = [];
-
-        for (const step of proposal.collections) {
-          deps.assertCurrent();
-          input.signal.throwIfAborted();
-          if (step.action === "unchanged") continue;
-
-          const existingReceipt = proposal.receipts[step.datasetId];
-          if (existingReceipt?.revisionSha256 === step.targetRevisionSha256) {
-            collectionsApplied.push({
-              datasetId: step.datasetId,
-              action: step.action,
-              revision: existingReceipt.revision,
-              revisionSha256: existingReceipt.revisionSha256,
-            });
-            continue;
-          }
-
-          const blobs = verifiedCollections.get(step.datasetId)!;
-          const existing = await deps.tryApprovedArtifacts(step.datasetId, input.signal);
-          deps.assertCurrent();
-          input.signal.throwIfAborted();
-
-          if (step.action === "create") {
-            if (existing) {
-              if (existing.revision.revisionSha256 === step.targetRevisionSha256) {
-                await persistReceipt(step.datasetId, {
-                  action: "create",
-                  revision: existing.revision.revision,
-                  revisionSha256: existing.revision.revisionSha256,
-                  completedAtMs: Date.now(),
-                });
-                collectionsApplied.push({
-                  datasetId: step.datasetId,
-                  action: "create",
-                  revision: existing.revision.revision,
-                  revisionSha256: existing.revision.revisionSha256,
-                });
-                continue;
               }
-              throw new Error(
-                `Collection "${step.name}" already exists with different rules. Stage the app again.`,
-              );
+
+              const memFiles = new Map<string, Uint8Array>([
+                [step.datasetPath, blobs.definitionBytes],
+                [step.schemaPath, blobs.schemaBytes],
+                [step.operationsPath, blobs.operationsBytes],
+              ]);
+              const prepared = await deps.prepareCreate({
+                descriptorPath: step.datasetPath,
+                adapter: memorySourceAdapter(deps.workspaceId, memFiles),
+                signal: input.signal,
+              });
+              if (prepared.revision.revisionSha256 !== step.targetRevisionSha256) {
+                deps.discardCreate(prepared.preparationId);
+                throw new Error(
+                  `Staged Collection "${step.name}" no longer matches its review digest. Stage again.`,
+                );
+              }
+              let approved: DatasetRevision;
+              try {
+                approved = await deps.approveCreate({
+                  preparationId: prepared.preparationId,
+                  revisionSha256: prepared.revision.revisionSha256,
+                  approvalAgent: agent,
+                  signal: input.signal,
+                });
+              } catch (error) {
+                deps.discardCreate(prepared.preparationId);
+                throw error;
+              }
+              deps.assertCurrent();
+              if (approved.revisionSha256 !== step.targetRevisionSha256)
+                throw new Error(`Collection "${step.name}" did not confirm the reviewed revision.`);
+              await persistReceipt(step.datasetId, {
+                action: "create",
+                revision: approved.revision,
+                revisionSha256: approved.revisionSha256,
+                completedAtMs: Date.now(),
+              });
+              collectionsApplied.push({
+                datasetId: step.datasetId,
+                action: "create",
+                revision: approved.revision,
+                revisionSha256: approved.revisionSha256,
+              });
+              continue;
             }
 
-            const memFiles = new Map<string, Uint8Array>([
-              [step.datasetPath, blobs.definitionBytes],
-              [step.schemaPath, blobs.schemaBytes],
-              [step.operationsPath, blobs.operationsBytes],
-            ]);
-            const prepared = await deps.prepareCreate({
-              descriptorPath: step.datasetPath,
-              adapter: memorySourceAdapter(deps.workspaceId, memFiles),
-              signal: input.signal,
-            });
-            if (prepared.revision.revisionSha256 !== step.targetRevisionSha256) {
-              deps.discardCreate(prepared.preparationId);
+            if (!existing || !existing.active)
               throw new Error(
-                `Staged Collection "${step.name}" no longer matches its review digest. Stage again.`,
+                `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
               );
+            if (existing.revision.revisionSha256 === step.targetRevisionSha256) {
+              await persistReceipt(step.datasetId, {
+                action: "migrate",
+                revision: existing.revision.revision,
+                revisionSha256: existing.revision.revisionSha256,
+                completedAtMs: Date.now(),
+              });
+              collectionsApplied.push({
+                datasetId: step.datasetId,
+                action: "migrate",
+                revision: existing.revision.revision,
+                revisionSha256: existing.revision.revisionSha256,
+              });
+              continue;
             }
-            let approved: DatasetRevision;
+            if (!step.expectedCursor || !sameCursor(existing.cursor, step.expectedCursor))
+              throw new Error(
+                `Collection "${step.name}" changed after staging. Stage the app again.`,
+              );
+
+            const candidate = DatasetMigrationCandidate.parse(
+              await deps.prepareMigrationCandidate({
+                workspaceId: deps.workspaceId,
+                revision: blobs.revision,
+                expected: step.expectedCursor,
+                schemaSql: blobs.schemaSql,
+                operationSource: blobs.operationSource,
+                migrationSql: blobs.migrationSql!,
+                signal: input.signal,
+              }),
+            );
+            let approving = false;
             try {
-              approved = await deps.approveCreate({
-                preparationId: prepared.preparationId,
-                revisionSha256: prepared.revision.revisionSha256,
+              deps.assertCurrent();
+              input.signal.throwIfAborted();
+              if (
+                !sameCursor(candidate.expected, step.expectedCursor) ||
+                candidate.approvedRevisionHash !== step.targetRevisionSha256
+              )
+                throw new Error(
+                  `Collection "${step.name}" changed while applying. Stage the app again.`,
+                );
+              approving = true;
+              const migrated = await deps.approveMigrationCandidate({
+                workspaceId: deps.workspaceId,
+                datasetId: step.datasetId,
+                candidateId: candidate.candidateId,
+                checkpointSha256: candidate.checkpointSha256,
                 approvalAgent: agent,
                 signal: input.signal,
               });
-            } catch (error) {
-              deps.discardCreate(prepared.preparationId);
-              throw error;
+              deps.assertCurrent();
+              if (migrated.revision.revisionSha256 !== step.targetRevisionSha256)
+                throw new Error(`Collection "${step.name}" did not confirm the reviewed update.`);
+              await persistReceipt(step.datasetId, {
+                action: "migrate",
+                revision: migrated.revision.revision,
+                revisionSha256: migrated.revision.revisionSha256,
+                completedAtMs: Date.now(),
+              });
+              collectionsApplied.push({
+                datasetId: step.datasetId,
+                action: "migrate",
+                revision: migrated.revision.revision,
+                revisionSha256: migrated.revision.revisionSha256,
+              });
+            } finally {
+              if (!approving) {
+                await deps
+                  .discardMigrationCandidate({
+                    workspaceId: deps.workspaceId,
+                    datasetId: step.datasetId,
+                    candidateId: candidate.candidateId,
+                    signal: input.signal,
+                  })
+                  .catch(() => undefined);
+              }
             }
-            deps.assertCurrent();
-            if (approved.revisionSha256 !== step.targetRevisionSha256)
-              throw new Error(`Collection "${step.name}" did not confirm the reviewed revision.`);
-            await persistReceipt(step.datasetId, {
-              action: "create",
-              revision: approved.revision,
-              revisionSha256: approved.revisionSha256,
-              completedAtMs: Date.now(),
-            });
-            collectionsApplied.push({
-              datasetId: step.datasetId,
-              action: "create",
-              revision: approved.revision,
-              revisionSha256: approved.revisionSha256,
-            });
-            continue;
           }
 
-          if (!existing || !existing.active)
-            throw new Error(
-              `Collection "${step.name}" is unavailable. Restore it and stage the app again.`,
-            );
-          if (existing.revision.revisionSha256 === step.targetRevisionSha256) {
-            await persistReceipt(step.datasetId, {
-              action: "migrate",
-              revision: existing.revision.revision,
-              revisionSha256: existing.revision.revisionSha256,
-              completedAtMs: Date.now(),
-            });
-            collectionsApplied.push({
-              datasetId: step.datasetId,
-              action: "migrate",
-              revision: existing.revision.revision,
-              revisionSha256: existing.revision.revisionSha256,
-            });
-            continue;
-          }
-          if (!step.expectedCursor || !sameCursor(existing.cursor, step.expectedCursor))
-            throw new Error(
-              `Collection "${step.name}" changed after staging. Stage the app again.`,
-            );
-
-          const candidate = DatasetMigrationCandidate.parse(
-            await deps.prepareMigrationCandidate({
-              workspaceId: deps.workspaceId,
-              revision: blobs.revision,
-              expected: step.expectedCursor,
-              schemaSql: blobs.schemaSql,
-              operationSource: blobs.operationSource,
-              migrationSql: blobs.migrationSql!,
-              signal: input.signal,
-            }),
+          const activated = await deps.activateApp(
+            {
+              candidate: proposal.app.candidate,
+              files: verifiedBundleFiles,
+            },
+            input.signal,
+            agent,
           );
-          let approving = false;
-          try {
-            deps.assertCurrent();
-            input.signal.throwIfAborted();
-            if (
-              !sameCursor(candidate.expected, step.expectedCursor) ||
-              candidate.approvedRevisionHash !== step.targetRevisionSha256
-            )
-              throw new Error(
-                `Collection "${step.name}" changed while applying. Stage the app again.`,
-              );
-            approving = true;
-            const migrated = await deps.approveMigrationCandidate({
-              workspaceId: deps.workspaceId,
-              datasetId: step.datasetId,
-              candidateId: candidate.candidateId,
-              checkpointSha256: candidate.checkpointSha256,
-              approvalAgent: agent,
-              signal: input.signal,
-            });
-            deps.assertCurrent();
-            if (migrated.revision.revisionSha256 !== step.targetRevisionSha256)
-              throw new Error(`Collection "${step.name}" did not confirm the reviewed update.`);
-            await persistReceipt(step.datasetId, {
-              action: "migrate",
-              revision: migrated.revision.revision,
-              revisionSha256: migrated.revision.revisionSha256,
-              completedAtMs: Date.now(),
-            });
-            collectionsApplied.push({
-              datasetId: step.datasetId,
-              action: "migrate",
-              revision: migrated.revision.revision,
-              revisionSha256: migrated.revision.revisionSha256,
-            });
-          } finally {
-            if (!approving) {
-              await deps
-                .discardMigrationCandidate({
-                  workspaceId: deps.workspaceId,
-                  datasetId: step.datasetId,
-                  candidateId: candidate.candidateId,
-                  signal: input.signal,
-                })
-                .catch(() => undefined);
-            }
-          }
-        }
+          deps.assertCurrent();
+          return { activated, collectionsApplied };
+        };
 
-        const activated = await deps.activateApp(
-          {
-            candidate: proposal.app.candidate,
-            files: verifiedBundleFiles,
-          },
-          input.signal,
-          agent,
-        );
-        deps.assertCurrent();
+        const datasetIds = proposal.collections.map((step) => step.datasetId);
+        const { activated, collectionsApplied } =
+          deps.withExclusiveDatasets && datasetIds.length > 0
+            ? await deps.withExclusiveDatasets(datasetIds, input.signal, runCommit)
+            : await runCommit();
         await rm(dir, { recursive: true, force: true }).catch(() => undefined);
         return {
-          stageId: input.stageId,
+          stageId,
           publicationId: activated.publicationId,
           authorityRevision: activated.authorityRevision,
           collectionsApplied,

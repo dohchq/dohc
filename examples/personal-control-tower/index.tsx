@@ -195,6 +195,16 @@ export function PersonalControlTower() {
             {workouts.error.message}
           </Callout>
         ) : null}
+        {deleteExpense.error ? (
+          <Callout tone="danger" title="Could not remove expense">
+            {deleteExpense.error.message}
+          </Callout>
+        ) : null}
+        {deleteWorkout.error ? (
+          <Callout tone="danger" title="Could not remove workout">
+            {deleteWorkout.error.message}
+          </Callout>
+        ) : null}
 
         <Grid cols={4}>
           <StatCard label="Total spend" value={formatCurrency(totalSpent)} />
