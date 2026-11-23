@@ -273,6 +273,7 @@ test("@members-live a member at Edit and the owner write in one document and eac
     await mine.getByRole("button", { name: "Close settings", exact: true }).click();
     if (!(await mine.getByTestId("sharing-view").isVisible()))
       await mine.getByTestId(activityPin("sharing")).click();
+    await mine.getByTestId("sharing-lane-received").click();
     const received = mine.getByTestId("sharing-received-row").filter({ hasText: workspaceName });
     await expect(received.getByTestId("sharing-row-who")).toContainText("·", { timeout: 60_000 });
     await received.locator("[data-sharing-row-focus]").hover();
