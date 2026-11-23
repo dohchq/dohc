@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { JournalError } from "@dohc/app-backend-runtime/journal";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { compileClosedApp } from "./closedAppCompiler";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createLocalStagedApps } from "./localStagedApps";
@@ -91,7 +92,15 @@ async function openFixture(overrides?: {
     discardMigrationCandidate: (input) => host.discardMigrationCandidate(input),
     activateApp: (prepared, signal, agent) => host.apps.activate(prepared, signal, agent),
     withExclusiveDatasets: (datasetIds, signal, work) =>
-      host.withExclusiveDatasets(datasetIds, signal, work),
+      host.withExclusiveDatasets(datasetIds, signal, (exclusive) =>
+        work({
+          approveCreate: async (input) => {
+            await overrides?.onBeforeApproveCreate?.(input.revisionSha256);
+            return exclusive.approve(input);
+          },
+          approveMigrationCandidate: (input) => exclusive.approveMigrationCandidate(input),
+        }),
+      ),
   });
   return { workspaceRoot, host, staged };
 }
@@ -592,5 +601,190 @@ describe("localStagedApps", () => {
       staged.approve({ stageId: summary.stageId, reviewDigest: summary.reviewDigest, signal }),
     ).rejects.toThrow(/failed integrity check/i);
     expect(host.list().datasets).toHaveLength(0);
+  }, 60_000);
+
+  it("blocks standalone Collection migration approval during staged approval", async () => {
+    let standaloneError: unknown = null;
+    let duringApprove = false;
+    let injected = false;
+    let standaloneArgs: Parameters<LocalDatasetHost["approveMigrationCandidate"]>[0] | null = null;
+    let hostRef!: LocalDatasetHost;
+    const { host, staged } = await openFixture({
+      onBeforePrepareMigration: async () => {
+        if (!duringApprove || injected || !standaloneArgs) return;
+        injected = true;
+        try {
+          await hostRef.approveMigrationCandidate(standaloneArgs);
+        } catch (error) {
+          standaloneError = error;
+        }
+      },
+    });
+    hostRef = host;
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    const initialStage = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+    await staged.approve({
+      stageId: initialStage.stageId,
+      reviewDigest: initialStage.reviewDigest,
+      signal,
+    });
+    const expensesCol = initialStage.collections.find((c) => c.alias === "expenses")!;
+    const workoutsCol = initialStage.collections.find((c) => c.alias === "workouts")!;
+
+    const updatedFiles = new Map(files);
+    updatedFiles.set(
+      "personal-control-tower/expenses/operations.js",
+      `${files.get("personal-control-tower/expenses/operations.js")!}\n// expense v2\n`,
+    );
+    updatedFiles.set(
+      "personal-control-tower/workouts/operations.js",
+      `${files.get("personal-control-tower/workouts/operations.js")!}\n// workout v2\n`,
+    );
+    const updateStage = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(updatedFiles),
+      signal,
+    });
+
+    const workoutsApproved = host.approvedArtifacts(workoutsCol.datasetId);
+    const altOpSource = `${files.get("personal-control-tower/workouts/operations.js")!}\n// standalone alt v2\n`;
+    const altRevision = describeDatasetRevision({
+      definition: workoutsApproved.revision.definition,
+      revision: 2,
+      schemaSql: workoutsApproved.schemaSql,
+      operationSource: altOpSource,
+    });
+    const standaloneCandidate = await host.prepareMigrationCandidate({
+      workspaceId: "w",
+      revision: altRevision,
+      expected: workoutsApproved.cursor,
+      schemaSql: workoutsApproved.schemaSql,
+      operationSource: altOpSource,
+      migrationSql: "SELECT 1;",
+      signal,
+    });
+    standaloneArgs = {
+      workspaceId: "w",
+      datasetId: workoutsCol.datasetId,
+      candidateId: standaloneCandidate.candidateId,
+      checkpointSha256: standaloneCandidate.checkpointSha256,
+      signal,
+    };
+
+    duringApprove = true;
+    const migrated = await staged.approve({
+      stageId: updateStage.stageId,
+      reviewDigest: updateStage.reviewDigest,
+      signal,
+    });
+    expect(injected).toBe(true);
+    expect(standaloneError).toBeInstanceOf(JournalError);
+    expect((standaloneError as Error).message).toMatch(/being updated/i);
+    expect(migrated.collectionsApplied).toHaveLength(2);
+    expect(host.approvedArtifacts(expensesCol.datasetId).revision.revision).toBe(2);
+    expect(host.approvedArtifacts(workoutsCol.datasetId).revision.revision).toBe(2);
+    expect(host.apps.list("personal-control-tower").some((p) => p.active)).toBe(true);
+  }, 60_000);
+
+  it("drains an in-flight Collection transfer before running staged approval pre-check", async () => {
+    const { host, staged } = await openFixture();
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    const initialStage = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+    await staged.approve({
+      stageId: initialStage.stageId,
+      reviewDigest: initialStage.reviewDigest,
+      signal,
+    });
+    const expensesCol = initialStage.collections.find((c) => c.alias === "expenses")!;
+    const workoutsCol = initialStage.collections.find((c) => c.alias === "workouts")!;
+
+    const updatedFiles = new Map(files);
+    updatedFiles.set(
+      "personal-control-tower/expenses/operations.js",
+      `${files.get("personal-control-tower/expenses/operations.js")!}\n// expense v2\n`,
+    );
+    updatedFiles.set(
+      "personal-control-tower/workouts/operations.js",
+      `${files.get("personal-control-tower/workouts/operations.js")!}\n// workout v2\n`,
+    );
+    const updateStage = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(updatedFiles),
+      signal,
+    });
+
+    let transferSettled = false;
+    let enteredTransfer!: () => void;
+    let releaseTransfer!: () => void;
+    const transferStarted = new Promise<void>((resolve) => {
+      enteredTransfer = resolve;
+    });
+    const transferGate = new Promise<void>((resolve) => {
+      releaseTransfer = resolve;
+    });
+
+    const transferring = host
+      .transferToShared({
+        datasetId: workoutsCol.datasetId,
+        targetOrigin: "https://relay.example",
+        target: {
+          importRecovery: async (input) => {
+            enteredTransfer();
+            await transferGate;
+            return {
+              transferId: input.transferId,
+              manifestSha256: input.manifestSha256,
+              sourceCursor: input.sourceCursor,
+              targetCursor: {
+                ...input.sourceCursor,
+                hostEpoch: `${input.sourceCursor.hostEpoch}-remote`,
+                revision: input.sourceCursor.revision + 1,
+              },
+            };
+          },
+        },
+        signal,
+      })
+      .finally(() => {
+        transferSettled = true;
+      });
+    await transferStarted;
+
+    let approvalSettledBeforeTransfer = false;
+    const approving = staged
+      .approve({
+        stageId: updateStage.stageId,
+        reviewDigest: updateStage.reviewDigest,
+        signal,
+      })
+      .catch((error) => {
+        if (!transferSettled) approvalSettledBeforeTransfer = true;
+        throw error;
+      });
+    await Promise.resolve();
+    expect(approvalSettledBeforeTransfer).toBe(false);
+    releaseTransfer();
+    await transferring;
+
+    await expect(approving).rejects.toThrow(/unavailable/i);
+    expect(approvalSettledBeforeTransfer).toBe(false);
+    expect(host.approvedArtifacts(expensesCol.datasetId).revision.revision).toBe(1);
+    expect(host.approvedArtifacts(workoutsCol.datasetId).active).toBe(false);
   }, 60_000);
 });

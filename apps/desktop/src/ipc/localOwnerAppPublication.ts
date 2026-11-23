@@ -192,7 +192,18 @@ export function createLocalOwnerAppPublicationHandler<
           activateApp: (prepared, signal, approvalAgent) =>
             local.apps.activate(prepared, signal, approvalAgent),
           withExclusiveDatasets: local.withExclusiveDatasets
-            ? (datasetIds, signal, work) => local.withExclusiveDatasets!(datasetIds, signal, work)
+            ? (datasetIds, signal, work) =>
+                local.withExclusiveDatasets!(datasetIds, signal, (exclusive) =>
+                  work({
+                    approveCreate: (approveInput) => exclusive.approve(approveInput),
+                    ...(migration
+                      ? {}
+                      : {
+                          approveMigrationCandidate: (migrationInput) =>
+                            exclusive.approveMigrationCandidate(migrationInput),
+                        }),
+                  }),
+                )
             : undefined,
         });
       };
@@ -213,7 +224,7 @@ export function createLocalOwnerAppPublicationHandler<
         current();
         return OwnerAppPublicationResult.parse({
           kind: "stagedDiscarded",
-          stageId: input.stageId,
+          stageId: input.stageId.toLowerCase(),
         });
       }
       if (input.action === "approveStaged") {

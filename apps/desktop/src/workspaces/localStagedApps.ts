@@ -134,7 +134,10 @@ export interface LocalStagedAppsDependencies {
   withExclusiveDatasets?<T>(
     datasetIds: readonly string[],
     signal: AbortSignal,
-    work: () => Promise<T>,
+    work: (exclusive?: {
+      approveCreate?: LocalStagedAppsDependencies["approveCreate"];
+      approveMigrationCandidate?: LocalStagedAppsDependencies["approveMigrationCandidate"];
+    }) => Promise<T>,
   ): Promise<T>;
 }
 
@@ -997,7 +1000,13 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
           });
         }
 
-        const runCommit = async () => {
+        const runCommit = async (exclusive?: {
+          approveCreate?: LocalStagedAppsDependencies["approveCreate"];
+          approveMigrationCandidate?: LocalStagedAppsDependencies["approveMigrationCandidate"];
+        }) => {
+          const approveCreate = exclusive?.approveCreate ?? deps.approveCreate;
+          const approveMigrationCandidate =
+            exclusive?.approveMigrationCandidate ?? deps.approveMigrationCandidate;
           for (const step of proposal.collections) {
             deps.assertCurrent();
             input.signal.throwIfAborted();
@@ -1119,7 +1128,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
               }
               let approved: DatasetRevision;
               try {
-                approved = await deps.approveCreate({
+                approved = await approveCreate({
                   preparationId: prepared.preparationId,
                   revisionSha256: prepared.revision.revisionSha256,
                   approvalAgent: agent,
@@ -1194,7 +1203,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
                   `Collection "${step.name}" changed while applying. Stage the app again.`,
                 );
               approving = true;
-              const migrated = await deps.approveMigrationCandidate({
+              const migrated = await approveMigrationCandidate({
                 workspaceId: deps.workspaceId,
                 datasetId: step.datasetId,
                 candidateId: candidate.candidateId,
