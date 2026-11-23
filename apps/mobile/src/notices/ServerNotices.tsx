@@ -4,7 +4,8 @@ import type { LegendListRef, OnViewableItemsChangedInfo } from "@legendapp/list/
 import { Stack, useIsFocused } from "expo-router";
 import { Check } from "lucide-react-native";
 import { useCallback, useEffect, useRef } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Platform, StyleSheet, Text, View } from "react-native";
+import { HeaderButton } from "../AndroidHeader";
 import { useTheme } from "../theme";
 import { HoldRow } from "../workspace/ListStates";
 import { NoticeRow } from "./NoticeRow";
@@ -47,8 +48,16 @@ export function ServerNotices() {
   });
   return (
     <>
-      <Stack.Screen options={{ title: noticesWords.heading }} />
-      {unread > 0 ? (
+      <Stack.Screen
+        options={{
+          title: noticesWords.heading,
+          headerRight:
+            Platform.OS === "android" && unread > 0
+              ? () => <HeaderButton label={noticesWords.markAllRead} onPress={markAllRead} />
+              : undefined,
+        }}
+      />
+      {Platform.OS === "ios" && unread > 0 ? (
         <Stack.Toolbar placement="right">
           <Stack.Toolbar.Button onPress={markAllRead}>
             {noticesWords.markAllRead}

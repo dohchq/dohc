@@ -46,7 +46,7 @@ describe("readOnlyReasons", () => {
       "Live editing is paused for this page. Open Live documents to continue.",
     ]);
     expect(readOnlyReasons({ ...NONE, livePaused: "full" })).toEqual([
-      "Live editing is paused until this page's waiting edits reach the server.",
+      "Live editing is paused until pending edits reach the server.",
     ]);
   });
 
@@ -82,7 +82,7 @@ describe("the next step", () => {
 describe("transitionReason", () => {
   it("says why a session became read-only", () => {
     expect(transitionReason({ ...TURN, readOnlyCause: "lineage-failure" })).toBe(
-      "dohc could not finish replacing this page. Try again to finish it.",
+      "dohc could not replace this page. Choose Try again to finish.",
     );
     expect(transitionReason(TURN)).toBe(CONNECTION_LOST_REASON);
     expect(transitionReason({ ...TURN, readOnlyCause: "access-ended" })).toBeUndefined();

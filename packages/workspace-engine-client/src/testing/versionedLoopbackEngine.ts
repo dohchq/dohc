@@ -154,6 +154,8 @@ const MUTATION_OPTIONAL_STRINGS = [
   "summary",
   "correlationId",
   "expectedSha256",
+  "expectedPathClearObjectId",
+  "expectedPathClearHeadMomentId",
 ] as const;
 const WRITE_OPTIONAL_STRINGS = [...MUTATION_OPTIONAL_STRINGS, "objectId", "momentId"] as const;
 const REQUIRED_SECRET_METADATA = ["workspaceId", "origin"] as const;
@@ -167,13 +169,13 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.textWrite]: {
     requiredStrings: ["versionId", "path", "text"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
-    optionalI64: ["nowMs"],
+    optionalI64: ["nowMs", "expectedPathClearSinceOrder"],
     optionalJson: ["author", "createOnly", "publish"],
   },
   [VERSIONED_METHOD.textWriteBlob]: {
     requiredStrings: ["versionId", "path", "sha256", "bytesBase64"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
-    optionalI64: ["nowMs"],
+    optionalI64: ["nowMs", "expectedPathClearSinceOrder"],
     optionalJson: ["author", "createOnly", "publish"],
   },
   [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
@@ -199,7 +201,7 @@ const VERSIONED_PARAM_SHAPES = {
       "expectedSha256",
       "captureHoldId",
     ],
-    optionalI64: ["nowMs"],
+    optionalI64: ["nowMs", "expectedPathClearSinceOrder"],
     optionalJson: ["author"],
     // The engine checks the disk; a loopback has none, so it only validates.
     optionalBools: ["onlyIfAbsentOnDisk"],
@@ -217,14 +219,14 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.binaryWrite]: {
     requiredStrings: ["versionId", "path"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "bytesBase64"],
-    optionalI64: ["nowMs"],
+    optionalI64: ["nowMs", "expectedPathClearSinceOrder"],
     optionalBytes: ["bytes"],
     optionalJson: ["author", "createOnly"],
   },
   [VERSIONED_METHOD.binaryWriteBlob]: {
     requiredStrings: ["versionId", "path", "sha256"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "bytesBase64"],
-    optionalI64: ["nowMs"],
+    optionalI64: ["nowMs", "expectedPathClearSinceOrder"],
     optionalJson: ["author", "createOnly"],
   },
   [VERSIONED_METHOD.binaryRead]: { requiredStrings: ["versionId", "path"] },
@@ -310,6 +312,7 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.momentsList]: {
     optionalStrings: ["versionId", "objectId"],
     optionalI64: ["limit", "beforeMomentOrder"],
+    optionalBools: ["metadataOnly"],
   },
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
   [VERSIONED_METHOD.publicationApplied]: { requiredStrings: ["requestId", "momentId"] },
@@ -861,67 +864,222 @@ interface LineHunk {
 
 type MarkdownMergeResult = { status: "merged"; text: string } | { status: "conflict" };
 
-function diffHunks(base: string[], side: string[]): LineHunk[] {
-  const rowCount = base.length;
-  const columnCount = side.length;
-  const lcs = Array.from({ length: rowCount + 1 }, () => Array<number>(columnCount + 1).fill(0));
-  for (let row = rowCount - 1; row >= 0; row -= 1) {
-    for (let column = columnCount - 1; column >= 0; column -= 1) {
-      lcs[row]![column] =
-        base[row] === side[column]
-          ? lcs[row + 1]![column + 1]! + 1
-          : Math.max(lcs[row + 1]![column]!, lcs[row]![column + 1]!);
+const MATCH_SCORE = 1 << 16;
+const CHECK_WORK = 4;
+
+function align(base: string[], side: string[], prefer: boolean[]): [number, number][] {
+  const width = side.length + 1;
+  const score = new Uint32Array((base.length + 1) * width);
+  const matched = (row: number, column: number): number =>
+    score[(row + 1) * width + column + 1]! + MATCH_SCORE + (prefer[row] ? 1 : 0);
+  for (let row = base.length - 1; row >= 0; row -= 1) {
+    for (let column = side.length - 1; column >= 0; column -= 1) {
+      const skipped = Math.max(
+        score[(row + 1) * width + column]!,
+        score[row * width + column + 1]!,
+      );
+      score[row * width + column] =
+        base[row] === side[column] ? Math.max(skipped, matched(row, column)) : skipped;
     }
   }
 
-  const hunks: LineHunk[] = [];
+  const pairs: [number, number][] = [];
   let row = 0;
   let column = 0;
-  let pendingStart: number | undefined;
-  let pendingReplacement: string[] = [];
-  const flush = (baseEnd: number): void => {
-    if (pendingStart === undefined) return;
-    hunks.push({ baseStart: pendingStart, baseEnd, replacement: pendingReplacement });
-    pendingStart = undefined;
-    pendingReplacement = [];
-  };
-
-  while (row < rowCount && column < columnCount) {
-    if (base[row] === side[column]) {
-      flush(row);
+  while (row < base.length && column < side.length) {
+    if (base[row] === side[column] && score[row * width + column] === matched(row, column)) {
+      pairs.push([row, column]);
       row += 1;
       column += 1;
-    } else if (lcs[row + 1]![column]! >= lcs[row]![column + 1]!) {
-      pendingStart ??= row;
+    } else if (score[(row + 1) * width + column]! >= score[row * width + column + 1]!) {
       row += 1;
     } else {
-      pendingStart ??= row;
-      pendingReplacement.push(side[column]!);
       column += 1;
     }
   }
-  if (row < rowCount || column < columnCount) {
-    pendingStart ??= row;
-    pendingReplacement.push(...side.slice(column));
-    hunks.push({
-      baseStart: pendingStart,
-      baseEnd: rowCount,
-      replacement: pendingReplacement,
-    });
-  } else {
-    flush(row);
+  return pairs;
+}
+
+function lineHunks(base: string[], side: string[], pairs: [number, number][]): LineHunk[] {
+  const hunks: LineHunk[] = [];
+  let baseStart = 0;
+  let sideStart = 0;
+  for (const [baseEnd, sideEnd] of [...pairs, [base.length, side.length]]) {
+    if (baseEnd! > baseStart || sideEnd! > sideStart) {
+      hunks.push({ baseStart, baseEnd: baseEnd!, replacement: side.slice(sideStart, sideEnd) });
+    }
+    baseStart = baseEnd! + 1;
+    sideStart = sideEnd! + 1;
   }
   return hunks;
 }
 
-function mergeMarkdown(base: string, local: string, remote: string): MarkdownMergeResult {
+function hunksTouch(left: LineHunk, right: LineHunk): boolean {
+  const leftInserts = left.baseStart === left.baseEnd;
+  const rightInserts = right.baseStart === right.baseEnd;
+  return (
+    (left.baseStart === right.baseStart && (leftInserts || rightInserts)) ||
+    (left.baseStart < right.baseEnd && right.baseStart < left.baseEnd)
+  );
+}
+
+function combineHunks(base: string[], local: LineHunk[], remote: LineHunk[]): string[] | undefined {
+  const all = [
+    ...local.map((hunk) => ({ remote: false, hunk })),
+    ...remote.map((hunk) => ({ remote: true, hunk })),
+  ].sort(
+    (left, right) =>
+      left.hunk.baseStart - right.hunk.baseStart || left.hunk.baseEnd - right.hunk.baseEnd,
+  );
+  const output: string[] = [];
+  let cursor = 0;
+  let next = 0;
+  while (next < all.length) {
+    const group = [all[next]!];
+    next += 1;
+    while (
+      next < all.length &&
+      group.some(
+        ({ remote, hunk }) => remote !== all[next]!.remote && hunksTouch(hunk, all[next]!.hunk),
+      )
+    ) {
+      group.push(all[next]!);
+      next += 1;
+    }
+    const start = Math.min(...group.map(({ hunk }) => hunk.baseStart));
+    const end = Math.max(...group.map(({ hunk }) => hunk.baseEnd));
+    const version = (remote: boolean): string[] => {
+      const lines: string[] = [];
+      let at = start;
+      for (const { hunk } of group.filter((entry) => entry.remote === remote)) {
+        lines.push(...base.slice(at, hunk.baseStart), ...hunk.replacement);
+        at = hunk.baseEnd;
+      }
+      lines.push(...base.slice(at, end));
+      return lines;
+    };
+    const localChanged = group.some((entry) => !entry.remote);
+    const remoteChanged = group.some((entry) => entry.remote);
+    const lines = version(!localChanged);
+    const remoteLines = version(true);
+    if (
+      localChanged &&
+      remoteChanged &&
+      (lines.length !== remoteLines.length ||
+        lines.some((line, index) => line !== remoteLines[index]))
+    ) {
+      return undefined;
+    }
+    output.push(...base.slice(cursor, start), ...lines);
+    cursor = end;
+  }
+  output.push(...base.slice(cursor));
+  return output;
+}
+
+function textLines(text: string): string[] {
+  return text === "" ? [] : text.split("\n");
+}
+
+function keepsCopies(lines: string[][]): boolean {
+  const counts = new Map<string, number[]>();
+  lines.forEach((text, index) => {
+    for (const line of text) {
+      const count = counts.get(line) ?? [0, 0, 0, 0];
+      count[index] += 1;
+      counts.set(line, count);
+    }
+  });
+  const onceInThree = (count: number[]): boolean =>
+    count[0] === 1 && count[1] === 1 && count[2] === 1;
+  const followsChange = (line: string, [base, local, remote, merged]: number[]): boolean =>
+    Math.max(base!, local!, remote!) > 1 ||
+    (base === 0 && local === 1 && remote === 1) ||
+    (/^[ \t]*$/.test(line) && !(base === 1 && local === 1 && remote === 1)) ||
+    merged === (base === local ? remote : local);
+  if (![...counts].every(([line, count]) => followsChange(line, count))) return false;
+  const positions = new Map<string, number[]>();
+  lines.forEach((text, index) => {
+    text.forEach((line, position) => {
+      if (!onceInThree(counts.get(line)!)) return;
+      const at = positions.get(line) ?? [0, 0, 0, 0];
+      at[index] = position;
+      positions.set(line, at);
+    });
+  });
+  const stretchKeepsCopies = (starts: number[], ends: number[]): boolean => {
+    const stretch = new Map<string, number[]>();
+    for (let side = 1; side < 4; side += 1) {
+      for (const line of lines[side]!.slice(starts[side], ends[side])) {
+        const count = stretch.get(line) ?? [0, 0, 0];
+        count[side - 1] += 1;
+        stretch.set(line, count);
+      }
+    }
+    return [...stretch.values()].every(
+      ([local, remote, merged]) =>
+        Math.min(local!, remote!) <= merged! && merged! <= Math.max(local!, remote!),
+    );
+  };
+  const anchors = lines[0]!.flatMap((line) => {
+    const at = positions.get(line);
+    return at ? [at] : [];
+  });
+  const before = (earlier: number, later: number): boolean =>
+    [0, 1, 2, 3].every((index) => anchors[earlier]![index]! < anchors[later]![index]!);
+  const ending = anchors.map(() => 1);
+  for (let later = 0; later < anchors.length; later += 1) {
+    for (let earlier = 0; earlier < later; earlier += 1) {
+      if (before(earlier, later)) ending[later] = Math.max(ending[later]!, ending[earlier]! + 1);
+    }
+  }
+  const starting = anchors.map(() => 1);
+  for (let earlier = anchors.length - 1; earlier >= 0; earlier -= 1) {
+    for (let later = earlier + 1; later < anchors.length; later += 1) {
+      if (before(earlier, later)) {
+        starting[earlier] = Math.max(starting[earlier]!, starting[later]! + 1);
+      }
+    }
+  }
+  const longest = Math.max(0, ...ending);
+  const onChain = anchors.flatMap((_, index) =>
+    ending[index]! + starting[index]! === longest + 1 ? [index] : [],
+  );
+  const first = [0, 0, 0, 0];
+  const last = lines.map((text) => text.length);
+  const after = (index: number): number[] => anchors[index]!.map((position) => position + 1);
+  let budget = CHECK_WORK * (last[1]! + last[2]! + last[3]!);
+  const keeps = (starts: number[], ends: number[]): boolean => {
+    const work = [1, 2, 3].reduce((sum, side) => sum + ends[side]! - starts[side]!, 0);
+    if (work > budget) return false;
+    budget -= work;
+    return stretchKeepsCopies(starts, ends);
+  };
+  if (onChain.length === 0) return keeps(first, last);
+  for (const earlier of onChain) {
+    if (ending[earlier] === 1 && !keeps(first, anchors[earlier]!)) return false;
+    if (starting[earlier] === 1 && !keeps(after(earlier), last)) return false;
+    for (const later of onChain) {
+      if (
+        ending[later] === ending[earlier]! + 1 &&
+        before(earlier, later) &&
+        !keeps(after(earlier), anchors[later]!)
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+export function mergeMarkdown(base: string, local: string, remote: string): MarkdownMergeResult {
   if (local === remote) return { status: "merged", text: local };
   if (local === base) return { status: "merged", text: remote };
   if (remote === base) return { status: "merged", text: local };
 
-  const baseLines = base.split("\n");
-  const localLines = local.split("\n");
-  const remoteLines = remote.split("\n");
+  const baseLines = textLines(base);
+  const localLines = textLines(local);
+  const remoteLines = textLines(remote);
   if (
     [baseLines.length, localLines.length, remoteLines.length].some(
       (count) => count > MAX_MERGE_LINES,
@@ -930,37 +1088,18 @@ function mergeMarkdown(base: string, local: string, remote: string): MarkdownMer
     return { status: "conflict" };
   }
 
-  const localHunks = diffHunks(baseLines, localLines);
-  const remoteHunks = diffHunks(baseLines, remoteLines);
-  for (const localHunk of localHunks) {
-    for (const remoteHunk of remoteHunks) {
-      const bothInsertAtSameOffset =
-        localHunk.baseStart === localHunk.baseEnd &&
-        remoteHunk.baseStart === remoteHunk.baseEnd &&
-        localHunk.baseStart === remoteHunk.baseStart;
-      const sameStartWithInsertion =
-        localHunk.baseStart === remoteHunk.baseStart &&
-        (localHunk.baseStart === localHunk.baseEnd) !==
-          (remoteHunk.baseStart === remoteHunk.baseEnd);
-      const overlapping =
-        localHunk.baseStart < remoteHunk.baseEnd && remoteHunk.baseStart < localHunk.baseEnd;
-      if (bothInsertAtSameOffset || sameStartWithInsertion || overlapping) {
-        return { status: "conflict" };
-      }
-    }
-  }
-
-  const hunks = [...localHunks, ...remoteHunks].sort(
-    (left, right) => left.baseStart - right.baseStart,
+  const localPairs = align(baseLines, localLines, []);
+  const keptByLocal: boolean[] = [];
+  for (const [baseIndex] of localPairs) keptByLocal[baseIndex] = true;
+  const merged = combineHunks(
+    baseLines,
+    lineHunks(baseLines, localLines, localPairs),
+    lineHunks(baseLines, remoteLines, align(baseLines, remoteLines, keptByLocal)),
   );
-  const output: string[] = [];
-  let cursor = 0;
-  for (const hunk of hunks) {
-    output.push(...baseLines.slice(cursor, hunk.baseStart), ...hunk.replacement);
-    cursor = hunk.baseEnd;
-  }
-  output.push(...baseLines.slice(cursor));
-  return { status: "merged", text: output.join("\n") };
+  if (!merged) return { status: "conflict" };
+  return keepsCopies([baseLines, localLines, remoteLines, merged])
+    ? { status: "merged", text: merged.join("\n") }
+    : { status: "conflict" };
 }
 
 export class VersionedLoopbackEngine implements EngineTransport {
@@ -1274,7 +1413,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       throw new Error("invalid-version");
     if (
       params.publish !== true &&
-      (params.createOnly === true || params.expectedSha256 !== undefined)
+      (params.createOnly === true ||
+        params.expectedSha256 !== undefined ||
+        params.expectedPathClearSinceOrder !== undefined ||
+        params.expectedPathClearObjectId !== undefined ||
+        params.expectedPathClearHeadMomentId !== undefined)
     )
       throw new Error("invalid-params");
     const knownVersion = state.versions.get(versionId);
@@ -1337,6 +1480,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     ) {
       throw new Error("write-precondition-failed");
     }
+    this.assertPathClearSince(
+      state,
+      versionId,
+      path,
+      params.createOnly === true,
+      params,
+      metadata.metadataCorrelationId,
+    );
     const existingMoment = momentId === undefined ? undefined : state.moments.get(momentId);
     const authorFingerprint = this.writeAuthorFingerprint(params);
     if (existingMoment) {
@@ -1579,6 +1730,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     ) {
       throw new Error("write-precondition-failed");
     }
+    this.assertPathClearSince(
+      state,
+      versionId,
+      path,
+      params.createOnly === true,
+      params,
+      metadata.metadataCorrelationId,
+    );
     const binarySha = sha256(bytes);
     // Daemon parity: writing the same bytes over an equal binary head is a
     // content-equality dedup — no new moment, no materialization work.
@@ -1787,6 +1946,22 @@ export class VersionedLoopbackEngine implements EngineTransport {
       (before.binarySha ?? sha256(before.text ?? "")) !== params.expectedSha256
     )
       throw new Error("write-precondition-failed");
+    if (
+      (params.expectedPathClearSinceOrder !== undefined ||
+        params.expectedPathClearObjectId !== undefined ||
+        params.expectedPathClearHeadMomentId !== undefined) &&
+      (params.expectedSha256 === undefined || params.expectedSha256 === null)
+    ) {
+      throw new Error("invalid-params");
+    }
+    this.assertPathClearSince(
+      state,
+      versionId,
+      path,
+      false,
+      params,
+      metadata.metadataCorrelationId,
+    );
     this.assertFreshMoment(state, momentId);
     const now = nowMs ?? this.clock++;
     // The removed content, not an empty tombstone: a delete moment repeats it
@@ -2646,9 +2821,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       .filter((moment) => objectId === undefined || moment.objectId === objectId)
       .sort((left, right) => right.momentOrder - left.momentOrder);
     const filtered = all.filter((moment) => before === undefined || moment.momentOrder < before);
+    const metadataOnly = params.metadataOnly === true;
     const page = filtered.slice(0, limit);
     return {
-      moments: page.map((moment) => this.capMoment(moment)),
+      moments: page.map((moment) => {
+        const capped = this.capMoment(moment);
+        return metadataOnly ? { ...capped, afterText: null, beforeText: null } : capped;
+      }),
       nextBeforeMomentOrder:
         filtered.length > page.length ? (page.at(-1)?.momentOrder ?? null) : null,
       latestMomentOrder: all[0]?.momentOrder ?? -1,
@@ -2959,6 +3138,83 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
   }
 
+  private assertPathClearSince(
+    state: WorkspaceState,
+    versionId: string,
+    path: string,
+    createOnly: boolean,
+    params: JsonObject,
+    correlationId: JsonValue | undefined,
+  ): void {
+    const order = params.expectedPathClearSinceOrder;
+    const allowedObjectId = params.expectedPathClearObjectId;
+    const expectedHeadMomentId = params.expectedPathClearHeadMomentId;
+    if (expectedHeadMomentId === "") {
+      throw new Error("invalid-params");
+    }
+    if (order === undefined && allowedObjectId === undefined) {
+      if (expectedHeadMomentId !== undefined) throw new Error("invalid-params");
+      return;
+    }
+    if (
+      typeof order !== "number" ||
+      !Number.isInteger(order) ||
+      typeof allowedObjectId !== "string" ||
+      allowedObjectId.length === 0 ||
+      (expectedHeadMomentId !== undefined && typeof expectedHeadMomentId !== "string")
+    ) {
+      throw new Error("invalid-params");
+    }
+    const targetKey = path.normalize("NFC").toLowerCase();
+    const captureRecoveryOrigins = new Set([
+      "capture-recovery",
+      "capture-recovery-cleared",
+      "merge-removal",
+      "merge-removal-cleared",
+    ]);
+    for (const entry of state.moments.values()) {
+      const m = entry.wire;
+      if (m.versionId !== versionId) continue;
+      if (m.momentOrder <= order) continue;
+      if (m.objectId === allowedObjectId) continue;
+      if (m.syncRecordOnly) continue;
+      if (captureRecoveryOrigins.has(m.metadataOrigin)) continue;
+      if (
+        m.metadataOrigin === "restore" &&
+        typeof correlationId === "string" &&
+        m.metadataCorrelationId === correlationId
+      ) {
+        continue;
+      }
+      if (
+        m.path.normalize("NFC").toLowerCase() === targetKey ||
+        (typeof m.beforePath === "string" &&
+          m.beforePath.normalize("NFC").toLowerCase() === targetKey)
+      ) {
+        throw new Error("restore-path-collision");
+      }
+    }
+    if (expectedHeadMomentId !== undefined) {
+      let latestOrder = -Infinity;
+      let latestId: string | undefined;
+      for (const entry of state.moments.values()) {
+        const m = entry.wire;
+        if (m.versionId !== versionId || m.objectId !== allowedObjectId) continue;
+        if (m.momentOrder > latestOrder) {
+          latestOrder = m.momentOrder;
+          latestId = m.momentId;
+        }
+      }
+      if (latestId !== expectedHeadMomentId) {
+        throw new Error("restore-head-changed");
+      }
+      const current = state.versions.get(versionId)?.files.get(path);
+      if (createOnly ? current !== undefined : current?.objectId !== allowedObjectId) {
+        throw new Error("restore-head-changed");
+      }
+    }
+  }
+
   private textWriteFingerprint(
     params: JsonObject,
     origin: VersionedOrigin,
@@ -2972,6 +3228,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       publish: params.publish === true,
       createOnly: params.createOnly === true,
       expectedSha256: params.expectedSha256 ?? null,
+      ...(params.expectedPathClearSinceOrder !== undefined
+        ? {
+            expectedPathClearSinceOrder: params.expectedPathClearSinceOrder,
+            expectedPathClearObjectId: params.expectedPathClearObjectId ?? null,
+            expectedPathClearHeadMomentId: params.expectedPathClearHeadMomentId ?? null,
+          }
+        : {}),
       momentId,
       objectId,
       metadataOrigin: origin,
@@ -2994,6 +3257,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       operation: "versioned-binary-write",
       createOnly: params.createOnly === true,
       expectedSha256: params.expectedSha256 ?? null,
+      ...(params.expectedPathClearSinceOrder !== undefined
+        ? {
+            expectedPathClearSinceOrder: params.expectedPathClearSinceOrder,
+            expectedPathClearObjectId: params.expectedPathClearObjectId ?? null,
+            expectedPathClearHeadMomentId: params.expectedPathClearHeadMomentId ?? null,
+          }
+        : {}),
       workspaceId: workspace,
       versionId: params.versionId,
       path: params.path,
@@ -3043,6 +3313,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       authorJson: this.writeAuthorFingerprint(params),
       ...(params.expectedObjectId != null ? { expectedObjectId: params.expectedObjectId } : {}),
       ...(params.expectedSha256 != null ? { expectedSha256: params.expectedSha256 } : {}),
+      ...(params.expectedPathClearSinceOrder !== undefined
+        ? {
+            expectedPathClearSinceOrder: params.expectedPathClearSinceOrder,
+            expectedPathClearObjectId: params.expectedPathClearObjectId ?? null,
+            expectedPathClearHeadMomentId: params.expectedPathClearHeadMomentId ?? null,
+          }
+        : {}),
     });
   }
 

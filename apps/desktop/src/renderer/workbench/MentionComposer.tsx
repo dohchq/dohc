@@ -1,4 +1,12 @@
-import { AtSign, FileText, Hash, ListChecks, Plus, type LucideIcon } from "lucide-react";
+import {
+  AtSign,
+  ChevronLeft,
+  FileText,
+  Hash,
+  ListChecks,
+  Plus,
+  type LucideIcon,
+} from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -26,7 +34,7 @@ import {
 import type { ActorPresentation, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { AgentOffer } from "./AgentOffer";
 import { ChatAvatar } from "./ChatAvatar";
-import { ownPresentation, ownAgentPresentation } from "./actorPresentation";
+import { neutralPresentation, ownPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { ComposerPoll } from "./ComposerPoll";
 import {
@@ -49,6 +57,7 @@ import {
   MENU_LABEL,
   MENU_ROW,
   MENU_ROW_TONE,
+  MENU_SECTION,
   MENU_SHORTCUT,
   MENU_TITLE,
   menuEnterFrom,
@@ -360,6 +369,7 @@ export function MentionComposer(props: {
   const menuRef = useRef<HTMLUListElement | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
   const stackRef = useRef<HTMLDivElement | null>(null);
+  const aboveRef = useRef<HTMLDivElement | null>(null);
   const [menuPosition, setMenuPosition] = useState<{
     left: number;
     top?: number;
@@ -381,9 +391,8 @@ export function MentionComposer(props: {
     const stack = stackRef.current ?? form;
     const position = () => {
       const frame = form.getBoundingClientRect();
-      // The topmost bar or the box itself: its border, not the stack's empty
-      // margin above it.
-      const top = (stackRef.current?.firstElementChild ?? form).getBoundingClientRect().top;
+      const aboveTop = aboveRef.current?.firstElementChild?.getBoundingClientRect().top;
+      const top = aboveTop !== undefined ? Math.min(frame.top, aboveTop) : frame.top;
       const above = top - MENU_GAP_PX - MENU_EDGE_PX;
       const below = window.innerHeight - frame.bottom - MENU_GAP_PX - MENU_EDGE_PX;
       const height = Math.min(192, menu.scrollHeight + 2);
@@ -796,13 +805,14 @@ export function MentionComposer(props: {
                 ? "border-line px-4 pb-2 pt-3"
                 : "border-line px-3 py-2 hover:border-muted/50"
             }`
-          : `relative flex shrink-0 flex-col rounded-[10px] border border-line bg-bg transition-colors duration-75 focus-within:border-ink/45 ${COMPOSER_INSET[props.inset ?? "stream"]}`
+          : `relative flex shrink-0 flex-col overflow-hidden rounded-[10px] border border-line bg-bg transition-colors duration-75 focus-within:border-ink/45 ${COMPOSER_INSET[props.inset ?? "stream"]}`
       }
       onSubmit={(event) => {
         event.preventDefault();
         props.onSend();
       }}
     >
+      {!isPost && props.above ? <div ref={aboveRef}>{props.above}</div> : null}
       {isPost && props.authorName ? (
         <div className={`flex items-center gap-2.5 ${expanded ? "mb-2" : ""}`}>
           <ChatAvatar
@@ -858,6 +868,23 @@ export function MentionComposer(props: {
             />
           ) : fileStage ? (
             <>
+              <li role="presentation" className="mb-0.5 border-b border-line pb-0.5">
+                <button
+                  type="button"
+                  data-testid={`${props.testIdPrefix}-file-stage-back`}
+                  tabIndex={-1}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    fileRequest.current += 1;
+                    setFileStage(null);
+                    setHighlight(0);
+                  }}
+                  className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-medium text-muted transition-colors hover:bg-hover hover:text-ink"
+                >
+                  <ChevronLeft size={13} aria-hidden className="shrink-0" />
+                  <span className="min-w-0 truncate">{fileStage.label}</span>
+                </button>
+              </li>
               <li role="presentation">
                 <button
                   type="button"
@@ -917,6 +944,11 @@ export function MentionComposer(props: {
             </>
           ) : (
             <>
+              {matches.length > 0 && fileMatches.length > 0 ? (
+                <li role="presentation" className={MENU_SECTION}>
+                  People &amp; agents
+                </li>
+              ) : null}
               {matches.map((candidate, index) => (
                 <li key={`mention:${candidate.id}`} role="presentation">
                   <button
@@ -937,9 +969,14 @@ export function MentionComposer(props: {
                     onMouseMove={hover(index)}
                     className={OPTION_CLASS}
                   >
-                    <span className={`${MENU_ICON} text-subtle`}>
-                      <AtSign size={14} aria-hidden />
-                    </span>
+                    <ChatAvatar
+                      size="strip"
+                      name={candidate.label}
+                      kind={candidate.kind === "agent" ? "agent" : "human"}
+                      presentation={
+                        candidate.kind === "agent" ? ownAgentPresentation : neutralPresentation
+                      }
+                    />
                     <span className={MENU_TITLE}>
                       <span className="sr-only">@</span>
                       {candidate.handle}
@@ -953,6 +990,11 @@ export function MentionComposer(props: {
                   </button>
                 </li>
               ))}
+              {matches.length > 0 && fileMatches.length > 0 ? (
+                <li role="presentation" className={`${MENU_SECTION} mt-1`}>
+                  Files
+                </li>
+              ) : null}
               {fileMatches.map((candidate, fileIndex) => {
                 const index = matches.length + fileIndex;
                 return (
@@ -1083,8 +1125,8 @@ export function MentionComposer(props: {
             {props.fileCandidates?.length ? (
               <button
                 type="button"
-                aria-label="Attach a file"
-                title="Attach a file"
+                aria-label="Attach file"
+                title="Attach file"
                 tabIndex={-1}
                 disabled={locked}
                 onMouseDown={(event) => {
@@ -1180,11 +1222,8 @@ export function MentionComposer(props: {
     </form>
   );
   if (isPost) return form;
-  // The bars and the box are one stack: a reply bar sits on the box, and the
-  // question comes before its choices inside it.
   return (
     <div ref={stackRef} className="@container/composer relative shrink-0">
-      {props.above}
       {form}
     </div>
   );

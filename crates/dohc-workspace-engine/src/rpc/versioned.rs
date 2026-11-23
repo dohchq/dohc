@@ -60,6 +60,12 @@ struct VersionedTextWriteParams {
     #[serde(default)]
     expected_sha256: Option<String>,
     #[serde(default)]
+    expected_path_clear_since_order: Option<i64>,
+    #[serde(default)]
+    expected_path_clear_object_id: Option<String>,
+    #[serde(default)]
+    expected_path_clear_head_moment_id: Option<String>,
+    #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
     origin: Option<String>,
@@ -93,6 +99,12 @@ struct VersionedTextWriteBlobParams {
     #[serde(default)]
     expected_sha256: Option<String>,
     #[serde(default)]
+    expected_path_clear_since_order: Option<i64>,
+    #[serde(default)]
+    expected_path_clear_object_id: Option<String>,
+    #[serde(default)]
+    expected_path_clear_head_moment_id: Option<String>,
+    #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
     origin: Option<String>,
@@ -116,6 +128,12 @@ struct VersionedBinaryWriteParams {
     create_only: bool,
     #[serde(default)]
     expected_sha256: Option<String>,
+    #[serde(default)]
+    expected_path_clear_since_order: Option<i64>,
+    #[serde(default)]
+    expected_path_clear_object_id: Option<String>,
+    #[serde(default)]
+    expected_path_clear_head_moment_id: Option<String>,
     #[serde(default)]
     object_id: Option<String>,
     path: String,
@@ -147,6 +165,12 @@ struct VersionedBinaryWriteBlobParams {
     create_only: bool,
     #[serde(default)]
     expected_sha256: Option<String>,
+    #[serde(default)]
+    expected_path_clear_since_order: Option<i64>,
+    #[serde(default)]
+    expected_path_clear_object_id: Option<String>,
+    #[serde(default)]
+    expected_path_clear_head_moment_id: Option<String>,
     #[serde(default)]
     object_id: Option<String>,
     path: String,
@@ -224,6 +248,12 @@ struct VersionedTextDeleteParams {
     expected_object_id: Option<String>,
     #[serde(default)]
     expected_sha256: Option<String>,
+    #[serde(default)]
+    expected_path_clear_since_order: Option<i64>,
+    #[serde(default)]
+    expected_path_clear_object_id: Option<String>,
+    #[serde(default)]
+    expected_path_clear_head_moment_id: Option<String>,
     /// Delete only if the path is still missing on disk when the engine
     /// applies the delete: the caller saw it missing, and a replace can empty
     /// the name for a moment.
@@ -331,6 +361,41 @@ fn comparison_json(comparison: &dohc_engine_domain::VersionedTextComparison) -> 
     })
 }
 
+fn parse_path_clear_since(
+    order: Option<i64>,
+    object_id: Option<String>,
+    head_moment_id: Option<String>,
+) -> Result<Option<dohc_engine_runtime::PathClearSince>, WireError> {
+    if matches!(head_moment_id.as_deref(), Some("")) {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "expectedPathClearHeadMomentId must not be empty",
+        ));
+    }
+    match (order, object_id) {
+        (None, None) => {
+            if head_moment_id.is_some() {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "expectedPathClearHeadMomentId requires expectedPathClearSinceOrder and expectedPathClearObjectId",
+                ));
+            }
+            Ok(None)
+        }
+        (Some(after_moment_order), Some(allowed_object_id)) if !allowed_object_id.is_empty() => {
+            Ok(Some(dohc_engine_runtime::PathClearSince {
+                after_moment_order,
+                allowed_object_id,
+                expected_head_moment_id: head_moment_id,
+            }))
+        }
+        _ => Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "expectedPathClearSinceOrder and expectedPathClearObjectId must be provided together",
+        )),
+    }
+}
+
 fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static str {
     match outcome {
         PostCommitMaterializeOutcome::Applied => "applied",
@@ -414,7 +479,16 @@ impl EngineService {
             author_json,
             now_ms: params.now_ms.unwrap_or(now_ms()?),
         };
-        if !params.publish && (params.create_only || params.expected_sha256.is_some()) {
+        let path_clear_since = parse_path_clear_since(
+            params.expected_path_clear_since_order,
+            params.expected_path_clear_object_id,
+            params.expected_path_clear_head_moment_id,
+        )?;
+        if !params.publish
+            && (params.create_only
+                || params.expected_sha256.is_some()
+                || path_clear_since.is_some())
+        {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "write conditions require publication",
@@ -428,6 +502,7 @@ impl EngineService {
                     dohc_engine_runtime::WriteConditions {
                         create_only: params.create_only,
                         expected_sha256: params.expected_sha256,
+                        path_clear_since,
                     },
                     params.restore_before_moment_id,
                     Arc::new(self.self_writes.scoped(&open.root)),
@@ -518,6 +593,9 @@ impl EngineService {
                 restore_before_moment_id: parsed.restore_before_moment_id,
                 create_only: parsed.create_only,
                 expected_sha256: parsed.expected_sha256,
+                expected_path_clear_since_order: parsed.expected_path_clear_since_order,
+                expected_path_clear_object_id: parsed.expected_path_clear_object_id,
+                expected_path_clear_head_moment_id: parsed.expected_path_clear_head_moment_id,
                 moment_id: parsed.moment_id,
                 origin: parsed.origin,
                 summary: parsed.summary,
@@ -567,6 +645,11 @@ impl EngineService {
         let moment_id = params.moment_id.unwrap_or_else(|| {
             self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
         });
+        let path_clear_since = parse_path_clear_since(
+            params.expected_path_clear_since_order,
+            params.expected_path_clear_object_id,
+            params.expected_path_clear_head_moment_id,
+        )?;
         let execution = open
             .actor
             .versioned_binary_write_with_conditions(
@@ -588,6 +671,7 @@ impl EngineService {
                 dohc_engine_runtime::WriteConditions {
                     create_only: params.create_only,
                     expected_sha256: params.expected_sha256,
+                    path_clear_since,
                 },
                 Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
@@ -677,6 +761,11 @@ impl EngineService {
         let moment_id = params.moment_id.unwrap_or_else(|| {
             self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
         });
+        let path_clear_since = parse_path_clear_since(
+            params.expected_path_clear_since_order,
+            params.expected_path_clear_object_id,
+            params.expected_path_clear_head_moment_id,
+        )?;
         let execution = open
             .actor
             .versioned_binary_write_with_conditions(
@@ -698,6 +787,7 @@ impl EngineService {
                 dohc_engine_runtime::WriteConditions {
                     create_only: params.create_only,
                     expected_sha256: params.expected_sha256,
+                    path_clear_since,
                 },
                 Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
@@ -878,6 +968,17 @@ impl EngineService {
             .await?;
         let request_id = request.idempotency_key;
         let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
+        let path_clear_since = parse_path_clear_since(
+            params.expected_path_clear_since_order,
+            params.expected_path_clear_object_id,
+            params.expected_path_clear_head_moment_id,
+        )?;
+        if path_clear_since.is_some() && params.expected_sha256.is_none() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "expectedPathClearSinceOrder requires expectedSha256",
+            ));
+        }
         let result = open
             .actor
             .versioned_text_delete_expected_object(
@@ -895,6 +996,7 @@ impl EngineService {
                 },
                 params.expected_object_id,
                 params.expected_sha256,
+                path_clear_since,
                 params.only_if_absent_on_disk,
                 open.root.clone(),
                 Arc::new(self.self_writes.scoped(&open.root)),
@@ -1145,6 +1247,7 @@ impl EngineService {
 #[cfg(test)]
 mod tests {
     use crate::EngineService;
+    use dohc_engine_protocol::error::ErrorCode;
     use dohc_engine_protocol::transport::RequestContext;
     use dohc_engine_protocol::wire::Request;
     use dohc_engine_protocol::wire::WorkspaceHandle;
@@ -1729,5 +1832,228 @@ mod tests {
             .workspace_close(Some(handle))
             .await
             .expect("workspace close");
+    }
+
+    #[tokio::test]
+    async fn restore_guard_wire_errors_and_metadata_only_moments_list() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let handle = open_for_test(&service, scratch.path()).await;
+
+        // 1. Metadata-only moments.list returns all edits of 120 KiB files in one page
+        // ordered by moment_order DESC, while full moments.list cuts at the 256 KiB frame budget.
+        let large_a = format!("A{}\n", "x".repeat(120 * 1024));
+        let large_b = format!("B{}\n", "y".repeat(120 * 1024));
+        for index in 0..5 {
+            let text = if index % 2 == 0 { &large_a } else { &large_b };
+            write_for_test(
+                &service,
+                &handle,
+                (10 + index) as u64,
+                &format!("large-{index}"),
+                "versionedText.write",
+                json!({
+                    "versionId": "main",
+                    "path": "notes/large.md",
+                    "text": text,
+                    "publish": true,
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let full_page = service
+            .moments_list(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "versionId": "main", "limit": 200 }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            full_page["moments"].as_array().unwrap().len() < 5,
+            "full moments.list should cut large-body rows at the frame budget"
+        );
+        let meta_page = service
+            .moments_list(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "versionId": "main", "limit": 200, "metadataOnly": true }),
+            )
+            .await
+            .unwrap();
+        let meta_rows = meta_page["moments"].as_array().unwrap();
+        assert_eq!(meta_rows.len(), 5);
+        assert!(meta_page["nextBeforeMomentOrder"].is_null());
+        for pair in meta_rows.windows(2) {
+            assert!(
+                pair[0]["momentOrder"].as_i64().unwrap() > pair[1]["momentOrder"].as_i64().unwrap()
+            );
+        }
+        for row in meta_rows {
+            assert!(row["afterText"].is_null());
+            assert!(row["beforeText"].is_null());
+        }
+
+        // 2. Wire surfaces restore-head-changed when same object is edited and reverted to same bytes.
+        let orig = write_for_test(
+            &service,
+            &handle,
+            20,
+            "orig",
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "notes/head.md", "text": "Before\n", "publish": true }),
+        )
+        .await
+        .unwrap();
+        let agent = write_for_test(
+            &service,
+            &handle,
+            21,
+            "agent",
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "notes/head.md", "text": "Agent\n", "publish": true }),
+        )
+        .await
+        .unwrap();
+        write_for_test(
+            &service,
+            &handle,
+            22,
+            "human-1",
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "notes/head.md", "text": "Human\n", "publish": true }),
+        )
+        .await
+        .unwrap();
+        write_for_test(
+            &service,
+            &handle,
+            23,
+            "human-revert",
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "notes/head.md", "text": "Agent\n", "publish": true }),
+        )
+        .await
+        .unwrap();
+        let head_err = write_for_test(
+            &service,
+            &handle,
+            24,
+            "restore-head-changed",
+            "versionedText.write",
+            json!({
+                "versionId": "main",
+                "path": "notes/head.md",
+                "text": "Before\n",
+                "origin": "restore",
+                "publish": true,
+                "restoreBeforeMomentId": agent["moment"]["momentId"],
+                "expectedSha256": dohc_engine_storage::hex_sha256(b"Agent\n"),
+                "expectedPathClearSinceOrder": agent["moment"]["momentOrder"].as_i64().unwrap() - 1,
+                "expectedPathClearObjectId": orig["snapshot"]["objectId"],
+                "expectedPathClearHeadMomentId": agent["moment"]["momentId"],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(head_err.code, ErrorCode::InvalidParams);
+        assert_eq!(head_err.message, "restore-head-changed");
+
+        // 3. Wire surfaces restore-path-collision when another object creates and deletes the path.
+        let raced = write_for_test(
+            &service,
+            &handle,
+            30,
+            "raced-create",
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "notes/raced.md", "text": "Orig\n", "publish": true }),
+        )
+        .await
+        .unwrap();
+        let raced_del = service
+            .versioned_text_delete(
+                &RequestContext::unbounded(),
+                Request {
+                    id: 31,
+                    method: "versionedText.delete".into(),
+                    workspace: Some(handle.clone()),
+                    deadline_ms: None,
+                    idempotency_key: Some("raced-del".into()),
+                    progress: false,
+                    params: json!({
+                        "versionId": "main",
+                        "path": "notes/raced.md",
+                        "origin": "api",
+                        "expectedObjectId": raced["snapshot"]["objectId"],
+                        "expectedSha256": dohc_engine_storage::hex_sha256(b"Orig\n"),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        let interloper = write_for_test(
+            &service,
+            &handle,
+            32,
+            "interloper-create",
+            "versionedText.write",
+            json!({
+                "versionId": "main",
+                "path": "notes/Raced.md",
+                "text": "Other\n",
+                "publish": true,
+                "nowMs": 1,
+            }),
+        )
+        .await
+        .unwrap();
+        service
+            .versioned_text_delete(
+                &RequestContext::unbounded(),
+                Request {
+                    id: 33,
+                    method: "versionedText.delete".into(),
+                    workspace: Some(handle.clone()),
+                    deadline_ms: None,
+                    idempotency_key: Some("interloper-del".into()),
+                    progress: false,
+                    params: json!({
+                        "versionId": "main",
+                        "path": "notes/Raced.md",
+                        "origin": "api",
+                        "expectedObjectId": interloper["snapshot"]["objectId"],
+                        "expectedSha256": dohc_engine_storage::hex_sha256(b"Other\n"),
+                        "nowMs": 2,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        let collision_err = write_for_test(
+            &service,
+            &handle,
+            34,
+            "restore-collision",
+            "versionedText.write",
+            json!({
+                "versionId": "main",
+                "path": "notes/raced.md",
+                "text": "Orig\n",
+                "origin": "restore",
+                "publish": true,
+                "createOnly": true,
+                "restoreBeforeMomentId": raced_del["moment"]["momentId"],
+                "expectedPathClearSinceOrder": raced_del["moment"]["momentOrder"].as_i64().unwrap() - 1,
+                "expectedPathClearObjectId": raced["snapshot"]["objectId"],
+                "expectedPathClearHeadMomentId": raced_del["moment"]["momentId"],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(collision_err.code, ErrorCode::InvalidParams);
+        assert_eq!(collision_err.message, "restore-path-collision");
+
+        service.workspace_close(Some(handle)).await.unwrap();
     }
 }

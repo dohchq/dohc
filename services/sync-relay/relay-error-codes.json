@@ -20,6 +20,7 @@
   { "code": "host-moved", "status": 409 },
   { "code": "host-start-failed", "status": 409 },
   { "code": "host-not-loaded", "status": 409 },
+  { "code": "proposal-file-live", "status": 409 },
   { "code": "dependents_changed", "status": 409 },
   { "code": "discussion_limit_reached", "status": 413 },
   { "code": "discussion_rate_limited", "status": 429 },

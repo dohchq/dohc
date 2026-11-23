@@ -160,7 +160,14 @@ export function generateDatasetFormSources(input: DatasetFormInput): {
     },
     revision,
   );
-  const { operations: _, name: _name, datasetId: _id, ...reference } = capability;
+  const {
+    operations: _,
+    name: _name,
+    datasetId: _id,
+    revision: _revision,
+    revisionSha256: _revisionSha256,
+    ...reference
+  } = capability;
   const binding = { ...reference, datasetPath: parseDatasetPath(input.datasetPath) };
   const frontend = generateDatasetFormFrontend({ title, operation: operation.name, fields });
   return {

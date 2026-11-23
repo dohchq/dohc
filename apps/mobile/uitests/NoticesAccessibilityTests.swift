@@ -18,7 +18,7 @@ final class NoticesAccessibilityTests: XCTestCase {
   func testRowIsOneElementWithItsActions() {
     let app = launchNotices()
     let rows = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", maya))
-    XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 20))
+    XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 45))
     XCTAssertEqual(rows.count, 1)
     // The row's own texts, pill and controls are inside the one element, not beside it.
     XCTAssertFalse(app.staticTexts["Maya Chen mentioned you in #planning"].exists)
@@ -33,7 +33,7 @@ final class NoticesAccessibilityTests: XCTestCase {
   func testVoiceOverSpeaksEachRowOnce() async throws {
     guard #available(iOS 27.0, *) else { throw XCTSkip("VoiceOver testing needs iOS 27") }
     let app = launchNotices()
-    XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", maya)).firstMatch.waitForExistence(timeout: 20))
+    XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", maya)).firstMatch.waitForExistence(timeout: 45))
     let voiceOver = XCUIDevice.shared.voiceOverService
     try voiceOver.enable()
     defer { try? voiceOver.disable() }

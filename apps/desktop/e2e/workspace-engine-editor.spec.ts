@@ -1,6 +1,6 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { DOCUMENT_END } from "./helpers/keys";
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -21,6 +21,7 @@ import {
   openWorkspaceFromFirstRun,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
+  type TempWorkspace,
 } from "./helpers/workspace";
 
 // Editor-on-engine round trip. A rich markdown file edits
@@ -101,7 +102,7 @@ async function restoreRestartTyping(
   if (open === "notice") {
     const toast = recoveryToast(page);
     await expect(toast).toContainText(
-      `The file "${path}" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.`,
+      `The file "${path}" changed outside dohc. Your text is saved in History. Open the recovery change and choose Restore.`,
       { timeout: 30_000 },
     );
     await toast.getByTestId("workspace-shell-error-action").click();
@@ -341,31 +342,54 @@ async function recoveredSiblings(
     .map((name) => `${folder}/${name}`);
 }
 
+const restartTypingFixture = {
+  path: "notes/rich.md",
+  base: "# Rich\n\nBase paragraph.\n",
+  human: "Human continued typing in the open document.",
+  external: "External agent wrote this straight to disk while the editor was open.",
+};
+const holdAutomaticSettle = { DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS: "600000" };
+
+async function overlapTypingWithOutsideWrite(page: Page, temp: TempWorkspace, workspaceId: string) {
+  const { path, base, human, external } = restartTypingFixture;
+  await waitForWorkspaceFile(page, workspaceId, path);
+  await openEngineDoc(page, path);
+  const editor = page.getByTestId("markdown-editor");
+  const saveState = page.getByTestId("markdown-save-state");
+  await expect(editor).toContainText("Base paragraph.");
+  await expect(saveState).toHaveAttribute("data-state", "saved");
+  await editor.click();
+  await page.keyboard.press(DOCUMENT_END);
+  const journaled = ydocUpdateCount(temp.rootPath);
+  await page.keyboard.insertText(human);
+  await expect.poll(() => ydocUpdateCount(temp.rootPath)).toBeGreaterThan(journaled);
+  expect(await readFile(join(temp.rootPath, path), "utf8")).toBe(base);
+
+  await writeWorkspaceFiles(temp, [{ path, contents: `# Rich\n\n${external}\n` }]);
+  await expect(page.getByTestId("changed-outside-notice")).toBeVisible();
+  await expect(
+    page.evaluate(
+      (input) =>
+        (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.retryEngineYDocSave(
+          input,
+        ),
+      { workspaceId, path },
+    ),
+  ).rejects.toThrow("conflict-stale-target");
+  await expect(saveState).toHaveAttribute("data-state", /^(error|changed-on-disk)$/);
+}
+
 test("@restart-durability-overlapping-typing overlapping typing on an externally edited document survives restart as a recovered copy", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-  const external = "External agent wrote this straight to disk while the editor was open.";
-  const human = "Human continued typing in the open document.";
-  const path = "notes/rich.md";
+  const { path, base, human, external } = restartTypingFixture;
   try {
-    await writeWorkspaceFiles(temp, [{ path, contents: "# Rich\n\nBase paragraph.\n" }]);
-    desktop = await launchDesktopApp({ workspace: temp });
+    await writeWorkspaceFiles(temp, [{ path, contents: base }]);
+    desktop = await launchDesktopApp({ workspace: temp, env: holdAutomaticSettle });
     const { page } = desktop;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
-    await waitForWorkspaceFile(page, workspace.workspaceId, path);
-    await openEngineDoc(page, path);
-    await expect(page.getByTestId("markdown-editor")).toContainText("Base paragraph.");
-    await writeWorkspaceFiles(temp, [{ path, contents: `# Rich\n\n${external}\n` }]);
-    // The live lease defers capture. Settlement must preserve the outside bytes.
-    await page.getByTestId("markdown-editor").click();
-    await page.keyboard.press(DOCUMENT_END);
-    await page.keyboard.type(human);
-    // The outside-write signal can reach main before or after the refused save.
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
-      "data-state",
-      /^(error|changed-on-disk)$/,
-    );
+    await overlapTypingWithOutsideWrite(page, temp, workspace.workspaceId);
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
     await expect(page.getByTestId("markdown-editor")).toContainText(human);
     await quitDesktop(desktop);
@@ -415,27 +439,13 @@ test("@restart-durability-capture-before-reopen kept typing survives capture bef
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-  const external = "External agent wrote this straight to disk while the editor was open.";
-  const human = "Human continued typing in the open document.";
-  const path = "notes/rich.md";
+  const { path, base, human, external } = restartTypingFixture;
   try {
-    await writeWorkspaceFiles(temp, [{ path, contents: "# Rich\n\nBase paragraph.\n" }]);
-    desktop = await launchDesktopApp({ workspace: temp });
+    await writeWorkspaceFiles(temp, [{ path, contents: base }]);
+    desktop = await launchDesktopApp({ workspace: temp, env: holdAutomaticSettle });
     const { page } = desktop;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
-    await waitForWorkspaceFile(page, workspace.workspaceId, path);
-    await openEngineDoc(page, path);
-    await expect(page.getByTestId("markdown-editor")).toContainText("Base paragraph.");
-    await writeWorkspaceFiles(temp, [{ path, contents: `# Rich\n\n${external}\n` }]);
-    // The live lease defers capture. Settlement must preserve the outside bytes.
-    await page.getByTestId("markdown-editor").click();
-    await page.keyboard.press(DOCUMENT_END);
-    await page.keyboard.type(human);
-    // The outside-write signal can reach main before or after the refused save.
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
-      "data-state",
-      /^(error|changed-on-disk)$/,
-    );
+    await overlapTypingWithOutsideWrite(page, temp, workspace.workspaceId);
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
     await expect(page.getByTestId("markdown-editor")).toContainText(human);
     await quitDesktop(desktop);

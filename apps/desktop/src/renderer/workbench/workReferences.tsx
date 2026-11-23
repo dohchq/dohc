@@ -160,7 +160,7 @@ const FALLBACK_NAMES: Partial<Record<NonNullable<WorkReferenceView["kind"]>, str
   chat: "Chat",
   thread: "Thread",
   message: "Message",
-  data: "Table",
+  data: "Collection",
 };
 
 // One work link, as the chip a file link shows. It opens what it names

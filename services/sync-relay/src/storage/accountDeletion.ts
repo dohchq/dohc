@@ -239,6 +239,9 @@ export function fenceAccount(
       .prepare("DELETE FROM sync_relay_push_deliveries WHERE account_user_id=?")
       .run(userId);
     storage.db
+      .prepare("DELETE FROM sync_relay_push_sender_rate WHERE sender_key='user:'||?")
+      .run(userId);
+    storage.db
       .prepare("DELETE FROM sync_relay_push_subscriptions WHERE account_user_id=?")
       .run(userId);
     storage.db
@@ -345,6 +348,8 @@ export function purgeAccountRows(
       }
     }
     storage.db.prepare("DELETE FROM sync_relay_ended_shares WHERE recipient_user_id=?").run(userId);
+    for (const shareId of manifest.shareIds)
+      storage.db.prepare("DELETE FROM sync_relay_share_departures WHERE share_id=?").run(shareId);
     const tables = storage.db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
       .all()

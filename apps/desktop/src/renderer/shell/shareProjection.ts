@@ -68,12 +68,12 @@ export function shareRefreshSummary(
   const shares = `${results.length} ${results.length === 1 ? "share" : "shares"}`;
   const refreshed =
     refreshedCount === results.length
-      ? `Shares refreshed — ${updated}`
+      ? `Shares refreshed. ${updated}`
       : refreshedCount === 0
         ? `dohc could not refresh ${shares}.`
         : `Refreshed ${refreshedCount} of ${shares}. ${updated}`;
   if (damaged.length === 0) return refreshed;
-  return `${refreshed} dohc can't read what ${damaged
+  return `${refreshed} dohc cannot read what ${damaged
     .map((row) => row.label)
     .join(", ")} ${damaged.length === 1 ? "grants" : "grant"}. Remove ${
     damaged.length === 1 ? "it" : "them"

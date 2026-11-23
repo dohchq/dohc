@@ -1,75 +1,88 @@
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isAppImageBoot, isTemporaryMacAppPath, resolveDohcMcpCommand } from "./dohcMcpCommand";
+import { isAppImageBoot, isTemporaryMacAppPath, resolveDohcMcpLaunch } from "./dohcMcpCommand";
 
-describe("resolveDohcMcpCommand", () => {
+describe("resolveDohcMcpLaunch", () => {
   it("recognizes only a non-empty APPIMAGE path", () => {
     expect(isAppImageBoot({ APPIMAGE: "" })).toBe(false);
     expect(isAppImageBoot({ APPIMAGE: "/path/to/x.AppImage" })).toBe(true);
     expect(isAppImageBoot({})).toBe(false);
   });
 
-  it("resolves a packaged install to its shipped cli-bin launcher by absolute path", () => {
-    // A bare `dohc-mcp` exists on no user's PATH; a packaged chat session
-    // config must name the file the app actually ships.
+  it("resolves a packaged Windows install to node.exe plus dohc-mcp.mjs so shell-free MCP clients avoid EINVAL", () => {
     const windowsResourcesPath = resolve("apps", "dohc", "resources");
     expect(
-      resolveDohcMcpCommand({
+      resolveDohcMcpLaunch({
         isPackaged: true,
         resourcesPath: windowsResourcesPath,
         platform: "win32",
         env: {},
       }),
-    ).toBe(join(windowsResourcesPath, "cli-bin", "dohc-mcp.cmd"));
+    ).toEqual({
+      command: join(windowsResourcesPath, "app-compiler", "node.exe"),
+      args: [join(windowsResourcesPath, "cli-bin", "dohc-mcp.mjs")],
+    });
     expect(
-      resolveDohcMcpCommand({
+      resolveDohcMcpLaunch({
         isPackaged: true,
         resourcesPath: "/opt/dohc/resources",
         platform: "linux",
         env: {},
       }),
-    ).toBe(join(resolve("/opt/dohc/resources"), "cli-bin", "dohc-mcp"));
+    ).toEqual({
+      command: join(resolve("/opt/dohc/resources"), "cli-bin", "dohc-mcp"),
+      args: [],
+    });
   });
 
   it("treats an empty APPIMAGE as a packaged non-AppImage install", () => {
     const resourcesPath = "/opt/dohc/resources";
     expect(
-      resolveDohcMcpCommand({
+      resolveDohcMcpLaunch({
         isPackaged: true,
         resourcesPath,
         platform: "linux",
         env: { APPIMAGE: "" },
       }),
-    ).toBe(join(resolve(resourcesPath), "cli-bin", "dohc-mcp"));
+    ).toEqual({
+      command: join(resolve(resourcesPath), "cli-bin", "dohc-mcp"),
+      args: [],
+    });
   });
 
   it("uses the persistent cli-bin only for a packaged Linux AppImage", () => {
     const resourcesPath = "/tmp/.mount_dohcAbC123/resources";
     const linuxStableCliBinDir = "/home/user/.config/dohc/cli-bin";
-    const appImageCommand = resolveDohcMcpCommand({
+    const appImageLaunch = resolveDohcMcpLaunch({
       isPackaged: true,
       resourcesPath,
       platform: "linux",
       env: { APPIMAGE: "/home/user/Downloads/dohc-1.2.3-linux-x86_64.AppImage" },
       linuxStableCliBinDir,
     });
-    expect(appImageCommand).toBe(join(linuxStableCliBinDir, "dohc-mcp"));
-    expect(appImageCommand).not.toContain("/tmp/.mount_dohcAbC123");
+    expect(appImageLaunch).toEqual({
+      command: join(linuxStableCliBinDir, "dohc-mcp"),
+      args: [],
+    });
+    expect(appImageLaunch?.command).not.toContain("/tmp/.mount_dohcAbC123");
 
     expect(
-      resolveDohcMcpCommand({
+      resolveDohcMcpLaunch({
         isPackaged: true,
         resourcesPath,
         platform: "linux",
         env: {},
         linuxStableCliBinDir,
       }),
-    ).toBe(join(resolve(resourcesPath), "cli-bin", "dohc-mcp"));
+    ).toEqual({
+      command: join(resolve(resourcesPath), "cli-bin", "dohc-mcp"),
+      args: [],
+    });
   });
 
   it("returns unavailable instead of exposing a packaged AppImage mount path", () => {
     expect(
-      resolveDohcMcpCommand({
+      resolveDohcMcpLaunch({
         isPackaged: true,
         resourcesPath: "/tmp/.mount_dohcAbC123/resources",
         platform: "linux",
@@ -86,7 +99,7 @@ describe("resolveDohcMcpCommand", () => {
     for (const resourcesPath of temporary) {
       expect(isTemporaryMacAppPath(resourcesPath)).toBe(true);
       expect(
-        resolveDohcMcpCommand({ isPackaged: true, resourcesPath, platform: "darwin", env: {} }),
+        resolveDohcMcpLaunch({ isPackaged: true, resourcesPath, platform: "darwin", env: {} }),
       ).toBeNull();
     }
     const installed = "/Applications/dohc.app/Contents/Resources";
@@ -101,24 +114,57 @@ describe("resolveDohcMcpCommand", () => {
       false,
     );
     expect(
-      resolveDohcMcpCommand({
+      resolveDohcMcpLaunch({
         isPackaged: true,
         resourcesPath: installed,
         platform: "darwin",
         env: {},
       }),
-    ).toBe(join(resolve(installed), "cli-bin", "dohc-mcp"));
+    ).toEqual({
+      command: join(resolve(installed), "cli-bin", "dohc-mcp"),
+      args: [],
+    });
   });
 
-  it("keeps the workspace bin in dev and the DOHC_MCP_COMMAND override everywhere", () => {
-    expect(resolveDohcMcpCommand({ isPackaged: false, env: {} })).toBe("dohc-mcp");
+  it("resolves staged dev resources when present and falls back to dohc-mcp or DOHC_MCP_COMMAND", () => {
+    const devResources = resolve("apps", "desktop", "resources");
     expect(
-      resolveDohcMcpCommand({
+      resolveDohcMcpLaunch({
+        isPackaged: false,
+        devResourcesPath: devResources,
+        platform: "win32",
+        env: {},
+        fileExists: () => true,
+      }),
+    ).toEqual({
+      command: join(devResources, "app-compiler", "node.exe"),
+      args: [join(devResources, "cli-bin", "dohc-mcp.mjs")],
+    });
+    expect(
+      resolveDohcMcpLaunch({
+        isPackaged: false,
+        devResourcesPath: devResources,
+        platform: "win32",
+        env: {},
+        fileExists: () => false,
+      }),
+    ).toEqual({ command: "dohc-mcp", args: [] });
+    expect(
+      resolveDohcMcpLaunch({
+        isPackaged: false,
+        devResourcesPath: devResources,
+        platform: "darwin",
+        env: {},
+        fileExists: () => true,
+      }),
+    ).toEqual({ command: "dohc-mcp", args: [] });
+    expect(
+      resolveDohcMcpLaunch({
         isPackaged: true,
         resourcesPath: "/opt/dohc/resources",
         platform: "linux",
         env: { DOHC_MCP_COMMAND: " /custom/dohc-mcp " },
       }),
-    ).toBe("/custom/dohc-mcp");
+    ).toEqual({ command: "/custom/dohc-mcp", args: [] });
   });
 });

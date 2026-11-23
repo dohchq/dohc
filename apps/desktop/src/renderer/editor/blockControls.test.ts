@@ -21,6 +21,7 @@ import {
   deleteBlock,
   deleteSelectedTopLevelBlock,
   duplicateBlock,
+  insertBlockAfter,
   makeBlockControlsPlugin,
   resolveTurnIntoDropdown,
   serializeBlockToMarkdown,
@@ -28,6 +29,7 @@ import {
   TurnIntoMenu,
   turnBlockInto,
   turnIntoIdAt,
+  turnSelectionInto,
   TURN_INTO_ENTRIES,
 } from "./blockControls";
 
@@ -171,7 +173,7 @@ describe("blockControls menu keyboard deletion", () => {
       }),
     );
 
-    fireEvent.keyDown(screen.getByRole("menu", { name: "block actions" }), {
+    fireEvent.keyDown(screen.getByRole("menu", { name: "Block actions" }), {
       key,
     });
     expect(onSelect).toHaveBeenCalledWith(
@@ -183,7 +185,7 @@ describe("blockControls menu keyboard deletion", () => {
 describe("BlockMenu on the Menu part's recipe and rule", () => {
   function openMenu(onSelect = vi.fn(), onClose = vi.fn()) {
     const handle = document.createElement("button");
-    handle.setAttribute("aria-label", "block actions");
+    handle.setAttribute("aria-label", "Block actions");
     document.body.append(handle);
     const outside = document.createElement("button");
     document.body.append(outside);
@@ -203,7 +205,7 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
         onClose,
       }),
     );
-    const menu = screen.getByRole("menu", { name: "block actions" });
+    const menu = screen.getByRole("menu", { name: "Block actions" });
     const rows = screen.getAllByRole("menuitem");
     return { handle, outside, menu, rows, onSelect, onClose };
   }
@@ -297,8 +299,8 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
       this: HTMLElement,
     ) {
       const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
-      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
-      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
+      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 10 ? 22 : 0);
+      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 306 : 4;
       return 0;
     });
     vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28);
@@ -326,8 +328,8 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
       this: HTMLElement,
     ) {
       const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
-      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
-      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
+      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 10 ? 22 : 0);
+      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 306 : 4;
       return 0;
     });
     vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28);
@@ -980,7 +982,66 @@ describe("blockControls turn-into dropdown (bubble menu) command path", () => {
       "Numbered list",
       "Todo list",
       "Quote",
+      "Code block",
+      "Callout",
     ]);
+  });
+
+  it("converts multi-block selections, supports code block and callout, and stays idempotent", () => {
+    const editor = track(makeEditor("First\n\nSecond"));
+    editor.commands.setTextSelection({ from: 2, to: 12 });
+    turnSelectionInto(editor, "heading-2");
+    expect(editor.getJSON().content?.map((n) => [n.type, n.attrs?.level])).toEqual([
+      ["heading", 2],
+      ["heading", 2],
+    ]);
+
+    // Idempotent: re-selecting Heading 2 keeps Heading 2.
+    turnSelectionInto(editor, "heading-2");
+    expect(editor.getJSON().content?.map((n) => [n.type, n.attrs?.level])).toEqual([
+      ["heading", 2],
+      ["heading", 2],
+    ]);
+
+    // Code block + idempotency.
+    editor.commands.setTextSelection(2);
+    turnSelectionInto(editor, "code-block");
+    expect(editor.getJSON().content?.[0]?.type).toBe("codeBlock");
+    expect(turnIntoIdAt(editor.state.selection.$from)).toBe("code-block");
+    turnSelectionInto(editor, "code-block");
+    expect(editor.getJSON().content?.[0]?.type).toBe("codeBlock");
+
+    // Turn back to paragraph, then wrap in callout, then lift out to paragraph.
+    turnSelectionInto(editor, "paragraph");
+    expect(editor.getJSON().content?.[0]?.type).toBe("paragraph");
+    turnSelectionInto(editor, "callout");
+    expect(editor.getJSON().content?.[0]?.type).toBe("callout");
+    expect(turnIntoIdAt(editor.state.selection.$from)).toBe("callout");
+    turnSelectionInto(editor, "callout");
+    expect(editor.getJSON().content?.[0]?.type).toBe("callout");
+    turnSelectionInto(editor, "paragraph");
+    expect(editor.getJSON().content?.[0]?.type).toBe("paragraph");
+  });
+
+  it("opens the gutter slash menu without mutating the document until typing or picking a block", () => {
+    const editor = track(makeEditor("Hello"));
+    const opened = vi.fn();
+    insertBlockAfter(editor, 0, opened);
+    expect(topLevelBlocks(editor).map((b) => b.type)).toEqual(["paragraph"]);
+    expect(editor.state.doc.textContent).toBe("Hello");
+    expect(opened).toHaveBeenCalledOnce();
+  });
+
+  it("renders crisp SVG icons inside gutter + and drag handle buttons", () => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: "Item" }] }],
+      }),
+    );
+    const controls = blockControls(editor, 0);
+    expect(controls.querySelector(".dohc-block-plus svg")).not.toBeNull();
+    expect(controls.querySelector(".dohc-block-handle svg")).not.toBeNull();
   });
 });
 
@@ -1007,7 +1068,7 @@ describe("TurnIntoMenu dropdown rendering", () => {
     );
 
     fireEvent.click(screen.getByTitle("Turn into"));
-    const listbox = screen.getByRole("listbox", { name: "turn into" });
+    const listbox = screen.getByRole("listbox", { name: "Turn into" });
     // jsdom rects are all-zero -> plenty of room below at the default
     // viewport, so the dropdown gets its full height, uncapped by the bar.
     expect(listbox.getAttribute("data-placement")).toBe("below");
@@ -1025,7 +1086,7 @@ describe("TurnIntoMenu dropdown rendering", () => {
     );
 
     fireEvent.click(screen.getByTitle("Turn into"));
-    const listbox = screen.getByRole("listbox", { name: "turn into" });
+    const listbox = screen.getByRole("listbox", { name: "Turn into" });
     fireEvent.click(within(listbox).getByText("Heading 1"));
 
     expect(screen.queryByRole("listbox")).toBeNull();
@@ -1045,7 +1106,7 @@ describe("TurnIntoMenu dropdown rendering", () => {
     editor.view.setProps({ handleScrollToSelection: () => true });
 
     fireEvent.click(screen.getByTitle("Turn into"));
-    const listbox = screen.getByRole("listbox", { name: "turn into" });
+    const listbox = screen.getByRole("listbox", { name: "Turn into" });
     expect(editor.view.hasFocus()).toBe(false);
     fireEvent.keyDown(listbox, { key: "Escape" });
     expect(screen.queryByRole("listbox")).toBeNull();
@@ -1066,7 +1127,7 @@ describe("TurnIntoMenu on the Menu part's recipe", () => {
         }),
       );
       fireEvent.click(screen.getByTitle("Turn into"));
-      const listbox = screen.getByRole("listbox", { name: "turn into" });
+      const listbox = screen.getByRole("listbox", { name: "Turn into" });
       const options = within(listbox).getAllByRole("option");
       const text = options[0]!;
       expect(document.activeElement).toBe(listbox);

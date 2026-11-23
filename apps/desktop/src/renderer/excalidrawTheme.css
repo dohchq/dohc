@@ -34,10 +34,14 @@
    * float on the canvas one step in. Hover is opaque because Excalidraw also
    * paints it straight on the canvas. */
   --island-bg-color: var(--dohc-panel);
+  --color-surface-lowest: var(--dohc-bg);
   --color-surface-low: var(--dohc-panel-2);
   --color-surface-mid: var(--dohc-panel-2);
   --color-surface-high: color-mix(in srgb, var(--dohc-ink) 7%, var(--dohc-panel));
   --color-on-surface: var(--dohc-ink);
+  --button-hover-bg: var(--dohc-hover);
+  --border-radius-lg: 8px;
+  --shadow-island: 0 1px 2px rgba(28, 27, 24, 0.05), 0 8px 24px rgba(28, 27, 24, 0.12);
   /* Hairlines and the slider track, which Excalidraw tints lavender. */
   --default-border-color: var(--dohc-line);
   --sidebar-border-color: var(--dohc-line);
@@ -52,6 +56,7 @@
  * invert(93%) hue-rotate(180deg). The selection takes the color that this
  * filter turns into the accent, as closely as the filter can show it. */
 :root[data-theme="dark"] .excalidraw {
+  --shadow-island: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 28px rgba(0, 0, 0, 0.45);
   --color-selection: rgb(from var(--dohc-accent)
     calc((237.15 + 0.574 * r - 1.43 * g - 0.144 * b) / 0.86)
     calc((237.15 - 0.426 * r - 0.43 * g - 0.144 * b) / 0.86)

@@ -152,6 +152,20 @@ export async function resolveWorkspaceFile(
   return target;
 }
 
+export async function resolveWorkspaceDocument(
+  rootPath: string,
+  relativePath: string,
+  access: "read" | "write",
+): Promise<string | null> {
+  try {
+    return (await resolveWorkspaceFile(rootPath, relativePath, access)).resolvedPath;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw error;
+  }
+}
+
 // Media views buffer the whole file into the privileged main process before
 // serving — cap it so one oversized file can't OOM/freeze the app (same
 // reasoning as MAX_TEXT_BYTES, sized for real images/audio).

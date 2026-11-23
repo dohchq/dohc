@@ -372,7 +372,13 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
-                    ops: Vec::new(),
+                    ops: vec![ShareReplicationEnvelope {
+                        origin_id: "peer".to_owned(),
+                        origin_seq: 0,
+                        op_kind: "workspace.init".to_owned(),
+                        payload: json!({}),
+                        recorded_at_ms: 10,
+                    }],
                     next_cursor: 1,
                     has_more: true,
                 },
@@ -401,7 +407,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
             &NoFaults,
         )
         .expect("bounded share-view page");
-    assert_eq!((first.fetched, first.pending_cursor.cursor), (0, 1));
+    assert_eq!((first.fetched, first.pending_cursor.cursor), (1, 1));
     assert!(
         first.has_more,
         "dropping has_more prevents the desktop adapter from draining page two"
@@ -4997,5 +5003,535 @@ fn a_page_marking_a_move_across_the_reach_stops_a_copy_that_holds_earlier_pages(
         pulls(None, vec![first(4), (page(true, 3, 4, "r2"), true)]),
         vec![(1, false, false, 1), (0, false, true, 1)],
         "an old mark on a page under other levels is a change of levels, not a move"
+    );
+}
+
+fn saved_note_versions() -> Vec<Vec<u8>> {
+    (0..25)
+        .map(|index| format!("Saved version {index}.\n").into_bytes())
+        .collect()
+}
+
+fn note_share_relay(versions: &[Vec<u8>]) -> PagedShareRelay {
+    PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
+                ops: versions
+                    .iter()
+                    .zip(0..)
+                    .map(|(version, seq)| {
+                        share_view_write_op(
+                            seq,
+                            "docs/note.md",
+                            &dohc_engine_storage::hex_sha256(version),
+                        )
+                    })
+                    .collect(),
+                next_cursor: versions.len() as i64,
+                has_more: false,
+            },
+        )],
+    )
+    .with_view_blobs(
+        versions
+            .iter()
+            .map(|version| (dohc_engine_storage::hex_sha256(version), version.clone())),
+    )
+}
+
+fn note_text(engine: &mut EngineStore) -> Option<Vec<u8>> {
+    VersionedTextStore::new(engine)
+        .read_text("ws", "main", "docs/note.md")
+        .expect("share-view path read is answerable")
+        .map(|snapshot| snapshot.text.into_bytes())
+}
+
+#[test]
+fn share_view_pull_asks_for_a_notes_saved_versions_a_batch_at_a_time() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let versions = saved_note_versions();
+    let client = RelaySyncClient::new(note_share_relay(&versions));
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a note saved 25 times is pulled");
+
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (25, 25, 0)
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_batches
+            .lock()
+            .expect("share blob batches"),
+        [8, 8, 8, 1],
+        "25 saved versions cost more than 4 requests to the transport"
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        versions
+            .iter()
+            .map(|version| dohc_engine_storage::hex_sha256(version))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(note_text(&mut engine).as_ref(), versions.last());
+}
+
+#[test]
+fn share_view_pull_stops_at_a_missing_blob_and_resumes_from_it() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let versions = saved_note_versions();
+    let shas = versions
+        .iter()
+        .map(|version| dohc_engine_storage::hex_sha256(version))
+        .collect::<Vec<_>>();
+    let interrupted = RelaySyncClient::new(
+        note_share_relay(&versions)
+            .with_view_blob_errors([(shas[10].clone(), RelayError::BlobMissing)]),
+    );
+
+    assert_eq!(
+        interrupted
+            .pull_share_view(
+                &mut engine,
+                "ws",
+                "share",
+                &tracked_grant(["docs"]),
+                &NoFaults,
+            )
+            .expect_err("a pull past a blob the relay does not hold yet"),
+        RelayError::BlobMissing
+    );
+    assert_eq!(
+        note_text(&mut engine).as_ref(),
+        Some(&versions[9]),
+        "the pull stops with every version before the missing one applied and none after it"
+    );
+
+    let resumed = RelaySyncClient::new(note_share_relay(&versions));
+    let outcome = resumed
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("the pull resumes once the relay holds the blob");
+
+    assert_eq!((outcome.fetched, outcome.applied), (25, 15));
+    assert_eq!(outcome.pending_cursor.cursor, 25);
+    assert_eq!(
+        *resumed
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        shas[10..],
+        "the resumed pull asks again for a version it already applied"
+    );
+    assert_eq!(note_text(&mut engine).as_ref(), versions.last());
+}
+
+#[test]
+fn share_view_pull_asks_once_for_a_blob_two_writes_of_one_batch_name() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let first = b"First wording.\n".to_vec();
+    let second = b"Second wording.\n".to_vec();
+    let client = RelaySyncClient::new(note_share_relay(&[
+        first.clone(),
+        second.clone(),
+        first.clone(),
+    ]));
+
+    client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a note put back to an earlier wording is pulled");
+
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        [
+            dohc_engine_storage::hex_sha256(&first),
+            dohc_engine_storage::hex_sha256(&second)
+        ],
+    );
+    assert_eq!(note_text(&mut engine), Some(first));
+}
+
+#[test]
+fn share_view_pull_applies_what_a_batch_answered_and_asks_again_for_the_rest() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let versions = saved_note_versions()[..5].to_vec();
+    let mut relay = note_share_relay(&versions);
+    relay.view_blobs_answered_per_batch = 2;
+    let client = RelaySyncClient::new(relay);
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a transport that answers part of each batch still serves the whole page");
+
+    assert_eq!((outcome.fetched, outcome.applied), (5, 5));
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_batches
+            .lock()
+            .expect("share blob batches"),
+        [5, 3, 1],
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        versions
+            .iter()
+            .map(|version| dohc_engine_storage::hex_sha256(version))
+            .collect::<Vec<_>>(),
+        "a blob the transport answered was asked for again"
+    );
+    assert_eq!(note_text(&mut engine).as_ref(), versions.last());
+}
+
+fn note_behind_empty_log_pages(empty_pages: i64, note: &[u8]) -> PagedShareRelay {
+    let page = |ops, next_cursor, has_more| ShareViewResponse {
+        work_references: Vec::new(),
+        next_reference_after: None,
+        reference_has_more: false,
+        ops,
+        next_cursor,
+        has_more,
+    };
+    let sha256 = dohc_engine_storage::hex_sha256(note);
+    PagedShareRelay::new(
+        [],
+        (0..empty_pages)
+            .map(|index| (index * 10, page(Vec::new(), (index + 1) * 10, true)))
+            .chain([(
+                empty_pages * 10,
+                page(
+                    vec![share_view_write_op(0, "docs/note.md", &sha256)],
+                    empty_pages * 10 + 1,
+                    false,
+                ),
+            )]),
+    )
+    .with_view_blobs([(sha256, note.to_vec())])
+}
+
+fn share_log_pages_read(client: &RelaySyncClient<PagedShareRelay>) -> Vec<i64> {
+    client
+        .transport()
+        .view_pulls
+        .lock()
+        .expect("view pull calls")
+        .iter()
+        .map(|(cursor, _)| *cursor)
+        .collect()
+}
+
+#[test]
+fn share_view_pull_reads_past_log_pages_that_hold_nothing_for_the_share() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let client = RelaySyncClient::new(note_behind_empty_log_pages(4, b"The note.\n"));
+    let pull = |engine: &mut EngineStore| {
+        client
+            .pull_share_view(engine, "ws", "share", &tracked_grant(["docs"]), &NoFaults)
+            .expect("share view pull")
+    };
+
+    let first = pull(&mut engine);
+
+    assert_eq!(share_log_pages_read(&client), [0, 10, 20, 30, 40]);
+    assert_eq!(
+        (
+            first.fetched,
+            first.applied,
+            first.has_more,
+            first.pending_cursor.cursor
+        ),
+        (0, 0, true, 40),
+        "the first pull answers with the last empty page, whose cursor is the note's page"
+    );
+
+    client
+        .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
+        .expect("commit the cursor past the empty pages");
+    let second = pull(&mut engine);
+
+    assert_eq!(share_log_pages_read(&client)[5..], [40]);
+    assert_eq!(
+        (
+            second.fetched,
+            second.applied,
+            second.has_more,
+            second.pending_cursor.cursor
+        ),
+        (1, 1, false, 41)
+    );
+    assert_eq!(note_text(&mut engine), Some(b"The note.\n".to_vec()));
+}
+
+#[test]
+fn share_view_pull_asks_for_no_blob_of_a_page_it_reached_past_empty_pages() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let client = RelaySyncClient::new(note_behind_empty_log_pages(4, b"The note.\n"));
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a pull that reaches the note's page past four empty ones");
+
+    assert!(
+        client
+            .transport()
+            .share_blob_batches
+            .lock()
+            .expect("share blob batches")
+            .is_empty(),
+        "the pull asked for a blob of the page it should leave to the next pull"
+    );
+    assert!(outcome.changed_paths.is_empty() && outcome.refusals.is_empty());
+    assert_eq!(note_text(&mut engine), None);
+    assert_eq!(
+        crate::read_share_cursor(&engine, "ws", "share", crate::CursorKind::ShareView)
+            .expect("share cursor"),
+        0
+    );
+}
+
+#[test]
+fn share_view_pull_stops_after_16_log_pages_and_the_next_pull_goes_on_from_there() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let client = RelaySyncClient::new(note_behind_empty_log_pages(16, b"The note.\n"));
+    let pull = |engine: &mut EngineStore| {
+        client
+            .pull_share_view(engine, "ws", "share", &tracked_grant(["docs"]), &NoFaults)
+            .expect("share view pull")
+    };
+
+    let first = pull(&mut engine);
+
+    assert_eq!(share_log_pages_read(&client).len(), 16);
+    assert_eq!(
+        (first.fetched, first.has_more, first.pending_cursor.cursor),
+        (0, true, 160)
+    );
+    assert_eq!(note_text(&mut engine), None);
+
+    client
+        .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
+        .expect("commit the cursor past the empty pages");
+    let second = pull(&mut engine);
+
+    assert_eq!(share_log_pages_read(&client)[16..], [160]);
+    assert_eq!((second.applied, second.has_more), (1, false));
+    assert_eq!(note_text(&mut engine), Some(b"The note.\n".to_vec()));
+}
+
+#[test]
+fn share_view_pull_that_fails_on_an_empty_log_page_starts_again_from_its_stored_cursor() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let mut broken = note_behind_empty_log_pages(4, b"The note.\n");
+    broken.view_pages.remove(&20);
+    let interrupted = RelaySyncClient::new(broken);
+
+    interrupted
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect_err("a pull whose third log page fails");
+
+    assert_eq!(share_log_pages_read(&interrupted), [0, 10, 20]);
+    assert_eq!(
+        crate::read_share_cursor(&engine, "ws", "share", crate::CursorKind::ShareView)
+            .expect("share cursor"),
+        0,
+        "a pull that failed part-way moved the stored cursor"
+    );
+
+    let resumed = RelaySyncClient::new(note_behind_empty_log_pages(4, b"The note.\n"));
+    let pull = |engine: &mut EngineStore| {
+        resumed
+            .pull_share_view(engine, "ws", "share", &tracked_grant(["docs"]), &NoFaults)
+            .expect("the next pull reads every page again")
+    };
+    let past_the_empty_pages = pull(&mut engine);
+
+    assert_eq!(share_log_pages_read(&resumed), [0, 10, 20, 30, 40]);
+    assert_eq!(
+        (
+            past_the_empty_pages.applied,
+            past_the_empty_pages.pending_cursor.cursor
+        ),
+        (0, 40)
+    );
+
+    resumed
+        .commit_share_view_cursor(
+            &mut engine,
+            "ws",
+            &past_the_empty_pages.pending_cursor,
+            &NoFaults,
+        )
+        .expect("commit the cursor past the empty pages");
+    let outcome = pull(&mut engine);
+
+    assert_eq!((outcome.applied, outcome.pending_cursor.cursor), (1, 41));
+    assert_eq!(note_text(&mut engine), Some(b"The note.\n".to_vec()));
+    let moments: i64 = engine
+        .read_with(|conn| conn.query_row("SELECT count(*) FROM moments", [], |row| row.get(0)))
+        .expect("moment count");
+    assert_eq!(moments, 1, "the note was applied more than once");
+}
+
+#[test]
+fn share_view_pull_stops_reading_empty_log_pages_once_they_have_taken_10_seconds() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let request = crate::PullContinuation::default();
+    let clock = request.clone();
+    let mut relay = note_behind_empty_log_pages(16, b"The note.\n");
+    relay.after_view_pull = Some(Box::new(move || {
+        clock.age_share_log_reads(std::time::Duration::from_secs(2));
+    }));
+    let client = RelaySyncClient::resuming(relay, request);
+
+    let mut pulls = 0;
+    loop {
+        let outcome = client
+            .pull_share_view(
+                &mut engine,
+                "ws",
+                "share",
+                &tracked_grant(["docs"]),
+                &NoFaults,
+            )
+            .expect("share view pull");
+        pulls += 1;
+        if pulls == 1 {
+            assert_eq!(
+                share_log_pages_read(&client),
+                [0, 10, 20, 30, 40],
+                "a pull whose log pages take 2 seconds each read past its 10 seconds"
+            );
+            assert_eq!(
+                (
+                    outcome.fetched,
+                    outcome.has_more,
+                    outcome.pending_cursor.cursor
+                ),
+                (0, true, 50)
+            );
+        }
+        if !outcome.has_more {
+            break;
+        }
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &outcome.pending_cursor, &NoFaults)
+            .expect("commit the cursor past the pages read");
+    }
+
+    assert_eq!(pulls, 5);
+    assert_eq!(share_log_pages_read(&client).len(), 18);
+    assert_eq!(note_text(&mut engine), Some(b"The note.\n".to_vec()));
+}
+
+#[test]
+fn share_view_pull_reads_every_page_an_earlier_pass_decided_whatever_the_clock_says() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let request = crate::PullContinuation::default();
+    let mut stops_at_its_third_page = note_behind_empty_log_pages(4, b"The note.\n");
+    stops_at_its_third_page.view_pages.remove(&20);
+    let earlier_pass = RelaySyncClient::resuming(stops_at_its_third_page, request.clone());
+
+    earlier_pass
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect_err("a pass that waits for its third log page");
+    assert_eq!(share_log_pages_read(&earlier_pass), [0, 10, 20]);
+
+    request.age_share_log_reads(std::time::Duration::from_secs(60));
+    let later_pass =
+        RelaySyncClient::resuming(note_behind_empty_log_pages(4, b"The note.\n"), request);
+    let outcome = later_pass
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a later pass of the same request");
+
+    assert_eq!(
+        share_log_pages_read(&later_pass),
+        [0, 10, 20],
+        "a later pass asks for the pages the earlier pass decided, and decides no more after the budget"
+    );
+    assert_eq!(
+        (
+            outcome.fetched,
+            outcome.has_more,
+            outcome.pending_cursor.cursor
+        ),
+        (0, true, 30)
     );
 }

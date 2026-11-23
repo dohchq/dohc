@@ -119,7 +119,7 @@ describe("ChatMembersDialog", () => {
 
     await userEvent.type(field(), "ANA@example.com{Enter}");
     expect(screen.getByTestId("chats-share-error").textContent).toBe(
-      "ana@example.com is already a member.",
+      "Already a member: ana@example.com.",
     );
     expect(field().getAttribute("aria-invalid")).toBe("true");
     await userEvent.clear(field());
@@ -210,11 +210,11 @@ describe("ChatMembersDialog", () => {
     dialog({ known: [] });
     await userEvent.keyboard("{ArrowDown}");
     expect(screen.getByTestId("chats-share-suggestions").textContent).toBe(
-      "No suggestions yet. Enter a full email.",
+      "No suggestions yet. Enter an email address.",
     );
     await userEvent.type(field(), "zed");
     expect(screen.getByTestId("chats-share-suggestions").textContent).toBe(
-      'No one matches "zed". Enter their full email.',
+      'No one matches "zed". Enter their email address.',
     );
   });
 

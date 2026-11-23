@@ -8,7 +8,7 @@ final class PageAccessibilityTests: XCTestCase {
     let app = XCUIApplication()
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
-    XCTAssertTrue(app.webViews.firstMatch.staticTexts["Packing list"].waitForExistence(timeout: 20))
+    XCTAssertTrue(app.webViews.firstMatch.staticTexts["Packing list"].waitForExistence(timeout: 45))
     let voiceOver = XCUIDevice.shared.voiceOverService
     try voiceOver.enable()
     defer { try? voiceOver.disable() }

@@ -14,7 +14,13 @@ import {
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
-import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import {
+  FieldError,
+  IconButton,
+  PrimaryButton,
+  SecondaryButton,
+  SectionLabel,
+} from "../ui/controls";
 import {
   draftToField,
   emptyFieldDraft,
@@ -140,7 +146,11 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
     let plan = captured;
     if (!plan) {
       const folder = name.trim().replace(/\/+$/, "");
-      if (!folder) return;
+      if (!folder) {
+        setError("Give the collection a name.");
+        inputRef.current?.focus();
+        return;
+      }
       const names: string[] = [];
       try {
         if (kind === "document") {
@@ -183,12 +193,12 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
           try {
             parseDatasetDefinition(definition);
           } catch {
-            throw new Error("Check the collection path, field options, and default values.");
+            throw new Error("Check the Collection path, field options, and default values.");
           }
           plan = { definition };
         }
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : "Check the collection fields.");
+        setError(cause instanceof Error ? cause.message : "Check the Collection fields.");
         return;
       }
     }
@@ -205,9 +215,7 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
         });
         if (!alive.current) return;
         if (result.kind !== "approved" || result.revision.datasetId !== plan.definition.datasetId)
-          throw new Error(
-            "dohc created a different Collection than the one you asked for. Try again.",
-          );
+          throw new Error("dohc created a different Collection than requested.");
         const base = datasetBaseFolder(result.revision.definition);
         props.onCreated({
           kind: "transactional",
@@ -228,7 +236,7 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
       }
     } catch (cause) {
       if (alive.current)
-        props.onError("dohc could not create this collection.", cause, () => {
+        props.onError("dohc could not create this Collection.", cause, () => {
           if (alive.current) void create(retryPlan);
         });
     } finally {
@@ -248,9 +256,12 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
         data-testid="new-collection-dialog"
         className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-[960px] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-line bg-panel"
       >
-        <h2 className="m-0 shrink-0 border-b border-line px-5 py-4 text-sm font-semibold text-ink">
-          New collection
-        </h2>
+        <div className="flex shrink-0 items-center gap-2 border-b border-line px-5 py-3.5">
+          <h2 className="m-0 flex-1 text-sm font-semibold text-ink">New Collection</h2>
+          <IconButton aria-label="Close" title="Close" disabled={pending} onClick={props.onClose}>
+            <X size={14} strokeWidth={1.9} aria-hidden />
+          </IconButton>
+        </div>
         <div className="min-h-0 overflow-y-auto min-[900px]:grid min-[900px]:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] min-[900px]:overflow-hidden">
           <div className="flex min-w-0 flex-col gap-4 p-5 min-[900px]:overflow-y-auto">
             {props.documentsOnly ? null : (
@@ -278,19 +289,25 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
                 ))}
               </fieldset>
             )}
-            <input
-              ref={inputRef}
-              spellCheck={false}
-              aria-label="Collection name"
-              placeholder="Collection name"
-              value={name}
-              disabled={pending}
-              className={`${inputClass} font-mono`}
-              onChange={(event) => setName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !isComposingKey(event)) void create();
-              }}
-            />
+            <label className="flex flex-col gap-1 text-[12px] text-muted">
+              Collection name
+              <input
+                ref={inputRef}
+                spellCheck={false}
+                aria-label="Collection name"
+                placeholder="Collection name"
+                value={name}
+                disabled={pending}
+                className={inputClass}
+                onChange={(event) => {
+                  setName(event.target.value);
+                  if (error) setError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !isComposingKey(event)) void create();
+                }}
+              />
+            </label>
             <SectionLabel>Fields</SectionLabel>
             {(kind === "document" ? documentDrafts : drafts).map((draft, index) => (
               <div key={index} className="flex items-start gap-2 border-b border-line pb-4">
@@ -446,7 +463,9 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
             ))}
             <SecondaryButton
               className="flex items-center gap-1.5 self-start"
-              disabled={pending || drafts.length >= 127}
+              disabled={
+                pending || (kind === "document" ? documentDrafts.length : drafts.length) >= 127
+              }
               onClick={() =>
                 kind === "document"
                   ? setDocumentDrafts((current) => [...current, emptyFieldDraft()])
@@ -464,21 +483,17 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
           />
         </div>
         <div className="flex shrink-0 flex-col gap-3 border-t border-line px-5 py-4">
-          {error ? (
-            <p role="alert" className="m-0 text-xs text-danger">
-              {error}
-            </p>
-          ) : null}
+          {error ? <FieldError id="new-collection-error">{error}</FieldError> : null}
           <div className="flex justify-end gap-2">
             <SecondaryButton disabled={pending} onClick={props.onClose}>
               Cancel
             </SecondaryButton>
             <PrimaryButton
               data-testid="new-collection-create"
-              disabled={pending || !name.trim()}
+              disabled={pending}
               onClick={() => void create()}
             >
-              {pending ? "Creating…" : "Create collection"}
+              {pending ? "Creating…" : "Create Collection"}
             </PrimaryButton>
           </div>
         </div>

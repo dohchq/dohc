@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, Link2, Pencil } from "lucide-react";
 import type {
   CollectionIndexedValue,
   CollectionValue,
@@ -62,6 +62,8 @@ export interface FieldCellProps {
   alignStart?: boolean;
   /** What an empty value says, as in a record's properties. Absent, it shows nothing. */
   emptyText?: string;
+  /** Wrap multi-select pills, relation chips, and long text instead of truncating to one line. */
+  wrap?: boolean;
 }
 
 /** Plain text for a raw collection value: board group labels, fallbacks. */
@@ -136,8 +138,8 @@ export const FLAGGED_REASON_TITLES: Record<FieldValueReasonCode, string> = {
   "unknown-option":
     "This field's options do not include this value. Edit the value to pick or add an option.",
   "duplicate-value": "This list repeats a value. Edit the value to remove the duplicate.",
-  "empty-person-id": "This person id is empty. Edit the value to enter a person id.",
-  "invalid-record-id": "This value is not a record id. Edit the value to pick a record.",
+  "empty-person-id": "This person ID is empty. Edit the value to enter a person ID.",
+  "invalid-record-id": "This value is not a record ID. Edit the value to pick a record.",
   "invalid-url": "This value is not a URL. Edit the value to replace it.",
   "expected-empty": "A button field stores no value. Remove this value from the record's file.",
 };
@@ -218,7 +220,7 @@ function CellInput({
         aria-describedby={refused ? errorId : undefined}
         // The table keeps this editor open while it holds a value it cannot save.
         data-unsaved={refused || undefined}
-        className="w-full rounded border border-line bg-bg px-1 text-[13px]"
+        className="h-8 w-full border-0 bg-transparent px-2 text-[13px] text-ink outline-none"
         onFocus={
           caretAtEnd
             ? (event) => {
@@ -245,7 +247,7 @@ function CellInput({
         <p
           id={errorId}
           role="alert"
-          className="m-0 mt-1 flex items-start gap-1 text-[12px] text-danger"
+          className="m-0 flex items-start gap-1 border-t border-line px-2 py-1 text-[12px] text-danger"
         >
           <span aria-hidden className="flex h-lh shrink-0 items-center">
             <CircleAlert size={12} />
@@ -343,7 +345,7 @@ export function CellEditor({
             const parsed = Number(trimmed);
             return Number.isFinite(parsed) ? parsed : undefined;
           }}
-          invalid="This value is not a number. Enter a number."
+          invalid="Enter a number."
         />
       );
     case "date":
@@ -419,6 +421,7 @@ export function FieldCell({
   tabStop = false,
   alignStart = false,
   emptyText,
+  wrap = false,
 }: FieldCellProps) {
   // In the table the grid is the Tab stop, and its keys act on the selected cell.
   const stop = tabStop ? undefined : -1;
@@ -460,7 +463,7 @@ export function FieldCell({
     onOpenLink
   ) {
     return (
-      <span className="flex w-full min-w-0 items-center text-[13px]">
+      <span className="group/url flex w-full min-w-0 items-center gap-1 text-[13px]">
         <span
           role="link"
           tabIndex={tabStop ? 0 : -1}
@@ -473,7 +476,7 @@ export function FieldCell({
                 }
               : undefined
           }
-          className="cursor-pointer truncate underline decoration-line underline-offset-[3px] transition-colors duration-75 hover:decoration-ink"
+          className={`cursor-pointer underline decoration-line underline-offset-[3px] transition-colors duration-75 hover:decoration-ink ${wrap ? "break-all" : "truncate"}`}
           onClick={(event) => {
             // The click opens the link. It neither selects nor edits the cell.
             event.stopPropagation();
@@ -487,8 +490,11 @@ export function FieldCell({
             type="button"
             tabIndex={stop}
             aria-label={`Edit ${label}`}
-            className={`min-h-5 min-w-6 flex-1 self-stretch${target}`}
-          />
+            title={`Edit ${label}`}
+            className={`ml-auto grid size-5 shrink-0 place-items-center rounded text-subtle opacity-0 transition-opacity duration-75 hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover/url:opacity-100 group-hover:opacity-100${target}`}
+          >
+            <Pencil size={12} strokeWidth={1.9} aria-hidden />
+          </button>
         ) : null}
       </span>
     );
@@ -506,6 +512,7 @@ export function FieldCell({
         indexed={indexed}
         personLabel={personLabel}
         alignStart={alignStart}
+        wrap={wrap}
       />
     );
   if (!editable) return wrapFlagged(reason, shown);
@@ -532,12 +539,15 @@ export function FieldValue({
   indexed,
   personLabel,
   alignStart = false,
+  wrap = false,
 }: {
   field: FieldDefinition;
   indexed: CollectionIndexedValue | undefined;
   personLabel?: (userId: string) => string | null;
   /** A number starts at the left, as every other value does. Absent, it ends at the right, as in a table's column. */
   alignStart?: boolean;
+  /** Wrap pills, relation chips, and long text onto multiple lines. */
+  wrap?: boolean;
 }) {
   const value = indexed?.value ?? null;
   if (value === null) return null;
@@ -548,7 +558,9 @@ export function FieldValue({
     }
     case "multi-select":
       return (
-        <span className="flex min-w-0 items-center gap-1 overflow-hidden">
+        <span
+          className={`flex min-w-0 items-center gap-1 ${wrap ? "flex-wrap py-1" : "overflow-hidden"}`}
+        >
           {asTextArray(value).map((option) => (
             <OptionPill key={option} label={option} color={optionColor(field, option)} />
           ))}
@@ -568,16 +580,41 @@ export function FieldValue({
           {asText(value)}
         </span>
       );
-    case "relation":
+    case "relation": {
+      const resolved = indexed?.resolvedRelations ?? [];
+      const items =
+        resolved.length > 0
+          ? resolved.map((relation) => ({ key: relation.recordId, label: relation.label }))
+          : asTextArray(value).map((entry) => ({ key: entry, label: entry }));
+      return (
+        <span
+          className={`flex min-w-0 items-center gap-1 ${wrap ? "flex-wrap py-1" : "overflow-hidden"}`}
+        >
+          {items.map((item) => (
+            <span
+              key={item.key}
+              className="inline-flex h-5 min-w-0 shrink-0 items-center gap-1 rounded border border-line bg-panel-2 px-1.5 text-[12px] text-ink"
+            >
+              <Link2 size={12} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+              <span className="truncate">{item.label}</span>
+            </span>
+          ))}
+        </span>
+      );
+    }
     case "url":
       return (
-        <span className="truncate text-[13px] underline decoration-line underline-offset-[3px]">
+        <span
+          className={`text-[13px] underline decoration-line underline-offset-[3px] ${wrap ? "break-all" : "truncate"}`}
+        >
           {fieldDisplayText(field, indexed, personLabel)}
         </span>
       );
     default:
       return (
-        <span className="truncate text-[13px]">
+        <span
+          className={`text-[13px] ${wrap ? "whitespace-pre-wrap break-words py-1" : "truncate"}`}
+        >
           {fieldDisplayText(field, indexed, personLabel)}
         </span>
       );

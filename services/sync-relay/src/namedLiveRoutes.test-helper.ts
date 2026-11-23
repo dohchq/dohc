@@ -438,12 +438,14 @@ export async function fixture(
     body: unknown,
     cookie = defaultCookie,
     extra: Record<string, string> = {},
+    signal?: AbortSignal,
   ) {
     return new Promise<Response>((resolve, reject) => {
       const request = httpRequest(
         `http://127.0.0.1:${port}${path}`,
         {
           method: "POST",
+          signal,
           headers: {
             host: relayHost,
             "content-type": "application/json",

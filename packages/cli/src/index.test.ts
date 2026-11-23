@@ -177,6 +177,21 @@ it("says when live editing was already stopped or live", async () => {
   ).toBe("plan.md was already live.\n");
 });
 
+it("says when a note whose file is gone only ended its pause", async () => {
+  expect(
+    (
+      await executeCli({
+        argv: ["document", "resume", "plan.md"],
+        cwd: "/workspace",
+        env: {},
+        request: async () => ({ ok: true, path: "plan.md", ended: true }),
+      })
+    ).stdout,
+  ).toBe(
+    "plan.md was moved, deleted or replaced, so live editing stays off. Its pause has ended.\n",
+  );
+});
+
 it("stops and resumes live editing with only the caller's path", async () => {
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
     verb === "liveStop"

@@ -65,7 +65,8 @@ type Place = { left: number; maxHeight: number; top?: number; bottom?: number; a
 // menu has one frame, one row, one ladder and one set of keys.
 
 /** The list's frame. The owner adds its position and width. */
-export const MENU_FRAME = "dohc-popover overflow-y-auto rounded-lg border border-line bg-panel p-1";
+export const MENU_FRAME =
+  "dohc-popover overflow-y-auto overscroll-contain rounded-lg border border-line bg-panel p-1";
 /**
  * One row. The list-row ladder: hover 7%, and 14% for the current or checked
  * row whatever has focus. A disabled row dims its icon and label, not the
@@ -262,6 +263,8 @@ export function Menu(props: {
   children?: ReactNode;
 }) {
   const { open, onOpenChange } = props;
+  const onOpenChangeRef = useRef(onOpenChange);
+  onOpenChangeRef.current = onOpenChange;
   const container = useRef<HTMLDivElement | null>(null);
   const trigger = useRef<HTMLButtonElement | null>(null);
   const list = useRef<HTMLDivElement | null>(null);
@@ -281,6 +284,7 @@ export function Menu(props: {
   const checkedRow = rows.findIndex((row) => row.checked === true);
   const openRow = useRef(0);
   openRow.current = Math.max(0, checkedRow);
+  const focusedOnOpen = useRef(false);
   const descriptionId = useId();
   // One leading column for every row when any row needs it, so labels line up.
   const lead = rows.some((row) => row.icon !== undefined || row.checked !== undefined);
@@ -297,14 +301,15 @@ export function Menu(props: {
     if (!open) return;
     if (fromKeyboard) setMarked(true);
     if (props.topLayer) list.current?.showPopover?.();
-    const box = at
-      ? { left: at.x, right: at.x, top: at.y, bottom: at.y }
-      : trigger.current?.getBoundingClientRect();
-    // A context menu places at its point; a trigger's list opens under or over its anchor when it has one.
-    const edge = at ? box : (props.anchor?.current?.getBoundingClientRect() ?? box);
-    const gap = at ? 0 : MENU_GAP_PX;
-    const height = list.current?.offsetHeight ?? 0;
-    if (box && edge) {
+    const computePlace = () => {
+      const box = at
+        ? { left: at.x, right: at.x, top: at.y, bottom: at.y }
+        : trigger.current?.getBoundingClientRect();
+      // A context menu places at its point; a trigger's list opens under or over its anchor when it has one.
+      const edge = at ? box : (props.anchor?.current?.getBoundingClientRect() ?? box);
+      const gap = at ? 0 : MENU_GAP_PX;
+      const height = list.current?.offsetHeight ?? 0;
+      if (!box || !edge) return;
       // A context menu's list starts at its point, as a trigger's does at "start".
       const left =
         at || props.align === "start"
@@ -317,21 +322,53 @@ export function Menu(props: {
           ? { left, bottom: window.innerHeight - edge.top + gap, maxHeight: above, above: true }
           : { left, top: edge.bottom + gap, maxHeight: below, above: false },
       );
-    }
-    rowElements.current[openRow.current]?.focus({ preventScroll: true });
+    };
+    computePlace();
+    const onResize = () => computePlace();
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Node && list.current?.contains(event.target)) return;
+      if (at) {
+        onOpenChangeRef.current(false);
+        return;
+      }
+      const anchorElement = props.anchor?.current ?? trigger.current;
+      const rect = anchorElement?.getBoundingClientRect();
+      if (
+        rect &&
+        (rect.bottom <= 0 ||
+          rect.top >= window.innerHeight ||
+          rect.right <= 0 ||
+          rect.left >= window.innerWidth)
+      ) {
+        onOpenChangeRef.current(false);
+        return;
+      }
+      computePlace();
+    };
+    window.addEventListener("resize", onResize);
+    document.addEventListener("scroll", onScroll, true);
     return () => {
+      window.removeEventListener("resize", onResize);
+      document.removeEventListener("scroll", onScroll, true);
+      focusedOnOpen.current = false;
       setPlace(null);
       setPointerMoved(false);
       setMarked(false);
     };
   }, [open, width, at?.x, at?.y, fromKeyboard, props.align, props.anchor, props.topLayer]);
 
-  // Placed, a list shorter than its rows shows its top, so it scrolls to the
-  // row focus opened on.
+  // Focus waits until placement clears `invisible`, because Chromium ignores
+  // `.focus()` on `visibility: hidden` elements. Once placed, a list shorter
+  // than its rows scrolls to the row focus opened on.
   useLayoutEffect(() => {
+    if (!open || !place) return;
     const row = rowElements.current[openRow.current];
-    if (place && list.current && row === document.activeElement) revealMenuRow(list.current, row);
-  }, [place]);
+    if (!focusedOnOpen.current) {
+      focusedOnOpen.current = true;
+      row?.focus({ preventScroll: true });
+    }
+    if (list.current && row === document.activeElement) revealMenuRow(list.current, row);
+  }, [open, place]);
 
   const close = () => {
     onOpenChange(false);
@@ -467,7 +504,7 @@ export function Menu(props: {
                 : { left: 0, top: 0 }),
             } as CSSProperties
           }
-          className={`${MENU_FRAME} fixed z-40 ${place ? MENU_ENTER : ""}`}
+          className={`${MENU_FRAME} fixed z-40 ${place ? MENU_ENTER : "invisible"}`}
         >
           {sections.map((section, sectionIndex) => {
             const sectionRows = section.entries.map(({ entry, entryIndex }) => {

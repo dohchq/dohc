@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -437,7 +437,7 @@ if (profileTool) {
     true,
   );
 } else {
-  if (mode !== "report" && mode !== "ask") {
+  if (mode !== "report" && mode !== "ask" && mode !== "react") {
     console.error(`unknown fake chat runner mode: ${mode ?? "missing"}`);
     process.exit(2);
   }
@@ -449,7 +449,7 @@ if (profileTool) {
   const taken = mode === "ask" ? /^- \[x\] (.+)$/mu.exec(prompt)?.[1] : undefined;
   const named = mode === "ask" ? /Call it (\S+)/u.exec(prompt)?.[1] : undefined;
   const replyArgs =
-    mode === "report"
+    mode === "report" || mode === "react"
       ? ["done: checked the exports"]
       : taken
         ? [`going with ${taken}`]
@@ -469,6 +469,20 @@ if (profileTool) {
   const fixtureDir = dirname(fileURLToPath(import.meta.url));
   const repoRoot = resolve(fixtureDir, "../../../..");
   const cliBin = resolve(repoRoot, "packages/cli/bin/dohc.js");
+  if (mode === "react") {
+    const cli = (args) =>
+      spawnSync(process.execPath, [cliBin, ...args], {
+        cwd: process.cwd(),
+        env: process.env,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "inherit"],
+      });
+    const shown = cli(["chat", "show", threadId, "--peek", "--json"]);
+    if (shown.status !== 0) process.exit(shown.status ?? 1);
+    const asked = JSON.parse(shown.stdout).messages[0].id;
+    const reacted = cli(["chat", "react", asked, "👍", "--as-agent"]);
+    if (reacted.status !== 0) process.exit(reacted.status ?? 1);
+  }
   const child = spawn(
     process.execPath,
     [cliBin, "chat", "reply", threadId, "--as-agent", ...replyArgs.slice(0, -1), "-"],

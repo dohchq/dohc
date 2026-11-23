@@ -7,6 +7,7 @@ import {
   RefreshCw,
   Search,
   SlidersHorizontal,
+  X,
 } from "lucide-react";
 import {
   useCallback,
@@ -433,8 +434,20 @@ function GraphSearch(props: {
             }
           }
         }}
-        className="h-7 w-full rounded-md border border-line bg-bg pl-7 pr-2 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+        className="h-7 w-full rounded-md border border-line bg-bg pl-7 pr-7 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
       />
+      {props.value.length > 0 ? (
+        <button
+          type="button"
+          aria-label="Clear search"
+          title="Clear search"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => props.onChange("")}
+          className="absolute right-1 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink"
+        >
+          <X size={12} aria-hidden />
+        </button>
+      ) : null}
       {shown ? (
         <ul
           id="graph-search-results"
@@ -626,7 +639,7 @@ export function GraphView(props: {
         setState((previous) => ({
           ...previous,
           status: "error",
-          error: ipcErrorMessage(error, "Graph failed to load"),
+          error: ipcErrorMessage(error, "dohc could not load the graph."),
         }));
         reportError.current?.("dohc could not load the graph.", error, retry);
       }
@@ -764,6 +777,7 @@ export function GraphView(props: {
     [settingsKey],
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   // The side panel is the open page's local graph; with no page open in the
@@ -856,6 +870,13 @@ export function GraphView(props: {
         {/* The side panel's own title names the Graph, so its row keeps the room for the counts. */}
         {variant === "page" ? (
           <GitFork size={13} aria-hidden className="shrink-0 text-subtle" />
+        ) : model.local ? (
+          <span
+            data-testid="graph-local-badge"
+            className="shrink-0 rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none text-muted"
+          >
+            Local
+          </span>
         ) : null}
         <span
           title={counts}
@@ -895,10 +916,10 @@ export function GraphView(props: {
         {gathering ? (
           <p
             role="status"
-            title="Gathering linked mentions"
+            title="Gathering linked mentions…"
             className="min-w-0 truncate text-[12px] text-subtle"
           >
-            Gathering linked mentions
+            Gathering linked mentions…
           </p>
         ) : null}
         <span className="ml-auto" />
@@ -932,6 +953,7 @@ export function GraphView(props: {
           <RefreshCw size={13} aria-hidden />
         </IconButton>
         <IconButton
+          ref={settingsTriggerRef}
           data-testid="graph-settings-toggle"
           aria-label="Graph settings"
           aria-pressed={settingsOpen}
@@ -944,7 +966,7 @@ export function GraphView(props: {
       </div>
 
       {empty ? (
-        <EmptyState icon={FileText} title="Add a Markdown file to start building your graph." />
+        <EmptyState icon={FileText} title="Add a page to start a graph." />
       ) : (
         <div
           className={
@@ -963,7 +985,7 @@ export function GraphView(props: {
             >
               {showLoading ? (
                 <p role="status" className="text-[12px] text-subtle">
-                  Gathering linked mentions
+                  Gathering linked mentions…
                 </p>
               ) : null}
             </div>
@@ -980,7 +1002,7 @@ export function GraphView(props: {
           deferredSearch.trim() &&
           variant === "page" ? (
             <p className="absolute inset-x-0 top-1/2 text-center text-sm text-muted">
-              {`No files match "${deferredSearch.trim()}". Try a shorter search.`}
+              {`No files match "${deferredSearch.trim()}".`}
             </p>
           ) : null}
           {settingsOpen ? (
@@ -988,6 +1010,7 @@ export function GraphView(props: {
               value={settings}
               counts={model.kindCounts}
               local={variant === "panel"}
+              triggerRef={settingsTriggerRef}
               onChange={setSettings}
               onClose={() => setSettingsOpen(false)}
             />

@@ -1,14 +1,17 @@
 import { createLiveMarkdownRegistrationValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import {
+  admitBodySequenceNotes,
   createLiveMarkdownJournalValidator,
   type LiveMarkdownJournalTiming,
 } from "@dohc/ydoc-projection/live-journal-validation";
+import { bodySequenceNotesAdmitted } from "./bodySequenceSetting.js";
 import type { LiveValidationWork } from "./liveValidation.js";
 import { liveJournalCheckpointDue } from "./storage/liveJournalCheckpoint.js";
 import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
 import { runLiveRestoreWork } from "./liveRestoreValidation.js";
 const send = process.send?.bind(process);
 if (!send) throw new Error("Live validation requires a child process.");
+admitBodySequenceNotes(bodySequenceNotesAdmitted());
 process.on("message", (message) => {
   const work = message as LiveValidationWork;
   if (work.kind === "restore") {

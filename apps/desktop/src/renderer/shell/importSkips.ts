@@ -19,33 +19,33 @@ const megabytes = (bytes: number) => `${bytes / (1024 * 1024)} MB`;
 export function skipSentence(reason: SkippedImportSource["reason"], name: string): string {
   switch (reason) {
     case "link":
-      return `${name} is a link. Drop the file it leads to.`;
+      return `${name} is a link. Drop the target file instead.`;
     case "not-a-file":
-      return `${name} isn't a file or a folder.`;
+      return `${name} is not a file or folder.`;
     case "unreadable":
-      return `${name} couldn't be read. Check that you can open it, then import it again.`;
+      return `dohc could not read ${name}. Check that you can open it, then import it again.`;
     case "workspace-data":
       return `${name} is dohc's own data for a workspace.`;
     case "system-file":
-      return `${name} is a file the system makes.`;
+      return `${name} is a system file.`;
     case "left-out":
-      return `${name} is left out of every workspace.`;
+      return `${name} is excluded from workspaces.`;
     case "dohc-name":
-      return `${name} is a name dohc keeps for itself. Rename it, then import it.`;
+      return `${name} uses a name reserved by dohc. Rename it, then import it.`;
     case "windows-name":
-      return `${name} has a name Windows can't use. Rename it, then import it.`;
+      return `${name} has a name Windows cannot use. Rename it, then import it.`;
     case "name":
-      return `${name} can't be saved under that name. Rename it, then import it.`;
+      return `dohc cannot save ${name} under that name. Rename it, then import it.`;
     case "too-long":
-      return `${name} has a name too long to save here. Shorten it, then import it.`;
+      return `${name} has a name that is too long to save here. Shorten it, then import it.`;
     case "taken":
       return `${name} and ${IMPORT_COLLISION_RENAMES} numbered copies are already here. Rename it, then import it.`;
     case "no-files":
       return `${name} has no files, and a shared view holds only files.`;
     case "too-large":
-      return `${name} is over the ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)} limit for files in a shared view. Make it smaller, then import it.`;
+      return `${name} exceeds the ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)} limit for files in a shared view. Make it smaller, then import it.`;
     case "too-large-text":
-      return `${name} is over the ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)} limit for text in a shared view. Make it smaller, then import it.`;
+      return `${name} exceeds the ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)} limit for text in a shared view. Make it smaller, then import it.`;
   }
 }
 
@@ -56,7 +56,8 @@ function shownPath(path: string): string {
     : `…${chars.slice(1 - SHOWN_PATH_MAX_CHARS).join("")}`;
 }
 
-const moreLine = (more: number) => `${more} more weren't imported.`;
+const moreLine = (more: number) =>
+  more === 1 ? "1 more item was not imported." : `${more} more items were not imported.`;
 
 // One line for each skipped source, as many as a notice holds, and a last
 // line counting the rest. Copy names every source the import listed.

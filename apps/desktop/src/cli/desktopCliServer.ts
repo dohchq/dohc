@@ -272,6 +272,8 @@ interface DesktopCliServerDependencies<State> {
       | "keepOutsideChange"
       | "restoreProtectedCopy"
       | "discardProtectedCopy"
+      | "planUndoAgentRun"
+      | "undoAgentRun"
       | "listRetainedCopies"
       | "deleteRetainedCopies"
       | "listVersions"
@@ -352,6 +354,8 @@ interface DesktopCliServerDependencies<State> {
   ): Promise<CollectionRecordEditContext>;
   /** This computer's person, read when a write is requested. */
   localPerson(): Promise<LocalPersonAuthor>;
+  /** Whether any desktop window currently shows this workspace. */
+  hasOpenWorkspaceWindow?(workspaceId: string): boolean;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
     work: (adapter: VersionedLiveAdapter) => Promise<Result>,
@@ -1235,6 +1239,18 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                 if (kept) notifyRenderer({ workspaceId: workspace.workspaceId });
                 return kept;
               },
+            },
+            agentRunUndo: async (agentRunId, planToken, origin) => {
+              const result = await capture.undoAgentRun(agentRunId, agentWriteAuthor(origin), {
+                expectedPlanToken: planToken,
+                hasOtherWindow: () =>
+                  dependencies.hasOpenWorkspaceWindow?.(workspace.workspaceId) ?? false,
+              });
+              if (result.restored.length > 0) {
+                activity.queueCloudSync(workspace.workspaceId);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+              }
+              return result;
             },
             heldNoteChange: (input) => capture.heldNoteChange(input),
             retainedCopies: {

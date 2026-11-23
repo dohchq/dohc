@@ -41,6 +41,7 @@ pub(crate) struct MigrationContext {
     pub protocol_version: i64,
     pub now_ms: i64,
     pub initial_root_token: Option<String>,
+    pub pages_checked_after_open: bool,
 }
 
 impl MigrationContext {
@@ -51,6 +52,7 @@ impl MigrationContext {
             protocol_version: ENGINE_STORAGE_PROTOCOL_VERSION,
             now_ms,
             initial_root_token: None,
+            pages_checked_after_open: false,
         }
     }
 }
@@ -3755,9 +3757,42 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               ON replication_log(workspace_id, origin_id, origin_seq) WHERE imported=0;",
         sets_user_version: None,
     },
-    // The log head a share view's first page named.
+    // The owner's own edits a live room took that no save holds yet, kept on
+    // the owner's disk until the accepted state holds each one.
     Migration {
         ordinal: 105,
+        id: "v2-owner-taken-rows",
+        sql: V2_OWNER_TAKEN_ROWS_DDL,
+        sets_user_version: None,
+    },
+    // A person and each of their agents keep their own reaction.
+    Migration {
+        ordinal: 106,
+        id: "v2-chat-reaction-agents",
+        sql: include_str!("chat_reaction_agents.sql"),
+        sets_user_version: None,
+    },
+    // A file of a version, by its path. Capture, live notes and sync look a
+    // file up by path, and without this index each lookup read every file of
+    // the version, so a large import slowed with the square of its size.
+    Migration {
+        ordinal: 107,
+        id: "v2-snapshots-by-path",
+        sql: "CREATE INDEX snapshots_by_path ON snapshots(workspace_id, version_id, path);",
+        sets_user_version: None,
+    },
+    // The DACL a Windows file had when it was staged, saved before dohc
+    // makes the file private so it gets that DACL back when it returns, or
+    // why dohc left the file's DACL as it is.
+    Migration {
+        ordinal: 108,
+        id: "v2-materialization-staged-dacls",
+        sql: V2_MATERIALIZATION_STAGED_DACLS_DDL,
+        sets_user_version: None,
+    },
+    // The log head a share view's first page named.
+    Migration {
+        ordinal: 109,
         id: "v2-share-view-fences",
         sql: include_str!("share_view_fences.sql"),
         sets_user_version: None,
@@ -4857,6 +4892,29 @@ const V2_OWNER_LIVE_STOP_COPY_DDL: &str = "\
 ALTER TABLE owner_live_stops ADD COLUMN copy_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT;
 ";
 
+const V2_MATERIALIZATION_STAGED_DACLS_DDL: &str = "CREATE TABLE materialization_staged_dacls (
+    file_identity TEXT PRIMARY KEY,
+    directory TEXT NOT NULL,
+    dacl TEXT,
+    left_reason TEXT CHECK (left_reason IN ('hard-links', 'other-owner')),
+    created_at_ms INTEGER NOT NULL,
+    CHECK ((dacl IS NULL) = (left_reason IS NOT NULL))
+) STRICT;
+";
+
+const V2_OWNER_TAKEN_ROWS_DDL: &str = "\
+CREATE TABLE ydoc_owner_taken_rows (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    restore_fence_generation INTEGER NOT NULL CHECK(restore_fence_generation >= 0),
+    room_position INTEGER NOT NULL CHECK(room_position BETWEEN 1 AND 9007199254740991),
+    update_blob_digest TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (workspace_id, main_version_id, object_id, lineage_claim_id, room_position)
+) STRICT;
+";
+
 const V2_OWNER_OUTBOX_DELIVERY_GROUP_DDL: &str = "\
 ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN delivery_group INTEGER;
 CREATE INDEX owner_ydoc_outbox_entries_group_receipt ON owner_ydoc_outbox_entries\
@@ -4979,8 +5037,8 @@ pub(crate) fn newer_build_refusal(
 /// What a store's ledger says about this build's migrations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerState {
-    /// Every migration completed from this build's definition and passed its
-    /// integrity check.
+    /// Every migration completed from this build's definition. One that
+    /// checked the store's pages before it committed passed that check.
     Current,
     /// Some migrations have not run, as in a store an older build last
     /// opened. Every recorded one matches this build's definition.
@@ -4989,9 +5047,11 @@ pub enum LedgerState {
 
 /// Classify the ledger of an existing store against `migrations`, reading
 /// only. A recorded migration must match its definition's ordinal and, once
-/// completed, its checksum and a passed integrity check; anything else is a
-/// ledger the runner would refuse or this build cannot judge. A migration
-/// this build does not define means a newer build ran it.
+/// completed, its checksum. Its integrity mark is 1 when it checked the
+/// store's pages before it committed, and empty when it left them to the
+/// check after the open. Anything else is a ledger the runner would refuse or
+/// this build cannot judge. A migration this build does not define means a
+/// newer build ran it.
 pub(crate) fn classify_ledger(
     conn: &Connection,
     migrations: &[Migration],
@@ -5027,7 +5087,8 @@ pub(crate) fn classify_ledger(
         };
         if i64::from(migration.ordinal) != *ordinal
             || (*complete
-                && (*checksum != migration_checksum(migration.sql) || *integrity_ok != Some(1)))
+                && (*checksum != migration_checksum(migration.sql)
+                    || integrity_ok.is_some_and(|ok| ok != 1)))
         {
             return Err(StorageError::MigrationFailed {
                 source: Some(
@@ -5211,17 +5272,19 @@ fn apply_transactional(
         }
     }
 
-    let integrity_ok = quick_check_ok(&tx)?;
-    if !integrity_ok {
-        // A migration that produces a structurally broken store never commits.
+    let integrity_ok = if ctx.pages_checked_after_open {
+        None
+    } else if quick_check_ok(&tx)? {
+        Some(1)
+    } else {
         return Err(StorageError::MigrationFailed { source: None });
-    }
+    };
 
     tx.execute(
         "INSERT INTO engine_migrations \
          (ordinal, id, checksum, engine_build, protocol_version, transactional, \
           started_at, completed_at, integrity_ok) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6, 1) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6, ?7) \
          ON CONFLICT(id) DO UPDATE SET \
            checksum = excluded.checksum, completed_at = excluded.completed_at, \
            integrity_ok = excluded.integrity_ok",
@@ -5232,6 +5295,7 @@ fn apply_transactional(
             ctx.engine_build,
             ctx.protocol_version,
             ctx.now_ms,
+            integrity_ok,
         ],
     )
     .map_err(StorageError::migration)?;
@@ -5322,6 +5386,44 @@ mod tests {
     #[ignore = "manual migration timing on one million persisted rows"]
     fn field_history_link_migration_million_rows() {
         field_history_link_upgrade(1_000_000);
+    }
+
+    #[test]
+    fn a_migration_that_runs_out_of_disk_answers_disk_full_and_runs_once_there_is_room() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1000);
+        let index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-replication-own-operations-index")
+            .expect("the index migration");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..index], &ctx, &NoFaults).unwrap();
+        let ledger = |conn: &Connection| {
+            conn.query_row(
+                "SELECT count(*) FROM engine_migrations WHERE completed_at IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        let before = ledger(&conn);
+        let pages: i64 = conn
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .unwrap();
+        conn.pragma_update(None, "max_page_count", pages).unwrap();
+
+        let refused = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap_err();
+        assert_eq!(refused.code(), "disk-full", "{refused:?}");
+        assert_eq!(ledger(&conn), before);
+
+        conn.pragma_update(None, "max_page_count", i64::from(u32::MAX))
+            .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied {
+                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - index).unwrap()
+            }
+        );
     }
 
     #[cfg(feature = "fault-injection")]
@@ -5741,6 +5843,22 @@ mod tests {
             (
                 "v2-replication-own-operations-index",
                 "ea76da045f98b5a34e4d623b3ad18b1fb96301a331292c67a0e11182c75bd383",
+            ),
+            (
+                "v2-owner-taken-rows",
+                "6b4424771e08b0385f39533f888ca71de00459be8518e3dbfb35f59d65051444",
+            ),
+            (
+                "v2-chat-reaction-agents",
+                "51fd2921c68be05dd17448035cfd2662502da8e5b2387a9be390147681f72e8e",
+            ),
+            (
+                "v2-snapshots-by-path",
+                "c27a48dbc124e26d73ead8e8758d08a9f4883ad0f17f66fcc7bc2155eab502bc",
+            ),
+            (
+                "v2-materialization-staged-dacls",
+                "0886c99a4cf9618f67b742ed28dc9b04d18fdc2a8367a833a307da28d91dfa15",
             ),
             (
                 "v2-share-view-fences",
@@ -7100,6 +7218,85 @@ mod tests {
     /// belong to the default agent after the agent-ids migration, and every
     /// request and place keeps its state. The agent chat is the one the
     /// default agent's wire id names, whatever its slug.
+    #[test]
+    fn a_file_of_a_version_is_found_by_its_path_without_reading_the_version() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let plan = |conn: &Connection| -> Vec<String> {
+            conn.prepare(
+                "EXPLAIN QUERY PLAN SELECT object_id,blob_sha256 FROM snapshots                  WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+            )
+            .unwrap()
+            .query_map(["ws", "v", "a.md"], |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        let plan = plan(&conn);
+        assert!(
+            plan.len() == 1
+                && plan[0].starts_with("SEARCH snapshots USING INDEX snapshots_by_path")
+                && plan[0].contains("path=?"),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn chat_reaction_agents_migration_keeps_reactions_and_gives_each_agent_its_own() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-chat-reaction-agents");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 106);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_reactions \
+                 (workspace_id, reaction_id, thread_id, message_id, emoji, author_id, author_kind, \
+                  author_display_name, state, at_ms, origin_id, origin_seq) \
+             VALUES ('ws', 'r1', 't1', 'm1', '👍', 'user-1', 'human', 'Sam', 'added', 5, 'o', 1);",
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let kept: (String, String, String, i64) = conn
+            .query_row(
+                "SELECT reaction_id, author_agent_id, state, at_ms FROM chat_reactions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, ("r1".into(), String::new(), "added".into(), 5));
+        for (reaction_id, kind, agent_id) in [
+            ("r2", "agent", ""),
+            ("r3", "agent", "codex"),
+            ("r4", "agent", "terminal"),
+        ] {
+            conn.execute(
+                "INSERT INTO chat_reactions \
+                     (workspace_id, reaction_id, thread_id, message_id, emoji, author_id, author_kind, \
+                      author_agent_id, author_display_name, state, at_ms, origin_id, origin_seq) \
+                 VALUES ('ws', ?1, 't1', 'm1', '👍', 'user-1', ?2, ?3, 'Agent', 'added', 6, 'o', 2)",
+                rusqlite::params![reaction_id, kind, agent_id],
+            )
+            .expect("each agent's reaction beside the person's");
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO chat_reactions \
+                     (workspace_id, reaction_id, thread_id, message_id, emoji, author_id, author_kind, \
+                      author_agent_id, author_display_name, state, at_ms, origin_id, origin_seq) \
+                 VALUES ('ws', 'r5', 't1', 'm2', '👍', 'user-1', 'human', 'codex', 'Sam', 'added', 6, 'o', 3)",
+                [],
+            )
+            .is_err(),
+            "only an agent's reaction names an agent"
+        );
+    }
+
     #[test]
     fn agent_ids_migration_gives_existing_agent_work_to_the_default_agent() {
         let dir = tempdir();

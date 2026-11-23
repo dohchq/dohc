@@ -1197,7 +1197,7 @@ it("hands Edit > Find to the editor that has focus, including its find bar", asy
   const find = (surface: HTMLElement) => findReplaceKey.getState(editorBehind(surface!).state);
 
   act(() => sendToFocusedEditor("editor-find"));
-  expect(screen.queryByRole("search", { name: "find and replace" })).toBeNull();
+  expect(screen.queryByRole("search", { name: "Find and replace" })).toBeNull();
 
   act(() => right.current?.focus("start"));
   await waitFor(() => expect(document.activeElement).toBe(rightSurface));

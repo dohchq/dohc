@@ -49,11 +49,16 @@ const { register } = await import(pathToFileURL(tsxApiPath).href);
 const unregisterTsx = register();
 const {
   AGENT_CHANNEL_WIRE_ID,
+  GENERAL_CHANNEL_ID,
   GENERAL_CHANNEL_WIRE_ID,
   classifyEngineFilePath,
   classifyEngineFilePathForRead,
 } = await import(
   pathToFileURL(join(repoRoot, "packages/security-contract/src/index.ts")).href
+);
+const { isFixedChatChannelId } = await import(
+  pathToFileURL(join(repoRoot, "packages/security-contract/src/chatWireIds.ts"))
+    .href
 );
 const {
   MAX_SHARE_VERSION_ID_CHARS,
@@ -184,6 +189,21 @@ const fixture = {
   wireIds: {
     agent: AGENT_CHANNEL_WIRE_ID,
     general: GENERAL_CHANNEL_WIRE_ID,
+  },
+  fixedChannelIds: {
+    general: GENERAL_CHANNEL_ID,
+    vectors: [
+      GENERAL_CHANNEL_ID,
+      "channel-agent-default",
+      "channel-agent-terminal",
+      `personal-dm:p-${"a".repeat(26)}`,
+      "channel-generals",
+      "channel-agent",
+      "channel-team",
+      "personal-dm",
+      "General",
+      "",
+    ].map((value) => ({ value, fixed: isFixedChatChannelId(value) })),
   },
   vectors,
   shareVersionIds: {

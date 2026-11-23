@@ -35,7 +35,11 @@ import {
   WorkspaceDaemonRequester,
 } from "@dohc/workspace-engine-client";
 
-import { openLiveDaemonWorkspace, type CloseStep } from "../../e2e/helpers/daemonSeed";
+import {
+  openLiveDaemonWorkspace,
+  type CloseStep,
+  type LiveDaemonWorkspace,
+} from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
@@ -102,14 +106,31 @@ afterAll(async () => {
 }, 30_000);
 
 export interface LiveDaemonCapture {
+  workspace: LiveDaemonWorkspace["workspace"];
   capture: WorkspaceEngineCapture;
   chats: DesktopLinkedChatStore;
   relay: EngineRelayWorkspaceClient;
   refusalNotices(): Promise<unknown>;
   queryCollectionRecords: VersionedLiveAdapter["queryCollectionRecords"];
+  // Rescan the folder and wait until capture has taken in what it found.
+  reconcileCapture(): Promise<void>;
   // What the desktop does first at quit.
   beginShutdown(): void;
   close(step?: CloseStep): Promise<void>;
+}
+
+function reconcileDaemonCapture(
+  workspace: LiveDaemonWorkspace,
+  workspaceId: string,
+): Promise<void> {
+  return workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) => {
+    const adapter = new VersionedLiveAdapter(client, handle, { workspaceId });
+    let capture = await adapter.reconcileCapture();
+    for (let attempt = 0; !capture.settled && attempt < 20; attempt++) {
+      capture = await adapter.flushCapture();
+    }
+    expect(capture.settled, "capture settles after a rescan").toBe(true);
+  });
 }
 
 export function pullCaptured(relay: EngineRelayWorkspaceClient, capture: WorkspaceEngineCapture) {
@@ -146,6 +167,7 @@ export async function openLiveDaemonCapture(input: {
     relay: input.relay,
   });
   return {
+    workspace: workspace.workspace,
     capture,
     chats: workspace.chats,
     relay,
@@ -155,6 +177,7 @@ export async function openLiveDaemonCapture(input: {
           workspaceId: input.workspaceId,
         }).queryCollectionRecords(query),
       ),
+    reconcileCapture: () => reconcileDaemonCapture(workspace, input.workspaceId),
     refusalNotices: () =>
       workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
         new WorkspaceDaemonRequester(client).request(
@@ -224,6 +247,7 @@ export async function openJoinedDaemonCapture(input: {
     rustEngineSessions: workspace.sessions,
   });
   return {
+    workspace: workspace.workspace,
     capture,
     chats: workspace.chats,
     relay,
@@ -233,6 +257,7 @@ export async function openJoinedDaemonCapture(input: {
           workspaceId: input.workspaceId,
         }).queryCollectionRecords(query),
       ),
+    reconcileCapture: () => reconcileDaemonCapture(workspace, input.workspaceId),
     refusalNotices: () =>
       workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
         new WorkspaceDaemonRequester(client).request(
@@ -485,7 +510,7 @@ const renameRepro = {
 } as const;
 const reproErrorText = (error: unknown) =>
   error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-const ownedRenameRefusal = `dohc can't move "${renameRepro.oldPath}" while it has live editing on
+const ownedRenameRefusal = `dohc cannot move "${renameRepro.oldPath}" while it has live editing on
 In Live documents, stop live editing for this page, then move it again.`;
 
 async function runRenameRepro(
@@ -666,6 +691,16 @@ async function runRenameRepro(
           signal: AbortSignal.timeout(60_000),
           assertCurrent() {},
           retire,
+          release: (binding, acceptedCursor, signal) =>
+            o.opened
+              .nativeClient()
+              .ownerYDocRelease(
+                { id: 0, workspace, deadlineMs: 30_000 },
+                binding,
+                "local-person",
+                { acceptedCursor },
+                signal,
+              ),
         }),
       )
       .then(() => "ok", reproErrorText);
@@ -956,6 +991,7 @@ async function runRenameRepro(
       },
       relayShareErrorCopy: unexpected,
       relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+      noteBytes: async () => null,
       listOwnerLiveStops: () =>
         source.sessions.run(source.workspace, async ({ workspace }) =>
           source
@@ -985,6 +1021,7 @@ async function runRenameRepro(
             : client.ownerYDocRelease(
                 request,
                 binding as import("@dohc/live-session-contract").LiveObjectBinding,
+                "local-person",
                 { acceptedCursor: acceptedCursor! },
               );
         }),
@@ -1009,8 +1046,10 @@ async function runRenameRepro(
       retryOwnerLiveQuarantine: unexpected,
       retryOwnerLiveRelease: unexpected,
       saveOwnerLiveRecoveryCopy: unexpected,
+      listOwnerLiveRecoveryPackages: unexpected,
       sendRendererActivity: () => {},
       sharesChanged: unexpected,
+      receivedSharesChanged: unexpected,
       reconcileReceivedShares: unexpected,
     });
     registerOperations(
@@ -1591,7 +1630,7 @@ type DeleteReproCase =
   | "file-manager-capture-stop";
 const ownedDeleteRefusal = (
   action: "delete" | "restore",
-) => `LivePageOwnedError: dohc can't ${action} "${renameRepro.oldPath}" while it has live editing on
+) => `LivePageOwnedError: dohc cannot ${action} "${renameRepro.oldPath}" while it has live editing on
 In Live documents, stop live editing for this page, then ${action} it again.`;
 
 async function runDeleteRepro(
@@ -1800,6 +1839,16 @@ async function runDeleteRepro(
           signal: AbortSignal.timeout(60_000),
           assertCurrent() {},
           retire,
+          release: (binding, acceptedCursor, signal) =>
+            opened
+              .nativeClient()
+              .ownerYDocRelease(
+                { id: 0, workspace, deadlineMs: 30_000 },
+                binding,
+                "local-person",
+                { acceptedCursor },
+                signal,
+              ),
         }),
       )
       .then(() => "ok", reproErrorText);
@@ -2067,6 +2116,7 @@ async function runDeleteRepro(
       },
       relayShareErrorCopy: unexpected,
       relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+      noteBytes: async () => null,
       listOwnerLiveStops: () =>
         opened.sessions.run(opened.workspace, async ({ workspace }) =>
           opened
@@ -2096,6 +2146,7 @@ async function runDeleteRepro(
             : client.ownerYDocRelease(
                 request,
                 binding as import("@dohc/live-session-contract").LiveObjectBinding,
+                "local-person",
                 { acceptedCursor: acceptedCursor! },
               );
         }),
@@ -2120,8 +2171,10 @@ async function runDeleteRepro(
       retryOwnerLiveQuarantine: unexpected,
       retryOwnerLiveRelease: unexpected,
       saveOwnerLiveRecoveryCopy: unexpected,
+      listOwnerLiveRecoveryPackages: unexpected,
       sendRendererActivity: () => {},
       sharesChanged: unexpected,
+      receivedSharesChanged: unexpected,
       reconcileReceivedShares: unexpected,
     });
     registerOperations(

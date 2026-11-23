@@ -9,6 +9,7 @@ import {
   NOTICE_FROM_PREFIX,
   NOTICE_ID_MAX_CHARS,
   NOTICE_KINDS,
+  NOTICE_MARK_KEY_MAX_CHARS,
   NOTICE_MARKS_MAX_BODY_BYTES,
   NOTICE_MARKS_PER_REQUEST,
   NOTICE_PAGE_MAX,
@@ -216,7 +217,7 @@ export function createNoticeRoutes(
 
   /**
    * `POST /sync/notices/marks?scope=phone`: the owner's phone marks its list
-   * with exactly `{ marks: [{ noticeId, mark }] }`, any of the four marks. It
+   * with exactly `{ marks: [{ noticeId, mark, key? }] }`, any of the four marks. It
    * names no computer, so it never consumes an automation wake. The sign-in is
    * checked again after the body arrives, right before anything changes.
    */
@@ -239,12 +240,19 @@ export function createNoticeRoutes(
     const current = await session();
     if (current.sessionId !== caller.sessionId || current.userId !== caller.userId)
       throw notFound();
-    const dismissed = storage.markNotices({
+    const { dismissed, repeated } = storage.markNotices({
       recipientUserId: caller.userId,
       marks,
       nowMs: nowMs(),
     });
-    return jsonResponse({ ok: true, dismissed } satisfies NoticeMarksResponse, 200);
+    return jsonResponse(
+      {
+        ok: true,
+        dismissed,
+        ...(repeated.length > 0 ? { repeated } : {}),
+      } satisfies NoticeMarksResponse,
+      200,
+    );
   }
 
   return async function respondToNotices(
@@ -308,7 +316,7 @@ export function createNoticeRoutes(
         throw badRequest("the body takes only marks and installId");
       if (body.installId !== undefined && !isNoticeLine(body.installId, MAX_INSTALL_ID_CHARS))
         throw badRequest("installId is invalid");
-      const dismissed = storage.markNotices({
+      const { dismissed } = storage.markNotices({
         recipientUserId: userId,
         marks: parseMarks(body.marks, COMPUTER_MARKS),
         ...(typeof body.installId === "string" ? { installId: body.installId } : {}),
@@ -393,7 +401,7 @@ interface MarkSender {
 }
 const PHONE_MARKS: MarkSender = {
   marks: ["read", "dismissed", "unread", "restore"],
-  fields: ["noticeId", "mark"],
+  fields: ["noticeId", "mark", "key"],
 };
 const COMPUTER_MARKS: MarkSender = {
   marks: ["read", "dismissed"],
@@ -427,7 +435,7 @@ async function readMarksBody(request: Request): Promise<Record<string, unknown>>
 function parseMarks(
   value: unknown,
   sender: MarkSender,
-): { noticeId: string; mark: NoticeMark; withdraw?: true }[] {
+): { noticeId: string; mark: NoticeMark; withdraw?: true; key?: string }[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > NOTICE_MARKS_PER_REQUEST) {
     throw badRequest(`marks must list 1 to ${NOTICE_MARKS_PER_REQUEST} notices`);
   }
@@ -443,10 +451,13 @@ function parseMarks(
     // A withdrawal dismisses the copies the sender posted to others; nothing else reaches another list.
     if (mark.withdraw !== undefined && (mark.withdraw !== true || kind !== "dismissed"))
       throw badRequest("withdraw requires a dismissal");
+    if (mark.key !== undefined && !isNoticeLine(mark.key, NOTICE_MARK_KEY_MAX_CHARS))
+      throw badRequest(`key must be 1 to ${NOTICE_MARK_KEY_MAX_CHARS} characters`);
     return {
       noticeId: mark.noticeId,
       mark: kind,
       ...(mark.withdraw === true ? { withdraw: true as const } : {}),
+      ...(typeof mark.key === "string" ? { key: mark.key } : {}),
     };
   });
 }

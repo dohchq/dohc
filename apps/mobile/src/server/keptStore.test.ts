@@ -81,7 +81,9 @@ describe("kept.db", () => {
       process.kill(process.pid, "SIGKILL");`,
       disk.path,
     ]);
-    expect(killed.signal).toBe("SIGKILL");
+    // Windows has no signals: a process that kills itself there ends with exit code 1.
+    if (process.platform === "win32") expect(killed.status).toBe(1);
+    else expect(killed.signal).toBe("SIGKILL");
     expect(statSync(`${disk.path}-wal`).size).toBeGreaterThan(4000);
     const store = disk.launch();
     await expect(store.read("SELECT sequence FROM outbox", [])).resolves.toEqual([{ sequence: 1 }]);

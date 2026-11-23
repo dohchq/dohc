@@ -227,6 +227,7 @@ describe("workspace wire schemas", () => {
   it("preserves arbitrary write and delete objects", () => {
     const decoded = decodeWorkspaceResult(WORKSPACE_METHOD.conflictsResolve, {
       conflict,
+      placed: true,
       write: { nested: { values: [1, true, null] } },
       delete: { path: "old.md", reason: "replaced" },
     });
@@ -1101,6 +1102,7 @@ it("decodes whether a recovery keeps typing for a deleted file", () => {
       phase: "ready",
       noAtomicPlacement: false,
       recoveryUnavailable: false,
+      secretKeyChecked: true,
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [record],
@@ -1126,6 +1128,7 @@ it("decodes outside writes waiting for an open document", () => {
     phase: "ready",
     noAtomicPlacement: false,
     recoveryUnavailable: false,
+    secretKeyChecked: true,
     keptFiles: [],
     captureRecoveries: [],
     mergeRemovals: [],
@@ -1150,6 +1153,7 @@ it("decodes why protected files wait on the secret key", () => {
     phase: "ready",
     noAtomicPlacement: false,
     recoveryUnavailable: false,
+    secretKeyChecked: true,
     keptFiles: [],
     captureRecoveries: [],
     mergeRemovals: [],
@@ -1163,6 +1167,12 @@ it("decodes why protected files wait on the secret key", () => {
   for (const secretKeyUnavailable of [null, "", 1]) {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, secretKeyUnavailable }),
+    ).toThrow(ProtocolShapeError);
+  }
+  const { secretKeyChecked: _, ...unsaid } = status;
+  for (const secretKeyChecked of [undefined, null, "true"]) {
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...unsaid, secretKeyChecked }),
     ).toThrow(ProtocolShapeError);
   }
 });
@@ -1205,6 +1215,7 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
       phase: "ready",
       noAtomicPlacement: false,
       recoveryUnavailable: false,
+      secretKeyChecked: true,
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [],

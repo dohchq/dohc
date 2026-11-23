@@ -11,7 +11,7 @@ test("profiles eight Quick Open keystrokes and Graph construction", async () => 
     await page.keyboard.press("ControlOrMeta+p");
     const palette = page.getByTestId("quick-open");
     await expect(palette).toBeVisible();
-    const input = palette.getByRole("textbox", { name: "File" });
+    const input = palette.getByRole("combobox", { name: "File" });
     const query = "flatnote";
     const queryTimings = [];
     let typed = "";

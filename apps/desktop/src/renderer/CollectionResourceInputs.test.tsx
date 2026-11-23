@@ -89,7 +89,7 @@ describe("Collection file controls", () => {
     fireEvent.change(screen.getByLabelText("Receipt"), {
       target: { files: [new File([], "empty.txt")] },
     });
-    expect(screen.getByRole("alert").textContent).toContain("nonempty");
+    expect(screen.getByRole("alert").textContent).toContain("non-empty");
     expect(upload).not.toHaveBeenCalled();
   });
   it("aborts an upload after unmount and cannot apply its returned ID", async () => {
@@ -263,9 +263,7 @@ it("requires a visible delete confirmation without promising record restoration"
       onCancel={onCancel}
     />,
   );
-  expect(screen.getByRole("dialog").textContent).toContain(
-    "You cannot undo this deletion in dohc.",
-  );
+  expect(screen.getByRole("dialog").textContent).toContain("This cannot be undone.");
   expect(onConfirm).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "Delete record" }));
   expect(onConfirm).toHaveBeenCalledOnce();

@@ -73,7 +73,7 @@ it.each(
     render(palette({ onClose: close }));
     const target =
       focus === "input"
-        ? screen.getByRole("textbox", { name: "File" })
+        ? screen.getByRole("combobox", { name: "File" })
         : focus === "result row"
           ? screen.getByRole("button", { name: /notes.md/ })
           : screen.getByTestId("quick-open").closest<HTMLElement>('[data-focus-surface="dialog"]')!;
@@ -122,7 +122,15 @@ it.each([
   { files: [], query: "", text: "No files yet." },
 ])("says what is missing when no file matches $query", ({ files: listed, query, text }) => {
   render(palette({ files: listed }));
-  fireEvent.change(screen.getByRole("textbox", { name: "File" }), { target: { value: query } });
+  fireEvent.change(screen.getByRole("combobox", { name: "File" }), { target: { value: query } });
   const list = screen.getByRole("listbox");
   expect(list.textContent).toBe(text);
+});
+
+it("exposes full relative paths on options and keeps the File label unique to the input", () => {
+  render(palette());
+  expect(screen.getByLabelText("File", { exact: false })).toBe(
+    screen.getByRole("combobox", { name: "File" }),
+  );
+  expect(screen.getByRole("option", { name: "docs/report.md" })).toBeTruthy();
 });

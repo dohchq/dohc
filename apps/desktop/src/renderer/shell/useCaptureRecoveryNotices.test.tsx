@@ -364,7 +364,7 @@ describe("useCaptureRecoveryNotices", () => {
     expect(row.title).toBe("Text kept in History");
     expect(row.title).toBe(CAPTURE_RECOVERY_TITLE);
     expect(row.message).toBe(
-      'The file "notes/rich.md" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.',
+      'The file "notes/rich.md" changed outside dohc. Your text is saved in History. Open the recovery change and choose Restore.',
     );
     expect(row.message).toBe(captureRecoveryMessage("notes/rich.md", false));
     expect(row.identity).toBe("capture-recovery:moment-capture-recovery-a");
@@ -422,7 +422,7 @@ describe("useCaptureRecoveryNotices", () => {
     await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(1));
     const failure = h.result.current.shellErrors[0]!;
     expect(failure.message).toBe(
-      'dohc could not remove the notice about "notes/rich.md". The workspace engine is not running.',
+      'dohc could not dismiss the Notice for "notes/rich.md". The workspace engine is not running.',
     );
     await act(() => h.result.current.notices.refresh());
     expect(recoveryRows(h)).toEqual([]);
@@ -478,7 +478,7 @@ describe("useCaptureRecoveryNotices", () => {
       (row) => row.identity === "capture-recovery:moment-capture-recovery-a",
     )!;
     expect(shared.message).toBe(
-      'The file "notes/rich.md" changed outside dohc. Your text is in History. The file is shared live, so replace its text with your version from the recovery change.',
+      'The file "notes/rich.md" changed outside dohc. Your text is saved in History. Because this file is shared live, copy your text from the recovery change into the file.',
     );
     expect(shared.message).not.toContain("Restore shared file");
     expect(shared.title).toBe(CAPTURE_RECOVERY_TITLE);
@@ -567,6 +567,6 @@ describe("useCaptureRecoveryNotices", () => {
 
 it("names deletion and the recovery Restore that recreates the file", () => {
   expect(captureRecoveryMessage("notes/deleted.md", false, true)).toBe(
-    'The file "notes/deleted.md" was deleted. Your text is in History. Open the recovery change and choose Restore to recreate the file.',
+    'The file "notes/deleted.md" was deleted. Your text is saved in History. Open the recovery change and choose Restore to recreate it.',
   );
 });

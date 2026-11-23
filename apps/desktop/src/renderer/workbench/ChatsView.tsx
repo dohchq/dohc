@@ -15,6 +15,7 @@ import {
   HOME_TOOLBAR,
   PostCard,
   SaveAsFileActions,
+  stripPostMarkdown,
   type PostData,
 } from "./PostCard";
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
@@ -77,6 +78,7 @@ import {
   Settings,
   Sparkles,
   Square,
+  TriangleAlert,
   UserPlus,
   Users,
 } from "lucide-react";
@@ -132,9 +134,12 @@ import { HideAgentChatDialog, RemoveAgentDialog } from "../settings/agentDialogs
 import { hideAgentChat } from "../settings/ArchivedAgents";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import {
+  chatMentions,
   extractChatFileReferences,
+  scanChatLinks,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
+import { stripMarkdown } from "../markdown/stripMarkdown";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
@@ -314,6 +319,18 @@ function AgentMark(props: { presentation: ActorPresentation; name: string }) {
   );
 }
 
+function stripFeedMarkdown(body: string, candidates: readonly MentionCandidate[]): string {
+  if (!body) return "";
+  const { files, works } = scanChatLinks(body);
+  const mentions = chatMentions(body, candidates, files);
+  const atoms = [
+    ...files.map((token) => ({ start: token.start, end: token.end })),
+    ...works.map((token) => ({ start: token.start, end: token.end })),
+    ...mentions.map((token) => ({ start: token.start, end: token.end })),
+  ].sort((a, b) => a.start - b.start);
+  return stripMarkdown(body, atoms).text;
+}
+
 // The strip names the program a runner command starts, not its whole
 // command line: a quoted path to a script is a path, and the strip is a
 // sentence. The full command sits in the title.
@@ -477,7 +494,7 @@ export function ChatsView(props: {
   const createsGroups = !inJoinedWorkspace || props.joinedWorkspace?.createsGroups === true;
   const lockedLine =
     postingClosed ??
-    (inJoinedWorkspace ? "Members post in Groups only." : "This group is read-only for you.");
+    (inJoinedWorkspace ? "Members post in Groups only." : "This Group is read-only for you.");
   const collaboration = props.collaboration ?? null;
   // A stable fallback: a fresh [] per render would defeat the message-list
   // memo boundaries below for every roster-less host.
@@ -1019,7 +1036,7 @@ export function ChatsView(props: {
         if (!claimLanes(["overview"], ticket)) return;
         setOverview({
           status: "unavailable",
-          message: ipcErrorMessage(error, "Could not load Chats."),
+          message: ipcErrorMessage(error, "dohc could not load Chats."),
         });
       }
     },
@@ -1341,7 +1358,7 @@ export function ChatsView(props: {
           const refusedPage =
             existing && isLivePageOwnedRefusal(error) ? existing.destinationPath : undefined;
           props.onError(
-            ipcErrorMessage(error, "Could not update this bookmark."),
+            ipcErrorMessage(error, "dohc could not update this bookmark."),
             error,
             refusedPage !== undefined ? () => void toggleBookmark(input) : undefined,
             refusedPage,
@@ -1467,7 +1484,7 @@ export function ChatsView(props: {
         applyChannelSnapshot(snapshot);
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not load this group."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not load this Group."), error);
       } finally {
         if (token === liveToken.current && refreshSeq === channelRefreshSeq.current) {
           setThreadsLoading(false);
@@ -1609,7 +1626,7 @@ export function ChatsView(props: {
         applyThreadSnapshot(thread.id, snapshot, !channelIsLocked(channel));
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not load this chat."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not load this chat."), error);
       } finally {
         if (token === liveToken.current && refreshSeq === threadRefreshSeq.current) {
           setMessagesLoading(false);
@@ -1865,7 +1882,7 @@ export function ChatsView(props: {
       setChannelThreads((current) => [result.thread, ...current]);
     } catch (error) {
       if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not start that chat."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not start that chat."), error);
     } finally {
       startingThreadRef.current = false;
       setStartingThread(false);
@@ -2009,7 +2026,7 @@ export function ChatsView(props: {
       }
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
-      props.onError(ipcErrorMessage(error, "Could not send that message."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not send that message."), error);
     } finally {
       const ownsContext = inFlightSendByContext.current.get(sendContextKey) === request;
       if (ownsContext) {
@@ -2791,7 +2808,7 @@ export function ChatsView(props: {
         return true;
       } catch (error) {
         if (token !== liveToken.current) return false;
-        props.onError(ipcErrorMessage(error, "Could not share that group."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not share that Group."), error);
         return false;
       }
     },
@@ -2810,7 +2827,7 @@ export function ChatsView(props: {
           undo: result.undo,
           message: result.undo
             ? `Removed ${member} from ${group}.`
-            : `${member} no longer has access to ${group}.`,
+            : `Access to ${group} had already ended for ${member}.`,
           restoredMessage: `Restored ${member} to ${group}.`,
           restored: () => {
             if (token === liveToken.current) void refreshShares();
@@ -2848,7 +2865,7 @@ export function ChatsView(props: {
         await refreshShares();
       } catch (error) {
         if (token !== liveToken.current) return;
-        const message = "Could not remove that person.";
+        const message = "dohc could not remove that person.";
         if (props.shareRemovals) {
           props.shareRemovals.failed({
             workspaceId,
@@ -2874,10 +2891,10 @@ export function ChatsView(props: {
   const endedGroupNotice = useCallback(
     (joined: JoinedSharedChannelRow) =>
       ownerRemoved(joined.shareId)
-        ? "The owner removed your access to this group. You can still read it."
+        ? "The owner removed your access to this Group. You can still read it."
         : channelShares?.received.some((row) => row.shareId === joined.shareId)
-          ? "You left this group. You can still read it."
-          : "This group is no longer shared with you. You can still read it.",
+          ? "You left this Group. You can still read it."
+          : "This Group is no longer shared with you. You can still read it.",
     [channelShares, ownerRemoved],
   );
 
@@ -2892,7 +2909,7 @@ export function ChatsView(props: {
         await refreshOverview();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not join that group."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not join that Group."), error);
       } finally {
         // Unconditional reset (the sendingRef/startingThreadRef precedent):
         // refreshOverview bumps liveToken itself, so a token-equality check
@@ -2918,7 +2935,7 @@ export function ChatsView(props: {
         await refreshOverview();
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not leave that group."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not leave that Group."), error);
       }
     },
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
@@ -3244,13 +3261,13 @@ export function ChatsView(props: {
       } catch (error) {
         // The open dialog says why and keeps the draft. Notices hears of it
         // only if the person closes the dialog without a retry that worked.
-        const message = ipcErrorMessage(error, `dohc couldn't create ${input.name}.`);
+        const message = ipcErrorMessage(error, `dohc could not create ${input.name}.`);
         if (token !== liveToken.current) return message;
         let notice: ChatErrorNotice | undefined;
         if (isGroupNameTaken(error)) {
           const slug = nameSlug(input.name);
           notice = {
-            title: `dohc couldn't create #${input.name}`,
+            title: `dohc could not create #${input.name}`,
             identity: `group-name-taken:${slug}`,
           };
           const listing = await bridge()
@@ -3466,7 +3483,7 @@ export function ChatsView(props: {
       if (token !== liveToken.current || refreshSeq !== threadRefreshSeq.current) {
         return;
       }
-      props.onError(ipcErrorMessage(error, "Could not stop this agent run."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not stop this agent run."), error);
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
@@ -3624,21 +3641,14 @@ export function ChatsView(props: {
   }
 
   if (overview.status === "loading") {
-    return <SkeletonRows inSlot layout="panel" label="Loading Chats..." />;
+    return <SkeletonRows inSlot layout="panel" label="Loading Chats…" />;
   }
 
   if (overview.status === "unavailable") {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <span className="text-xs text-danger">{overview.message}</span>
-        <button
-          type="button"
-          onClick={() => void refreshOverview()}
-          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
-        >
-          Try again
-        </button>
-      </div>
+      <EmptyState icon={TriangleAlert} tone="danger" title={overview.message}>
+        <SecondaryButton onClick={() => void refreshOverview()}>Try again</SecondaryButton>
+      </EmptyState>
     );
   }
 
@@ -3655,7 +3665,7 @@ export function ChatsView(props: {
           testId="chats-feed"
           onBack={variant === "panel" ? goBack : undefined}
           icon={<House size={12} aria-hidden className="shrink-0 text-subtle" />}
-          description="Posts and comments from your groups and files, newest first"
+          description="Posts and comments from your Groups and files, newest first"
         />
         <PostFeedList
           key={`${workspaceId}:home`}
@@ -3665,7 +3675,7 @@ export function ChatsView(props: {
           empty={
             personalFeedLoading ? undefined : (
               <div className="flex flex-1 py-12">
-                <EmptyState picture={EMPTY_ART.posts} title="No posts in your groups yet.">
+                <EmptyState picture={EMPTY_ART.posts} title="No posts in your Groups yet.">
                   <SecondaryButton
                     data-testid="chats-feed-empty-groups"
                     size="compact"
@@ -3681,14 +3691,13 @@ export function ChatsView(props: {
             <>
               {personalFeedLoading ? <SkeletonRows label="Loading…" className="py-5" /> : null}
               {personalFeedNextCursor && !personalFeedLoading ? (
-                <button
-                  type="button"
+                <SecondaryButton
                   data-testid="chats-feed-more"
                   onClick={() => void loadPersonalFeed(personalFeedNextCursor)}
-                  className="mt-4 h-8 w-full rounded-md border border-line text-[11px] text-muted hover:bg-hover hover:text-ink"
+                  className="mt-4 w-full justify-center"
                 >
                   Load older
-                </button>
+                </SecondaryButton>
               ) : null}
             </>
           }
@@ -3768,10 +3777,12 @@ export function ChatsView(props: {
                 focusMessageId: item.message.id,
               });
             };
+            const strippedBody = stripFeedMarkdown(item.message.body, mentionCandidates);
+            const strippedTitle = stripPostMarkdown(item.thread.title) || item.thread.title;
             const body = (
               <span className="mt-0.5 block whitespace-pre-wrap break-words text-[14px] leading-[21px] text-ink">
                 <MentionText
-                  body={item.message.body}
+                  body={strippedBody}
                   candidates={mentionCandidates}
                   attachments={item.message.attachments}
                   onOpenPath={hasFileMentions ? props.onOpenPath : undefined}
@@ -3817,11 +3828,11 @@ export function ChatsView(props: {
                       {item.message.authorKind === "link" ? (
                         <LinkHolderMark testId="chats-feed-link-holder" />
                       ) : null}
-                      <span className="truncate text-[11px] tabular-nums text-subtle">{where}</span>
+                      <span className="truncate text-[12px] tabular-nums text-subtle">{where}</span>
                       <time
                         dateTime={time.iso}
                         title={time.label}
-                        className="shrink-0 text-[11px] tabular-nums text-subtle"
+                        className="shrink-0 text-[12px] tabular-nums text-subtle"
                       >
                         {formatShortTime(item.message.createdAtMs)}
                       </time>
@@ -3830,7 +3841,7 @@ export function ChatsView(props: {
                       <span className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
                         <MessageSquare size={12} aria-hidden className="shrink-0" />
                         <span className="truncate">
-                          <WorkLinkText text={item.thread.title} interactive={false} />
+                          <WorkLinkText text={strippedTitle} interactive={false} />
                         </span>
                       </span>
                     ) : null}
@@ -3845,7 +3856,9 @@ export function ChatsView(props: {
                         {[...byEmoji.entries()].map(([emoji, count]) => {
                           const mine = itemReactions.some(
                             (reaction) =>
-                              reaction.emoji === emoji && reaction.authorId === itemViewer,
+                              reaction.emoji === emoji &&
+                              reaction.authorKind === "human" &&
+                              reaction.authorId === itemViewer,
                           );
                           return (
                             <FeedReactionPill
@@ -3982,18 +3995,18 @@ export function ChatsView(props: {
                 testId="chats-thread-bookmark"
               />
               {!threadLocked && liveRunId !== null ? (
-                <button
-                  type="button"
+                <SecondaryButton
+                  size="row"
                   data-testid="chats-stop-agent-run"
                   aria-label="Stop agent run"
                   title="Stop agent run"
                   disabled={dispatchActionBusy}
                   onClick={() => void stopThreadRun()}
-                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
+                  className="shrink-0"
                 >
-                  <Square size={8} fill="currentColor" aria-hidden />
+                  <Square size={12} strokeWidth={2} aria-hidden />
                   Stop
-                </button>
+                </SecondaryButton>
               ) : null}
             </span>
           }
@@ -4014,7 +4027,7 @@ export function ChatsView(props: {
         {computerPausedStrip ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-muted"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[12px] text-muted"
           >
             <span>Agent replies paused on this computer</span>
             {!threadLocked ? (
@@ -4039,13 +4052,13 @@ export function ChatsView(props: {
                 Resume
               </button>
             ) : (
-              <span className="text-muted">read-only</span>
+              <span className="text-muted">Read-only</span>
             )}
           </div>
         ) : dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-muted"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[12px] text-muted"
           >
             <span>Agent replies paused</span>
             {!threadLocked ? (
@@ -4059,16 +4072,16 @@ export function ChatsView(props: {
                 Resume
               </button>
             ) : (
-              <span className="text-muted">read-only</span>
+              <span className="text-muted">Read-only</span>
             )}
           </div>
         ) : dispatchState && (liveRunId !== null || dispatchState.pendingCount > 0) ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-muted"
+            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[12px] tabular-nums text-muted"
           >
             {liveRunId !== null
-              ? `agent working${
+              ? `Agent working${
                   dispatchState.pendingCount > 0 ? ` · ${dispatchState.pendingCount} queued` : ""
                 }`
               : `${dispatchState.pendingCount} queued`}
@@ -4235,10 +4248,19 @@ export function ChatsView(props: {
       !agentDm || !props.agentSetup
         ? null
         : agentRemoved(nav.channel)
-          ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
+          ? {
+              words: channelAgent?.label
+                ? `The agent ${channelAgent.label} was removed.`
+                : "This agent was removed.",
+              action: "Agents",
+            }
           : (channelSettingsAgent?.launch || channelSettingsAgent?.thread) &&
               !channelSettingsAgent.enabled
-            ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
+            ? {
+                words: `The agent ${channelSettingsAgent.name} is off.`,
+                action: "Turn on",
+                off: true,
+              }
             : null;
     const channelGrants = nav.channel.wireId ? (grantedByWire.get(nav.channel.wireId) ?? []) : [];
     // Sharing an owned channel needs the sharing surface up; a joined channel
@@ -4270,7 +4292,7 @@ export function ChatsView(props: {
           <div
             role="tablist"
             aria-label="Group lanes"
-            className="flex rounded-lg border border-line bg-panel-2 p-0.5"
+            className="flex rounded-lg border border-line bg-panel-2 p-0.5 dark:bg-bg"
           >
             {(
               [
@@ -4285,8 +4307,10 @@ export function ChatsView(props: {
                 aria-selected={lane === value}
                 data-testid={`chats-group-lane-${value}`}
                 onClick={() => setLane(value)}
-                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
-                  lane === value ? "bg-bg text-ink shadow-sm" : "text-muted hover:text-ink"
+                className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                  lane === value
+                    ? "border-transparent bg-bg text-ink shadow-sm dark:border-line/70 dark:bg-panel-2"
+                    : "border-transparent text-muted hover:text-ink"
                 }`}
               >
                 {label}
@@ -4396,14 +4420,14 @@ export function ChatsView(props: {
               kind="human"
               size="strip"
             />
-            <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
+            <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
               {joinedChannelLabel(channelJoined, ownerRemoved(channelJoined.shareId))}
             </span>
             <button
               type="button"
               data-testid="chats-leave-shared"
               onClick={() => void leaveShared(channelJoined.shareId)}
-              className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
+              className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[12px] text-muted hover:bg-hover hover:text-ink"
             >
               Leave
             </button>
@@ -4465,6 +4489,7 @@ export function ChatsView(props: {
             onOpenAgentSettings={props.onSetupAgent}
             revision={props.threadRevision ?? 0}
             agentSetup={props.agentSetup}
+            agents={settingsAgents}
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
             {...(nav.focusMessageId === undefined ? {} : { focusMessageId: nav.focusMessageId })}
@@ -4547,7 +4572,7 @@ export function ChatsView(props: {
             }
             empty={
               threadsLoading ? (
-                <SkeletonRows label="Loading..." className="pt-4" />
+                <SkeletonRows label="Loading…" className="pt-4" />
               ) : (
                 <div className="flex flex-1 py-12">
                   <EmptyState
@@ -4605,21 +4630,11 @@ export function ChatsView(props: {
 
   if (variant === "page") {
     return (
-      <div
-        data-testid="chats-page-empty"
-        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center"
-      >
-        <p className="m-0 text-sm text-muted">Choose a conversation in Chats.</p>
+      <EmptyState data-testid="chats-page-empty" title="Choose a conversation in Chats.">
         {props.onOpenNavigator ? (
-          <button
-            type="button"
-            onClick={props.onOpenNavigator}
-            className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:bg-hover hover:text-ink"
-          >
-            Open Chats
-          </button>
+          <SecondaryButton onClick={props.onOpenNavigator}>Open Chats</SecondaryButton>
         ) : null}
-      </div>
+      </EmptyState>
     );
   }
 
@@ -4688,7 +4703,7 @@ export function ChatsView(props: {
           }}
           active={selectedChannelId === channel.id}
           unread={unread}
-          muted={archived && !unread}
+          muted={!unread}
           onClick={() => openConversation({ level: "channel", channel })}
           icon={<Hash size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
           label={channel.name}
@@ -4723,9 +4738,12 @@ export function ChatsView(props: {
               {archived ? (
                 <UnreadPill count={unreadCount} tone="quiet" testId="chats-channel-unread" />
               ) : unread ? (
-                <span data-testid="chats-channel-unread" className="sr-only">
-                  {unreadCount} unread
-                </span>
+                <>
+                  <span aria-hidden className="size-[5px] shrink-0 rounded-full bg-ink" />
+                  <span data-testid="chats-channel-unread" className="sr-only">
+                    {unreadCount} unread
+                  </span>
+                </>
               ) : null}
             </>
           }
@@ -4755,7 +4773,7 @@ export function ChatsView(props: {
         }}
         active={selectedChannelId === channel.id}
         unread={unread}
-        muted={archived && !unread}
+        muted={!unread}
         onClick={() => openConversation({ level: "channel", channel })}
         icon={<ChatAvatar presentation={presentation} name={label} kind="agent" size="strip" />}
         label={label}
@@ -4777,8 +4795,8 @@ export function ChatsView(props: {
         trailing={
           <>
             {off && !archived ? (
-              <span data-testid="chats-my-agent-state" className="shrink-0 text-[10px] text-muted">
-                off
+              <span data-testid="chats-my-agent-state" className="shrink-0 text-[12px] text-muted">
+                Off
               </span>
             ) : null}
             {archived ? null : (
@@ -4824,7 +4842,7 @@ export function ChatsView(props: {
             {createsGroups ? (
               <SectionActionButton
                 testId="chats-new-channel"
-                label="New group"
+                label="New Group"
                 onClick={() => setCreatingGroup(true)}
               >
                 <Plus size={12} aria-hidden />
@@ -4876,15 +4894,15 @@ export function ChatsView(props: {
                     />
                     <div
                       className="min-w-0 flex-1"
-                      title={`${row.subjectName ?? "a Group"} · ${shareSenderLabel(row.sharerName, row.granterEmail)}`}
+                      title={`${row.subjectName ?? "Untitled Group"} · ${shareSenderLabel(row.sharerName, row.granterEmail)}`}
                     >
                       <div className="truncate text-[13px] text-ink">
-                        {row.subjectName ?? "a Group"}
+                        {row.subjectName ?? "Untitled Group"}
                         <span className="sr-only"> · </span>
                       </div>
                       <ShareSender name={row.sharerName} email={row.granterEmail} />
                     </div>
-                    <span className="shrink-0 text-[10px] text-muted">
+                    <span className="shrink-0 text-[12px] text-muted">
                       {shareAccessLabel(row.access)}
                     </span>
                     <button
@@ -4893,7 +4911,7 @@ export function ChatsView(props: {
                       data-invitation={row.shareId}
                       disabled={joiningShareId !== null}
                       onClick={() => void joinShared(row.shareId)}
-                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
+                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
                     >
                       {joiningShareId === row.shareId ? "Joining…" : "Join"}
                     </button>
@@ -4946,7 +4964,7 @@ export function ChatsView(props: {
                         labelTestId="chats-other-agent-name"
                         muted
                         trailing={
-                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-muted">
+                          <span className="max-w-[50%] shrink-0 truncate text-[12px] tabular-nums text-muted">
                             via {agent.owner}
                           </span>
                         }
@@ -5010,7 +5028,7 @@ export function ChatsView(props: {
                 ) : (
                   <span
                     data-testid="chats-archived-count"
-                    className="shrink-0 text-[11px] tabular-nums text-subtle"
+                    className="shrink-0 text-[12px] tabular-nums text-subtle"
                   >
                     {archivedRows.length}
                   </span>

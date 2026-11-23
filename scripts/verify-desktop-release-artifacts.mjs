@@ -6,7 +6,8 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 // Each platform's artifacts, and whether its updater installs from one. electron-builder names an x64
-// AppImage x86_64 and an x64 .deb amd64. Each Linux updater installs its own kind, so the manifest lists both.
+// AppImage and .rpm x86_64, and an x64 .deb amd64. Each Linux updater installs its own kind, so the
+// manifest lists all three.
 const platforms = {
   mac: {
     suffix: "-mac",
@@ -20,6 +21,7 @@ const platforms = {
     artifacts: [
       { extension: "AppImage", arch: "x86_64", update: true },
       { extension: "deb", arch: "amd64", update: true },
+      { extension: "rpm", arch: "x86_64", update: true },
     ],
   },
 };

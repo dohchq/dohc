@@ -183,6 +183,9 @@ function ScopedCollection({
   const request = useRef(0);
   // Rises each time a quiet read shows its answer.
   const quietShown = useRef(0);
+  // A session is starting while the page shows a signed-out copy: the page
+  // reads nothing until it is ready.
+  const sessionChanging = useRef(false);
   // The page, not a dialog in it, decides whether an approval that finished still refreshes it and opens the builder.
   const pageOpen = useRef(true);
   useEffect(() => {
@@ -193,6 +196,7 @@ function ScopedCollection({
   }, []);
   // Says whether this read showed the Collection, failed, or gave way to a newer read.
   const refresh = useCallback(async (): Promise<"read" | "failed" | "superseded"> => {
+    if (sessionChanging.current) return "failed";
     const sequence = ++request.current,
       shown = quietShown.current;
     setLoading(true);
@@ -205,8 +209,7 @@ function ScopedCollection({
         ...(owner ? { includeArchived: true } : {}),
       });
       if (sequence !== request.current) return "superseded";
-      if (result.kind !== "description")
-        throw Error("dohc could not read this Collection. Try again.");
+      if (result.kind !== "description") throw Error("dohc could not read this Collection.");
       describedId.current = result.dataset.datasetId;
       onSettled?.(openIdentity);
       setRefusal(null);
@@ -231,7 +234,7 @@ function ScopedCollection({
       if (refused || away) setDataset(null);
       else
         onError(
-          "Could not open this Collection.",
+          "dohc could not open this Collection.",
           error,
           () => {
             void refresh();
@@ -304,8 +307,7 @@ function ScopedCollection({
         code: "operation_refused",
         refusal: { code: result.code, message: result.message },
       });
-    if (result.kind !== "invoked")
-      throw Error("dohc could not confirm the Collection action. Try again.");
+    if (result.kind !== "invoked") throw Error("dohc could not confirm the Collection action.");
     if (sequence === request.current && !signal.aborted) setCopy(result.copy);
     return result;
   };
@@ -398,6 +400,7 @@ function ScopedCollection({
     quietAgain = useRef(false);
   const readQuietly = useCallback(
     function read(records: boolean) {
+      if (sessionChanging.current) return;
       if (records) quietRecords.current = true;
       if (quietBusy.current) {
         quietAgain.current = true;
@@ -423,6 +426,24 @@ function ScopedCollection({
       }),
     [workspaceId, readQuietly],
   );
+  // A signed-out copy belongs to the account signed in last. When a session
+  // starts, the page drops any read under way, including its first, reads
+  // nothing until the session is ready, and then reads once. A signed-out
+  // copy it shows goes at once, so another account never sees it.
+  const signedOutCopy = useRef(false);
+  signedOutCopy.current = copy?.signedOut === true;
+  useEffect(() => {
+    const stop = bridge().onCloudSessionChanged(({ phase }) => {
+      request.current++;
+      sessionChanging.current = phase === "changing";
+      if (signedOutCopy.current) setDataset(null);
+      if (phase === "ready") void refresh();
+    });
+    return () => {
+      stop();
+      sessionChanging.current = false;
+    };
+  }, [refresh]);
   // Each read brings this computer's copy up to date from the server
   // afterwards, so an open page that shows a copy reads again now and then.
   const showsCopy = owner && copy !== undefined;
@@ -521,8 +542,7 @@ function ScopedCollection({
       expectedDatasetId: datasetId,
     });
     signal.throwIfAborted();
-    if (result.kind !== "exported")
-      throw Error("dohc could not save this recovery file. Try again.");
+    if (result.kind !== "exported") throw Error("dohc could not save this recovery file.");
     return result.savedPath;
   }
   if (deleted)
@@ -568,11 +588,11 @@ function ScopedCollection({
   }
   if (!dataset || !columns)
     return loading ? (
-      <SkeletonRows inSlot layout="panel" label="Opening collection…" />
+      <SkeletonRows inSlot layout="panel" label="Opening Collection…" />
     ) : (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
         <span className="text-sm text-muted">
-          {unreachable ?? "Open this Collection to see its records."}
+          {unreachable ?? "dohc could not open this Collection."}
         </span>
         <SecondaryButton
           onClick={() => {
@@ -603,7 +623,7 @@ function ScopedCollection({
       await refresh();
     } catch (error) {
       if (sequence === request.current)
-        onError("Could not restore this Collection.", error, () => {
+        onError("dohc could not restore this Collection.", error, () => {
           void restore();
         });
     } finally {
@@ -615,14 +635,18 @@ function ScopedCollection({
     return (
       <>
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
-          <h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2>
+          <h2 className="m-0 text-sm font-semibold text-ink">
+            The Collection {dataset.name} is archived
+          </h2>
           <p className="m-0 text-sm text-muted">
             Records and files are saved. Restore the Collection to use them.
           </p>
           {copy?.offline && (
             <p role="status" className="m-0 text-[12px] text-muted">
               Offline copy ·{" "}
-              {copy.host ? `Restoring needs ${copy.host}` : "Connect to restore this Collection."}
+              {copy.host && !copy.signedOut
+                ? `Restoring needs ${copy.host}`
+                : "Connect to restore this Collection"}
             </p>
           )}
           {owner && (
@@ -668,7 +692,7 @@ function ScopedCollection({
               });
               signal.throwIfAborted();
               if (result.kind !== "delete-preview")
-                throw Error("dohc could not read the deletion preview. Try again.");
+                throw Error("dohc could not read the deletion preview.");
               return result;
             }}
             onDelete={async (input, signal) => {
@@ -744,15 +768,14 @@ function ScopedCollection({
               bytesBase64: btoa(binary),
             });
             signal.throwIfAborted();
-            if (result.kind !== "uploaded")
-              throw Error("dohc could not confirm the file upload. Try again.");
+            if (result.kind !== "uploaded") throw Error("dohc could not confirm the file upload.");
             return result.file;
           }}
           readFile={async (input, signal) => {
             signal.throwIfAborted();
             const result = await bridge().dataset({ ...addressInput(input), action: "file" });
             signal.throwIfAborted();
-            if (result.kind !== "file") throw Error("dohc could not read the file. Try again.");
+            if (result.kind !== "file") throw Error("dohc could not read the file.");
             return result;
           }}
           resolveRelation={async (input, signal) => {
@@ -784,8 +807,7 @@ function ScopedCollection({
               idempotencyKey: crypto.randomUUID(),
             });
             signal.throwIfAborted();
-            if (response.kind !== "invoked")
-              throw Error("dohc could not read related records. Try again.");
+            if (response.kind !== "invoked") throw Error("dohc could not read related records.");
             const page = parsePage(response.result, read.fieldIds);
             const label = target.fields.find(
               (field) =>
@@ -830,7 +852,7 @@ function ScopedCollection({
             });
             signal.throwIfAborted();
             if (result.kind !== "pending-attempts")
-              throw Error("dohc could not read pending responses. Try again.");
+              throw Error("dohc could not read pending responses.");
             const { kind: _, ...page } = result;
             return page;
           }}
@@ -940,7 +962,7 @@ function ScopedCollection({
             const result = await bridge().dataset({ ...addressInput(input), action: "history" });
             signal.throwIfAborted();
             if (result.kind !== "history")
-              throw Error("dohc could not read this Collection's history. Try again.");
+              throw Error("dohc could not read this Collection's history.");
             const { kind: _, ...page } = result;
             return page;
           }}
@@ -1053,7 +1075,7 @@ function ScopedCollection({
             });
             signal.throwIfAborted();
             if (result.kind !== "migration-prepared")
-              throw Error("dohc could not prepare this field change. Try again.");
+              throw Error("dohc could not prepare this field change.");
             return result;
           }}
           onApprove={async (input, signal) => {
@@ -1096,7 +1118,7 @@ function ScopedCollection({
             });
             signal.throwIfAborted();
             if (result.kind !== "migration-prepared")
-              throw Error("dohc could not prepare this change. Try again.");
+              throw Error("dohc could not prepare this change.");
             return result;
           }}
           onApprove={async (input, signal) => {
@@ -1182,7 +1204,7 @@ function ScopedCollection({
             if (sequence !== request.current)
               throw Error("The Collection changed. Prepare the choices again.");
             if (result.kind !== "migration-prepared")
-              throw Error("dohc could not prepare these choices. Try again.");
+              throw Error("dohc could not prepare these choices.");
             return result;
           }}
           onApproveChoices={async (input, signal) => {
@@ -1215,7 +1237,7 @@ function ScopedCollection({
             if (sequence !== request.current) return;
             if (result.kind === "partial") throw new CreationPartialError(result);
             if (result.kind !== "form-created")
-              throw Error("dohc could not confirm the form files. Try again.");
+              throw Error("dohc could not confirm the form files.");
             setCreatingForm(false);
             onFormCreated(result.appRoot);
           }}

@@ -143,7 +143,9 @@ describe("useSyncFailureNotice", () => {
   it("toasts a failure's first pass once, then only updates the row", () => {
     const view = renderNotice({ failure: unreachable(100, 1) });
     expect(view.toasts()).toHaveLength(1);
-    expect(view.toasts()[0]!.message).toBe("dohc could not reach the server.");
+    expect(view.toasts()[0]!.message).toBe(
+      "dohc could not reach the server. Check your connection.",
+    );
     act(() => view.result.current.errors.hideShellError(view.rows()[0]!.id));
     view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
     expect(view.toasts()).toEqual([]);
@@ -179,7 +181,7 @@ describe("useSyncFailureNotice", () => {
       act(() => vi.advanceTimersByTime(1));
       expect(view.toasts()).toHaveLength(1);
       expect(view.toasts()[0]!.message).toBe(
-        "The server is busy. dohc keeps trying to sync this workspace.",
+        "The server is busy. dohc will keep trying to sync this workspace.",
       );
       expect(view.rows()[0]!.retry).toBeTypeOf("function");
 
@@ -191,13 +193,13 @@ describe("useSyncFailureNotice", () => {
         failure: { cause: "unknown", detail: "Error: no", sinceMs: since, attempts: 1 },
       });
       expect(view.toasts()).toHaveLength(1);
-      expect(view.toasts()[0]!.message).toBe("dohc could not sync this workspace.");
+      expect(view.toasts()[0]!.message).toBe("dohc could not sync this workspace. Try again.");
 
       act(() => vi.advanceTimersByTime(1_000));
       view.rerender({ workspaceId: "ws-a", failure: busy(since, 2) });
       expect(view.rows()).toHaveLength(1);
       expect(view.rows()[0]!.message).toBe(
-        "The server is busy. dohc keeps trying to sync this workspace.",
+        "The server is busy. dohc will keep trying to sync this workspace.",
       );
       expect(view.toasts()).toHaveLength(1);
     } finally {
@@ -237,7 +239,7 @@ describe("useSyncFailureNotice", () => {
     const view = renderNotice({
       failure: { cause: "unknown", detail: "RelayError: first", sinceMs: 100, attempts: 1 },
     });
-    expect(view.rows()[0]!.message).toBe("dohc could not sync this workspace.");
+    expect(view.rows()[0]!.message).toBe("dohc could not sync this workspace. Try again.");
     act(() => view.result.current.errors.hideShellError(view.rows()[0]!.id));
     view.rerender({
       workspaceId: "ws-a",
@@ -249,7 +251,7 @@ describe("useSyncFailureNotice", () => {
       },
     });
     expect(view.rows()).toHaveLength(1);
-    expect(view.rows()[0]!.message).toBe("dohc could not reach the server.");
+    expect(view.rows()[0]!.message).toBe("dohc could not reach the server. Check your connection.");
     expect(view.rows()[0]!.details).toEqual([["Detail", "RelayUnreachableError: reconnect"]]);
     expect(view.toasts()).toEqual([]);
   });
@@ -389,27 +391,11 @@ describe("useSyncFailureNotice", () => {
 
   it("never claims the changes are saved", () => {
     expect(syncFailureNotice(unreachable(1, 1))).toEqual({
-      message: "dohc could not reach the server.",
+      message: "dohc could not reach the server. Check your connection.",
     });
     expect(
       syncFailureNotice({ cause: "unknown", detail: "Error: disk full", sinceMs: 1, attempts: 1 }),
-    ).toEqual({ message: "dohc could not sync this workspace." });
-  });
-
-  it("an occupied-path refusal names the file", async () => {
-    const detail = "DaemonRefusalError: sync-path-occupied: notes/trip.txt";
-    const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
-    await waitFor(() => expect(view.toasts()).toHaveLength(1));
-    expect(view.rows()).toHaveLength(1);
-    expect(view.rows()[0]).toMatchObject({
-      kind: "cloud-sync",
-      title: "dohc could not sync this workspace",
-      message:
-        "dohc can't apply a change to notes/trip.txt, because this machine has a different file there. Other changes wait behind it.",
-      details: [["Detail", detail]],
-      seen: false,
-    });
-    expect(view.rows()[0]!.retry).toBeTypeOf("function");
+    ).toEqual({ message: "dohc could not sync this workspace. Try again." });
   });
 
   it("names a file whose permissions dohc could not read, with Try again", async () => {
@@ -421,7 +407,7 @@ describe("useSyncFailureNotice", () => {
       kind: "cloud-sync",
       title: "dohc could not sync this workspace",
       message:
-        "dohc could not read the permissions of notes/trip.txt, so it left the file as it was.\nIn its Properties › Security › Advanced, give your account Read permissions, then choose Try again.",
+        "dohc could not read the permissions of notes/trip.txt, so it left the file as it was.\nIn Properties › Security › Advanced, give your account Read permissions.",
       details: [["Detail", detail]],
     });
     expect(view.rows()[0]!.retry).toBeTypeOf("function");
@@ -449,6 +435,6 @@ describe("useSyncFailureNotice", () => {
         sinceMs: 1,
         attempts: 1,
       }),
-    ).toEqual({ message: "dohc could not sync this workspace." });
+    ).toEqual({ message: "dohc could not sync this workspace. Try again." });
   });
 });

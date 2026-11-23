@@ -8,11 +8,11 @@ export const unreadableWords = (code: string) => `dohc could not read the usage 
 export const unreadableNotice = (code: string) =>
   `${unreadableWords(code)} ${
     code === INVALID_USAGE_RECORD
-      ? "Start a new record in Privacy, or fix the file and try again."
-      : "Fix the file or its permissions, then try again."
+      ? "Start a new record in Privacy, or fix the file."
+      : "Fix the file or its permissions."
   }`;
 export const USAGE_RECORD_STOPPED =
-  "dohc stopped counting, because the usage record changed outside dohc.";
+  "dohc stopped counting because the usage record changed outside dohc.";
 
 type ReportFailure = (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
 

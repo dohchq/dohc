@@ -38,10 +38,8 @@ export function stageFigure(
   const size = box.getSize(new T.Vector3());
   const radius = box.getBoundingSphere(new T.Sphere()).radius;
 
-  const pmrem = new T.PMREMGenerator(renderer);
-  const environment = pmrem.fromEquirectangular(studio);
-  pmrem.dispose();
-  scene.environment = environment.texture;
+  studio.mapping = T.CubeUVReflectionMapping;
+  scene.environment = studio;
   scene.environmentIntensity = 0.8;
   scene.environmentRotation.y = 0.75;
 
@@ -50,7 +48,8 @@ export function stageFigure(
   key.position.copy(center).addScaledVector(new T.Vector3(-0.22, 1, 0.3).normalize(), radius * 3);
   key.target.position.copy(center);
   key.castShadow = true;
-  key.shadow.mapSize.set(512, 512);
+  const shadowSize = animated ? 256 : 512;
+  key.shadow.mapSize.set(shadowSize, shadowSize);
   Object.assign(key.shadow.camera, {
     left: -radius * 1.4,
     right: radius * 1.4,
@@ -62,8 +61,8 @@ export function stageFigure(
   key.shadow.camera.updateProjectionMatrix();
   key.shadow.normalBias = 0.02;
   key.shadow.bias = -0.0001;
-  key.shadow.radius = 10;
-  key.shadow.blurSamples = 16;
+  key.shadow.radius = animated ? 5 : 10;
+  key.shadow.blurSamples = animated ? 6 : 12;
   scene.add(key, key.target);
   const fill = new T.DirectionalLight(0xdfe8ff, 0.5);
   fill.position.copy(center).add(new T.Vector3(radius * 2, radius * 0.6, -radius * 1.2));
@@ -82,8 +81,8 @@ export function stageFigure(
   const width = size.x + radius * 0.6;
   const depth = size.z + radius * 0.6;
   const reach = size.y * 0.3;
-  const target = new T.WebGLRenderTarget(512, 512);
-  const blurTarget = new T.WebGLRenderTarget(512, 512);
+  const target = new T.WebGLRenderTarget(256, 256);
+  const blurTarget = new T.WebGLRenderTarget(256, 256);
   const floorCamera = new T.OrthographicCamera(
     -width / 2,
     width / 2,
@@ -143,13 +142,14 @@ export function stageFigure(
   ground.visible = false;
   scene.overrideMaterial = depthMaterial;
   renderer.setRenderTarget(target);
+  renderer.shadowMap.enabled = false;
   renderer.render(scene, floorCamera);
   scene.overrideMaterial = null;
   ground.visible = true;
-  blur(1.4);
-  blur(0.6);
+  blur(1.5);
   renderer.setRenderTarget(null);
   // The bake ran with the floor hidden; draw the cast shadow again with it in place.
+  renderer.shadowMap.enabled = true;
   renderer.shadowMap.needsUpdate = true;
   blurTarget.dispose();
   depthMaterial.dispose();
@@ -170,7 +170,7 @@ export function stageFigure(
     radius,
     setDark,
     dispose() {
-      environment.dispose();
+      studio.dispose();
       key.shadow.dispose();
       target.dispose();
       groundGeometry.dispose();

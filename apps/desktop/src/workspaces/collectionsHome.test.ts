@@ -1,6 +1,7 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { APP_BACKEND_CATCH_UP_HEADER } from "@dohc/security-contract/app-backend";
-import { collectionsServer } from "./collectionsHome";
+import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import { collectionsServer, createServerHomeData } from "./collectionsHome";
 import { id, startTestRelay, unanswered } from "./serverCollectionsTestRelay";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -74,7 +75,7 @@ it("offline, lists and reads what this computer kept, and refuses a change at on
   // A refusal tells the window that nothing ran, so it shows the true value and keeps nothing to send later.
   const refused = expect.objectContaining({
     code: "operation_refused",
-    message: `dohc didn't save this change. This Collection is read-only until ${relay.host} is reachable.`,
+    message: `dohc did not save this change. This Collection is read-only until ${relay.host} is reachable.`,
     refusal: expect.objectContaining({ code: "offline" }),
   });
   await expect(computer.write(id(7), { id: 1, name: "Offline" })).rejects.toEqual(refused);
@@ -90,6 +91,44 @@ it("offline, lists and reads what this computer kept, and refuses a change at on
     result: [{ id: 1, name: "First" }],
     copy: { offline: false },
   });
+}, 60_000);
+
+it("signed out, lists and reads what this computer kept, read-only, and refuses a change at once", async () => {
+  const relay = await relayWithCollection();
+  const computer = await relay.computer();
+  await computer.write(id(5), { values: { [id(4)]: "First" } });
+  await computer.data.list({});
+  await computer.read();
+
+  const signedOut = await computer.signOut();
+  expect((await signedOut.data.list({})).datasets.map((dataset) => dataset.datasetId)).toEqual([
+    id(1),
+  ]);
+  expect(await signedOut.read()).toMatchObject({
+    result: [{ id: 1, name: "First" }],
+    copy: { offline: true, signedOut: true },
+  });
+  const started = performance.now();
+  await expect(signedOut.write(id(7), { id: 1, name: "Signed out" })).rejects.toEqual(
+    expect.objectContaining({
+      code: "operation_refused",
+      message:
+        "dohc did not save this change. This Collection is read-only until you connect your server.",
+      refusal: expect.objectContaining({ code: "offline" }),
+    }),
+  );
+  expect(performance.now() - started).toBeLessThan(1000);
+  // What the copy does not hold needs the server, which a signed-out read never asks.
+  await expect(signedOut.data.history({ datasetId: id(1) })).rejects.toThrow(
+    "Sign in to your server first.",
+  );
+  expect(await signedOut.read()).toMatchObject({ result: [{ id: 1, name: "First" }] });
+}, 60_000);
+
+it("signed out on a computer that kept nothing, says to sign in, as before", async () => {
+  const relay = await relayWithCollection();
+  const signedOut = await (await relay.computer()).signOut();
+  await expect(signedOut.data.list({})).rejects.toThrow("Sign in to your server first.");
 }, 60_000);
 
 type Computer = Awaited<ReturnType<Awaited<ReturnType<typeof startTestRelay>>["computer"]>>;
@@ -154,7 +193,7 @@ it("waits for the server only to open a Collection this computer has no copy of,
   computer.server("silent", { limitMs: 2000 });
   const started = performance.now();
   await expect(computer.open()).rejects.toThrow(
-    `This Collection needs ${relay.host}, which dohc can't reach.`,
+    `dohc could not reach ${relay.host} for this Collection. Check your connection, then try again.`,
   );
   // One limit, not one for each request in turn. The rest leaves room for a
   // loaded test run.
@@ -189,6 +228,88 @@ it("brings an open Collection up to date by itself: another computer's change, t
   await changed;
   expect(await computer.open()).toMatchObject({ copy: { offline: false } });
 }, 60_000);
+
+// A server with `count` Collections, and a list saved in memory.
+function savedListOf(count: number) {
+  const describe = (n: number): DatasetDescription => ({
+    datasetId: `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+    name: `Collection ${n}`,
+    revision: 1,
+    revisionSha256: "a".repeat(64),
+    tables: [],
+    operations: [],
+  });
+  const all = Array.from({ length: count }, (_, n) => describe(n + 1));
+  let kept: unknown,
+    offline = false,
+    changes = 0,
+    saved = () => {};
+  const data = createServerHomeData({
+    host: "relay.test",
+    list: async ({ after, limit = 50 }) => {
+      if (offline) throw new TypeError("fetch failed");
+      const rest = all.filter((dataset) => dataset.datasetId > (after ?? ""));
+      return {
+        datasets: rest.slice(0, limit),
+        nextCursor: rest.length > limit ? rest[limit - 1]!.datasetId : null,
+      };
+    },
+    copy: () => Promise.reject(Error("No Collection opens here.")),
+    saved: {
+      read: async () => kept ?? Promise.reject(Error("Nothing saved.")),
+      update: async (change) => {
+        kept = change(kept) ?? kept;
+        saved();
+      },
+    },
+    changed: () => changes++,
+  });
+  const listed = async () => {
+    const ids: string[] = [];
+    for (let after: string | null | undefined; after !== null;) {
+      const page = await data.list({ limit: 50, ...(after ? { after } : {}) });
+      ids.push(...page.datasets.map((dataset) => dataset.datasetId));
+      after = page.nextCursor;
+    }
+    return ids;
+  };
+  return {
+    ids: () => all.map((dataset) => dataset.datasetId),
+    data,
+    listed,
+    add: () => all.push(describe(all.length + 1)),
+    offline: (value: boolean) => (offline = value),
+    changes: () => changes,
+    /** The next save of the list. */
+    saved: () => new Promise<void>((resolve) => (saved = resolve)),
+  };
+}
+it("lists every Collection past the first page from the list it saved", async () => {
+  const { ids, data, listed } = savedListOf(51);
+  // The first visit reads the first page, and the list is saved.
+  expect((await data.list({ limit: 50 })).nextCursor).toBe(ids()[49]);
+  // A later visit answers from the saved list, and still reaches the last Collection.
+  expect(await listed()).toEqual(ids());
+});
+it("lists a Collection added past the end of a list it saved whole, online and offline", async () => {
+  const server = savedListOf(50);
+  expect(await server.listed()).toEqual(server.ids());
+  // Another computer adds Collection 51.
+  server.add();
+  const saved = server.saved();
+  // The saved list answers, and the server's answer says the list goes on.
+  expect((await server.data.list({ limit: 50 })).nextCursor).toBeNull();
+  await saved;
+  expect((await server.data.list({ limit: 50 })).nextCursor).toBe(server.ids()[49]);
+  await vi.waitFor(() => expect(server.changes()).toBe(1));
+  expect(await server.listed()).toEqual(server.ids());
+  server.offline(true);
+  expect(await server.listed()).toEqual(server.ids());
+});
+it("shows the next page at once when the list saved only the first", async () => {
+  const { ids, listed } = savedListOf(51);
+  expect(await listed()).toEqual(ids());
+});
 
 it("shows a Collection another computer created once the list is brought up to date", async () => {
   const relay = await startTestRelay();
@@ -335,7 +456,7 @@ it("waits for the server at most once for a first open whose history stops comin
     path.endsWith("/replica/page") ? unanswered(15_000, signal) : go(),
   );
   await expect(within(1500, computer.read())).rejects.toThrow(
-    `This Collection needs ${relay.host}, which dohc can't reach.`,
+    `dohc could not reach ${relay.host} for this Collection. Check your connection, then try again.`,
   );
 }, 60_000);
 
@@ -383,7 +504,7 @@ it("waits for the server at most once for the whole first open, however many req
   });
   const started = performance.now();
   await expect(computer.open()).rejects.toThrow(
-    `This Collection needs ${relay.host}, which dohc can't reach.`,
+    `dohc could not reach ${relay.host} for this Collection. Check your connection, then try again.`,
   );
   expect(performance.now() - started).toBeLessThan(1250);
 }, 60_000);
@@ -424,7 +545,7 @@ it("gives up on a change the server does not answer at the limit, after one requ
   computer.server("silent", { limitMs: 400 });
   const started = performance.now();
   await expect(computer.write(id(7), { id: 1, name: "Late" })).rejects.toThrow(
-    `This Collection needs ${relay.host}, which dohc can't reach.`,
+    `dohc could not reach ${relay.host} for this Collection. Check your connection, then try again.`,
   );
   expect(performance.now() - started).toBeLessThan(700);
 }, 60_000);

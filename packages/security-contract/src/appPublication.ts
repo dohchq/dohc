@@ -2,7 +2,11 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import { SHA256_HEX_PATTERN } from "./wirePatterns";
 import { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
-import { parseAppDatasetCapability, type AppDatasetCapability } from "./dataset";
+import {
+  APP_DATASET_MAX_BINDINGS,
+  parseAppDatasetCapability,
+  type AppDatasetCapability,
+} from "./dataset";
 export { parseAppDatasetCapability, type AppDatasetCapability } from "./dataset";
 export { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
 export {
@@ -140,7 +144,7 @@ export function parseAppPublicationCandidate(
     row.files.length < 1 ||
     row.files.length > 3 ||
     !Array.isArray(row.capabilities) ||
-    row.capabilities.length > 1
+    row.capabilities.length > APP_DATASET_MAX_BINDINGS
   )
     throw new Error("Unsupported publication inventory or capabilities.");
   let remainingTextBytes = limits.maxMetadataBytes;
@@ -184,11 +188,27 @@ export function parseAppPublicationCandidate(
       })
       .sort(([a], [b]) => compare(a, b)),
   );
-  const capabilities = row.capabilities.map((value) =>
+  const parsedCapabilities = row.capabilities.map((value) =>
     value?.kind === "dataset"
       ? parseAppDatasetCapability(value)
       : parseAppCollectionCapability(value),
   );
+  let capabilities: Array<AppCollectionCapability | AppDatasetCapability> = parsedCapabilities;
+  if (parsedCapabilities.length > 1) {
+    const datasetCaps: AppDatasetCapability[] = [];
+    const seenAliases = new Set<string>();
+    const seenDatasets = new Set<string>();
+    for (const cap of parsedCapabilities) {
+      if (cap.kind !== "dataset" || cap.alias === undefined)
+        throw new Error("Unsupported publication capabilities.");
+      if (seenAliases.has(cap.alias) || seenDatasets.has(cap.datasetId))
+        throw new Error("Unsupported publication capabilities.");
+      seenAliases.add(cap.alias);
+      seenDatasets.add(cap.datasetId);
+      datasetCaps.push(cap);
+    }
+    capabilities = datasetCaps.sort((a, b) => compare(a.datasetId, b.datasetId));
+  }
   // Display words are for Review app. A candidate is what the approval binds, so it carries none.
   if (
     capabilities.some(

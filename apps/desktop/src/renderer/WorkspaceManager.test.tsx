@@ -663,4 +663,33 @@ describe("workspace manager with registered workspaces", () => {
     expect(screen.queryByRole("menu")).toBeNull();
     expect(document.activeElement).toBe(trigger);
   });
+
+  it("leaves Open a share and Join server on Escape even when an input has focus", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Open a share/i }));
+    expect(await screen.findByTestId("open-shared-view")).toBeTruthy();
+    const shareInput = screen.getByTestId("open-share-code");
+    expect(shareInput.hasAttribute("data-framed-input")).toBe(true);
+    shareInput.focus();
+    fireEvent.keyDown(shareInput, { key: "Escape", isComposing: true });
+    expect(screen.getByTestId("open-shared-view")).toBeTruthy();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("open-shared-view")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /Join a synced workspace/i }));
+    expect(await screen.findByRole("button", { name: "Back" })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape", isComposing: true });
+    expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("button", { name: /Join a synced workspace/i })).toBeTruthy();
+  });
 });

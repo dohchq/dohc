@@ -716,9 +716,9 @@ it.each([
   expect(harness.applyAttempts).toEqual([]);
   expect(screen.getByTestId("state").textContent).toBe("error");
   expect(screen.getByTestId("save-error").textContent).toContain(
-    `ENGINE_YDOC_UPDATE_MAX_BYTES is ${ENGINE_YDOC_UPDATE_MAX_BYTES} bytes`,
+    `over the ${ENGINE_YDOC_UPDATE_MAX_BYTES}-byte limit`,
   );
-  expect(screen.getByTestId("save-error").textContent).toMatch(/the update is \d+ bytes/);
+  expect(screen.getByTestId("save-error").textContent).toMatch(/The update is \d+ bytes/);
   await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("present"));
   expect(Number(screen.getByTestId("draft-size").textContent)).toBeGreaterThan(
     ENGINE_YDOC_UPDATE_MAX_BYTES,

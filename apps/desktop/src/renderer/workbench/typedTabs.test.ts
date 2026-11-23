@@ -66,8 +66,8 @@ const rows = [
   [
     "versionCompare",
     "tab://versions/compare/try%2Fone",
-    ["Compare with Main", "Compare this Version with Main", "Compare with Main"],
-    ["Compare with Main", "Compare this Version with Main", "Compare with Main"],
+    ["Compare with Main", "Compare this version with Main", "Compare with Main"],
+    ["Compare with Main", "Compare this version with Main", "Compare with Main"],
   ],
   [
     "collection",

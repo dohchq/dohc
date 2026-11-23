@@ -1127,6 +1127,16 @@ pub(crate) fn record_retained_busy_check(
     Ok(())
 }
 
+/// What dohc saved for a staged Windows file before it made the file
+/// private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagedDacl {
+    /// The file's own DACL, in SDDL, to give back when it leaves staging.
+    Saved(String),
+    /// Why dohc left the file's DACL as it is.
+    Left(String),
+}
+
 pub(crate) fn with_full_commit<T>(
     conn: &Connection,
     f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StorageError>,
@@ -1179,6 +1189,53 @@ pub(crate) fn record_retained_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each save replaces what was saved for the file, a reason or a DACL,
+    /// and the folder it is in, and an unknown reason is refused.
+    #[test]
+    fn a_staged_dacl_holds_the_last_save() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("staged-dacls").unwrap();
+        let store = crate::EngineStore::open(&dir.join("engine.db"), 1).unwrap();
+        let saved = |dacl: &str| StagedDacl::Saved(dacl.to_owned());
+        let left = |reason: &str| StagedDacl::Left(reason.to_owned());
+        store
+            .save_staged_dacl("a", "x", &saved("D:AI(A;ID;FR;;;BU)"), 1)
+            .unwrap();
+        store
+            .save_staged_dacl("a", "y", &saved("D:P(A;;FA;;;SY)"), 2)
+            .unwrap();
+        assert_eq!(
+            store.staged_dacl("a").unwrap(),
+            Some(saved("D:P(A;;FA;;;SY)"))
+        );
+        store
+            .save_staged_dacl("a", "x", &left("hard-links"), 3)
+            .unwrap();
+        assert_eq!(store.staged_dacl("a").unwrap(), Some(left("hard-links")));
+
+        store
+            .save_staged_dacl("b", "x", &left("hard-links"), 1)
+            .unwrap();
+        assert_eq!(store.staged_dacl("b").unwrap(), Some(left("hard-links")));
+        store
+            .save_staged_dacl("b", "x", &left("other-owner"), 2)
+            .unwrap();
+        assert_eq!(store.staged_dacl("b").unwrap(), Some(left("other-owner")));
+        store.save_staged_dacl("b", "x", &saved("D:"), 3).unwrap();
+        assert_eq!(store.staged_dacl("b").unwrap(), Some(saved("D:")));
+
+        assert!(
+            store
+                .save_staged_dacl("c", "x", &left("unknown"), 1)
+                .is_err()
+        );
+        store.save_staged_dacl("c", "y", &saved("D:"), 1).unwrap();
+        assert_eq!(store.staged_dacls_in("x").unwrap(), ["a", "b"]);
+        assert_eq!(store.staged_dacls_in("y").unwrap(), ["c"]);
+        store.forget_staged_dacls(&["a".to_owned()]).unwrap();
+        assert_eq!(store.staged_dacl("a").unwrap(), None);
+        assert_eq!(store.staged_dacls_in("x").unwrap(), ["b"]);
+    }
 
     /// A write that finds its target occupied runs this lookup, so it must
     /// read its index instead of scanning the pending jobs.

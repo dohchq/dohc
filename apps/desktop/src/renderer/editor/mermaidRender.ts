@@ -483,7 +483,7 @@ function applyMermaidResult(container: HTMLElement, result: MermaidRenderResult)
   }
   container.classList.add("dohc-mermaid-preview--skipped");
   status.hidden = false;
-  status.textContent = "Diagram too large to preview (10,000+ characters).";
+  status.textContent = "This diagram is too large to preview, over 10,000 characters.";
 }
 
 type MermaidPluginState = {

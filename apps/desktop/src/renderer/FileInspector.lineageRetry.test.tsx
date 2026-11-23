@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -25,6 +25,7 @@ import {
   useDocumentSaveNotices,
 } from "./shell/useDocumentSaveNotices";
 import { useShellError } from "./shell/useShellError";
+import { useFocusSurface } from "./ui/focusReturn";
 
 setupFileInspectorTests();
 
@@ -67,20 +68,14 @@ const surface = (activeWorkspace: string) => (
   </Shell>
 );
 
-function refuseDraftStorage() {
-  return vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-    throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
-  });
-}
-
 async function failReplacement() {
   await screen.findByTestId("markdown-source-toggle");
   harness.emit("settling", 0);
-  const setItem = refuseDraftStorage();
+  harness.drafts.fail(new Error("No space left on device"));
   harness.emitLineageReplacement("winner");
   const retry = await screen.findByTestId("markdown-save-state-action");
   expect(harness.acknowledgedGenerations).toEqual([]);
-  return { setItem, retry };
+  return { retry };
 }
 
 beforeEach(() => {
@@ -117,7 +112,7 @@ afterEach(async () => {
 it("keeps Try again on the frozen editor after its row is dismissed", async () => {
   const user = userEvent.setup();
   render(surface("ws-1"));
-  const { setItem } = await failReplacement();
+  await failReplacement();
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
     REPLACED_DOCUMENT_UNSAVED,
   );
@@ -135,7 +130,7 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
   );
   expect(screen.queryByTestId("connection-notices")).toBeNull();
 
-  setItem.mockRestore();
+  harness.drafts.fail(null);
   await user.click(screen.getByTestId("markdown-save-state-action"));
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
   await waitFor(() => expect(screen.queryByTestId("markdown-save-state-action")).toBeNull());
@@ -148,4 +143,62 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
   expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
     REPLACED_HISTORY_DRAFT_NOTICE,
   );
+});
+
+// The shell's editor group, which takes focus when its focused editor goes.
+function EditorGroup(props: { children: ReactNode }) {
+  const root = useRef<HTMLDivElement>(null);
+  useFocusSurface(root, () => null);
+  return (
+    <div ref={root}>
+      <section
+        data-testid="editor-group"
+        data-focus-surface="editor"
+        data-active="true"
+        tabIndex={-1}
+      >
+        {props.children}
+      </section>
+    </div>
+  );
+}
+
+it("keeps the caret in the editor when a replacement rebuilds it", async () => {
+  render(<EditorGroup>{surface("ws-1")}</EditorGroup>);
+  await screen.findByTestId("markdown-source-toggle");
+  const before = await screen.findByTestId("markdown-editor");
+  before.focus();
+  expect(document.activeElement).toBe(before);
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  await waitFor(() => expect(screen.getByTestId("markdown-editor")).not.toBe(before));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("markdown-editor")));
+});
+
+// A click after the old editor goes and before the new one mounts: on the
+// group's blank space, which focuses the group, or outside any focusable
+// element, which leaves focus on the page.
+it.each([
+  ["the editor group", (group: HTMLElement) => group],
+  ["the page", () => document.body],
+])("leaves focus on %s when a click puts it there while the editor rebuilds", async (_, target) => {
+  render(<EditorGroup>{surface("ws-1")}</EditorGroup>);
+  await screen.findByTestId("markdown-source-toggle");
+  const before = await screen.findByTestId("markdown-editor");
+  before.focus();
+  const group = screen.getByTestId("editor-group");
+  const clicked = target(group);
+  let done = false;
+  group.addEventListener("focusin", (event) => {
+    if (done || event.target !== group) return;
+    done = true;
+    fireEvent.pointerDown(clicked);
+    // After focusSurface returns, or it puts focus back on the group.
+    if (clicked !== group) queueMicrotask(() => group.blur());
+  });
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(done).toBe(true));
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  await waitFor(() => expect(screen.getByTestId("markdown-editor")).not.toBe(before));
+  expect(document.activeElement).toBe(clicked);
 });

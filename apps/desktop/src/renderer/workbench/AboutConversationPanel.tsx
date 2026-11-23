@@ -1,4 +1,5 @@
 import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { Link2Off } from "lucide-react";
 import {
   Fragment,
@@ -11,8 +12,9 @@ import {
   type RefObject,
 } from "react";
 import { withErrorWords } from "../../ipc/errorWords";
+import { basenameOf, dirnameOf } from "../path";
 import { RetryRow } from "../ui/controls";
-import { Ref } from "../ui/Ref";
+import { KindGlyph } from "../ui/KindGlyph";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import {
   ABOUT_ROW_BUTTON,
@@ -311,16 +313,27 @@ const MentionedFileList = memo(function MentionedFileList(props: {
 // named as one in words, as a sentence elsewhere says "Paused by agent".
 function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
   const { file } = props;
+  const name = basenameOf(file.path);
+  const dir = dirnameOf(file.path);
   return (
     <button
       type="button"
       data-testid="about-conversation-link"
       data-path={file.path}
+      title={file.path}
       onClick={props.onOpen}
-      className={`${ABOUT_ROW_BUTTON} py-1`}
+      className={`${ABOUT_ROW_BUTTON} py-1.5`}
     >
       <span className="flex min-w-0 flex-1 flex-col items-start gap-1">
-        <Ref path={file.path} folder />
+        <span className="flex min-w-0 max-w-full items-center gap-1.5">
+          <KindGlyph kind={fileKindForPath(file.path)} size={13} className="shrink-0 text-muted" />
+          <span className="min-w-0 truncate text-[13px] text-ink">{name}</span>
+          {dir ? (
+            <span className="min-w-0 shrink-[4] truncate text-[12px] tabular-nums text-subtle">
+              {dir}
+            </span>
+          ) : null}
+        </span>
         <span className="flex min-w-0 max-w-full items-center gap-1.5 text-[12px] leading-4">
           <span className="flex shrink-0">
             {file.authors.slice(0, 3).map((author) => (
@@ -331,7 +344,7 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
                 linkAgent={author.linkAgent === true}
                 presentation={author.presentation}
                 size="strip"
-                className="-ml-1 first:ml-0"
+                className="-ml-1 ring-2 ring-panel first:ml-0"
               />
             ))}
           </span>

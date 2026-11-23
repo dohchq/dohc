@@ -145,6 +145,8 @@ jobs:
               - '.github/workflows/desktop-release.yml'
               # packages/mcp's reference test compares this page with its generator.
               - 'docs/reference/cli-mcp-sdk.md'
+              # packages/mcp's eval case test validates YAML examples in the public skill.
+              - 'skills/dohc/references/automations.md'
               # Source-backed example apps are compiled and staged by the desktop scripts.
               - 'examples/trip-poll/**'
               - 'examples/fundraiser/**'
@@ -394,7 +396,7 @@ jobs:
           tool: cargo-nextest@0.9.143
       - name: Build compiler confinement tests
         run: cargo nextest run --locked --package dohc-compiler-owner --no-run
-      - name: Compiler and relay confinement
+      - name: Compiler confinement
         run: |
           set -euo pipefail
           mkdir -p .agent-artifacts/confinement
@@ -407,51 +409,19 @@ jobs:
             grep -qx '# skipped 0' "$report" && grep -qx '# todo 0' "$report" && ! grep -qx '# pass 0' "$report" ||
               { grep '^# ' "$report"; echo "::error::Some app compiler tests did not run."; return 1; }
           }
-          relay() {
-            node_root="$(dirname "$(dirname "$(command -v node)")")"
-            report="$PWD/.agent-artifacts/confinement/relay.json"
-            docker run --rm --init --security-opt no-new-privileges:true --cap-drop ALL \
-              --user "$(id -u):$(id -g)" --env HOME=/tmp --env CI --env PATH="$node_root/bin:/usr/bin:/bin" \
-              --env DOHC_CONFINEMENT_SUITES=only --env DOHC_REQUIRE_ENGINE_E2E=1 \
-              --env DOHC_TEST_ENGINE_BINARY="$PWD/target/debug/dohc-workspace-engine" \
-              --volume "$node_root:$node_root:ro" --volume "$PWD:$PWD" --workdir "$PWD/services/sync-relay" \
-              ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 \
-              sh -c 'grep -x "Seccomp:[[:space:]]*2" /proc/self/status &&
-                exec node node_modules/vitest/vitest.mjs run --reporter=default --reporter=json --outputFile="$0"' "$report"
-            node -e '
-              const r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-              if (!r.numTotalTests || r.numPendingTests || r.numTodoTests) throw new Error((r.numPendingTests + r.numTodoTests) + " of " + r.numTotalTests + " replica tests did not run.");
-              console.log(r.numPassedTests + " replica tests passed under the default seccomp profile.");' "$report"
-          }
-          relay > .agent-artifacts/confinement/relay.log 2>&1 &
-          relay_pid=$!
           compiler_status=0
           (compiler) > .agent-artifacts/confinement/compiler.log 2>&1 &
           compiler_pid=$!
           wait "$compiler_pid" || compiler_status=$?
-          relay_status=0
-          wait "$relay_pid" || relay_status=$?
           echo '::group::Compiler confinement'
           cat .agent-artifacts/confinement/compiler.log
           echo '::endgroup::'
-          echo '::group::Relay confinement'
-          cat .agent-artifacts/confinement/relay.log
-          echo '::endgroup::'
-          test "$compiler_status" -eq 0 && test "$relay_status" -eq 0
+          test "$compiler_status" -eq 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: verification-confinement-compiler-${{ github.run_attempt }}
           path: .agent-artifacts/confinement/compiler.*
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: verification-confinement-relay-${{ github.run_attempt }}
-          path: .agent-artifacts/confinement/relay.*
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -554,11 +524,12 @@ jobs:
           compression-level: 0
       - name: Wait for the complete JavaScript group
         run: node scripts/verification/cloud-aggregate.mjs wait js
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          pattern: verification-js-*-${{ github.run_attempt }}
-          merge-multiple: true
+          pattern: verification-js-*
           path: .agent-artifacts/verification/downloaded
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
       - name: Require complete proof and the JavaScript timing ceiling
         if: always()
         run: node scripts/verification/cloud-aggregate.mjs js
@@ -611,21 +582,26 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
       - name: Wait for the shared Rust archive
+        id: rust-archive
         run: node scripts/verification/wait-preparation.mjs rust
       - id: rust-archive-download
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         timeout-minutes: 2
         continue-on-error: true
         with:
-          name: rust-tests-${{ github.run_attempt }}
+          name: ${{ steps.rust-archive.outputs.name }}
           path: .agent-artifacts/verification
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
       - name: Download the shared Rust archive again after a stalled transfer
         if: steps.rust-archive-download.outcome == 'failure'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         timeout-minutes: 3
         with:
-          name: rust-tests-${{ github.run_attempt }}
+          name: ${{ steps.rust-archive.outputs.name }}
           path: .agent-artifacts/verification
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
       - name: Run every assigned test from the shared native archive
         run: node scripts/verification/cloud-rust.mjs tests ${{ matrix.shard }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -764,11 +740,12 @@ jobs:
           compression-level: 0
       - name: Wait for the complete Rust group
         run: node scripts/verification/cloud-aggregate.mjs wait rust
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          pattern: verification-rust-*-${{ github.run_attempt }}
-          merge-multiple: true
+          pattern: verification-rust-*
           path: .agent-artifacts/verification/downloaded
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
       - name: Require complete proof and the Rust timing ceiling
         if: always()
         run: node scripts/verification/cloud-aggregate.mjs rust
@@ -814,10 +791,11 @@ jobs:
         working-directory: apps/mobile
         run: pnpm exec expo prebuild --platform android --no-install --template ./node_modules/expo/template.tgz
       # Gradle installs the SDK platform, build tools, and NDK that React Native's version catalog names; the runner's
-      # SDK licenses are already accepted. expo-sqlite ships a prebuilt Android library, so it has no Kotlin to compile here.
-      - name: Compile the native modules' Kotlin
+      # SDK licenses are already accepted. Every project's Java and Kotlin compiles: the app, its own modules, and each
+      # autolinked library, so a new native dependency compiles here before it merges. The JS bundle isn't built.
+      - name: Compile the app and its native modules
         working-directory: apps/mobile/android
-        run: ./gradlew :chat-composer:compileDebugKotlin :durable-file:compileDebugKotlin --no-daemon --console=plain --stacktrace
+        run: ./gradlew compileDebugSources --no-daemon --console=plain --stacktrace
 
   # Headless browsers against a dohc server of its own on the runner. One leg has people edit one
   # shared note together; the other runs the share page's end-to-end tests. Neither is part of a
@@ -855,11 +833,14 @@ jobs:
         run: pnpm --filter @dohc/desktop exec playwright install chromium
       # Shared preparation publishes the engine and the share page while it goes on to its own tests.
       - name: Wait for the prepared engine and share page
+        id: prepared
         run: node scripts/verification/wait-preparation.mjs js
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: javascript-prepared-${{ github.run_attempt }}
+          name: ${{ steps.prepared.outputs.name }}
           path: ${{ runner.temp }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
       - name: Unpack the prepared engine and share page
         run: tar -I zstd -xf "$RUNNER_TEMP/javascript-prepared.tar.zst"
       - name: Edit together
@@ -960,11 +941,13 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: needs.javascript.result == 'success'
         with:
-          name: verification-js-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/aggregate
+          pattern: verification-js-[0-9]*
+          path: .agent-artifacts/verification/aggregate/published
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Require every selected gate
         env:

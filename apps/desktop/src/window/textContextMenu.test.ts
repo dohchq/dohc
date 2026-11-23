@@ -134,7 +134,7 @@ describe("text menu template", () => {
       "the",
       "Add to dictionary",
       "-",
-      "Look up “teh”",
+      'Look up "teh"',
       "-",
       "role:cut",
       "role:copy",
@@ -154,7 +154,7 @@ describe("text menu template", () => {
       { role: "toggleTextReplacement" },
     ]);
     expect(template.at(-1)?.submenu).toEqual([{ role: "startSpeaking" }, { role: "stopSpeaking" }]);
-    click(template, "Look up “teh”");
+    click(template, 'Look up "teh"');
     expect(run.lookUp).toHaveBeenCalledOnce();
 
     const long = textMenuTemplate(
@@ -165,7 +165,7 @@ describe("text menu template", () => {
       "darwin",
       actions(),
     );
-    expect(long[0]?.label).toBe("Look up “a selection that runs we…”");
+    expect(long[0]?.label).toBe('Look up "a selection that runs we…"');
 
     const atSpace = textMenuTemplate(
       params({
@@ -175,7 +175,7 @@ describe("text menu template", () => {
       "darwin",
       actions(),
     );
-    expect(atSpace[0]?.label).toBe(`Look up “${"a".repeat(23)}…”`);
+    expect(atSpace[0]?.label).toBe(`Look up "${"a".repeat(23)}…"`);
   });
 
   it("offers Paste and Match Style on macOS only while Paste applies", () => {
@@ -206,7 +206,7 @@ describe("text menu template", () => {
     const selected = params({ selectionText: "plan", editFlags: { ...noFlags, canCopy: true } });
     expect(shape(textMenuTemplate(selected, "win32", actions()))).toEqual(["role:copy"]);
     expect(shape(textMenuTemplate(selected, "darwin", actions()))).toEqual([
-      "Look up “plan”",
+      'Look up "plan"',
       "-",
       "role:copy",
       "-",
@@ -282,7 +282,7 @@ describe("text menu on a window", () => {
     expect(contents.replaceMisspelling).toHaveBeenCalledExactlyOnceWith("the");
     click(template, "Add to dictionary");
     expect(contents.session.addWordToSpellCheckerDictionary).toHaveBeenCalledExactlyOnceWith("teh");
-    click(template, "Look up “teh”");
+    click(template, 'Look up "teh"');
     expect(contents.showDefinitionForSelection).toHaveBeenCalledOnce();
   });
 

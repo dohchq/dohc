@@ -87,7 +87,7 @@ function parseKeyFile(content: string): Buffer {
   if (!trimmed.startsWith(SECRET_KEY_FILE_PREFIX)) {
     throw new SecretFileStoreError(
       "key-corrupt",
-      "The workspace secret key file is malformed; refusing to touch protected files. (dohc never regenerates a key over an existing file — that would orphan every protected snapshot.)",
+      "The workspace secret key file is malformed; refusing to touch protected files. dohc never regenerates a key over an existing file, because that would orphan every protected snapshot.",
     );
   }
   let key: Buffer;
@@ -121,13 +121,13 @@ async function verifyKeyDir(rootDir: string, path: string): Promise<void> {
       "key-corrupt",
       (error as NodeJS.ErrnoException).code === "ENOENT"
         ? "The .dohc/engine folder is missing. Restore this workspace's .dohc/engine folder, then try again."
-        : "dohc couldn't verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
+        : "dohc could not verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
     );
   }
   if (realParent !== expected) {
     throw new SecretFileStoreError(
       "key-corrupt",
-      "dohc didn't use .dohc/engine/secret.key because its folder resolves through a link. Move the folder the link points to into this workspace in place of the link.",
+      "dohc did not use .dohc/engine/secret.key because its folder resolves through a link. Move the folder the link points to into this workspace in place of the link.",
     );
   }
 }

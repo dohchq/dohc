@@ -746,7 +746,7 @@ export async function t3CodeThreadLink(input: {
     await refuse(response, new T3CodeError("refused", `T3 Code answered ${response.status}.`));
   const { environmentId } = shaped(Environment, await jsonOf(response));
   if (!LINK_PART.test(environmentId) || !LINK_PART.test(input.threadId))
-    throw new T3CodeError("unexpected", "dohc can't write a link to this thread.");
+    throw new T3CodeError("unexpected", "dohc cannot write a link to this thread.");
   return `t3code://threads/${environmentId}/${input.threadId}`;
 }
 

@@ -9,6 +9,7 @@ it.each(["wikilink", "markdown"] as const)(
     vi.stubGlobal("dohcDesktop", { linksResolve });
     expect(await resolveLinkNavigation("ws", "source.md", "#heading", kind, 7)).toEqual({
       path: "source.md",
+      create: false,
       headingTarget: { anchor: "heading", nonce: 7 },
     });
     expect(linksResolve).not.toHaveBeenCalled();
@@ -21,6 +22,7 @@ it("uses the resolved engine path and fragment", async () => {
   vi.stubGlobal("dohcDesktop", { linksResolve });
   expect(await resolveLinkNavigation("ws", "source.md", "actual#part", "wikilink", 8)).toEqual({
     path: "actual.md",
+    create: false,
     headingTarget: { anchor: "part", nonce: 8 },
   });
   expect(linksResolve).toHaveBeenCalledWith({
@@ -35,6 +37,7 @@ it("keeps an explicit empty fragment from an engine result", async () => {
   });
   expect(await resolveLinkNavigation("ws", "source.md", "target#", "wikilink", 1)).toEqual({
     path: "target.md",
+    create: false,
     headingTarget: { anchor: "", nonce: 1 },
   });
 });
@@ -50,6 +53,7 @@ it.each([
   });
   expect(await resolveLinkNavigation("ws", "notes/source.md", literal, "markdown", 9)).toEqual({
     path: create,
+    create: true,
     ...(fragment === null ? {} : { headingTarget: { anchor: fragment, nonce: 9 } }),
   });
 });

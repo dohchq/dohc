@@ -197,7 +197,7 @@ describe("a live note whose editor code loads after it opens", () => {
       const pane = document.querySelector("[data-testid='view-markdown']");
       frames.push({
         text: !!pane?.textContent?.includes("Base paragraph."),
-        rows: !!document.body.textContent?.includes("Loading editor..."),
+        rows: !!document.body.textContent?.includes("Loading editor…"),
         editor: !!pane?.querySelector("[data-testid='markdown-editor']"),
         top: pane?.scrollTop ?? 0,
       });

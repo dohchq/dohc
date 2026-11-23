@@ -9,7 +9,7 @@ import {
   type LiveUpdateRefusal,
 } from "@dohc/live-session-contract/live-update-admission";
 import type { StorageContext } from "./context";
-import { deleteSavedLiveRoomEdits, initializeRoomMigration } from "./liveRoomEdits";
+import { deleteLiveRoomEdits, initializeRoomMigration } from "./liveRoomEdits";
 import { documentParams } from "./liveUpdateJournal";
 import type { SqliteDb } from "./types";
 
@@ -48,6 +48,11 @@ export interface LiveRoomPause {
   readonly pauseId: string;
   readonly objectId: string;
   readonly lineageClaimId: string;
+  /**
+   * The note's last path the relay knew. A note moved or deleted outside dohc keeps the path it
+   * had, so the owner's desktop can write the copy next to it.
+   */
+  readonly path: string;
   readonly pausedAtMs: number;
   /**
    * The journal cursor of the note's last save when it paused. The owner's computer has every
@@ -57,7 +62,7 @@ export interface LiveRoomPause {
   /** A save refused for a reason that will not clear by itself, or saves failing for too long. */
   readonly cause: LiveRoomPauseCause;
   readonly refusal: LiveUpdateRefusal | null;
-  /** Each sender in the refused save, or in the unsaved edits when saves kept failing. */
+  /** The senders whose unsaved edits went into the copy, up to the most a pause names. */
   readonly named: readonly LiveAuthorSnapshot[];
   /** Null once the owner's desktop has written the copy next to the note. */
   readonly copy: { readonly sha256: string; readonly byteLength: number } | null;
@@ -84,7 +89,7 @@ export function pauseLiveRoom(
   const named = JSON.stringify(input.named);
   const pauseId = randomUUID();
   storage.tx(() => {
-    deleteSavedLiveRoomEdits(storage, document, Number.MAX_SAFE_INTEGER);
+    deleteLiveRoomEdits(storage, document);
     const saved = storage.db
       .prepare(
         "SELECT COALESCE(MAX(journal_cursor),0) AS cursor FROM sync_relay_live_update_journal WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?",
@@ -174,7 +179,7 @@ export function liveRoomPauses(storage: StorageContext, workspaceId: string): Li
     .readTx(() =>
       storage.db
         .prepare(
-          `SELECT pause_id,object_id,lineage_claim_id,paused_at_ms,saved_cursor,cause,refusal,named_json,copy_sha256,length(copy_bytes) AS copy_length FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? ORDER BY paused_at_ms,pause_id`,
+          `SELECT p.pause_id,p.object_id,p.lineage_claim_id,d.current_path,p.paused_at_ms,p.saved_cursor,p.cause,p.refusal,p.named_json,p.copy_sha256,length(p.copy_bytes) AS copy_length FROM ${LIVE_ROOM_PAUSES} p LEFT JOIN sync_relay_live_documents d USING (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE p.workspace_id=? ORDER BY p.paused_at_ms,p.pause_id`,
         )
         .all(workspaceId),
     )
@@ -184,10 +189,13 @@ export function liveRoomPauses(storage: StorageContext, workspaceId: string): Li
         throw new Error("live room pause is damaged");
       const named: unknown = JSON.parse(String(row.named_json));
       if (!Array.isArray(named)) throw new Error("live room pause is damaged");
+      // A pause is taken only for a live document, and those rows are never deleted.
+      if (row.current_path === null) throw new Error("live room pause is damaged");
       return {
         pauseId: String(row.pause_id),
         objectId: String(row.object_id),
         lineageClaimId: String(row.lineage_claim_id),
+        path: String(row.current_path),
         pausedAtMs: Number(row.paused_at_ms),
         savedCursor: Number(row.saved_cursor),
         cause: String(row.cause) as LiveRoomPauseCause,

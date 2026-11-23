@@ -430,7 +430,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     bridgeMock.leaveSharedChannel.mockResolvedValue(undefined);
     renderView();
     expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
-      "Shared by owner@example.com — read-only",
+      "Shared by owner@example.com · Read-only",
     );
 
     await userEvent.click(screen.getByTestId("chats-channel"));
@@ -524,12 +524,12 @@ describe("ChatsView shared channels (MU-C4)", () => {
     bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ joined: [endedRow] }));
     renderView();
     expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
-      "no longer shared",
+      "No longer shared",
     );
     await userEvent.click(screen.getByTestId("chats-channel"));
     const note = await screen.findByTestId("chats-readonly-note");
     expect(note.textContent).toBe(
-      "This group is no longer shared with you. You can still read it.",
+      "This Group is no longer shared with you. You can still read it.",
     );
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
     cleanup();
@@ -540,11 +540,11 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
     renderView();
     expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
-      "the owner removed your access",
+      "The owner removed your access",
     );
     await userEvent.click(screen.getByTestId("chats-channel"));
     expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(
-      "The owner removed your access to this group. You can still read it.",
+      "The owner removed your access to this Group. You can still read it.",
     );
     cleanup();
 
@@ -572,7 +572,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     renderView();
     await userEvent.click(await screen.findByTestId("chats-channel"));
     expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(
-      "You left this group. You can still read it.",
+      "You left this Group. You can still read it.",
     );
   });
   it("offers the files a Group's messages may link: a joined Group's mount by its paths, a shared Group's folder, and every file otherwise", async () => {

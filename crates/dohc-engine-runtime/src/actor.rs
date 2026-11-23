@@ -79,8 +79,9 @@ pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
 pub use relay::{
     RelayConfiguration, RelayOperation, RelayOperationOutcome, ShareViewIdentityRecord,
 };
+pub use secrets::SecretWriteDisk;
 pub use versioned::{
-    BinaryWriteExecutionResult, MergeExecutionResult, RollbackExecutionResult,
+    BinaryWriteExecutionResult, MergeExecutionResult, PathClearSince, RollbackExecutionResult,
     TextWriteExecutionResult, WriteConditions,
 };
 pub use versions::{ActiveVersionSwitch, HistoryPageRead};
@@ -157,12 +158,15 @@ pub enum LifecycleState {
     Closed,
     /// An unfinished authored create must recover before another command runs.
     RecoveryRequired,
+    /// The store's page check found damage, so the worker stopped serving and
+    /// released the connection. A reopen checks the whole store first.
+    Damaged,
 }
 
 impl LifecycleState {
     /// Reopening must replace an actor that cannot accept more workspace work.
     pub const fn needs_reopen(self) -> bool {
-        matches!(self, Self::Closed | Self::RecoveryRequired)
+        matches!(self, Self::Closed | Self::RecoveryRequired | Self::Damaged)
     }
 
     const fn as_u8(self) -> u8 {
@@ -172,6 +176,7 @@ impl LifecycleState {
             LifecycleState::Draining => 2,
             LifecycleState::Closed => 3,
             LifecycleState::RecoveryRequired => 4,
+            LifecycleState::Damaged => 5,
         }
     }
 
@@ -181,6 +186,7 @@ impl LifecycleState {
             1 => LifecycleState::Ready,
             2 => LifecycleState::Draining,
             4 => LifecycleState::RecoveryRequired,
+            5 => LifecycleState::Damaged,
             _ => LifecycleState::Closed,
         }
     }
@@ -1236,18 +1242,31 @@ fn worker_main(
     released_tails: ReleasedTails,
     markdown_recovery: Arc<MarkdownRecoverySignal>,
 ) {
-    // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
-    // panicking fault injector). Declared before `store` so `store` (and its
-    // connection) drops first, then this guard publishes Closed: a reader that
-    // observes Closed is guaranteed the writer handle is already gone.
-    struct ClosedGuard(Arc<AtomicU8>);
+    // Publish Closed, or Damaged, on any exit — normal return OR a panic
+    // unwind (e.g. a panicking fault injector). Declared before `store` so
+    // `store` (and its connection) drops first, then this guard publishes:
+    // a reader that observes either is guaranteed the writer handle is
+    // already gone.
+    struct ClosedGuard {
+        state: Arc<AtomicU8>,
+        damaged: Arc<AtomicBool>,
+    }
     impl Drop for ClosedGuard {
         fn drop(&mut self) {
-            self.0
-                .store(LifecycleState::Closed.as_u8(), Ordering::Release);
+            let end = if self.damaged.load(Ordering::Acquire) {
+                LifecycleState::Damaged
+            } else {
+                LifecycleState::Closed
+            };
+            self.state.store(end.as_u8(), Ordering::Release);
         }
     }
-    let _closed_guard = ClosedGuard(Arc::clone(&state));
+    let store_damaged = Arc::new(AtomicBool::new(false));
+    let mut unserved_after_damage = Vec::new();
+    let _closed_guard = ClosedGuard {
+        state: Arc::clone(&state),
+        damaged: Arc::clone(&store_damaged),
+    };
     // Drop SQLite first, then its owner lock, then publish Closed, including unwind.
     let _writer_lock = writer_lock;
 
@@ -1255,7 +1274,6 @@ fn worker_main(
     // the whole file. If the check then finds damage, this actor stops: the
     // flag ends the loop before its next command, and the wake reaches a loop
     // that waits for one. A full channel needs no wake.
-    let store_damaged = Arc::new(AtomicBool::new(false));
     let damaged: dohc_engine_storage::PagesDamaged = {
         let store_damaged = Arc::clone(&store_damaged);
         Box::new(move || {
@@ -1476,9 +1494,10 @@ fn worker_main(
             }
             continue;
         };
-        // A damaged store serves nothing more. Dropping the command tells
-        // its caller that the actor is unavailable.
+        // A damaged store serves nothing more. Its caller hears that the
+        // actor is unavailable once the actor has published Damaged.
         if store_damaged.load(Ordering::Acquire) {
+            unserved_after_damage.push(cmd);
             break;
         }
         // Counted as each command starts, so its caller sees the count by the

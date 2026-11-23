@@ -11,7 +11,13 @@ const ROUTES = [
   "JoinApp.tsx",
   "WorkspaceApp.tsx",
 ];
-const EDITOR = ["NamedDocumentEditor.tsx", "DiscardDraft.tsx"];
+const EDITOR = [
+  "NamedDocumentEditor.tsx",
+  "DiscardDraft.tsx",
+  "LinkDocumentEditor.tsx",
+  "CollectionFileEditor.tsx",
+  "linkLive.ts",
+];
 
 it("loads only each route's own code before it renders", async () => {
   const result = await build({
@@ -59,6 +65,7 @@ it("loads only each route's own code before it renders", async () => {
   });
   // A member's page loads the live editor only once a page opens for editing.
   expect(loads(pages["workspace.html"]!, EDITOR)).toEqual([]);
+  expect(loads(pages["index.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["chat.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["apps.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["join.html"]!, EDITOR)).toEqual([]);

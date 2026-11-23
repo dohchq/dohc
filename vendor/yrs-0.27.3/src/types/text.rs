@@ -481,6 +481,40 @@ pub trait Text: AsRef<Branch> + Sized {
         Ok(())
     }
 
+    /// Visits every live item of this text in stored order, formatting items
+    /// included, without collecting or copying.
+    ///
+    /// Unlike [Text::try_visit_diff] it keeps no attribute map: a formatting
+    /// item is delivered as it is stored, so the caller decides which keys to
+    /// keep. The first visitor error stops traversal immediately.
+    fn try_visit_items<T, E, F>(&self, _txn: &T, mut visit: F) -> Result<(), E>
+    where
+        T: ReadTxn,
+        F: for<'a> FnMut(TextItem<'a>) -> Result<(), E>,
+    {
+        let mut next = self.as_ref().start;
+        while let Some(item) = next.as_deref() {
+            if !item.is_deleted() {
+                let stored = match &item.content {
+                    ItemContent::String(value) => TextItem::Letters(value.as_str()),
+                    ItemContent::Format(key, value) => {
+                        TextItem::Format(key.as_ref(), value.as_ref())
+                    }
+                    ItemContent::Type(_) | ItemContent::Embed(_) => {
+                        match item.content.get_first() {
+                            Some(embedded) => TextItem::Embed(embedded),
+                            None => TextItem::Other,
+                        }
+                    }
+                    _ => TextItem::Other,
+                };
+                visit(stored)?;
+            }
+            next = item.right;
+        }
+        Ok(())
+    }
+
     /// Returns the Delta representation of this YText type.
     fn diff_range<D, F>(
         &self,
@@ -568,6 +602,19 @@ where
     fn integrate(self, txn: &mut TransactionMut, inner_ref: BranchPtr) {
         self.0.integrate(txn, inner_ref)
     }
+}
+
+/// One live item of a text, delivered by [Text::try_visit_items].
+pub enum TextItem<'a> {
+    /// The text of one string item. It can be empty.
+    Letters(&'a str),
+    /// A formatting item: its key and the value it holds.
+    Format(&'a str, &'a Any),
+    /// One embed. Shared types are handles and `Any` payloads use shared
+    /// backing storage, so delivering this value does not copy its payload.
+    Embed(Out),
+    /// An item of any other content, which no text API writes.
+    Other,
 }
 
 /// A fragment of the current text Delta, delivered by [Text::try_visit_diff].
@@ -1129,6 +1176,7 @@ fn clean_format_gap(
             ItemContent::Format(key, value) if !item.is_deleted() => {
                 update_current_attributes(end_attrs, key.as_ref(), value);
             }
+            _ if !item.is_deleted() && item.is_countable() => break,
             _ => {}
         }
         end = item.right.clone();

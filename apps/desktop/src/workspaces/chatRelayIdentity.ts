@@ -114,7 +114,7 @@ export function assertSyncEnrollmentCredentials(
   const remote = workspace.remote ?? workspace.pausedRemote;
   if (!remote) return;
   if (!serverUrlsMatch(remote.serverUrl, credentials.serverUrl)) {
-    throw new Error("Sign in to the cloud server this workspace uses.");
+    throw new Error("Sign in to the server this workspace uses.");
   }
   if (remote.ownerUserId !== credentials.userId) {
     throw new Error("Sign in to the account that synced this workspace.");
@@ -180,7 +180,7 @@ export function assertSharedChannelMessageIdentity(input: {
     !input.credentials.relayUrl ||
     !relayUrlsMatch(input.credentials.relayUrl, input.joinedChannel.relayUrl)
   ) {
-    throw new Error("Sign in to the cloud server this was shared from.");
+    throw new Error("Sign in to the server this was shared from.");
   }
   if (
     input.credentials.userId !== input.joinedChannel.recipientUserId ||

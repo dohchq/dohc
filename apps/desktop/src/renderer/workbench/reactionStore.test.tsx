@@ -121,6 +121,23 @@ const settled = (store: ReactionStore, messageId = "m1", threadId = "thread-1") 
   waitFor(() => expect(store.pending(threadId, messageId)).toBe(false));
 
 describe("reaction store: one chain per cell", () => {
+  it("leaves the viewer's agents' reactions alone when the viewer toggles", async () => {
+    const agent = you({
+      reactionId: "r-agent",
+      authorKind: "agent",
+      authorDisplayName: "Codex",
+    });
+    const h = setup([agent]);
+    bridgeMock.setChatReaction.mockReturnValue(new Promise(() => {}));
+    h.toggle("added");
+    expect(h.reactions).toEqual([
+      agent,
+      expect.objectContaining({ authorId: "you@x", authorKind: "human" }),
+    ]);
+    h.toggle("removed");
+    expect(h.reactions).toEqual([agent]);
+  });
+
   it("rolls a rejected write back to the prior cell state and keeps peers", async () => {
     const h = setup([peer]);
     bridgeMock.setChatReaction.mockRejectedValue(new TypeError("offline"));

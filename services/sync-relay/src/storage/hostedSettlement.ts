@@ -1,4 +1,4 @@
-import { clientMomentAuthorsRefused } from "../relayLogInputs";
+import { clientMomentAuthorsRefused, isOwnerLogOrigin } from "../relayLogInputs";
 import {
   parseHostControlIdentifier,
   parseHostEpoch,
@@ -234,6 +234,7 @@ type Prepared = {
   markdown: string;
   terminalDigest: string;
   before: string;
+  pushMovedFile: boolean;
 };
 const prepared = new WeakMap<SyncRelayLogInput, Prepared>();
 /** What a verified settlement record proves: its binding and accepted interval. */
@@ -612,13 +613,44 @@ function prepareBindingBase(storage: StorageContext, p: Prepared, budget: Restor
   }
   p.baseBindingJson = stableJsonStringify(metadata.accepted.binding);
 }
+function ownerSavedSince(
+  storage: StorageContext,
+  p: Prepared,
+  settled: { originId: string; originSeq: number },
+): boolean {
+  const stored = storage.db
+    .prepare(
+      `SELECT f.blob_sha256,l.relay_seq,l.origin_id,json_extract(l.payload_json,'$.objectId') AS object_id,
+        (SELECT s.relay_seq FROM sync_relay_log s WHERE s.workspace_id=f.workspace_id AND s.origin_id=? AND s.origin_seq=?) AS settled_seq
+        FROM sync_relay_current_files f JOIN sync_relay_log l ON l.relay_seq=f.state_relay_seq
+        WHERE f.workspace_id=? AND f.version_id='main' AND f.path=?`,
+    )
+    .get(settled.originId, settled.originSeq, p.binding.workspaceId, p.binding.currentPath);
+  return (
+    !p.pushMovedFile &&
+    p.before === p.markdown &&
+    stored?.blob_sha256 === p.before &&
+    stored.object_id === p.binding.objectId &&
+    typeof stored.origin_id === "string" &&
+    isOwnerLogOrigin(stored.origin_id) &&
+    typeof stored.settled_seq === "number" &&
+    Number(stored.relay_seq) > stored.settled_seq
+  );
+}
 function requirePublicationPredecessor(
   storage: StorageContext,
   p: Prepared,
-  prior: { terminal: number; markdown: string; namespace: string },
+  prior: {
+    terminal: number;
+    markdown: string;
+    namespace: string;
+    settled?: { originId: string; originSeq: number };
+  },
 ) {
   require(prior.terminal <= p.previous, "predecessor-published-past");
-  require(prior.markdown === p.before, "predecessor-markdown");
+  require(prior.markdown === p.before ||
+    (prior.settled !== undefined &&
+      ownerSavedSince(storage, p, prior.settled)), "predecessor-markdown");
   require(prior.namespace === p.namespace, "predecessor-namespace");
   if (prior.terminal === p.previous) return;
   const b = p.initialBinding;
@@ -668,6 +700,7 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
       terminal: integer(prior.terminal_cursor, "published-terminal-cursor"),
       markdown: String(prior.markdown_sha256),
       namespace: String(prior.namespace),
+      settled: { originId: String(prior.origin_id), originSeq: Number(prior.origin_seq) },
     });
     return;
   }
@@ -697,7 +730,7 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
     restoreFenceGeneration: base.restore_fence_generation,
   }) === p.baseBindingJson, "base-binding");
 }
-type ProvedSettlement = Omit<Prepared, "before"> & {
+type ProvedSettlement = Omit<Prepared, "before" | "pushMovedFile"> & {
   events: ReturnType<typeof readAcceptedHistoryInterval>;
 };
 /**
@@ -877,7 +910,7 @@ export async function prepareHostedSettlements(
   signal?: AbortSignal,
 ) {
   const provisional = new Map<string, Prepared>();
-  for (const op of input.ops) {
+  for (const [index, op] of input.ops.entries()) {
     if (op.opKind !== "moment.append") continue;
     const payload = bag(JSON.parse(op.payloadJson), "payload-object");
     if (!Object.hasOwn(payload, "settlementReference")) {
@@ -942,7 +975,17 @@ export async function prepareHostedSettlements(
       if (!after) throw relayError("blob_missing");
       require(payload.payloadAfterByteLength ===
         integer(after.byte_length, "markdown-length"), "markdown-length");
-      const p: Prepared = { ...proved, before: String(payload.payloadBeforeBlobSha256) };
+      const p: Prepared = {
+        ...proved,
+        before: String(payload.payloadBeforeBlobSha256),
+        pushMovedFile: input.ops
+          .slice(0, index)
+          .some(
+            (earlier) =>
+              earlier.opKind === "moment.append" &&
+              JSON.parse(earlier.payloadJson).path === proved.binding.currentPath,
+          ),
+      };
       const document = p.binding;
       const key = JSON.stringify(documentParams(document)),
         prior = provisional.get(key);

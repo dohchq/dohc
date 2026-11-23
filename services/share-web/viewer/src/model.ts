@@ -546,3 +546,9 @@ export function resolveSharedImage(
     ? `/api/view/blob/${file.blobSha256}?session=${session}`
     : null;
 }
+
+/** A Collection's collection.yaml or automations.yaml, as its schema and automations are named on disk. */
+export function isCollectionOwnFile(path: string): boolean {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return path.includes("/") && (name === "collection.yaml" || name === "automations.yaml");
+}

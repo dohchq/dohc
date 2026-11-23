@@ -71,6 +71,38 @@ afterAll(() => {
 const CHILD_TIMEOUT_MS = 45_000;
 
 describe("relay deployment continuity", () => {
+  it("names each part of the open as it ends, in order", () => {
+    const f = fixture(),
+      parts: string[] = [];
+    openRelayDeployment(f.configPath, { opened: (part) => parts.push(part) }).storage.close();
+    expect(parts).toEqual(["lock", "file", "continuity", "schema", "purge"]);
+  });
+
+  it("names the three parts of an open with no deployment", () => {
+    const root = mkdtempSync(join(tmpdir(), "relay-plain-open-")),
+      parts: string[] = [];
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    openSyncRelayStorage(join(root, "relay.sqlite"), {
+      opened: (part) => parts.push(part),
+    }).close();
+    expect(parts).toEqual(["file", "schema", "purge"]);
+  });
+
+  it.each(["lock", "file", "continuity", "schema", "purge"] as const)(
+    "lets the deployment open again after its open failed at the end of its %s part",
+    (failing) => {
+      const f = fixture();
+      expect(() =>
+        openRelayDeployment(f.configPath, {
+          opened(part) {
+            if (part === failing) throw new Error("The caller failed.");
+          },
+        }),
+      ).toThrow("The caller failed.");
+      openRelayDeployment(f.configPath).storage.close();
+    },
+  );
+
   it("reuses its private dataset root and reclaims crashed preview directories on restart", async () => {
     const f = fixture(),
       first = openRelayDeployment(f.configPath);

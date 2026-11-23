@@ -57,6 +57,12 @@ export type WorkspaceProposalRoute =
 // and its own name so the bound says what it bounds.
 const MAX_SUBMIT_ID_CHARS = 128;
 
+function liveFilesMessage(path: string, count: number): string {
+  return count === 1
+    ? `dohc could not accept these changes because ${path} is being edited live. Stop live editing for it in Live documents, then accept them.`
+    : `dohc could not accept these changes because ${path} and ${count - 1} more ${count === 2 ? "file are" : "files are"} being edited live. Stop live editing for them in Live documents, then accept them.`;
+}
+
 export function createProposalRoutes(
   storage: Pick<
     SyncRelayStorage,
@@ -72,6 +78,7 @@ export function createProposalRoutes(
     | "appendLogBatch"
     | "workspaceIsOwnedBy"
     | "settleShareProposalInTransaction"
+    | "isHostedForLiveEditing"
     | "findChannelCreateKind"
   >,
   nowMs: () => number,
@@ -398,8 +405,14 @@ export function createProposalRoutes(
       // numbers loses on appendLogBatch's own dense-sequence check.
       let originSeq = storage.maxOriginSeq(route.workspaceId, originId);
       const logOps: SyncRelayLogInput[] = [];
+      const touched: Array<{ objectId: string; path: string | null }> = [];
       for (const op of proposal.ops) {
         const resolved = proposalBase(storage, route.workspaceId, versionId, op);
+        if (versionId === "main" && op.basedOnObjectId !== null)
+          touched.push({
+            objectId: op.basedOnObjectId,
+            path: resolved.head?.path ?? op.basedOnPath,
+          });
         const built = proposalMomentPayload(op, {
           versionId,
           // A file the granter does not have gets a new object id, minted
@@ -434,6 +447,15 @@ export function createProposalRoutes(
         // batch rolls back.
         guard: () => {
           if (!storage.workspaceIsOwnedBy(route.workspaceId, actorUserId)) throw notFound();
+          const live = touched.filter((file) =>
+            storage.isHostedForLiveEditing(route.workspaceId, file.objectId),
+          );
+          const named = live.find((file) => file.path !== null)?.path;
+          if (live.length > 0)
+            throw relayError(
+              "proposal-file-live",
+              named ? liveFilesMessage(named, live.length) : undefined,
+            );
           if (!storage.settleShareProposalInTransaction(route.proposalId, "accepted", nowMs())) {
             throw relayError(
               "conflict",
