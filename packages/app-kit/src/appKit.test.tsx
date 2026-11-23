@@ -10,6 +10,7 @@ import {
   mutationKey,
   useDatasetMutation,
   useDatasetQuery,
+  type AppClient,
 } from "./app";
 import {
   AppShell,
@@ -1037,7 +1038,7 @@ describe("dohc/ui and dohc/charts", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("routes multi-Collection client.dataset(alias), useDatasetQuery, and useDatasetMutation over the broker", async () => {
+  it("serializes multi-Collection client.dataset(alias), useDatasetQuery, and useDatasetMutation messages", async () => {
     const channel = new MessageChannel();
     const seen: Array<Record<string, unknown>> = [];
     channel.port1.onmessage = (event: MessageEvent) => {
@@ -1050,6 +1051,21 @@ describe("dohc/ui and dohc/charts", () => {
           value: {
             result: { dataset: msg.dataset ?? null, op: msg.operation },
             revision: 3,
+            replayed: false,
+          },
+        });
+      } else if (msg.op === "backend.upload") {
+        channel.port1.postMessage({
+          id: msg.id,
+          ok: true,
+          value: {
+            file: {
+              fileId: "file_1",
+              name: String(msg.name),
+              contentType: String(msg.contentType),
+              byteLength: 4,
+              sha256: "a".repeat(64),
+            },
             replayed: false,
           },
         });
@@ -1067,6 +1083,18 @@ describe("dohc/ui and dohc/charts", () => {
 
       expensesA.close();
       expect(await expensesA.read("list")).toEqual({ dataset: "expenses", op: "list" });
+
+      const sneakyUpload = {
+        name: "receipt.txt",
+        contentType: "text/plain",
+        bytesBase64: "ZGF0YQ==",
+        dataset: "workouts",
+      };
+      await expensesA.upload(sneakyUpload, "up-scoped");
+      await client.upload(sneakyUpload, "up-root");
+      const uploads = seen.filter((msg) => msg.op === "backend.upload");
+      expect(uploads[0]?.dataset).toBe("expenses");
+      expect(Object.hasOwn(uploads[1]!, "dataset")).toBe(false);
 
       function MultiHarness() {
         const q1 = useDatasetQuery<{ dataset: string | null; op: string }>(
@@ -1130,5 +1158,128 @@ describe("dohc/ui and dohc/charts", () => {
       client.close();
       channel.port1.close();
     }
+  });
+
+  it("memoizes custom AppClient.dataset(alias) targets in useDatasetQuery and isolates useDatasetMutation state across alias switches", async () => {
+    let queryInvocations = 0;
+    let rejectExpense!: (error: unknown) => void;
+    const retryCalls: Array<{ alias: string; key?: string }> = [];
+    let expenseAttempt = 0;
+
+    const makeClient = (alias?: string): AppClient => ({
+      async invoke<T>(operation: string, _input?: unknown, idempotencyKey?: string) {
+        if (operation === "list") {
+          queryInvocations += 1;
+          return { result: { alias } as T, revision: 1, replayed: false };
+        }
+        if (alias === "expenses") {
+          expenseAttempt += 1;
+          retryCalls.push({ alias, key: idempotencyKey });
+          if (expenseAttempt === 1) {
+            return await new Promise<never>((_resolve, reject) => {
+              rejectExpense = reject;
+            });
+          }
+          return { result: { saved: "expenses" } as T, revision: 2, replayed: true };
+        }
+        retryCalls.push({ alias: alias ?? "", key: idempotencyKey });
+        return { result: { saved: alias } as T, revision: 2, replayed: false };
+      },
+      async read<T>() {
+        return {} as T;
+      },
+      async upload() {
+        throw new Error("unused");
+      },
+      async file() {
+        throw new Error("unused");
+      },
+      async attempt() {
+        return { attempt: null };
+      },
+      dataset(nextAlias: string) {
+        return makeClient(nextAlias);
+      },
+      close() {},
+    });
+
+    const customClient = makeClient();
+    function SwitchHarness() {
+      const [alias, setAlias] = useState("expenses");
+      const query = useDatasetQuery<{ alias?: string }>("list", {}, { dataset: alias });
+      const mutation = useDatasetMutation<{ v: number }, { saved: string }>("save", {
+        dataset: alias,
+      });
+      return (
+        <div>
+          <p data-testid="alias">{alias}</p>
+          <p data-testid="q-alias">{query.data?.alias ?? "loading"}</p>
+          <p data-testid="m-err">{mutation.error ? String(mutation.error.status) : "none"}</p>
+          <p data-testid="m-uncertain">{mutation.uncertain ? "yes" : "no"}</p>
+          <p data-testid="m-pending">{mutation.pending ? "yes" : "no"}</p>
+          <button
+            type="button"
+            onClick={() => {
+              void mutation.mutate({ v: 1 }, "exp-key-1").catch(() => {});
+            }}
+          >
+            Save
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void mutation.retry().catch(() => {});
+            }}
+          >
+            Retry
+          </button>
+          <button type="button" onClick={() => setAlias("workouts")}>
+            Switch workouts
+          </button>
+          <button type="button" onClick={() => setAlias("expenses")}>
+            Switch expenses
+          </button>
+        </div>
+      );
+    }
+
+    render(
+      <AppProvider client={customClient}>
+        <SwitchHarness />
+      </AppProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("q-alias").textContent).toBe("expenses"));
+    expect(queryInvocations).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.getByTestId("m-pending").textContent).toBe("yes"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch workouts" }));
+    await waitFor(() => expect(screen.getByTestId("q-alias").textContent).toBe("workouts"));
+    expect(queryInvocations).toBe(2);
+
+    rejectExpense(new AppBackendError(503));
+    await waitFor(() => {
+      expect(screen.getByTestId("m-err").textContent).toBe("none");
+      expect(screen.getByTestId("m-uncertain").textContent).toBe("no");
+      expect(screen.getByTestId("m-pending").textContent).toBe("no");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch expenses" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("m-err").textContent).toBe("503");
+      expect(screen.getByTestId("m-uncertain").textContent).toBe("yes");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("m-uncertain").textContent).toBe("no");
+      expect(screen.getByTestId("m-err").textContent).toBe("none");
+    });
+    expect(retryCalls).toEqual([
+      { alias: "expenses", key: "exp-key-1" },
+      { alias: "expenses", key: "exp-key-1" },
+    ]);
   });
 });

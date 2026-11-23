@@ -42,6 +42,8 @@ import {
 } from "@dohc/app-backend-runtime/supervisor";
 import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
 import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
+import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import { createLocalAppStore, type LocalAppStore } from "./localAppStore";
 import { createLocalApps } from "./localApps";
 import { createServerDatasetApps, type ServerCollectionsTransport } from "./serverDatasetApps";
@@ -669,17 +671,37 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         const affectedMultiIds: string[] = [];
         const multiRows = db
           .prepare(
-            `SELECT app.publication_id, app.storage_bytes
-             FROM local_dataset_apps app
-             JOIN dohc_dataset_bindings binding
-               ON binding.workspace_id = ? AND binding.dataset_id = ? AND binding.app_id = app.publication_id
-             WHERE app.dataset_id = ''`,
+            "SELECT publication_id, candidate, storage_bytes FROM local_dataset_apps WHERE dataset_id = ''",
           )
-          .all(workspaceId, key.datasetId) as Array<{
+          .all() as Array<{
           publication_id: string;
+          candidate: string;
           storage_bytes: number;
         }>;
         for (const row of multiRows) {
+          const bound = Boolean(
+            db
+              .prepare(
+                "SELECT 1 FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+              )
+              .get(workspaceId, key.datasetId, row.publication_id),
+          );
+          let referenced = false;
+          if (!bound) {
+            try {
+              const candidate = parseAppPublicationCandidate(
+                JSON.parse(row.candidate),
+                APP_PUBLICATION_LIMITS,
+              );
+              referenced = candidate.capabilities.some(
+                (capability) =>
+                  capability.kind === "dataset" && capability.datasetId === key.datasetId,
+              );
+            } catch {
+              referenced = false;
+            }
+          }
+          if (!bound && !referenced) continue;
           affectedMultiIds.push(row.publication_id);
           const siblingBindings = db
             .prepare(

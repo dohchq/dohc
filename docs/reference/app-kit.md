@@ -91,7 +91,7 @@ A Collection binding can name operations directly and omit `revision` and `revis
 
 ## Multi-Collection owner apps (`datasets`)
 
-An owner desktop app can bind between 1 and 16 Collections on the same host by replacing `dataset` with a `datasets` map keyed by lowercase alias (`^[a-z][a-z0-9_-]{0,63}$`). Each alias maps to one Collection reference and cannot share a `datasetId` with another alias. Shared links, named shares, and phone apps stay at one Collection.
+An owner desktop app can bind between 1 and 16 Collections on the same host by replacing `dataset` with a `datasets` map keyed by lowercase alias (`^[a-z][a-z0-9_-]{0,63}$`, excluding the reserved names `constructor` and `prototype`). Each alias maps to one Collection reference and cannot share a `datasetId` with another alias. Shared links, named shares, and phone apps stay at one Collection.
 
 ```json
 {
@@ -120,7 +120,7 @@ const logWorkout = useDatasetMutation("logWorkout", { dataset: "workouts" });
 const workoutsClient = useApp().dataset("workouts");
 ```
 
-Each Collection keeps its own permissions, idempotency keys, file storage, and rate-limit scope. Archiving or deleting any bound Collection stops the app until you restore or re-approve it.
+Each Collection keeps its own permissions, idempotency keys, file storage, and per-Collection rate limit. Owner requests to all bound Collections also share one budget. When that budget is empty, calls to any bound Collection are refused. Archiving or deleting any bound Collection stops the app until you restore or re-approve it.
 
 ## Slug-based `dataset.json` (`formatVersion: 2`)
 

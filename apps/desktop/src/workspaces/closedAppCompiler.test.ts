@@ -246,6 +246,108 @@ globalThis.unmountBrokerTest = () => root.unmount();`,
     }
   });
 
+  it("forwards valid dataset aliases through attachAppCollectionBroker and rejects invalid or reserved aliases", async () => {
+    const forwarded: Array<Record<string, unknown>> = [];
+    let port: MessagePort | undefined;
+    const listeners = new Map<string, Array<() => void>>();
+    const frame = {
+      addEventListener(type: string, cb: () => void) {
+        const list = listeners.get(type) ?? [];
+        list.push(cb);
+        listeners.set(type, list);
+      },
+      contentWindow: {
+        postMessage(_message: unknown, _target: string, transfer: MessagePort[]) {
+          port = transfer[0];
+        },
+      },
+    } as unknown as HTMLIFrameElement;
+    const controller = new AbortController();
+    attachAppCollectionBroker(
+      frame,
+      async (body) => {
+        forwarded.push(body as Record<string, unknown>);
+        return Response.json({ ok: true });
+      },
+      controller.signal,
+    );
+    for (const cb of listeners.get("load") ?? []) cb();
+    const ask = (payload: Record<string, unknown>) =>
+      new Promise<Record<string, unknown>>((resolve) => {
+        const onMsg = (event: MessageEvent) => {
+          port!.removeEventListener("message", onMsg);
+          resolve(event.data as Record<string, unknown>);
+        };
+        port!.addEventListener("message", onMsg);
+        port!.start();
+        port!.postMessage(payload);
+      });
+    try {
+      expect(
+        await ask({
+          id: "req-1",
+          op: "backend.invoke",
+          dataset: "expenses",
+          operation: "list",
+          input: {},
+          idempotencyKey: "k1",
+        }),
+      ).toEqual({ id: "req-1", ok: true, value: { ok: true } });
+      expect(
+        await ask({
+          id: "req-2",
+          op: "backend.upload",
+          dataset: "workouts",
+          name: "a.txt",
+          contentType: "text/plain",
+          bytesBase64: "YQ==",
+          idempotencyKey: "k2",
+        }),
+      ).toEqual({ id: "req-2", ok: true, value: { ok: true } });
+      expect(
+        await ask({
+          id: "req-3",
+          op: "backend.file",
+          dataset: "expenses",
+          fileId: "file_1",
+          operation: "read",
+          input: {},
+        }),
+      ).toEqual({ id: "req-3", ok: true, value: { ok: true } });
+      expect(
+        await ask({
+          id: "req-4",
+          op: "backend.attempt",
+          dataset: "workouts",
+          operation: "log",
+          request: { action: "get" },
+        }),
+      ).toEqual({ id: "req-4", ok: true, value: { ok: true } });
+      expect(forwarded.map((entry) => [entry.op, entry.dataset])).toEqual([
+        ["backend.invoke", "expenses"],
+        ["backend.upload", "workouts"],
+        ["backend.file", "expenses"],
+        ["backend.attempt", "workouts"],
+      ]);
+
+      for (const bad of ["BadAlias", "prototype", "constructor", ""]) {
+        expect(
+          await ask({
+            id: `bad-${bad || "empty"}`,
+            op: "backend.invoke",
+            dataset: bad,
+            operation: "list",
+            input: {},
+            idempotencyKey: "k-bad",
+          }),
+        ).toEqual({ id: `bad-${bad || "empty"}`, ok: false, status: 400 });
+      }
+      expect(forwarded).toHaveLength(4);
+    } finally {
+      controller.abort();
+    }
+  });
+
   it("refuses missing and escaping package targets, transitive imports, and invalid or oversized maps", async () => {
     const main = file("main.ts", "import 'trip'");
     for (const target of ["missing.js", "../private.js"]) {

@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -522,7 +523,8 @@ export function useDatasetQuery<T = unknown>(
   options?: DatasetQueryOptions,
 ): DatasetQueryState<T> {
   const client = useApp();
-  const target = resolveTargetClient(client, options?.dataset);
+  const datasetAlias = options?.dataset;
+  const target = useMemo(() => resolveTargetClient(client, datasetAlias), [client, datasetAlias]);
   const enabled = options?.enabled ?? true;
   let serializedInput: string | null = null;
   if (enabled) {
@@ -539,7 +541,7 @@ export function useDatasetQuery<T = unknown>(
   }
   const invalidInput = enabled && serializedInput === null;
   const invalidRequest = enabled && (target === null || invalidInput);
-  const scope = `${target ? clientIdOf(target) : "invalid"}:${options?.dataset ?? ""}:${operation}:${
+  const scope = `${target ? clientIdOf(target) : "invalid"}:${datasetAlias ?? ""}:${operation}:${
     !enabled ? "disabled" : invalidInput ? "invalid" : `s:${serializedInput}`
   }`;
 
@@ -633,6 +635,7 @@ export interface DatasetMutationState<TInput, TResult> {
 
 type RetainedSubmission = {
   readonly id: number;
+  readonly scopeKey: string;
   readonly client: AppClient;
   readonly operation: string;
   readonly key: string;
@@ -644,13 +647,17 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
   options?: DatasetMutationOptions,
 ): DatasetMutationState<TInput, TResult> {
   const client = useApp();
-  const target = resolveTargetClient(client, options?.dataset);
-  const [inFlightCount, setInFlightCount] = useState(0);
-  const [error, setError] = useState<AppBackendError | null>(null);
-  const [retained, setRetained] = useState<readonly RetainedSubmission[]>([]);
-  const retainedRef = useRef<readonly RetainedSubmission[]>([]);
+  const datasetAlias = options?.dataset;
+  const target = useMemo(() => resolveTargetClient(client, datasetAlias), [client, datasetAlias]);
+  const scopeKey = `${clientIdOf(client)}:${datasetAlias ?? ""}`;
+  const [inFlightByScope, setInFlightByScope] = useState<Record<string, number>>({});
+  const [errorByScope, setErrorByScope] = useState<Record<string, AppBackendError | null>>({});
+  const [retainedByScope, setRetainedByScope] = useState<
+    Record<string, readonly RetainedSubmission[]>
+  >({});
+  const retainedByScopeRef = useRef<Record<string, readonly RetainedSubmission[]>>({});
   const nextAttemptId = useRef(1);
-  const discardFloor = useRef(0);
+  const discardFloorByScope = useRef(new Map<string, number>());
   const inFlightRetries = useRef(new Map<number, Promise<InvokeReply<TResult>>>());
   const mounted = useRef(true);
 
@@ -661,12 +668,17 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
     };
   }, []);
 
-  const updateRetained = useCallback(
-    (updater: (current: readonly RetainedSubmission[]) => readonly RetainedSubmission[]) => {
-      const next = updater(retainedRef.current);
-      retainedRef.current = next;
+  const updateRetainedForScope = useCallback(
+    (
+      targetScope: string,
+      updater: (current: readonly RetainedSubmission[]) => readonly RetainedSubmission[],
+    ) => {
+      const existing = retainedByScopeRef.current[targetScope] ?? [];
+      const nextList = updater(existing);
+      const nextMap = { ...retainedByScopeRef.current, [targetScope]: nextList };
+      retainedByScopeRef.current = nextMap;
       if (mounted.current) {
-        setRetained(next);
+        setRetainedByScope(nextMap);
       }
     },
     [],
@@ -674,53 +686,72 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
 
   const execute = useCallback(
     async (submission: RetainedSubmission): Promise<InvokeReply<TResult>> => {
+      const targetScope = submission.scopeKey;
       let payload: unknown;
       try {
         payload = JSON.parse(submission.payloadJson);
       } catch {
         const badInput = new AppBackendError(400);
-        if (mounted.current && submission.id >= discardFloor.current) setError(badInput);
-        updateRetained((current) => current.filter((item) => item.id !== submission.id));
+        const floor = discardFloorByScope.current.get(targetScope) ?? 0;
+        if (mounted.current && submission.id >= floor) {
+          setErrorByScope((current) => ({ ...current, [targetScope]: badInput }));
+        }
+        updateRetainedForScope(targetScope, (current) =>
+          current.filter((item) => item.id !== submission.id),
+        );
         throw badInput;
       }
-      setInFlightCount((count) => count + 1);
-      setError(null);
+      setInFlightByScope((current) => ({
+        ...current,
+        [targetScope]: (current[targetScope] ?? 0) + 1,
+      }));
+      setErrorByScope((current) => ({ ...current, [targetScope]: null }));
       try {
         const reply = await submission.client.invoke<TResult>(
           submission.operation,
           payload,
           submission.key,
         );
-        updateRetained((current) => current.filter((item) => item.id !== submission.id));
+        updateRetainedForScope(targetScope, (current) =>
+          current.filter((item) => item.id !== submission.id),
+        );
         return reply;
       } catch (caught) {
         const backendError = caught instanceof AppBackendError ? caught : new AppBackendError(503);
-        const eligible = submission.id >= discardFloor.current;
+        const floor = discardFloorByScope.current.get(targetScope) ?? 0;
+        const eligible = submission.id >= floor;
         if (mounted.current && eligible) {
-          setError(backendError);
+          setErrorByScope((current) => ({ ...current, [targetScope]: backendError }));
         }
         if (backendError.uncertain && eligible) {
-          updateRetained((current) =>
+          updateRetainedForScope(targetScope, (current) =>
             current.some((item) => item.id === submission.id) ? current : [...current, submission],
           );
         } else {
-          updateRetained((current) => current.filter((item) => item.id !== submission.id));
+          updateRetainedForScope(targetScope, (current) =>
+            current.filter((item) => item.id !== submission.id),
+          );
         }
         throw backendError;
       } finally {
         if (mounted.current) {
-          setInFlightCount((count) => Math.max(0, count - 1));
+          setInFlightByScope((current) => ({
+            ...current,
+            [targetScope]: Math.max(0, (current[targetScope] ?? 0) - 1),
+          }));
         }
       }
     },
-    [updateRetained],
+    [updateRetainedForScope],
   );
 
   const mutate = useCallback(
     async (input: TInput, idempotencyKey?: string) => {
       if (!target) {
         const badAlias = new AppBackendError(400);
-        if (mounted.current) setError(badAlias);
+        if (mounted.current) {
+          setErrorByScope((current) => ({ ...current, [scopeKey]: badAlias }));
+        }
         throw badAlias;
       }
       let payloadJson: string | undefined;
@@ -731,11 +762,14 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
       }
       if (payloadJson === undefined) {
         const badInput = new AppBackendError(400);
-        if (mounted.current) setError(badInput);
+        if (mounted.current) {
+          setErrorByScope((current) => ({ ...current, [scopeKey]: badInput }));
+        }
         throw badInput;
       }
       const submission: RetainedSubmission = {
         id: nextAttemptId.current++,
+        scopeKey,
         client: target,
         operation,
         key: idempotencyKey ?? mutationKey(operation),
@@ -743,11 +777,14 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
       };
       return execute(submission);
     },
-    [execute, operation, target],
+    [execute, operation, scopeKey, target],
   );
 
+  const retainedForScope = retainedByScope[scopeKey] ?? [];
+
   const retry = useCallback(async () => {
-    const next = retainedRef.current.find((item) => item.id >= discardFloor.current);
+    const floor = discardFloorByScope.current.get(scopeKey) ?? 0;
+    const next = (retainedByScopeRef.current[scopeKey] ?? []).find((item) => item.id >= floor);
     if (!next) return null;
     const active = inFlightRetries.current.get(next.id);
     if (active) return active;
@@ -758,22 +795,23 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
     });
     inFlightRetries.current.set(next.id, promise);
     return promise;
-  }, [execute]);
+  }, [execute, scopeKey]);
 
   const discardPending = useCallback(() => {
-    discardFloor.current = nextAttemptId.current;
-    inFlightRetries.current.clear();
-    retainedRef.current = [];
-    setRetained([]);
-    setError(null);
-  }, []);
+    discardFloorByScope.current.set(scopeKey, nextAttemptId.current);
+    for (const item of retainedByScopeRef.current[scopeKey] ?? []) {
+      inFlightRetries.current.delete(item.id);
+    }
+    updateRetainedForScope(scopeKey, () => []);
+    setErrorByScope((current) => ({ ...current, [scopeKey]: null }));
+  }, [scopeKey, updateRetainedForScope]);
 
   return {
     mutate,
     retry,
     discardPending,
-    pending: inFlightCount > 0,
-    uncertain: retained.length > 0,
-    error,
+    pending: (inFlightByScope[scopeKey] ?? 0) > 0,
+    uncertain: retainedForScope.length > 0,
+    error: errorByScope[scopeKey] ?? null,
   };
 }

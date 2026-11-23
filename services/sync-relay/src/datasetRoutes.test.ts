@@ -1475,7 +1475,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
   const f = await httpFixture();
   expect((await f.activate()).status).toBe(200);
 
-  // Activate a second Collection in the same workspace.
   const secondDef: DatasetDefinition = {
     formatVersion: 1,
     datasetId: id(101),
@@ -1621,7 +1620,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
     capabilities: [cap1, cap2],
   };
 
-  // Shared link publication MUST refuse >1 Collection (Decision 1A).
   expect(
     (
       await f.http("w/app-publications", {
@@ -1651,7 +1649,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
   const dataset1UsageBeforeApprove = readDatasetUsage(id(1));
   const dataset2UsageBeforeApprove = readDatasetUsage(id(101));
 
-  // Refuses approval when a bound Collection's journal is fenced (inactive), leaving zero bindings/rows.
   f.storage.tx(() =>
     f.storage.db
       .prepare("UPDATE dohc_dataset_journals SET active=0 WHERE workspace_id='w' AND dataset_id=?")
@@ -1663,6 +1660,13 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
       .prepare("SELECT count(*) AS n FROM sync_relay_local_dataset_apps WHERE workspace_id='w'")
       .get()!.n,
   ).toBe(0);
+  expect(
+    f.storage.db
+      .prepare(
+        "SELECT count(*) AS n FROM dohc_dataset_bindings WHERE workspace_id='w' AND dataset_id IN (?,?)",
+      )
+      .get(id(1), id(101))!.n,
+  ).toBe(0);
   expect(readWorkspaceUsage()).toBe(workspaceUsageBeforeApprove);
   expect(readDatasetUsage(id(1))).toBe(dataset1UsageBeforeApprove);
   expect(readDatasetUsage(id(101))).toBe(dataset2UsageBeforeApprove);
@@ -1672,7 +1676,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
       .run(id(101)),
   );
 
-  // Local workspace approval via /sync/w/local-apps succeeds for the owner.
   const approvedRes = await f.http("w/local-apps", { localApp: multiCandidate });
   expect(approvedRes.status).toBe(200);
   const approved = (await approvedRes.json()) as {
@@ -1681,7 +1684,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
   };
   const backendBase = `w/app-publications/${approved.publicationId}/backend`;
 
-  // Re-approving an already-approved app while a bound Collection is fenced also fails with 409.
   f.storage.tx(() =>
     f.storage.db
       .prepare("UPDATE dohc_dataset_journals SET active=0 WHERE workspace_id='w' AND dataset_id=?")
@@ -1693,12 +1695,10 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
       .prepare("UPDATE dohc_dataset_journals SET active=1 WHERE workspace_id='w' AND dataset_id=?")
       .run(id(101)),
   );
-  // Idempotent approval while both Collections are active returns the same authorityRevision.
   const idempotentRes = await f.http("w/local-apps", { localApp: multiCandidate });
   expect(idempotentRes.status).toBe(200);
   expect(await idempotentRes.json()).toEqual(approved);
 
-  // Missing alias returns 400; unknown alias returns 404.
   expect(
     (
       await f.http(`${backendBase}/invoke`, {
@@ -1721,7 +1721,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
     ).status,
   ).toBe(404);
 
-  // Upload to expenses, attach, read via expenses, and verify workouts cannot read expenses' fileId.
   const upRes = await f.http(`${backendBase}/upload`, {
     authorityRevision: approved.authorityRevision,
     dataset: "expenses",
@@ -1765,7 +1764,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
       })
     ).status,
   ).toBe(200);
-  // Cross-Collection file read MUST be refused.
   expect(
     (
       await f.http(`${backendBase}/file`, {
@@ -1778,7 +1776,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
     ).status,
   ).toBe(404);
 
-  // Archiving Collection 2 deactivates the whole app (including Collection 1 requests).
   expect((await f.http(`w/datasets/${id(101)}/archive`, {})).status).toBe(200);
   expect(
     (
@@ -1792,7 +1789,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
     ).status,
   ).toBe(404);
 
-  // Restoring Collection 2 re-enables the app; withdrawing via /local-apps revokes all bindings.
   expect((await f.http(`w/datasets/${id(101)}/restore`, {})).status).toBe(200);
   expect(
     (
@@ -1819,7 +1815,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
       .get("w", approved.publicationId)!.n,
   ).toBe(0);
 
-  // Re-approving increments authorityRevision, and per-Collection unbind cleans up every sibling binding.
   const reapprovedRes = await f.http("w/local-apps", { localApp: multiCandidate });
   expect(reapprovedRes.status).toBe(200);
   const reapproved = (await reapprovedRes.json()) as {
@@ -1848,8 +1843,6 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
       .get(reapproved.publicationId)!.candidate,
   ).toBe("");
 
-  // Re-approving once more and permanently deleting Collection 2 removes every binding, deletes the
-  // multi-Collection row, and refunds exact storage bytes with zero leak.
   const dataset1UsageBeforeFinalApprove = readDatasetUsage(id(1));
   const dataset2UsageBeforeFinalApprove = readDatasetUsage(id(101));
   const workspaceUsageBeforeFinalApprove = readWorkspaceUsage();
