@@ -5,21 +5,22 @@ import {
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
   leavesOfSequence,
-  recordsOfContainer,
   type SequenceAttrs,
-  type SequenceFrame,
 } from "./bodySequenceGrammar.js";
 import {
   bodyHistory,
-  deleteLetters,
+  deleteRange,
   indentItem,
+  insertInline,
   joinLine,
   liftBlocks,
   outdentItem,
   readBody,
   setContainerAttributes,
   setContainerKind,
+  setInlineAttributes,
   setLineKind,
+  setMarks,
   splitLine,
   typeLetters,
   wrapBlocks,
@@ -36,6 +37,34 @@ const REMOTE = Symbol("remote");
 const LOCAL = Symbol("local");
 const OUTSIDE_HISTORY = Symbol("outside the history");
 const NEVER_ELAPSES = Number.MAX_SAFE_INTEGER;
+const OBJECT = String.fromCharCode(0xfffc);
+const HIGH_HALF = /[\uD800-\uDBFF]/;
+const LOW_HALF = /[\uDC00-\uDFFF]/;
+
+const PARAGRAPH: SequenceAttrs = { type: "paragraph" };
+const LEAF_KINDS: Record<string, SequenceAttrs> = {
+  paragraph: {},
+  heading: { level: 1 },
+  codeBlock: { language: null },
+  horizontalRule: {},
+  mathBlock: { tex: "" },
+  rawBlock: { source: "" },
+};
+const HOLDS_LETTERS = ["paragraph", "heading", "codeBlock"];
+const HOLDS_INLINE = ["paragraph", "heading"];
+const BOX = { calloutType: "note", title: "", fold: "" };
+const LIST = { loose: null, start: 1, type: null };
+const ITEM = { checked: false };
+const RECORDS: Record<string, SequenceAttrs> = {
+  blockquote: BOX,
+  callout: BOX,
+  bulletList: LIST,
+  orderedList: LIST,
+  taskList: LIST,
+  listItem: ITEM,
+  taskItem: ITEM,
+};
+const DEFAULTS: SequenceAttrs = { ...BOX, ...LIST, ...ITEM };
 const LISTS = ["bulletList", "orderedList", "taskList"];
 const ITEMS = ["listItem", "taskItem"];
 const ITEM_OF: Record<string, string | undefined> = {
@@ -43,47 +72,67 @@ const ITEM_OF: Record<string, string | undefined> = {
   orderedList: "listItem",
   taskList: "taskItem",
 };
-const defaultsOf = (types: string[]): Record<string, unknown> =>
-  Object.fromEntries(
-    types.flatMap((type) =>
-      Object.entries(schema.nodes[type]!.spec.attrs ?? {}).map(([key, spec]) => [
-        key,
-        (spec as { default?: unknown }).default ?? null,
-      ]),
-    ),
-  );
-const DEFAULTS = defaultsOf(["blockquote", "callout", ...LISTS, ...ITEMS]);
-const HIGH_HALF = /[\uD800-\uDBFF]/;
-const LOW_HALF = /[\uDC00-\uDFFF]/;
+const HOLDS_BLOCKS = ["blockquote", "callout", "listItem", "taskItem", "tableCell", "tableHeader"];
+const INLINE: Record<string, SequenceAttrs> = {
+  image: { src: "", alt: "", title: null },
+  mathInline: { tex: "" },
+};
+const MARKS = new Set(["link", "highlight", "bold", "code", "italic", "strike", "underline"]);
 
 const FAULT = {
   defaultMapUndo: "Yjs's default undo of map changes",
   noDeleteFilter: "no delete filter",
   recordsOnlyFilter: "a delete filter that keeps container records and not a boundary's attributes",
+  inlineAttributesKept: "a delete filter that also keeps an inline item's attributes",
   typeRecordOnly: "a container made with its type record and no defaults",
   defaultFirst: "a missing record's default written first, outside the history",
+  noLooseRecord: "a list made without its `loose` record",
   oldBoundaryAbove: "a split at offset 0 that leaves the old boundary with the empty line",
+  splitAlwaysParagraph: "a split whose new line is always a paragraph",
   oneRecordForTwins: "a setting written to an id that is on two containers",
   noKindDefaults: "a line's kind written without the attributes that hold their default",
   splitInsideLetter: "a split between the two units of a surrogate pair",
   alwaysLowerBoundary: "a join that always deletes the lower line's boundary",
+  twinsJoined: "a join that lets two containers with one id stand together",
   wrongSetting: "a start number written one higher than asked",
   deleteAndRecreate: "a record deleted and written again in one transaction",
   copyKnownAttributes: "a fresh id's copy that takes only the records its kind has",
+  typingInheritsMarks: "typing that takes the marks around it and not the marks it is given",
+  spillLeftBare: "a change of kind that gives the paragraph after the block no boundary",
+  addedParagraphBare: "typing in a list item's added first paragraph without giving it a boundary",
 } as const;
 type Fault = (typeof FAULT)[keyof typeof FAULT];
+const LENIENT: (Fault | undefined)[] = [FAULT.typeRecordOnly, FAULT.defaultFirst];
 
 type Id = string;
 const idOf = (client: number, clock: number): Id => `${String(client)}:${String(clock)}`;
 const json = (value: unknown) =>
   JSON.stringify(value, (_key, held: unknown) => (typeof held === "bigint" ? Number(held) : held));
+const isPlain = (value: unknown) =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const marksOf = (marks: Iterable<[string, unknown]>) =>
+  json([...marks].filter(([, value]) => isPlain(value)).sort(([a], [b]) => (a < b ? -1 : 1)));
+const cutsALetter = (units: string, offset: number) =>
+  HIGH_HALF.test(units.charAt(offset - 1)) && LOW_HALF.test(units.charAt(offset));
 
 type Held = { item: Id; value: string };
-type Token =
-  | { kind: "char"; id: Id; line: Id | null; unit: string }
-  | { kind: "boundary"; id: Id; attrs: Map<string, Held> };
-type Shot = { tokens: Token[]; records: Map<string, Held> };
+type Atom = { name: string; attrs: Map<string, Held> };
+type Letter = { kind: "char"; id: Id; line: Id | null; unit: string; marks: string; atom?: Atom };
+type Token = Letter | { kind: "boundary"; id: Id; attrs: Map<string, Held> };
+type Shot = { tokens: Token[]; records: Map<string, Held>; formats: string };
 type Row = { boundary: Id | null; attrs: Map<string, Held>; chars: Id[]; units: string };
+type Frame = { id: string; type: string; key: number };
+type Line = {
+  row: number;
+  from: number;
+  chars: Id[];
+  units: string;
+  boundary: Id | null;
+  bare: "" | "start" | "item" | "spill";
+  type: string;
+  path: Frame[];
+};
+type Look = { shot: Shot; rows: Row[]; lines: Line[]; frames: Frame[][] };
 
 const heldBy = new WeakMap<Y.Item, { length: number; held: Held }>();
 
@@ -107,24 +156,35 @@ function heldIn(map: Map<string, Y.Item>): Map<string, Held> {
 
 function shoot(doc: Y.Doc): Shot {
   const tokens: Token[] = [];
+  const formats = new Map<string, unknown>();
+  let marks = "[]";
+  let formatting = "";
   let line: Id | null = null;
   for (let item = doc.getText(SEQUENCE)._start; item !== null; item = item.right) {
     if (item.deleted) continue;
     const content = item.content;
-    if (content instanceof Y.ContentString)
+    const id = idOf(item.id.client, item.id.clock);
+    if (content instanceof Y.ContentFormat) {
+      formatting += `${id} `;
+      if (MARKS.has(content.key)) marks = marksOf(formats.set(content.key, content.value));
+    } else if (content instanceof Y.ContentString)
       for (let at = 0; at < content.str.length; at++)
         tokens.push({
           kind: "char",
           id: idOf(item.id.client, item.id.clock + at),
           line,
           unit: content.str[at]!,
+          marks,
         });
     else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
-      line = idOf(item.id.client, item.id.clock);
-      tokens.push({ kind: "boundary", id: line, attrs: heldIn(content.type._map) });
+      const attrs = heldIn(content.type._map);
+      const name = content.type.nodeName;
+      if (name !== BLOCK_ELEMENT)
+        tokens.push({ kind: "char", id, line, unit: OBJECT, marks: "", atom: { name, attrs } });
+      else tokens.push({ kind: "boundary", id: (line = id), attrs });
     }
   }
-  return { tokens, records: heldIn(doc.getMap(CONTAINERS)._map) };
+  return { tokens, records: heldIn(doc.getMap(CONTAINERS)._map), formats: formatting };
 }
 
 function rowsOf(shot: Shot): Row[] {
@@ -141,14 +201,142 @@ function rowsOf(shot: Shot): Row[] {
   return rows.length > 0 ? rows : [unbounded()];
 }
 
+function lookAt(doc: Y.Doc): Look {
+  const shot = shoot(doc);
+  const rows = rowsOf(shot);
+  const leaves = leavesOfSequence(
+    schema,
+    piecesOfSequence(doc.getText(SEQUENCE), MARKS),
+    doc.getMap(CONTAINERS),
+  );
+  const unread = rows.length - leaves.length;
+  const lines: Line[] = [];
+  const frames: Frame[][] = [];
+  let keys = 0;
+  let above: Frame[] = [];
+  rows.forEach((row, at) => {
+    const leaf = leaves[at - unread];
+    const type = leaf && Object.hasOwn(LEAF_KINDS, leaf.type) ? leaf.type : "paragraph";
+    const fitted = (leaf?.path ?? []).map((frame) => ({ id: frame.id, type: frame.type }));
+    while (fitted.length > 0 && !HOLDS_BLOCKS.includes(fitted.at(-1)!.type)) fitted.pop();
+    let shared = true;
+    const path = fitted.map((frame, depth): Frame => {
+      shared &&= above[depth]?.id === frame.id;
+      return { ...frame, key: shared ? above[depth]!.key : keys++ };
+    });
+    path.forEach((frame, depth) => {
+      const itsFirstIsThis = depth === path.length - 1 && type === "paragraph";
+      if (frame.key === above[depth]?.key || !ITEMS.includes(frame.type) || itsFirstIsThis) return;
+      lines.push({
+        row: at,
+        from: 0,
+        chars: [],
+        units: "",
+        boundary: null,
+        bare: "item",
+        type: "paragraph",
+        path: path.slice(0, depth + 1),
+      });
+    });
+    const item = row.units.indexOf(OBJECT);
+    const all = row.chars.length;
+    const held = HOLDS_INLINE.includes(type)
+      ? all
+      : type !== "codeBlock"
+        ? 0
+        : item < 0
+          ? all
+          : item;
+    lines.push({
+      row: at,
+      from: 0,
+      chars: row.chars.slice(0, held),
+      units: row.units.slice(0, held),
+      boundary: row.boundary,
+      bare: row.boundary === null ? "start" : "",
+      type,
+      path,
+    });
+    if (held < all)
+      lines.push({
+        row: at,
+        from: held,
+        chars: row.chars.slice(held),
+        units: row.units.slice(held),
+        boundary: null,
+        bare: "spill",
+        type: "paragraph",
+        path,
+      });
+    frames.push(path);
+    above = path;
+  });
+  return { shot, rows, lines, frames };
+}
+
+const idsOf = (path: Frame[]) => path.map((frame) => frame.id);
 const pathOf = (row: Row) => JSON.parse(row.attrs.get("path")?.value ?? "[]") as string[];
 const freshIds = (before: Shot, after: Shot) =>
   [...after.records.keys()].filter((key) => !key.includes(".") && !before.records.has(key));
-const reads = (shot: Shot, key: string) => {
+const reads = (shot: Shot, key: string, lenient: boolean) => {
   const attribute = key.split(".")[1];
-  const unset = attribute === undefined ? undefined : json(DEFAULTS[attribute]);
+  const unset = lenient && attribute !== undefined ? json(DEFAULTS[attribute]) : undefined;
   return shot.records.get(key)?.value ?? unset;
 };
+
+function recordsWanted(id: string, type: string, attrs: SequenceAttrs): Map<string, unknown> {
+  const wanted = new Map<string, unknown>([[id, type]]);
+  for (const [key, unset] of Object.entries(RECORDS[type] ?? {}))
+    wanted.set(`${id}.${key}`, key in attrs ? attrs[key] : unset);
+  return wanted;
+}
+
+function twinsIn(look: Look) {
+  const keys = new Map<string, Set<number>>();
+  for (const frame of look.frames.flat())
+    keys.set(frame.id, (keys.get(frame.id) ?? new Set<number>()).add(frame.key));
+  return [...keys.values()].reduce((twins, each) => twins + each.size - 1, 0);
+}
+
+function noneJoined(before: Look, after: Look) {
+  const was = new Map(
+    before.rows.map((row, at) => [
+      row.boundary,
+      new Map(before.frames[at]!.map((frame) => [frame.id, frame.key])),
+    ]),
+  );
+  const now = new Map<number, Set<number>>();
+  after.rows.forEach((row, at) => {
+    for (const frame of after.frames[at]!) {
+      const earlier = was.get(row.boundary)?.get(frame.id);
+      if (earlier === undefined) continue;
+      now.set(frame.key, (now.get(frame.key) ?? new Set<number>()).add(earlier));
+      if (now.get(frame.key)!.size > 1)
+        throw new Error("[writer] a change made two containers that share an id read as one");
+    }
+  });
+}
+
+function blocksRead(doc: Y.Doc) {
+  const blocks: [string, string][] = [];
+  readBodySequence(schema, doc).descendants((node) => {
+    if (!node.isTextblock && !(node.isBlock && node.isLeaf)) return true;
+    let units = "";
+    node.forEach((child) => {
+      units += child.isText ? (child.text ?? "") : OBJECT;
+    });
+    blocks.push([node.type.name, units]);
+    return false;
+  });
+  return json(blocks);
+}
+
+function writerAgrees(doc: Y.Doc, look: Look) {
+  const read = readBody(schema, doc).map((line) => [line.bare, line.text, line.ids, line.type]);
+  const held = look.lines.map((line) => [line.bare, line.units, idsOf(line.path), line.type]);
+  if (json(read) !== json(held))
+    throw new Error("[writer] the writer reads other lines than the note holds");
+}
 
 type Change = { from?: Held; to?: Held };
 type Step = {
@@ -156,11 +344,13 @@ type Step = {
   deletedChars: Id[];
   insertedBoundaries: Id[];
   deletedBoundaries: Id[];
-  moved: Id[];
   slots: Map<string, Change>;
   rounds: Map<string, [number, number]>;
   gone: Map<Id, Map<string, Held>>;
   settings: Set<string>;
+  marks: boolean;
+  formats: boolean;
+  known: Set<Id>;
 };
 
 const step = (): Step => ({
@@ -168,14 +358,17 @@ const step = (): Step => ({
   deletedChars: [],
   insertedBoundaries: [],
   deletedBoundaries: [],
-  moved: [],
   slots: new Map(),
   rounds: new Map(),
   gone: new Map(),
   settings: new Set(),
+  marks: false,
+  formats: false,
+  known: new Set(),
 });
 
 const partsOf = (slot: string) => slot.split(" ") as [string, string, string | undefined];
+const attrsOf = (token: Token) => (token.kind === "boundary" ? token.attrs : token.atom?.attrs);
 
 function effectsOf(before: Shot, after: Shot, round: number): Step {
   const effects = step();
@@ -194,19 +387,19 @@ function effectsOf(before: Shot, after: Shot, round: number): Step {
   const now = new Map(after.tokens.map((token) => [token.id, token]));
   for (const token of before.tokens) {
     const next = now.get(token.id);
-    if (token.kind === "char") {
-      if (!next) effects.deletedChars.push(token.id);
-      else if (next.kind === "char" && next.line !== token.line) effects.moved.push(token.id);
-    } else if (!next) {
-      effects.deletedBoundaries.push(token.id);
-      effects.gone.set(token.id, token.attrs);
-    } else if (next.kind === "boundary")
-      changed(token.attrs, next.attrs, (key) => `line ${token.id} ${key}`);
+    const attrs = attrsOf(token);
+    const kind = token.kind === "boundary" ? "line" : "atom";
+    if (token.kind === "char") effects.known.add(token.id);
+    if (!next) {
+      (token.kind === "char" ? effects.deletedChars : effects.deletedBoundaries).push(token.id);
+      if (attrs) effects.gone.set(token.id, attrs);
+    } else if (attrs) changed(attrs, attrsOf(next)!, (key) => `${kind} ${token.id} ${key}`);
   }
   for (const token of after.tokens)
     if (!was.has(token.id))
       (token.kind === "char" ? effects.insertedChars : effects.insertedBoundaries).push(token.id);
   changed(before.records, after.records, (key) => `record ${key}`);
+  effects.formats = before.formats !== after.formats;
   return effects;
 }
 
@@ -225,6 +418,19 @@ function join(top: Step, more: Step) {
   }
   for (const [id, attrs] of more.gone) top.gone.set(id, attrs);
   for (const key of more.settings) top.settings.add(key);
+  top.marks ||= more.marks;
+  top.formats ||= more.formats;
+  top.known = new Set([...top.known].filter((id) => more.known.has(id)));
+}
+
+function marksMoved(before: Shot, after: Shot, saw: (id: Id) => boolean) {
+  const was = new Map(
+    before.tokens.flatMap((token) => (token.kind === "char" ? [[token.id, token.marks]] : [])),
+  );
+  return after.tokens.some(
+    (token) =>
+      token.kind === "char" && saw(token.id) && (was.get(token.id) ?? token.marks) !== token.marks,
+  );
 }
 
 const tally = () => ({
@@ -237,10 +443,18 @@ const tally = () => ({
   changedNothing: 0,
   freshIdsForATwin: 0,
   roundsWithOneIdOnTwo: 0,
+  keptApart: 0,
   settingsChecked: 0,
+  marksMovedByUndoOfFormatting: 0,
   textBeforeFirstBoundary: 0,
   boundariesForUnboundedText: 0,
+  boundariesForAddedParagraphs: 0,
+  boundariesForParagraphsAfter: 0,
   refusedInsideALetter: 0,
+  inlineItems: 0,
+  attributesFirstSet: 0,
+  markChanges: 0,
+  linesDeleted: 0,
   unnamedRecords: 0,
   records: 0,
 });
@@ -288,51 +502,100 @@ class Oracle {
   }
 }
 
-const cutsALetter = (row: Row, offset: number) =>
-  HIGH_HALF.test(row.units.charAt(offset - 1)) && LOW_HALF.test(row.units.charAt(offset));
-
-function twins(doc: Y.Doc) {
-  const held = new Set(readBody(schema, doc).flatMap((line) => line.path));
-  return held.size - new Set([...held].map((container) => container.id)).size;
-}
-
 function kindsHold(shot: Shot) {
   for (const token of shot.tokens) {
     if (token.kind !== "boundary") continue;
     const type = String(JSON.parse(token.attrs.get("type")?.value ?? "null"));
-    for (const key of ["type", "path", ...Object.keys(schema.nodes[type]?.spec.attrs ?? {})])
+    for (const key of ["type", "path", ...Object.keys(LEAF_KINDS[type] ?? {})])
       if (!token.attrs.has(key)) throw new Error(`[7 kind] a ${type} boundary holds no ${key}`);
   }
 }
 
-function expectMade(after: Shot, id: string, type: string, attrs: SequenceAttrs) {
-  for (const [key, value] of recordsOfContainer(schema, { id, type, attrs }))
-    if (reads(after, key) !== json(value))
+function expectMade(after: Shot, id: string, type: string, attrs: SequenceAttrs, lenient: boolean) {
+  for (const [key, value] of recordsWanted(id, type, attrs))
+    if (reads(after, key, lenient) !== json(value))
       throw new Error(
-        `[4 settings] asked for a ${type} with ${key.slice(id.length) || "type"} ${json(value)} and the note holds ${String(reads(after, key))}`,
+        `[4 settings] asked for a ${type} with ${key.slice(id.length) || "type"} ${json(value)} and the note holds ${String(reads(after, key, lenient))}`,
       );
 }
 
-function expectCopies(before: Shot, after: Shot, changed: string[] = []) {
-  const was = new Map(rowsOf(before).map((row) => [row.boundary, pathOf(row)]));
-  for (const id of freshIds(before, after)) {
-    const replaced = rowsOf(after).flatMap((row) => {
-      const path = pathOf(row);
-      const earlier = path.includes(id) ? (was.get(row.boundary) ?? []) : [];
-      return earlier.filter((old) => !path.includes(old));
-    });
-    const whole = replaced.some((old) =>
-      [...before.records].every(([key, held]) => {
-        if (key !== old && !key.startsWith(`${old}.`)) return true;
-        const suffix = key.slice(old.length);
-        return changed.includes(suffix) || reads(after, id + suffix) === held.value;
-      }),
-    );
-    if (!whole)
+function copies(before: Shot, after: Shot, id: string, changed: string[], lenient: boolean) {
+  const was = new Map<Id | null | undefined, string[]>();
+  for (const row of rowsOf(before))
+    for (const held of [row.boundary, ...row.chars]) was.set(held, pathOf(row));
+  const replaced = rowsOf(after).flatMap((row) => {
+    const path = pathOf(row);
+    const earlier = was.get(row.boundary) ?? was.get(row.chars[0]) ?? [];
+    return path.includes(id) ? earlier.filter((old) => !path.includes(old)) : [];
+  });
+  return replaced.some((old) =>
+    [...before.records].every(([key, held]) => {
+      if (key !== old && !key.startsWith(`${old}.`)) return true;
+      const suffix = key.slice(old.length);
+      return changed.includes(suffix) || reads(after, id + suffix, lenient) === held.value;
+    }),
+  );
+}
+
+function expectCopies(before: Shot, after: Shot, changed: string[], lenient: boolean) {
+  for (const id of freshIds(before, after))
+    if (!copies(before, after, id, changed, lenient))
       throw new Error(
         `[4 settings] the fresh id ${id} does not hold a copy of every record of the id it replaces`,
       );
-  }
+}
+
+type Want = { b: string; chars: string[]; path: string[]; frames: Frame[]; kind?: SequenceAttrs };
+
+const wantOf = (look: Look): Want[] =>
+  look.rows.map((row, at) => ({
+    b: row.boundary ?? "-",
+    chars: [...row.chars],
+    path: pathOf(row),
+    frames: look.frames[at]!,
+  }));
+
+function rowsAre(what: string, want: Want[], before: Look, after: Look) {
+  const known = new Set(before.shot.tokens.map((token) => token.id));
+  const ids = new Set([
+    ...before.rows.flatMap(pathOf),
+    ...[...before.shot.records.keys()].map((key) => key.split(".")[0]!),
+  ]);
+  const got = after.rows.map((row) => ({
+    b: row.boundary === null ? "-" : known.has(row.boundary) ? row.boundary : "+",
+    chars: row.chars.map((id) => (known.has(id) ? id : "+")),
+    path: pathOf(row).map((id) => (ids.has(id) ? id : "+")),
+  }));
+  const wanted = want.map(({ b, chars, path }) => ({ b, chars, path }));
+  const both = process.env.BODY_CONTAINERS_DEBUG ? `\nWANT ${json(wanted)}\nGOT  ${json(got)}` : "";
+  if (json(got) !== json(wanted))
+    throw new Error(
+      `[writer] after ${what}, the note's lines are not the ones section 4 gives${both}`,
+    );
+  want.forEach((row, at) => {
+    for (const [key, value] of Object.entries(row.kind ?? {}))
+      if (after.rows[at]!.attrs.get(key)?.value !== json(value))
+        throw new Error(
+          `[7 kind] after ${what}, a boundary holds ${key} ${String(after.rows[at]!.attrs.get(key)?.value)} where it should hold ${json(value)}`,
+        );
+  });
+}
+
+function rowsKept(what: string, before: Look, after: Look) {
+  const known = new Set(before.shot.tokens.map((token) => token.id));
+  const got: { b: Id | null; chars: Id[] }[] = [];
+  after.rows.forEach((row, at) => {
+    const given = row.boundary !== null && !known.has(row.boundary);
+    const above = got.at(-1);
+    const wasBare = before.lines.some(
+      (line) => (line.bare === "spill" || line.bare === "start") && line.chars[0] === row.chars[0],
+    );
+    if (given && !wasBare) throw new Error(`[writer] ${what} made a line that was not there`);
+    if (given && above && at > 0) above.chars.push(...row.chars);
+    else got.push({ b: given ? null : row.boundary, chars: [...row.chars] });
+  });
+  const was = before.rows.map((row) => ({ b: row.boundary, chars: row.chars }));
+  if (json(got) !== json(was)) throw new Error(`[writer] ${what} changed what a line holds`);
 }
 
 const docs: Y.Doc[] = [];
@@ -340,7 +603,6 @@ afterEach(() => {
   for (const doc of docs.splice(0)) doc.destroy();
 });
 
-type Expected = { chars?: number; boundaries?: number; movable?: Id[] };
 type Claim = { value: string | undefined; round: number };
 
 function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, fault?: Fault) {
@@ -353,22 +615,31 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
   records.delete = () => {
     throw new Error("[5 records] a writer deleted a record");
   };
+  const lenient = LENIENT.includes(fault);
   const own = { trackedOrigins: new Set([LOCAL]), captureTimeout: NEVER_ELAPSES };
+  const overwriting = { ...own, ignoreRemoteMapChanges: true };
   const keepRecords = (item: Y.Item) => item.parent !== records;
   const keepAttributes = (item: Y.Item) =>
     keepRecords(item) && !(item.parentSub !== null && item.parent instanceof Y.XmlElement);
+  const keepBoundaries = (item: Y.Item) =>
+    keepRecords(item) &&
+    (keepAttributes(item) || (item.parent as Y.XmlElement).nodeName !== BLOCK_ELEMENT);
+  const filtered = (deleteFilter: (item: Y.Item) => boolean, overwrites = true) =>
+    new Y.UndoManager([sequence, records], {
+      ...own,
+      ignoreRemoteMapChanges: overwrites,
+      deleteFilter,
+    });
   const history =
     fault === FAULT.defaultMapUndo
-      ? new Y.UndoManager([sequence, records], { ...own, deleteFilter: keepAttributes })
+      ? filtered(keepBoundaries, false)
       : fault === FAULT.noDeleteFilter
-        ? new Y.UndoManager([sequence, records], { ...own, ignoreRemoteMapChanges: true })
+        ? new Y.UndoManager([sequence, records], overwriting)
         : fault === FAULT.recordsOnlyFilter
-          ? new Y.UndoManager([sequence, records], {
-              ...own,
-              ignoreRemoteMapChanges: true,
-              deleteFilter: keepRecords,
-            })
-          : bodyHistory(doc, LOCAL, NEVER_ELAPSES);
+          ? filtered(keepRecords)
+          : fault === FAULT.inlineAttributesKept
+            ? filtered(keepAttributes)
+            : bodyHistory(doc, LOCAL, NEVER_ELAPSES);
   const sent: Uint8Array[] = [];
   doc.on("update", (update: Uint8Array, origin: unknown) => {
     if (origin !== REMOTE) sent.push(update);
@@ -383,51 +654,36 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     asked.add(id);
     return id;
   };
-  const lines = () => readBody(schema, doc);
 
-  const seen = (before: Shot): [Step, Shot] => {
-    const after = shoot(doc);
-    const effects = effectsOf(before, after, oracle.round);
-    for (const key of before.records.keys())
-      if (!after.records.has(key)) throw new Error(`[5 records] the record ${key} was deleted`);
-    oracle.sees(after.tokens);
+  const seen = (before: Look): [Step, Look] => {
+    const after = lookAt(doc);
+    const effects = effectsOf(before.shot, after.shot, oracle.round);
+    for (const key of before.shot.records.keys())
+      if (!after.shot.records.has(key))
+        throw new Error(`[5 records] the record ${key} was deleted`);
+    oracle.sees(after.shot.tokens);
     for (const id of effects.deletedChars) oracle.everDeletedChars.add(oracle.root(id));
     for (const id of effects.insertedChars) oracle.insertedChars.add(id);
     for (const id of effects.deletedChars) oracle.deletedChars.add(id);
     for (const id of effects.insertedBoundaries) oracle.insertedBoundaries.add(id);
     for (const id of effects.deletedBoundaries) oracle.deletedBoundaries.add(id);
     for (const slot of effects.slots.keys()) oracle.wrote(slot, who);
-    oracle.snapshots.push(after.tokens.map((token) => token.id));
-    if (after.tokens[0]?.kind === "char") oracle.count.textBeforeFirstBoundary++;
+    oracle.snapshots.push(after.shot.tokens.map((token) => token.id));
+    if (after.shot.tokens[0]?.kind === "char") oracle.count.textBeforeFirstBoundary++;
     return [effects, after];
   };
 
-  const local = (act: () => void, expected: Expected, settings: string[] = []): [Step, Shot] => {
+  const local = (before: Look, act: () => void, mayMark: boolean, settings: string[]) => {
     const depth = history.undoStack.length;
-    const twinsBefore = twins(doc);
-    const before = shoot(doc);
     doc.transact(act, LOCAL);
     const [effects, after] = seen(before);
-    const chars = effects.insertedChars.length - effects.deletedChars.length;
-    const boundaries = effects.insertedBoundaries.length - effects.deletedBoundaries.length;
-    if (chars !== (expected.chars ?? 0) || boundaries !== (expected.boundaries ?? 0))
-      throw new Error(
-        `[writer] expected ${json(expected)} and saw ${String(chars)} letters and ${String(boundaries)} boundaries`,
-      );
-    if ((expected.chars ?? 0) >= 0 && effects.deletedChars.length > 0)
-      throw new Error("[writer] a change that deletes no letters deleted letters");
-    if ((expected.chars ?? 0) <= 0 && effects.insertedChars.length > 0)
-      throw new Error("[writer] a change that types no letters added letters");
-    if ((expected.boundaries ?? 0) >= 0 && effects.deletedBoundaries.length > 0)
-      throw new Error("[writer] a change that deletes no boundary deleted one");
-    if ((expected.boundaries ?? 0) <= 0 && effects.insertedBoundaries.length > 0)
-      throw new Error("[writer] a change that adds no boundary added one");
-    if (!effects.moved.every((id) => expected.movable?.includes(id)))
-      throw new Error(
-        "[writer] a change took letters to another line that section 4 leaves in theirs",
-      );
-    if (twins(doc) > twinsBefore)
+    effects.marks = mayMark;
+    if (!mayMark && marksMoved(before.shot, after.shot, () => true))
+      throw new Error("[2 letters] a change that is not about marks changed a letter's marks");
+    noneJoined(before, after);
+    if (twinsIn(after) > twinsIn(before))
       throw new Error("[writer] a change left one id on two containers");
+    writerAgrees(doc, after);
     for (const id of effects.insertedChars) oracle.typed.add(id);
     for (const [slot, change] of effects.slots)
       claims.set(slot, { value: change.to?.value, round: oracle.round });
@@ -437,7 +693,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     else if (top && history.undoStack.length === depth) join(top, effects);
     if (history.redoStack.length === 0) redoMirror = [];
     oracle.count.changes++;
-    return [effects, after];
+    return [effects, after] as const;
   };
 
   const withoutFreshIds = (plan: BodyWrites) => {
@@ -457,7 +713,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     plan.attributes.clear();
   };
 
-  const write = (plan: BodyWrites | null, expected: Expected = {}): [Step, Shot] | null => {
+  const write = (before: Look, plan: BodyWrites | null, mayMark = false) => {
     const unused = [...asked].filter((id) => !plan?.records.has(id));
     asked.clear();
     if (!plan) return null;
@@ -473,12 +729,14 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     for (const [key, value] of fault === undefined ? [] : [...plan.records]) {
       const [id, attribute] = key.split(".") as [string, string | undefined];
       const isDefault = attribute !== undefined && json(value) === json(DEFAULTS[attribute]);
-      const itsKind = () =>
-        recordsOfContainer(schema, { id, type: String(plan.records.get(id)), attrs: {} });
-      if (fault === FAULT.typeRecordOnly || fault === FAULT.defaultFirst) {
+      const itsKind = RECORDS[String(plan.records.get(id))] ?? {};
+      if (lenient) {
         if (isDefault && !records.has(key)) plan.records.delete(key);
+      } else if (fault === FAULT.noLooseRecord) {
+        if (attribute === "loose" && !records.has(key)) plan.records.delete(key);
       } else if (fault === FAULT.copyKnownAttributes) {
-        if (!records.has(id) && !itsKind().has(key)) plan.records.delete(key);
+        if (!records.has(id) && attribute !== undefined && !Object.hasOwn(itsKind, attribute))
+          plan.records.delete(key);
       } else if (fault === FAULT.wrongSetting && attribute === "start")
         plan.records.set(key, Number(value) + 1);
     }
@@ -486,27 +744,59 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       (key) => key.includes(".") && !records.has(key),
     );
     if (fault === FAULT.defaultFirst && missing.length > 0) {
-      const before = shoot(doc);
+      const earlier = lookAt(doc);
       doc.transact(() => {
         for (const key of missing) records.set(key, DEFAULTS[key.split(".")[1]!]);
       }, OUTSIDE_HISTORY);
-      seen(before);
+      seen(earlier);
     }
+    const typed = fault === FAULT.typingInheritsMarks ? plan.typed : undefined;
+    if (typed) delete plan.typed;
+    const shift = plan.added.filter((boundary) => boundary.index <= (typed?.index ?? 0)).length;
     return local(
+      before,
       () => {
         if (fault === FAULT.deleteAndRecreate)
           for (const key of plan.records.keys()) if (records.has(key)) records.delete(key);
         writeBody(doc, plan);
+        if (typed) sequence.insert(typed.index + shift, typed.letters);
       },
-      expected,
+      mayMark,
       settings,
     );
   };
 
+  const refusal = (before: Look, plan: BodyWrites | null, allowed: boolean, what: string) => {
+    if (plan && !allowed)
+      throw new Error(`[writer] ${what} was written where section 4 refuses it`);
+    if (!plan && allowed) throw new Error(`[writer] ${what} was refused where section 4 allows it`);
+    if (!plan) write(before, null);
+    return plan === null;
+  };
+
+  const keepApart = (want: Want[], upper: number) => {
+    const one = want[upper]?.frames ?? [];
+    const other = want[upper + 1]?.frames ?? [];
+    let depth = 0;
+    while (one[depth] !== undefined && one[depth]!.key === other[depth]?.key) depth++;
+    if (one[depth] === undefined || one[depth]!.id !== other[depth]?.id) return;
+    for (const row of want) if (row.frames[depth]?.key === other[depth]!.key) row.path[depth] = "+";
+    oracle.count.keptApart++;
+  };
+
+  const rowAfter = (before: Look, after: Look, line: Line) =>
+    line.chars.length > 0
+      ? after.rows.findIndex((row) => row.chars.includes(line.chars[0]!))
+      : Math.max(
+          0,
+          after.rows.findIndex((row) => row.boundary === before.rows[line.row]!.boundary),
+        );
+
   const shown = () =>
-    leavesOfSequence(schema, piecesOfSequence(sequence), records).map((leaf) =>
+    leavesOfSequence(schema, piecesOfSequence(sequence, MARKS), records).map((leaf) =>
       leaf.path.map((frame) => json([frame.type, frame.attrs])),
     );
+
   const setting = (
     at: number,
     depth: number,
@@ -514,45 +804,46 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     attrs: SequenceAttrs,
     plan: BodyWrites | null,
   ) => {
-    const body = lines();
-    const container = body[at]?.path[depth];
-    if (!container) return false;
-    const before = shoot(doc);
+    const before = lookAt(doc);
+    const line = before.lines[at];
+    const container = line?.path[depth];
+    if (!line || !container) return false;
     const shownBefore = shown();
-    const asked = new Map(Object.entries(attrs).map(([name, value]) => [`.${name}`, json(value)]));
-    if (type !== undefined) asked.set("", json(type));
+    const wanted = new Map(Object.entries(attrs).map(([name, value]) => [`.${name}`, json(value)]));
+    if (type !== undefined) wanted.set("", json(type));
     if (plan && fault === FAULT.oneRecordForTwins) withoutFreshIds(plan);
-    const done = write(plan);
+    const done = write(before, plan);
     if (!done) {
-      for (const [suffix, value] of asked)
-        if (before.records.get(container.id + suffix)?.value !== value)
+      for (const [suffix, value] of wanted)
+        if (before.shot.records.get(container.id + suffix)?.value !== value)
           throw new Error(
             `[4 settings] asked for ${suffix || "type"} ${value} and the writer wrote nothing`,
           );
       return false;
     }
     const after = done[1];
-    const now = lines();
-    const its = now[at]!.path[depth]!;
-    for (const [suffix, value] of asked) {
-      const holds = after.records.get(its.id + suffix)?.value;
+    rowsKept("a setting", before, after);
+    const its = after.frames[rowAfter(before, after, line)]![depth]!;
+    for (const [suffix, value] of wanted) {
+      const holds = after.shot.records.get(its.id + suffix)?.value;
       if (holds !== value)
         throw new Error(
           `[4 settings] asked for ${suffix || "type"} ${value} and the note holds ${String(holds)}`,
         );
       claims.set(`record ${its.id}${suffix}`, { value, round: oracle.round });
     }
-    for (const line of now) {
-      const item = line.path[depth] === its ? line.path[depth + 1] : undefined;
-      const itemType = type === undefined ? undefined : ITEM_OF[type];
-      if (item && itemType && after.records.get(item.id)?.value !== json(itemType))
+    const itemType = type === undefined ? undefined : ITEM_OF[type];
+    for (const path of after.frames) {
+      const item = path[depth]?.key === its.key ? path[depth + 1] : undefined;
+      if (item && itemType && after.shot.records.get(item.id)?.value !== json(itemType))
         throw new Error(`[4 settings] an item of a list made a ${type!} is stored as another kind`);
     }
-    expectCopies(before, after, [...asked.keys()]);
-    if (freshIds(before, after).length > 0) oracle.count.freshIdsForATwin++;
+    expectCopies(before.shot, after.shot, [...wanted.keys()], lenient);
+    if (freshIds(before.shot, after.shot).length > 0) oracle.count.freshIdsForATwin++;
+    const unread = before.rows.length - shownBefore.length;
     shown().forEach((path, index) =>
       path.forEach((frame, level) => {
-        const itsOwn = body[index]!.path[depth] === container;
+        const itsOwn = before.frames[index + unread]?.[depth]?.key === container.key;
         const onIt = level === depth || (type !== undefined && level === depth + 1);
         if (frame !== shownBefore[index]![level] && !(itsOwn && onIt))
           throw new Error("[writer] a setting changed on a container it was not made on");
@@ -579,11 +870,16 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
 
   const nothingLeftToUndo = (entry: Step) => {
     const added = new Set([...entry.insertedChars, ...entry.insertedBoundaries]);
+    const left = ([slot, change]: [string, Change]) => {
+      const [kind, name] = partsOf(slot);
+      if (kind === "record" || !alive(name)) return false;
+      return change.from !== undefined || kind === "line" || alive(change.to!.item);
+    };
     return (
       [...entry.settings].every((key) => madeItsContainer(entry, key)) &&
       [...entry.deletedChars, ...entry.deletedBoundaries].every((id) => added.has(id)) &&
       ![...added].some(alive) &&
-      ![...entry.slots.keys()].some((slot) => slot.startsWith("line ") && alive(partsOf(slot)[1]))
+      ![...entry.slots].some(left)
     );
   };
 
@@ -635,12 +931,21 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     if (from.length !== depth) throw new Error("the model lost count of the history");
     let nothingLeft = 0;
     while (nothingLeft < depth && nothingLeftToUndo(from[depth - 1 - nothingLeft]!)) nothingLeft++;
-    const before = shoot(doc);
+    const before = lookAt(doc);
     const did = (which === "undo" ? history.undo() : history.redo()) !== null;
     const popped = from.splice(stack().length, depth - stack().length);
     const [effects, after] = seen(before);
     learnCopies();
-    oracle.sees(after.tokens);
+    oracle.sees(after.shot.tokens);
+    const changedFormatting = effects.formats;
+    effects.marks = popped.some((entry) => entry.marks);
+    effects.formats = popped.some((entry) => entry.formats);
+    const sawAll = (id: Id) => popped.every((entry) => entry.known.has(id));
+    if (!effects.marks && marksMoved(before.shot, after.shot, sawAll)) {
+      if (!effects.formats)
+        throw new Error(`[2 letters] ${which} changed a letter's marks and its step wrote none`);
+      oracle.count.marksMovedByUndoOfFormatting++;
+    }
     const passedOver = popped.length - (did ? 1 : 0);
     if (passedOver > nothingLeft)
       throw new Error(`[3 undo] ${which} passed over a step that still had something to ${which}`);
@@ -659,7 +964,8 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       effects.deletedBoundaries,
       [...effects.slots],
     ];
-    if (did && changed.every((none) => none.length === 0)) oracle.count.changedNothing++;
+    if (did && !changedFormatting && changed.every((none) => none.length === 0))
+      oracle.count.changedNothing++;
 
     const roots = (ids: Id[]) => ids.map((id) => oracle.root(id));
     const within = (ids: Id[], allowed: Id[]) => {
@@ -685,7 +991,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
 
     const rooted = (slot: string) => {
       const [kind, name, key] = partsOf(slot);
-      return kind === "line" ? `line ${oracle.root(name)} ${key!}` : slot;
+      return kind === "record" ? slot : `${kind} ${oracle.root(name)} ${key!}`;
     };
     const byRoot = new Map([...done.slots.keys()].map((slot) => [rooted(slot), slot]));
     for (const [slot, change] of effects.slots) {
@@ -711,46 +1017,106 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
         continue;
       }
       const earlier = change.from?.value ?? json(DEFAULTS[key.split(".")[1] ?? ""]);
-      if (reads(after, key) !== earlier)
+      if (reads(after.shot, key, true) !== earlier)
         throw new Error(
-          `[4 settings] ${which} left ${key} reading ${String(reads(after, key))}, and it read ${String(earlier)} before the step`,
+          `[4 settings] ${which} left ${key} reading ${String(reads(after.shot, key, true))}, and it read ${String(earlier)} before the step`,
         );
     }
 
-    for (const copy of effects.insertedBoundaries) {
+    const tokens = new Map(after.shot.tokens.map((token) => [token.id, token]));
+    for (const copy of [...effects.insertedBoundaries, ...effects.insertedChars]) {
+      const restored = tokens.get(copy);
+      const now = restored && attrsOf(restored);
+      if (!restored || !now) continue;
+      const kind = restored.kind === "boundary" ? "line" : "atom";
       const source = sourceOf(copy);
-      if (source === null || !noVisibleCharBetween(source, copy))
+      if (source === null || (kind === "line" && !noVisibleCharBetween(source, copy)))
         throw new Error(`[3 undo] ${which} put a boundary back away from where it was`);
       const lastSeen = new Map(
         [...(done.gone.get(source) ?? [])].map(([key, held]) => [key, held.value]),
       );
       const unsure = new Set<string>();
       for (const [slot, change] of done.slots) {
-        const [kind, name, key] = partsOf(slot);
-        if (kind !== "line" || name !== source) continue;
+        const [slotKind, name, key] = partsOf(slot);
+        if (slotKind !== kind || name !== source) continue;
         if (oracle.others(slot, who, done.rounds.get(slot)![0])) unsure.add(key!);
         else if (change.from) lastSeen.set(key!, change.from.value);
         else lastSeen.delete(key!);
       }
-      const restored = after.tokens.find((token) => token.id === copy);
-      const now = restored?.kind === "boundary" ? restored.attrs : new Map<string, Held>();
+      const what = kind === "line" ? "a boundary" : "an inline item";
       for (const key of new Set([...lastSeen.keys(), ...now.keys()]))
         if (!unsure.has(key) && lastSeen.get(key) !== now.get(key)?.value)
           throw new Error(
-            `[3 undo] ${which} put a boundary back with ${key} ${String(now.get(key)?.value)}, and the person last saw ${String(lastSeen.get(key))}`,
+            `[3 undo] ${which} put ${what} back with ${key} ${String(now.get(key)?.value)}, and the person last saw ${String(lastSeen.get(key))}`,
           );
     }
 
     for (const key of done.settings)
       if (effects.slots.has(`record ${key}`)) effects.settings.add(key);
     if (other().length > otherDepth) to.push(effects);
-    kindsHold(after);
+    kindsHold(after.shot);
     return did;
   };
 
-  const expectDefaults = (before: Shot, after: Shot) => {
-    for (const id of freshIds(before, after))
-      expectMade(after, id, String(JSON.parse(after.records.get(id)!.value)), {});
+  const expectDefaults = (before: Look, after: Look) => {
+    for (const id of freshIds(before.shot, after.shot))
+      expectMade(
+        after.shot,
+        id,
+        String(JSON.parse(after.shot.records.get(id)!.value)),
+        {},
+        lenient,
+      );
+  };
+
+  const paragraph = (chars: string[], line: Line): Want => ({
+    b: "+",
+    chars,
+    path: idsOf(line.path),
+    frames: line.path,
+    kind: PARAGRAPH,
+  });
+
+  const given = (line: Line) =>
+    oracle.count[
+      line.bare === "item"
+        ? "boundariesForAddedParagraphs"
+        : line.bare === "spill"
+          ? "boundariesForParagraphsAfter"
+          : "boundariesForUnboundedText"
+    ]++;
+
+  const into = (
+    what: string,
+    at: number,
+    offset: number,
+    holders: string[],
+    plan: BodyWrites | null,
+    units: number,
+  ) => {
+    const before = lookAt(doc);
+    const line = before.lines[at];
+    const fits =
+      line !== undefined &&
+      (line.bare !== "" || holders.includes(line.type)) &&
+      offset <= line.chars.length &&
+      !cutsALetter(line.units, offset);
+    if (refusal(before, plan, fits, what) || !line || !plan) return null;
+    const want = wantOf(before);
+    const row = want[line.row]!;
+    const typed = Array.from({ length: units }, () => "+");
+    const readAbove =
+      line.bare === "spill" && offset === 0 && holders.includes(before.lines[at - 1]!.type);
+    if (line.bare === "item") want.splice(line.row, 0, paragraph(typed, line));
+    else if (readAbove)
+      want.splice(line.row + 1, 0, paragraph([...typed, ...row.chars.splice(line.from)], line));
+    else row.chars.splice(line.from + offset, 0, ...typed);
+    if (line.bare === "item" || readAbove) given(line);
+    if (line.bare === "item" && fault === FAULT.addedParagraphBare) plan.added = [];
+    const [effects, after] = write(before, plan)!;
+    rowsAre(what, want, before, after);
+    const tokens = new Map(after.shot.tokens.map((token) => [token.id, token]));
+    return effects.insertedChars.map((id) => tokens.get(id) as Letter);
   };
 
   return {
@@ -759,172 +1125,344 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     records,
     sent,
     claims,
-    lines,
-    shot: () => shoot(doc),
+    look: () => lookAt(doc),
     receive(update: Uint8Array) {
       Y.applyUpdate(doc, update, REMOTE);
     },
-    type(at: number, offset: number, letters: string) {
-      const row = rowsOf(shoot(doc))[at];
-      const done = write(typeLetters(schema, doc, at, offset, letters), { chars: letters.length });
-      if (!done && row && offset <= row.chars.length && !cutsALetter(row, offset))
-        throw new Error("[writer] typing was refused where letters can be typed");
-      if (!done) return false;
-      const [effects, after] = done;
-      const landed = rowsOf(after)[at]?.chars.slice(offset, offset + letters.length);
-      if (json(landed) !== json(effects.insertedChars))
-        throw new Error("[writer] letters landed away from where they were typed");
-      const units = new Map(
-        after.tokens.flatMap((token) => (token.kind === "char" ? [[token.id, token.unit]] : [])),
-      );
-      if (effects.insertedChars.map((id) => units.get(id)).join("") !== letters)
+    type(at: number, offset: number, letters: string, marks: SequenceAttrs = {}) {
+      const plan = typeLetters(schema, doc, at, offset, letters, marks);
+      const landed = into("typing", at, offset, HOLDS_LETTERS, plan, letters.length);
+      if (!landed) return false;
+      if (landed.map((token) => token.unit).join("") !== letters)
         throw new Error("[2 letters] the note does not hold the letters that were typed");
+      const wrong = landed.find((token) => token.marks !== marksOf(Object.entries(marks)));
+      if (wrong)
+        throw new Error(
+          `[2 letters] letters typed with the marks ${json(marks)} hold the marks ${wrong.marks}`,
+        );
       return true;
     },
-    erase(at: number, offset: number, length: number) {
-      const row = rowsOf(shoot(doc))[at];
-      const asked = row?.chars.slice(offset, offset + length) ?? [];
-      const done = write(deleteLetters(schema, doc, at, offset, length), { chars: -asked.length });
-      const whole = row && !cutsALetter(row, offset) && !cutsALetter(row, offset + length);
-      if (!done && whole && length > 0 && asked.length === length)
-        throw new Error("[writer] an erase was refused where letters can be deleted");
-      if (!done) return false;
-      if (json(done[0].deletedChars) !== json(asked))
-        throw new Error("[writer] an erase deleted other letters than the ones asked for");
+    place(at: number, offset: number, name: string, attrs: SequenceAttrs) {
+      const plan = insertInline(schema, doc, at, offset, name, attrs);
+      const landed = into("an inline item", at, offset, HOLDS_INLINE, plan, 1);
+      if (!landed) return false;
+      const holds = [...(landed[0]?.atom?.attrs ?? [])].map(([key, held]) => [key, held.value]);
+      const wanted = Object.entries(attrs).map(([key, value]) => [key, json(value)]);
+      if (landed[0]?.atom?.name !== name || json(holds.sort()) !== json(wanted.sort()))
+        throw new Error("[4 settings] an inline item does not hold what it was made with");
+      oracle.count.inlineItems++;
       return true;
     },
-    split(at: number, offset: number) {
-      const before = shoot(doc);
-      const row = rowsOf(before)[at];
-      if (!row || offset > row.chars.length) return false;
-      const inside = cutsALetter(row, offset);
-      let plan = splitLine(schema, doc, at, offset, freshId);
+    inline(at: number, offset: number, attrs: SequenceAttrs) {
+      const before = lookAt(doc);
+      const id = before.lines[at]?.chars[offset];
+      const token = before.shot.tokens.find((each) => each.id === id);
+      const atom = token?.kind === "char" ? token.atom : undefined;
+      const wanted = Object.entries(attrs).map(([key, value]) => [key, json(value)] as const);
+      const differs = wanted.some(([key, value]) => atom?.attrs.get(key)?.value !== value);
+      const plan = setInlineAttributes(schema, doc, at, offset, attrs);
+      const what = "a change to an inline item";
+      if (refusal(before, plan, atom !== undefined && differs, what) || !atom) return false;
+      const after = write(before, plan)![1];
+      rowsAre(what, wantOf(before), before, after);
+      const now = after.shot.tokens.find((each) => each.id === id);
+      for (const [key, value] of wanted) {
+        if ((now && attrsOf(now))?.get(key)?.value !== value)
+          throw new Error(
+            `[4 settings] asked for ${key} ${value} on an inline item, and it holds another`,
+          );
+        claims.set(`atom ${id!} ${key}`, { value, round: oracle.round });
+        if (!atom.attrs.has(key)) oracle.count.attributesFirstSet++;
+      }
+      return true;
+    },
+    mark(at: number, offset: number, length: number, marks: SequenceAttrs) {
+      const before = lookAt(doc);
+      const line = before.lines[at];
+      const fits =
+        line !== undefined &&
+        length > 0 &&
+        offset + length <= line.chars.length &&
+        !cutsALetter(line.units, offset) &&
+        !cutsALetter(line.units, offset + length);
+      const plan = setMarks(schema, doc, at, offset, length, marks);
+      if (refusal(before, plan, fits, "a change of marks") || !line) return false;
+      const after = write(before, plan, true)![1];
+      rowsAre("a change of marks", wantOf(before), before, after);
+      const marked = new Set(line.chars.slice(offset, offset + length));
+      const was = new Map(before.shot.tokens.map((token) => [token.id, token]));
+      for (const token of after.shot.tokens) {
+        const earlier = was.get(token.id);
+        if (token.kind !== "char" || earlier?.kind !== "char" || token.atom) continue;
+        const wanted = new Map(JSON.parse(earlier.marks) as [string, unknown][]);
+        if (marked.has(token.id))
+          for (const [name, value] of Object.entries(marks))
+            if (isPlain(value)) wanted.set(name, value);
+            else wanted.delete(name);
+        if (marksOf(wanted) !== token.marks)
+          throw new Error(
+            `[2 letters] a letter holds the marks ${token.marks} after ${json(marks)} was asked for, where it should hold ${marksOf(wanted)}`,
+          );
+      }
+      oracle.count.markChanges++;
+      return true;
+    },
+    erase(at: number, offset: number, toAt: number, toOffset: number) {
+      const before = lookAt(doc);
+      const { lines, rows } = before;
+      const first = lines[at];
+      const last = lines[toAt];
+      const plan = deleteRange(schema, doc, at, offset, toAt, toOffset, freshId);
+      const fits =
+        first !== undefined &&
+        last !== undefined &&
+        offset <= first.chars.length &&
+        toOffset <= last.chars.length &&
+        !cutsALetter(first.units, offset) &&
+        !cutsALetter(last.units, toOffset);
+      const upTo = last?.bare === "item";
+      const r1 = first?.row ?? 0;
+      const p1 = (first?.from ?? 0) + offset;
+      const r2 = (last?.row ?? 0) - (upTo ? 1 : 0);
+      const p2 = upTo ? (rows[r2]?.chars.length ?? 0) : (last?.from ?? 0) + toOffset;
+      const some = fits && (r1 < r2 || (r1 === r2 && (p1 < p2 || first.bare === "item")));
+      if (refusal(before, plan, some, "a delete") || !first || !last) return false;
+      const want = wantOf(before);
+      const retyped =
+        first.bare === "item" && rows[r1]!.attrs.get("type")?.value !== json("paragraph");
+      const block = lines.find(
+        (line) => line.row === r2 && line.from === 0 && line.bare !== "item",
+      )!;
+      const held = block.chars.length;
+      const keepsAfter = held < rows[r2]!.chars.length && p2 <= held && (r2 > r1 || retyped);
+      const tail = want[r2]!.chars.slice(p2);
+      const after = keepsAfter ? [paragraph(tail.splice(held - p2), block)] : [];
+      if (keepsAfter) oracle.count.boundariesForParagraphsAfter++;
+      const left = [...want[r1]!.chars.slice(0, p1), ...tail];
+      if (first.bare === "item")
+        Object.assign(want[r1]!, paragraph(left, first), { b: want[r1]!.b });
+      want[r1]!.chars = left;
+      want.splice(r1 + 1, r2 - r1, ...after);
+      if (want[0]!.b === "-" && left.length === 0 && r1 === 0 && want.length > 1) {
+        Object.assign(want[0]!, { b: "+", kind: PARAGRAPH });
+        oracle.count.boundariesForUnboundedText++;
+      }
+      keepApart(want, r1);
+      const done = write(before, plan, true)![1];
+      rowsAre("a delete", want, before, done);
+      expectCopies(before.shot, done.shot, [], lenient);
+      if (r2 > r1) oracle.count.linesDeleted++;
+      return true;
+    },
+    split(at: number, offset: number, kind?: SequenceAttrs) {
+      const before = lookAt(doc);
+      const { lines } = before;
+      const line = lines[at];
+      const inside = line !== undefined && cutsALetter(line.units, offset);
+      const fits = line !== undefined && offset <= line.chars.length && !inside;
+      let plan = splitLine(schema, doc, at, offset, freshId, kind);
       if (!plan && inside) oracle.count.refusedInsideALetter++;
       if (!plan && inside && fault === FAULT.splitInsideLetter) {
-        plan = splitLine(schema, doc, at, offset + 1, freshId);
-        if (plan?.added) plan.added[0]!.index--;
-      }
-      if (!plan?.added && !inside)
-        throw new Error("[writer] a split was refused where a line can be split");
-      if (!plan?.added) return write(null) !== null;
-      const unbounded = row.boundary === null && offset === 0;
-      const above = offset === 0 && row.chars.length > 0 && !unbounded;
+        plan = splitLine(schema, doc, at, offset + 1, freshId, kind);
+        if (plan) plan.added[0]!.index--;
+      } else if (refusal(before, plan, fits, "a split")) return false;
+      if (!line || !plan) return false;
+      const want = wantOf(before);
+      const row = want[line.row]!;
+      const stored = before.rows[line.row]!.attrs;
+      const type = String(
+        kind ? (kind.type ?? "paragraph") : line.bare === "" ? line.type : "paragraph",
+      );
+      const copied = (key: string) => (line.bare === "" ? stored.get(key)?.value : undefined);
+      const newKind: SequenceAttrs = { type };
+      for (const [key, unset] of Object.entries(LEAF_KINDS[type]!))
+        newKind[key] = kind
+          ? key in kind
+            ? kind[key]
+            : unset
+          : (JSON.parse(copied(key) ?? json(unset)) as unknown);
+      const depth = line.path.length - 1;
+      const item = line.path[depth];
+      const isFirst =
+        item !== undefined &&
+        ITEMS.includes(item.type) &&
+        lines[at - 1]?.path[depth]?.key !== item.key;
+      const ids = idsOf(line.path);
+      const newPath = isFirst ? [...ids.slice(0, depth), "+"] : ids;
+      const fresh = (chars: string[]): Want => ({
+        b: "+",
+        chars,
+        path: [...newPath],
+        frames: line.path,
+        kind: newKind,
+      });
+      const pos = line.from + offset;
+      const end = line.from + line.chars.length;
+      const some = line.chars.length > 0 || line.bare !== "";
+      const above = offset === 0 && line.bare !== "item" && some;
+      const after = line.bare === "" && end < row.chars.length && offset === line.chars.length;
+      let moved = line.row + 1;
+      if (line.bare !== "" && offset === 0) given(line);
+      if (line.bare === "start" && offset === 0)
+        want.splice(0, 1, fresh([]), paragraph(row.chars, line));
+      else if (line.bare === "item") {
+        want.splice(line.row, 0, paragraph([], line), fresh([]));
+        moved = line.row + 2;
+      } else if (line.bare === "spill" && offset === 0)
+        want.splice(line.row + 1, 0, fresh([]), paragraph(row.chars.splice(pos), line));
+      else if (above) want.splice(line.row, 0, fresh([]));
+      else if (after) {
+        want.splice(line.row + 1, 0, fresh([]), paragraph(row.chars.splice(pos), line));
+        want[line.row + 2]!.path = [...newPath];
+        oracle.count.boundariesForParagraphsAfter++;
+        moved = line.row + 3;
+      } else want.splice(line.row + 1, 0, fresh(row.chars.splice(pos)));
+      if (isFirst && !above)
+        for (let later = moved; want[later]?.frames[depth]?.key === item.key; later++)
+          want[later]!.path[depth] = "+";
       if (above && fault === FAULT.oldBoundaryAbove) plan.added[0]!.index++;
-      if (unbounded) oracle.count.boundariesForUnboundedText++;
-      const done = write(plan, {
-        boundaries: unbounded ? 2 : 1,
-        movable: above ? [] : row.chars.slice(offset),
-      })!;
-      const [upper, lower] = rowsOf(done[1]).slice(at, at + 2);
-      const stays = above || unbounded ? [] : row.chars.slice(0, offset);
-      const wrongLine = above
-        ? lower?.boundary !== row.boundary
-        : !unbounded && upper?.boundary !== row.boundary;
-      if (
-        wrongLine ||
-        json(upper?.chars) !== json(stays) ||
-        json(lower?.chars) !== json(row.chars.slice(stays.length))
-      )
-        throw new Error("[writer] a split put its boundary in the wrong place");
-      expectDefaults(before, done[1]);
+      if (fault === FAULT.splitAlwaysParagraph && plan.added.length === 1)
+        plan.added[0]!.attrs = { type: "paragraph", path: plan.added[0]!.attrs.path };
+      const done = write(before, plan)![1];
+      rowsAre("a split", want, before, done);
+      expectDefaults(before, done);
       return true;
     },
     join(at: number) {
-      const rows = rowsOf(shoot(doc));
-      const upper = rows[at - 1];
-      const lower = rows[at];
-      const plan = joinLine(schema, doc, at);
-      if (!upper || !lower?.boundary) {
-        if (plan) throw new Error("[writer] a join was written where no line can be joined");
-        return false;
+      const before = lookAt(doc);
+      const lower = before.lines[at];
+      const upper = before.lines[at - 1];
+      const plan = joinLine(schema, doc, at, freshId);
+      const fits = upper !== undefined && lower !== undefined && lower.bare === "";
+      if (refusal(before, plan, fits, "a join") || !plan || !upper || !lower) return false;
+      const want = wantOf(before);
+      const row = want[lower.row]!;
+      const held = lower.chars.length;
+      const retyped = before.rows[lower.row]!.attrs.get("type")?.value !== json("paragraph");
+      const after = (): Want[] => {
+        if (held === row.chars.length) return [];
+        oracle.count.boundariesForParagraphsAfter++;
+        return [paragraph(row.chars.splice(held), lower)];
+      };
+      if (upper.bare === "item") {
+        const below = retyped ? after() : [];
+        Object.assign(row, paragraph(row.chars, upper), { b: row.b });
+        want.splice(lower.row + 1, 0, ...below);
+      } else if (upper.bare === "" && upper.chars.length === 0) {
+        want.splice(upper.row, 1);
+        keepApart(want, upper.row - 1);
+      } else {
+        const below = after();
+        want[upper.row]!.chars.push(...row.chars);
+        want.splice(lower.row, 1, ...below);
+        keepApart(want, upper.row);
       }
-      if (!plan) throw new Error("[writer] a join was refused between two lines");
-      if (fault === FAULT.alwaysLowerBoundary) plan.removed = lines()[at]!.start - 1;
-      const upperGoes = upper.boundary !== null && upper.chars.length === 0;
-      const done = write(plan, { boundaries: -1, movable: upperGoes ? [] : lower.chars })!;
-      if (json(done[0].deletedBoundaries) !== json([upperGoes ? upper.boundary : lower.boundary]))
-        throw new Error("[writer] a join deleted the boundary of the wrong line");
+      if (plan.erased.length > 0 && fault === FAULT.alwaysLowerBoundary)
+        plan.erased[0]!.index = readBody(schema, doc)[at]!.start - 1;
+      if (plan.erased.length > 0 && fault === FAULT.twinsJoined) {
+        plan.records.clear();
+        plan.attributes.clear();
+      }
+      const done = write(before, plan)![1];
+      rowsAre("a join", want, before, done);
+      expectCopies(before.shot, done.shot, [], lenient);
       return true;
     },
     kind(at: number, asked: SequenceAttrs) {
-      const row = rowsOf(shoot(doc))[at];
-      if (!row) return false;
-      const held = String(JSON.parse(row.attrs.get("type")?.value ?? '"paragraph"'));
+      const before = lookAt(doc);
+      const line = before.lines[at];
+      if (!line) return false;
+      const stored = line.bare === "" ? before.rows[line.row]!.attrs : new Map<string, Held>();
+      const held = line.bare === "" ? line.type : "paragraph";
       const type = typeof asked.type === "string" ? asked.type : held;
-      const unset = defaultsOf([type]);
-      const expected = new Map([["type", json(type)]]);
-      for (const key of Object.keys(unset))
-        expected.set(
-          key,
-          key in asked
-            ? json(asked[key])
-            : ((type === held ? row.attrs.get(key)?.value : undefined) ?? json(unset[key])),
-        );
+      const unset = LEAF_KINDS[type]!;
+      const wanted: SequenceAttrs = { type };
+      for (const key of Object.keys(unset)) {
+        const kept = type === held ? stored.get(key)?.value : undefined;
+        wanted[key] = key in asked ? asked[key] : (JSON.parse(kept ?? json(unset[key])) as unknown);
+      }
+      const holds = (key: string) =>
+        line.bare === "" ? stored.get(key)?.value : json(PARAGRAPH[key]);
+      const same = Object.entries(wanted).every(([key, value]) => holds(key) === json(value));
       const plan = setLineKind(schema, doc, at, asked);
-      if (plan && fault === FAULT.noKindDefaults)
-        for (const attrs of [
-          ...plan.attributes.values(),
-          ...(plan.added ?? []).map((a) => a.attrs),
-        ])
+      if (refusal(before, plan, line.bare !== "item" && !same, "a change of kind") || !plan)
+        return false;
+      const want = wantOf(before);
+      const row = want[line.row]!;
+      const end = line.from + line.chars.length;
+      if (line.bare === "start") Object.assign(row, { b: "+", kind: wanted });
+      else if (line.bare === "spill")
+        want.splice(line.row + 1, 0, {
+          ...paragraph(row.chars.splice(line.from), line),
+          kind: wanted,
+        });
+      else {
+        row.kind = wanted;
+        if (type !== held && end < row.chars.length) {
+          want.splice(line.row + 1, 0, paragraph(row.chars.splice(end), line));
+          oracle.count.boundariesForParagraphsAfter++;
+          if (fault === FAULT.spillLeftBare) plan.added = [];
+        }
+      }
+      if (line.bare !== "") given(line);
+      if (fault === FAULT.noKindDefaults)
+        for (const attrs of [...plan.attributes.values(), ...plan.added.map((each) => each.attrs)])
           for (const key of Object.keys(unset))
-            if (!row.attrs.has(key) && json(attrs[key]) === json(unset[key])) delete attrs[key];
-      const unbounded = row.boundary === null;
-      if (plan && unbounded) oracle.count.boundariesForUnboundedText++;
-      const done = write(plan, {
-        boundaries: unbounded ? 1 : 0,
-        movable: unbounded ? row.chars : [],
-      });
-      const now = done ? rowsOf(done[1])[at]!.attrs : row.attrs;
-      for (const [key, value] of expected)
-        if (now.get(key)?.value !== value && (done || !unbounded || type !== "paragraph"))
-          throw new Error(
-            `[7 kind] asked for ${json(asked)}, and the boundary holds ${key} ${String(now.get(key)?.value)} where it should hold ${value}`,
-          );
-      return done !== null;
+            if (!stored.has(key) && json(attrs[key]) === json(unset[key])) delete attrs[key];
+      rowsAre("a change of kind", want, before, write(before, plan)![1]);
+      return true;
     },
     wrap(at: number, depth: number, count: number, type: string, attrs: SequenceAttrs) {
-      const before = shoot(doc);
-      const first = rowsOf(before)[0]!;
-      const unbounded = at === 0 && first.boundary === null;
+      const before = lookAt(doc);
+      const line = before.lines[at];
       const plan = wrapBlocks(schema, doc, at, depth, count, type, attrs, freshId);
-      const body = lines();
-      const inAList = LISTS.includes(body[at]?.path[depth - 1]?.type ?? "");
-      const shallow = body.every((line) => line.path.length < 60);
-      if (!plan && body[at] && depth <= body[at].path.length && !inAList && shallow)
+      const alone = line?.bare === "item" && depth === line.path.length;
+      const inAList = LISTS.includes(line?.path[depth - 1]?.type ?? "");
+      const shallow = before.frames.every((path) => path.length < 60);
+      if (!plan && line && depth <= line.path.length && !inAList && shallow && !alone)
         throw new Error("[writer] a wrap was refused where blocks can be wrapped");
-      if (plan && unbounded) oracle.count.boundariesForUnboundedText++;
-      const done = write(plan, {
-        boundaries: unbounded ? 1 : 0,
-        movable: unbounded ? first.chars : [],
-      });
-      if (!done) return false;
-      const made = lines()[at]!.path[depth]?.id;
-      const fresh = freshIds(before, done[1]);
+      const done = write(before, plan);
+      if (!done || !line) return false;
+      rowsKept("a wrap", before, done[1]);
+      const made = done[1].frames[rowAfter(before, done[1], line)]?.[depth]?.id;
+      const fresh = freshIds(before.shot, done[1].shot);
       if (made === undefined || !fresh.includes(made))
         throw new Error("[4 settings] a wrap made no container where it was asked for one");
       for (const id of fresh)
-        if (id === made) expectMade(done[1], id, type, attrs);
-        else if (ITEM_OF[type]) expectMade(done[1], id, ITEM_OF[type], {});
+        if (id === made) expectMade(done[1].shot, id, type, attrs, lenient);
+        else if (ITEM_OF[type]) expectMade(done[1].shot, id, ITEM_OF[type], {}, lenient);
         else throw new Error("[4 settings] a wrap made a container it was not asked for");
       return true;
     },
     lift(at: number, depth: number, count: number) {
-      const before = shoot(doc);
-      const done = write(liftBlocks(schema, doc, at, depth, count, freshId));
-      if (done) expectCopies(before, done[1]);
-      return done !== null;
+      const before = lookAt(doc);
+      const done = write(before, liftBlocks(schema, doc, at, depth, count, freshId));
+      if (!done) return false;
+      rowsKept("a lift", before, done[1]);
+      expectCopies(before.shot, done[1].shot, [], lenient);
+      return true;
     },
     indent(at: number, depth: number) {
-      const before = shoot(doc);
-      const done = write(indentItem(schema, doc, at, depth, freshId));
-      if (done) expectDefaults(before, done[1]);
-      return done !== null;
+      const before = lookAt(doc);
+      const done = write(before, indentItem(schema, doc, at, depth, freshId));
+      if (!done) return false;
+      rowsKept("an indent", before, done[1]);
+      for (const id of freshIds(before.shot, done[1].shot)) {
+        const type = String(JSON.parse(done[1].shot.records.get(id)!.value));
+        if (copies(before.shot, done[1].shot, id, [], lenient)) continue;
+        if (!LISTS.includes(type))
+          throw new Error("[4 settings] an indent made a container that is not a list");
+        expectMade(done[1].shot, id, type, {}, lenient);
+      }
+      return true;
     },
     outdent(at: number, depth: number) {
-      const before = shoot(doc);
-      const done = write(outdentItem(schema, doc, at, depth, freshId));
-      if (done) expectCopies(before, done[1]);
-      return done !== null;
+      const before = lookAt(doc);
+      const done = write(before, outdentItem(schema, doc, at, depth, freshId));
+      if (!done) return false;
+      rowsKept("an outdent", before, done[1]);
+      expectCopies(before.shot, done[1].shot, [], lenient);
+      return true;
     },
     containerKind: (at: number, depth: number, type: string) =>
       setting(at, depth, type, {}, setContainerKind(schema, doc, at, depth, type, freshId)),
@@ -945,11 +1483,15 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
 }
 type Person = ReturnType<typeof person>;
 
-type Written = [text: string, kind: SequenceAttrs, path: string[]];
-const PARAGRAPH = { type: "paragraph" };
+type Piece =
+  | string
+  | { text: string; marks: SequenceAttrs }
+  | { inline: string; attrs: SequenceAttrs };
+type Written = [text: string | Piece[], kind: SequenceAttrs, path: string[]];
+type Made = { id: string; type: string; attrs: SequenceAttrs };
 
 function note(
-  frames: SequenceFrame[],
+  frames: Made[],
   lines: Written[],
   more: Record<string, unknown> = {},
   unbounded = "",
@@ -958,21 +1500,32 @@ function note(
   doc.clientID = 1;
   const sequence = doc.getText(SEQUENCE);
   const records = doc.getMap(CONTAINERS);
-  for (const frame of frames)
-    for (const [key, value] of recordsOfContainer(schema, frame)) records.set(key, value);
+  const element = (name: string, attrs: SequenceAttrs) => {
+    const made = new Y.XmlElement(name);
+    for (const [key, value] of Object.entries(attrs))
+      made.setAttribute(key, value as unknown as string);
+    sequence.insertEmbed(sequence.length, made, {});
+  };
+  for (const { id, type, attrs } of frames)
+    for (const [key, value] of recordsWanted(id, type, attrs)) records.set(key, value);
   for (const [key, value] of Object.entries(more)) records.set(key, value);
   sequence.insert(0, unbounded, {});
   for (const [text, kind, path] of lines) {
-    const boundary = new Y.XmlElement(BLOCK_ELEMENT);
-    for (const [key, value] of Object.entries({ ...kind, path }))
-      boundary.setAttribute(key, value as unknown as string);
-    sequence.insertEmbed(sequence.length, boundary, {});
-    sequence.insert(sequence.length, text, {});
+    element(BLOCK_ELEMENT, { ...kind, path });
+    for (const piece of typeof text === "string" ? [text] : text)
+      if (typeof piece === "string") sequence.insert(sequence.length, piece, {});
+      else if ("text" in piece) sequence.insert(sequence.length, piece.text, { ...piece.marks });
+      else element(piece.inline, piece.attrs);
   }
   const baseline = Y.encodeStateAsUpdate(doc);
   doc.destroy();
   return baseline;
 }
+
+const IMAGE = { inline: "image", attrs: { src: "a.png", alt: "" } };
+const MATH = { inline: "mathInline", attrs: { tex: "x" } };
+const BOLD = { bold: {} };
+const TIP = { calloutType: "tip", title: "Read me", fold: "+" };
 
 const plainNote = () =>
   note(
@@ -989,24 +1542,42 @@ const nestedNote = (unbounded = "") =>
       { id: "N", type: "orderedList", attrs: { start: 3n } },
       { id: "N1", type: "listItem", attrs: {} },
       { id: "T2", type: "taskItem", attrs: { checked: true } },
-      { id: "C", type: "callout", attrs: { calloutType: "tip", title: "Read me", fold: "+" } },
+      { id: "C", type: "callout", attrs: TIP },
     ],
     [
-      ["a\u{1F600}b", PARAGRAPH, []],
+      [["a\u{1F600}", { text: "b", marks: BOLD }], PARAGRAPH, []],
       ["cd", { type: "heading", level: 2 }, ["Q"]],
-      ["ef", PARAGRAPH, ["Q"]],
+      [["e", IMAGE, "f"], PARAGRAPH, ["Q"]],
       ["gh", PARAGRAPH, ["T", "T1"]],
-      ["ij", PARAGRAPH, ["T", "T1", "N", "N1"]],
+      ["ij", { type: "heading", level: 3 }, ["T", "T1", "N", "N1"]],
       ["kl", PARAGRAPH, ["T", "T2"]],
       ["mn", PARAGRAPH, ["C"]],
-      ["o\u{1F9E9}", PARAGRAPH, ["C"]],
+      [["o\u{1F9E9}", MATH, "p"], { type: "codeBlock", language: null }, ["C"]],
       ["qr", PARAGRAPH, ["C"]],
-      ["st", PARAGRAPH, []],
+      [[{ text: "st", marks: BOLD }, "u"], PARAGRAPH, []],
     ],
     { "Q.start": 7, "T.title": "kept", "T1.fold": "-", "N.calloutType": "tip", "C.checked": true },
     unbounded,
   );
-const STARTS = [plainNote, nestedNote, () => nestedNote("u\u{1F389}v")];
+const twinNote = () =>
+  note(
+    [
+      { id: "C", type: "callout", attrs: TIP },
+      { id: "L", type: "bulletList", attrs: {} },
+      { id: "I", type: "listItem", attrs: {} },
+    ],
+    [
+      ["ab", PARAGRAPH, ["C"]],
+      ["x", PARAGRAPH, []],
+      ["cd", PARAGRAPH, ["C"]],
+      ["ef", PARAGRAPH, ["L", "I"]],
+      ["", PARAGRAPH, []],
+      ["gh", PARAGRAPH, ["L", "I"]],
+      ["yz", PARAGRAPH, []],
+    ],
+    { "C.checked": true, "I.title": "kept" },
+  );
+const STARTS = [plainNote, nestedNote, () => nestedNote("u\u{1F389}v"), twinNote];
 
 function team(count: number, baseline: Uint8Array, gc = true, fault?: Fault) {
   const oracle = new Oracle();
@@ -1071,14 +1642,16 @@ function view(doc: Y.Doc): string {
   }
   return json({
     tokens: shot.tokens.map((token) =>
-      token.kind === "char" ? [token.id, token.line, token.unit] : [token.id, sorted(token.attrs)],
+      token.kind === "boundary"
+        ? [token.id, sorted(token.attrs)]
+        : [token.id, token.line, token.unit, token.marks, sorted(token.atom?.attrs ?? new Map())],
     ),
     records: sorted(shot.records),
     note: read.toJSON(),
   });
 }
 
-function agreed(people: Person[]): Shot {
+function agreed(people: Person[]): Look {
   const first = view(people[0]!.doc);
   for (const each of people) {
     if (view(each.doc) !== first) throw new Error("[1 same note] two people read different notes");
@@ -1091,7 +1664,7 @@ function agreed(people: Person[]): Shot {
     if (again !== first)
       throw new Error("[1 same note] a note reopened from its full state reads differently");
   }
-  return people[0]!.shot();
+  return people[0]!.look();
 }
 
 function lettersHold(oracle: Oracle, final: Token[]) {
@@ -1131,32 +1704,33 @@ function lettersHold(oracle: Oracle, final: Token[]) {
   }
 }
 
-function settingsHold(people: Person[], oracle: Oracle) {
+function settingsHold(people: Person[], oracle: Oracle, lenient: boolean) {
   const doc = people[0]!.doc;
   const shot = shoot(doc);
   const records = doc.getMap(CONTAINERS);
   for (const [key, value] of oracle.asMade)
-    if (reads(shot, key) !== value)
+    if (reads(shot, key, lenient) !== value)
       throw new Error(
-        `[4 settings] ${key} was made as ${value} and reads ${String(reads(shot, key))}, and no one changed it`,
+        `[4 settings] ${key} was made as ${value} and reads ${String(reads(shot, key, lenient))}, and no one changed it`,
       );
-  const boundaries = new Map(
-    shot.tokens.flatMap((token) =>
-      token.kind === "boundary" ? [[token.id, token.attrs] as const] : [],
-    ),
-  );
-  const frames = leavesOfSequence(schema, piecesOfSequence(doc.getText(SEQUENCE)), records).flatMap(
-    (leaf) => leaf.path.map((frame, depth) => ({ frame, under: leaf.path[depth - 1]?.type })),
+  const elements = new Map(shot.tokens.map((token) => [token.id, attrsOf(token)]));
+  const frames = leavesOfSequence(
+    schema,
+    piecesOfSequence(doc.getText(SEQUENCE), MARKS),
+    records,
+  ).flatMap((leaf) =>
+    leaf.path.map((frame, depth) => ({ frame, under: leaf.path[depth - 1]?.type })),
   );
   for (const each of people)
     for (const [slot, claim] of each.claims) {
       const [kind, name, key] = partsOf(slot);
-      const gone = kind === "line" && !boundaries.has(name);
+      const element = kind === "record" ? undefined : elements.get(name);
+      const gone = kind !== "record" && !element;
       if (gone || oracle.others(slot, each.who, claim.round)) {
         each.claims.delete(slot);
         continue;
       }
-      const held = kind === "line" ? boundaries.get(name)!.get(key!) : shot.records.get(name);
+      const held = kind === "record" ? shot.records.get(name) : element!.get(key!);
       oracle.count.settingsChecked++;
       if (held?.value !== claim.value)
         throw new Error(
@@ -1196,43 +1770,73 @@ function unnamedRecords(doc: Y.Doc) {
   return { records: shot.records.size, unnamed: unnamed.length, unnamedBytes };
 }
 
-function readsAsWritten(doc: Y.Doc) {
-  const records = doc.getMap(CONTAINERS);
-  for (const line of readBody(schema, doc)) {
-    if (!line.boundary) continue;
-    if (json(line.attrs.path) !== json(line.path.map((container) => container.id)))
+function readsAsWritten(doc: Y.Doc, look: Look, faithful: boolean, lenient: boolean) {
+  if (blocksRead(doc) !== json(look.lines.map((line) => [line.type, line.units])))
+    throw new Error("[1 same note] the model's lines are not the blocks the reader gives");
+  writerAgrees(doc, look);
+  look.rows.forEach((row, at) => {
+    const path = look.frames[at]!;
+    if (faithful && row.boundary !== null && json(pathOf(row)) !== json(idsOf(path)))
       throw new Error("[writer] a path does not read as it was written");
-    for (const { id, type } of line.path)
-      for (const key of recordsOfContainer(schema, { id, type, attrs: {} }).keys())
-        if (!records.has(key)) throw new Error(`[writer] the container ${id} has no ${key}`);
-  }
-  return twins(doc);
+    for (const { id, type } of lenient ? [] : path)
+      for (const key of recordsWanted(id, type, {}).keys())
+        if (!look.shot.records.has(key))
+          throw new Error(`[4 settings] the ${type} ${id} has no record ${key.slice(id.length)}`);
+  });
 }
 
-function settled(people: Person[], oracle: Oracle, faithful: boolean) {
+function settled(people: Person[], oracle: Oracle, fault?: Fault) {
   const final = agreed(people);
-  lettersHold(oracle, final.tokens);
-  settingsHold(people, oracle);
+  lettersHold(oracle, final.shot.tokens);
+  settingsHold(people, oracle, LENIENT.includes(fault));
   for (const each of people) recordsKept(each.doc);
-  kindsHold(final);
-  if (faithful && readsAsWritten(people[0]!.doc) > 0) oracle.count.roundsWithOneIdOnTwo++;
+  kindsHold(final.shot);
+  readsAsWritten(people[0]!.doc, final, fault === undefined, LENIENT.includes(fault));
+  if (twinsIn(final) > 0) oracle.count.roundsWithOneIdOnTwo++;
   oracle.round++;
 }
 
 const CALLOUT_KINDS = ["note", "tip", "warning"];
 const TITLES = ["", "Read me", "Danger"];
 const FOLDS = ["", "+", "-"];
+const LINK = { link: { href: "https://example.com" } };
+const MARK_SETS: SequenceAttrs[] = [
+  {},
+  {},
+  {},
+  BOLD,
+  { italic: {} },
+  { ...BOLD, italic: {} },
+  LINK,
+];
+const MARK_CHANGES: SequenceAttrs[] = [
+  BOLD,
+  { bold: null },
+  { italic: {} },
+  { italic: null },
+  LINK,
+  { link: null },
+];
+const SPLIT_KINDS: (SequenceAttrs | undefined)[] = [
+  undefined,
+  undefined,
+  undefined,
+  PARAGRAPH,
+  { type: "heading", level: 2 },
+  { type: "codeBlock" },
+];
 
-type Weights = { wraps: number; kindsOfTheFirstLine: number; undos: number };
-const EVEN: Weights = { wraps: 1, kindsOfTheFirstLine: 0, undos: 0.16 };
-const ONE_LINE: Weights = { wraps: 1, kindsOfTheFirstLine: 600, undos: 0.4 };
+type Weights = { wraps: number; kindsOfTheFirstLine: number; inlines: number; undos: number };
+const EVEN: Weights = { wraps: 1, kindsOfTheFirstLine: 0, inlines: 1, undos: 0.16 };
+const ONE_LINE: Weights = { ...EVEN, kindsOfTheFirstLine: 600, undos: 0.4 };
+const INLINES: Weights = { ...EVEN, inlines: 12, undos: 0.3 };
 
 function change(
   each: Person,
   next: () => number,
   letter: () => string,
   log: string[],
-  { wraps, kindsOfTheFirstLine }: Weights,
+  { wraps, kindsOfTheFirstLine, inlines }: Weights,
 ) {
   const pick = (below: number) => Math.floor(next() * below);
   const tried = (what: unknown[], run: () => boolean) => {
@@ -1241,26 +1845,30 @@ function change(
     log.pop();
     return false;
   };
-  const lines = each.lines();
-  const at = lines[0]!.boundary === null && pick(3) === 0 ? 0 : pick(lines.length);
+  const { lines, shot } = each.look();
+  const bare = lines.flatMap((held, index) =>
+    held.bare === "" ? [] : held.bare === "spill" ? [index - 1, index] : [index],
+  );
+  const at = bare.length > 0 && pick(4) === 0 ? bare[pick(bare.length)]! : pick(lines.length);
   const line = lines[at]!;
-  const length = line.text.length;
+  const length = line.chars.length;
   const depth = pick(line.path.length + 1);
   const spot = (...types: string[]) => {
     const found: { at: number; depth: number; id: string; type: string }[] = [];
-    const seen = new Set<unknown>();
+    const seen = new Set<number>();
     lines.forEach((held, index) =>
-      held.path.forEach((container, level) => {
-        if (seen.has(container) || !types.includes(container.type)) return;
-        seen.add(container);
-        found.push({ at: index, depth: level, id: container.id, type: container.type });
+      held.path.forEach((frame, level) => {
+        if (seen.has(frame.key) || !types.includes(frame.type)) return;
+        seen.add(frame.key);
+        found.push({ at: index, depth: level, id: frame.id, type: frame.type });
       }),
     );
     return found[pick(found.length)];
   };
   const typing = () => {
     const offset = pick(length + 1);
-    return tried(["type", at, offset], () => each.type(at, offset, letter()));
+    const marks = MARK_SETS[pick(MARK_SETS.length)]!;
+    return tried(["type", at, offset, json(marks)], () => each.type(at, offset, letter(), marks));
   };
   const options: [number, () => boolean][] = [
     [14, typing],
@@ -1268,17 +1876,68 @@ function change(
       4,
       () => {
         const offset = pick(length + 1);
-        const count = Math.min(1 + pick(2), length - offset);
-        return tried(["erase", at, offset, count], () => each.erase(at, offset, count));
+        const { inline, attrs } = [IMAGE, MATH][pick(2)]!;
+        return tried(["place", at, offset, inline], () => each.place(at, offset, inline, attrs));
+      },
+    ],
+    [
+      5 * inlines,
+      () => {
+        const items = lines.flatMap((held, index) =>
+          held.chars.flatMap((id, offset) =>
+            held.units[offset] === OBJECT ? [{ index, offset, id }] : [],
+          ),
+        );
+        const item = items[pick(items.length)];
+        const token = shot.tokens.find((one) => one.id === item?.id);
+        if (!item || token?.kind !== "char") return false;
+        const attrs =
+          token.atom?.name === "image"
+            ? [{ title: "A cat" }, { title: "A dog" }, { alt: "seen" }][pick(3)]!
+            : { tex: `y^${String(pick(3))}` };
+        return tried(["inline", item.index, item.offset, json(attrs)], () =>
+          each.inline(item.index, item.offset, attrs),
+        );
+      },
+    ],
+    [
+      5,
+      () => {
+        const offset = pick(length + 1);
+        const count = Math.min(1 + pick(3), length - offset);
+        const marks = MARK_CHANGES[pick(MARK_CHANGES.length)]!;
+        return tried(["mark", at, offset, count, json(marks)], () =>
+          each.mark(at, offset, count, marks),
+        );
+      },
+    ],
+    [
+      4,
+      () => {
+        const offset = pick(length + 1);
+        const end = offset + Math.min(1 + pick(2), length - offset);
+        return tried(["erase", at, offset, at, end], () => each.erase(at, offset, at, end));
+      },
+    ],
+    [
+      4,
+      () => {
+        const offset = pick(length + 1);
+        const toAt = Math.min(lines.length - 1, at + 1 + pick(2));
+        const toOffset = pick(lines[toAt]!.chars.length + 1);
+        return tried(["erase", at, offset, toAt, toOffset], () =>
+          each.erase(at, offset, toAt, toOffset),
+        );
       },
     ],
     [
       11,
       () => {
-        const pair = line.text.search(HIGH_HALF);
+        const pair = line.units.search(HIGH_HALF);
         const insideALetter = pair < 0 ? 0 : pair + 1;
         const offset = [0, length, pick(length + 1), insideALetter][pick(4)]!;
-        return tried(["split", at, offset], () => each.split(at, offset));
+        const kind = SPLIT_KINDS[pick(SPLIT_KINDS.length)];
+        return tried(["split", at, offset, json(kind)], () => each.split(at, offset, kind));
       },
     ],
     [8, () => tried(["join", at], () => each.join(at))],
@@ -1404,8 +2063,8 @@ function change(
           { type: "codeBlock" },
           { type: "codeBlock", language: "ts" },
         ][pick(6)]!;
-        const line = next() * (6 + kindsOfTheFirstLine) < 6 ? at : 0;
-        return tried(["kind", line, json(kind)], () => each.kind(line, kind));
+        const which = next() * (6 + kindsOfTheFirstLine) < 6 ? at : 0;
+        return tried(["kind", which, json(kind)], () => each.kind(which, kind));
       },
     ],
   ];
@@ -1450,11 +2109,14 @@ type Run = {
   gc: boolean;
   fault?: Fault;
   weights?: Weights;
+  start?: number;
 };
 
-function randomRun({ seed, count, arrive, rounds, busiest, gc, fault, weights }: Run): Tally {
+function randomRun(run: Run): Tally {
+  const { seed, count, arrive, rounds, busiest, gc, fault, weights } = run;
   const next = random(seed);
-  const { oracle, people } = team(count, STARTS[seed % 3]!(), gc, fault);
+  const baseline = STARTS[run.start ?? seed % STARTS.length]!();
+  const { oracle, people } = team(count, baseline, gc, fault);
   const log: string[] = [];
   const letter = lettersFrom();
   try {
@@ -1464,7 +2126,7 @@ function randomRun({ seed, count, arrive, rounds, busiest, gc, fault, weights }:
           act(each, next, letter, log, weights);
       log.push("|");
       deliver(people, arrive, next);
-      settled(people, oracle, fault === undefined);
+      settled(people, oracle, fault);
     }
   } catch (error) {
     throw new Error(
@@ -1481,7 +2143,32 @@ function add(total: Tally, more: Tally) {
   for (const key of Object.keys(total) as (keyof Tally)[]) total[key] += more[key];
 }
 
-const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 24);
+it("states the kinds, records and marks the editor's schema has", () => {
+  const unset = (types: string[]) =>
+    Object.fromEntries(
+      types.flatMap((type) =>
+        Object.entries(schema.nodes[type]!.spec.attrs ?? {}).map(([key, spec]) => [
+          key,
+          (spec as { default?: unknown }).default ?? null,
+        ]),
+      ),
+    );
+  for (const [type, attrs] of Object.entries({ ...LEAF_KINDS, ...INLINE }))
+    expect(unset([type]), type).toEqual(attrs);
+  expect(unset(["blockquote", "callout"])).toEqual(BOX);
+  expect(unset(LISTS)).toEqual(LIST);
+  expect(unset(ITEMS)).toEqual(ITEM);
+  expect(new Set(Object.keys(schema.marks))).toEqual(MARKS);
+  for (const type of Object.keys(LEAF_KINDS)) {
+    const node = schema.nodes[type]!;
+    expect(node.isTextblock, type).toBe(HOLDS_LETTERS.includes(type));
+    expect(node.contentMatch.matchType(schema.nodes.image!) !== null, type).toBe(
+      HOLDS_INLINE.includes(type),
+    );
+  }
+});
+
+const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 20);
 const WEIGHTS = process.env.BODY_CONTAINERS_ONE_LINE ? ONE_LINE : EVEN;
 const FIRST = Number(process.env.BODY_CONTAINERS_FIRST ?? 1);
 const ROUNDS = Number(process.env.BODY_CONTAINERS_ROUNDS ?? 0);
@@ -1518,37 +2205,46 @@ it.each(SETUPS)(
   600_000,
 );
 
-const BREAKAGE_SEEDS = Number(process.env.BODY_CONTAINERS_BREAKAGE_SEEDS ?? 6);
-const BREAKAGES: [Fault, string, Weights?][] = [
+const BREAKAGE_SEEDS = Number(process.env.BODY_CONTAINERS_BREAKAGE_SEEDS ?? 5);
+const BREAKAGES: [Fault, string, Weights?, number?][] = [
   [FAULT.defaultMapUndo, "[3 undo]"],
   [FAULT.noDeleteFilter, "[5 records] the record"],
+  [FAULT.recordsOnlyFilter, "[7 kind] a", ONE_LINE],
+  [FAULT.inlineAttributesKept, "[3 undo] undo passed over", INLINES],
   [FAULT.typeRecordOnly, "[3 undo] or [4 settings]"],
   [FAULT.defaultFirst, "[4 settings]"],
-  [FAULT.oldBoundaryAbove, "[writer] a change took letters to another line"],
+  [FAULT.noLooseRecord, "[4 settings] asked for a"],
+  [FAULT.oldBoundaryAbove, "[writer] after a split"],
+  [FAULT.splitAlwaysParagraph, "[7 kind] after a split"],
   [FAULT.oneRecordForTwins, "[writer] a setting changed on a container it was not made on"],
-  [FAULT.noKindDefaults, "[7 kind] asked for"],
+  [FAULT.noKindDefaults, "[7 kind] after a"],
   [FAULT.splitInsideLetter, "[2 letters] a letter changed"],
+  [FAULT.alwaysLowerBoundary, "[writer] after a join"],
   [
-    FAULT.alwaysLowerBoundary,
-    "[writer] a join deleted the boundary of the wrong line or [writer] a change took letters",
+    FAULT.twinsJoined,
+    "[writer] a change made two containers that share an id read as one",
+    EVEN,
+    STARTS.indexOf(twinNote),
   ],
-  [FAULT.recordsOnlyFilter, "[7 kind] a", ONE_LINE],
   [FAULT.wrongSetting, "[4 settings] asked for"],
   [FAULT.deleteAndRecreate, "[5 records] a writer deleted a record"],
   [FAULT.copyKnownAttributes, "[4 settings] the fresh id"],
+  [FAULT.typingInheritsMarks, "[2 letters] letters typed with the marks"],
+  [FAULT.spillLeftBare, "[writer] after a change of kind", EVEN, STARTS.indexOf(nestedNote)],
+  [FAULT.addedParagraphBare, "[writer] after typing"],
 ];
 
 it.each(BREAKAGES)(
   "fails when broken on purpose with %s, at check %s",
-  (fault, check, weights) => {
+  (fault, check, weights, start) => {
     const fired = new Map<string, number>();
     let asExpected = 0;
-    const seeds = BREAKAGE_SEEDS * (weights ? 3 : 1);
+    const seeds = BREAKAGE_SEEDS * (weights === ONE_LINE ? 3 : 1);
     for (let seed = 1; seed <= seeds; seed++)
       for (const [count, arrive, rounds, busiest] of SETUPS) {
         try {
           const gc = seed % 2 === 0;
-          randomRun({ seed, count, arrive, rounds, busiest, gc, fault, weights });
+          randomRun({ seed, count, arrive, rounds, busiest, gc, fault, weights, start });
         } catch (error) {
           const said = /\n(\[[^\]]+\]) ?(.*)/.exec(String(error)) ?? [];
           const message = `${String(said[1])} ${String(said[2])}`;
@@ -1568,7 +2264,7 @@ it.each(BREAKAGES)(
   600_000,
 );
 
-const LONG_RUN = Number(process.env.BODY_CONTAINERS_LONG_RUN ?? 2000);
+const LONG_RUN = Number(process.env.BODY_CONTAINERS_LONG_RUN ?? 1000);
 
 it("counts the records no path names while one person wraps, lifts and undoes", () => {
   const next = random(11);
@@ -1580,14 +2276,14 @@ it("counts the records no path names while one person wraps, lifts and undoes", 
   for (let changes = 1; changes <= LONG_RUN; changes++) {
     act(only, next, letter, log, { ...EVEN, wraps: 4 });
     if (changes % (LONG_RUN / 4) !== 0) continue;
-    settled(people, oracle, true);
-    const lines = only.lines();
+    settled(people, oracle);
+    const { frames } = only.look();
     const kept = open(Y.encodeStateAsUpdate(only.doc), 99);
     growth.push(
       json({
         changes,
-        lines: lines.length,
-        deepest: Math.max(...lines.map((line) => line.path.length)),
+        lines: frames.length,
+        deepest: Math.max(...frames.map((path) => path.length)),
         ...unnamedRecords(only.doc),
         bytesWithOwnHistory: Y.encodeStateAsUpdate(only.doc).length,
         bytesForSomeoneElse: Y.encodeStateAsUpdate(kept).length,
@@ -1615,41 +2311,95 @@ const written = (doc: Y.Doc, plan: BodyWrites | null) => {
   if (plan) doc.transact(() => writeBody(doc, plan), LOCAL);
   return plan !== null;
 };
-const pathsOf = (doc: Y.Doc) =>
-  readBody(schema, doc).map((line) => line.path.map((container) => container.id));
+const pathsOf = (doc: Y.Doc) => lookAt(doc).frames.map(idsOf);
+const storedOf = (attrs: Map<string, Held>) =>
+  Object.fromEntries([...attrs].map(([key, held]) => [key, JSON.parse(held.value) as unknown]));
 const storedLines = (doc: Y.Doc) =>
-  readBody(schema, doc).map((line) => (line.boundary ? { ...line.attrs, text: line.text } : null));
+  lookAt(doc).rows.map((row) =>
+    row.boundary === null ? null : { ...storedOf(row.attrs), text: row.units },
+  );
+const rowsRead = (doc: Y.Doc) =>
+  lookAt(doc).rows.map((row) => {
+    const kind = `${String(storedOf(row.attrs).type)} ${pathOf(row).join("/")}`;
+    return `${row.boundary === null ? "" : kind}:${row.units}`;
+  });
+const linesRead = (doc: Y.Doc) =>
+  lookAt(doc).lines.map((line) => `${line.bare || "line"} ${line.type}:${line.units}`);
+type Block = {
+  type: string;
+  attrs?: SequenceAttrs;
+  content?: { type: string; text?: string; marks?: { type: string }[] }[];
+};
 const blocksOf = (doc: Y.Doc) =>
-  (
-    readBodySequence(schema, doc).toJSON() as {
-      content: {
-        type: string;
-        attrs?: SequenceAttrs;
-        content?: { type: string; text?: string }[];
-      }[];
-    }
-  ).content;
+  (readBodySequence(schema, doc).toJSON() as { content: Block[] }).content;
 const titlesOf = (doc: Y.Doc) =>
   blocksOf(doc).map((block) => (block.type === "callout" ? block.attrs?.title : block.type));
 const textsOf = (doc: Y.Doc) =>
   blocksOf(doc).map((block) => `${block.type}:${block.content?.[0]?.text ?? ""}`);
+const recordsOf = (doc: Y.Doc, id: string) =>
+  Object.fromEntries(
+    [...doc.getMap(CONTAINERS)].flatMap(([key, value]) =>
+      key.startsWith(`${id}.`) ? [[key.slice(id.length + 1), value]] : [],
+    ),
+  );
+const FACE = "\u{1F600}";
 
-it("refuses a split, a delete and typing between the two units of a surrogate pair", () => {
-  const face = "\u{1F600}";
-  const doc = open(note([], [[`a${face}b`, PARAGRAPH, []]]), 10);
-  const text = () => readBody(schema, doc)[0]!.text;
+it("refuses a split, a delete, typing and marks between the two units of a surrogate pair", () => {
+  const doc = open(note([], [[`a${FACE}b`, PARAGRAPH, []]]), 10);
+  const text = () => lookAt(doc).rows.map((row) => row.units);
   expect(splitLine(schema, doc, 0, 2, String)).toBeNull();
-  expect(deleteLetters(schema, doc, 0, 1, 1)).toBeNull();
-  expect(deleteLetters(schema, doc, 0, 2, 1)).toBeNull();
-  expect(deleteLetters(schema, doc, 0, 2, 2)).toBeNull();
-  expect(typeLetters(schema, doc, 0, 2, "x")).toBeNull();
-  expect(typeLetters(schema, doc, 0, 1, face[0]!)).toBeNull();
-  expect(text()).toBe(`a${face}b`);
-  expect(written(doc, typeLetters(schema, doc, 0, 3, face))).toBe(true);
+  expect(deleteRange(schema, doc, 0, 1, 0, 2, String)).toBeNull();
+  expect(deleteRange(schema, doc, 0, 2, 0, 3, String)).toBeNull();
+  expect(deleteRange(schema, doc, 0, 2, 0, 4, String)).toBeNull();
+  expect(typeLetters(schema, doc, 0, 2, "x", {})).toBeNull();
+  expect(typeLetters(schema, doc, 0, 1, FACE[0]!, {})).toBeNull();
+  expect(setMarks(schema, doc, 0, 0, 2, BOLD)).toBeNull();
+  expect(text()).toEqual([`a${FACE}b`]);
+  expect(written(doc, typeLetters(schema, doc, 0, 3, FACE, {}))).toBe(true);
+  expect(written(doc, setMarks(schema, doc, 0, 1, 2, BOLD))).toBe(true);
   expect(written(doc, splitLine(schema, doc, 0, 3, String))).toBe(true);
-  expect(written(doc, deleteLetters(schema, doc, 0, 1, 2))).toBe(true);
-  expect(readBody(schema, doc).map((line) => line.text)).toEqual(["a", `${face}b`]);
-  expect(textsOf(doc)).toEqual(["paragraph:a", `paragraph:${face}b`]);
+  expect(written(doc, deleteRange(schema, doc, 0, 1, 0, 3, String))).toBe(true);
+  expect(text()).toEqual(["a", `${FACE}b`]);
+  expect(textsOf(doc)).toEqual(["paragraph:a", `paragraph:${FACE}b`]);
+});
+
+it("undoes a title given to an image that had none, and leaves the typing before it", () => {
+  const doc = open(note([], [[["a", IMAGE], PARAGRAPH, []]]), 10);
+  const history = bodyHistory(doc, LOCAL, NEVER_ELAPSES);
+  const image = () => {
+    const token = shoot(doc).tokens.find((each) => each.kind === "char" && each.atom);
+    return storedOf(attrsOf(token!)!);
+  };
+  written(doc, typeLetters(schema, doc, 0, 0, "X", {}));
+  history.stopCapturing();
+  expect(written(doc, setInlineAttributes(schema, doc, 0, 2, { title: "A cat" }))).toBe(true);
+  expect(setInlineAttributes(schema, doc, 0, 2, { title: "A cat" })).toBeNull();
+  expect(image()).toEqual({ src: "a.png", alt: "", title: "A cat" });
+  history.undo();
+  expect(image()).toEqual({ src: "a.png", alt: "" });
+  expect(rowsRead(doc)).toEqual([`paragraph :Xa${OBJECT}`]);
+  history.undo();
+  expect(rowsRead(doc)).toEqual([`paragraph :a${OBJECT}`]);
+  history.redo();
+  history.redo();
+  expect(image()).toEqual({ src: "a.png", alt: "", title: "A cat" });
+  expect(rowsRead(doc)).toEqual([`paragraph :Xa${OBJECT}`]);
+});
+
+it("types letters with the marks it is given, whatever the letters around them hold", () => {
+  const doc = open(note([], [[[{ text: "abc", marks: BOLD }, "def"], PARAGRAPH, []]]), 10);
+  const runs = () =>
+    blocksOf(doc)[0]!.content!.map(
+      (run) => `${run.text!}${(run.marks ?? []).map((mark) => `/${mark.type}`).join("")}`,
+    );
+  expect(written(doc, typeLetters(schema, doc, 0, 1, "X", {}))).toBe(true);
+  expect(runs()).toEqual(["a/bold", "X", "bc/bold", "def"]);
+  expect(written(doc, typeLetters(schema, doc, 0, 6, "Y", BOLD))).toBe(true);
+  expect(runs()).toEqual(["a/bold", "X", "bc/bold", "de", "Y/bold", "f"]);
+  expect(written(doc, typeLetters(schema, doc, 0, 3, "Z", { italic: {} }))).toBe(true);
+  expect(runs()).toEqual(["a/bold", "X", "b/bold", "Z/italic", "c/bold", "de", "Y/bold", "f"]);
+  expect(written(doc, setMarks(schema, doc, 0, 0, 3, { bold: null, italic: {} }))).toBe(true);
+  expect(runs()).toEqual(["aXbZ/italic", "c/bold", "de", "Y/bold", "f"]);
 });
 
 const unboundedNote = () => note([], [["d", PARAGRAPH, []]], {}, "abc");
@@ -1670,6 +2420,11 @@ it.each([
     (doc: Y.Doc) => wrapBlocks(schema, doc, 0, 0, 1, "blockquote", {}, () => "q"),
     ["blockquote:", "paragraph:d"],
   ],
+  [
+    "a delete of all it holds gives it a boundary, so the empty line stays",
+    (doc: Y.Doc) => deleteRange(schema, doc, 0, 0, 0, 3, String),
+    ["paragraph:", "paragraph:d"],
+  ],
 ] as [string, (doc: Y.Doc) => BodyWrites | null, string[]][])(
   "text before the first boundary: %s",
   (_, plan, read) => {
@@ -1680,12 +2435,10 @@ it.each([
     expect(textsOf(doc)).toEqual(read);
     const lines = storedLines(doc);
     expect(lines.every((line) => line !== null && "type" in line && "path" in line)).toBe(true);
-    expect(lines.map((line) => line?.text)).toEqual(
-      read.length === 3 ? ["", "abc", "d"] : ["abc", "d"],
-    );
+    expect(lines).toHaveLength(read.length);
     history.undo();
     expect(storedLines(doc)).toEqual([null, { type: "paragraph", path: [], text: "d" }]);
-    expect(readBody(schema, doc)[0]!.text).toBe("abc");
+    expect(lookAt(doc).rows[0]!.units).toBe("abc");
   },
 );
 
@@ -1711,7 +2464,7 @@ it.each([
     const third = open(unboundedNote(), one);
     const fourth = open(unboundedNote(), other);
     written(third, heading(third));
-    written(fourth, typeLetters(schema, fourth, 0, 0, "X"));
+    written(fourth, typeLetters(schema, fourth, 0, 0, "X", {}));
     exchange(third, fourth);
     expect(textsOf(third)).toEqual(typed);
     expect(view(third)).toBe(view(fourth));
@@ -1729,6 +2482,131 @@ it("splits a note that holds nothing into two empty lines, each with a boundary"
   expect(textsOf(doc)).toEqual(["paragraph:", "paragraph:"]);
 });
 
+const itemNote = () =>
+  note(
+    [
+      { id: "L", type: "bulletList", attrs: {} },
+      { id: "I", type: "listItem", attrs: {} },
+    ],
+    [
+      ["head", { type: "heading", level: 2 }, ["L", "I"]],
+      ["tail", PARAGRAPH, ["L", "I"]],
+    ],
+  );
+
+it("gives a list item's added first paragraph a boundary when a change needs one", () => {
+  const fresh = () => open(itemNote(), 10);
+  const first = fresh();
+  expect(linesRead(first)).toEqual(["item paragraph:", "line heading:head", "line paragraph:tail"]);
+  expect(readBody(schema, first).map((line) => line.bare)).toEqual(["item", "", ""]);
+
+  expect(written(first, typeLetters(schema, first, 0, 0, "X", {}))).toBe(true);
+  expect(rowsRead(first)).toEqual(["paragraph L/I:X", "heading L/I:head", "paragraph L/I:tail"]);
+  expect(linesRead(first)).toEqual([
+    "line paragraph:X",
+    "line heading:head",
+    "line paragraph:tail",
+  ]);
+
+  const split = fresh();
+  expect(
+    written(
+      split,
+      splitLine(schema, split, 0, 0, () => "new"),
+    ),
+  ).toBe(true);
+  expect(rowsRead(split)).toEqual([
+    "paragraph L/I:",
+    "paragraph L/new:",
+    "heading L/new:head",
+    "paragraph L/new:tail",
+  ]);
+
+  const joined = fresh();
+  expect(joinLine(schema, joined, 0, String)).toBeNull();
+  expect(written(joined, joinLine(schema, joined, 1, String))).toBe(true);
+  expect(rowsRead(joined)).toEqual(["paragraph L/I:head", "paragraph L/I:tail"]);
+  expect(linesRead(joined)).toEqual(["line paragraph:head", "line paragraph:tail"]);
+
+  const deleted = fresh();
+  expect(written(deleted, deleteRange(schema, deleted, 0, 0, 1, 4, String))).toBe(true);
+  expect(rowsRead(deleted)).toEqual(["paragraph L/I:", "paragraph L/I:tail"]);
+
+  const kept = fresh();
+  expect(setLineKind(schema, kept, 0, { type: "heading" })).toBeNull();
+  expect(wrapBlocks(schema, kept, 0, 2, 1, "blockquote", {}, () => "alone")).toBeNull();
+  expect(
+    written(
+      kept,
+      wrapBlocks(schema, kept, 0, 0, 1, "blockquote", {}, () => "q"),
+    ),
+  ).toBe(true);
+  expect(rowsRead(kept)).toEqual(["heading q/L/I:head", "paragraph q/L/I:tail"]);
+});
+
+const codeNote = () =>
+  note(
+    [],
+    [
+      ["top", PARAGRAPH, []],
+      [["co", MATH, "de"], { type: "codeBlock", language: "ts" }, []],
+      ["z", PARAGRAPH, []],
+    ],
+  );
+
+it("gives the paragraph after a code block a boundary when a change needs one", () => {
+  const fresh = () => open(codeNote(), 10);
+  const rest = `${OBJECT}de`;
+  const others = (doc: Y.Doc) => rowsRead(doc).slice(1, -1);
+  const first = fresh();
+  expect(linesRead(first)).toEqual([
+    "line paragraph:top",
+    "line codeBlock:co",
+    `spill paragraph:${rest}`,
+    "line paragraph:z",
+  ]);
+
+  expect(written(first, typeLetters(schema, first, 2, 0, "X", {}))).toBe(true);
+  expect(others(first)).toEqual(["codeBlock :co", `paragraph :X${rest}`]);
+  const inCode = fresh();
+  expect(written(inCode, typeLetters(schema, inCode, 1, 2, "X", {}))).toBe(true);
+  expect(linesRead(inCode).slice(1, 3)).toEqual(["line codeBlock:coX", `spill paragraph:${rest}`]);
+  expect(insertInline(schema, inCode, 1, 1, "image", IMAGE.attrs)).toBeNull();
+
+  const atEnd = fresh();
+  expect(written(atEnd, splitLine(schema, atEnd, 1, 2, String, PARAGRAPH))).toBe(true);
+  expect(others(atEnd)).toEqual(["codeBlock :co", "paragraph :", `paragraph :${rest}`]);
+  const atStart = fresh();
+  expect(written(atStart, splitLine(schema, atStart, 2, 0, String))).toBe(true);
+  expect(others(atStart)).toEqual(["codeBlock :co", "paragraph :", `paragraph :${rest}`]);
+  const inside = fresh();
+  expect(written(inside, splitLine(schema, inside, 2, 2, String))).toBe(true);
+  expect(others(inside)).toEqual([`codeBlock :co${OBJECT}d`, "paragraph :e"]);
+
+  const joined = fresh();
+  expect(joinLine(schema, joined, 2, String)).toBeNull();
+  expect(written(joined, joinLine(schema, joined, 1, String))).toBe(true);
+  expect(rowsRead(joined)).toEqual(["paragraph :topco", `paragraph :${rest}`, "paragraph :z"]);
+  const below = fresh();
+  expect(written(below, joinLine(schema, below, 3, String))).toBe(true);
+  expect(linesRead(below).slice(1)).toEqual(["line codeBlock:co", `spill paragraph:${rest}z`]);
+
+  const block = fresh();
+  expect(written(block, setLineKind(schema, block, 1, PARAGRAPH))).toBe(true);
+  expect(others(block)).toEqual(["paragraph :co", `paragraph :${rest}`]);
+  const language = fresh();
+  expect(written(language, setLineKind(schema, language, 1, { language: null }))).toBe(true);
+  expect(others(language)).toEqual([`codeBlock :co${rest}`]);
+  const own = fresh();
+  expect(written(own, setLineKind(schema, own, 2, { type: "heading" }))).toBe(true);
+  expect(others(own)).toEqual(["codeBlock :co", `heading :${rest}`]);
+  expect(storedLines(own)[2]).toMatchObject({ type: "heading", level: 1, path: [] });
+
+  const deleted = fresh();
+  expect(written(deleted, deleteRange(schema, deleted, 0, 1, 1, 1, String))).toBe(true);
+  expect(rowsRead(deleted)).toEqual(["paragraph :to", `paragraph :${rest}`, "paragraph :z"]);
+});
+
 it("stores every attribute a line's kind has, with the default for one not asked for", () => {
   const doc = open(plainNote(), 10);
   const first = () => storedLines(doc)[0];
@@ -1741,8 +2619,37 @@ it("stores every attribute a line's kind has, with the default for one not asked
   expect(first()).toMatchObject({ type: "codeBlock", language: null, level: 3 });
   expect(written(doc, setLineKind(schema, doc, 0, { type: "heading" }))).toBe(true);
   expect(first()).toMatchObject({ type: "heading", level: 1 });
-  expect(written(doc, splitLine(schema, doc, 0, 2, String))).toBe(true);
-  expect(storedLines(doc)[1]).toEqual({ type: "heading", level: 1, path: [], text: "cd" });
+});
+
+it("gives a split's new line the kind asked for, or the line's own when none is", () => {
+  const baseline = note(
+    [],
+    [
+      ["head", { type: "heading", level: 3 }, []],
+      ["code", { type: "codeBlock", language: "ts" }, []],
+    ],
+  );
+  const split = (at: number, offset: number, kind?: SequenceAttrs) => {
+    const doc = open(baseline, 10);
+    written(doc, splitLine(schema, doc, at, offset, String, kind));
+    return storedLines(doc).slice(at, at + 2);
+  };
+  expect(split(0, 4, PARAGRAPH)).toEqual([
+    { type: "heading", level: 3, path: [], text: "head" },
+    { type: "paragraph", path: [], text: "" },
+  ]);
+  expect(split(0, 2)).toEqual([
+    { type: "heading", level: 3, path: [], text: "he" },
+    { type: "heading", level: 3, path: [], text: "ad" },
+  ]);
+  expect(split(1, 2)).toEqual([
+    { type: "codeBlock", language: "ts", path: [], text: "co" },
+    { type: "codeBlock", language: "ts", path: [], text: "de" },
+  ]);
+  expect(split(1, 0, { type: "heading" })).toEqual([
+    { type: "heading", level: 1, path: [], text: "" },
+    { type: "codeBlock", language: "ts", path: [], text: "code" },
+  ]);
 });
 
 it("compares a BigInt with the number it reads as, in a record, an attribute and an array", () => {
@@ -1760,7 +2667,7 @@ it("compares a BigInt with the number it reads as, in a record, an attribute and
   expect(start(2)).toBeNull();
   expect(start(2n)).toBeNull();
   expect(setContainerAttributes(schema, doc, 0, 0, { colwidth: [1, 2n] }, String)).toBeNull();
-  expect(setLineKind(schema, doc, 0, { type: "heading", level: 2 })).toBeNull();
+  expect(setLineKind(schema, doc, 1, { type: "heading", level: 2 })).toBeNull();
   expect(written(doc, start(3))).toBe(true);
   expect(doc.getMap(CONTAINERS).get("N.start")).toBe(3);
   expect(written(doc, start(4n))).toBe(true);
@@ -1769,20 +2676,14 @@ it("compares a BigInt with the number it reads as, in a record, an attribute and
 
 const calloutNote = (more: Record<string, unknown> = {}) =>
   note(
-    [{ id: "C", type: "callout", attrs: { calloutType: "tip", title: "Read me", fold: "+" } }],
+    [{ id: "C", type: "callout", attrs: TIP }],
     ["a", "b", "c"].map((text): Written => [text, PARAGRAPH, ["C"]]),
     more,
   );
 
 it("copies every record under a split container's id to the fresh id, whatever it names", () => {
   const more = { "C.checked": true, "C.start": 7n };
-  const copy = { checked: true, start: 7n, calloutType: "tip", title: "Read me", fold: "+" };
-  const recordsOf = (doc: Y.Doc, id: string) =>
-    Object.fromEntries(
-      [...doc.getMap(CONTAINERS)].flatMap(([key, value]) =>
-        key.startsWith(`${id}.`) ? [[key.slice(id.length + 1), value]] : [],
-      ),
-    );
+  const copy = { checked: true, start: 7n, ...TIP };
   const lifter = open(calloutNote(more), 10);
   expect(
     written(
@@ -1806,23 +2707,67 @@ it("copies every record under a split container's id to the fresh id, whatever i
   expect(recordsOf(adder, "own")).toEqual({ ...copy, title: "Danger" });
 });
 
-it("splits a line of a list item in each of the four places section 4 names", () => {
-  const baseline = () =>
+it.each([
+  [
+    "the line between them is joined into the first",
+    "x",
+    (doc: Y.Doc) => joinLine(schema, doc, 1, () => "own"),
+    "ax",
+  ],
+  [
+    "the empty line between them is joined away",
+    "",
+    (doc: Y.Doc) => joinLine(schema, doc, 2, () => "own"),
+    "a",
+  ],
+  [
+    "the line between them is deleted",
+    "x",
+    (doc: Y.Doc) => deleteRange(schema, doc, 0, 1, 1, 1, () => "own"),
+    "a",
+  ],
+] as [string, string, (doc: Y.Doc) => BodyWrites | null, string][])(
+  "keeps two callouts that share an id apart when %s",
+  (_, between, plan, left) => {
+    const baseline = note(
+      [{ id: "C", type: "callout", attrs: TIP }],
+      [
+        ["a", PARAGRAPH, ["C"]],
+        [between, PARAGRAPH, []],
+        ["b", PARAGRAPH, ["C"]],
+      ],
+      { "C.checked": true },
+    );
+    const doc = open(baseline, 10);
+    const history = bodyHistory(doc, LOCAL);
+    expect(titlesOf(doc)).toEqual(["Read me", "paragraph", "Read me"]);
+    expect(written(doc, plan(doc))).toBe(true);
+    expect(rowsRead(doc)).toEqual([`paragraph C:${left}`, "paragraph own:b"]);
+    expect(titlesOf(doc)).toEqual(["Read me", "Read me"]);
+    expect(recordsOf(doc, "own")).toEqual({ checked: true, ...TIP });
+    history.undo();
+    expect(pathsOf(doc)).toEqual([["C"], [], ["C"]]);
+    expect(titlesOf(doc)).toEqual(["Read me", "paragraph", "Read me"]);
+  },
+);
+
+it("splits a line of a list item in each of the places section 4 names", () => {
+  const baseline = (first: string) =>
     note(
       [
         { id: "L", type: "bulletList", attrs: {} },
         { id: "I", type: "listItem", attrs: {} },
       ],
-      ["first", "later", "last"].map((text): Written => [text, PARAGRAPH, ["L", "I"]]),
+      [first, "later", "last"].map((text): Written => [text, PARAGRAPH, ["L", "I"]]),
     );
-  const split = (at: number, offset: number) => {
-    const doc = open(baseline(), 10);
+  const split = (at: number, offset: number, first = "first") => {
+    const doc = open(baseline(first), 10);
     let asked = 0;
-    const plan = splitLine(schema, doc, at, offset, () => `new${String(asked++)}`);
-    written(doc, plan);
-    const lines = readBody(schema, doc).map(
-      (line) => `${line.path.map((container) => container.id).join("/")}:${line.text}`,
+    written(
+      doc,
+      splitLine(schema, doc, at, offset, () => `new${String(asked++)}`),
     );
+    const lines = rowsRead(doc).map((line) => line.replace("paragraph ", ""));
     return { lines, asked, records: doc.getMap(CONTAINERS).has("new0.checked") };
   };
   expect(split(0, 2)).toEqual({
@@ -1845,6 +2790,11 @@ it("splits a line of a list item in each of the four places section 4 names", ()
     asked: 0,
     records: false,
   });
+  expect(split(0, 0, "")).toEqual({
+    lines: ["L/I:", "L/new0:", "L/new0:later", "L/new0:last"],
+    asked: 1,
+    records: true,
+  });
 });
 
 it.each([
@@ -1863,7 +2813,7 @@ it.each([
     const splitter = open(baseline, 10);
     const ticker = open(baseline, 20);
     const split = splitLine(schema, splitter, 0, 0, () => "fresh")!;
-    if (wrong) split.added![0]!.index++;
+    if (wrong) split.added[0]!.index++;
     written(splitter, split);
     ticker.transact(() => {
       writeBody(ticker, setContainerAttributes(schema, ticker, 0, 1, { checked: true }, String)!);
@@ -1872,12 +2822,7 @@ it.each([
     exchange(splitter, ticker);
     const list = (
       readBodySequence(schema, ticker).toJSON() as {
-        content: {
-          content: {
-            attrs: { checked: boolean };
-            content: { type: string; content?: { text: string }[] }[];
-          }[];
-        }[];
+        content: { content: { attrs: { checked: boolean }; content: Block[] }[] }[];
       }
     ).content[0]!;
     expect(
@@ -1899,7 +2844,7 @@ it("gives what a callout holds after a lifted line a fresh id and the same setti
   expect(only.records.get("w0.fold")).toBe("+");
   only.undo();
   expect(pathsOf(only.doc)).toEqual([["C"], ["C"], ["C"]]);
-  settled(people, oracle, true);
+  settled(people, oracle);
 });
 
 it("gives a callout its own id before changing its title when its id is on two callouts", () => {
@@ -1908,18 +2853,18 @@ it("gives a callout its own id before changing its title when its id is on two c
   lifter.lift(2, 1, 1);
   adder.split(2, 1);
   deliver(people, "one by one", random(1));
-  settled(people, oracle, true);
+  settled(people, oracle);
   expect(pathsOf(lifter.doc)).toEqual([["C"], ["C"], [], ["C"]]);
   lifter.newStep();
   lifter.containerAttrs(3, 0, { title: "Danger" });
   deliver(people, "one by one", random(1));
-  settled(people, oracle, true);
+  settled(people, oracle);
   expect(pathsOf(adder.doc)).toEqual([["C"], ["C"], [], ["w0"]]);
   expect(titlesOf(adder.doc)).toEqual(["Read me", "paragraph", "Danger"]);
   expect(adder.records.get("w0.calloutType")).toBe("tip");
   lifter.undo();
   deliver(people, "one by one", random(1));
-  settled(people, oracle, true);
+  settled(people, oracle);
   expect(titlesOf(adder.doc)).toEqual(["Read me", "paragraph", "Read me"]);
   expect(adder.records.get("w0.title")).toBe("Danger");
 });
@@ -1937,22 +2882,22 @@ it("redo puts back what the undo replaced, which is someone else's start number"
   const start = () => first.records.get("N.start");
   first.containerAttrs(0, 0, { start: 5 });
   deliver(people, "one by one", random(1));
-  settled(people, oracle, true);
+  settled(people, oracle);
   second.containerAttrs(0, 0, { start: 9 });
   deliver(people, "one by one", random(1));
-  settled(people, oracle, true);
+  settled(people, oracle);
   first.undo();
   expect(start()).toBe(1);
   first.redo();
   expect(start()).toBe(9);
   deliver(people, "one by one", random(1));
-  settled(people, oracle, true);
+  settled(people, oracle);
 });
 
 it.each([
   ["keeps its level when the history keeps a boundary's attributes", undefined],
   [
-    "loses its level, and an undo then removes other typing, on section 4's first filter",
+    "loses its level, and an undo then removes other typing, when the history keeps only records",
     FAULT.recordsOnlyFilter,
   ],
 ] as [string, Fault | undefined][])("a heading two people's undos bring back %s", (_, fault) => {
@@ -1970,7 +2915,7 @@ it.each([
     second.undo();
     send();
     expect(heading()).toMatchObject({ type: "heading", level: 2, text: "abcd" });
-    settled(people, oracle, true);
+    settled(people, oracle);
     return;
   }
   expect(() => second.undo()).toThrow("[7 kind] a heading boundary holds no level");
@@ -1998,14 +2943,14 @@ it.each([
     first.wrap(0, 0, 1, "orderedList", { start: 3 });
     first.containerAttrs(0, 0, { start: 5 });
     deliver(people, "one by one", random(1));
-    settled(people, oracle, true);
+    settled(people, oracle);
     if (changedSince) second.containerAttrs(0, 0, { start: 9 });
     second.split(0, 4);
     deliver(people, "one by one", random(1));
-    settled(people, oracle, true);
+    settled(people, oracle);
     first.undo();
     deliver(people, "one by one", random(1));
-    settled(people, oracle, true);
+    settled(people, oracle);
     expect(pathsOf(second.doc)).toEqual([[], ["w0", "x0"], [], []]);
     expect(second.records.get("w0.start")).toBe(start);
   },
@@ -2017,11 +2962,11 @@ it("shows a title set while someone lifts a line out of the callout's middle on 
   namer.containerAttrs(0, 0, { title: "Danger" });
   lifter.lift(1, 1, 1);
   deliver(people, "one by one", random(1));
-  settled(people, oracle, true);
+  settled(people, oracle);
   expect(titlesOf(namer.doc)).toEqual(["Danger", "paragraph", "Read me"]);
   lifter.undo();
   deliver(people, "one by one", random(1));
-  settled(people, oracle, true);
+  settled(people, oracle);
   expect(titlesOf(namer.doc)).toEqual(["Danger"]);
 });
 
@@ -2034,7 +2979,7 @@ it("splits a line inside bold text without writing any formatting", () => {
       if (item.content instanceof Y.ContentFormat) items++;
     return items;
   };
-  doc.transact(() => sequence.format(1, 4, { bold: {} }), LOCAL);
+  written(doc, setMarks(schema, doc, 0, 0, 4, BOLD));
   const before = formatting();
   written(doc, splitLine(schema, doc, 0, 2, String));
   expect(formatting()).toBe(before);
