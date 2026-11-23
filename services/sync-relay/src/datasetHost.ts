@@ -179,6 +179,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       .prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
       .run(marker, Date.now());
   });
+  storage.tx(() =>
+    storage.db.exec(`CREATE TABLE IF NOT EXISTS sync_relay_local_dataset_app_datasets(
+      workspace_id TEXT NOT NULL,app_id TEXT NOT NULL,dataset_id TEXT NOT NULL,
+      PRIMARY KEY(workspace_id,app_id,dataset_id),
+      FOREIGN KEY(workspace_id,app_id) REFERENCES sync_relay_local_dataset_apps(workspace_id,app_id) ON DELETE CASCADE) STRICT;`),
+  );
   // The relay's own private folder, which it keeps at the path it was given.
   await mkdir(options.directory, { recursive: true });
   const workers = await realpath(options.directory);
@@ -820,11 +826,22 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           .prepare(
             `SELECT app.app_id, app.candidate
              FROM sync_relay_local_dataset_apps app
-             JOIN dohc_dataset_bindings binding
-               ON binding.workspace_id = app.workspace_id AND binding.dataset_id = ? AND binding.app_id = app.app_id
-             WHERE app.workspace_id = ? AND app.dataset_id IS NULL AND app.candidate <> ''`,
+             WHERE app.workspace_id = ? AND app.dataset_id IS NULL
+               AND (
+                 EXISTS (
+                   SELECT 1 FROM dohc_dataset_bindings binding
+                   WHERE binding.workspace_id = app.workspace_id AND binding.dataset_id = ? AND binding.app_id = app.app_id
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM sync_relay_local_dataset_app_datasets link
+                   WHERE link.workspace_id = app.workspace_id AND link.dataset_id = ? AND link.app_id = app.app_id
+                 )
+               )`,
           )
-          .all(key.datasetId, key.workspaceId) as Array<{ app_id: string; candidate: string }>;
+          .all(key.workspaceId, key.datasetId, key.datasetId) as Array<{
+          app_id: string;
+          candidate: string;
+        }>;
         for (const row of multiRows) {
           const siblingBindings = storage.db
             .prepare(
@@ -1779,6 +1796,11 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
                 "INSERT INTO sync_relay_local_dataset_apps VALUES(?,?,NULL,?,?,?) ON CONFLICT(workspace_id,app_id) DO UPDATE SET candidate=excluded.candidate,authority_revision=excluded.authority_revision",
               )
               .run(input.workspaceId, appId, auth.userId, kept, authorityRevision);
+            const recordAppDataset = storage.db.prepare(
+              "INSERT OR IGNORE INTO sync_relay_local_dataset_app_datasets VALUES(?,?,?)",
+            );
+            for (const entry of bindings)
+              recordAppDataset.run(input.workspaceId, appId, entry.datasetId);
           },
         );
         return { publicationId: appId, authorityRevision };

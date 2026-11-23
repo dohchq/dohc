@@ -1845,7 +1845,29 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
 
   const dataset1UsageBeforeFinalApprove = readDatasetUsage(id(1));
   const dataset2UsageBeforeFinalApprove = readDatasetUsage(id(101));
-  const workspaceUsageBeforeFinalApprove = readWorkspaceUsage();
+  const workspaceUsageBeforeWithdrawn = readWorkspaceUsage();
+  const withdrawnCandidate = { ...multiCandidate, appRoot: "apps/withdrawn-tower" };
+  const withdrawnApproveRes = await f.http("w/local-apps", { localApp: withdrawnCandidate });
+  expect(withdrawnApproveRes.status).toBe(200);
+  const withdrawnApp = (await withdrawnApproveRes.json()) as {
+    publicationId: string;
+    authorityRevision: number;
+  };
+  expect(
+    (
+      await f.http("w/local-apps", {
+        publicationId: withdrawnApp.publicationId,
+        enabled: false,
+      })
+    ).status,
+  ).toBe(200);
+  const expectedWithdrawnRowBytes = Buffer.byteLength(withdrawnApp.publicationId) + 256;
+  expect(readWorkspaceUsage()).toBe(workspaceUsageBeforeWithdrawn + expectedWithdrawnRowBytes);
+  expect(
+    f.storage.db
+      .prepare("SELECT count(*) AS n FROM dohc_dataset_bindings WHERE workspace_id=? AND app_id=?")
+      .get("w", withdrawnApp.publicationId)!.n,
+  ).toBe(0);
   const finalApprovedRes = await f.http("w/local-apps", { localApp: multiCandidate });
   expect(finalApprovedRes.status).toBe(200);
   const finalApproved = (await finalApprovedRes.json()) as {
@@ -1879,9 +1901,21 @@ it("supports multi-Collection local apps on the relay, enforces isolation and de
       .prepare("SELECT 1 FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?")
       .get(finalApproved.publicationId),
   ).toBeUndefined();
+  expect(
+    f.storage.db
+      .prepare("SELECT 1 FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?")
+      .get(withdrawnApp.publicationId),
+  ).toBeUndefined();
+  expect(
+    f.storage.db
+      .prepare(
+        "SELECT count(*) AS n FROM sync_relay_local_dataset_app_datasets WHERE workspace_id='w'",
+      )
+      .get()!.n,
+  ).toBe(0);
   expect(readDatasetUsage(id(1))).toBe(dataset1UsageBeforeFinalApprove);
   const expectedLocalAppRowBytes = Buffer.byteLength(finalApproved.publicationId) + 256;
   expect(readWorkspaceUsage()).toBe(
-    workspaceUsageBeforeFinalApprove - expectedLocalAppRowBytes - dataset2UsageBeforeFinalApprove,
+    workspaceUsageBeforeWithdrawn - expectedLocalAppRowBytes - dataset2UsageBeforeFinalApprove,
   );
 });
