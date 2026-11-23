@@ -16,6 +16,8 @@ import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { describeApprovedDataset, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
+import { generateDatasetSchema } from "../workspaces/datasetGenerator";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import { DatasetResult, type DatasetPlace } from "@dohc/cli/dataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
@@ -1643,4 +1645,60 @@ it("reads a received share's Collections through its server, never the local sto
     nextCursor: null,
   });
   expect(localHost).not.toHaveBeenCalled();
+});
+
+it("computes generatedSources on historyRevision from both schemaSql and operationSource", async () => {
+  const f = fixture();
+  const definition = f.revision.definition;
+  const generatedSchemaSql = generateDatasetSchema(definition);
+  const generatedOperations = generateDatasetOperations(definition);
+  const generatedRevision = describeDatasetRevision({
+    definition,
+    revision: 1,
+    schemaSql: generatedSchemaSql,
+    operationSource: generatedOperations,
+  });
+  const triggeredSchemaSql = `${generatedSchemaSql}\nCREATE TRIGGER audit_insert AFTER INSERT ON responses BEGIN SELECT 1; END;`;
+  const triggeredRevision = describeDatasetRevision({
+    definition,
+    revision: 2,
+    schemaSql: triggeredSchemaSql,
+    operationSource: generatedOperations,
+  });
+  const historyRevision = vi.fn(async ({ revisionSha256 }: { revisionSha256: string }) =>
+    revisionSha256 === generatedRevision.revisionSha256
+      ? {
+          revision: generatedRevision,
+          schemaSql: generatedSchemaSql,
+          operationSource: generatedOperations,
+        }
+      : {
+          revision: triggeredRevision,
+          schemaSql: triggeredSchemaSql,
+          operationSource: generatedOperations,
+          generatedSources: true,
+        },
+  );
+  const fWithHistory = fixture({
+    ...(f.host as unknown as OwnerDatasetData),
+    historyRevision,
+  });
+  const plain = DatasetResult.parse(
+    await fWithHistory.handler("window", {
+      workspaceId: "workspace",
+      action: "historyRevision",
+      datasetPath: "data/dataset.json",
+      revisionSha256: generatedRevision.revisionSha256,
+    }),
+  );
+  expect(plain).toMatchObject({ kind: "history-revision", generatedSources: true });
+  const triggered = DatasetResult.parse(
+    await fWithHistory.handler("window", {
+      workspaceId: "workspace",
+      action: "historyRevision",
+      datasetPath: "data/dataset.json",
+      revisionSha256: triggeredRevision.revisionSha256,
+    }),
+  );
+  expect(triggered).toMatchObject({ kind: "history-revision", generatedSources: false });
 });

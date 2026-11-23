@@ -811,10 +811,10 @@ export function createRemoteDatasetTransferTarget(input: {
   };
 }
 
-export async function resolveRemoteDatasetRevision(
+export async function resolveRemoteDatasetArtifacts(
   data: Pick<OwnerDatasetData, "approvedArtifacts">,
   binding: AppDatasetBinding,
-): Promise<DatasetRevision> {
+): Promise<{ revision: DatasetRevision; schemaSql: string }> {
   const approved = await data.approvedArtifacts(binding.datasetId);
   if (
     !approved.active ||
@@ -823,7 +823,14 @@ export async function resolveRemoteDatasetRevision(
   ) {
     throw new Error("Collection rules changed. Reload the Collection and prepare the app again.");
   }
-  return approved.revision;
+  return { revision: approved.revision, schemaSql: approved.schemaSql };
+}
+
+export async function resolveRemoteDatasetRevision(
+  data: Pick<OwnerDatasetData, "approvedArtifacts">,
+  binding: AppDatasetBinding,
+): Promise<DatasetRevision> {
+  return (await resolveRemoteDatasetArtifacts(data, binding)).revision;
 }
 
 export interface DatasetAuthorityRoute {

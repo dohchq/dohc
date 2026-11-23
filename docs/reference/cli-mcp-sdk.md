@@ -1641,7 +1641,7 @@ Show the saved source of one past revision.
 - `expectedDatasetId`: `UUID`
 - `revisionSha256`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "history-revision", approvalAgent?: { kind: "agent", label, labelSource: "agent-declared" } | null, revision, schemaSql, operationSource }`.
+Returns `{ kind: "history-revision", approvalAgent?: { kind: "agent", label, labelSource: "agent-declared" } | null, revision, schemaSql, operationSource, generatedSources? }`.
 
 #### `dohc dataset prepareHistoryRestore`
 

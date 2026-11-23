@@ -180,6 +180,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     );
     const approval = publication.getByTestId("app-publication-capability");
     await expect(approval).toContainText("Link actions:");
+    await expect(approval).toContainText("Adds records with Name");
     await expect(approval).toContainText("Helper actions: None");
     await expect(approval).toContainText("Owner actions: None");
     await page.screenshot({ path: info.outputPath("owner-publication-review.png") });

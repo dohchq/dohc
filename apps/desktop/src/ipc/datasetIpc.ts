@@ -34,6 +34,7 @@ import {
   type LocalDatasetMigrationPreparation,
 } from "../workspaces/localDatasetMigration";
 import { generateDatasetHistoryRestore } from "../workspaces/datasetHistoryRestore";
+import { hasGeneratedDatasetSources } from "../workspaces/datasetFieldMigration";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 import { generateDatasetRelationChoices } from "../workspaces/datasetRelationChoices";
 import { collectionChangeProposal } from "../workspaces/collectionChange";
@@ -745,7 +746,11 @@ export function createDatasetHandler<
               result.revision.revisionSha256 !== input.revisionSha256
             )
               throw new Error("This revision belongs to another Collection change.");
-            return { kind: "history-revision" as const, ...result };
+            return {
+              kind: "history-revision" as const,
+              ...result,
+              generatedSources: hasGeneratedDatasetSources(result.revision, result.schemaSql),
+            };
           }
           if (input.action === "prepareHistoryRestore") {
             if (!data.historyRevision)

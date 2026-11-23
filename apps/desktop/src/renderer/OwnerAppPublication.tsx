@@ -5,36 +5,36 @@ import {
   ChevronRight,
   CircleCheck,
   CircleDashed,
-  Eye,
   EyeOff,
-  Globe,
   Link as LinkIcon,
   LogIn,
-  Pencil,
-  Table2,
   TriangleAlert,
   Unlink,
   X,
   type LucideIcon,
 } from "lucide-react";
 import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
-import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import type { RelayShareLinkRow, SyncStatusResult } from "../ipc/bridgeContract";
 import {
   OwnerAppPublicationResult,
   type OwnerAppPublicationRequest,
 } from "../ipc/ownerAppPublicationContract";
-import { collectionsRefusalError } from "../ipc/errorWords";
+import {
+  AppAccessSummary,
+  CollectionPermissionCard,
+  DatasetPermissionCard,
+  ExternalNetworkCard,
+  type AppCapability,
+  type ReportPermissionError,
+} from "./AppPermissionsCard";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
 import { OwnerAppResponses } from "./OwnerAppResponses";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
-import { IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton } from "./ui/controls";
+import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { syncNamesServer } from "./workbench/WorkspaceSyncStatus";
-import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
-import { useWorkspaceSession } from "./workspace/workspaceSession";
 import { accessReasonForLane, serverName, type AccessContext } from "./workbench/accessReason";
 
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
@@ -45,196 +45,11 @@ type LocalPublication = Extract<
   { kind: "localListed" }
 >["publications"][number];
 type ActiveLink = RelayShareLinkRow & { selector: NonNullable<RelayShareLinkRow["selector"]> };
-type ReportError = (fallback: string, error: unknown, retry: (() => void) | null) => void;
-
-function OperationNames({ operations }: { operations: AppDatasetCapability["operations"] }) {
-  if (operations.length === 0) return <>None</>;
-  return (
-    <>
-      {operations.map((operation, index) => (
-        <span key={operation.name}>
-          {index ? ", " : ""}
-          <span className="font-mono">{operation.name}</span> (
-          {operation.readOnly ? "reads only" : "changes data"})
-        </span>
-      ))}
-    </>
-  );
-}
-
-type DatasetAddress = {
-  path: string | null;
-  status: "missing" | "ambiguous" | "unreadable" | "failed" | "available";
-};
-
-function DatasetApproval({
-  capability,
-  workspaceId,
-  reportError,
-}: {
-  capability: AppDatasetCapability;
-  workspaceId: string;
-  reportError: ReportError;
-}) {
-  const { datasetId } = capability;
-  const { value, error, retry } = useWorkspaceQuery(useWorkspaceSession(), {
-    key: JSON.stringify([workspaceId, datasetId]),
-    load: async (signal): Promise<DatasetAddress> => {
-      let after: string | undefined;
-      const seen = new Set<string>();
-      do {
-        const page = await bridge().dataset({
-          action: "list",
-          workspaceId,
-          after,
-          includeArchived: true,
-        });
-        signal.throwIfAborted();
-        if (page.kind === "collections-refused") throw collectionsRefusalError(page.refusal);
-        if (page.kind !== "list") throw Error("dohc could not find this Collection.");
-        const dataset = page.datasets.find((value) => value.datasetId === datasetId);
-        if (dataset)
-          return {
-            path: dataset.datasetPath,
-            status: dataset.datasetAddressStatus ?? (dataset.datasetPath ? "available" : "missing"),
-          };
-        after = page.nextCursor ?? undefined;
-        if (after && seen.has(after)) throw Error("The Collection list changed.");
-        if (after) seen.add(after);
-      } while (after);
-      return { path: null, status: "missing" };
-    },
-  });
-  const report = useRef(reportError);
-  report.current = reportError;
-  const newestError = useRef<unknown>(null);
-  useEffect(() => {
-    newestError.current = error;
-    if (error === null) return;
-    report.current("dohc could not find this Collection.", error, () => {
-      if (newestError.current !== error) return;
-      newestError.current = null;
-      void retry();
-    });
-  }, [error, retry]);
-  const found: DatasetAddress | null =
-    error !== null ? { path: null, status: "failed" } : (value ?? null);
-  return (
-    <div data-testid="app-publication-capability" className="space-y-2">
-      <p className="m-0 font-medium">{capability.name}</p>
-      <p className="m-0 break-all text-[12px]">
-        {!found
-          ? "Finding Collection…"
-          : (found.path ??
-            (found.status === "ambiguous"
-              ? "Multiple dataset.json files name this Collection. Remove the duplicate file."
-              : found.status === "unreadable"
-                ? "dohc cannot read this Collection's dataset.json. Fix the file, or restore it from History."
-                : found.status === "missing"
-                  ? "Collection source missing. Restore its dataset.json file."
-                  : "Collection path unavailable."))}
-      </p>
-      <p className="m-0">
-        This app uses the Collection's approved actions. Its responses appear in the same
-        Collection.
-      </p>
-      <dl className="m-0 space-y-1 text-[12px]">
-        <div>
-          <dt className="inline font-medium text-ink">Link actions: </dt>
-          <dd className="m-0 inline">
-            <OperationNames
-              operations={capability.operations.filter(
-                (operation) =>
-                  operation.access === "link" ||
-                  capability.linkReads?.some((read) => read.operationId === operation.operationId),
-              )}
-            />
-          </dd>
-        </div>
-        <div>
-          <dt className="inline font-medium text-ink">Helper actions: </dt>
-          <dd className="m-0 inline">
-            <OperationNames
-              operations={capability.operations.filter(
-                (operation) => operation.access === "helper",
-              )}
-            />
-          </dd>
-        </div>
-        <div>
-          <dt className="inline font-medium text-ink">Owner actions: </dt>
-          <dd className="m-0 inline">
-            <OperationNames
-              operations={capability.operations.filter((operation) => operation.access === "owner")}
-            />
-          </dd>
-        </div>
-      </dl>
-      {capability.linkReads?.length ? (
-        <p className="m-0 text-[12px]">
-          Approved link reads:{" "}
-          {capability.operations
-            .filter((operation) =>
-              capability.linkReads!.some((read) => read.operationId === operation.operationId),
-            )
-            .map(
-              (operation) =>
-                `${operation.name} (${operation.fields?.map((field) => field.name).join(", ")})`,
-            )
-            .join("; ")}
-          . Unpublish to withdraw access.
-        </p>
-      ) : null}
-      <p className="m-0 text-[12px]">
-        Approving this app grants these actions. It does not change the Collection's rules.
-      </p>
-      <details className="text-[12px]">
-        <summary className="cursor-pointer">Collection revision</summary>
-        <p className="break-all font-mono">Revision {capability.revision}</p>
-        <p className="break-all font-mono">{capability.revisionSha256}</p>
-      </details>
-    </div>
-  );
-}
 
 const responses = (count: number) => `${count} ${count === 1 ? "response" : "responses"}`;
 const unconfirmedResponses = (count: number) => `${responses(count)} not yet confirmed`;
 const unconfirmedRemoval = (count: number) =>
   `dohc removed this app's approval but has not confirmed whether ${responses(count)} ${count === 1 ? "was" : "were"} saved.`;
-
-function CollectionApproval({ capability }: { capability: AppCollectionCapability }) {
-  return (
-    <div data-testid="app-publication-capability" className="space-y-2">
-      <p className="m-0">
-        Creates records only in <span className="break-all">{capability.collectionPath}</span>.
-      </p>
-      <dl className="m-0 space-y-1 text-[12px]">
-        <div>
-          <dt className="inline font-medium text-ink">Fields it can create: </dt>
-          <dd className="m-0 inline break-words">{capability.allowedFields.join(", ")}</dd>
-        </div>
-        <div>
-          <dt className="inline font-medium text-ink">Required fields: </dt>
-          <dd className="m-0 inline break-words">
-            {capability.requiredFields.join(", ") || "None"}
-          </dd>
-        </div>
-        <div>
-          <dt className="inline font-medium text-ink">Fields shown in the app: </dt>
-          <dd className="m-0 inline break-words">{capability.readFields.join(", ") || "None"}</dd>
-        </div>
-      </dl>
-      <p className="m-0 text-[12px]">
-        People with this share can read every response file and all its fields.
-      </p>
-      <p className="m-0 text-[12px]">The app cannot change or delete existing records.</p>
-      <details className="text-[12px]">
-        <summary className="cursor-pointer">Collection schema revision</summary>
-        <p className="break-all font-mono">{capability.schemaSha256}</p>
-      </details>
-    </div>
-  );
-}
 
 /** The local launcher answers with a loopback address only. Anything else never reaches the browser. */
 export function localLaunchUrl(raw: string): string | null {
@@ -277,205 +92,18 @@ function verifiedPrepared(result: OwnerAppPublicationResult): Prepared {
   return checked.data;
 }
 
-type Capability = AppDatasetCapability | AppCollectionCapability;
 type Checked = Extract<OwnerAppPublicationResult, { kind: "localChecked" }>;
 const checkFailed = "dohc could not check whether this app is approved on this device.";
 const sourceCheckFailed =
   "dohc could not check whether this app's source changed since you approved it.";
 
-/** What a capability lets the app do, each item marked when the approval did not already allow it. */
-type Reach = { text: string; added: boolean };
-/** One line under Reads or Changes. A document Collection's fields share one line. Each Collection operation has its own. */
-type Line = { key: string; prefix?: string; items: Reach[] };
-type Access = { key: string; name: string; path?: string; reads: Line[]; changes: Line[] };
-
 /** An approval of an app that reaches no workspace data has no capability. */
-const approvedCapabilities = (row: LocalPublication): Capability[] =>
+const approvedCapabilities = (row: LocalPublication): AppCapability[] =>
   "datasetCapability" in row
     ? [row.datasetCapability]
     : "collectionCapability" in row
       ? [row.collectionCapability]
       : [];
-
-const addsRecords = "Adds records with ";
-
-/** dohc's words for an operation, from the kind it enforces. Only an action uses the app's words, its label. */
-function operationWords({ display }: AppDatasetCapability["operations"][number]): string {
-  // This device no longer has the revision the approval names.
-  if (!display) return "Records";
-  const fields = display.fields.join(", ");
-  switch (display.kind) {
-    case "read":
-      return fields || "Records";
-    case "create":
-      return fields ? `${addsRecords}${fields}` : "Adds records";
-    case "edit":
-      return fields ? `Edits ${fields}` : "Edits records";
-    case "delete":
-      return "Deletes records";
-    case "action":
-      return `Runs "${display.label}"`;
-  }
-}
-
-/** `approved` is what the person approved earlier, or null on a first review, which marks nothing new. */
-function accessOf(capability: Capability, approved: readonly Capability[] | null): Access {
-  if (capability.kind === "dataset") {
-    const same = approved?.find(
-      (value): value is AppDatasetCapability =>
-        value.kind === "dataset" && value.datasetId === capability.datasetId,
-    );
-    // Operations with the same words share one line, marked New if any of them is new.
-    // An action's words are only its label, and two actions with one label can do different things, so each keeps its own line.
-    const lines = (operations: AppDatasetCapability["operations"]) => {
-      const byWords = new Map<string, Reach & { key: string }>();
-      for (const operation of operations) {
-        const text = operationWords(operation),
-          added = approved !== null && !same?.operationIds.includes(operation.operationId);
-        const group =
-          operation.display?.kind === "action"
-            ? `action ${operation.operationId}`
-            : `words ${text}`;
-        const seen = byWords.get(group);
-        if (seen) seen.added ||= added;
-        else byWords.set(group, { key: operation.operationId, text, added });
-      }
-      return [...byWords.values()].map(({ key, ...item }): Line => ({ key, items: [item] }));
-    };
-    return {
-      key: capability.datasetId,
-      name: capability.name,
-      reads: lines(capability.operations.filter((operation) => operation.readOnly)),
-      changes: lines(capability.operations.filter((operation) => !operation.readOnly)),
-    };
-  }
-  const same = approved?.find(
-    (value): value is AppCollectionCapability =>
-      value.kind !== "dataset" && value.collectionPath === capability.collectionPath,
-  );
-  const items = (fields: readonly string[], allowed: readonly string[] | undefined) =>
-    fields.map((field) => ({ text: field, added: approved !== null && !allowed?.includes(field) }));
-  return {
-    key: capability.collectionPath,
-    name: capability.collectionPath.split("/").pop() || capability.collectionPath,
-    path: capability.collectionPath,
-    reads: capability.readFields.length
-      ? [{ key: "fields", items: items(capability.readFields, same?.readFields) }]
-      : [],
-    changes: capability.allowedFields.length
-      ? [
-          {
-            key: "fields",
-            prefix: addsRecords,
-            items: items(capability.allowedFields, same?.allowedFields),
-          },
-        ]
-      : [],
-  };
-}
-
-function Reaches({ lines }: { lines: Line[] }) {
-  return (
-    <dd className="m-0 min-w-0 break-words text-ink">
-      {lines.map((line) => (
-        <div key={line.key}>
-          {line.prefix}
-          {line.items.map((item, index) => (
-            <span key={item.text}>
-              {index ? ", " : ""}
-              {item.text}
-              {item.added ? (
-                <span className="ml-1 inline-block">
-                  <Pill tone="warning">New</Pill>
-                </span>
-              ) : null}
-            </span>
-          ))}
-        </div>
-      ))}
-    </dd>
-  );
-}
-
-function AccessRows({ access }: { access: Access }) {
-  return (
-    <div className="grid grid-cols-[14px_minmax(0,1fr)] items-center gap-x-2 px-3">
-      <Table2 size={14} aria-hidden className="text-muted" />
-      <span className="truncate text-[13px] font-medium text-ink" title={access.path}>
-        {access.name}
-      </span>
-      <dl className="col-start-2 m-0 mt-2 grid grid-cols-[88px_minmax(0,1fr)] gap-x-2 gap-y-1 text-[13px]">
-        {access.reads.length ? (
-          <>
-            <dt className="flex items-center gap-2 self-start text-muted">
-              <Eye size={12} aria-hidden />
-              Reads
-            </dt>
-            <Reaches lines={access.reads} />
-          </>
-        ) : null}
-        {access.changes.length ? (
-          <>
-            <dt className="flex items-center gap-2 self-start text-muted">
-              <Pencil size={12} aria-hidden />
-              Changes
-            </dt>
-            <Reaches lines={access.changes} />
-          </>
-        ) : null}
-      </dl>
-    </div>
-  );
-}
-
-/** What the app can reach: the approved capabilities, or the candidate's with what the approval lacks marked New. */
-function AccessBox({
-  capabilities,
-  approved,
-  failed,
-  onRetry,
-}: {
-  capabilities: readonly Capability[] | null;
-  approved: readonly Capability[] | null;
-  failed: boolean;
-  onRetry(): void;
-}) {
-  const id = useId();
-  return (
-    <section aria-labelledby={id}>
-      <h3 id={id} className="m-0 mb-2 text-[13px] font-medium text-ink">
-        What it can reach
-      </h3>
-      <div data-testid="app-access" className="rounded-lg border border-line bg-bg">
-        {capabilities ? (
-          <>
-            <div className="flex flex-col gap-3 py-3">
-              {capabilities.length ? (
-                capabilities.map((capability) => {
-                  const access = accessOf(capability, approved);
-                  return <AccessRows key={access.key} access={access} />;
-                })
-              ) : (
-                <div className="grid grid-cols-[14px_minmax(0,1fr)] items-center gap-x-2 px-3">
-                  <Table2 size={14} aria-hidden className="text-muted" />
-                  <span className="text-[13px] text-muted">No workspace data</span>
-                </div>
-              )}
-            </div>
-            <p className="m-0 flex items-start gap-2 border-t border-line px-3 py-2 text-[12px] text-muted">
-              <Globe size={12} aria-hidden className="mt-0.5 shrink-0" />
-              It can send what it receives to other websites.
-            </p>
-          </>
-        ) : failed ? (
-          <RetryRow testId="app-access-retry" onRetry={onRetry} />
-        ) : (
-          <SkeletonRows rows={3} label="Loading what this app can reach…" className="p-3" />
-        )}
-      </div>
-    </section>
-  );
-}
 
 function StateLine({
   icon: Icon,
@@ -511,7 +139,7 @@ type PublicationProps = {
   title?: string;
   localApproval?: "tab" | "browser" | null;
   onShareSource?: () => void;
-  reportError?: ReportError;
+  reportError?: ReportPermissionError;
   onLocalChange?: () => void;
   access?: { context: AccessContext; server: string | null };
 };
@@ -545,6 +173,34 @@ function PublicationControl(props: ControlProps) {
         />
       ) : null}
     </>
+  );
+}
+
+function PublishedDatasetDetails({
+  capability,
+  workspaceId,
+  reportError,
+}: {
+  capability: AppDatasetCapability;
+  workspaceId: string;
+  reportError: ReportPermissionError;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="mt-1" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="cursor-pointer">Approved Collection access</summary>
+      {open ? (
+        <div className="mt-2 space-y-2">
+          <DatasetPermissionCard
+            reportError={reportError}
+            workspaceId={workspaceId}
+            capability={capability}
+            loadDisplay
+          />
+          <p className="m-0">Open the Collection to view and manage its records.</p>
+        </div>
+      ) : null}
+    </details>
   );
 }
 
@@ -631,7 +287,7 @@ function PublicationDialog(
   const committing =
     busy === "approve" || busy === "withdraw" || busy === "revokeCollection" || responsesBusy;
   // Backend data errors go to the shell's Notices when root passes reportShellError; otherwise this dialog's own alert line.
-  const reportError: ReportError =
+  const reportError: ReportPermissionError =
     props.reportError ?? ((fallback, cause) => setError(ipcErrorMessage(cause, fallback)));
   const report = useRef(reportError);
   report.current = reportError;
@@ -1407,7 +1063,7 @@ function PublicationDialog(
                     </p>
                   ) : null,
                 )}
-              <AccessBox
+              <AppAccessSummary
                 capabilities={boxCapabilities}
                 approved={changed && approval ? approvedCapabilities(approval) : null}
                 failed={localReview.status === "failed" || candidateState === "failed"}
@@ -1633,16 +1289,19 @@ function PublicationDialog(
                   ))}
                 </ul>
               </div>
-              <div className="space-y-2 text-[13px] text-muted">
+              <div className="space-y-3 text-[13px] text-muted">
                 <h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
                 {prepared.capabilities.length === 0 ? (
-                  <p className="m-0">None</p>
+                  <p className="m-0 rounded-lg border border-line bg-bg px-3 py-2 text-[13px] text-muted">
+                    No workspace data
+                  </p>
                 ) : (
                   prepared.capabilities.map((capability) =>
                     capability.kind === "dataset" ? (
-                      <DatasetApproval
+                      <DatasetPermissionCard
                         reportError={reportError}
                         workspaceId={props.workspaceId}
+                        draftLinkReads={!reactivating}
                         key={collectionKey(prepared.approvalId, capability.datasetId)}
                         capability={
                           !reactivating
@@ -1651,7 +1310,10 @@ function PublicationDialog(
                         }
                       />
                     ) : (
-                      <CollectionApproval key={capability.collectionPath} capability={capability} />
+                      <CollectionPermissionCard
+                        key={capability.collectionPath}
+                        capability={capability}
+                      />
                     ),
                   )
                 )}
@@ -1670,9 +1332,9 @@ function PublicationDialog(
                           <fieldset
                             key={capability.datasetId}
                             disabled={!!busy}
-                            className="space-y-2 border-0 p-0"
+                            className="space-y-2 rounded-lg border border-line bg-bg p-3"
                           >
-                            <legend className="text-[13px] font-medium text-ink">
+                            <legend className="px-1 text-[13px] font-medium text-ink">
                               Allow people with the link to read
                             </legend>
                             {capability.operations
@@ -1717,20 +1379,18 @@ function PublicationDialog(
                                 </label>
                               ))}
                             <p className="m-0 text-[12px] text-muted">
-                              Approved reads show current records and later changes. People with the
-                              link can use only the selected reads. Unpublish to withdraw access.
+                              Selected reads are added to this app's link access and show current
+                              records and later changes. Unpublish to withdraw access.
                             </p>
                           </fieldset>
                         ) : null,
                       )
                   : null}
-                <p className="m-0">
-                  The app can use external services and send them data it receives.
-                </p>
-                <p className="m-0">
-                  Unpublishing stops new access through dohc. It cannot remove copies sent
-                  elsewhere.
-                </p>
+                <ExternalNetworkCard
+                  sharedCollectionFiles={prepared.capabilities.some(
+                    (capability) => capability.kind === "collection-create",
+                  )}
+                />
               </div>
               <details className="text-[12px] text-muted">
                 <summary className="cursor-pointer">Publication revision</summary>
@@ -1851,26 +1511,12 @@ function PublicationDialog(
                                 <summary className="cursor-pointer">
                                   Approved Collection access
                                 </summary>
-                                <p className="mb-0 break-all">
-                                  {publication.collectionCapability.collectionPath}
-                                </p>
-                                <p className="mb-0 break-words">
-                                  Create:{" "}
-                                  {publication.collectionCapability.allowedFields.join(", ")}
-                                </p>
-                                <p className="mb-0 break-words">
-                                  Required:{" "}
-                                  {publication.collectionCapability.requiredFields.join(", ") ||
-                                    "None"}
-                                </p>
-                                <p className="mb-0 break-words">
-                                  Shown in the app:{" "}
-                                  {publication.collectionCapability.readFields.join(", ") || "None"}
-                                </p>
-                                <p className="mb-0">
-                                  People with this share can read every response file and all its
-                                  fields.
-                                </p>
+                                <div className="mt-2">
+                                  <CollectionPermissionCard
+                                    capability={publication.collectionCapability}
+                                    compact
+                                  />
+                                </div>
                               </details>
                             ) : publication.datasetCapability ? null : (
                               <p className="mb-0 mt-1">No Collection access</p>
@@ -1880,19 +1526,11 @@ function PublicationDialog(
                                 Collection access details unavailable.
                               </p>
                             ) : publication.datasetCapability ? (
-                              <details className="mt-1">
-                                <summary className="cursor-pointer">
-                                  Approved Collection access
-                                </summary>
-                                <DatasetApproval
-                                  reportError={reportError}
-                                  workspaceId={props.workspaceId}
-                                  capability={publication.datasetCapability}
-                                />
-                                <p className="mb-0">
-                                  Open the Collection to view and manage its records.
-                                </p>
-                              </details>
+                              <PublishedDatasetDetails
+                                reportError={reportError}
+                                workspaceId={props.workspaceId}
+                                capability={publication.datasetCapability}
+                              />
                             ) : null}
                           </div>
                           <div className="flex shrink-0 flex-col items-end gap-2">

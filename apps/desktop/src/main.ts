@@ -178,7 +178,7 @@ import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCom
 import {
   createDatasetAuthorityRouter,
   createRemoteDatasetData,
-  resolveRemoteDatasetRevision,
+  resolveRemoteDatasetArtifacts,
   type OwnerDatasetData,
   type RemoteDatasetData,
 } from "./workspaces/remoteDataset";
@@ -10168,15 +10168,20 @@ function registerIpcHandlers(): void {
       ),
   });
   registerOperations(operationBoundary, appViewOperations, { appView: appViews.appView });
-  const resolveDatasetRevision = async (
+  const resolveDatasetArtifacts = async (
     workspace: DesktopRendererWorkspaceOperation["workspace"],
     binding: import("@dohc/security-contract/dataset").AppDatasetBinding,
     signal: AbortSignal,
   ) =>
-    resolveRemoteDatasetRevision(
+    resolveRemoteDatasetArtifacts(
       await datasetDependencies.dataForWorkspace(workspace, signal),
       binding,
     );
+  const resolveDatasetRevision = async (
+    workspace: DesktopRendererWorkspaceOperation["workspace"],
+    binding: import("@dohc/security-contract/dataset").AppDatasetBinding,
+    signal: AbortSignal,
+  ) => (await resolveDatasetArtifacts(workspace, binding, signal)).revision;
   registerOwnerAppPublicationIpc<
     WebContents,
     DesktopRendererWorkspaceOperation["workspace"],
@@ -10185,6 +10190,7 @@ function registerIpcHandlers(): void {
     ...ownerPublicationDependencies,
     localPublication,
     resolveDatasetRevision,
+    resolveDatasetArtifacts,
   });
   const cliOwnerPublication = createOwnerAppPublicationHandler<
     string,
@@ -10194,6 +10200,7 @@ function registerIpcHandlers(): void {
     ...ownerPublicationDependencies,
     localPublication,
     resolveDatasetRevision,
+    resolveDatasetArtifacts,
     callerKey: (workspaceId) => `local-owner-cli:${workspaceId}`,
     withWorkspaceOperation: (_caller, workspaceId, work) =>
       workspaceAuthorities.withOperation(workspaceId, work),
