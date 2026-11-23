@@ -1341,7 +1341,7 @@ fn capture_manifest_seeds_a_placed_folder_marker_whoever_wrote_it() {
                 "DELETE FROM materialization_jobs WHERE workspace_id = ?1",
                 [WS],
             )
-            .map_err(DomainError::sql_corrupt)?;
+            .unwrap();
             write_text_in_tx(tx, &write("crew/.DOHC-ACCESS", "obj-waiting-marker"))?;
             Ok::<_, DomainError>(())
         })
