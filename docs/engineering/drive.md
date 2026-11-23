@@ -208,6 +208,32 @@ Missing pings show a watch that stopped.
 
 The Origin CA certificate serves only the app hosts. It is not the edge certificate, and browsers do not trust it.
 
+### Phone alerts
+
+Drive sends iPhone alerts with an APNs auth key from the Apple Developer team that publishes the phone app.
+
+1. **Provider:** In that Apple Developer account, create an APNs auth key and download its `.p8` file.
+   Apple lets you download the file only once.
+2. **Operator:** Keep the `.p8` file in the operator's password manager. A deployment archive leaves it out.
+3. **Operator:** Install the key on the server, as described in [Send iPhone alerts](../how-to/self-host.md#send-iphone-alerts):
+
+   ```sh
+   sudo install -D -o root -g 1000 -m 0640 AuthKey_<key-id>.p8 /etc/dohc/apns-key.p8
+   ```
+
+After you create the configuration, add these values to `/etc/dohc/drive.env`, then replace the password manager copy:
+
+```dotenv
+DOHC_RELAY_APNS_TOPIC=app.dohc.mobile
+DOHC_RELAY_APNS_ENVIRONMENTS=production
+DOHC_RELAY_APNS_KEY_FILE=/etc/dohc/apns-key.p8
+DOHC_RELAY_APNS_KEY_ID=<key-id>
+DOHC_RELAY_APNS_TEAM_ID=<team-id>
+```
+
+Use `production,sandbox` only while development builds need alerts from Drive.
+Leave all five empty to keep alerts off.
+
 ## Create the configuration
 
 1. **Operator:** Create the configuration with fresh secrets:

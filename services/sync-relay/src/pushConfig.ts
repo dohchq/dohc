@@ -101,7 +101,7 @@ export function readApnsConfig(
   env: Record<string, string | undefined>,
   readKeyFile: (path: string) => string = (path) => readFileSync(path, "utf8"),
 ): ApnsConfig | undefined {
-  if (APNS_NAMES.every((name) => env[name] === undefined)) return undefined;
+  if (APNS_NAMES.every((name) => !env[name])) return undefined;
   const missing = APNS_NAMES.filter((name) => !env[name]);
   if (missing.length) throw new TypeError(`Missing APNs configuration: ${missing.join(", ")}.`);
   const invalid = (...names: string[]) =>

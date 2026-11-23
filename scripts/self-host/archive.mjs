@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { apnsKeyTarget } from "../../tools/self-host/config.mjs";
 
 const archiveVolumeScript = `
 const {spawnSync}=require('node:child_process');
@@ -48,15 +49,14 @@ export async function archiveDeployment(options, config, run) {
     ),
   ];
   await save("images.json", run(["image", "inspect", ...images]));
-  const bindSources = [
-    ...new Set(
-      Object.values(config.services).flatMap((service) =>
-        (service.volumes ?? [])
-          .filter((volume) => volume.type === "bind")
-          .map((volume) => volume.source),
-      ),
-    ),
+  const binds = Object.values(config.services).flatMap((service) =>
+    (service.volumes ?? []).filter((volume) => volume.type === "bind"),
+  );
+  const sources = (keep) => [
+    ...new Set(binds.filter((volume) => keep(volume.target)).map((volume) => volume.source)),
   ];
+  const bindSources = sources((target) => target !== apnsKeyTarget);
+  const apnsKeys = sources((target) => target === apnsKeyTarget);
   for (const [index, source] of bindSources.entries()) {
     if (!(await stat(source)).isFile())
       throw new Error(
@@ -125,6 +125,10 @@ export async function archiveDeployment(options, config, run) {
           "No automatic restore is supported. Never replace current continuity with an older archived copy.",
           "An archive does not prove this host accepted no later work. Restoring it can resurrect revoked authority.",
           "Use a separate relay snapshot for exact-continuity repair or offline content salvage.",
+          ...apnsKeys.map(
+            (source) =>
+              `Leaves out the APNs auth key ${source}. Keep your own copy: Apple lets you download it only once.`,
+          ),
         ],
       },
       null,

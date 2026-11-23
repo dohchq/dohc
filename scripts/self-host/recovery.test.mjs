@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { apnsKeyTarget } from "../../tools/self-host/config.mjs";
+import { archiveDeployment } from "./archive.mjs";
 import { parseRecoveryArguments, runRecovery } from "./recovery.mjs";
 
 const config = {
@@ -502,5 +504,41 @@ test("a same-project orphan writer is refused after stop", async (t) => {
   assert.equal(
     mock.calls.some((args) => args.includes("run")),
     false,
+  );
+});
+
+test("an archive keeps bound configuration files but leaves out the APNs auth key", async (t) => {
+  const root = await fixture(t);
+  const ca = join(root, "postgres-ca.pem"),
+    key = join(root, "AuthKey_KEY1234567.p8"),
+    envFile = join(root, ".env.self-host");
+  await writeFile(ca, "provider CA");
+  await writeFile(key, "apple signing key");
+  await writeFile(envFile, `DOHC_RELAY_APNS_KEY_FILE=${key}\n`);
+  const bind = (source, target) => ({ type: "bind", source, target, read_only: true });
+  const archived = {
+    name: "archive-test",
+    services: {
+      "sync-relay": {
+        image: "image",
+        volumes: [bind(ca, "/etc/dohc/postgres-ca.pem"), bind(key, apnsKeyTarget)],
+      },
+      "workspace-api": { image: "image", volumes: [bind(ca, "/etc/dohc/postgres-ca.pem")] },
+    },
+    volumes: {},
+  };
+  const directory = join(root, "archive");
+  await archiveDeployment({ directory, envFile }, archived, () => "[]");
+  const manifest = JSON.parse(await readFile(join(directory, "archive.json"), "utf8"));
+  assert.deepEqual(
+    manifest.files.filter((file) => file.source).map((file) => file.source),
+    [ca],
+  );
+  for (const name of await readdir(directory))
+    assert.ok(!(await readFile(join(directory, name), "utf8")).includes("apple signing key"), name);
+  assert.ok(
+    manifest.limitations.includes(
+      `Leaves out the APNs auth key ${key}. Keep your own copy: Apple lets you download it only once.`,
+    ),
   );
 });

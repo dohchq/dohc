@@ -284,6 +284,8 @@ This includes authentication, relay, live-host, continuity and TLS data declared
 With an [external database](self-host.md#keep-accounts-in-an-external-postgres), the archive does not include accounts.
 It also saves the environment, resolved Compose configuration, bound configuration files and image identities.
 Bound directories are refused because this procedure does not define their backup scope.
+It leaves out the [APNs auth key](self-host.md#send-iphone-alerts), and `archive.json` names the file it left out.
+Keep your own copy of the key: Apple lets you download it only once.
 The command resumes previously running services after success.
 
 Restrict the archive to the server operator.

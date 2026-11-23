@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { isDeepStrictEqual, parseEnv } from "node:util";
 import { posix, resolve } from "node:path";
 
@@ -211,6 +211,36 @@ export function validateSettings(settings) {
     Number(settings.DOHC_SMTP_PORT) > 65535
   )
     errors.push("Set DOHC_SMTP_PORT to a valid port.");
+  if (apnsAlerts(settings)) {
+    for (const name of apnsSettings)
+      if (!settings[name])
+        errors.push(
+          `Set ${name}, or clear every DOHC_RELAY_APNS_ value to turn off iPhone alerts.`,
+        );
+    const topic = settings.DOHC_RELAY_APNS_TOPIC;
+    if (topic && (topic.length > 255 || !/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(topic)))
+      errors.push("Set DOHC_RELAY_APNS_TOPIC to the phone app's bundle ID, app.dohc.mobile.");
+    const environments = settings.DOHC_RELAY_APNS_ENVIRONMENTS?.split(",").map((name) =>
+      name.trim(),
+    );
+    if (
+      environments &&
+      settings.DOHC_RELAY_APNS_ENVIRONMENTS &&
+      (!environments.every((name) => ["production", "sandbox"].includes(name)) ||
+        new Set(environments).size !== environments.length)
+    )
+      errors.push(
+        "Set DOHC_RELAY_APNS_ENVIRONMENTS to production, or to production,sandbox to also alert development builds.",
+      );
+    for (const name of ["DOHC_RELAY_APNS_KEY_ID", "DOHC_RELAY_APNS_TEAM_ID"])
+      if (settings[name] && !/^[A-Z0-9]{10}$/.test(settings[name]))
+        errors.push(`Set ${name} to the 10-character ID from your Apple Developer account.`);
+    const key = settings.DOHC_RELAY_APNS_KEY_FILE;
+    if (key && (!/^(\/(?!\.\.?(\/|$))[a-zA-Z0-9._-]+)+$/.test(key) || !isFile(key)))
+      errors.push(
+        "Set DOHC_RELAY_APNS_KEY_FILE to the absolute path of the APNs auth key (.p8) on this server.",
+      );
+  }
   if (
     settings.DOHC_DATA_DIRECTORY &&
     !/^(\/(?!\.\.?(\/|$))[a-zA-Z0-9._-]+)+$/.test(settings.DOHC_DATA_DIRECTORY)
@@ -221,6 +251,26 @@ export function validateSettings(settings) {
   }
   return errors;
 }
+
+const isFile = (path) => {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+};
+
+const apnsSettings = [
+  "DOHC_RELAY_APNS_TOPIC",
+  "DOHC_RELAY_APNS_ENVIRONMENTS",
+  "DOHC_RELAY_APNS_KEY_FILE",
+  "DOHC_RELAY_APNS_KEY_ID",
+  "DOHC_RELAY_APNS_TEAM_ID",
+];
+/** iPhone alerts need every APNs setting. With none of them set, the server sends no alerts. */
+export const apnsAlerts = (settings) => apnsSettings.some((name) => settings[name]);
+/** Where the relay reads the APNs auth key. A deployment archive leaves the file bound here out. */
+export const apnsKeyTarget = "/etc/dohc/apns-key.p8";
 
 /** Refuses invalid settings, so a command stops before any Docker or database operation uses them. */
 export function readValidSettings(path) {
@@ -246,6 +296,7 @@ export function composeArgs(envFile, settings, ...args) {
       : []),
     ...(settings.DOHC_DATA_DIRECTORY ? ["-f", "tools/self-host/compose.data-disk.yml"] : []),
     ...(settings.DOHC_POSTGRES_HOST ? ["-f", "tools/self-host/compose.external-postgres.yml"] : []),
+    ...(apnsAlerts(settings) ? ["-f", "tools/self-host/compose.apns.yml"] : []),
     ...(settings.DOHC_BEHIND_CLOUDFLARE === "1"
       ? ["-f", "tools/self-host/compose.cloudflare.yml"]
       : []),

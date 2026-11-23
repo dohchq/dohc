@@ -251,6 +251,22 @@ describe("a phone's alert binding", () => {
     ).toThrow(
       "Missing APNs configuration: DOHC_RELAY_APNS_KEY_FILE, DOHC_RELAY_APNS_KEY_ID, DOHC_RELAY_APNS_TEAM_ID.",
     );
+    expect(
+      readApnsConfig(
+        apnsEnv("", {
+          DOHC_RELAY_APNS_TOPIC: "",
+          DOHC_RELAY_APNS_KEY_FILE: "",
+          DOHC_RELAY_APNS_KEY_ID: "",
+          DOHC_RELAY_APNS_TEAM_ID: "",
+        }),
+      ),
+    ).toBeUndefined();
+    expect(() =>
+      readApnsConfig(
+        apnsEnv("sandbox", { DOHC_RELAY_APNS_KEY_FILE: "", DOHC_RELAY_APNS_TEAM_ID: "" }),
+        () => PEM,
+      ),
+    ).toThrow("Missing APNs configuration: DOHC_RELAY_APNS_KEY_FILE, DOHC_RELAY_APNS_TEAM_ID.");
     for (const environments of ["staging", "sandbox,sandbox", ""])
       expect(() => readApnsConfig(apnsEnv(environments), () => PEM)).toThrow("APNs configuration");
   });

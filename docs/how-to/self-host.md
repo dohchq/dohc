@@ -503,6 +503,56 @@ The synced workspace files remain in the relay.
 At the owner's next desktop check-in, schedules move back to that computer.
 Set `DOHC_RELAY_AUTOMATIONS=1` and restart to enable server automations again.
 
+## Send iPhone alerts
+
+The server can send alerts to the dohc phone app on iPhone through Apple Push Notification service (APNs).
+Alerts stay off until you set all five APNs settings. Without them the server starts as before.
+
+APNs delivers alerts for the phone app only when they are signed with an APNs auth key that belongs to the Apple Developer team that publishes the app.
+
+1. In that Apple Developer account, create an APNs auth key and download its `.p8` file.
+   Apple lets you download the file only once.
+2. Keep a copy of the `.p8` file away from the server, for example in your password manager.
+   A deployment archive leaves the key out, so the server's backups do not hold it.
+3. Install the key on the server.
+   The relay runs as UID 1000 and needs to read it:
+
+   ```sh
+   sudo install -D -o root -g 1000 -m 0640 AuthKey_ABC123DEFG.p8 /etc/dohc/apns-key.p8
+   ```
+
+4. Set the APNs settings in `.env.self-host`:
+
+   ```dotenv
+   DOHC_RELAY_APNS_TOPIC=app.dohc.mobile
+   DOHC_RELAY_APNS_ENVIRONMENTS=production
+   DOHC_RELAY_APNS_KEY_FILE=/etc/dohc/apns-key.p8
+   DOHC_RELAY_APNS_KEY_ID=ABC123DEFG
+   DOHC_RELAY_APNS_TEAM_ID=XYZ987WVUT
+   ```
+
+   | Setting | Value |
+   | --- | --- |
+   | `DOHC_RELAY_APNS_TOPIC` | The phone app's bundle ID, `app.dohc.mobile`. |
+   | `DOHC_RELAY_APNS_ENVIRONMENTS` | `production` for TestFlight and App Store builds. `production,sandbox` to also send to development builds. |
+   | `DOHC_RELAY_APNS_KEY_FILE` | The absolute path of the APNs auth key (`.p8`) on the server. |
+   | `DOHC_RELAY_APNS_KEY_ID` | The key's 10-character Key ID, which Apple shows with the key. |
+   | `DOHC_RELAY_APNS_TEAM_ID` | The Apple Developer team's 10-character Team ID, which Apple shows under Membership details. |
+
+5. Stop and start the deployment.
+
+With any APNs setting set, the setup and recovery commands add the APNs Compose overlay.
+They refuse to run unless all five are set in the formats above and the key file exists.
+The overlay binds the key file read-only into the relay at `/etc/dohc/apns-key.p8`.
+Docker refuses to start the relay when the file is missing, and never creates it.
+The relay refuses to start when the file is not a P-256 private key.
+
+To check the setup, open **Settings** in the phone app while signed in to this server.
+**Alerts** offers a switch. On a server without APNs, it says the server isn't set up to send alerts.
+
+To turn alerts off, clear all five settings, then stop and start the deployment.
+To replace the key, install the new file at the same path, update `DOHC_RELAY_APNS_KEY_ID`, then stop and start the deployment.
+
 ## Replace the Markdown reader
 
 The amd64 and arm64 images include the Markdown reader. The relay refuses to start without it, because Edit shares need it.

@@ -21,6 +21,7 @@ import {
 } from "../tools/self-host/bootstrap.mjs";
 import {
   accountsDatabaseError,
+  apnsKeyTarget,
   deploymentChecks,
   validateSettings,
   composeArgs,
@@ -786,6 +787,7 @@ test("the gateway starts before the relay is healthy, because the relay needs th
     DOHC_POSTGRES_HOST: "db.provider.invalid",
     DOHC_BEHIND_CLOUDFLARE: "1",
     DOHC_SHARE_WEB_APP_DOMAIN: "apps.team.invalid",
+    DOHC_RELAY_APNS_TOPIC: "app.dohc.mobile",
   };
   const names = Object.keys(choices),
     selections = new Map();
@@ -1316,5 +1318,102 @@ test("automatic initialization cannot overwrite orphaned data or continuity", ()
     assert.equal(relayInitializationRequired(config, data, continuity), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const apnsOverlay = () => load(readFileSync("tools/self-host/compose.apns.yml", "utf8"));
+function apns(t) {
+  const directory = mkdtempSync(join(tmpdir(), "dohc-apns-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const key = join(directory, "AuthKey_KEY1234567.p8");
+  writeFileSync(key, "-----BEGIN PRIVATE KEY-----\n");
+  return {
+    ...settings(),
+    DOHC_RELAY_APNS_TOPIC: "app.dohc.mobile",
+    DOHC_RELAY_APNS_ENVIRONMENTS: "production,sandbox",
+    DOHC_RELAY_APNS_KEY_FILE: key,
+    DOHC_RELAY_APNS_KEY_ID: "KEY1234567",
+    DOHC_RELAY_APNS_TEAM_ID: "TEAM123456",
+  };
+}
+
+test("a server without APNs settings starts as before, and the APNs overlay gives the relay all five and a read-only key", (t) => {
+  assert.ok(!composeText.includes("APNS"));
+  const empty = Object.fromEntries(
+    Object.keys(apns(t))
+      .filter((name) => name.startsWith("DOHC_RELAY_APNS_"))
+      .map((name) => [name, ""]),
+  );
+  for (const values of [settings(), { ...settings(), ...empty }]) {
+    assert.deepEqual(validateSettings(values), []);
+    assert.ok(
+      !composeArgs(".env.self-host", values, "up").includes("tools/self-host/compose.apns.yml"),
+    );
+  }
+  const args = composeArgs(".env.self-host", apns(t), "up");
+  assert.ok(args.indexOf("tools/self-host/compose.apns.yml") < args.indexOf("up"));
+  const relay = apnsOverlay().services["sync-relay"];
+  assert.deepEqual(Object.keys(apnsOverlay().services), ["sync-relay"]);
+  assert.deepEqual(relay.environment, {
+    DOHC_RELAY_APNS_TOPIC: "${DOHC_RELAY_APNS_TOPIC:?Set DOHC_RELAY_APNS_TOPIC}",
+    DOHC_RELAY_APNS_ENVIRONMENTS:
+      "${DOHC_RELAY_APNS_ENVIRONMENTS:?Set DOHC_RELAY_APNS_ENVIRONMENTS}",
+    DOHC_RELAY_APNS_KEY_ID: "${DOHC_RELAY_APNS_KEY_ID:?Set DOHC_RELAY_APNS_KEY_ID}",
+    DOHC_RELAY_APNS_TEAM_ID: "${DOHC_RELAY_APNS_TEAM_ID:?Set DOHC_RELAY_APNS_TEAM_ID}",
+    DOHC_RELAY_APNS_KEY_FILE: apnsKeyTarget,
+  });
+  // Docker creates a missing source path as an empty folder unless the mount forbids it.
+  assert.deepEqual(relay.volumes, [
+    {
+      type: "bind",
+      source: "${DOHC_RELAY_APNS_KEY_FILE:?Set DOHC_RELAY_APNS_KEY_FILE}",
+      target: apnsKeyTarget,
+      read_only: true,
+      bind: { create_host_path: false },
+    },
+  ]);
+});
+
+test("APNs settings are all or none, in the formats the relay accepts, with the key file on this server", (t) => {
+  const values = apns(t);
+  assert.deepEqual(validateSettings(values), []);
+  for (const environments of ["production", "sandbox", "production, sandbox"])
+    assert.deepEqual(
+      validateSettings({ ...values, DOHC_RELAY_APNS_ENVIRONMENTS: environments }),
+      [],
+      environments,
+    );
+  const partial = validateSettings({
+    ...values,
+    DOHC_RELAY_APNS_KEY_FILE: "",
+    DOHC_RELAY_APNS_TEAM_ID: undefined,
+  });
+  assert.deepEqual(partial, [
+    "Set DOHC_RELAY_APNS_KEY_FILE, or clear every DOHC_RELAY_APNS_ value to turn off iPhone alerts.",
+    "Set DOHC_RELAY_APNS_TEAM_ID, or clear every DOHC_RELAY_APNS_ value to turn off iPhone alerts.",
+  ]);
+  const refusals = {
+    DOHC_RELAY_APNS_TOPIC: ["mobile", "app..dohc", "app.dohc.mobile/", "a.".repeat(128) + "b"],
+    DOHC_RELAY_APNS_ENVIRONMENTS: [
+      " ",
+      "development",
+      "production,production",
+      "production;sandbox",
+    ],
+    DOHC_RELAY_APNS_KEY_ID: ["key1234567", "KEY123456", "KEY12345678"],
+    DOHC_RELAY_APNS_TEAM_ID: ["team123456", "TEAM-12345"],
+    DOHC_RELAY_APNS_KEY_FILE: [
+      "AuthKey.p8",
+      "/etc/../apns-key.p8",
+      join(tmpdir(), "dohc-apns-missing", "AuthKey.p8"),
+      tmpdir(),
+    ],
+  };
+  for (const [name, refused] of Object.entries(refusals)) {
+    for (const value of refused) {
+      const errors = validateSettings({ ...values, [name]: value });
+      assert.equal(errors.length, 1, `${name}=${value}`);
+      assert.ok(errors[0].includes(name), `${name}=${value}`);
+    }
   }
 });
