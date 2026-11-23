@@ -368,17 +368,15 @@ test(
     try {
       const result = await launchPreview(root, {
         log: () => {},
-        spawnApp: (_executable, _args, options) => {
-          const child = spawn(process.env.ComSpec, ["/d", "/q"], {
-            ...options,
-            windowsHide: true,
-            stdio: ["pipe", options.stdio[1], options.stdio[2]],
-          });
-          child.stdin.end(
-            `@echo off\r\nstart "" /b "${process.execPath}" "${script}" "${record}"\r\nexit\r\n`,
-          );
-          return child;
-        },
+        spawnApp: (_executable, _args, options) =>
+          spawn(
+            process.execPath,
+            [
+              "-e",
+              `require("node:child_process").spawn(process.execPath, ${JSON.stringify([script, record])}, { detached: true, stdio: ["ignore", "inherit", "inherit"] }).unref();`,
+            ],
+            options,
+          ),
       });
       assert.equal(result.code, 0);
       assert.ok(
