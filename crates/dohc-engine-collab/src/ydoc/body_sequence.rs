@@ -562,10 +562,7 @@ impl Reader<'_> {
             let read = self.budget.read_marks(&self.formatting, depth)?;
             self.formatting.read = Some(read);
         }
-        let read = match &self.formatting.read {
-            Some(read) if !unmarked => Some(read),
-            _ => None,
-        };
+        let read = self.formatting.read.as_ref().filter(|_| !unmarked);
         let holds = Leaf::holds_letters;
         let place = inline_place(&mut self.leaf, &mut self.budget, holds, depth)?;
         self.budget.letters(place, text, read, depth)
@@ -1372,8 +1369,9 @@ mod tests {
         assert!(same_document(&edited.document, &read), "{blocks}");
 
         let (live, nodes) = (live_items(&doc), nodes_spent(&doc));
-        assert!(1_000 <= live && live <= edited.stored.live, "{live} live items");
-        assert!(live <= nodes && nodes <= edited.stored.nodes_at_most, "{nodes} for {live}");
+        let (counted, at_most) = (edited.stored.live, edited.stored.nodes_at_most);
+        assert!((1_000..=counted).contains(&live), "{live} live items");
+        assert!((live..=at_most).contains(&nodes), "{nodes} for {live}");
     }
 
     #[test]

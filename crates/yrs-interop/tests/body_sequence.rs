@@ -478,7 +478,11 @@ fn takes_a_stored_value_only_from_the_newest_item_when_it_holds_plain_values() {
     records.insert(&mut doc.transact_mut(), "kind", "callout");
     assert_eq!(stored_value("kind"), Some(Any::from("callout")));
 
-    records.insert(&mut doc.transact_mut(), "kind", XmlElementPrelim::empty("block"));
+    records.insert(
+        &mut doc.transact_mut(),
+        "kind",
+        XmlElementPrelim::empty("block"),
+    );
     assert!(records.get(&doc.transact(), "kind").is_some());
     assert_eq!(stored_value("kind"), None);
 
