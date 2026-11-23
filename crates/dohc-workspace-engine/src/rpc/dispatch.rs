@@ -615,13 +615,17 @@ impl EngineService {
                 self.share_record_creation_statuses(&ctx, request.workspace, request.params)
                     .await?
             }
-            "versionedText.writeBlob" => self.versioned_text_write_blob(&ctx, request).await?,
-            "versionedText.write" => self.versioned_text_write(&ctx, request).await?,
-            "versionedBinary.write" => self.versioned_binary_write(&ctx, request).await?,
-            "versionedBinary.writeBlob" => self.versioned_binary_write_blob(&ctx, request).await?,
+            "versionedText.writeBlob" => {
+                Box::pin(self.versioned_text_write_blob(&ctx, request)).await?
+            }
+            "versionedText.write" => Box::pin(self.versioned_text_write(&ctx, request)).await?,
+            "versionedBinary.write" => Box::pin(self.versioned_binary_write(&ctx, request)).await?,
+            "versionedBinary.writeBlob" => {
+                Box::pin(self.versioned_binary_write_blob(&ctx, request)).await?
+            }
             "versionedText.rename" => self.versioned_text_rename(&ctx, request).await?,
             "versionedText.checkMove" => self.versioned_text_check_move(&ctx, request).await?,
-            "versionedText.delete" => self.versioned_text_delete(&ctx, request).await?,
+            "versionedText.delete" => Box::pin(self.versioned_text_delete(&ctx, request)).await?,
             "versionedText.rollback" => self.versioned_text_rollback(&ctx, request).await?,
             "versionedText.merge" => self.versioned_text_merge(&ctx, request).await?,
             "versionedText.compare" => {

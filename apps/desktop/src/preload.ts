@@ -1,7 +1,12 @@
+import { agentRunHistoryOperations } from "./ipc/agentRunHistoryOperations";
 import { captureOperations } from "./ipc/captureOperations";
 import { linksOperations } from "./ipc/linksOperations";
 import { retrievalOperations } from "./ipc/retrievalOperations";
-import { protectedCopyOperations, stoppedRunOperations } from "./ipc/writeOperations";
+import {
+  agentRunUndoOperations,
+  protectedCopyOperations,
+  stoppedRunOperations,
+} from "./ipc/writeOperations";
 import { heldChangeOperations } from "./ipc/heldChangeOperations";
 import {
   shareHandoffOperations,
@@ -195,6 +200,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(linksOperations, invoke),
   ...operationBridge(retrievalOperations, invoke),
   ...operationBridge(captureOperations, invoke),
+  ...operationBridge(agentRunHistoryOperations, invoke),
   ...operationBridge(heldChangeOperations, invoke),
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
@@ -593,6 +599,7 @@ const bridge: DohcDesktopBridge = {
   onAgentRunState: (listener) => onEvent(CHANNELS.agentRunState, AgentRunStateEvent, listener),
   ...operationBridge(stoppedRunOperations, invoke),
   ...operationBridge(protectedCopyOperations, invoke),
+  ...operationBridge(agentRunUndoOperations, invoke),
   ...operationBridge(chatDispatchPauseOperations, invoke),
   ...operationBridge(agentThreadOperations, invoke),
   onChatDispatchPaused: (listener) =>

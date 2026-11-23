@@ -617,6 +617,9 @@ export interface VersionedTextStore {
     path: string;
     requestId?: string;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: WorkspaceObjectId;
+    expectedPathClearHeadMomentId?: VersionedTextMomentId;
     text: string;
     /** Publish after committing. Omit when recording bytes already on disk. */
     publish?: boolean;
@@ -632,6 +635,9 @@ export interface VersionedTextStore {
     path: string;
     requestId?: string;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: WorkspaceObjectId;
+    expectedPathClearHeadMomentId?: VersionedTextMomentId;
     bytes: Uint8Array;
     createOnly?: boolean;
     metadata: ActorNeutralWriteMetadata;
@@ -708,6 +714,9 @@ export interface VersionedTextStore {
     path: string;
     expectedObjectId?: WorkspaceObjectId;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: WorkspaceObjectId;
+    expectedPathClearHeadMomentId?: VersionedTextMomentId;
     // Delete only if the path is still missing on disk when the engine applies
     // the delete. A caller that saw the file missing sets it: a replace can
     // empty the name for a moment.

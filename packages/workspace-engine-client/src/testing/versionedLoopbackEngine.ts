@@ -154,6 +154,8 @@ const MUTATION_OPTIONAL_STRINGS = [
   "summary",
   "correlationId",
   "expectedSha256",
+  "expectedPathClearObjectId",
+  "expectedPathClearHeadMomentId",
 ] as const;
 const WRITE_OPTIONAL_STRINGS = [...MUTATION_OPTIONAL_STRINGS, "objectId", "momentId"] as const;
 const REQUIRED_SECRET_METADATA = ["workspaceId", "origin"] as const;
@@ -167,13 +169,13 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.textWrite]: {
     requiredStrings: ["versionId", "path", "text"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
-    optionalI64: ["nowMs"],
+    optionalI64: ["nowMs", "expectedPathClearSinceOrder"],
     optionalJson: ["author", "createOnly", "publish"],
   },
   [VERSIONED_METHOD.textWriteBlob]: {
     requiredStrings: ["versionId", "path", "sha256", "bytesBase64"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
-    optionalI64: ["nowMs"],
+    optionalI64: ["nowMs", "expectedPathClearSinceOrder"],
     optionalJson: ["author", "createOnly", "publish"],
   },
   [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
@@ -199,7 +201,7 @@ const VERSIONED_PARAM_SHAPES = {
       "expectedSha256",
       "captureHoldId",
     ],
-    optionalI64: ["nowMs"],
+    optionalI64: ["nowMs", "expectedPathClearSinceOrder"],
     optionalJson: ["author"],
     // The engine checks the disk; a loopback has none, so it only validates.
     optionalBools: ["onlyIfAbsentOnDisk"],
@@ -217,14 +219,14 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.binaryWrite]: {
     requiredStrings: ["versionId", "path"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "bytesBase64"],
-    optionalI64: ["nowMs"],
+    optionalI64: ["nowMs", "expectedPathClearSinceOrder"],
     optionalBytes: ["bytes"],
     optionalJson: ["author", "createOnly"],
   },
   [VERSIONED_METHOD.binaryWriteBlob]: {
     requiredStrings: ["versionId", "path", "sha256"],
     optionalStrings: [...WRITE_OPTIONAL_STRINGS, "bytesBase64"],
-    optionalI64: ["nowMs"],
+    optionalI64: ["nowMs", "expectedPathClearSinceOrder"],
     optionalJson: ["author", "createOnly"],
   },
   [VERSIONED_METHOD.binaryRead]: { requiredStrings: ["versionId", "path"] },
@@ -310,6 +312,7 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.momentsList]: {
     optionalStrings: ["versionId", "objectId"],
     optionalI64: ["limit", "beforeMomentOrder"],
+    optionalBools: ["metadataOnly"],
   },
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
   [VERSIONED_METHOD.publicationApplied]: { requiredStrings: ["requestId", "momentId"] },
@@ -1410,7 +1413,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       throw new Error("invalid-version");
     if (
       params.publish !== true &&
-      (params.createOnly === true || params.expectedSha256 !== undefined)
+      (params.createOnly === true ||
+        params.expectedSha256 !== undefined ||
+        params.expectedPathClearSinceOrder !== undefined ||
+        params.expectedPathClearObjectId !== undefined ||
+        params.expectedPathClearHeadMomentId !== undefined)
     )
       throw new Error("invalid-params");
     const knownVersion = state.versions.get(versionId);
@@ -1473,6 +1480,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     ) {
       throw new Error("write-precondition-failed");
     }
+    this.assertPathClearSince(
+      state,
+      versionId,
+      path,
+      params.createOnly === true,
+      params,
+      metadata.metadataCorrelationId,
+    );
     const existingMoment = momentId === undefined ? undefined : state.moments.get(momentId);
     const authorFingerprint = this.writeAuthorFingerprint(params);
     if (existingMoment) {
@@ -1715,6 +1730,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     ) {
       throw new Error("write-precondition-failed");
     }
+    this.assertPathClearSince(
+      state,
+      versionId,
+      path,
+      params.createOnly === true,
+      params,
+      metadata.metadataCorrelationId,
+    );
     const binarySha = sha256(bytes);
     // Daemon parity: writing the same bytes over an equal binary head is a
     // content-equality dedup — no new moment, no materialization work.
@@ -1923,6 +1946,22 @@ export class VersionedLoopbackEngine implements EngineTransport {
       (before.binarySha ?? sha256(before.text ?? "")) !== params.expectedSha256
     )
       throw new Error("write-precondition-failed");
+    if (
+      (params.expectedPathClearSinceOrder !== undefined ||
+        params.expectedPathClearObjectId !== undefined ||
+        params.expectedPathClearHeadMomentId !== undefined) &&
+      (params.expectedSha256 === undefined || params.expectedSha256 === null)
+    ) {
+      throw new Error("invalid-params");
+    }
+    this.assertPathClearSince(
+      state,
+      versionId,
+      path,
+      false,
+      params,
+      metadata.metadataCorrelationId,
+    );
     this.assertFreshMoment(state, momentId);
     const now = nowMs ?? this.clock++;
     // The removed content, not an empty tombstone: a delete moment repeats it
@@ -2782,9 +2821,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       .filter((moment) => objectId === undefined || moment.objectId === objectId)
       .sort((left, right) => right.momentOrder - left.momentOrder);
     const filtered = all.filter((moment) => before === undefined || moment.momentOrder < before);
+    const metadataOnly = params.metadataOnly === true;
     const page = filtered.slice(0, limit);
     return {
-      moments: page.map((moment) => this.capMoment(moment)),
+      moments: page.map((moment) => {
+        const capped = this.capMoment(moment);
+        return metadataOnly ? { ...capped, afterText: null, beforeText: null } : capped;
+      }),
       nextBeforeMomentOrder:
         filtered.length > page.length ? (page.at(-1)?.momentOrder ?? null) : null,
       latestMomentOrder: all[0]?.momentOrder ?? -1,
@@ -3095,6 +3138,83 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
   }
 
+  private assertPathClearSince(
+    state: WorkspaceState,
+    versionId: string,
+    path: string,
+    createOnly: boolean,
+    params: JsonObject,
+    correlationId: JsonValue | undefined,
+  ): void {
+    const order = params.expectedPathClearSinceOrder;
+    const allowedObjectId = params.expectedPathClearObjectId;
+    const expectedHeadMomentId = params.expectedPathClearHeadMomentId;
+    if (expectedHeadMomentId === "") {
+      throw new Error("invalid-params");
+    }
+    if (order === undefined && allowedObjectId === undefined) {
+      if (expectedHeadMomentId !== undefined) throw new Error("invalid-params");
+      return;
+    }
+    if (
+      typeof order !== "number" ||
+      !Number.isInteger(order) ||
+      typeof allowedObjectId !== "string" ||
+      allowedObjectId.length === 0 ||
+      (expectedHeadMomentId !== undefined && typeof expectedHeadMomentId !== "string")
+    ) {
+      throw new Error("invalid-params");
+    }
+    const targetKey = path.normalize("NFC").toLowerCase();
+    const captureRecoveryOrigins = new Set([
+      "capture-recovery",
+      "capture-recovery-cleared",
+      "merge-removal",
+      "merge-removal-cleared",
+    ]);
+    for (const entry of state.moments.values()) {
+      const m = entry.wire;
+      if (m.versionId !== versionId) continue;
+      if (m.momentOrder <= order) continue;
+      if (m.objectId === allowedObjectId) continue;
+      if (m.syncRecordOnly) continue;
+      if (captureRecoveryOrigins.has(m.metadataOrigin)) continue;
+      if (
+        m.metadataOrigin === "restore" &&
+        typeof correlationId === "string" &&
+        m.metadataCorrelationId === correlationId
+      ) {
+        continue;
+      }
+      if (
+        m.path.normalize("NFC").toLowerCase() === targetKey ||
+        (typeof m.beforePath === "string" &&
+          m.beforePath.normalize("NFC").toLowerCase() === targetKey)
+      ) {
+        throw new Error("restore-path-collision");
+      }
+    }
+    if (expectedHeadMomentId !== undefined) {
+      let latestOrder = -Infinity;
+      let latestId: string | undefined;
+      for (const entry of state.moments.values()) {
+        const m = entry.wire;
+        if (m.versionId !== versionId || m.objectId !== allowedObjectId) continue;
+        if (m.momentOrder > latestOrder) {
+          latestOrder = m.momentOrder;
+          latestId = m.momentId;
+        }
+      }
+      if (latestId !== expectedHeadMomentId) {
+        throw new Error("restore-head-changed");
+      }
+      const current = state.versions.get(versionId)?.files.get(path);
+      if (createOnly ? current !== undefined : current?.objectId !== allowedObjectId) {
+        throw new Error("restore-head-changed");
+      }
+    }
+  }
+
   private textWriteFingerprint(
     params: JsonObject,
     origin: VersionedOrigin,
@@ -3108,6 +3228,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       publish: params.publish === true,
       createOnly: params.createOnly === true,
       expectedSha256: params.expectedSha256 ?? null,
+      ...(params.expectedPathClearSinceOrder !== undefined
+        ? {
+            expectedPathClearSinceOrder: params.expectedPathClearSinceOrder,
+            expectedPathClearObjectId: params.expectedPathClearObjectId ?? null,
+            expectedPathClearHeadMomentId: params.expectedPathClearHeadMomentId ?? null,
+          }
+        : {}),
       momentId,
       objectId,
       metadataOrigin: origin,
@@ -3130,6 +3257,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       operation: "versioned-binary-write",
       createOnly: params.createOnly === true,
       expectedSha256: params.expectedSha256 ?? null,
+      ...(params.expectedPathClearSinceOrder !== undefined
+        ? {
+            expectedPathClearSinceOrder: params.expectedPathClearSinceOrder,
+            expectedPathClearObjectId: params.expectedPathClearObjectId ?? null,
+            expectedPathClearHeadMomentId: params.expectedPathClearHeadMomentId ?? null,
+          }
+        : {}),
       workspaceId: workspace,
       versionId: params.versionId,
       path: params.path,
@@ -3179,6 +3313,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       authorJson: this.writeAuthorFingerprint(params),
       ...(params.expectedObjectId != null ? { expectedObjectId: params.expectedObjectId } : {}),
       ...(params.expectedSha256 != null ? { expectedSha256: params.expectedSha256 } : {}),
+      ...(params.expectedPathClearSinceOrder !== undefined
+        ? {
+            expectedPathClearSinceOrder: params.expectedPathClearSinceOrder,
+            expectedPathClearObjectId: params.expectedPathClearObjectId ?? null,
+            expectedPathClearHeadMomentId: params.expectedPathClearHeadMomentId ?? null,
+          }
+        : {}),
     });
   }
 

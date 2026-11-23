@@ -1,3 +1,4 @@
+import type { UndoAgentRunResult } from "@dohc/workspace-contracts/agent-run-undo";
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { ChatMessageWaiters } from "./chatMessageWaiters";
 import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
@@ -590,6 +591,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent in a shared view, which keeps no copies or versions of its own.
   versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
+  agentRunUndo?: (agentRunId: string, planToken: string) => Promise<UndoAgentRunResult>;
   heldNoteChange?: (input: HeldNoteChangeInput) => Promise<HeldNoteChangeResult>;
   retainedCopies?: CliRetainedCopiesPort;
   keptEdits?: CliKeptEditsPort;
@@ -2449,6 +2451,7 @@ const HAND_WRITTEN_SHARE_RULES: {
   chatLinks: "anywhere",
   chatFileMentions: "anywhere",
   outsideChanges: "owner",
+  planUndoAgentRun: "owner",
   workspaceSearch: "owner",
   linksEdges: "anywhere",
   linksIn: "anywhere",
@@ -3057,6 +3060,33 @@ const DECLARED_WRITERS: {
       return { ok: true as const, ...restored };
     } catch (error) {
       return pathFreeFailure(error, "dohc could not restore the kept change.");
+    }
+  },
+  undoAgentRun: async (request, context, options) => {
+    if (
+      writeActor(request.args.actor, context, options) === "agent" ||
+      context.connected !== undefined
+    ) {
+      return {
+        ok: false as const,
+        reason: "Only a person can undo an agent run.",
+      };
+    }
+    if (context.readOnly) {
+      return {
+        ok: false as const,
+        reason: "This workspace is read-only. Write in the owning workspace.",
+      };
+    }
+    if (!context.agentRunUndo) {
+      return { ok: false as const, reason: "Agent run undo is unavailable." };
+    }
+    try {
+      const result = await context.agentRunUndo(request.args.agentRunId, request.args.planToken);
+      if (result.restored.length > 0) await notifyWrite(options, context);
+      return { ok: true as const, ...result };
+    } catch (error) {
+      return pathFreeFailure(error, "dohc could not undo this agent run.");
     }
   },
 };

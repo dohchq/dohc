@@ -25,7 +25,18 @@ import {
   livePageTitle,
   type LivePageAction,
 } from "../ipc/errorWords";
-import { findRestoreReceipt } from "./restoreWriteIdentity";
+import { findRestoreReceipt, restoreRequestId } from "./restoreWriteIdentity";
+import {
+  AGENT_RUN_SCAN_MAX_PAGES,
+  MAX_AGENT_RUN_UNDO_FILES,
+  type AgentRunUndoPlanItem,
+  type AgentRunUndoSkippedItem,
+  type PlanUndoAgentRunResult,
+  type UndoAgentRunFailedItem,
+  type UndoAgentRunRestoredItem,
+  type UndoAgentRunResult,
+  type UndoAgentRunTarget,
+} from "@dohc/workspace-contracts/agent-run-undo";
 import type { AppResponseUndoSelection, AppResponseUndoResult } from "./ownerAppResponseModeration";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import type { WatcherEvent } from "@dohc/workspace-core";
@@ -848,6 +859,25 @@ export interface WorkspaceEngineCapture {
       | { expectedHeadMomentId?: string; aloneInFolder?: true; requestId?: undefined }
       | { expectedHeadMomentId: string; aloneInFolder?: true; requestId: string },
   ): Promise<WorkspaceEngineRestoreResult>;
+  planUndoAgentRun(
+    agentRunId: string,
+    options?: {
+      hasOtherWindow?: () => boolean;
+      reviewPaths?: readonly string[];
+      resolveAgentName?: (author: Extract<MomentAuthor, { kind: "agent" }>) => string;
+    },
+  ): Promise<PlanUndoAgentRunResult>;
+  undoAgentRun(
+    agentRunId: string,
+    person: Extract<MomentWriteAuthor, { kind: "human" }>,
+    options: (
+      | { expectedTargets: readonly UndoAgentRunTarget[]; expectedPlanToken?: undefined }
+      | { expectedPlanToken: string; expectedTargets?: undefined }
+    ) & {
+      hasOtherWindow?: () => boolean;
+      reviewPaths?: readonly string[];
+    },
+  ): Promise<UndoAgentRunResult>;
   // `author` names an agent's removal during a run an automation started, so
   // the removed record's claims carry the run's chain depth.
   undoAcceptedAppResponse(
@@ -1446,6 +1476,22 @@ export class RestoreLocalChangesError extends Error {
   ) {
     super(detail);
     this.name = "RestoreLocalChangesError";
+  }
+}
+
+class RestorePathCollisionError extends Error {
+  constructor(readonly path: string) {
+    super(
+      "Another file used this path while undoing this agent run. Review it in History instead.",
+    );
+    this.name = "RestorePathCollisionError";
+  }
+}
+
+class RestoreOtherWindowError extends Error {
+  constructor(readonly path: string) {
+    super("Open in another window. Close that window and try again.");
+    this.name = "RestoreOtherWindowError";
   }
 }
 
@@ -6840,6 +6886,1340 @@ export function createWorkspaceEngineCapture(
     return file?.status === "found" ? file : null;
   }
 
+  async function restoreFileToBeforeMomentInQueue(
+    engine: CaptureVersionedTextStore,
+    activeVersionId: string,
+    policy: WorkspaceEnginePolicySnapshot,
+    momentId: string,
+    author: Extract<MomentWriteAuthor, { kind: "human" }>,
+    restoreOptions: {
+      expectedHeadMomentId?: string;
+      aloneInFolder?: true;
+      requestId?: string;
+      correlationId?: string;
+      hasOtherWindow?: () => boolean;
+      pathCollisionGuard?: {
+        afterMomentOrder: number;
+        paths: readonly string[];
+        ignoreMomentIds: ReadonlySet<string>;
+      };
+      pathClearSince?: {
+        afterMomentOrder: number;
+        allowedObjectId: string;
+        expectedHeadMomentId?: string;
+      };
+    } = {},
+  ): Promise<WorkspaceEngineRestoreResult> {
+    refuseCallerOperationId(restoreOptions.requestId);
+    refuseCallerOperationId(restoreOptions.correlationId);
+    const moment = await engine.getMoment({ workspaceId, momentId });
+    if (!moment) {
+      const secrets = secretStoreFor();
+      const secretMoment = await secrets.getSecretMoment({ workspaceId, momentId });
+      if (!secretMoment) {
+        throw new Error("This history moment is no longer available.");
+      }
+      if (restoreOptions.expectedHeadMomentId !== undefined)
+        throw new RestoreHeadChangedError(secretMoment.path);
+      if (secretMoment.versionId !== activeVersionId) {
+        throw new Error(
+          "This moment belongs to a different version. Switch to that version to restore it.",
+        );
+      }
+      const secretPath = secretMoment.path;
+      const secretCorrelationId = `restore-${createId()}`;
+      const disk = await readDiskSecretState(rootPath, secretPath);
+      if (disk.kind === "unreadable") {
+        throw new Error(`Could not read the current ${secretPath} on disk.`);
+      }
+      if (disk.kind === "untracked-content") {
+        throw new Error(`Only text files can be restored. ${secretPath} is no longer a text file.`);
+      }
+      if (disk.kind === "text") {
+        await secrets.writeSecretFile({
+          workspaceId,
+          versionId: activeVersionId,
+          path: secretPath,
+          text: disk.text,
+          metadata: {
+            origin: "local-file",
+            summary: "Saved latest edits",
+            correlationId: secretCorrelationId,
+          },
+        });
+      } else {
+        await secrets.deleteSecretFile({
+          workspaceId,
+          versionId: activeVersionId,
+          path: secretPath,
+          metadata: {
+            origin: "local-file",
+            summary: "Saved latest edits",
+            correlationId: secretCorrelationId,
+          },
+        });
+      }
+      const result = await secrets.restoreSecretFileToBeforeMoment({
+        workspaceId,
+        momentId,
+        metadata: {
+          origin: "restore",
+          summary: `Restored ${pathBasename(secretPath)}`,
+          correlationId: secretCorrelationId,
+        },
+      });
+      const materialized = await secrets.materializeSecretFile({
+        workspaceId,
+        versionId: activeVersionId,
+        path: secretPath,
+      });
+      const currentDisk = await readDiskTextState(rootPath, secretPath);
+      const alreadyCurrent = materialized.present
+        ? currentDisk.kind === "text" && currentDisk.text === materialized.text
+        : currentDisk.kind === "absent";
+      if (!alreadyCurrent) {
+        await materialize(
+          [
+            materialized.present
+              ? {
+                  kind: "write",
+                  path: secretPath,
+                  text: materialized.text,
+                  protected: true,
+                }
+              : { kind: "delete", path: secretPath, protected: true },
+          ],
+          policy,
+        );
+      }
+      return {
+        restored: result.restored,
+        restoredMomentId: result.restoredMomentId,
+        path: secretPath,
+      };
+    }
+    if (!historyMomentPathsAdmitted(historyPathAdmission(policy), moment)) {
+      throw new RestorePolicyRefusalError({ reason: "path-not-admitted" });
+    }
+    if (moment.versionId !== activeVersionId) {
+      throw new Error(
+        "This moment belongs to a different version. Switch to that version to restore it.",
+      );
+    }
+    if (moment.operation === "rename") {
+      throw new Error("A rename can't be restored directly.");
+    }
+    if (restoreOptions.requestId && !restoreOptions.correlationId) {
+      const receipt = await findRestoreReceipt(engine, moment, restoreOptions.requestId);
+      if (receipt) return receipt;
+    }
+    const path = moment.path;
+    try {
+      let expectedSha256: string | undefined;
+      let expectedAbsent = false;
+      if (restoreOptions.expectedHeadMomentId !== undefined) {
+        const expected = await engine.getMoment({
+          workspaceId,
+          momentId: restoreOptions.expectedHeadMomentId,
+        });
+        if (!expected || expected.objectId !== moment.objectId) {
+          throw new RestoreHeadChangedError(path);
+        }
+        const head = await engine.listMoments({
+          workspaceId,
+          versionId: activeVersionId,
+          objectId: moment.objectId,
+          limit: 1,
+        });
+        if (head.moments[0]?.id !== restoreOptions.expectedHeadMomentId)
+          throw new RestoreHeadChangedError(path);
+        let changed = expected;
+        search: for (
+          let beforeMomentOrder: number | null | undefined;
+          expected.syncRecordOnly && beforeMomentOrder !== null;
+        ) {
+          const page = await engine.listMoments({
+            workspaceId,
+            versionId: activeVersionId,
+            objectId: moment.objectId,
+            limit: 100,
+            ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+          });
+          for (const row of page.moments) {
+            const changes = !row.syncRecordOnly && !isCaptureRecoveryOrigin(row.metadata.origin);
+            if (row.id === moment.id) {
+              if (changes) changed = moment;
+              break search;
+            }
+            if (changes) {
+              changed = (await engine.getMoment({ workspaceId, momentId: row.id })) ?? expected;
+              break search;
+            }
+          }
+          beforeMomentOrder = page.nextBeforeMomentOrder;
+        }
+        expectedAbsent = changed.operation === "delete";
+        if (!expectedAbsent)
+          expectedSha256 =
+            changed.payload.after.sha256 ??
+            createHash("sha256").update(changed.payload.after.text).digest("hex");
+        const live = liveYDocSessions.get(path);
+        if (live) {
+          throw new RestoreLocalChangesError(
+            path,
+            "Open for live editing. Close this file and try again.",
+          );
+        }
+        let retainedDraft: boolean | undefined;
+        try {
+          retainedDraft = await options.hasRetainedLiveDraft?.(path, moment.objectId);
+        } catch {
+          throw new RestoreLocalChangesError(
+            path,
+            "Could not check saved drafts on this device. Try again.",
+          );
+        }
+        if (detachedLockedDebts.has(path) || retainedDraft) {
+          throw new RestoreLocalChangesError(path);
+        }
+        const disk = await readDiskTextState(rootPath, path);
+        if (
+          expectedAbsent
+            ? disk.kind !== "absent"
+            : (disk.kind !== "text" && disk.kind !== "binary") || disk.sha256 !== expectedSha256
+        ) {
+          throw new RestoreLocalChangesError(path);
+        }
+      }
+      if (restoreOptions.hasOtherWindow?.()) {
+        throw new RestoreOtherWindowError(path);
+      }
+      const correlationId =
+        restoreOptions.correlationId ?? restoreOptions.requestId ?? `restore-${createId()}`;
+      const disk = await readDiskTextState(rootPath, path);
+      if (disk.kind === "unreadable") {
+        throw new Error(`Could not read the current ${path} on disk.`);
+      }
+      if (disk.kind === "untracked-content") {
+        throw new Error(
+          `Only tracked files can be restored. ${path} is no longer tracked by dohc.`,
+        );
+      }
+      const saveMetadata: ActorNeutralWriteMetadata = {
+        origin: "local-file",
+        summary: "Saved latest edits",
+        correlationId,
+      };
+      if (disk.kind === "text" || disk.kind === "binary") {
+        await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
+      } else {
+        try {
+          await deleteIfTracked(engine, activeVersionId, path, saveMetadata, undefined, true);
+        } catch (error) {
+          const again = await readDiskTextState(rootPath, path);
+          if (again.kind !== "text" && again.kind !== "binary") throw error;
+          await writeIfChanged(engine, activeVersionId, path, again, saveMetadata);
+        }
+      }
+      const target = moment.payload.before;
+      const metadata: ActorNeutralWriteMetadata = {
+        origin: "restore",
+        summary: `Restored ${path}`,
+        correlationId,
+      };
+      const current = await engine.readTextFile({
+        workspaceId,
+        versionId: activeVersionId,
+        path,
+      });
+      if (restoreOptions.expectedHeadMomentId !== undefined) {
+        const history = await engine.listMoments({
+          workspaceId,
+          versionId: activeVersionId,
+          objectId: moment.objectId,
+          limit: 1,
+        });
+        if (
+          (expectedAbsent ? current !== null : current?.objectId !== moment.objectId) ||
+          history.moments[0]?.id !== restoreOptions.expectedHeadMomentId
+        ) {
+          throw new RestoreHeadChangedError(path);
+        }
+      }
+      if (
+        restoreOptions.pathCollisionGuard &&
+        (await hasPathCollisionAfter(
+          engine,
+          activeVersionId,
+          moment.objectId,
+          restoreOptions.pathCollisionGuard.paths,
+          restoreOptions.pathCollisionGuard.afterMomentOrder,
+          restoreOptions.pathCollisionGuard.ignoreMomentIds,
+          restoreOptions.correlationId,
+        ))
+      ) {
+        throw new RestorePathCollisionError(path);
+      }
+      const pathClearFields = restoreOptions.pathClearSince
+        ? {
+            expectedPathClearSinceOrder: restoreOptions.pathClearSince.afterMomentOrder,
+            expectedPathClearObjectId: restoreOptions.pathClearSince.allowedObjectId,
+            ...(restoreOptions.pathClearSince.expectedHeadMomentId !== undefined
+              ? {
+                  expectedPathClearHeadMomentId: restoreOptions.pathClearSince.expectedHeadMomentId,
+                }
+              : {}),
+          }
+        : {};
+      if (target) {
+        if (
+          current &&
+          (target.contentKind === "binary" || current.contentKind === "binary"
+            ? current.sha256 !== undefined && current.sha256 === target.sha256
+            : current.text === target.text)
+        ) {
+          return { restored: "text" as const, restoredMomentId: momentId, path };
+        }
+        const result =
+          target.contentKind === "binary"
+            ? await (async () => {
+                const bytes = await engine.readBinaryBlob({
+                  workspaceId,
+                  sha256: target.sha256 ?? "",
+                });
+                if (!bytes) {
+                  throw new Error(`Binary content for ${path} is no longer available.`);
+                }
+                if (restoreOptions.hasOtherWindow?.()) {
+                  throw new RestoreOtherWindowError(path);
+                }
+                return engine.writeBinaryFile({
+                  ...(restoreOptions.requestId ? { requestId: restoreOptions.requestId } : {}),
+                  workspaceId,
+                  versionId: activeVersionId,
+                  path,
+                  bytes,
+                  ...(expectedSha256 ? { expectedSha256 } : {}),
+                  ...(expectedAbsent ? { createOnly: true } : {}),
+                  ...pathClearFields,
+                  metadata,
+                  author,
+                });
+              })()
+            : await (async () => {
+                if (restoreOptions.hasOtherWindow?.()) {
+                  throw new RestoreOtherWindowError(path);
+                }
+                return engine.writeTextFile({
+                  ...(restoreOptions.requestId ? { requestId: restoreOptions.requestId } : {}),
+                  workspaceId,
+                  versionId: activeVersionId,
+                  path,
+                  text: target.text,
+                  publish: true,
+                  restoreBeforeMomentId: momentId,
+                  ...(expectedSha256 ? { expectedSha256 } : {}),
+                  ...(expectedAbsent ? { createOnly: true } : {}),
+                  ...pathClearFields,
+                  metadata,
+                  author,
+                });
+              })();
+        requirePublishedWrite(path, result);
+        return {
+          restored: "text" as const,
+          restoredMomentId: result.moment.id,
+          path,
+        };
+      }
+      if (!current) {
+        return { restored: "deleted" as const, restoredMomentId: momentId, path };
+      }
+      if (restoreOptions.aloneInFolder) {
+        const siblings = await folderEntriesOrNone(join(rootPath, dirname(path)));
+        if (siblings.some((name) => name !== basename(path)))
+          throw new RestoreFolderInUseError(path);
+      }
+      if (restoreOptions.hasOtherWindow?.()) {
+        throw new RestoreOtherWindowError(path);
+      }
+      const result = await engine.deleteTextFile({
+        ...(restoreOptions.requestId ? { requestId: restoreOptions.requestId } : {}),
+        workspaceId,
+        versionId: activeVersionId,
+        path,
+        ...(expectedSha256
+          ? { expectedSha256, expectedObjectId: moment.objectId, ...pathClearFields }
+          : {}),
+        metadata,
+        author,
+      });
+      if (!expectedSha256) await materialize([{ kind: "delete", path }], policy);
+      return {
+        restored: "deleted" as const,
+        restoredMomentId: result.moment.id,
+        path,
+      };
+    } catch (error) {
+      if (error instanceof DaemonRefusalError && error.message === "restore-path-collision") {
+        throw new RestorePathCollisionError(path);
+      }
+      if (error instanceof DaemonRefusalError && error.message === "restore-head-changed") {
+        throw new RestoreHeadChangedError(path);
+      }
+      if (restoreOptions.expectedHeadMomentId !== undefined) {
+        if (
+          error instanceof AuthoredTextChangedError ||
+          (error instanceof VersionedTextStoreError &&
+            ["write-precondition-failed", "target-path-exists"].includes(error.code))
+        )
+          throw new RestoreLocalChangesError(path);
+        const code =
+          error instanceof DaemonRefusalError
+            ? error.message
+            : error instanceof VersionedTextStoreError
+              ? error.code
+              : undefined;
+        if (code === "symlink-target")
+          throw new RestoreLocalChangesError(
+            path,
+            "dohc could not remove this file because its path contains a link. Check the file's path.",
+          );
+        if (code === "recovery-unavailable")
+          throw new RestoreLocalChangesError(
+            path,
+            "dohc could not remove this file. Check folder access, then try again.",
+          );
+        if (code === "file-locked")
+          throw new RestoreLocalChangesError(
+            path,
+            "dohc could not remove this file. It may be open in another app.",
+          );
+        if (code?.startsWith("materialize-"))
+          throw new RestoreLocalChangesError(path, "dohc could not remove this file.");
+      }
+      if (
+        error instanceof DaemonRefusalError &&
+        error.message === "synced-deletion-revival-refused"
+      ) {
+        throw new SyncedDeletionRevivalError(path, { cause: error }, true);
+      }
+      throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
+    }
+  }
+
+  type InternalAgentRunPlanItem = AgentRunUndoPlanItem & {
+    headMomentId: string;
+    preRestoreHeadMomentId: string;
+    earliestMomentOrder: number;
+    paths: string[];
+    scanTopMomentOrder: number;
+    pendingRestore: { momentId: string; requestId: string } | null;
+  };
+  const AGENT_RUN_SCAN_PAGE_LIMIT = 200;
+  const PATH_COLLISION_GUARD_MAX_PAGES = 50;
+  const OBJECT_INTERVAL_MAX_PAGES = 50;
+
+  function agentRunUndoCorrelationId(activeVersionId: string, agentRunId: string): string {
+    const digest = createHash("sha256")
+      .update(JSON.stringify([workspaceId, activeVersionId, agentRunId]))
+      .digest("hex")
+      .slice(0, 32);
+    return `restore-agent-run-${digest}`;
+  }
+
+  async function hasPathCollisionAfter(
+    engine: CaptureVersionedTextStore,
+    activeVersionId: string,
+    objectId: string,
+    paths: readonly string[],
+    afterMomentOrder: number,
+    ignoreMomentIds: ReadonlySet<string>,
+    batchCorrelationId?: string,
+  ): Promise<boolean> {
+    await engine.flushCapture?.();
+    const targetKeys = new Set(paths.map(pathCollisionKey));
+    let beforeMomentOrder: number | undefined;
+    for (let pageIndex = 0; pageIndex < PATH_COLLISION_GUARD_MAX_PAGES; pageIndex += 1) {
+      const page = await engine.listMoments({
+        workspaceId,
+        versionId: activeVersionId,
+        limit: AGENT_RUN_SCAN_PAGE_LIMIT,
+        ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+      });
+      let reachedWatermark = false;
+      for (const row of page.moments) {
+        if (row.versionId !== activeVersionId) continue;
+        if (row.momentOrder <= afterMomentOrder) {
+          reachedWatermark = true;
+          break;
+        }
+        if (row.syncRecordOnly || isCaptureRecoveryOrigin(row.metadata.origin)) continue;
+        if (ignoreMomentIds.has(row.id)) continue;
+        if (
+          batchCorrelationId !== undefined &&
+          row.metadata.origin === "restore" &&
+          row.metadata.correlationId === batchCorrelationId
+        ) {
+          continue;
+        }
+        if (row.objectId !== objectId && targetKeys.has(pathCollisionKey(row.path))) {
+          return true;
+        }
+      }
+      if (reachedWatermark || page.nextBeforeMomentOrder === null) return false;
+      beforeMomentOrder = page.nextBeforeMomentOrder;
+    }
+    return true;
+  }
+
+  async function replayPendingRestoreInQueue(
+    engine: CaptureVersionedTextStore,
+    activeVersionId: string,
+    policy: WorkspaceEnginePolicySnapshot,
+    earliestMomentId: string,
+    latestMomentId: string,
+    author: Extract<MomentWriteAuthor, { kind: "human" }>,
+    replayOptions: {
+      committedMomentId: string;
+      requestId: string;
+      correlationId: string;
+      hasOtherWindow?: () => boolean;
+      pathCollisionGuard: {
+        afterMomentOrder: number;
+        paths: readonly string[];
+        ignoreMomentIds: ReadonlySet<string>;
+      };
+      pathClearSince: {
+        afterMomentOrder: number;
+        allowedObjectId: string;
+        expectedHeadMomentId?: string;
+      };
+    },
+  ): Promise<WorkspaceEngineRestoreResult> {
+    const [earliest, latest, committed] = await Promise.all([
+      engine.getMoment({ workspaceId, momentId: earliestMomentId }),
+      engine.getMoment({ workspaceId, momentId: latestMomentId }),
+      engine.getMoment({ workspaceId, momentId: replayOptions.committedMomentId }),
+    ]);
+    if (
+      !earliest ||
+      !latest ||
+      !committed ||
+      earliest.versionId !== activeVersionId ||
+      latest.versionId !== activeVersionId ||
+      committed.versionId !== activeVersionId
+    ) {
+      throw new Error("This history moment is no longer available.");
+    }
+    const path = earliest.path;
+    const admitted = historyPathAdmission(policy);
+    if (
+      !historyMomentPathsAdmitted(admitted, earliest) ||
+      !historyMomentPathsAdmitted(admitted, latest)
+    ) {
+      throw new RestorePolicyRefusalError({ reason: "path-not-admitted" });
+    }
+    const alreadyPublished = await engine.publicationApplied({
+      workspaceId,
+      requestId: replayOptions.requestId,
+      momentId: replayOptions.committedMomentId,
+    });
+    if (alreadyPublished) {
+      return {
+        restored: earliest.payload.before === null ? "deleted" : "text",
+        restoredMomentId: replayOptions.committedMomentId,
+        path,
+      };
+    }
+    if (replayOptions.hasOtherWindow?.()) {
+      throw new RestoreOtherWindowError(path);
+    }
+    const head = await engine.listMoments({
+      workspaceId,
+      versionId: activeVersionId,
+      objectId: committed.objectId,
+      limit: 1,
+    });
+    if (head.moments[0]?.id !== replayOptions.committedMomentId) {
+      throw new RestoreHeadChangedError(path);
+    }
+    if (liveYDocSessions.has(path)) {
+      throw new RestoreLocalChangesError(
+        path,
+        "Open for live editing. Close this file and try again.",
+      );
+    }
+    let retainedDraft: boolean | undefined;
+    try {
+      retainedDraft = await options.hasRetainedLiveDraft?.(path, earliest.objectId);
+    } catch {
+      throw new RestoreLocalChangesError(
+        path,
+        "Could not check saved drafts on this device. Try again.",
+      );
+    }
+    if (detachedLockedDebts.has(path) || retainedDraft) {
+      throw new RestoreLocalChangesError(path);
+    }
+    if (
+      await hasPathCollisionAfter(
+        engine,
+        activeVersionId,
+        earliest.objectId,
+        replayOptions.pathCollisionGuard.paths,
+        replayOptions.pathCollisionGuard.afterMomentOrder,
+        replayOptions.pathCollisionGuard.ignoreMomentIds,
+        replayOptions.correlationId,
+      )
+    ) {
+      throw new RestorePathCollisionError(path);
+    }
+    if (replayOptions.hasOtherWindow?.()) {
+      throw new RestoreOtherWindowError(path);
+    }
+    const expectedAbsent = latest.operation === "delete";
+    const expectedSha256 = expectedAbsent
+      ? undefined
+      : (latest.payload.after.sha256 ??
+        createHash("sha256").update(latest.payload.after.text).digest("hex"));
+    const metadata: ActorNeutralWriteMetadata = {
+      origin: "restore",
+      summary: `Restored ${path}`,
+      correlationId: replayOptions.correlationId,
+    };
+    const pathClearFields = {
+      expectedPathClearSinceOrder: replayOptions.pathClearSince.afterMomentOrder,
+      expectedPathClearObjectId: replayOptions.pathClearSince.allowedObjectId,
+      ...(replayOptions.pathClearSince.expectedHeadMomentId !== undefined
+        ? { expectedPathClearHeadMomentId: replayOptions.pathClearSince.expectedHeadMomentId }
+        : {}),
+    };
+    const target = earliest.payload.before;
+    try {
+      if (target) {
+        const result =
+          target.contentKind === "binary"
+            ? await (async () => {
+                const bytes = await engine.readBinaryBlob({
+                  workspaceId,
+                  sha256: target.sha256 ?? "",
+                });
+                if (!bytes) {
+                  throw new Error(`Binary content for ${path} is no longer available.`);
+                }
+                if (replayOptions.hasOtherWindow?.()) {
+                  throw new RestoreOtherWindowError(path);
+                }
+                return engine.writeBinaryFile({
+                  requestId: replayOptions.requestId,
+                  workspaceId,
+                  versionId: activeVersionId,
+                  path,
+                  bytes,
+                  ...(expectedSha256 ? { expectedSha256 } : {}),
+                  ...(expectedAbsent ? { createOnly: true } : {}),
+                  ...pathClearFields,
+                  metadata,
+                  author,
+                });
+              })()
+            : await (async () => {
+                if (replayOptions.hasOtherWindow?.()) {
+                  throw new RestoreOtherWindowError(path);
+                }
+                return engine.writeTextFile({
+                  requestId: replayOptions.requestId,
+                  workspaceId,
+                  versionId: activeVersionId,
+                  path,
+                  text: target.text,
+                  publish: true,
+                  restoreBeforeMomentId: earliestMomentId,
+                  ...(expectedSha256 ? { expectedSha256 } : {}),
+                  ...(expectedAbsent ? { createOnly: true } : {}),
+                  ...pathClearFields,
+                  metadata,
+                  author,
+                });
+              })();
+        requirePublishedWrite(path, result);
+        return {
+          restored: "text" as const,
+          restoredMomentId: result.moment.id,
+          path,
+        };
+      }
+      if (replayOptions.hasOtherWindow?.()) {
+        throw new RestoreOtherWindowError(path);
+      }
+      const result = await engine.deleteTextFile({
+        requestId: replayOptions.requestId,
+        workspaceId,
+        versionId: activeVersionId,
+        path,
+        ...(expectedSha256
+          ? { expectedSha256, expectedObjectId: earliest.objectId, ...pathClearFields }
+          : {}),
+        metadata,
+        author,
+      });
+      return {
+        restored: "deleted" as const,
+        restoredMomentId: result.moment.id,
+        path,
+      };
+    } catch (error) {
+      if (error instanceof DaemonRefusalError && error.message === "restore-path-collision") {
+        throw new RestorePathCollisionError(path);
+      }
+      if (error instanceof DaemonRefusalError && error.message === "restore-head-changed") {
+        throw new RestoreHeadChangedError(path);
+      }
+      if (
+        error instanceof AuthoredTextChangedError ||
+        (error instanceof VersionedTextStoreError &&
+          ["write-precondition-failed", "target-path-exists"].includes(error.code))
+      ) {
+        throw new RestoreLocalChangesError(path);
+      }
+      throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
+    }
+  }
+
+  function matchingAgentRunAuthor(
+    authors: readonly MomentAuthor[] | undefined,
+    agentRunId: string,
+  ): Extract<MomentAuthor, { kind: "agent" }> | undefined {
+    return authors?.find(
+      (author): author is Extract<MomentAuthor, { kind: "agent" }> =>
+        author.kind === "agent" && author.agentRunId === agentRunId,
+    );
+  }
+
+  function computeAgentRunPlanToken(
+    activeVersionId: string,
+    agentRunId: string,
+    restorable: readonly Pick<
+      AgentRunUndoPlanItem,
+      "objectId" | "path" | "earliestMomentId" | "latestMomentId" | "action"
+    >[],
+  ): string {
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          v: 1,
+          workspaceId,
+          activeVersionId,
+          agentRunId,
+          targets: restorable.map(
+            ({ objectId, path, earliestMomentId, latestMomentId, action }) => [
+              objectId,
+              path,
+              earliestMomentId,
+              latestMomentId,
+              action,
+            ],
+          ),
+        }),
+      )
+      .digest("hex");
+  }
+
+  async function inspectAgentRunInQueue(
+    engine: CaptureVersionedTextStore,
+    activeVersionId: string,
+    policy: WorkspaceEnginePolicySnapshot,
+    agentRunId: string,
+    inspectOptions: {
+      hasOtherWindow?: () => boolean;
+      reviewPaths?: readonly string[];
+      resolveAgentName?: (author: Extract<MomentAuthor, { kind: "agent" }>) => string;
+    } = {},
+  ): Promise<{
+    agentName: string | null;
+    planToken: string;
+    truncated: boolean;
+    scannedChanges: number;
+    restorable: InternalAgentRunPlanItem[];
+    skipped: AgentRunUndoSkippedItem[];
+  }> {
+    await engine.flushCapture?.();
+    const admitted = historyPathAdmission(policy);
+    const reviewPaths = new Set(inspectOptions.reviewPaths ?? []);
+    const batchCorrelationId = agentRunUndoCorrelationId(activeVersionId, agentRunId);
+    const touched = new Map<
+      string,
+      {
+        objectId: string;
+        latestMomentId: string;
+        earliestMomentId: string;
+        earliestMomentOrder: number;
+        momentCount: number;
+        latestPath: string;
+        paths: Set<string>;
+      }
+    >();
+    const pathActivity = new Map<string, Map<string, number>>();
+    const collectionMarkerDirs = new Set<string>();
+    let agentAuthor: Extract<MomentAuthor, { kind: "agent" }> | undefined;
+    let beforeMomentOrder: number | undefined;
+    let truncated = false;
+    let scanTopMomentOrder = -1;
+    let scannedChanges = 0;
+    for (let pageIndex = 0; pageIndex < AGENT_RUN_SCAN_MAX_PAGES; pageIndex += 1) {
+      const page = await engine.listMoments({
+        workspaceId,
+        versionId: activeVersionId,
+        limit: AGENT_RUN_SCAN_PAGE_LIMIT,
+        ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+      });
+      for (const moment of page.moments) {
+        if (moment.versionId !== activeVersionId) continue;
+        if (moment.momentOrder > scanTopMomentOrder) {
+          scanTopMomentOrder = moment.momentOrder;
+        }
+        if (moment.syncRecordOnly || isCaptureRecoveryOrigin(moment.metadata.origin)) continue;
+        scannedChanges += 1;
+        const ownBatchRestore =
+          moment.metadata.origin === "restore" &&
+          moment.metadata.correlationId === batchCorrelationId;
+        if (!ownBatchRestore) {
+          const pathKey = pathCollisionKey(moment.path);
+          let ownersAtPath = pathActivity.get(pathKey);
+          if (!ownersAtPath) {
+            ownersAtPath = new Map();
+            pathActivity.set(pathKey, ownersAtPath);
+          }
+          const prevMax = ownersAtPath.get(moment.objectId);
+          if (prevMax === undefined || moment.momentOrder > prevMax) {
+            ownersAtPath.set(moment.objectId, moment.momentOrder);
+          }
+        }
+        const fileName = basename(moment.path).toLowerCase();
+        if (fileName === "collection.yaml" || fileName === "dataset.json") {
+          collectionMarkerDirs.add(dirname(moment.path).replaceAll("\\", "/"));
+        }
+        if (moment.metadata.origin === "restore") continue;
+        const match = matchingAgentRunAuthor(moment.authors, agentRunId);
+        if (!match) continue;
+        agentAuthor ??= match;
+        const existing = touched.get(moment.objectId);
+        if (!existing) {
+          touched.set(moment.objectId, {
+            objectId: moment.objectId,
+            latestMomentId: moment.id,
+            earliestMomentId: moment.id,
+            earliestMomentOrder: moment.momentOrder,
+            momentCount: 1,
+            latestPath: moment.path,
+            paths: new Set([moment.path]),
+          });
+        } else {
+          existing.earliestMomentId = moment.id;
+          existing.earliestMomentOrder = Math.min(existing.earliestMomentOrder, moment.momentOrder);
+          existing.momentCount += 1;
+          existing.paths.add(moment.path);
+        }
+      }
+      if (page.nextBeforeMomentOrder === null) break;
+      if (pageIndex + 1 === AGENT_RUN_SCAN_MAX_PAGES) {
+        truncated = true;
+        break;
+      }
+      beforeMomentOrder = page.nextBeforeMomentOrder;
+    }
+
+    const collectionFolderCache = new Map<string, boolean>();
+    const isCollectionFolder = async (folder: string): Promise<boolean> => {
+      const normalized = folder.replaceAll("\\", "/");
+      const cached = collectionFolderCache.get(normalized);
+      if (cached !== undefined) return cached;
+      if (collectionMarkerDirs.has(normalized)) {
+        collectionFolderCache.set(normalized, true);
+        return true;
+      }
+      const markers =
+        normalized === "." || normalized === ""
+          ? ["collection.yaml", "dataset.json"]
+          : [`${normalized}/collection.yaml`, `${normalized}/dataset.json`];
+      for (const marker of markers) {
+        const [inEngine, onDisk] = await Promise.all([
+          engine.readTextFile({ workspaceId, versionId: activeVersionId, path: marker }),
+          readDiskTextState(rootPath, marker),
+        ]);
+        if (inEngine !== null || onDisk.kind !== "absent") {
+          collectionFolderCache.set(normalized, true);
+          return true;
+        }
+      }
+      collectionFolderCache.set(normalized, false);
+      return false;
+    };
+    const isCollectionPath = async (candidatePath: string): Promise<boolean> => {
+      const fileName = basename(candidatePath).toLowerCase();
+      if (
+        fileName === "collection.yaml" ||
+        fileName === "dataset.json" ||
+        fileName === "automations.yaml"
+      ) {
+        return true;
+      }
+      let dir = dirname(candidatePath).replaceAll("\\", "/");
+      for (;;) {
+        if (await isCollectionFolder(dir)) return true;
+        if (dir === "." || dir === "/" || dir === "") return false;
+        const parent = dirname(dir).replaceAll("\\", "/");
+        if (parent === dir) return false;
+        dir = parent;
+      }
+    };
+
+    const agentName = agentAuthor
+      ? (inspectOptions.resolveAgentName?.(agentAuthor) ?? agentAuthor.agentName ?? null)
+      : null;
+
+    const pathOwners = new Map<string, Set<string>>();
+    for (const entry of touched.values()) {
+      for (const path of entry.paths) {
+        const key = pathCollisionKey(path);
+        let owners = pathOwners.get(key);
+        if (!owners) {
+          owners = new Set();
+          pathOwners.set(key, owners);
+        }
+        owners.add(entry.objectId);
+      }
+    }
+    const collidedObjectIds = new Set<string>();
+    for (const owners of pathOwners.values()) {
+      if (owners.size > 1) {
+        for (const objectId of owners) collidedObjectIds.add(objectId);
+      }
+    }
+
+    const restorable: InternalAgentRunPlanItem[] = [];
+    const skipped: AgentRunUndoSkippedItem[] = [];
+    const skippedPaths = new Set<string>();
+    const pushSkipped = (
+      path: string,
+      reason: AgentRunUndoSkippedItem["reason"],
+      detail: string,
+    ) => {
+      if (skippedPaths.has(path)) return;
+      skippedPaths.add(path);
+      skipped.push({ path, reason, detail });
+    };
+
+    for (const entry of touched.values()) {
+      const path = entry.latestPath;
+      let belongsToCollection = false;
+      for (const candidatePath of entry.paths) {
+        if (await isCollectionPath(candidatePath)) {
+          belongsToCollection = true;
+          break;
+        }
+      }
+      if (belongsToCollection) {
+        pushSkipped(
+          path,
+          "collection",
+          "Part of a Collection. Collections keep their own History and are not changed here.",
+        );
+        continue;
+      }
+
+      let hasPathCollision = collidedObjectIds.has(entry.objectId);
+      if (!hasPathCollision) {
+        for (const candidatePath of entry.paths) {
+          const owners = pathActivity.get(pathCollisionKey(candidatePath));
+          if (!owners) continue;
+          for (const [otherObjectId, maxOrder] of owners.entries()) {
+            if (otherObjectId !== entry.objectId && maxOrder >= entry.earliestMomentOrder) {
+              hasPathCollision = true;
+              break;
+            }
+          }
+          if (hasPathCollision) break;
+        }
+      }
+      if (hasPathCollision) {
+        pushSkipped(
+          path,
+          "path-collision",
+          "Another file used this path during or after this agent run. Review it in History instead.",
+        );
+        continue;
+      }
+
+      let headMomentId: string | undefined;
+      let preRestoreHeadMomentId: string | undefined;
+      let seenLatest = false;
+      let seenEarliest = false;
+      let verifiedBeforeEarliest = !truncated;
+      let pendingRestore: { momentId: string; requestId: string } | null = null;
+      let skipItem: { reason: AgentRunUndoSkippedItem["reason"]; detail: string } | null = null;
+      let beforeMomentOrder: number | undefined;
+      walk: for (let pageIndex = 0; pageIndex < OBJECT_INTERVAL_MAX_PAGES; pageIndex += 1) {
+        const page = await engine.listMoments({
+          workspaceId,
+          versionId: activeVersionId,
+          objectId: entry.objectId,
+          limit: 100,
+          ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+        });
+        if (pageIndex === 0) headMomentId = page.moments[0]?.id;
+        for (const row of page.moments) {
+          const ignored = row.syncRecordOnly || isCaptureRecoveryOrigin(row.metadata.origin);
+          if (seenEarliest) {
+            if (ignored) continue;
+            if (
+              row.metadata.origin !== "restore" &&
+              matchingAgentRunAuthor(row.authors, agentRunId)
+            ) {
+              skipItem = {
+                reason: "later-edits",
+                detail:
+                  "Earlier changes from this agent run are beyond the scanned History window. Restore this file individually from History.",
+              };
+            } else {
+              verifiedBeforeEarliest = true;
+            }
+            break walk;
+          }
+          if (!seenLatest) {
+            if (row.id === entry.latestMomentId) {
+              seenLatest = true;
+            } else if (!ignored) {
+              if (
+                pendingRestore === null &&
+                row.metadata.origin === "restore" &&
+                row.metadata.correlationId === batchCorrelationId
+              ) {
+                const retryRequestId = restoreRequestId(batchCorrelationId, entry.earliestMomentId);
+                const applied = await engine.publicationApplied({
+                  workspaceId,
+                  requestId: retryRequestId,
+                  momentId: row.id,
+                });
+                if (applied) {
+                  skipItem = {
+                    reason: "unchanged",
+                    detail: "Already undone by an earlier attempt.",
+                  };
+                  break walk;
+                }
+                pendingRestore = { momentId: row.id, requestId: retryRequestId };
+                preRestoreHeadMomentId = undefined;
+                continue;
+              }
+              skipItem =
+                row.operation === "rename"
+                  ? {
+                      reason: "renamed",
+                      detail:
+                        "Renamed after this agent run. Restore it from its file history instead.",
+                    }
+                  : { reason: "later-edits", detail: "Changed again after this agent run." };
+              break walk;
+            }
+          }
+          if (preRestoreHeadMomentId === undefined) {
+            preRestoreHeadMomentId = row.id;
+          }
+          if (seenLatest) {
+            if (row.operation === "rename" || row.path !== path) {
+              skipItem = {
+                reason: "renamed",
+                detail: "Renamed during this agent run. Restore it from its file history instead.",
+              };
+              break walk;
+            }
+            if (!ignored) {
+              if (row.metadata.origin === "restore") {
+                skipItem = {
+                  reason: "later-edits",
+                  detail: "Another edit occurred on this file during this agent run.",
+                };
+                break walk;
+              }
+              if (
+                (row.authors?.length ?? 0) > 1 &&
+                matchingAgentRunAuthor(row.authors, agentRunId)
+              ) {
+                skipItem = {
+                  reason: "later-edits",
+                  detail: "Shared with another author during this agent run.",
+                };
+                break walk;
+              }
+              if (row.authors?.length !== 1 || !matchingAgentRunAuthor(row.authors, agentRunId)) {
+                skipItem = {
+                  reason: "later-edits",
+                  detail: "Another edit occurred on this file during this agent run.",
+                };
+                break walk;
+              }
+            }
+            if (row.id === entry.earliestMomentId) {
+              seenEarliest = true;
+              if (!truncated) break walk;
+            }
+          }
+        }
+        if (page.nextBeforeMomentOrder === null) {
+          if (seenEarliest) verifiedBeforeEarliest = true;
+          break;
+        }
+        beforeMomentOrder = page.nextBeforeMomentOrder;
+      }
+
+      if (skipItem) {
+        pushSkipped(path, skipItem.reason, skipItem.detail);
+        continue;
+      }
+      if (
+        !headMomentId ||
+        !preRestoreHeadMomentId ||
+        !seenLatest ||
+        !seenEarliest ||
+        !verifiedBeforeEarliest
+      ) {
+        pushSkipped(
+          path,
+          "later-edits",
+          "History for this file changed before the run could be verified.",
+        );
+        continue;
+      }
+
+      const [earliest, latest] = await Promise.all([
+        engine.getMoment({ workspaceId, momentId: entry.earliestMomentId }),
+        engine.getMoment({ workspaceId, momentId: entry.latestMomentId }),
+      ]);
+      if (
+        !earliest ||
+        !latest ||
+        earliest.versionId !== activeVersionId ||
+        latest.versionId !== activeVersionId
+      ) {
+        pushSkipped(
+          path,
+          "later-edits",
+          "History for this file is no longer available on this version.",
+        );
+        continue;
+      }
+      if (
+        !historyMomentPathsAdmitted(admitted, earliest) ||
+        !historyMomentPathsAdmitted(admitted, latest)
+      ) {
+        const isSecret =
+          resolveEffectivePolicy({
+            path,
+            filesPolicy: policy.filesPolicy,
+            visibilityPolicy: policy.visibilityPolicy,
+          }).floor === "secret";
+        pushSkipped(
+          path,
+          isSecret ? "protected" : "untracked",
+          isSecret
+            ? "Protected file. Restore protected files individually from History."
+            : "No longer tracked by workspace rules.",
+        );
+        continue;
+      }
+
+      if (inspectOptions.hasOtherWindow?.()) {
+        pushSkipped(
+          path,
+          "other-window",
+          "Open in another window. Close that window and try again.",
+        );
+        continue;
+      }
+
+      const current = await engine.readTextFile({
+        workspaceId,
+        versionId: activeVersionId,
+        path,
+      });
+      const expectedAbsent = latest.operation === "delete";
+      if (
+        pendingRestore === null &&
+        expectedAbsent &&
+        earliest.payload.before?.contentKind === "binary" &&
+        current !== null &&
+        current.objectId !== entry.objectId
+      ) {
+        const recreated = await engine.listMoments({
+          workspaceId,
+          versionId: activeVersionId,
+          objectId: current.objectId,
+          limit: 2,
+        });
+        const sole = recreated.moments.length === 1 ? recreated.moments[0] : undefined;
+        if (
+          sole &&
+          sole.metadata.origin === "restore" &&
+          sole.metadata.correlationId === batchCorrelationId
+        ) {
+          const retryRequestId = restoreRequestId(batchCorrelationId, entry.earliestMomentId);
+          const applied = await engine.publicationApplied({
+            workspaceId,
+            requestId: retryRequestId,
+            momentId: sole.id,
+          });
+          if (applied) {
+            pushSkipped(path, "unchanged", "Already undone by an earlier attempt.");
+            continue;
+          }
+          pendingRestore = { momentId: sole.id, requestId: retryRequestId };
+          headMomentId = sole.id;
+        }
+      }
+      if (pendingRestore !== null) {
+        const before = earliest.payload.before;
+        const currentOk =
+          before === null
+            ? current === null || current.objectId === entry.objectId
+            : current !== null &&
+              (before.contentKind === "binary" || current.objectId === entry.objectId);
+        if (!currentOk) {
+          pushSkipped(path, "later-edits", "Changed after this agent run.");
+          continue;
+        }
+      } else if (
+        expectedAbsent ? current !== null : current === null || current.objectId !== entry.objectId
+      ) {
+        if (current !== null && current.objectId !== entry.objectId) {
+          pushSkipped(path, "path-collision", "A different file now exists at this path.");
+        } else {
+          pushSkipped(path, "later-edits", "Changed after this agent run.");
+        }
+        continue;
+      }
+
+      if (liveYDocSessions.has(path)) {
+        pushSkipped(path, "live-editing", "Open for live editing. Close this file and try again.");
+        continue;
+      }
+      if (reviewPaths.has(path)) {
+        pushSkipped(
+          path,
+          "local-changes",
+          "Has unsaved edits in this window. Save or close it first.",
+        );
+        continue;
+      }
+      let retainedDraft: boolean | undefined;
+      try {
+        retainedDraft = await options.hasRetainedLiveDraft?.(path, entry.objectId);
+      } catch {
+        pushSkipped(
+          path,
+          "local-changes",
+          "Could not check saved drafts on this device. Try again.",
+        );
+        continue;
+      }
+      if (detachedLockedDebts.has(path) || retainedDraft) {
+        pushSkipped(path, "local-changes", "Has an unsaved draft on this device.");
+        continue;
+      }
+
+      const expectedSha256 = expectedAbsent
+        ? undefined
+        : (latest.payload.after.sha256 ??
+          createHash("sha256").update(latest.payload.after.text).digest("hex"));
+      const disk = await readDiskTextState(rootPath, path);
+      const diskMatchesPreRestore = expectedAbsent
+        ? disk.kind === "absent"
+        : (disk.kind === "text" || disk.kind === "binary") && disk.sha256 === expectedSha256;
+      if (pendingRestore !== null) {
+        const before = earliest.payload.before;
+        const beforeSha256 =
+          before === null
+            ? undefined
+            : (before.sha256 ?? createHash("sha256").update(before.text).digest("hex"));
+        const diskMatchesRestored =
+          before === null
+            ? disk.kind === "absent"
+            : (disk.kind === "text" || disk.kind === "binary") && disk.sha256 === beforeSha256;
+        if (!diskMatchesPreRestore && !diskMatchesRestored) {
+          pushSkipped(path, "local-changes", "Changed on disk since this agent run.");
+          continue;
+        }
+      } else if (!diskMatchesPreRestore) {
+        pushSkipped(path, "local-changes", "Changed on disk since this agent run.");
+        continue;
+      }
+
+      if (pendingRestore === null) {
+        const alreadyMatchesBefore =
+          earliest.payload.before === null
+            ? expectedAbsent
+            : current !== null &&
+              (earliest.payload.before.contentKind === "binary" || current.contentKind === "binary"
+                ? current.sha256 !== undefined && current.sha256 === earliest.payload.before.sha256
+                : current.text === earliest.payload.before.text);
+        if (alreadyMatchesBefore) {
+          pushSkipped(path, "unchanged", "Already matches its state before this agent run.");
+          continue;
+        }
+      }
+      if (earliest.payload.before === null && truncated) {
+        pushSkipped(
+          path,
+          "path-collision",
+          `Checked the latest ${AGENT_RUN_SCAN_MAX_PAGES} History pages (${scannedChanges.toLocaleString()} ${scannedChanges === 1 ? "change" : "changes"} on this version). Older history was not checked, so a recreated file at this path cannot be verified.`,
+        );
+        continue;
+      }
+      if (
+        earliest.payload.before === null &&
+        (path.toLowerCase().endsWith(".excalidraw") ||
+          (latest.payload.after.contentKind !== "binary" &&
+            /"type"\s*:\s*"excalidraw"/.test(latest.payload.after.text.slice(0, 512))))
+      ) {
+        pushSkipped(
+          path,
+          "drawing",
+          "Removing a drawing can also remove linked assets. Delete it individually from History instead.",
+        );
+        continue;
+      }
+
+      restorable.push({
+        objectId: entry.objectId,
+        path,
+        earliestMomentId: entry.earliestMomentId,
+        latestMomentId: entry.latestMomentId,
+        headMomentId,
+        preRestoreHeadMomentId,
+        earliestMomentOrder: entry.earliestMomentOrder,
+        paths: [...entry.paths],
+        scanTopMomentOrder,
+        pendingRestore,
+        momentCount: entry.momentCount,
+        action: earliest.payload.before === null ? "delete" : "restore",
+      });
+    }
+
+    restorable.sort((a, b) => compareEnginePaths(a.path, b.path));
+    if (restorable.length > MAX_AGENT_RUN_UNDO_FILES) {
+      const totalRestorable = restorable.length;
+      const overflow = restorable.splice(MAX_AGENT_RUN_UNDO_FILES);
+      const detail = `At most ${MAX_AGENT_RUN_UNDO_FILES.toLocaleString()} files can be undone at once (${totalRestorable.toLocaleString()} files can be undone in this run). Undo this batch, then run Undo again for the rest.`;
+      for (const item of overflow) {
+        pushSkipped(item.path, "batch-limit", detail);
+      }
+    }
+    skipped.sort((a, b) => compareEnginePaths(a.path, b.path));
+    const planToken = computeAgentRunPlanToken(activeVersionId, agentRunId, restorable);
+    return { agentName, planToken, truncated, scannedChanges, restorable, skipped };
+  }
+
   return {
     start() {
       pollDaemonCaptureHealth();
@@ -8204,7 +9584,6 @@ export function createWorkspaceEngineCapture(
     },
 
     restoreFileToBeforeMoment(momentId, person, restoreOptions = {}) {
-      // The person as submitted, before the restore waits for its turn.
       const author = structuredClone(person);
       return enqueueResult("restore file", async () => {
         refuseCallerOperationId(restoreOptions.requestId);
@@ -8219,382 +9598,261 @@ export function createWorkspaceEngineCapture(
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
         await engine.flushCapture?.();
-        const moment = await engine.getMoment({ workspaceId, momentId });
-        if (!moment) {
-          // Protected restore: the whole round trip stays encrypted —
-          // the store copies the prior CIPHERTEXT forward, and plaintext only
-          // appears for the final authorized disk materialization.
-          const secrets = secretStoreFor();
-          const secretMoment = await secrets.getSecretMoment({ workspaceId, momentId });
-          if (!secretMoment) {
-            throw new Error("This history moment is no longer available.");
-          }
-          if (restoreOptions.expectedHeadMomentId !== undefined)
-            throw new RestoreHeadChangedError(secretMoment.path);
-          if (secretMoment.versionId !== activeVersionId) {
-            throw new Error(
-              "This moment belongs to a different version. Switch to that version to restore it.",
-            );
-          }
-          const secretPath = secretMoment.path;
-          const secretCorrelationId = `restore-${createId()}`;
-          // Capture the file's latest disk state first so a restore can never
-          // destroy an edit the store has not recorded yet.
-          const disk = await readDiskSecretState(rootPath, secretPath);
-          if (disk.kind === "unreadable") {
-            throw new Error(`Could not read the current ${secretPath} on disk.`);
-          }
-          if (disk.kind === "untracked-content") {
-            throw new Error(
-              `Only text files can be restored. ${secretPath} is no longer a text file.`,
-            );
-          }
-          if (disk.kind === "text") {
-            await secrets.writeSecretFile({
-              workspaceId,
-              versionId: activeVersionId,
-              path: secretPath,
-              text: disk.text,
-              metadata: {
-                origin: "local-file",
-                summary: "Saved latest edits",
-                correlationId: secretCorrelationId,
-              },
-            });
-          } else {
-            await secrets.deleteSecretFile({
-              workspaceId,
-              versionId: activeVersionId,
-              path: secretPath,
-              metadata: {
-                origin: "local-file",
-                summary: "Saved latest edits",
-                correlationId: secretCorrelationId,
-              },
-            });
-          }
-          const result = await secrets.restoreSecretFileToBeforeMoment({
-            workspaceId,
-            momentId,
-            metadata: {
-              origin: "restore",
-              summary: `Restored ${pathBasename(secretPath)}`,
-              correlationId: secretCorrelationId,
-            },
-          });
-          const materialized = await secrets.materializeSecretFile({
-            workspaceId,
-            versionId: activeVersionId,
-            path: secretPath,
-          });
-          // Idempotent restore/undo: skip the disk write when the target
-          // state already matches (mirrors planSecretMaterialization) — an
-          // unconditional .env rewrite fires watchers and dev-server reloads
-          // for identical bytes.
-          const currentDisk = await readDiskTextState(rootPath, secretPath);
-          const alreadyCurrent = materialized.present
-            ? currentDisk.kind === "text" && currentDisk.text === materialized.text
-            : currentDisk.kind === "absent";
-          if (!alreadyCurrent) {
-            await materialize(
-              [
-                materialized.present
-                  ? {
-                      kind: "write",
-                      path: secretPath,
-                      text: materialized.text,
-                      protected: true,
-                    }
-                  : { kind: "delete", path: secretPath, protected: true },
-              ],
-              policy,
-            );
-          }
+        return restoreFileToBeforeMomentInQueue(
+          engine,
+          activeVersionId,
+          policy,
+          momentId,
+          author,
+          restoreOptions,
+        );
+      });
+    },
+
+    planUndoAgentRun(agentRunId, planOptions = {}) {
+      return enqueueResult("plan undo agent run", async () => {
+        const policy = await readPolicyForTask();
+        if (policy.errors.length) {
           return {
-            restored: result.restored,
-            restoredMomentId: result.restoredMomentId,
-            path: secretPath,
+            agentRunId,
+            agentName: null,
+            planToken: computeAgentRunPlanToken("", agentRunId, []),
+            truncated: false,
+            scannedChanges: 0,
+            restorable: [],
+            skipped: [],
+            policyUnreadable: policy.unreadable,
           };
         }
-        if (!historyMomentPathsAdmitted(historyPathAdmission(policy), moment)) {
-          throw new RestorePolicyRefusalError({ reason: "path-not-admitted" });
+        const engine = await engineStore();
+        const activeVersionId = await activeVersionIdOf(engine);
+        const plan = await inspectAgentRunInQueue(
+          engine,
+          activeVersionId,
+          policy,
+          agentRunId,
+          planOptions,
+        );
+        return {
+          agentRunId,
+          agentName: plan.agentName,
+          planToken: plan.planToken,
+          truncated: plan.truncated,
+          scannedChanges: plan.scannedChanges,
+          restorable: plan.restorable.map(
+            ({
+              headMomentId: _head,
+              preRestoreHeadMomentId: _preRestoreHead,
+              earliestMomentOrder: _earliestOrder,
+              paths: _paths,
+              scanTopMomentOrder: _scanTop,
+              pendingRestore: _pending,
+              ...item
+            }) => item,
+          ),
+          skipped: plan.skipped,
+        };
+      });
+    },
+
+    undoAgentRun(agentRunId, person, undoOptions) {
+      const author = structuredClone(person);
+      return enqueueResult("undo agent run", async () => {
+        if (
+          undoOptions.expectedTargets === undefined &&
+          undoOptions.expectedPlanToken === undefined
+        ) {
+          throw new Error("Agent run undo requires a reviewed plan.");
         }
-        if (moment.versionId !== activeVersionId) {
-          throw new Error(
-            "This moment belongs to a different version. Switch to that version to restore it.",
-          );
+        const policy = await readPolicyForTask();
+        if (policy.errors.length) {
+          return {
+            agentRunId,
+            correlationId: null,
+            truncated: false,
+            restored: [],
+            skipped: [],
+            failed: [],
+            policyUnreadable: policy.unreadable,
+          };
         }
-        if (moment.operation === "rename") {
-          throw new Error("A rename can't be restored directly.");
-        }
-        if (restoreOptions.requestId) {
-          const receipt = await findRestoreReceipt(engine, moment, restoreOptions.requestId);
-          if (receipt) return receipt;
-        }
-        const path = moment.path;
-        try {
-          let expectedSha256: string | undefined;
-          let expectedAbsent = false;
-          if (restoreOptions.expectedHeadMomentId !== undefined) {
-            const expected = await engine.getMoment({
-              workspaceId,
-              momentId: restoreOptions.expectedHeadMomentId,
-            });
-            if (!expected || expected.objectId !== moment.objectId) {
-              throw new RestoreHeadChangedError(path);
-            }
-            const head = await engine.listMoments({
-              workspaceId,
-              versionId: activeVersionId,
-              objectId: moment.objectId,
-              limit: 1,
-            });
-            if (head.moments[0]?.id !== restoreOptions.expectedHeadMomentId)
-              throw new RestoreHeadChangedError(path);
-            // A record-only settlement changes no file and can arrive after later
-            // edits, so the file holds the newest moment that changed it. Only
-            // moments from the restored one on were checked by the caller.
-            let changed = expected;
-            search: for (
-              let beforeMomentOrder: number | null | undefined;
-              expected.syncRecordOnly && beforeMomentOrder !== null;
+        const engine = await engineStore();
+        const activeVersionId = await activeVersionIdOf(engine);
+        const plan = await inspectAgentRunInQueue(
+          engine,
+          activeVersionId,
+          policy,
+          agentRunId,
+          undoOptions,
+        );
+        const skipped: AgentRunUndoSkippedItem[] = [...plan.skipped];
+        const targetsToRestore: InternalAgentRunPlanItem[] = [];
+        if (undoOptions.expectedTargets !== undefined) {
+          const expectedByObjectId = new Map<string, UndoAgentRunTarget>();
+          for (const target of undoOptions.expectedTargets) {
+            expectedByObjectId.set(target.objectId, target);
+          }
+          for (const item of plan.restorable) {
+            const expected = expectedByObjectId.get(item.objectId);
+            if (
+              !expected ||
+              expected.path !== item.path ||
+              expected.earliestMomentId !== item.earliestMomentId ||
+              expected.latestMomentId !== item.latestMomentId ||
+              expected.action !== item.action
             ) {
-              const page = await engine.listMoments({
-                workspaceId,
-                versionId: activeVersionId,
-                objectId: moment.objectId,
-                limit: 100,
-                ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+              skipped.push({
+                path: item.path,
+                reason: "not-in-plan",
+                detail: "Changed since the undo preview was loaded. Try again.",
               });
-              for (const row of page.moments) {
-                const changes =
-                  !row.syncRecordOnly && !isCaptureRecoveryOrigin(row.metadata.origin);
-                if (row.id === moment.id) {
-                  if (changes) changed = moment;
-                  break search;
-                }
-                if (changes) {
-                  changed = (await engine.getMoment({ workspaceId, momentId: row.id })) ?? expected;
-                  break search;
-                }
-              }
-              beforeMomentOrder = page.nextBeforeMomentOrder;
+              continue;
             }
-            expectedAbsent = changed.operation === "delete";
-            if (!expectedAbsent)
-              expectedSha256 =
-                changed.payload.after.sha256 ??
-                createHash("sha256").update(changed.payload.after.text).digest("hex");
-            const live = liveYDocSessions.get(path);
-            if (live) {
-              // Keep the canonical session and its queued edits intact. Closing it
-              // explicitly lets a later attempt prove that it has settled.
-              throw new RestoreLocalChangesError(
-                path,
-                "Open for live editing. Close this file and try again.",
-              );
-            }
-            let retainedDraft: boolean | undefined;
-            try {
-              retainedDraft = await options.hasRetainedLiveDraft?.(path, moment.objectId);
-            } catch {
-              throw new RestoreLocalChangesError(
-                path,
-                "Could not check saved drafts on this device. Try again.",
-              );
-            }
-            if (detachedLockedDebts.has(path) || retainedDraft) {
-              throw new RestoreLocalChangesError(path);
-            }
-            const disk = await readDiskTextState(rootPath, path);
-            if (
-              expectedAbsent
-                ? disk.kind !== "absent"
-                : (disk.kind !== "text" && disk.kind !== "binary") || disk.sha256 !== expectedSha256
-            ) {
-              throw new RestoreLocalChangesError(path);
+            targetsToRestore.push(item);
+          }
+          const seenPaths = new Set([
+            ...targetsToRestore.map((item) => item.path),
+            ...skipped.map((item) => item.path),
+          ]);
+          for (const expected of undoOptions.expectedTargets) {
+            if (!seenPaths.has(expected.path)) {
+              skipped.push({
+                path: expected.path,
+                reason: "not-in-plan",
+                detail: "No longer matches the undo preview. Try again.",
+              });
             }
           }
-          const correlationId = restoreOptions.requestId ?? `restore-${createId()}`;
-          // Capture the file's latest disk state first so a restore can never
-          // destroy an edit the engine has not recorded yet — the pre-restore
-          // content stays one moment back in history.
-          const disk = await readDiskTextState(rootPath, path);
-          if (disk.kind === "unreadable") {
-            throw new Error(`Could not read the current ${path} on disk.`);
-          }
-          if (disk.kind === "untracked-content") {
-            throw new Error(
-              `Only tracked files can be restored. ${path} is no longer tracked by dohc.`,
-            );
-          }
-          const saveMetadata: ActorNeutralWriteMetadata = {
-            origin: "local-file",
-            summary: "Saved latest edits",
-            correlationId,
-          };
-          if (disk.kind === "text" || disk.kind === "binary") {
-            await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
-          } else {
-            // Seen absent: reconcile the deletion so engine and disk agree
-            // before the restore moment is recorded. A replace the engine is
-            // finishing can empty the name for a moment, so the engine
-            // confirms the absence itself. When it refuses, the disk decides.
-            try {
-              await deleteIfTracked(engine, activeVersionId, path, saveMetadata, undefined, true);
-            } catch (error) {
-              const again = await readDiskTextState(rootPath, path);
-              if (again.kind !== "text" && again.kind !== "binary") throw error;
-              await writeIfChanged(engine, activeVersionId, path, again, saveMetadata);
-            }
-          }
-          const target = moment.payload.before;
-          const metadata: ActorNeutralWriteMetadata = {
-            origin: "restore",
-            summary: `Restored ${path}`,
-            correlationId,
-          };
-          const current = await engine.readTextFile({
-            workspaceId,
-            versionId: activeVersionId,
-            path,
-          });
-          if (restoreOptions.expectedHeadMomentId !== undefined) {
-            const history = await engine.listMoments({
-              workspaceId,
-              versionId: activeVersionId,
-              objectId: moment.objectId,
-              limit: 1,
+          skipped.sort((a, b) => compareEnginePaths(a.path, b.path));
+        } else if (undoOptions.expectedPlanToken !== plan.planToken) {
+          for (const item of plan.restorable) {
+            skipped.push({
+              path: item.path,
+              reason: "not-in-plan",
+              detail: "Changed since the undo plan was created. Run agent-run-plan again.",
             });
-            if (
-              (expectedAbsent ? current !== null : current?.objectId !== moment.objectId) ||
-              history.moments[0]?.id !== restoreOptions.expectedHeadMomentId
-            ) {
-              throw new RestoreHeadChangedError(path);
-            }
           }
-          if (target) {
-            // Equal bytes are the pre-moment state, whatever their kinds.
-            if (
-              current &&
-              (target.contentKind === "binary" || current.contentKind === "binary"
-                ? current.sha256 !== undefined && current.sha256 === target.sha256
-                : current.text === target.text)
-            ) {
-              // Already in the pre-moment state. Returning the same moment id
-              // keeps undo a no-op (undoing an idempotent restore restores the
-              // identical state again).
-              return { restored: "text" as const, restoredMomentId: momentId, path };
-            }
-            const result =
-              target.contentKind === "binary"
-                ? await (async () => {
-                    const bytes = await engine.readBinaryBlob({
-                      workspaceId,
-                      sha256: target.sha256 ?? "",
-                    });
-                    if (!bytes) {
-                      throw new Error(`Binary content for ${path} is no longer available.`);
-                    }
-                    return engine.writeBinaryFile({
-                      ...(restoreOptions.requestId ? { requestId: restoreOptions.requestId } : {}),
-                      workspaceId,
-                      versionId: activeVersionId,
-                      path,
-                      bytes,
-                      ...(expectedSha256 ? { expectedSha256 } : {}),
-                      ...(expectedAbsent ? { createOnly: true } : {}),
-                      metadata,
-                      author,
-                    });
-                  })()
-                : await engine.writeTextFile({
-                    ...(restoreOptions.requestId ? { requestId: restoreOptions.requestId } : {}),
-                    workspaceId,
-                    versionId: activeVersionId,
-                    path,
-                    text: target.text,
-                    publish: true,
-                    restoreBeforeMomentId: momentId,
-                    ...(expectedSha256 ? { expectedSha256 } : {}),
-                    ...(expectedAbsent ? { createOnly: true } : {}),
-                    metadata,
-                    author,
-                  });
-            requirePublishedWrite(path, result);
-            return {
-              restored: "text" as const,
-              restoredMomentId: result.moment.id,
-              path,
-            };
-          }
-          // The moment created the file: restoring to before it removes it.
-          if (!current) {
-            return { restored: "deleted" as const, restoredMomentId: momentId, path };
-          }
-          if (restoreOptions.aloneInFolder) {
-            // Checked here, in the queue, so nothing queued before it can add
-            // a file between the check and the delete.
-            const siblings = await folderEntriesOrNone(join(rootPath, dirname(path)));
-            if (siblings.some((name) => name !== basename(path)))
-              throw new RestoreFolderInUseError(path);
-          }
-          const result = await engine.deleteTextFile({
-            ...(restoreOptions.requestId ? { requestId: restoreOptions.requestId } : {}),
-            workspaceId,
-            versionId: activeVersionId,
-            path,
-            ...(expectedSha256 ? { expectedSha256, expectedObjectId: moment.objectId } : {}),
-            metadata,
-            author,
-          });
-          // Conditional deletes publish inside the engine through a checked preimage.
-          if (!expectedSha256) await materialize([{ kind: "delete", path }], policy);
-          return {
-            restored: "deleted" as const,
-            restoredMomentId: result.moment.id,
-            path,
-          };
-        } catch (error) {
-          if (restoreOptions.expectedHeadMomentId !== undefined) {
-            if (
-              error instanceof AuthoredTextChangedError ||
-              (error instanceof VersionedTextStoreError &&
-                ["write-precondition-failed", "target-path-exists"].includes(error.code))
-            )
-              throw new RestoreLocalChangesError(path);
-            const code =
-              error instanceof DaemonRefusalError
-                ? error.message
-                : error instanceof VersionedTextStoreError
-                  ? error.code
-                  : undefined;
-            if (code === "symlink-target")
-              throw new RestoreLocalChangesError(
-                path,
-                "dohc could not remove this file because its path contains a link. Check the file's path.",
-              );
-            if (code === "recovery-unavailable")
-              throw new RestoreLocalChangesError(
-                path,
-                "dohc could not remove this file. Check folder access, then try again.",
-              );
-            if (code === "file-locked")
-              throw new RestoreLocalChangesError(
-                path,
-                "dohc could not remove this file. It may be open in another app.",
-              );
-            if (code?.startsWith("materialize-"))
-              throw new RestoreLocalChangesError(path, "dohc could not remove this file.");
-          }
-          if (
-            error instanceof DaemonRefusalError &&
-            error.message === "synced-deletion-revival-refused"
-          ) {
-            throw new SyncedDeletionRevivalError(path, { cause: error }, true);
-          }
-          throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
+          skipped.sort((a, b) => compareEnginePaths(a.path, b.path));
+        } else {
+          targetsToRestore.push(...plan.restorable);
         }
+
+        if (targetsToRestore.length === 0) {
+          return {
+            agentRunId,
+            correlationId: null,
+            truncated: plan.truncated,
+            restored: [],
+            skipped,
+            failed: [],
+          };
+        }
+
+        const correlationId = agentRunUndoCorrelationId(activeVersionId, agentRunId);
+        const restored: UndoAgentRunRestoredItem[] = [];
+        const failed: UndoAgentRunFailedItem[] = [];
+        const ownRestoredMomentIds = new Set<string>();
+        let dynamicSkipAdded = false;
+        for (const item of targetsToRestore) {
+          if (undoOptions.hasOtherWindow?.()) {
+            skipped.push({
+              path: item.path,
+              reason: "other-window",
+              detail: "Open in another window. Close that window and try again.",
+            });
+            dynamicSkipAdded = true;
+            continue;
+          }
+          const pathCollisionGuard = {
+            afterMomentOrder: item.scanTopMomentOrder,
+            paths: item.paths,
+            ignoreMomentIds: ownRestoredMomentIds,
+          };
+          const pathClearSince = {
+            afterMomentOrder: item.earliestMomentOrder - 1,
+            allowedObjectId: item.objectId,
+            expectedHeadMomentId: item.preRestoreHeadMomentId,
+          };
+          try {
+            const outcome = item.pendingRestore
+              ? await replayPendingRestoreInQueue(
+                  engine,
+                  activeVersionId,
+                  policy,
+                  item.earliestMomentId,
+                  item.latestMomentId,
+                  author,
+                  {
+                    committedMomentId: item.pendingRestore.momentId,
+                    requestId: item.pendingRestore.requestId,
+                    correlationId,
+                    hasOtherWindow: undoOptions.hasOtherWindow,
+                    pathCollisionGuard,
+                    pathClearSince,
+                  },
+                )
+              : await restoreFileToBeforeMomentInQueue(
+                  engine,
+                  activeVersionId,
+                  policy,
+                  item.earliestMomentId,
+                  author,
+                  {
+                    expectedHeadMomentId: item.headMomentId,
+                    requestId: restoreRequestId(correlationId, item.earliestMomentId),
+                    correlationId,
+                    hasOtherWindow: undoOptions.hasOtherWindow,
+                    pathCollisionGuard,
+                    pathClearSince,
+                  },
+                );
+            ownRestoredMomentIds.add(outcome.restoredMomentId);
+            restored.push({
+              path: outcome.path,
+              restored: outcome.restored,
+              restoredMomentId: outcome.restoredMomentId,
+            });
+          } catch (error) {
+            if (error instanceof RestoreOtherWindowError) {
+              skipped.push({
+                path: item.path,
+                reason: "other-window",
+                detail: error.message,
+              });
+              dynamicSkipAdded = true;
+            } else if (error instanceof RestorePathCollisionError) {
+              skipped.push({
+                path: item.path,
+                reason: "path-collision",
+                detail: error.message,
+              });
+              dynamicSkipAdded = true;
+            } else if (error instanceof RestoreHeadChangedError) {
+              skipped.push({
+                path: item.path,
+                reason: "later-edits",
+                detail: "Changed again after this agent run.",
+              });
+              dynamicSkipAdded = true;
+            } else {
+              failed.push({
+                path: item.path,
+                detail: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+        }
+        if (dynamicSkipAdded) {
+          skipped.sort((a, b) => compareEnginePaths(a.path, b.path));
+        }
+        return {
+          agentRunId,
+          correlationId: restored.length > 0 ? correlationId : null,
+          truncated: plan.truncated,
+          restored,
+          skipped,
+          failed,
+        };
       });
     },
 

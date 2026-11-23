@@ -242,5 +242,7 @@
   "desktop:links-edges": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-held-change": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:outside-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:retrieve-workspace": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:retrieve-workspace": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:plan-undo-agent-run": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:undo-agent-run": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }

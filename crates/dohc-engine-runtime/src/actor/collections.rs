@@ -3045,6 +3045,7 @@ mod collection_relation_cleanup_tests {
                 Some(&WriteConditions {
                     create_only: false,
                     expected_sha256: Some(expected_sha),
+                    path_clear_since: None,
                 }),
                 None,
                 &NoFaults,

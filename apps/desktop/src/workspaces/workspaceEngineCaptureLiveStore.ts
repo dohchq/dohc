@@ -1032,6 +1032,9 @@ export function createCaptureLiveStores(
       path: string;
       requestId?: string;
       expectedSha256?: string;
+      expectedPathClearSinceOrder?: number;
+      expectedPathClearObjectId?: string;
+      expectedPathClearHeadMomentId?: string;
       text: string;
       publish?: boolean;
       createOnly?: boolean;
@@ -1067,6 +1070,9 @@ export function createCaptureLiveStores(
       path: string;
       requestId?: string;
       expectedSha256?: string;
+      expectedPathClearSinceOrder?: number;
+      expectedPathClearObjectId?: string;
+      expectedPathClearHeadMomentId?: string;
       bytes: Uint8Array;
       createOnly?: boolean;
       metadata: ActorNeutralWriteMetadata;
@@ -1119,6 +1125,9 @@ export function createCaptureLiveStores(
       path: string;
       expectedObjectId?: string;
       expectedSha256?: string;
+      expectedPathClearSinceOrder?: number;
+      expectedPathClearObjectId?: string;
+      expectedPathClearHeadMomentId?: string;
       onlyIfAbsentOnDisk?: boolean;
       requestId?: string;
       metadata: ActorNeutralWriteMetadata;
@@ -1233,7 +1242,9 @@ export function createCaptureLiveStores(
       limit?: number;
       beforeMomentOrder?: number;
     }) {
-      const page = await runRead(async (adapter) => await adapter.listMoments(input));
+      const page = await runRead(
+        async (adapter) => await adapter.listMoments({ ...input, metadataOnly: true }),
+      );
       return {
         ...page,
         moments: page.moments.map((moment) =>

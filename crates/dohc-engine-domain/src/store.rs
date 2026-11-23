@@ -696,6 +696,23 @@ impl<'a> VersionedTextStore<'a> {
     /// (`versions-list-moments`). Filters on version and/or object; a version
     /// filter that names an unknown version fails closed (`VersionNotFound`).
     pub fn list_moments(&self, query: &ListMomentsQuery) -> Result<MomentPage, DomainError> {
+        self.list_moments_with_bodies(query, true)
+    }
+
+    /// Keyset page of moment metadata ordered by `moment_order DESC` without
+    /// loading text bodies from SQLite.
+    pub fn list_moments_metadata(
+        &self,
+        query: &ListMomentsQuery,
+    ) -> Result<MomentPage, DomainError> {
+        self.list_moments_with_bodies(query, false)
+    }
+
+    fn list_moments_with_bodies(
+        &self,
+        query: &ListMomentsQuery,
+        hydrate_bodies: bool,
+    ) -> Result<MomentPage, DomainError> {
         if query.limit <= 0 {
             return Err(DomainError::InvalidInput {
                 reason: "limit must be positive",
@@ -760,7 +777,11 @@ impl<'a> VersionedTextStore<'a> {
                 moments.push(row.map_err(DomainError::sql_corrupt)??);
             }
 
-            let mut moments = hydrate_moments(conn, moments)?;
+            let mut moments = if hydrate_bodies {
+                hydrate_moments(conn, moments)?
+            } else {
+                moments.into_iter().map(|(moment, _, _)| moment).collect()
+            };
             let next_before_moment_order = if moments.len() as i64 > query.limit {
                 moments.truncate(query.limit as usize);
                 moments.last().map(|m| m.moment_order)

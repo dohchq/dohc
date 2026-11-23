@@ -115,6 +115,23 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn list_moments_with_bodies(
+        &self,
+        query: ListMomentsQuery,
+        hydrate_bodies: bool,
+    ) -> Result<MomentPage, RuntimeError> {
+        self.run(move |store, _| {
+            let store = VersionedTextStore::new(store);
+            if hydrate_bodies {
+                store.list_moments(&query)
+            } else {
+                store.list_moments_metadata(&query)
+            }
+            .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn history_page(
         &self,
         workspace_id: String,

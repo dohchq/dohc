@@ -1,5 +1,6 @@
 import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLimits";
 import { ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
+import type { agentRunHistoryOperations } from "./agentRunHistoryOperations";
 import type { captureOperations } from "./captureOperations";
 import type { linksOperations } from "./linksOperations";
 import type { retrievalOperations } from "./retrievalOperations";
@@ -171,7 +172,11 @@ import type {
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { explorerMenuOperations } from "./explorerMenuOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
-import type { protectedCopyOperations, stoppedRunOperations } from "./writeOperations";
+import type {
+  agentRunUndoOperations,
+  protectedCopyOperations,
+  stoppedRunOperations,
+} from "./writeOperations";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   AgentId,
@@ -9371,6 +9376,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof linksOperations>,
     OperationBridge<typeof retrievalOperations>,
     OperationBridge<typeof captureOperations>,
+    OperationBridge<typeof agentRunHistoryOperations>,
     OperationBridge<typeof heldChangeOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,
@@ -9397,6 +9403,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof protectedCopyOperations>,
+    OperationBridge<typeof agentRunUndoOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof agentThreadOperations>,
     OperationBridge<typeof agentsListeningOperations>,

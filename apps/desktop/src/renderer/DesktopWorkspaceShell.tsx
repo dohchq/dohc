@@ -344,6 +344,9 @@ import {
   type HistoryCollections,
 } from "./workbench/EngineHistory";
 import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
+import { AgentRunUndoDialog } from "./workbench/AgentRunUndoDialog";
+import { retainedCollectionFieldWritePaths } from "./collections/recordFieldWrites";
+import { retainedOrphanedDraftPaths } from "./orphanedDrafts";
 import {
   ConflictReviewDialog,
   VersionComparePage,
@@ -7264,6 +7267,29 @@ function WorkspaceShell(props: {
   const historyPaused = isHistoryPaused(syncStatus);
   const historyPausedRef = useRef(historyPaused);
   historyPausedRef.current = historyPaused;
+  const [agentRunUndoTarget, setAgentRunUndoTarget] = useState<{
+    workspaceId: string;
+    agentRunId: string;
+    agentName: string | null;
+  } | null>(null);
+  useEffect(() => {
+    setAgentRunUndoTarget(null);
+  }, [workspaceId]);
+  const canUndoAgentRun =
+    !shareView && !historyPaused && !props.oldWindow && !syncStatus?.engineStoreRefused;
+  const agentRunUndoReviewPaths = useMemo(() => {
+    if (!agentRunUndoTarget || agentRunUndoTarget.workspaceId !== workspaceId) return [];
+    const dirtyFilePaths = [...dirtyPaths].filter(
+      (path) => !TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual,
+    );
+    return [
+      ...new Set([
+        ...dirtyFilePaths,
+        ...retainedCollectionFieldWritePaths(workspaceId),
+        ...retainedOrphanedDraftPaths(workspaceId),
+      ]),
+    ];
+  }, [agentRunUndoTarget, dirtyPaths, workspaceId]);
   // The rail needs no capture-decision clause of its own, unlike the surfaces
   // that call on mount. Only `refreshHistory` and the open effect
   // commit a status, and both now answer after the decision, so a null status
@@ -7293,6 +7319,12 @@ function WorkspaceShell(props: {
           void refreshHistory().catch((error) =>
             reportShellError("dohc could not refresh History.", error),
           )
+        }
+        onUndoAgentRun={
+          canUndoAgentRun
+            ? (agentRunId, agentName) =>
+                setAgentRunUndoTarget({ workspaceId, agentRunId, agentName })
+            : undefined
         }
         paused={historyPaused}
       />
@@ -9922,6 +9954,24 @@ function WorkspaceShell(props: {
                           />
                         ) : null}
                         {sharedRestore.dialog}
+                        {agentRunUndoTarget &&
+                        agentRunUndoTarget.workspaceId === workspaceId &&
+                        canUndoAgentRun ? (
+                          <AgentRunUndoDialog
+                            key={`${agentRunUndoTarget.workspaceId}:${agentRunUndoTarget.agentRunId}`}
+                            workspaceId={workspaceId}
+                            agentRunId={agentRunUndoTarget.agentRunId}
+                            agentName={agentRunUndoTarget.agentName}
+                            reviewPaths={agentRunUndoReviewPaths}
+                            onBeforeRestore={beginLineageOperation}
+                            onRestored={refreshAfterHistoryRestore}
+                            onSuccessNotice={showSuccessNotice}
+                            onError={(fallback, error, retry, identity) =>
+                              reportShellError(fallback, error, retry, undefined, identity)
+                            }
+                            onClose={() => setAgentRunUndoTarget(null)}
+                          />
+                        ) : null}
                         {stopAndRestore.session ? (
                           <StopAndRestoreDialog
                             key={stopAndRestore.session.key}

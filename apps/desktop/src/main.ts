@@ -5,6 +5,7 @@ import { agentColorsForPresentation } from "./settings/userSettingsStore";
 import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
 import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
 import { createWorkspaceRetrievalReader } from "./workspaces/workspaceRetrieval";
+import { agentRunHistoryOperations } from "./ipc/agentRunHistoryOperations";
 import { captureOperations } from "./ipc/captureOperations";
 import { linksOperations } from "./ipc/linksOperations";
 import { retrievalOperations } from "./ipc/retrievalOperations";
@@ -51,6 +52,7 @@ import { stoppedWorkspaceCall } from "./ipc/stoppedWorkspaceCalls";
 import { createWorkLinkActivations, createWorkLinks } from "./workspaces/workLinks";
 import { workReferenceView } from "./workspaces/workReferenceViews";
 import { parseWorkLinkUrl } from "@dohc/workspace-contracts/work-links";
+import { shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
 import { recordHistoryPersonIsNamed } from "./ipc/recordHistoryIpc";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net, clipboard } from "electron";
@@ -236,7 +238,7 @@ import {
 import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
 import { protectedCopyHandlers, workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
-import { protectedCopyOperations } from "./ipc/writeOperations";
+import { agentRunUndoOperations, protectedCopyOperations } from "./ipc/writeOperations";
 import { createShareProposalsIpc } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
@@ -6995,6 +6997,16 @@ const liveDocumentsForCli = () => {
   if (!ownerLiveDocumentsForCli) throw new Error("Live editing is not ready. Try again.");
   return ownerLiveDocumentsForCli;
 };
+const hasAnyWorkspaceWindowFor = (workspaceId: string) =>
+  desktopWindows.workspaceWindows
+    .allLive()
+    .some((window) =>
+      windowShowsWorkspace(
+        rendererWorkspaceSessions.current(window.webContents),
+        workspaceId,
+        workspaceAuthorities,
+      ),
+    );
 const { startDesktopCliServer } = createDesktopCliServer({
   accountReadOwner: async (workspace, store, threadId) => {
     await warmCredentialCache();
@@ -7138,8 +7150,24 @@ const { startDesktopCliServer } = createDesktopCliServer({
     linksIn: (workspace, input) => workspaceLinks.incoming(workspace, input),
     linksResolve: (workspace, input) => workspaceLinks.resolve(workspace, input),
     outsideChanges: (workspace) => workspaceOutsideChanges(workspace),
+    planUndoAgentRun: async (workspace, input) => {
+      if (shareViewIsPresent(workspace.shareView))
+        throw new Error("Only the original workspace can plan an agent run undo.");
+      const { capture } = await requireEngineCapture(workspace.workspaceId, "History");
+      return capture.planUndoAgentRun(input.agentRunId, {
+        hasOtherWindow: () => hasAnyWorkspaceWindowFor(workspace.workspaceId),
+        resolveAgentName: (author) =>
+          shownAgentName(author.agentName) ??
+          (author.onBehalfOf === localUserId()
+            ? author.agentId === "dohc-mcp"
+              ? "Agent"
+              : (cachedAgents.find(({ id }) => id === author.agentId)?.name ?? author.agentId)
+            : "Agent"),
+      });
+    },
     workspaceSearch: (workspace, input) => workspaceRetrieval.search(workspace, input),
   },
+  hasOpenWorkspaceWindow: (workspaceId) => hasAnyWorkspaceWindowFor(workspaceId),
   heldChanges: workspaceHeldChanges,
   findWorkspace,
   agentYouRun: async (agentId) =>
@@ -8956,6 +8984,60 @@ function registerIpcHandlers(): void {
       if (shareViewIsPresent(operation.workspace.shareView))
         throw new Error("Only the original workspace holds outside changes.");
       return await workspaceOutsideChanges(operation.workspace);
+    },
+  });
+  const hasOtherWorkspaceWindowFor = (sender: WebContents, workspaceId: string) =>
+    desktopWindows.workspaceWindows
+      .allLive()
+      .some(
+        (window) =>
+          window.webContents !== sender &&
+          windowShowsWorkspace(
+            rendererWorkspaceSessions.current(window.webContents),
+            workspaceId,
+            workspaceAuthorities,
+          ),
+      );
+  registerOperations(operationBoundary, agentRunHistoryOperations, {
+    planUndoAgentRun: async (input, { event, operation }) => {
+      if (shareViewIsPresent(operation.workspace.shareView))
+        throw new Error("Only the original workspace can plan an agent run undo.");
+      const { capture } = await requireEngineCapture(operation.workspace.workspaceId, "History");
+      operation.assertCurrent();
+      return capture.planUndoAgentRun(input.agentRunId, {
+        hasOtherWindow: () =>
+          hasOtherWorkspaceWindowFor(event.sender, operation.workspace.workspaceId),
+        resolveAgentName: (author) =>
+          shownAgentName(author.agentName) ??
+          (author.onBehalfOf === localUserId()
+            ? author.agentId === "dohc-mcp"
+              ? "Agent"
+              : (cachedAgents.find(({ id }) => id === author.agentId)?.name ?? author.agentId)
+            : "Agent"),
+      });
+    },
+  });
+  registerOperations(operationBoundary, agentRunUndoOperations, {
+    undoAgentRun: async (input, { event, operation }) => {
+      if (shareViewIsPresent(operation.workspace.shareView))
+        throw new Error("Only the original workspace can undo an agent run.");
+      assertWritableWorkspace(operation.workspace);
+      const person = await localPerson();
+      operation.assertCurrent();
+      const { capture } = await requireEngineCapture(operation.workspace.workspaceId, "History");
+      operation.assertCurrent();
+      const result = await capture.undoAgentRun(input.agentRunId, person, {
+        hasOtherWindow: () =>
+          hasOtherWorkspaceWindowFor(event.sender, operation.workspace.workspaceId),
+        expectedTargets: input.expectedTargets,
+        ...(input.reviewPaths ? { reviewPaths: input.reviewPaths } : {}),
+      });
+      if (result.restored.length > 0) {
+        activity.queueCloudSync(operation.workspace.workspaceId);
+        notifyRenderer({ workspaceId: operation.workspace.workspaceId });
+        ownerPendingShare.refresh(operation.workspace.workspaceId);
+      }
+      return result;
     },
   });
   registerOperations(operationBoundary, heldChangeOperations, {

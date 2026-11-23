@@ -788,4 +788,125 @@ describe("History timeline sources", () => {
     expect(line.previousElementSibling!.getAttribute("aria-hidden")).toBe("true");
     expect(screen.queryByTestId("history-sources-notice")).toBeNull();
   });
+
+  it("groups consecutive multi-file edits from one agent run and offers Undo run when expanded", () => {
+    const onUndoAgentRun = vi.fn();
+    const runAuthor = (agentRunId: string) => ({
+      kind: "agent" as const,
+      agentId: "rover",
+      onBehalfOf: "user-1",
+      agentRunId,
+    });
+    view({
+      onUndoAgentRun,
+      entries: [
+        file("m-4", {
+          path: "notes/checklist.md",
+          recordedAtMs: DAY,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+        file("m-3", {
+          path: "notes/budget.md",
+          recordedAtMs: DAY - 60_000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+        file("m-2", {
+          path: "notes/plan.md",
+          recordedAtMs: DAY - 120_000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+        file("m-1", {
+          path: "notes/other.md",
+          recordedAtMs: DAY - 180_000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-0")],
+        }),
+      ],
+    });
+
+    const toggle = screen.getByTestId("engine-moment-group-toggle");
+    expect(toggle.textContent).toContain("Rover");
+    expect(toggle.textContent).toContain("Agent run");
+    expect(toggle.textContent).toContain("3 files");
+    expect(screen.queryByTestId("engine-moment-undo-run")).toBeNull();
+
+    fireEvent.click(toggle);
+    const undo = screen.getByTestId("engine-moment-undo-run");
+    expect(undo.textContent).toContain("Undo run…");
+    fireEvent.click(undo);
+    expect(onUndoAgentRun).toHaveBeenCalledWith("run-1", "Rover");
+  });
+
+  it("hides Undo run when onUndoAgentRun is omitted and labels correlated undo passes", () => {
+    view({
+      entries: [
+        file("r-2", {
+          path: "notes/plan.md",
+          origin: "restore",
+          correlationId: "restore-agent-run-batch-1",
+          summary: "Restored notes/plan.md",
+          recordedAtMs: DAY,
+        }),
+        file("r-1", {
+          path: "notes/checklist.md",
+          origin: "restore",
+          operation: "delete",
+          correlationId: "restore-agent-run-batch-1",
+          summary: "Restored notes/checklist.md",
+          recordedAtMs: DAY - 1000,
+        }),
+      ],
+    });
+    const toggle = screen.getByTestId("engine-moment-group-toggle");
+    expect(toggle.textContent).toContain("Undid agent run");
+    expect(toggle.textContent).toContain("2 files");
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId("engine-moment-undo-run")).toBeNull();
+  });
+
+  it("keeps distinct agent runs separate when a later run edits the same file", () => {
+    const onUndoAgentRun = vi.fn();
+    const runAuthor = (agentRunId: string) => ({
+      kind: "agent" as const,
+      agentId: "rover",
+      onBehalfOf: "user-1",
+      agentRunId,
+    });
+    view({
+      onUndoAgentRun,
+      entries: [
+        file("m-3", {
+          path: "notes/a.md",
+          recordedAtMs: DAY,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-2")],
+        }),
+        file("m-2", {
+          path: "notes/a.md",
+          recordedAtMs: DAY - 60_000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+        file("m-1", {
+          path: "notes/b.md",
+          recordedAtMs: DAY - 120_000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+      ],
+    });
+
+    expect(screen.queryByTestId("engine-moment-run")).toBeNull();
+    const toggle = screen.getByTestId("engine-moment-group-toggle");
+    expect(toggle.textContent).toContain("Rover");
+    expect(toggle.textContent).toContain("Agent run");
+    expect(toggle.textContent).toContain("2 files");
+
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByTestId("engine-moment-undo-run"));
+    expect(onUndoAgentRun).toHaveBeenCalledWith("run-1", "Rover");
+  });
 });

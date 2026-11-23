@@ -121,6 +121,8 @@ export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
   undo: "historyUndo",
   list: "moments",
   show: "moment",
+  "agent-run-plan": "planUndoAgentRun",
+  "undo-agent-run": "undoAgentRun",
 };
 
 export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
@@ -649,6 +651,8 @@ const NOT_SHARED_READS: Record<string, string> = {
     "The owning workspace holds outside changes. Shared profiles do not offer this read.",
   dohc_search_workspace:
     "Workspace search runs only on the owning workspace. Shared profiles do not offer this read.",
+  dohc_plan_agent_run_undo:
+    "Only the original workspace plans an agent run undo. Shared profiles do not offer this read.",
 };
 
 export const MCP_TOOL_GROUPS: readonly {
