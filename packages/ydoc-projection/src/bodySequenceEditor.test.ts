@@ -22,6 +22,17 @@ import {
   keepBodySequenceFormatting,
 } from "./bodySequenceEditor.js";
 import { boundaryAt, createBodyReader } from "./bodySequenceReading.js";
+import {
+  deleteRange,
+  insertInline,
+  joinLine,
+  setLineKind,
+  setMarks,
+  splitLine,
+  typeLetters,
+  writeBody,
+  type BodyChange,
+} from "./bodySequenceWriter.js";
 import { keepsContainers } from "./bodySequenceWriting.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import {
@@ -3486,6 +3497,312 @@ describe.each(["bare", "hosted"] as const)(
     });
   },
 );
+
+const IMAGE_FREE_ITEM_HEADING = [stored({ type: "heading", level: 2, ...IN_ITEM }, "cd")];
+const ITEM_CODE_WITH_TEXT_AFTER = [stored({ ...CODE, ...IN_ITEM }, "ab", HARD_BREAK, "cd")];
+
+describe.each(["bare", "hosted"] as const)(
+  "on a %s page, a list item's only stored line and the paragraph added above it",
+  (shape) => {
+    it.each([
+      [
+        "a heading",
+        IMAGE_FREE_ITEM_HEADING,
+        "doc(bulletList(listItem(paragraph)))",
+        'doc(bulletList(listItem(paragraph, heading("cdB"))))',
+      ],
+      [
+        "a code block with text after it",
+        ITEM_CODE_WITH_TEXT_AFTER,
+        'doc(bulletList(listItem(paragraph, paragraph(hardBreak, "cd"))))',
+        'doc(bulletList(listItem(paragraph, codeBlock("abB"), paragraph(hardBreak, "cd"))))',
+      ],
+    ])(
+      "deletes %s with its own boundary and gives the paragraph one of its own first; a peer's letter typed there stands after the deleted line and reads in it once undo brings it back (a known behaviour of Yjs)",
+      (_name, lines, deleted, undone) => {
+        const a = person(noteOfLines(lines), 10, shape);
+        const b = person(noteOfLines(lines), 20, shape);
+        const [stored] = a.boundaryIds();
+        const effects = a.effects(() => a.view.dispatch(a.view.state.tr.delete(4, 8)));
+        expect(a.view.state.doc.toString()).toBe(deleted);
+        expect(effects.goneBoundaries).toEqual([stored]);
+        expect(a.sent).toHaveLength(2);
+        const given = boundariesMadeIn(a.sent[0]!);
+        expect(boundariesMadeIn(a.sent[1]!)).toEqual([]);
+        expect(given.length).toBeGreaterThan(0);
+        for (const id of given) expect(a.boundaryIds()).toContain(id);
+        exchange(a, b);
+        b.typeAt(0, 0, "B");
+        exchange(b, a);
+        expect(a.undo()).toBe(true);
+        exchange(a, b);
+        for (const each of [a, b]) {
+          each.expectMirror();
+          expect(each.view.state.doc.toString()).toBe(undone);
+        }
+      },
+    );
+
+    it("does not bring the deleted heading back when someone else makes it a code block at the same moment; both gave the paragraph its boundary, so two paragraphs stay", () => {
+      const a = person(noteOfLines(IMAGE_FREE_ITEM_HEADING), 10, shape);
+      const b = person(noteOfLines(IMAGE_FREE_ITEM_HEADING), 20, shape);
+      a.view.dispatch(a.view.state.tr.delete(4, 8));
+      b.select([1, 1]);
+      b.retype("codeBlock");
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.view.state.doc.toString()).toBe(
+          "doc(bulletList(listItem(paragraph, paragraph)))",
+        );
+      }
+    });
+  },
+);
+
+const REFERENCE = Symbol("the reference writer");
+const idOfStruct = (id: Y.ID) => `${String(id.client)}:${String(id.clock)}`;
+
+/** Where in the note as it was each boundary an editor gave in its first, unrecorded change went. */
+function givenByEditor(a: Person, was: readonly { id: string }[]): number[] {
+  if (a.sent.length < 2) return [];
+  return Y.decodeUpdate(a.sent[0]!)
+    .structs.flatMap((struct) => {
+      if (!(struct instanceof Y.Item) || !(struct.content instanceof Y.ContentType)) return [];
+      const next = struct.rightOrigin;
+      return [next ? was.findIndex((token) => token.id === idOfStruct(next)) : was.length];
+    })
+    .toSorted((one, other) => one - other);
+}
+
+describe.each([
+  [
+    "heading to code block in a list item, under the paragraph added above it",
+    IMAGE_FREE_ITEM_HEADING,
+    1,
+  ],
+  [
+    "code block to heading in a list item, between that paragraph and the text after it",
+    ITEM_CODE_WITH_TEXT_AFTER,
+    2,
+  ],
+] as const)("a kind change: %s", (_name, lines, given) => {
+  it(`gives ${String(given)} of them a boundary first, as the reference writer does`, () => {
+    const a = person(noteOfLines(lines), 10);
+    const was = tokensOf(a.sequence);
+    const reference = declared(93);
+    Y.applyUpdate(reference.doc, noteOfLines(lines));
+    const kind =
+      lines === IMAGE_FREE_ITEM_HEADING ? { type: "codeBlock" } : { type: "heading", level: 2 };
+    const change = setLineKind(schema, reference.doc, 1, kind)!;
+    a.select([1, 1]);
+    a.retype(String(kind.type), "level" in kind ? { level: kind.level } : undefined);
+    expect(change.given).toHaveLength(given);
+    expect(givenByEditor(a, was)).toEqual(change.given.map((each) => each.index));
+    a.expectMirror();
+    reference.doc.destroy();
+  });
+});
+
+describe("a change next to the paragraph after a block that cannot hold its content", () => {
+  it("gives that paragraph its boundary first when a rule becomes a math block, as the reference writer does", () => {
+    const lines = [stored(RULE, "abc")];
+    const a = person(noteOfLines(lines), 10);
+    const was = tokensOf(a.sequence);
+    const reference = declared(93);
+    Y.applyUpdate(reference.doc, noteOfLines(lines));
+    const change = setLineKind(schema, reference.doc, 0, { type: "mathBlock", tex: "x" })!;
+    a.view.dispatch(a.view.state.tr.setSelection(NodeSelection.create(a.view.state.doc, 0)));
+    a.put("mathBlock", { tex: "x" });
+    expect(change.given).toHaveLength(1);
+    expect(givenByEditor(a, was)).toEqual(change.given.map((each) => each.index));
+    a.expectMirror();
+    reference.doc.destroy();
+  });
+
+  it("gives that paragraph its boundary first when the code block before it is split, as the reference writer does", () => {
+    const lines = [stored(CODE, "ab", HARD_BREAK, "cd")];
+    const a = person(noteOfLines(lines), 10);
+    const was = tokensOf(a.sequence);
+    const reference = declared(93);
+    Y.applyUpdate(reference.doc, noteOfLines(lines));
+    const change = splitLine(schema, reference.doc, 0, 1, () => "fresh")!;
+    a.view.dispatch(a.view.state.tr.split(2));
+    expect(change.given).toHaveLength(1);
+    expect(givenByEditor(a, was)).toEqual(change.given.map((each) => each.index));
+    writeBody(reference.doc, change, REFERENCE);
+    expect(a.view.state.doc.toJSON()).toEqual(readBodySequence(schema, reference.doc).toJSON());
+    a.expectMirror();
+    reference.doc.destroy();
+  });
+});
+
+type Differential = {
+  compared: number;
+  onlyOne: number;
+  neither: number;
+  givenDifferently: Record<string, number>;
+  readDifferently: Record<string, number>;
+};
+const DIFFERENTIAL_COUNTS: Differential = {
+  compared: 1702,
+  onlyOne: 306,
+  neither: 205,
+  givenDifferently: {},
+  readDifferently: { "a change of kind to codeBlock": 19 },
+};
+const differential: Differential & { notes: number; examples: string[] } = {
+  notes: 0,
+  compared: 0,
+  onlyOne: 0,
+  neither: 0,
+  givenDifferently: {},
+  readDifferently: {},
+  examples: [],
+};
+
+describe("the editor and the reference writer, for the same edit of the same note", () => {
+  it.each(ORACLE_NOTES)("give boundaries to the same lines in %s", (_name, lines) => {
+    const baseline = noteOfLines(lines);
+    const start = declared(92);
+    Y.applyUpdate(start.doc, baseline);
+    const reading = createBodyReader(schema, start.sequence, start.containers).reading();
+    const was = tokensOf(start.sequence);
+    let fresh = 0;
+    const freshId = () => `fresh${String(fresh++)}`;
+
+    const compare = (
+      edit: string,
+      label: string,
+      byReference: (doc: Y.Doc) => BodyChange | null,
+      byEditor: (a: Person) => void,
+    ) => {
+      const reference = declared(93);
+      Y.applyUpdate(reference.doc, baseline);
+      let change: BodyChange | null = null;
+      try {
+        change = byReference(reference.doc);
+      } catch (error) {
+        if (!(error instanceof RangeError)) throw error;
+      }
+      const a = person(baseline, 10);
+      try {
+        byEditor(a);
+      } catch (error) {
+        if (!(error instanceof RangeError)) throw error;
+      }
+      const wrote = a.sent.length > 0;
+      if (!change || !wrote) {
+        if (!change && !wrote) differential.neither += 1;
+        else differential.onlyOne += 1;
+      } else {
+        differential.compared += 1;
+        const where = `${edit} ${label} in ${reading.doc.toString()}`;
+        const byTheEditor = givenByEditor(a, was);
+        const byTheReference = change.given.map((each) => each.index);
+        writeBody(reference.doc, change, REFERENCE);
+        const read = readBodySequence(schema, reference.doc);
+        a.expectMirror();
+        const count = (counts: Record<string, number>, why: string) => {
+          counts[edit] = (counts[edit] ?? 0) + 1;
+          if (counts[edit] <= 2) differential.examples.push(`${why}: ${where}`);
+        };
+        if (JSON.stringify(byTheEditor) !== JSON.stringify(byTheReference))
+          count(
+            differential.givenDifferently,
+            `the editor gave ${JSON.stringify(byTheEditor)}, the reference ${JSON.stringify(byTheReference)}`,
+          );
+        else if (!a.view.state.doc.eq(read))
+          count(
+            differential.readDifferently,
+            `the editor reads ${a.view.state.doc.toString()}, the reference ${read.toString()}`,
+          );
+      }
+      reference.doc.destroy();
+      stopEveryone();
+    };
+
+    reading.blocks.forEach((block, at) => {
+      const from = reading.starts[at]! + 1;
+      const size = block.node.isTextblock ? block.node.content.size : 0;
+      const kinds = [{ type: "heading", level: 2 }, { type: "codeBlock" }, { type: "paragraph" }];
+      for (const kind of kinds)
+        compare(
+          `a change of kind to ${kind.type}`,
+          `of block ${String(at)}`,
+          (doc) => setLineKind(schema, doc, at, kind),
+          (a) => {
+            a.select([at, 0]);
+            a.retype(kind.type, "level" in kind ? { level: kind.level } : undefined);
+          },
+        );
+      if (!block.node.isTextblock) return;
+      if (size > 0)
+        compare(
+          "a mark",
+          `over block ${String(at)}`,
+          (doc) => setMarks(schema, doc, at, 0, size, { bold: {} }),
+          (a) => {
+            a.select([at, 0], [at, size]);
+            a.toggle("bold");
+          },
+        );
+      for (const offset of new Set([0, Math.floor(size / 2), size])) {
+        const pos = from + offset;
+        compare(
+          "a letter",
+          `at ${String(offset)} of block ${String(at)}`,
+          (doc) => typeLetters(schema, doc, at, offset, "x", {}),
+          (a) => a.view.dispatch(a.view.state.tr.insertText("x", pos)),
+        );
+        compare(
+          "an inline item",
+          `at ${String(offset)} of block ${String(at)}`,
+          (doc) =>
+            insertInline(schema, doc, at, offset, "wikilink", { target: "Other", label: null }),
+          (a) =>
+            a.view.dispatch(
+              a.view.state.tr.insert(pos, schema.nodes.wikilink!.create({ target: "Other" })),
+            ),
+        );
+        compare(
+          "a split",
+          `at ${String(offset)} of block ${String(at)}`,
+          (doc) => splitLine(schema, doc, at, offset, freshId),
+          (a) => a.view.dispatch(a.view.state.tr.split(pos)),
+        );
+        if (offset < size)
+          compare(
+            "a delete",
+            `from ${String(offset)} to the end of block ${String(at)}`,
+            (doc) => deleteRange(schema, doc, at, offset, at, size, freshId),
+            (a) => a.view.dispatch(a.view.state.tr.delete(pos, from + size)),
+          );
+      }
+      if (at > 0)
+        compare(
+          "a join",
+          `of block ${String(at)} into the one above`,
+          (doc) => joinLine(schema, doc, at, freshId),
+          (a) => {
+            a.select([at, 0]);
+            a.press("Backspace");
+          },
+        );
+    });
+    start.doc.destroy();
+    differential.notes += 1;
+  });
+
+  it("compares as many edits as counted", () => {
+    const { notes, examples, ...counts } = differential;
+    console.log(
+      `the editor against the reference writer: ${String(notes)} notes; compared ${String(counts.compared)}; gave boundaries to other lines ${JSON.stringify(counts.givenDifferently)}; gave the same and read differently ${JSON.stringify(counts.readDifferently)}; only one of the two took the edit ${String(counts.onlyOne)}, neither ${String(counts.neither)}\n${examples.join("\n")}`,
+    );
+    if (notes !== ORACLE_NOTES.length) return;
+    expect(counts).toEqual(DIFFERENTIAL_COUNTS);
+  });
+});
 
 describe("two plain editors racing", () => {
   raceTests((baseline, at) => person(baseline, 10 * (at + 1)));

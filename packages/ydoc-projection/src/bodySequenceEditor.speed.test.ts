@@ -213,10 +213,9 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       (view) => view.dispatch(view.state.tr.insertText("x", 30)),
       (view) => view.dispatch(view.state.tr.insertText("x", 31)),
     );
-    const edits =
-      "10,000 paragraphs, the first with no boundary, each edit of which is first written to a copy of the note";
+    const edits = "10,000 paragraphs, the first with no boundary";
     report.push(
-      `${edits}: the first letter typed in its middle, once: ${typed[0]!}`,
+      `${edits}: the first letter typed in its middle, which gives it its boundary first, once: ${typed[0]!}`,
       `${edits}: the next letter typed there, once the line has its boundary: ${typed[1]!}`,
       `${edits}: one Enter in its middle, once: ${timed((view) => view.dispatch(view.state.tr.split(30)))[0]!}`,
       `${edits}: one Enter at its start, once: ${timed((view) => view.dispatch(view.state.tr.split(1)))[0]!}`,
