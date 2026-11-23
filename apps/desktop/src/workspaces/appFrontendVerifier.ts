@@ -107,7 +107,10 @@ export function createDiagnosticScrubber(workspaceRoot: string, origin?: string)
       .replace(/[\u0000-\u001f\u007f]+/g, " ")
       .replace(/https?:\/\/127\.0\.0\.1:\d+[^\s"'<>]*/gi, "<local-app>")
       .replace(/Bearer\s+\S+/gi, "Bearer <redacted>")
-      .replace(/(?:shareToken|token|handoff|x-dohc-app-proof)[=:]\s*\S+/gi, "<redacted>");
+      .replace(
+        /["']?(?:shareToken|token|handoff|x-dohc-app-proof)["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi,
+        "<redacted>",
+      );
     if (originRe) text = text.replace(originRe, "<local-app>");
     for (const { re, replacement } of roots) text = text.replace(re, replacement);
     text = text

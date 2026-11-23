@@ -213,11 +213,12 @@ describe("verifyLocalAppFrontend", () => {
       "http://127.0.0.1:54321",
     );
     const cleaned = scrub(
-      "Error at C:\\Users\\alice\\my-workspace\\apps\\a.js\nfrom http://127.0.0.1:54321/bootstrap#abc123 Bearer secret-tok token=xyz /Users/bob/private.txt",
+      'Error at C:\\Users\\alice\\my-workspace\\apps\\a.js\nfrom http://127.0.0.1:54321/bootstrap#abc123 Bearer secret-tok token=xyz {"token":"json-secret-val"} /Users/bob/private.txt',
     );
     expect(cleaned).not.toContain("alice");
     expect(cleaned).not.toContain("127.0.0.1");
     expect(cleaned).not.toContain("secret-tok");
+    expect(cleaned).not.toContain("json-secret-val");
     expect(cleaned).not.toContain("abc123");
     expect(cleaned).not.toContain("/Users/bob");
     expect(cleaned).toContain("<workspace>");

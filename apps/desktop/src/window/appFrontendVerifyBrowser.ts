@@ -217,12 +217,13 @@ async function executeVerification(
 ): Promise<AppFrontendBrowserVerifyOutput> {
   input.signal.throwIfAborted();
   const isolated = ensureVerifySession();
-  const clearSession = async () => {
-    await isolated.closeAllConnections().catch(() => {});
-    await isolated.clearStorageData().catch(() => {});
-    await isolated.clearCache().catch(() => {});
+  const clearSession = async (bestEffort: boolean) => {
+    const step = (work: Promise<unknown>) => (bestEffort ? work.catch(() => {}) : work);
+    await step(isolated.closeAllConnections());
+    await step(isolated.clearStorageData());
+    await step(isolated.clearCache());
   };
-  await clearSession();
+  await clearSession(false);
   input.signal.throwIfAborted();
 
   let launchedSession: AppFrontendBrowserSession | undefined;
@@ -267,6 +268,9 @@ async function executeVerification(
   const clean = (raw: string | undefined) => {
     const text = raw ? input.scrub(raw) : "";
     return text.length ? text : undefined;
+  };
+  const pushCall = (startSeq: number, call: AppFrontendBrokerCall) => {
+    if (recordedCalls.length < MAX_ITEMS) recordedCalls.push({ startSeq, call });
   };
   const pushDiag = (diag: AppFrontendDiagnostic) => {
     if (diagnostics.length < MAX_ITEMS) diagnostics.push(diag);
@@ -461,16 +465,13 @@ async function executeVerification(
     const opMeta = event.operation ? { operation: event.operation } : {};
     if (event.kind === "rejected") {
       handshake.messageCount++;
-      recordedCalls.push({
-        startSeq: ++callSeq,
-        call: {
-          op: event.op,
-          ...opMeta,
-          status: event.status,
-          ok: false,
-          rejectedBy: "broker",
-          reasonCode: event.reason,
-        },
+      pushCall(++callSeq, {
+        op: event.op,
+        ...opMeta,
+        status: event.status,
+        ok: false,
+        rejectedBy: "broker",
+        reasonCode: event.reason,
       });
       return pushDiag({
         code: `broker_${event.reason}`,
@@ -485,38 +486,29 @@ async function executeVerification(
     const startSeq = startedSeqById.get(event.id) ?? ++callSeq;
     startedSeqById.delete(event.id);
     if (event.ok) {
-      recordedCalls.push({
-        startSeq,
-        call: { op: event.op, ...opMeta, status: event.status, ok: true },
-      });
+      pushCall(startSeq, { op: event.op, ...opMeta, status: event.status, ok: true });
       return notify();
     }
     if (event.status === 409 && event.refusalCode) {
-      recordedCalls.push({
-        startSeq,
-        call: {
-          op: event.op,
-          ...opMeta,
-          status: 409,
-          ok: false,
-          rejectedBy: "backend",
-          reasonCode: "refused",
-          refusalCode: event.refusalCode,
-        },
+      pushCall(startSeq, {
+        op: event.op,
+        ...opMeta,
+        status: 409,
+        ok: false,
+        rejectedBy: "backend",
+        reasonCode: "refused",
+        refusalCode: event.refusalCode,
       });
       return notify();
     }
     const hint = input.consumeBackendHint(event.op, event.operation);
-    recordedCalls.push({
-      startSeq,
-      call: {
-        op: event.op,
-        ...opMeta,
-        status: event.status,
-        ok: false,
-        rejectedBy: "backend",
-        reasonCode: hint?.reasonCode ?? "runtime_error",
-      },
+    pushCall(startSeq, {
+      op: event.op,
+      ...opMeta,
+      status: event.status,
+      ok: false,
+      rejectedBy: "backend",
+      reasonCode: hint?.reasonCode ?? "runtime_error",
     });
     pushDiag({
       code: hint?.diagnosticCode ?? "broker_runtime_error",
@@ -993,6 +985,6 @@ async function executeVerification(
         proxyBypassRules: "<-loopback>",
       })
       .catch(() => {});
-    await clearSession();
+    await clearSession(true);
   }
 }
