@@ -153,6 +153,7 @@ import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetH
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as workspaceSecretStorage from "./storage/workspaceSecrets";
+import * as outboundWebhookStorage from "./storage/outboundWebhooks";
 import * as logStorage from "./storage/log";
 import * as linkChatStorage from "./storage/linkChat";
 import * as agentConnectionStorage from "./storage/agentConnections";
@@ -2587,6 +2588,59 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   deleteWorkspaceSecret(workspaceId: string, ownerUserId: string, name: string) {
     return workspaceSecretStorage.deleteWorkspaceSecret(this, workspaceId, ownerUserId, name);
+  }
+
+  listWorkspaceHttpStepApprovals(workspaceId: string) {
+    return outboundWebhookStorage.listWorkspaceHttpStepApprovals(this, workspaceId);
+  }
+
+  hasWorkspaceHttpStepApproval(workspaceId: string, approvalDigest: string) {
+    return outboundWebhookStorage.hasWorkspaceHttpStepApproval(this, workspaceId, approvalDigest);
+  }
+
+  approveWorkspaceHttpStep(
+    input: Parameters<typeof outboundWebhookStorage.approveWorkspaceHttpStep>[1],
+  ) {
+    return outboundWebhookStorage.approveWorkspaceHttpStep(this, input);
+  }
+
+  reserveWorkspaceHttpDispatch<Refusal = never>(input: {
+    readonly workspaceId: string;
+    readonly ownerUserId: string;
+    readonly deliveryId: string;
+    readonly nowMs: number;
+    readonly beforeReserve?: () => Refusal | null;
+  }): outboundWebhookStorage.ReserveWorkspaceHttpDispatchResult<Refusal> {
+    return outboundWebhookStorage.reserveWorkspaceHttpDispatch(this, input);
+  }
+
+  listActiveWorkspaceShareGrants(workspaceId: string) {
+    return outboundWebhookStorage.listActiveWorkspaceShareGrants(this, workspaceId);
+  }
+
+  finalizeWorkspaceHttpDispatch(
+    input: Parameters<typeof outboundWebhookStorage.finalizeWorkspaceHttpDispatch>[1],
+  ) {
+    return outboundWebhookStorage.finalizeWorkspaceHttpDispatch(this, input);
+  }
+
+  readCommittedWorkspaceTextFile(
+    workspaceId: string,
+    versionId: string,
+    path: string,
+    maxBytes: number,
+  ) {
+    return outboundWebhookStorage.readCommittedWorkspaceTextFile(
+      this,
+      workspaceId,
+      versionId,
+      path,
+      maxBytes,
+    );
+  }
+
+  committedWorkspaceFileExists(workspaceId: string, versionId: string, path: string) {
+    return outboundWebhookStorage.committedWorkspaceFileExists(this, workspaceId, versionId, path);
   }
 }
 import { hasRelayWriteObservers, notifyRelayWrite } from "./relayWriteChanges";

@@ -351,6 +351,8 @@ function changeText(change: AutomationRunChange): string {
       return `posted to ${lineSafe(change.name)} · ${change.messageId}`;
     case "notice":
       return `sent a notice to ${lineSafe(change.name)} · ${change.noticeId}`;
+    case "http-sent":
+      return `sent webhook to ${lineSafe(change.target)} (HTTP ${change.status}) · ${change.deliveryId}`;
   }
 }
 

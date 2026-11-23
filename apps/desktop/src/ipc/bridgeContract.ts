@@ -8208,7 +8208,11 @@ export const RetryAutomationNoticePayload = z.object({
 });
 export const RetryAutomationNoticeResult = z.union([
   z.object({ status: z.literal("queued"), press: z.boolean() }),
-  z.object({ status: z.literal("definition-changed"), repeatsMessages: z.boolean() }),
+  z.object({
+    status: z.literal("definition-changed"),
+    repeatsMessages: z.boolean(),
+    repeatsWebhooks: z.boolean().optional(),
+  }),
   z.object({ status: z.literal("switched-off"), target: AutomationControlsTargetShape }),
   z.object({ status: z.literal("refused"), reason: z.string().min(1).max(2_000) }),
 ]);

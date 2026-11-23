@@ -1599,6 +1599,7 @@ automations =
         datasetHost,
         replicas: copyReplicas,
         readOwnerShares: relayApplication.readOwnerShares,
+        executeOutboundWebhook: relayApplication.executeOutboundWebhook,
         lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
         noticeLimiter: noticePostRateLimiter,
         ...(deployment && namedLiveConfig

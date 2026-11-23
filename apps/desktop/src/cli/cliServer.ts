@@ -1077,11 +1077,15 @@ function automationRetryResult(result: AutomationRunRetry): CliResultByVerb["aut
         ok: false,
         status: result.status,
         repeatsMessages: result.repeatsMessages,
+        ...(result.repeatsWebhooks ? { repeatsWebhooks: true } : {}),
         reason: [
           "This automation changed since the run failed.",
           "Running it again starts from the first step and can repeat changes it already made.",
           ...(result.repeatsMessages
             ? ["Posts, direct messages, and notices it already sent may be sent again."]
+            : []),
+          ...(result.repeatsWebhooks
+            ? ["Webhook requests it already sent may be sent again."]
             : []),
           "To do that, try again with --start-over, or startOver: true.",
         ].join(" "),
