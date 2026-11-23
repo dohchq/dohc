@@ -561,6 +561,7 @@ fn pull_the_share() -> RelayOperation {
             scope: dohc_engine_sync::ShareScope::Paths(vec!["notes".to_owned()]),
             version_id: None,
             access: dohc_engine_sync::ShareAccess::View,
+            reach: None,
         },
     }
 }
