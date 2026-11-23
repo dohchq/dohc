@@ -280,7 +280,7 @@ createRoot(document.getElementById("root")!).render(<AppShell><StatCard label="S
         ),
         {
           message:
-            "index.html links missing.js, which is not in the app. Add the file or fix the link.",
+            "index.html links missing.js, which is not in the app. Add the file, list it in app.publish.json, or fix the link.",
         },
       );
       const uiBuiltinPath = join(destination, "builtins/dohc-ui.mjs");
