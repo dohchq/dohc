@@ -44,7 +44,11 @@ const CATEGORIES = ["Food", "Transport", "Housing", "Health", "Gear", "Other"];
 const EFFORTS = ["Easy", "Moderate", "Hard"];
 
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const year = String(now.getFullYear());
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 export function PersonalControlTower() {
@@ -207,14 +211,29 @@ export function PersonalControlTower() {
         ) : null}
 
         <Grid cols={4}>
-          <StatCard label="Total spend" value={formatCurrency(totalSpent)} />
-          <StatCard label="Expenses" value={String(expenseRows.length)} />
-          <StatCard label="Active minutes" value={`${totalMinutes} min`} />
-          <StatCard label="Workouts" value={String(workoutRows.length)} />
+          <StatCard
+            label={expenseRows.length >= 200 ? "Total spend (latest 200)" : "Total spend"}
+            value={formatCurrency(totalSpent)}
+          />
+          <StatCard
+            label={expenseRows.length >= 200 ? "Expenses (latest 200)" : "Expenses"}
+            value={String(expenseRows.length)}
+          />
+          <StatCard
+            label={workoutRows.length >= 200 ? "Active minutes (latest 200)" : "Active minutes"}
+            value={`${totalMinutes} min`}
+          />
+          <StatCard
+            label={workoutRows.length >= 200 ? "Workouts (latest 200)" : "Workouts"}
+            value={String(workoutRows.length)}
+          />
         </Grid>
 
         <Grid cols={2}>
-          <Card title="Spending by category" subtitle="From Expenses">
+          <Card
+            title="Spending by category"
+            subtitle={expenseRows.length >= 200 ? "From latest 200 expenses" : "From Expenses"}
+          >
             {spendByCategory.length > 0 ? (
               <BarChart
                 data={spendByCategory}
@@ -371,140 +390,172 @@ export function PersonalControlTower() {
         </Card>
       </Stack>
 
-      <Modal open={expenseModal} title="Add expense" onClose={() => setExpenseModal(false)}>
-        <form onSubmit={submitExpense} style={{ display: "grid", gap: 12 }}>
-          {addExpense.error ? (
-            <Callout tone="danger" title="Could not save expense">
-              {addExpense.error.message}
-            </Callout>
-          ) : null}
-          <Field label="Date" htmlFor="exp-date">
-            <Input
-              id="exp-date"
-              type="date"
-              value={expDate}
-              onChange={(event) => setExpDate(event.target.value)}
-              required
-            />
-          </Field>
-          <Field label="Merchant" htmlFor="exp-merchant">
-            <Input
-              id="exp-merchant"
-              value={merchant}
-              onChange={(event) => setMerchant(event.target.value)}
-              placeholder="Blue Bottle Coffee"
-              required
-            />
-          </Field>
-          <Field label="Category" htmlFor="exp-category">
-            <Select
-              id="exp-category"
-              value={category}
-              onChange={(event) => setCategory(event.target.value)}
-            >
-              {CATEGORIES.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Amount" htmlFor="exp-amount">
-            <Input
-              id="exp-amount"
-              type="number"
-              step="0.01"
-              min="0.01"
-              value={amount}
-              onChange={(event) => setAmount(event.target.value)}
-              placeholder="12.50"
-              required
-            />
-          </Field>
-          <Field label="Note" htmlFor="exp-note">
-            <Input
-              id="exp-note"
-              value={expNote}
-              onChange={(event) => setExpNote(event.target.value)}
-              placeholder="Optional note"
-            />
-          </Field>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-            <Button type="button" variant="secondary" onClick={() => setExpenseModal(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary" loading={addExpense.pending}>
-              Save expense
-            </Button>
-          </div>
+      <Modal
+        open={expenseModal}
+        title="Add expense"
+        onClose={() => {
+          if (!addExpense.pending) setExpenseModal(false);
+        }}
+      >
+        <form onSubmit={submitExpense}>
+          <fieldset
+            disabled={addExpense.pending}
+            style={{ border: 0, padding: 0, margin: 0, display: "grid", gap: 12 }}
+          >
+            {addExpense.error ? (
+              <Callout tone="danger" title="Could not save expense">
+                {addExpense.error.message}
+              </Callout>
+            ) : null}
+            <Field label="Date" htmlFor="exp-date">
+              <Input
+                id="exp-date"
+                type="date"
+                value={expDate}
+                onChange={(event) => setExpDate(event.target.value)}
+                required
+              />
+            </Field>
+            <Field label="Merchant" htmlFor="exp-merchant">
+              <Input
+                id="exp-merchant"
+                value={merchant}
+                onChange={(event) => setMerchant(event.target.value)}
+                placeholder="Blue Bottle Coffee"
+                required
+              />
+            </Field>
+            <Field label="Category" htmlFor="exp-category">
+              <Select
+                id="exp-category"
+                value={category}
+                onChange={(event) => setCategory(event.target.value)}
+              >
+                {CATEGORIES.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Amount" htmlFor="exp-amount">
+              <Input
+                id="exp-amount"
+                type="number"
+                step="0.01"
+                min="0.01"
+                value={amount}
+                onChange={(event) => setAmount(event.target.value)}
+                placeholder="12.50"
+                required
+              />
+            </Field>
+            <Field label="Note" htmlFor="exp-note">
+              <Input
+                id="exp-note"
+                value={expNote}
+                onChange={(event) => setExpNote(event.target.value)}
+                placeholder="Optional note"
+              />
+            </Field>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={addExpense.pending}
+                onClick={() => setExpenseModal(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary" loading={addExpense.pending}>
+                Save expense
+              </Button>
+            </div>
+          </fieldset>
         </form>
       </Modal>
 
-      <Modal open={workoutModal} title="Log workout" onClose={() => setWorkoutModal(false)}>
-        <form onSubmit={submitWorkout} style={{ display: "grid", gap: 12 }}>
-          {logWorkout.error ? (
-            <Callout tone="danger" title="Could not save workout">
-              {logWorkout.error.message}
-            </Callout>
-          ) : null}
-          <Field label="Date" htmlFor="wrk-date">
-            <Input
-              id="wrk-date"
-              type="date"
-              value={wrkDate}
-              onChange={(event) => setWrkDate(event.target.value)}
-              required
-            />
-          </Field>
-          <Field label="Activity" htmlFor="wrk-activity">
-            <Input
-              id="wrk-activity"
-              value={activity}
-              onChange={(event) => setActivity(event.target.value)}
-              placeholder="Morning 5K run"
-              required
-            />
-          </Field>
-          <Field label="Minutes" htmlFor="wrk-minutes">
-            <Input
-              id="wrk-minutes"
-              type="number"
-              min="1"
-              max="1440"
-              value={minutes}
-              onChange={(event) => setMinutes(event.target.value)}
-              required
-            />
-          </Field>
-          <Field label="Effort" htmlFor="wrk-effort">
-            <Select
-              id="wrk-effort"
-              value={effort}
-              onChange={(event) => setEffort(event.target.value)}
-            >
-              {EFFORTS.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Notes" htmlFor="wrk-notes">
-            <Input
-              id="wrk-notes"
-              value={wrkNotes}
-              onChange={(event) => setWrkNotes(event.target.value)}
-              placeholder="Optional notes"
-            />
-          </Field>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-            <Button type="button" variant="secondary" onClick={() => setWorkoutModal(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary" loading={logWorkout.pending}>
-              Save workout
-            </Button>
-          </div>
+      <Modal
+        open={workoutModal}
+        title="Log workout"
+        onClose={() => {
+          if (!logWorkout.pending) setWorkoutModal(false);
+        }}
+      >
+        <form onSubmit={submitWorkout}>
+          <fieldset
+            disabled={logWorkout.pending}
+            style={{ border: 0, padding: 0, margin: 0, display: "grid", gap: 12 }}
+          >
+            {logWorkout.error ? (
+              <Callout tone="danger" title="Could not save workout">
+                {logWorkout.error.message}
+              </Callout>
+            ) : null}
+            <Field label="Date" htmlFor="wrk-date">
+              <Input
+                id="wrk-date"
+                type="date"
+                value={wrkDate}
+                onChange={(event) => setWrkDate(event.target.value)}
+                required
+              />
+            </Field>
+            <Field label="Activity" htmlFor="wrk-activity">
+              <Input
+                id="wrk-activity"
+                value={activity}
+                onChange={(event) => setActivity(event.target.value)}
+                placeholder="Morning 5K run"
+                required
+              />
+            </Field>
+            <Field label="Minutes" htmlFor="wrk-minutes">
+              <Input
+                id="wrk-minutes"
+                type="number"
+                min="1"
+                max="1440"
+                value={minutes}
+                onChange={(event) => setMinutes(event.target.value)}
+                required
+              />
+            </Field>
+            <Field label="Effort" htmlFor="wrk-effort">
+              <Select
+                id="wrk-effort"
+                value={effort}
+                onChange={(event) => setEffort(event.target.value)}
+              >
+                {EFFORTS.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Notes" htmlFor="wrk-notes">
+              <Input
+                id="wrk-notes"
+                value={wrkNotes}
+                onChange={(event) => setWrkNotes(event.target.value)}
+                placeholder="Optional notes"
+              />
+            </Field>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={logWorkout.pending}
+                onClick={() => setWorkoutModal(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary" loading={logWorkout.pending}>
+                Save workout
+              </Button>
+            </div>
+          </fieldset>
         </form>
       </Modal>
     </AppShell>

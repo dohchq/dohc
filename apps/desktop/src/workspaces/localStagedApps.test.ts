@@ -46,15 +46,20 @@ async function loadControlTowerFiles(): Promise<Map<string, string>> {
 }
 
 async function openFixture(overrides?: {
+  workspaceRoot?: string;
   onBeforeApproveCreate?: (revisionSha256: string) => void | Promise<void>;
   onBeforePrepareMigration?: (datasetId: string) => void | Promise<void>;
   onBeforeApproveMigration?: (datasetId: string) => void | Promise<void>;
   onAfterApproveMigration?: (datasetId: string) => void | Promise<void>;
   onEnterExclusiveDatasets?: () => void;
+  onTryApprovedArtifacts?: (datasetId: string) => void;
 }) {
-  const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-staged-apps-"));
-  roots.push(workspaceRoot);
-  await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
+  const workspaceRoot =
+    overrides?.workspaceRoot ?? (await mkdtemp(join(tmpdir(), "dohc-staged-apps-")));
+  if (!overrides?.workspaceRoot) {
+    roots.push(workspaceRoot);
+    await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
+  }
   const host = await createLocalDatasetHost({
     localPersonId: () => "person-local",
     workspaceId: "w",
@@ -71,6 +76,7 @@ async function openFixture(overrides?: {
     compile: compileClosedApp,
     preflightCreate: (input) => host.preflightCreate(input),
     tryApprovedArtifacts: async (datasetId) => {
+      overrides?.onTryApprovedArtifacts?.(datasetId);
       try {
         return host.approvedArtifacts(datasetId);
       } catch (error) {
@@ -299,7 +305,7 @@ describe("localStagedApps", () => {
 
   it("records durable per-step receipts for crash-safe idempotent resume and supports discard", async () => {
     let calls = 0;
-    const { staged, host } = await openFixture({
+    const { workspaceRoot, staged, host } = await openFixture({
       onBeforeApproveCreate: () => {
         calls += 1;
         if (calls === 2) throw new Error("Simulated crash before second Collection.");
@@ -325,24 +331,29 @@ describe("localStagedApps", () => {
     expect(pending!.collections.filter((c) => !c.applied)).toHaveLength(1);
     expect(host.list().datasets).toHaveLength(1);
 
-    const resumed = await staged.approve({
+    await host.close();
+    const reopened = await openFixture({ workspaceRoot });
+    const [reopenedPending] = await reopened.staged.list("personal-control-tower");
+    expect(reopenedPending?.collections.filter((c) => c.applied)).toHaveLength(1);
+
+    const resumed = await reopened.staged.approve({
       stageId: summary.stageId,
       reviewDigest: summary.reviewDigest,
       signal,
     });
     expect(resumed.collectionsApplied).toHaveLength(2);
-    expect(host.list().datasets).toHaveLength(2);
-    expect(await staged.list()).toEqual([]);
+    expect(reopened.host.list().datasets).toHaveLength(2);
+    expect(await reopened.staged.list()).toEqual([]);
 
-    const third = await staged.stage({
+    const third = await reopened.staged.stage({
       appRoot: "personal-control-tower",
       deferredWrites: [],
       adapter: sourceCaptureAdapter(files),
       signal,
     });
-    expect(await staged.list()).toHaveLength(1);
-    await staged.discard(third.stageId);
-    expect(await staged.list()).toEqual([]);
+    expect(await reopened.staged.list()).toHaveLength(1);
+    await reopened.staged.discard(third.stageId);
+    expect(await reopened.staged.list()).toEqual([]);
   }, 60_000);
 
   it("refuses a stale second Collection before committing the first so the active app stays live", async () => {
@@ -441,30 +452,38 @@ describe("localStagedApps", () => {
       reviewDigest: summary.reviewDigest,
       signal,
     });
-    await firstEntered;
+    let result!: Awaited<typeof approving>;
+    try {
+      await firstEntered;
 
-    await expect(staged.discard(summary.stageId)).rejects.toThrow(/currently being approved/i);
-    await expect(staged.discard(summary.stageId.toUpperCase())).rejects.toThrow(
-      /currently being approved/i,
-    );
-    await expect(
-      staged.approve({
-        stageId: summary.stageId,
-        reviewDigest: summary.reviewDigest,
-        signal,
-      }),
-    ).rejects.toThrow(/already being approved/i);
-    await expect(
-      staged.stage({
-        appRoot: "personal-control-tower",
-        deferredWrites: [],
-        adapter: sourceCaptureAdapter(files),
-        signal,
-      }),
-    ).rejects.toThrow(/currently being approved/i);
-
-    releaseFirst();
-    const result = await approving;
+      await expect(staged.discard(summary.stageId)).rejects.toThrow(/currently being approved/i);
+      await expect(staged.discard(summary.stageId.toUpperCase())).rejects.toThrow(
+        /currently being approved/i,
+      );
+      await expect(
+        staged.approve({
+          stageId: summary.stageId,
+          reviewDigest: summary.reviewDigest,
+          signal,
+        }),
+      ).rejects.toThrow(/already being approved/i);
+      await expect(
+        staged.stage({
+          appRoot: "personal-control-tower",
+          deferredWrites: [],
+          adapter: sourceCaptureAdapter(files),
+          signal,
+        }),
+      ).rejects.toThrow(/currently being approved/i);
+    } finally {
+      releaseFirst();
+      result = await approving.catch(() => ({
+        stageId: "",
+        publicationId: "",
+        authorityRevision: 0,
+        collectionsApplied: [],
+      }));
+    }
     expect(result.collectionsApplied).toHaveLength(2);
     expect(host.list().datasets).toHaveLength(2);
     expect(host.apps.list("personal-control-tower").some((p) => p.active)).toBe(true);
@@ -717,9 +736,20 @@ describe("localStagedApps", () => {
       enteredExclusive = resolve;
     });
     let trackExclusive = false;
+    let transferSettled = false;
+    let importRecoveryFinished = false;
+    let transferInFlightAtPreCheck: boolean | null = null;
+    let importRecoveryFinishedAtPreCheck: boolean | null = null;
+    let workoutsDatasetId = "";
     const { host, staged } = await openFixture({
       onEnterExclusiveDatasets: () => {
         if (trackExclusive) enteredExclusive();
+      },
+      onTryApprovedArtifacts: () => {
+        if (trackExclusive && transferInFlightAtPreCheck === null) {
+          transferInFlightAtPreCheck = Boolean(host.transferInFlight(workoutsDatasetId));
+          importRecoveryFinishedAtPreCheck = importRecoveryFinished;
+        }
       },
     });
     const files = await loadControlTowerFiles();
@@ -755,7 +785,6 @@ describe("localStagedApps", () => {
       signal,
     });
 
-    let transferSettled = false;
     let enteredTransfer!: () => void;
     let releaseTransfer!: () => void;
     const transferStarted = new Promise<void>((resolve) => {
@@ -765,6 +794,7 @@ describe("localStagedApps", () => {
       releaseTransfer = resolve;
     });
 
+    workoutsDatasetId = workoutsCol.datasetId;
     const transferring = host
       .transferToShared({
         datasetId: workoutsCol.datasetId,
@@ -773,6 +803,7 @@ describe("localStagedApps", () => {
           importRecovery: async (input) => {
             enteredTransfer();
             await transferGate;
+            importRecoveryFinished = true;
             return {
               transferId: input.transferId,
               manifestSha256: input.manifestSha256,
@@ -790,26 +821,33 @@ describe("localStagedApps", () => {
       .finally(() => {
         transferSettled = true;
       });
-    await transferStarted;
-
-    trackExclusive = true;
+    let approving: Promise<unknown> | null = null;
     let approvalSettledBeforeTransfer = false;
-    const approving = staged
-      .approve({
-        stageId: updateStage.stageId,
-        reviewDigest: updateStage.reviewDigest,
-        signal,
-      })
-      .catch((error) => {
-        if (!transferSettled) approvalSettledBeforeTransfer = true;
-        throw error;
-      });
-    await exclusiveEntered;
-    expect(approvalSettledBeforeTransfer).toBe(false);
-    releaseTransfer();
-    await transferring;
+    try {
+      await transferStarted;
 
-    await expect(approving).rejects.toThrow(/unavailable/i);
+      trackExclusive = true;
+      approving = staged
+        .approve({
+          stageId: updateStage.stageId,
+          reviewDigest: updateStage.reviewDigest,
+          signal,
+        })
+        .catch((error) => {
+          if (!transferSettled) approvalSettledBeforeTransfer = true;
+          throw error;
+        });
+      await exclusiveEntered;
+      expect(transferInFlightAtPreCheck).toBeNull();
+      expect(approvalSettledBeforeTransfer).toBe(false);
+    } finally {
+      releaseTransfer();
+      await transferring.catch(() => undefined);
+    }
+
+    await expect(approving!).rejects.toThrow(/unavailable/i);
+    expect(transferInFlightAtPreCheck).toBe(false);
+    expect(importRecoveryFinishedAtPreCheck).toBe(true);
     expect(approvalSettledBeforeTransfer).toBe(false);
     expect(host.approvedArtifacts(expensesCol.datasetId).revision.revision).toBe(1);
     expect(host.approvedArtifacts(workoutsCol.datasetId).active).toBe(false);
@@ -843,15 +881,24 @@ describe("localStagedApps", () => {
     });
 
     let currentFiles = new Map(files);
+    let hostKind: "local" | "server" = "local";
+    let failMigrationAuthority = false;
+    const handlerHost = {
+      ...host,
+      appHostKind: () => hostKind,
+    };
     const handler = createLocalOwnerAppPublicationHandler({
-      datasetForWorkspace: async () => host,
+      datasetForWorkspace: async () => handlerHost,
       approvedArtifacts: async (_ws, datasetId) => routed.approvedArtifacts(datasetId),
-      migrationAuthority: async () => ({
-        approvedArtifacts: (datasetId) => Promise.resolve(routed.approvedArtifacts(datasetId)),
-        prepareMigrationCandidate: (input) => routed.prepareMigrationCandidate!(input),
-        approveMigrationCandidate: (input) => routed.approveMigrationCandidate!(input),
-        discardMigrationCandidate: (input) => routed.discardMigrationCandidate!(input),
-      }),
+      migrationAuthority: async () => {
+        if (failMigrationAuthority) throw new Error("Sign in to your server first.");
+        return {
+          approvedArtifacts: (datasetId) => Promise.resolve(routed.approvedArtifacts(datasetId)),
+          prepareMigrationCandidate: (input) => routed.prepareMigrationCandidate!(input),
+          approveMigrationCandidate: (input) => routed.approveMigrationCandidate!(input),
+          discardMigrationCandidate: (input) => routed.discardMigrationCandidate!(input),
+        };
+      },
       flushCapture: async () => ({ deferredWrites: [] }),
       withAdapter: async (_ws, work) => work(sourceCaptureAdapter(currentFiles) as never),
       compile: compileClosedApp,
@@ -924,6 +971,17 @@ describe("localStagedApps", () => {
       signal,
     });
 
+    hostKind = "server";
+    currentFiles = new Map(files);
+    await expect(
+      handler(
+        { action: "stage", workspaceId: "w", appRoot: "personal-control-tower" },
+        "caller",
+        op,
+      ),
+    ).rejects.toThrow(/same host/i);
+
+    hostKind = "local";
     const newDatasetId = "00000000-0000-4000-8000-000000000099";
     const mixedFiles = new Map(files);
     mixedFiles.set(
@@ -943,6 +1001,23 @@ describe("localStagedApps", () => {
     expect(
       host.list({ includeArchived: true }).datasets.some((d) => d.datasetId === newDatasetId),
     ).toBe(false);
+
+    failMigrationAuthority = true;
+    const offlineList = await handler(
+      { action: "listStaged", workspaceId: "w", appRoot: "personal-control-tower" },
+      "caller",
+      op,
+    );
+    expect(offlineList).toEqual({ kind: "stagedListed", stages: [] });
+    const offlineDiscard = await handler(
+      { action: "discardStaged", workspaceId: "w", stageId: firstStage.stage.stageId },
+      "caller",
+      op,
+    );
+    expect(offlineDiscard).toEqual({
+      kind: "stagedDiscarded",
+      stageId: firstStage.stage.stageId,
+    });
   }, 60_000);
 
   it("refuses a staged SQL backfill migration when a standalone migration already reached the same rules hash", async () => {
@@ -1359,5 +1434,36 @@ describe("localStagedApps", () => {
       input: {},
     })) as { result: Array<{ notes: string }> };
     expect(resumedRows.result.map((r) => r.notes)).toEqual(["backfilled"]);
+  }, 60_000);
+
+  it("rejects staged proposals whose review display metadata was altered on disk", async () => {
+    const { workspaceRoot, staged } = await openFixture();
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    const summary = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+    const proposalPath = join(
+      workspaceRoot,
+      ".dohc",
+      "local",
+      "staged-apps",
+      summary.stageId,
+      "proposal.json",
+    );
+    const stored = JSON.parse(await readFile(proposalPath, "utf8")) as {
+      collections: Array<{ tables?: Array<{ name: string; fields: string[] }> }>;
+    };
+    stored.collections[0]!.tables = [];
+    await writeFile(proposalPath, JSON.stringify(stored, null, 2), "utf8");
+
+    expect(await staged.list("personal-control-tower")).toEqual([]);
+    await expect(
+      staged.approve({ stageId: summary.stageId, reviewDigest: summary.reviewDigest, signal }),
+    ).rejects.toThrow(/not found|changed/i);
   }, 60_000);
 });

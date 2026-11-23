@@ -569,19 +569,15 @@ function PublicationDialog(
             else props.onReopen();
           });
       }
-      let staged: StagedProposal | null = null;
-      try {
-        const listed = await api.publishOwnerApp({
-          action: "listStaged",
-          workspaceId: props.workspaceId,
-          appRoot: props.appRoot,
-        });
-        if (listed && listed.kind === "stagedListed") {
-          staged = listed.stages.find((entry) => entry.appRoot === props.appRoot) ?? null;
-        }
-      } catch {
-        staged = null;
-      }
+      const listed = await api.publishOwnerApp({
+        action: "listStaged",
+        workspaceId: props.workspaceId,
+        appRoot: props.appRoot,
+      });
+      const staged: StagedProposal | null =
+        listed && listed.kind === "stagedListed"
+          ? (listed.stages.find((entry) => entry.appRoot === props.appRoot) ?? null)
+          : null;
       if (!current) return;
       setLocalReview({ status: "ready", rows, approval, source, staged });
     })().catch((error) => {

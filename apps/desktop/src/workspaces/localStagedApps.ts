@@ -55,6 +55,7 @@ const SHA256_RE = /^[0-9a-f]{64}$/;
 
 const activeStageApprovals = new Map<string, { stageId: string; appRoot: string | null }>();
 const activeStageDiscards = new Map<string, number>();
+const activeStagePublishes = new Map<string, Promise<void>>();
 
 const normalizeStageId = (stageId: string): string => {
   if (!UUID_RE.test(stageId)) throw new Error("Invalid staged app id.");
@@ -282,22 +283,33 @@ function computeReviewDigest(input: {
   collections: readonly StoredCollectionStep[];
   candidateDigest: string;
   sourceRevision: string;
+  sourcePaths: readonly string[];
+  displayCapabilities: readonly AppPublicationCandidate["capabilities"][number][];
 }): string {
   return sha256(
     JSON.stringify([
-      "dohc-staged-app-review-v1",
+      "dohc-staged-app-review-v2",
       input.workspaceId,
       input.appRoot,
       input.collections.map((entry) => [
         entry.alias ?? null,
         entry.datasetId,
+        entry.name,
+        entry.datasetPath,
         entry.action,
+        entry.previousRevision ?? null,
         entry.previousRevisionSha256 ?? null,
+        entry.targetRevision,
         entry.targetRevisionSha256,
+        entry.migrationPath ?? null,
         entry.migrationSha256 ?? null,
+        entry.tables ?? null,
+        entry.changes ?? null,
       ]),
       input.candidateDigest,
       input.sourceRevision,
+      input.sourcePaths,
+      input.displayCapabilities,
     ]),
   );
 }
@@ -386,6 +398,19 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
         return null;
       parsed.stageId = stageId;
       parseAppPublicationCandidate(parsed.app.candidate, APP_PUBLICATION_LIMITS);
+      if (
+        sha256(JSON.stringify(parsed.app.candidate)) !== parsed.app.candidateDigest ||
+        computeReviewDigest({
+          workspaceId: parsed.workspaceId,
+          appRoot: parsed.appRoot,
+          collections: parsed.collections,
+          candidateDigest: parsed.app.candidateDigest,
+          sourceRevision: parsed.app.sourceRevision,
+          sourcePaths: parsed.app.sourcePaths,
+          displayCapabilities: parsed.app.displayCapabilities,
+        }) !== parsed.reviewDigest
+      )
+        return null;
       return parsed;
     } catch {
       return null;
@@ -634,7 +659,7 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
         ) {
           if (migrationPath !== null)
             throw new Error(
-              `${definition.name} has no rule changes and does not take a migration file.`,
+              `${definition.name} already matches these rules (its migration may already have been applied) and does not take a migration file.`,
             );
           projectedRevisions.set(definition.datasetId, {
             revision: existing.revision,
@@ -787,12 +812,15 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
             )
           : capability;
       });
+      const sourcePaths = preparedApp.candidate.inputs.map((entry) => entry.path);
       const reviewDigest = computeReviewDigest({
         workspaceId: deps.workspaceId,
         appRoot: input.appRoot,
         collections: steps,
         candidateDigest,
         sourceRevision: preparedApp.candidate.sourceRevision,
+        sourcePaths,
+        displayCapabilities,
       });
 
       const stageId = randomUUID();
@@ -814,47 +842,77 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
           candidate: preparedApp.candidate,
           candidateDigest,
           sourceRevision: preparedApp.candidate.sourceRevision,
-          sourcePaths: preparedApp.candidate.inputs.map((entry) => entry.path),
+          sourcePaths,
           displayCapabilities,
         },
         receipts: {},
       };
 
-      const previousForRoot = (await listProposalsIn(root)).filter(
-        (existing) => existing.appRoot === input.appRoot,
-      );
-      await mkdir(bundleDir, { recursive: true, mode: 0o700 });
-      await mkdir(collectionsDir, { recursive: true, mode: 0o700 });
+      const publishKey = `${lockKey}\0${input.appRoot}`;
+      const priorPublish = activeStagePublishes.get(publishKey) ?? Promise.resolve();
+      let releasePublish!: () => void;
+      const myTurn = new Promise<void>((resolve) => {
+        releasePublish = resolve;
+      });
+      const publishTail = priorPublish.then(() => myTurn);
+      activeStagePublishes.set(publishKey, publishTail);
       try {
-        for (const file of preparedApp.files) {
-          if (!SHA256_RE.test(file.sha256)) throw new Error("Invalid compiled app artifact hash.");
-          await writeAtomicFile(join(bundleDir, file.sha256), file.bytes);
-        }
-        for (const [datasetId, blob] of capturedBlobs) {
-          const colDir = join(collectionsDir, datasetId);
-          await mkdir(colDir, { recursive: true, mode: 0o700 });
-          await writeAtomicFile(join(colDir, "definition.json"), blob.definitionJson);
-          await writeAtomicFile(join(colDir, "schema.sql"), blob.schemaSql);
-          await writeAtomicFile(join(colDir, "operations.js"), blob.operationSource);
-          await writeAtomicFile(join(colDir, "revision.json"), JSON.stringify(blob.revision));
-          if (blob.migrationSql !== undefined) {
-            await writeAtomicFile(join(colDir, "migration.sql"), blob.migrationSql);
-          }
-        }
-        await writeAtomicFile(proposalPathIn(root, stageId), JSON.stringify(proposal, null, 2));
-      } catch (error) {
-        await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-        throw error;
-      }
+        await priorPublish;
+        deps.assertCurrent();
+        input.signal.throwIfAborted();
+        const activeNow = activeStageApprovals.get(lockKey);
+        if (activeNow && (activeNow.appRoot === null || activeNow.appRoot === input.appRoot))
+          throw new Error(
+            "A staged review for this app is currently being approved. Wait for it to finish.",
+          );
 
-      for (const old of previousForRoot) {
-        await removeStageDir(root, old.stageId, false);
+        const previousForRoot = (await listProposalsIn(root)).filter(
+          (existing) => existing.appRoot === input.appRoot,
+        );
+        await mkdir(bundleDir, { recursive: true, mode: 0o700 });
+        await mkdir(collectionsDir, { recursive: true, mode: 0o700 });
+        try {
+          for (const file of preparedApp.files) {
+            if (!SHA256_RE.test(file.sha256))
+              throw new Error("Invalid compiled app artifact hash.");
+            await writeAtomicFile(join(bundleDir, file.sha256), file.bytes);
+          }
+          for (const [datasetId, blob] of capturedBlobs) {
+            const colDir = join(collectionsDir, datasetId);
+            await mkdir(colDir, { recursive: true, mode: 0o700 });
+            await writeAtomicFile(join(colDir, "definition.json"), blob.definitionJson);
+            await writeAtomicFile(join(colDir, "schema.sql"), blob.schemaSql);
+            await writeAtomicFile(join(colDir, "operations.js"), blob.operationSource);
+            await writeAtomicFile(join(colDir, "revision.json"), JSON.stringify(blob.revision));
+            if (blob.migrationSql !== undefined) {
+              await writeAtomicFile(join(colDir, "migration.sql"), blob.migrationSql);
+            }
+          }
+          deps.assertCurrent();
+          input.signal.throwIfAborted();
+          await writeAtomicFile(proposalPathIn(root, stageId), JSON.stringify(proposal, null, 2));
+          deps.assertCurrent();
+          input.signal.throwIfAborted();
+        } catch (error) {
+          await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+          throw error;
+        }
+
+        for (const old of previousForRoot) {
+          await removeStageDir(root, old.stageId, false);
+        }
+        const allNow = await listProposalsIn(root);
+        for (const overflow of allNow.slice(MAX_STAGE_COUNT)) {
+          if (Object.keys(overflow.receipts).length > 0 || overflow.inProgress !== undefined)
+            continue;
+          await removeStageDir(root, overflow.stageId, false);
+        }
+        return summarizeStage(proposal);
+      } finally {
+        releasePublish();
+        if (activeStagePublishes.get(publishKey) === publishTail)
+          activeStagePublishes.delete(publishKey);
       }
-      const allNow = await listProposalsIn(root);
-      for (const overflow of allNow.slice(MAX_STAGE_COUNT)) {
-        await removeStageDir(root, overflow.stageId, false);
-      }
-      return summarizeStage(proposal);
     },
 
     async approve(input: {
@@ -900,6 +958,8 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
           collections: proposal.collections,
           candidateDigest: proposal.app.candidateDigest,
           sourceRevision: proposal.app.sourceRevision,
+          sourcePaths: proposal.app.sourcePaths,
+          displayCapabilities: proposal.app.displayCapabilities,
         });
         if (
           proposal.reviewDigest !== input.reviewDigest ||
@@ -1203,9 +1263,9 @@ export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
                   `Staged Collection "${step.name}" no longer matches its review digest. Stage again.`,
                 );
               }
-              await markInProgress(step);
               let approved: DatasetRevision;
               try {
+                await markInProgress(step);
                 approved = await approveCreate({
                   preparationId: prepared.preparationId,
                   revisionSha256: prepared.revision.revisionSha256,

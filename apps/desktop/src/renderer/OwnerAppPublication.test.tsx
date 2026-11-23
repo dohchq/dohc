@@ -1835,3 +1835,38 @@ it("renders a single plain-English staged review card for new/updated Collection
     api.publishOwnerApp.mockImplementation(answer);
   }
 });
+
+it("shows the failed review state instead of falling back when loading staged proposals fails", async () => {
+  const user = userEvent.setup();
+  const prepareLocalCalls: OwnerAppPublicationRequest[] = [];
+  api.publishOwnerApp.mockImplementation(async (request) => {
+    if (request.action === "listLocal") return { kind: "localListed", publications: [] };
+    if (request.action === "checkLocal")
+      return {
+        kind: "localChecked",
+        appRoot: "control-tower",
+        sourceRevision: prepared.sourceRevision,
+        sourcePaths: ["control-tower/index.tsx"],
+      };
+    if (request.action === "listStaged") throw new Error("staged store unavailable");
+    if (request.action === "prepareLocal") {
+      prepareLocalCalls.push(request);
+      return { ...prepared, local: true };
+    }
+    return answer(request);
+  });
+  vi.stubGlobal("dohcDesktop", api);
+  try {
+    render(
+      <OwnerAppPublication workspaceId="ws-trip" appRoot="control-tower" localApproval="tab" />,
+    );
+    await user.click(screen.getByRole("button", { name: "Review app" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("staged store unavailable");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeDefined();
+    expect(prepareLocalCalls).toEqual([]);
+  } finally {
+    cleanup();
+    vi.unstubAllGlobals();
+    api.publishOwnerApp.mockImplementation(answer);
+  }
+});

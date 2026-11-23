@@ -125,12 +125,13 @@ export function createLocalOwnerAppPublicationHandler<
     ) {
       const rootPath = operation.workspace.rootPath;
       if (!rootPath) throw new Error("Staged app reviews are unavailable for this workspace.");
-      const openStaged = async () => {
+      const openStaged = async (needsAuthority: boolean) => {
         const local = await deps.datasetForWorkspace(operation.workspace, operation.signal);
         current();
-        const migration = deps.migrationAuthority
-          ? await deps.migrationAuthority(operation.workspace, operation.signal)
-          : null;
+        const migration =
+          needsAuthority && deps.migrationAuthority
+            ? await deps.migrationAuthority(operation.workspace, operation.signal)
+            : null;
         current();
         const useServerAuthority = local.appHostKind
           ? local.appHostKind() === "server" && !!migration
@@ -225,13 +226,13 @@ export function createLocalOwnerAppPublicationHandler<
           (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot))
         )
           throw new Error("Choose an app in your workspace.");
-        const staged = await openStaged();
+        const staged = await openStaged(false);
         const stages = await staged.list(input.appRoot);
         current();
         return OwnerAppPublicationResult.parse({ kind: "stagedListed", stages });
       }
       if (input.action === "discardStaged") {
-        const staged = await openStaged();
+        const staged = await openStaged(false);
         await staged.discard(input.stageId);
         current();
         return OwnerAppPublicationResult.parse({
@@ -240,7 +241,7 @@ export function createLocalOwnerAppPublicationHandler<
         });
       }
       if (input.action === "approveStaged") {
-        const staged = await openStaged();
+        const staged = await openStaged(true);
         const result = await staged.approve({
           stageId: input.stageId,
           reviewDigest: input.reviewDigest,
@@ -254,7 +255,7 @@ export function createLocalOwnerAppPublicationHandler<
         throw new Error("Choose an app in your workspace.");
       const capture = await deps.flushCapture(operation.workspace);
       current();
-      const staged = await openStaged();
+      const staged = await openStaged(true);
       const stage = await deps.withAdapter(operation.workspace, (adapter) =>
         staged.stage({
           appRoot: input.appRoot,

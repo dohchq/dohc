@@ -1023,10 +1023,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       signal: lifetime.signal,
       assertCurrent,
       prepare: (input) => host.prepareRecovery(owner, input),
-      claim: (input) => {
-        assertDatasetWritable(input.datasetId);
-        return host.claimRecovery(owner, input);
-      },
+      claim: (input) => host.claimRecovery(owner, input),
       async discardUnfinished(datasetId) {
         assertCurrent();
         const row = db
