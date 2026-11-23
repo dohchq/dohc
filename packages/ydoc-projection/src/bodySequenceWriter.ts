@@ -422,9 +422,10 @@ function changeOf(
     const tryout = plan(lines, idToTry);
     if (!tryout) return null;
     const known = given.size;
+    const left = new Set(lines);
     all.forEach((line, at) => {
-      if (line.bare !== "" && (moved(line) || (line.owner !== undefined && moved(line.owner))))
-        given.add(at);
+      const itMoved = moved(line) || (line.owner !== undefined && moved(line.owner));
+      if (line.bare !== "" && left.has(line) && itMoved) given.add(at);
     });
     if (given.size > known) {
       lines = readBody(schema, doc);
@@ -726,9 +727,10 @@ export function setMarks(
  * Delete from an offset of one line to an offset of the same or a later line: the letters and
  * inline items between, and the boundary of each line after the first, so what is left of the
  * last line joins the first. When the first line cannot hold what is left of the last, the last
- * line keeps its boundary and stays a line. A line after the first that is read with no boundary
- * gets none, as the delete would only take it away again. Refused where it would cut a surrogate
- * pair, and where all it would delete is the empty first paragraph a list item needs.
+ * line keeps its boundary and stays a line, as does a last line read with no boundary that the
+ * delete only runs up to. A line the delete takes away gets no boundary first. Refused where it
+ * would cut a surrogate pair, and where all it would delete is the empty first paragraph a list
+ * item needs.
  */
 export function deleteRange(
   schema: Schema,
@@ -747,9 +749,14 @@ export function deleteRange(
     (lines) => {
       const first = lines[at];
       const last = lines[toAt];
-      const isLeft = last?.boundary && at < toAt && toOffset >= 0 && toOffset < last.text.length;
-      joins = !isLeft || !first || holdsIt(schema, first.type, unitAt(doc, last.start + toOffset));
-      return [first, at < toAt && joins ? afterIt(lines, last) : undefined];
+      const apart = at < toAt && last !== undefined;
+      const afterFirst = last?.bare === "spill" && last.owner === first && toOffset === 0;
+      const stays = apart && (last.bare === "item" || afterFirst);
+      const isLeft = apart && last.boundary && toOffset >= 0 && toOffset < last.text.length;
+      const held =
+        !isLeft || !first || holdsIt(schema, first.type, unitAt(doc, last.start + toOffset));
+      joins = !stays && held;
+      return [first, apart && joins ? afterIt(lines, last) : undefined];
     },
     (lines, freshId) => {
       const first = lines[at];
@@ -759,19 +766,27 @@ export function deleteRange(
       if (splitsALetter(first.text, offset) || splitsALetter(last.text, toOffset)) return null;
       const from = first.start + offset;
       const to = last.start + toOffset;
+      const end = last.boundary ? last.start - 1 : last.start;
       const ranges = joins
         ? [{ index: from, length: to - from }]
         : [
-            { index: from, length: last.start - 1 - from },
+            { index: from, length: end - from },
             { index: last.start, length: toOffset },
           ];
       const erased = ranges.filter((range) => range.length > 0);
       if (erased.length === 0) return null;
-      const stored = lines.slice(at + 1, toAt + 1).filter((line) => line.boundary);
-      const backAgain = stored.every((line) => isNeededFirst(lines, lines.indexOf(line)));
-      const onlyBoundaries = joins && stored.length > 0 && to - from === stored.length;
-      if (onlyBoundaries && last.text === "" && backAgain) return null;
-      lines.splice(at + 1, toAt - at - (joins ? 0 : 1));
+      const taken = lines.slice(at + 1, joins ? toAt + 1 : toAt).filter((line) => line.boundary);
+      const backAgain = taken.every((line) => isNeededFirst(lines, lines.indexOf(line)));
+      const length = erased.reduce((sum, range) => sum + range.length, 0);
+      const onlyBoundaries = taken.length > 0 && length === taken.length;
+      if (onlyBoundaries && backAgain && (!joins || last.text === "")) return null;
+      const isLeft = (line: BodyLine) => {
+        const owner = lines.indexOf(line.owner!);
+        const itsOwnerStays = owner > toAt || (owner === toAt && !joins);
+        return line.bare === "item" ? itsOwnerStays : line.bare === "spill" && owner === at;
+      };
+      const goes = lines.slice(at + 1, joins ? toAt + 1 : toAt).filter((line) => !isLeft(line));
+      for (const line of goes) lines.splice(lines.indexOf(line), 1);
       const writes = writesOf(schema, doc, lines, freshId);
       writes?.erased.push(...erased);
       return writes;

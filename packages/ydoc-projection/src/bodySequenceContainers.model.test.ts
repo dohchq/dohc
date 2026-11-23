@@ -1580,21 +1580,27 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       const left = before.shot.tokens.find((token) => token.id === last?.chars[toOffset]);
       const holders = left?.kind === "char" && left.atom ? HOLDS_INLINE : HOLDS_LETTERS;
       const cannotJoin = at < toAt && last?.bare === "" && left !== undefined;
-      const joins = !cannotJoin || holders.includes(first?.type ?? "");
+      const afterFirst =
+        last?.bare === "spill" && toAt === at + 1 && first?.bare === "" && toOffset === 0;
+      const lastStays = at < toAt && (last?.bare === "item" || afterFirst);
+      const joins = !lastStays && (!cannotJoin || holders.includes(first?.type ?? ""));
+      const itsBoundary = !joins && last?.bare === "" ? 1 : 0;
       const span = fits
-        ? placeOf(before, last, toOffset) - placeOf(before, first, offset) - (joins ? 0 : 1)
+        ? placeOf(before, last, toOffset) - placeOf(before, first, offset) - itsBoundary
         : 0;
-      const stored = lines.flatMap((line, index) =>
-        index > at && index <= toAt && line.bare === "" ? [index] : [],
+      const taken = lines.flatMap((line, index) =>
+        index > at && index < (joins ? toAt + 1 : toAt) && line.bare === "" ? [index] : [],
       );
-      const backAgain = stored.every((index) => isNeededFirst(lines, index));
-      const onlyBoundaries = joins && stored.length > 0 && span === stored.length;
-      const some = span > 0 && !(onlyBoundaries && last?.chars.length === 0 && backAgain);
+      const backAgain = taken.every((index) => isNeededFirst(lines, index));
+      const onlyBoundaries = taken.length > 0 && span === taken.length;
+      const nothingLeft = !joins || last?.chars.length === 0;
+      const some = span > 0 && !(onlyBoundaries && backAgain && nothingLeft);
       if (refusal(before, change, some, "a delete") || !first || !last) return false;
       const joined = lines.flatMap((_, index) => (index >= at && index <= toAt ? [index] : []));
       const stays = (index: number) => {
         const line = lines[index]!;
-        const added = line.bare === "item" && last.bare === "item" && line.row === last.row;
+        const kept = last.bare === "item" || !joins;
+        const added = line.bare === "item" && kept && line.row === last.row;
         const after = last.bare === "spill" && index === at + 1 && toOffset === 0;
         return added || (after && index === toAt && first.bare === "");
       };
@@ -1613,14 +1619,13 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
           const from = between.lines[at]!;
           const to = between.lines[toAt]!;
           want = wantOf(between);
-          const upTo = to.bare === "item";
-          const end = upTo ? to.row - 1 : to.row;
-          const cut = upTo ? want[end]!.chars.length : to.from + toOffset;
           const kept = want[from.row]!.chars.slice(0, from.from + offset);
-          const rest = want[end]!.chars.slice(cut);
-          want[from.row]!.chars = joins ? [...kept, ...rest] : kept;
-          if (!joins) want[end]!.chars = rest;
-          want.splice(from.row + 1, end - from.row - (joins ? 0 : 1));
+          const rest = want[to.row]!.chars.slice(to.from + toOffset);
+          const rows = to.row - from.row;
+          if (rows === 0 || joins) want[from.row]!.chars = [...kept, ...rest];
+          else want[from.row]!.chars = kept;
+          if (rows > 0 && !joins && to.bare === "") want[to.row]!.chars = rest;
+          want.splice(from.row + 1, rows === 0 || joins ? rows : rows - 1);
           keepApart(want, from.row);
         },
       })!;
@@ -3969,6 +3974,47 @@ it("refuses a join or a delete that would only take away the empty first paragra
   expect(view(doc)).toBe(stored);
   expect(written(doc, deleteRange(schema, doc, 0, 0, 1, 0, String))).toBe(true);
   expect(rowsRead(doc)).toEqual(["paragraph :", "paragraph L/I:", "heading L/I:head"]);
+
+  const underRaw = open(
+    note(
+      [
+        { id: "L", type: "bulletList", attrs: {} },
+        { id: "I", type: "listItem", attrs: {} },
+        { id: "Q", type: "blockquote", attrs: {} },
+      ],
+      [
+        ["", { type: "rawBlock", source: "<hr>" }, []],
+        ["", PARAGRAPH, ["L", "I"]],
+        ["ij", PARAGRAPH, ["L", "I", "Q"]],
+      ],
+    ),
+    20,
+  );
+  expect(deleteRange(schema, underRaw, 0, 0, 2, 0, String)).toBeNull();
+});
+
+it("gives no boundary to a line inside a deleted range when the delete keeps two containers apart", () => {
+  const doc = open(
+    note(
+      [
+        { id: "C", type: "callout", attrs: TIP },
+        { id: "L", type: "bulletList", attrs: {} },
+        { id: "I", type: "listItem", attrs: {} },
+      ],
+      [
+        ["ab", PARAGRAPH, ["C"]],
+        ["m", PARAGRAPH, []],
+        ["head", { type: "heading", level: 1 }, ["C", "L", "I"]],
+        ["z", PARAGRAPH, ["C"]],
+      ],
+    ),
+    10,
+  );
+  expect(linesRead(doc)[2]).toBe("item paragraph:");
+  const change = deleteRange(schema, doc, 0, 2, 3, 0, () => "apart")!;
+  expect(change.given).toEqual([]);
+  expect(written(doc, change)).toBe(true);
+  expect(rowsRead(doc)).toEqual(["paragraph C:abhead", "paragraph apart:z"]);
 });
 
 it("writes nothing for marks the letters already hold", () => {
