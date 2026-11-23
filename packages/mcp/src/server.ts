@@ -117,6 +117,21 @@ import {
   type ToolContext,
 } from "./tools";
 
+export const MCP_USAGE = [
+  "Usage: dohc-mcp [options]",
+  "",
+  "Run dohc's stdio MCP server for one local workspace while the dohc desktop app is open.",
+  "Copy the ready-to-use command and arguments for a workspace from Settings › Agents in dohc.",
+  "",
+  "Options:",
+  "  --workspace <path>       Workspace folder to serve (default: current directory).",
+  "  --home <path>            dohc desktop state directory (copy from Settings › Agents; required for desktop-backed tools).",
+  "  --agent-id <id>          Connected agent id from Settings › Agents.",
+  "  --share-access <level>   Restrict tools to a share level: view, comment, or edit.",
+  "  --tool <name>            Expose only this MCP tool. Repeat for more tools.",
+  "  --help, -h               Show this help and exit.",
+].join("\n");
+
 export function parseArgs(argv: string[]): ToolContext {
   let root = nonEmptyArg(process.cwd(), "workspace root");
   let home = nonEmptyArg(process.env.HOME ?? process.cwd(), "home path");
@@ -124,11 +139,14 @@ export function parseArgs(argv: string[]): ToolContext {
   let agentId: string | undefined;
   const tools = new Set<keyof typeof MCP_TOOL_CAPABILITIES>();
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--workspace" && argv[i + 1]) root = nonEmptyArg(argv[++i], "--workspace");
-    else if (argv[i] === "--home" && argv[i + 1]) home = nonEmptyArg(argv[++i], "--home");
-    else if (argv[i] === "--share-access") shareAccess = shareAccessArg(argv[++i]);
-    else if (argv[i] === "--tool") tools.add(toolArg(argv[++i]));
-    else if (argv[i] === "--agent-id") agentId = agentIdArg(argv[++i]);
+    const flag = argv[i]!;
+    if (flag === "--workspace") root = pathArg(argv[++i], "--workspace");
+    else if (flag === "--home") home = pathArg(argv[++i], "--home");
+    else if (flag === "--share-access") shareAccess = shareAccessArg(argv[++i]);
+    else if (flag === "--tool") tools.add(toolArg(argv[++i]));
+    else if (flag === "--agent-id") agentId = agentIdArg(argv[++i]);
+    else
+      throw new Error(`Unknown argument ${JSON.stringify(flag)}. Run dohc-mcp --help for usage.`);
   }
   const runId = process.env.DOHC_RUN_ID?.trim();
   return {
@@ -149,6 +167,14 @@ function agentIdArg(value: string | undefined): string {
   throw new Error(
     `--agent-id must be an agent's id from Settings › Agents. Received: ${received}.`,
   );
+}
+
+function pathArg(value: string | undefined, name: string): string {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed || trimmed.startsWith("-")) {
+    throw new Error(`${name} requires a non-empty path value (use ./ for a path starting with -).`);
+  }
+  return trimmed;
 }
 
 function nonEmptyArg(value: string, name: string): string {
@@ -293,7 +319,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_dataset",
     {
       description:
-        "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
+        'Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.',
       inputSchema: { request: DatasetRequest },
     },
     async ({ request }) => text(await dataset(ctx, request)),
@@ -720,7 +746,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_edit_document",
     {
       description:
-        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A pending `warning` means the edit is saved locally and the shared file update is pending; do not repeat the edit. Other warnings mean someone may be changing the same blocks; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.",
+        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. Pass `allowLossySourceSha256` (from dohc_read_file) only when confirming a rewrite of a lossy Markdown note that dohc cannot round-trip verbatim. It returns when the edit is saved. A pending `warning` means the edit is saved locally and the shared file update is pending; do not repeat the edit. Other warnings mean someone may be changing the same blocks; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.",
       inputSchema: {
         allowLossySourceSha256: z
           .string()
@@ -1215,7 +1241,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
 }
 
 async function main() {
-  const ctx = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  if (argv.includes("--help") || argv.includes("-h")) {
+    process.stdout.write(`${MCP_USAGE}\n`);
+    return;
+  }
+  const ctx = parseArgs(argv);
   const server = createDohcMcpServer(ctx);
   await server.connect(new StdioServerTransport());
 }

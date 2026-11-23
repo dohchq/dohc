@@ -52,6 +52,18 @@ type ExportScope =
   | { kind: "group"; group: string }
   | { kind: "thread"; thread: string };
 
+type JsonRequestCommand =
+  | { verb: "dataset"; request: DatasetRequest }
+  | { verb: "appPublication"; request: OwnerAppPublicationRequest }
+  | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest };
+
+type StdinJsonCommand = {
+  [Verb in JsonRequestCommand["verb"]]: {
+    verb: Verb;
+    stdinJson: (raw: string) => Extract<JsonRequestCommand, { verb: Verb }>;
+  };
+}[JsonRequestCommand["verb"]];
+
 type CliCommandBody =
   | { verb: "link"; target: CliLinkTarget }
   | { [Verb in DeclaredVerb]: { verb: Verb } & DeclaredRequestInput<Verb> }[DeclaredVerb]
@@ -98,9 +110,8 @@ type CliCommandBody =
       agent?: string;
       requestId?: string;
     }
-  | { verb: "dataset"; request: DatasetRequest }
-  | { verb: "appPublication"; request: OwnerAppPublicationRequest }
-  | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
+  | JsonRequestCommand
+  | StdinJsonCommand
   | { verb: "groups" }
   | { verb: "groupCreate"; name: string; purpose?: string; type?: "posts" | "chat" | "both" }
   | { verb: "threads"; group: string }
@@ -1600,17 +1611,42 @@ function describeJsonSyntaxLocation(error: unknown): string | undefined {
   return undefined;
 }
 
-function jsonVerb(
+function jsonVerb<Verb extends JsonRequestCommand["verb"]>(
   capabilityId: CapabilityId,
   command: string,
   name: string,
   action: string,
+  verb: Verb,
   fields: Readonly<Record<string, z.ZodType>>,
   help: JsonVerbHelp,
-  build: (value: object) => CliCommandBody,
+  build: (value: object) => Extract<JsonRequestCommand, { verb: Verb }>,
 ): CliVerbSpec {
   const label = `${command} ${name}`;
   const invalid = `invalid ${label} arguments; run dohc ${label} --help`;
+  const parseJson = (json: string): Extract<JsonRequestCommand, { verb: Verb }> => {
+    let value: unknown;
+    try {
+      value = JSON.parse(json);
+    } catch (error) {
+      const location = describeJsonSyntaxLocation(error);
+      fail(
+        `invalid ${label} JSON${location ? ` (${location})` : ""}; pass one JSON object or run dohc ${label} --help`,
+      );
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      fail(`${label} requires one JSON object`);
+    if ("action" in value && value.action !== action && value.action !== name) {
+      fail(`${label} arguments must not name another action`);
+    }
+    const missing = help.required?.find((field) => !(field in value));
+    if (missing) fail(`${label} requires ${missing}`);
+    try {
+      return build({ ...value, action });
+    } catch (error) {
+      const detail = formatJsonVerbError(error, help);
+      fail(detail ? `invalid ${label} arguments: ${detail}; run dohc ${label} --help` : invalid);
+    }
+  };
   return {
     capabilityId,
     ...help,
@@ -1620,34 +1656,14 @@ function jsonVerb(
       const [json, ...extra] = operands;
       if (!json) fail(`${label} requires one JSON object; run dohc ${label} --help`);
       noExtraArgs(extra, label);
-      let value: unknown;
-      try {
-        value = JSON.parse(json);
-      } catch (error) {
-        const location = describeJsonSyntaxLocation(error);
-        fail(
-          `invalid ${label} JSON${location ? ` (${location})` : ""}; pass one JSON object or run dohc ${label} --help`,
-        );
-      }
-      if (!value || typeof value !== "object" || Array.isArray(value))
-        fail(`${label} requires one JSON object`);
-      if ("action" in value && value.action !== action && value.action !== name) {
-        fail(`${label} arguments must not name another action`);
-      }
-      const missing = help.required?.find((field) => !(field in value));
-      if (missing) fail(`${label} requires ${missing}`);
-      try {
-        return build({ ...value, action });
-      } catch (error) {
-        const detail = formatJsonVerbError(error, help);
-        fail(detail ? `invalid ${label} arguments: ${detail}; run dohc ${label} --help` : invalid);
-      }
+      if (json === "-") return { verb, stdinJson: parseJson } as StdinJsonCommand;
+      return parseJson(json);
     },
   };
 }
 
 const workspaceNote =
-  "Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root.";
+  "Each verb takes one JSON object that names workspaceId (or - to read the JSON from stdin, recommended in PowerShell on Windows). Find workspaceId in .dohc/manifest.json at the workspace root.";
 const migrationApproval = "Review the result, then approve it with approveMigration.";
 const agentLabelNote =
   "agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.";
@@ -1759,7 +1775,12 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Prepare public choices for a relation field.",
     notes: [migrationApproval],
   },
-  create: { summary: "Write source for a new Collection, ready to approve." },
+  create: {
+    summary: "Write source for a new Collection, ready to approve.",
+    notes: [
+      "definition is a dataset.json descriptor: formatVersion (1 or 2), name, schemaPath, operationsPath, tables, and operations (plus datasetId for formatVersion 1).",
+    ],
+  },
   prepare: { summary: "Capture existing Collection source for review." },
   approve: {
     summary: "Approve prepared source.",
@@ -1797,7 +1818,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   invoke: {
     summary: "Run an approved operation.",
     notes: [
-      "Use describe to find approved operation IDs.",
+      'Use describe to find approved operation IDs. Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs).',
       "Retry an uncertain write with the same input and idempotencyKey.",
       "Send a fresh invocationId to allow cancelInvoke to stop this running request. Cancellation cannot undo committed changes.",
     ],
@@ -1940,6 +1961,7 @@ const DATASET_VERBS: Record<string, CliVerbSpec> = Object.fromEntries(
           "dataset",
           action,
           action,
+          "dataset",
           option.shape,
           DATASET_HELP[action],
           (value) => ({
@@ -1962,6 +1984,7 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
         "app",
         action,
         action,
+        "appPublication",
         option.shape,
         APP_HELP[action],
         (value) => ({
@@ -1981,6 +2004,7 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
         "app",
         name,
         action,
+        "ownerAppResponses",
         option.shape,
         help,
         (value) => ({

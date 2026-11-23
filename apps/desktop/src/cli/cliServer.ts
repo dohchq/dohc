@@ -3220,12 +3220,12 @@ async function dispatchWorkspace(
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.sharing(request.args);
     case "appPublication": {
-      if (
-        request.args.request.workspaceId !== context.workspaceId ||
-        context.readOnly ||
-        !context.appPublication
-      )
+      if (context.readOnly || !context.appPublication)
         throw new CliCommandError("App publication requires the owning workspace.");
+      if (request.args.request.workspaceId !== context.workspaceId)
+        throw new CliCommandError(
+          "workspaceId does not match this workspace. Read workspaceId from .dohc/manifest.json or dohc_list_workspaces.",
+        );
       if (options.agentRunDepth(context.workspaceId) > 0)
         throw new CliCommandError("Automations cannot use app publication.");
       const agent =
@@ -3244,12 +3244,12 @@ async function dispatchWorkspace(
     case "dataset": {
       if (request.args.request.action === "export" && !request.args.request.savePath)
         throw new CliCommandError("Collection export requires an explicit savePath.");
-      if (
-        request.args.request.workspaceId !== context.workspaceId ||
-        context.readOnly ||
-        !context.dataset
-      )
+      if (context.readOnly || !context.dataset)
         throw new CliCommandError("Collections require the owning workspace.");
+      if (request.args.request.workspaceId !== context.workspaceId)
+        throw new CliCommandError(
+          "workspaceId does not match this workspace. Read workspaceId from .dohc/manifest.json or dohc_list_workspaces.",
+        );
       if (
         request.args.request.action === "approve" ||
         request.args.request.action === "approveMigration"
@@ -3275,12 +3275,12 @@ async function dispatchWorkspace(
       );
     }
     case "ownerAppResponses": {
-      if (
-        request.args.request.workspaceId !== context.workspaceId ||
-        context.readOnly ||
-        !context.ownerAppResponses
-      )
+      if (context.readOnly || !context.ownerAppResponses)
         throw new CliCommandError("App responses require the owning workspace.");
+      if (request.args.request.workspaceId !== context.workspaceId)
+        throw new CliCommandError(
+          "workspaceId does not match this workspace. Read workspaceId from .dohc/manifest.json or dohc_list_workspaces.",
+        );
       return context.ownerAppResponses(request.args.request);
     }
     case "moments": {

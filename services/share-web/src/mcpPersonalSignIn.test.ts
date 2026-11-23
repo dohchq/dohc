@@ -348,6 +348,9 @@ it("asks a browser that signed in before the password last changed to sign in ag
   const page = await allowed.text();
   expect(page).toContain("<h1>Sign in to dohc</h1>");
   expect(page).toContain(
+    '<a class="link" href="/account/forgot-password">Forgot your password?</a>',
+  );
+  expect(page).toContain(
     "This browser signed in before your password last changed. Sign in again.",
   );
   expect(page).not.toContain('type="radio"');
@@ -370,6 +373,7 @@ it("signs an agent in again from its current reach", async () => {
   expect(opened.html).toContain(
     '<div class="sec" id="who-label">Who it is</div><div class="box" role="group" aria-labelledby="who-label">',
   );
+  expect(opened.html).toContain("Changes to the name update it on Allow.");
   expect(opened.html).toContain(
     'name="as" value="new" class="opt" aria-pressed="true"><span class="tick" aria-hidden="true"></span>' +
       '<span class="k">New agent</span></button>',

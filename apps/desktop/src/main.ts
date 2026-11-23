@@ -776,7 +776,7 @@ import { createOwedRunNotices } from "./agents/owedRunNotices";
 import {
   isAppImageBoot,
   isTemporaryMacAppPath,
-  resolveDohcMcpCommand,
+  resolveDohcMcpLaunch,
 } from "./agents/dohcMcpCommand";
 import { resolveDohcCliBinDirectory } from "./agents/chatRunnerProcess";
 import { refreshLinuxStableCliBin } from "./agents/linuxStableCliBin";
@@ -3172,12 +3172,13 @@ async function mcpConfigFor(
   rootPath: string,
   shareAccess: ShareAccess | null,
 ): Promise<McpConfigResult> {
-  const command = resolveDohcMcpCommand({
+  const launch = resolveDohcMcpLaunch({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
+    devResourcesPath: resourcesBasePath(),
     linuxStableCliBinDir: await linuxStableCliBinDir(),
   });
-  if (command === null) {
+  if (launch === null) {
     return {
       unavailable: true,
       message:
@@ -3186,16 +3187,14 @@ async function mcpConfigFor(
           : MCP_LAUNCHER_UNAVAILABLE_MESSAGE,
     };
   }
+  const workspacePath = resolve(rootPath);
   const home = stateDir();
-  const args = ["--workspace", rootPath, "--home", home];
-  // A share view hands out the MCP profile for its level: the launched
-  // server registers only the write tools that level grants. `null` is a local
-  // workspace, which gets every tool.
+  const args = [...launch.args, "--workspace", workspacePath, "--home", home];
   if (shareAccess) args.push("--share-access", shareAccess);
   return {
-    command,
+    command: launch.command,
     args,
-    workspacePath: rootPath,
+    workspacePath,
     home,
   };
 }

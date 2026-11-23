@@ -96,7 +96,7 @@ Returns `{ ok: true, path } | { ok: false, reason }`.
 
 ### `dohc_edit_document`
 
-Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A pending `warning` means the edit is saved locally and the shared file update is pending; do not repeat the edit. Other warnings mean someone may be changing the same blocks; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.
+Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. Pass `allowLossySourceSha256` (from dohc_read_file) only when confirming a rewrite of a lossy Markdown note that dohc cannot round-trip verbatim. It returns when the edit is saved. A pending `warning` means the edit is saved locally and the shared file update is pending; do not repeat the edit. Other warnings mean someone may be changing the same blocks; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -159,7 +159,7 @@ Returns `{ ok: true, recordPath } | { ok: false, reason }`.
 
 ### `dohc_dataset`
 
-Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
+Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. For action create, definition is a dataset.json descriptor object (formatVersion 1 or 2, name, schemaPath, operationsPath, tables, operations; plus datasetId for formatVersion 1). Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs from describe). Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1604,7 +1604,7 @@ dohc dataset <verb> '<JSON>'
 
 Create, change, and use transactional Collections.
 
-Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root. datasetPath is the caller-relative dataset.json path. List and describe return it alongside the internal datasetId. After moving the file, update commands and app manifests. An old path reports a broken reference. These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity.
+Each verb takes one JSON object that names workspaceId (or - to read the JSON from stdin, recommended in PowerShell on Windows). Find workspaceId in .dohc/manifest.json at the workspace root. datasetPath is the caller-relative dataset.json path. List and describe return it alongside the internal datasetId. After moving the file, update commands and app manifests. An old path reports a broken reference. These verbs use the same Collection rules as dohc. They do not accept SQL or caller identity.
 
 #### `dohc dataset list`
 
@@ -1942,6 +1942,8 @@ Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision
 
 Write source for a new Collection, ready to approve.
 
+definition is a dataset.json descriptor: formatVersion (1 or 2), name, schemaPath, operationsPath, tables, and operations (plus datasetId for formatVersion 1).
+
 - `workspaceId`: `string`. Required.
 - `definition`: `any JSON`. Required.
 
@@ -2059,7 +2061,7 @@ Returns `{ kind: "migration-discarded" }`.
 
 Run an approved operation.
 
-Use describe to find approved operation IDs. Retry an uncertain write with the same input and idempotencyKey. Send a fresh invocationId to allow cancelInvoke to stop this running request. Cancellation cannot undo committed changes.
+Use describe to find approved operation IDs. Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs). Retry an uncertain write with the same input and idempotencyKey. Send a fresh invocationId to allow cancelInvoke to stop this running request. Cancellation cannot undo committed changes.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
@@ -2081,7 +2083,7 @@ dohc app <verb> '<JSON>'
 
 Approve, open, and share apps.
 
-Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root.
+Each verb takes one JSON object that names workspaceId (or - to read the JSON from stdin, recommended in PowerShell on Windows). Find workspaceId in .dohc/manifest.json at the workspace root.
 
 #### `dohc app createLink`
 

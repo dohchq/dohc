@@ -576,6 +576,24 @@ it("explains field mistakes, unrecognized keys, and definition errors before tra
   expect(missingTake.stderr).toContain("from prepare");
 
   expect(send).not.toHaveBeenCalled();
+
+  const fromStdin = await executeCli({
+    argv: ["dataset", "list", "-", "--json"],
+    readStdin: async () => JSON.stringify({ workspaceId: "workspace" }),
+    request: async (req) => {
+      send(req);
+      return { kind: "list", datasets: [], nextCursor: null };
+    },
+  });
+  expect(fromStdin.exitCode).toBe(0);
+  expect(send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      verb: "dataset",
+      args: expect.objectContaining({
+        request: { action: "list", workspaceId: "workspace" },
+      }),
+    }),
+  );
 });
 
 it("accepts formatVersion 2 Collection definitions in dataset create and mints datasetId when omitted", () => {
@@ -627,4 +645,26 @@ it("accepts formatVersion 2 Collection definitions in dataset create and mints d
       },
     }),
   ).toThrow(/explicit schemaPath and operationsPath/);
+});
+
+it("reads BOM-prefixed UTF-8 JSON with non-ASCII text from stdin via -", async () => {
+  const send = vi.fn();
+  const result = await executeCli({
+    argv: ["dataset", "list", "-", "--json"],
+    cwd: "/workspace",
+    readStdin: async () => '\uFEFF{"workspaceId":"ws-café-漢"}',
+    request: async (req) => {
+      send(req);
+      return { kind: "list", datasets: [], nextCursor: null };
+    },
+  });
+  expect(result.exitCode).toBe(0);
+  expect(send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      verb: "dataset",
+      args: expect.objectContaining({
+        request: { action: "list", workspaceId: "ws-café-漢" },
+      }),
+    }),
+  );
 });

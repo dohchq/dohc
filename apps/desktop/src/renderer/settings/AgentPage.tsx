@@ -1055,7 +1055,7 @@ export function AgentPage(props: {
                 </PageRow>
               </div>
               <p className="m-0 mt-2 text-[12px] text-muted">
-                {`While a run is on, History shows changes in this workspace as ${agent.name}'s.`}
+                {`MCP edits (and CLI commands with --agent-id) already show as ${agent.name}'s. Start a run to also mark direct file edits in this workspace.`}
               </p>
             </>
           ) : null}
@@ -1121,7 +1121,7 @@ export function AgentPage(props: {
           </PageRow>
         ) : forwarded ? null : (
           <PageRow label="Reaches">
-            <span className={VALUE}>Every workspace dohc opens on this computer</span>
+            <span className={VALUE}>This workspace (copy the config in each workspace)</span>
           </PageRow>
         )}
       </div>

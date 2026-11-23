@@ -103,6 +103,9 @@ it("shows the live file's frontmatter as written above the body it edits, until 
   expect(
     container.querySelector('section[aria-label="Properties"] + .named-body-editor'),
   ).not.toBeNull();
+  expect(
+    container.querySelector<HTMLDetailsElement>('section[aria-label="Properties"] details')?.open,
+  ).toBe(false);
 
   await act(async () => setFrontmatterValue(live.doc, "status", "ready"));
   expect(properties()).toContain("status: draft # delete drafts");
