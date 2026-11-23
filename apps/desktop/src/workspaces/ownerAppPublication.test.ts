@@ -222,6 +222,12 @@ describe("app.publish.json paths", () => {
       parseAppPublicationDeclaration(new TextEncoder().encode('{"version":2}'), "app"),
     ).toThrow("app/app.publish.json uses a newer version. Update dohc to read this file.");
   });
+
+  it("names the manifest path when app.publish.json is not valid JSON", () => {
+    expect(() =>
+      parseAppPublicationDeclaration(new TextEncoder().encode("{bad json"), "apps/shop"),
+    ).toThrow(/apps\/shop\/app\.publish\.json is not valid JSON \(at .+\)\. Check its syntax\./);
+  });
   const manifest = {
     entryPath: "main.ts",
     inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"],
@@ -631,3 +637,28 @@ it.each(["会议", "Cafe\u0301"])(
     });
   },
 );
+
+it("reports malformed app.publish.json on one line without disclosing input contents or spoofed offsets", () => {
+  const secret = "SECRET_MANIFEST_TOKEN_999";
+  const malformed = new TextEncoder().encode(`{\n  "token": "${secret}",\n  broken\n}`);
+  let message = "";
+  try {
+    parseAppPublicationDeclaration(malformed, "app");
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+  expect(message).toMatch(
+    /^app\/app\.publish\.json is not valid JSON \(at .+\)\. Check its syntax\.$/,
+  );
+  expect(message).not.toContain(secret);
+  expect(message).not.toContain("\n");
+
+  let spoofed = "";
+  try {
+    parseAppPublicationDeclaration(new TextEncoder().encode("position 8675309"), "app");
+  } catch (error) {
+    spoofed = error instanceof Error ? error.message : String(error);
+  }
+  expect(spoofed).toBe("app/app.publish.json is not valid JSON. Check its syntax.");
+  expect(spoofed).not.toContain("8675309");
+});

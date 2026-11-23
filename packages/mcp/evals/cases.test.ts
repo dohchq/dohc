@@ -1,16 +1,22 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { cliResultSchemas } from "@dohc/cli/protocol";
+import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { createDohcMcpServer } from "../src/server";
-import type { EvalCase, RunRecord } from "./case";
+import type { DatasetSnapshot, EvalCase, RunRecord } from "./case";
 import { CASES } from "./cases";
 import { seedWorkspace, workspaceFiles } from "./claude";
 import { fakeDesktop } from "./desktop";
+import { EVERYDAY_CASES } from "./everydayCases";
+import { createEverydayDesktop } from "./everydayDesktop";
 import { grade } from "./grade";
+
+const ALL_CASES: readonly EvalCase[] = [...CASES, ...EVERYDAY_CASES];
 
 /**
  * Runs a case's known-good calls against the real server and the stand-in app, with no model.
@@ -19,18 +25,33 @@ import { grade } from "./grade";
  */
 async function replay(
   evalCase: EvalCase,
-  calls: EvalCase["solution"]["calls"],
+  mode: "solution" | "idle",
+  customRun?: (
+    callTool: (tool: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  ) => Promise<string | void>,
 ): Promise<{ run: RunRecord; unanswered: string; misshapen: string[] }> {
   const dir = await mkdtemp(join(tmpdir(), "dohc-eval-case-"));
   const root = join(dir, "workspace");
+  const home = join(dir, "home");
   const unansweredLog = join(dir, "unanswered.log");
   const misshapen: string[] = [];
+  const datasetSnapshots: Record<string, DatasetSnapshot> = {};
   try {
-    await seedWorkspace(root, evalCase);
-    const desktop = fakeDesktop({ root, answers: evalCase.desktop ?? {}, unansweredLog });
+    await seedWorkspace(root, evalCase, home);
+    const answers = {
+      ...(evalCase.setupDesktop
+        ? await evalCase.setupDesktop(root, {
+            onDatasetSnapshot: (datasetPath, snapshot) => {
+              datasetSnapshots[datasetPath] = snapshot;
+            },
+          })
+        : {}),
+      ...evalCase.desktop,
+    };
+    const desktop = fakeDesktop({ root, answers, unansweredLog });
     const server = createDohcMcpServer({
       root,
-      home: root,
+      home,
       // An answer that throws stands for one that never arrived, so only answers are checked.
       request: async (request) => {
         const answer = await desktop(request);
@@ -44,17 +65,38 @@ async function replay(
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     const recorded: RunRecord["calls"] = [];
-    for (const call of calls) {
-      const result = await client.callTool({ name: call.tool, arguments: call.args });
-      recorded.push({ tool: call.tool, args: call.args, ok: result.isError !== true });
+    const callTool = async (
+      tool: string,
+      args: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> => {
+      const result = await client.callTool({ name: tool, arguments: args });
+      recorded.push({ tool, args, ok: result.isError !== true });
+      return (result.structuredContent as Record<string, unknown> | undefined) ?? {};
+    };
+    let text = evalCase.solution.text ?? "";
+    if (customRun) {
+      const out = await customRun(callTool);
+      if (typeof out === "string") text = out;
+    } else if (mode === "solution") {
+      if (evalCase.solution.run) {
+        const out = await evalCase.solution.run(callTool);
+        if (typeof out === "string") text = out;
+      } else {
+        for (const call of evalCase.solution.calls ?? []) {
+          await callTool(call.tool, call.args);
+        }
+      }
+    } else {
+      text = "";
     }
     await client.close();
     await server.close();
     return {
       run: {
         calls: recorded,
-        text: evalCase.solution.text ?? "",
+        text,
         files: await workspaceFiles(root),
+        ...(Object.keys(datasetSnapshots).length > 0 ? { datasetSnapshots } : {}),
       },
       unanswered: await readFile(unansweredLog, "utf8").catch(() => ""),
       misshapen,
@@ -66,28 +108,527 @@ async function replay(
 
 describe("eval cases", () => {
   it("names each case once and says where it came from", () => {
-    expect(new Set(CASES.map((evalCase) => evalCase.id)).size).toBe(CASES.length);
-    for (const evalCase of CASES) {
+    expect(new Set(ALL_CASES.map((evalCase) => evalCase.id)).size).toBe(ALL_CASES.length);
+    for (const evalCase of ALL_CASES) {
       expect(evalCase.experience, evalCase.id).toMatch(/\S/);
       expect(evalCase.source, evalCase.id).toMatch(
-        evalCase.kind === "control" ? /^control$/ : /#\d+/,
+        evalCase.kind === "control"
+          ? /^control$/
+          : evalCase.kind === "everyday"
+            ? /^everyday-job-\d+$/
+            : /#\d+/,
       );
     }
   });
 
-  it.each(CASES.map((evalCase) => [evalCase.id, evalCase] as const))(
+  it.each(ALL_CASES.map((evalCase) => [evalCase.id, evalCase] as const))(
     "%s passes with its known-good calls and fails without them",
     async (_id, evalCase) => {
-      const solved = await replay(evalCase, evalCase.solution.calls);
+      const solved = await replay(evalCase, "solution");
       expect(solved.unanswered).toBe("");
       expect(solved.misshapen).toEqual([]);
-      expect(grade(evalCase.expect, solved.run).filter((check) => !check.pass)).toEqual([]);
+      expect(
+        (await grade(evalCase.expect, solved.run, evalCase.gradeRun)).filter(
+          (check) => !check.pass,
+        ),
+      ).toEqual([]);
       // An agent that does nothing and says nothing must not pass. A control forbids calls, so
       // its answer checks carry that.
-      const idle = await replay(evalCase, []);
-      expect(grade(evalCase.expect, { ...idle.run, text: "" }).some((check) => !check.pass)).toBe(
-        true,
-      );
+      const idle = await replay(evalCase, "idle");
+      expect(
+        (await grade(evalCase.expect, idle.run, evalCase.gradeRun)).some((check) => !check.pass),
+      ).toBe(true);
     },
   );
+
+  it("answers dohc_search_workspace, refuses paths outside workspace (including junctions), rejects invalid collection manifests, and serializes concurrent writes", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dohc-eval-standin-"));
+    const root = join(dir, "workspace");
+    const home = join(dir, "home");
+    const outsideDir = join(dir, "outside-dir");
+    const unansweredLog = join(dir, "unanswered.log");
+    try {
+      await seedWorkspace(
+        root,
+        {
+          ...EVERYDAY_CASES[0]!,
+          files: {
+            "notes/plan.md": "# Kyoto\nVisit Fushimi Inari.\n",
+            "bad-app/index.html": "<!doctype html><h1>Bad</h1>\n",
+            "bad-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html"],
+              packageMap: {},
+              collection: true,
+            }),
+          },
+        },
+        home,
+      );
+      await mkdir(outsideDir, { recursive: true });
+      await writeFile(join(outsideDir, "secret.json"), JSON.stringify({ secret: true }));
+      await symlink(
+        outsideDir,
+        join(root, "escape-dir"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
+      const answers = await createEverydayDesktop(root, { workspaceId: "ws-everyday" });
+      const desktop = fakeDesktop({ root, answers, unansweredLog });
+      const server = createDohcMcpServer({
+        root,
+        home,
+        request: async (request) => {
+          const answer = await desktop(request);
+          expect(cliResultSchemas[request.verb].safeParse(answer).success).toBe(true);
+          return answer;
+        },
+      });
+      const client = new Client({ name: "eval-standin", version: "1" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+      const search = await client.callTool({
+        name: "dohc_search_workspace",
+        arguments: { query: "Kyoto" },
+      });
+      expect(search.isError).not.toBe(true);
+      expect(JSON.stringify(search.structuredContent)).toContain("notes/plan.md");
+
+      const traversal = await client.callTool({
+        name: "dohc_dataset",
+        arguments: {
+          request: {
+            action: "prepare",
+            workspaceId: "ws-everyday",
+            descriptorPath: "../outside-dir/secret.json",
+          },
+        },
+      });
+      expect(traversal.isError).toBe(true);
+
+      const escaped = await client.callTool({
+        name: "dohc_dataset",
+        arguments: {
+          request: {
+            action: "prepare",
+            workspaceId: "ws-everyday",
+            descriptorPath: "escape-dir/secret.json",
+          },
+        },
+      });
+      expect(escaped.isError).toBe(true);
+      expect(JSON.stringify(escaped.content)).toContain("escapes-workspace");
+
+      const badManifest = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "prepareLocal",
+            workspaceId: "ws-everyday",
+            appRoot: "bad-app",
+          },
+        },
+      });
+      expect(badManifest.isError).toBe(true);
+
+      // Verify concurrent dataset writes do not clobber each other's snapshot.
+      const createRes = await client.callTool({
+        name: "dohc_dataset",
+        arguments: {
+          request: {
+            action: "create",
+            workspaceId: "ws-everyday",
+            definition: {
+              formatVersion: 1,
+              datasetId: "99000000-0000-4000-8000-000000000001",
+              name: "Concurrent",
+              schemaPath: "conc/schema.sql",
+              operationsPath: "conc/ops.js",
+              tables: [
+                {
+                  tableId: "99000000-0000-4000-8000-000000000002",
+                  name: "Items",
+                  sqlName: "items",
+                  primaryKey: "id",
+                  fields: [
+                    {
+                      fieldId: "99000000-0000-4000-8000-000000000003",
+                      name: "ID",
+                      sqlColumn: "id",
+                      type: "text",
+                      required: true,
+                      unique: true,
+                      generated: "record-id",
+                    },
+                    {
+                      fieldId: "99000000-0000-4000-8000-000000000004",
+                      name: "Label",
+                      sqlColumn: "label",
+                      type: "text",
+                      required: true,
+                      unique: false,
+                    },
+                  ],
+                },
+              ],
+              operations: [
+                {
+                  operationId: "99000000-0000-4000-8000-000000000005",
+                  name: "addItem",
+                  label: "Add",
+                  tableId: "99000000-0000-4000-8000-000000000002",
+                  kind: "create",
+                  access: "owner",
+                  readOnly: false,
+                  fieldIds: ["99000000-0000-4000-8000-000000000004"],
+                },
+                {
+                  operationId: "99000000-0000-4000-8000-000000000006",
+                  name: "listItems",
+                  label: "List",
+                  tableId: "99000000-0000-4000-8000-000000000002",
+                  kind: "read",
+                  access: "owner",
+                  readOnly: true,
+                  fieldIds: [
+                    "99000000-0000-4000-8000-000000000003",
+                    "99000000-0000-4000-8000-000000000004",
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      });
+      const rev = (
+        createRes.structuredContent as { revision: { revision: number; revisionSha256: string } }
+      ).revision;
+      const [w1, w2] = await Promise.all([
+        client.callTool({
+          name: "dohc_dataset",
+          arguments: {
+            request: {
+              action: "invoke",
+              workspaceId: "ws-everyday",
+              datasetPath: "conc/dataset.json",
+              operationId: "99000000-0000-4000-8000-000000000005",
+              revision: rev.revision,
+              revisionSha256: rev.revisionSha256,
+              input: { values: { "99000000-0000-4000-8000-000000000004": "First" } },
+              idempotencyKey: "k1",
+            },
+          },
+        }),
+        client.callTool({
+          name: "dohc_dataset",
+          arguments: {
+            request: {
+              action: "invoke",
+              workspaceId: "ws-everyday",
+              datasetPath: "conc/dataset.json",
+              operationId: "99000000-0000-4000-8000-000000000005",
+              revision: rev.revision,
+              revisionSha256: rev.revisionSha256,
+              input: { values: { "99000000-0000-4000-8000-000000000004": "Second" } },
+              idempotencyKey: "k2",
+            },
+          },
+        }),
+      ]);
+      expect(w1.isError).not.toBe(true);
+      expect(w2.isError).not.toBe(true);
+      const listed = await client.callTool({
+        name: "dohc_dataset",
+        arguments: {
+          request: {
+            action: "invoke",
+            workspaceId: "ws-everyday",
+            datasetPath: "conc/dataset.json",
+            operationId: "99000000-0000-4000-8000-000000000006",
+            revision: rev.revision,
+            revisionSha256: rev.revisionSha256,
+            input: {},
+            idempotencyKey: "k3",
+          },
+        },
+      });
+      const listedText = JSON.stringify(listed.structuredContent);
+      expect(listedText).toContain("First");
+      expect(listedText).toContain("Second");
+
+      await client.close();
+      await server.close();
+      expect(await readFile(unansweredLog, "utf8").catch(() => "")).toBe("");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails the finance, booking, and connected-form graders on broken implementations", async () => {
+    const finance = EVERYDAY_CASES.find((c) => c.id === "everyday-finance-health-tracker")!;
+    const financeSolved = await replay(finance, "solution");
+    const spoofedFinanceRun: RunRecord = {
+      ...financeSolved.run,
+      calls: financeSolved.run.calls.map((call) => {
+        const req = call.args.request as Record<string, unknown> | undefined;
+        if (call.tool === "dohc_dataset" && req?.action === "invoke") {
+          return {
+            ...call,
+            args: {
+              request: {
+                ...req,
+                input: {
+                  values:
+                    req.operationId === "a1000000-0000-4000-8000-000000000013"
+                      ? {
+                          "a1000000-0000-4000-8000-000000000004": "2026-11-22",
+                          "a1000000-0000-4000-8000-000000000005": "Seafood",
+                          "a1000000-0000-4000-8000-000000000006": 118.5,
+                          "a1000000-0000-4000-8000-000000000007": "Seafood 118.50",
+                        }
+                      : {
+                          "a1000000-0000-4000-8000-000000000010": "2026-11-22",
+                          "a1000000-0000-4000-8000-000000000011": 17.5,
+                          "a1000000-0000-4000-8000-000000000012": 400,
+                        },
+                },
+              },
+            },
+          };
+        }
+        return call;
+      }),
+    };
+    const financeChecks = await grade(finance.expect, spoofedFinanceRun, finance.gradeRun);
+    expect(financeChecks.some((c) => !c.pass && c.name.includes("expense"))).toBe(true);
+    expect(financeChecks.some((c) => !c.pass && c.name.includes("check-in"))).toBe(true);
+
+    const swappedCheckinRun: RunRecord = {
+      ...financeSolved.run,
+      calls: financeSolved.run.calls.map((call) => {
+        const req = call.args.request as Record<string, unknown> | undefined;
+        if (
+          call.tool === "dohc_dataset" &&
+          req?.action === "invoke" &&
+          req.operationId === "a1000000-0000-4000-8000-000000000015"
+        ) {
+          return {
+            ...call,
+            args: {
+              request: {
+                ...req,
+                input: {
+                  values: {
+                    "a1000000-0000-4000-8000-000000000010": "2026-11-22",
+                    "a1000000-0000-4000-8000-000000000011": 40,
+                    "a1000000-0000-4000-8000-000000000012": 7.5,
+                  },
+                },
+              },
+            },
+          };
+        }
+        return call;
+      }),
+    };
+    const swappedChecks = await grade(finance.expect, swappedCheckinRun, finance.gradeRun);
+    expect(swappedChecks.some((c) => !c.pass && c.name.includes("check-in"))).toBe(true);
+
+    const booking = EVERYDAY_CASES.find((c) => c.id === "everyday-booking-capacity-app")!;
+    const bookingSolved = await replay(booking, "solution");
+    const brokenBookingRun: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "workshop/backend.ts": `globalThis.operations = {
+  bookSeat(ctx, input) {
+    const taken = Number(ctx.db.query("SELECT COALESCE(SUM(seats), 0) AS t FROM bookings")[0].t);
+    const seats = Number(input?.seats ?? 1);
+    if (taken > 0 && taken + seats > 8) ctx.refuse("full", "Full");
+    ctx.db.execute("INSERT INTO bookings(id, name, seats) VALUES(?, ?, ?)", [ctx.requestId, String(input?.name ?? ""), seats]);
+    return { id: ctx.requestId };
+  },
+  listBookings(ctx) {
+    return { rows: ctx.db.query("SELECT id, name, seats FROM bookings") };
+  },
+};`,
+      },
+    };
+    const bookingChecks = await grade(booking.expect, brokenBookingRun, booking.gradeRun);
+    expect(bookingChecks.some((c) => !c.pass && c.name.includes("8-seat capacity"))).toBe(true);
+
+    const stubBookingFrontendRun: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/index.html": "<!doctype html><h1>Pottery Workshop</h1>\n",
+        "apps/booking/app.publish.json": JSON.stringify(
+          {
+            ...JSON.parse(bookingSolved.run.files["apps/booking/app.publish.json"]!),
+            inputs: ["index.html"],
+          },
+          null,
+          2,
+        ),
+      },
+    };
+    delete stubBookingFrontendRun.files["apps/booking/app.js"];
+    const stubBookingChecks = await grade(booking.expect, stubBookingFrontendRun, booking.gradeRun);
+    expect(stubBookingChecks.some((c) => !c.pass && c.name.includes("booking controls"))).toBe(
+      true,
+    );
+
+    const unlistedScriptBookingRun: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/app.publish.json": JSON.stringify(
+          {
+            ...JSON.parse(bookingSolved.run.files["apps/booking/app.publish.json"]!),
+            inputs: ["index.html"],
+          },
+          null,
+          2,
+        ),
+      },
+    };
+    const unlistedScriptChecks = await grade(
+      booking.expect,
+      unlistedScriptBookingRun,
+      booking.gradeRun,
+    );
+    expect(
+      unlistedScriptChecks.some(
+        (c) => !c.pass && c.detail?.includes("not listed in app.publish.json"),
+      ),
+    ).toBe(true);
+
+    const migrate = EVERYDAY_CASES.find((c) => c.id === "everyday-add-field-and-migrate")!;
+    const renamedInsteadOfAddField = await replay(migrate, "solution", async (callTool) => {
+      const described = (await callTool("dohc_dataset", {
+        request: {
+          action: "describe",
+          workspaceId: "ws-everyday",
+          datasetPath: "clients/dataset.json",
+        },
+      })) as { dataset: { revision: number; revisionSha256: string } };
+      const prep = (await callTool("dohc_dataset", {
+        request: {
+          action: "prepareSchemaChange",
+          workspaceId: "ws-everyday",
+          datasetPath: "clients/dataset.json",
+          revision: described.dataset.revision,
+          revisionSha256: described.dataset.revisionSha256,
+          change: { kind: "renameCollection", name: "Clients Renamed" },
+        },
+      })) as {
+        preparationId: string;
+        approvalDigest: string;
+        revision: { revision: number; revisionSha256: string };
+      };
+      await callTool("dohc_dataset", {
+        request: {
+          action: "approveMigration",
+          workspaceId: "ws-everyday",
+          preparationId: prep.preparationId,
+          revisionSha256: prep.revision.revisionSha256,
+          approvalDigest: prep.approvalDigest,
+        },
+      });
+      await callTool("dohc_write_file", {
+        path: "apps/client-portal/app.publish.json",
+        content: JSON.stringify(
+          {
+            version: 1,
+            entryPath: "index.html",
+            inputs: ["index.html"],
+            packageMap: {},
+            dataset: {
+              kind: "dataset",
+              datasetPath: "clients/dataset.json",
+              revision: prep.revision.revision,
+              revisionSha256: prep.revision.revisionSha256,
+              operationIds: ["c1000000-0000-4000-8000-000000000006"],
+            },
+          },
+          null,
+          2,
+        ),
+      });
+      const appPrep = (await callTool("dohc_publish_app", {
+        request: {
+          action: "prepareLocal",
+          workspaceId: "ws-everyday",
+          appRoot: "apps/client-portal",
+        },
+      })) as { approvalId: string; candidateDigest: string };
+      await callTool("dohc_publish_app", {
+        request: {
+          action: "approve",
+          workspaceId: "ws-everyday",
+          approvalId: appPrep.approvalId,
+          candidateDigest: appPrep.candidateDigest,
+        },
+      });
+    });
+    const renamedChecks = await grade(
+      migrate.expect,
+      renamedInsteadOfAddField.run,
+      migrate.gradeRun,
+    );
+    expect(renamedChecks.some((c) => !c.pass && c.name.includes('"Tier"'))).toBe(true);
+    expect(renamedChecks.some((c) => !c.pass && c.name.includes("3 seeded client records"))).toBe(
+      true,
+    );
+
+    const form = EVERYDAY_CASES.find((c) => c.id === "everyday-connected-form-relations")!;
+    const formSolved = await replay(form, "solution");
+    const bogusManifest = JSON.parse(formSolved.run.files["apps/signup-form/app.publish.json"]!);
+    bogusManifest.dataset.operationIds = [
+      "e2000000-0000-4000-8000-000000000011",
+      "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    ];
+    const bogusFormRun: RunRecord = {
+      ...formSolved.run,
+      files: {
+        ...formSolved.run.files,
+        "apps/signup-form/app.publish.json": JSON.stringify(bogusManifest, null, 2),
+      },
+    };
+    const formChecks = await grade(form.expect, bogusFormRun, form.gradeRun);
+    expect(formChecks.some((c) => !c.pass && c.detail?.includes("not in approved"))).toBe(true);
+
+    const staleManifest = JSON.parse(formSolved.run.files["apps/signup-form/app.publish.json"]!);
+    staleManifest.dataset.revision = 1;
+    const staleFormRun: RunRecord = {
+      ...formSolved.run,
+      files: {
+        ...formSolved.run.files,
+        "apps/signup-form/app.publish.json": JSON.stringify(staleManifest, null, 2),
+      },
+    };
+    const staleChecks = await grade(form.expect, staleFormRun, form.gradeRun);
+    expect(staleChecks.some((c) => !c.pass && c.detail?.includes("stale revision"))).toBe(true);
+  });
+
+  it("keeps public skill automations.yaml examples valid under parseAutomationsFile", async () => {
+    const docPath = fileURLToPath(
+      new URL("../../../skills/dohc/references/automations.md", import.meta.url),
+    );
+    const markdown = await readFile(docPath, "utf8");
+    const blocks = [...markdown.matchAll(/```yaml\r?\n([\s\S]*?)```/g)].map((m) => m[1]!);
+    expect(blocks.length).toBeGreaterThanOrEqual(2);
+    for (const block of blocks) {
+      const parsed = parseAutomationsFile(block);
+      expect(parsed.status).toBe("read");
+      if (parsed.status === "read") {
+        expect(parsed.entries.length).toBeGreaterThan(0);
+        for (const entry of parsed.entries) {
+          expect(entry.status, block).toBe("valid");
+        }
+      }
+    }
+  });
 });

@@ -12,8 +12,8 @@ import {
 } from "./dataset";
 import { generateDatasetOperations } from "./datasetOperations";
 
-function fail(): never {
-  throw new Error("Invalid dataset metadata.");
+function fail(reason?: string): never {
+  throw new Error(reason ? `Invalid dataset metadata: ${reason}` : "Invalid dataset metadata.");
 }
 
 /** Only hosts reading artifact-verified catalog revisions may supply this lookup. */
@@ -38,17 +38,21 @@ export function parseDatasetBinding(
 ): AppDatasetBinding {
   const approved = parseDatasetRevision(approvedRevision);
   const result = parseDatasetBindingReference(value);
-  if (
-    result.datasetId !== approved.datasetId ||
-    result.revision !== approved.revision ||
-    result.revisionSha256 !== approved.revisionSha256
-  )
-    fail();
+  if (result.datasetId !== approved.datasetId)
+    fail("dataset binding datasetId does not match the approved Collection.");
+  if (result.revision !== approved.revision || result.revisionSha256 !== approved.revisionSha256)
+    fail(
+      `dataset binding revision (${result.revision}) or revisionSha256 does not match the approved revision (${approved.revision}). Run describe to read the current revision and revisionSha256, update app.publish.json, and prepare again.`,
+    );
   const operations = new Set(
     approved.definition.operations.map((operation) => operation.operationId),
   );
-  if (result.operationIds.some((id) => !operations.has(id))) fail();
-  if (result.linkReads?.length && !hasGeneratedDatasetRevision(approved, lookup)) fail();
+  if (result.operationIds.some((id) => !operations.has(id)))
+    fail(
+      "dataset binding operationIds contains an operationId that is not in the approved revision. Run describe to list valid operationIds.",
+    );
+  if (result.linkReads?.length && !hasGeneratedDatasetRevision(approved, lookup))
+    fail("dataset binding linkReads is only allowed for generated Collection revisions.");
   for (const read of result.linkReads ?? []) {
     const operation = approved.definition.operations.find(
       (operation) => operation.operationId === read.operationId,
@@ -56,7 +60,8 @@ export function parseDatasetBinding(
     const table = approved.definition.tables.find((table) => table.tableId === operation?.tableId);
     const primary =
       table && datasetColumnFields(table).find((field) => field.sqlColumn === table.primaryKey);
-    if (!primary || !read.fieldIds.includes(primary.fieldId)) fail();
+    if (!primary || !read.fieldIds.includes(primary.fieldId))
+      fail("dataset binding linkReads must include the table's primary key fieldId.");
     if (
       !operation ||
       operation.kind !== "read" ||
@@ -65,7 +70,9 @@ export function parseDatasetBinding(
       read.fieldIds.length !== operation.fieldIds.length ||
       read.fieldIds.some((id) => !operation.fieldIds.includes(id))
     )
-      fail();
+      fail(
+        'dataset binding linkReads must reference a non-owner read-only "read" operation and list its exact fieldIds.',
+      );
   }
   for (const restriction of result.createFields ?? []) {
     const operation = approved.definition.operations.find(
@@ -76,7 +83,9 @@ export function parseDatasetBinding(
       operation.kind !== "create" ||
       restriction.fieldIds.some((id) => !operation.fieldIds.includes(id))
     )
-      fail();
+      fail(
+        'dataset binding createFields must reference a "create" operation and only list fieldIds declared by that operation.',
+      );
   }
   return result;
 }
@@ -128,7 +137,7 @@ export function displayAppDatasetCapability(
     capability.revision !== approved.revision ||
     capability.revisionSha256 !== approved.revisionSha256
   )
-    fail();
+    fail("capability revision does not match the approved revision.");
   const shown = {
     ...capability,
     operations: capability.operations.map((operation) => {
@@ -138,7 +147,7 @@ export function displayAppDatasetCapability(
       const table = approved.definition.tables.find(
         (candidate) => candidate.tableId === declared?.tableId,
       );
-      if (!declared || !table) fail();
+      if (!declared || !table) fail("capability operation is not in the approved revision.");
       if (!generated)
         return {
           ...operation,
@@ -187,7 +196,8 @@ export function verifyAppDatasetCapability(
   const parsed = parseAppDatasetCapability(value);
   const { operations: _, name: _name, ...binding } = parsed;
   const expected = resolveAppDatasetCapability(binding, approvedRevision, lookup);
-  if (JSON.stringify(parsed) !== JSON.stringify(expected)) fail();
+  if (JSON.stringify(parsed) !== JSON.stringify(expected))
+    fail("capability metadata does not match the approved revision.");
   return expected;
 }
 

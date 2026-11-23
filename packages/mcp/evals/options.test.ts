@@ -5,6 +5,8 @@ describe("eval command line", () => {
   it("reads every flag, and defaults the rest", () => {
     expect(readOptions(["--out", "runs/a"])).toEqual({
       out: "runs/a",
+      harness: "claude",
+      suite: "tool-use",
       model: "claude-sonnet-5-5",
       samples: 2,
       concurrency: 2,
@@ -12,10 +14,20 @@ describe("eval command line", () => {
       dryRun: false,
       context: false,
     });
+    expect(readOptions(["--out", "runs/c", "--harness", "codex"])).toMatchObject({
+      harness: "codex",
+      model: "gpt-6.2-sol",
+    });
     expect(
       readOptions([
         "--out",
         "runs/b",
+        "--harness",
+        "claude",
+        "--suite",
+        "everyday",
+        "--skill",
+        "skills/dohc/SKILL.md",
         "--model",
         "claude-haiku-5-5",
         "--case",
@@ -32,6 +44,9 @@ describe("eval command line", () => {
       ]),
     ).toEqual({
       out: "runs/b",
+      harness: "claude",
+      suite: "everyday",
+      skill: "skills/dohc/SKILL.md",
       model: "claude-haiku-5-5",
       cases: ["one", "two"],
       samples: 3,
@@ -54,6 +69,8 @@ describe("eval command line", () => {
       ["--out", "runs/a", "--concurrency", "1.5"],
       "--concurrency takes a whole number of 1 or more",
     ],
+    [["--out", "runs/a", "--suite", "other"], "--suite takes tool-use, everyday, or all"],
+    [["--out", "runs/a", "--skill"], "--skill takes a value"],
     [["--out", "runs/a", "--sample", "1"], "unknown argument '--sample'"],
     [["runs/a"], "unknown argument 'runs/a'"],
   ])("refuses %j", (argv, message) => {

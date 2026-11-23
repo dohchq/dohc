@@ -1199,3 +1199,39 @@ it.each([
 ])("locates the base folder of %s", (schemaPath, folder) => {
   expect(datasetBaseFolder({ schemaPath })).toBe(folder);
 });
+
+describe("self-remedying dataset validation errors", () => {
+  it("names the exact broken field and rule in dataset definitions and bindings", () => {
+    const readOnlyCreate = definition();
+    readOnlyCreate.operations[0]!.readOnly = true;
+    expect(() => parseDatasetDefinition(readOnlyCreate)).toThrow(
+      /operations\[0\] \(submit\): readOnly must be false when kind is "create"/,
+    );
+
+    const editPrimary = definition();
+    editPrimary.operations[0]!.kind = "edit";
+    editPrimary.operations[0]!.fieldIds = [id(3)];
+    expect(() => parseDatasetDefinition(editPrimary)).toThrow(
+      /operations\[0\] \(submit\)\.fieldIds must not include primaryKey column "id" on an "edit" operation/,
+    );
+
+    const createGenerated = definition();
+    column(createGenerated.tables[0]!.fields[0]).generated = "record-id";
+    createGenerated.operations[0]!.fieldIds = [id(3), id(4)];
+    expect(() => parseDatasetDefinition(createGenerated)).toThrow(
+      /operations\[0\] \(submit\)\.fieldIds must not include generated record-id field "Record ID" on a "create" operation/,
+    );
+
+    expect(() => parseDatasetDefinition({ ...definition(), unexpectedKey: true })).toThrow(
+      /unknown field\(s\): "unexpectedKey".*Allowed fields:/,
+    );
+
+    const approved = revision();
+    expect(() => parseDatasetBinding({ ...binding(approved), revision: 2 }, approved)).toThrow(
+      /dataset binding revision \(2\) or revisionSha256 does not match the approved revision \(1\)/,
+    );
+    expect(() =>
+      parseDatasetBinding({ ...binding(approved), operationIds: [id(99)] }, approved),
+    ).toThrow(/operationId that is not in the approved revision/);
+  });
+});
