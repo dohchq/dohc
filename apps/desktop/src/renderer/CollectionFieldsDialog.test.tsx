@@ -252,7 +252,9 @@ it("keeps a label-only review short and does not demand a destructive-change con
   await screen.findByText("People · Full name");
   expect(screen.queryByRole("checkbox", { name: /reviewed this change/ })).toBeNull();
   expect(screen.queryByText("Show migration SQL")).toBeNull();
-  expect(screen.getByText(/Shared apps and access stay unchanged/)).toBeTruthy();
+  expect(
+    screen.getByText(/Existing shared apps keep working\. Access stays unchanged\./),
+  ).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Approve change" }));
   await waitFor(() => expect(props.onApprove).toHaveBeenCalledOnce());
 });

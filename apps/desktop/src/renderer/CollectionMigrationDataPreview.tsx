@@ -107,6 +107,7 @@ export interface MigrationClearedColumn {
   count: number;
   renamedTo: string | null;
   atLeast?: boolean;
+  fieldName?: string;
 }
 
 export interface MigrationReplacedColumn {
@@ -251,8 +252,59 @@ export function summarizeMigrationPreview(
     updatedRows += updated;
     deletedRows += table.deletedRows;
 
+    const reusedRenamedColumns = new Set<string>();
+    if (beforeDef && afterDef) {
+      const afterFields = datasetColumnFields(afterDef);
+      const keptRows = Math.max(0, table.beforeRows - table.deletedRows);
+      for (const prior of datasetColumnFields(beforeDef)) {
+        const nextSameId = afterFields.find((field) => field.fieldId === prior.fieldId);
+        if (!nextSameId || nextSameId.sqlColumn === prior.sqlColumn) continue;
+        const reusedByOtherField = afterFields.some(
+          (field) => field.sqlColumn === prior.sqlColumn && field.fieldId !== prior.fieldId,
+        );
+        if (!reusedByOtherField) continue;
+        const beforeCount = Object.hasOwn(table.beforeValues, prior.sqlColumn)
+          ? (table.beforeValues[prior.sqlColumn] ?? 0)
+          : 0;
+        const possibleKept = Math.min(beforeCount, keptRows);
+        if (possibleKept <= 0) continue;
+        reusedRenamedColumns.add(prior.sqlColumn);
+        const clearedCount = Object.hasOwn(table.clearedValues, prior.sqlColumn)
+          ? (table.clearedValues[prior.sqlColumn] ?? 0)
+          : 0;
+        const guaranteedKept = Math.max(clearedCount, beforeCount - table.deletedRows);
+        const afterRenamedCount = Object.hasOwn(table.afterValues, nextSameId.sqlColumn)
+          ? (table.afterValues[nextSameId.sqlColumn] ?? 0)
+          : 0;
+        const shortfall = Math.max(0, guaranteedKept - afterRenamedCount);
+        const unverified = Math.max(0, possibleKept - shortfall);
+        if (shortfall > 0) {
+          clearedColumns.push({
+            table: table.table,
+            column: prior.sqlColumn,
+            count: shortfall,
+            renamedTo: null,
+            atLeast: true,
+            fieldName: nextSameId.name,
+          });
+          clearedValues += shortfall;
+          clearedValuesAtLeast = true;
+        }
+        if (unverified > 0) {
+          clearedColumns.push({
+            table: table.table,
+            column: prior.sqlColumn,
+            count: unverified,
+            renamedTo: nextSameId.sqlColumn,
+            fieldName: nextSameId.name,
+          });
+          renamedColumnValues += unverified;
+        }
+      }
+    }
+
     for (const [column, count] of Object.entries(table.clearedValues)) {
-      if (count <= 0) continue;
+      if (count <= 0 || reusedRenamedColumns.has(column)) continue;
       if (Object.hasOwn(table.afterValues, column)) {
         clearedColumns.push({ table: table.table, column, count, renamedTo: null });
         clearedValues += count;
@@ -286,7 +338,7 @@ export function summarizeMigrationPreview(
       }
     }
     for (const [column, count] of Object.entries(table.replacedValues ?? {})) {
-      if (count <= 0) continue;
+      if (count <= 0 || reusedRenamedColumns.has(column)) continue;
       replacedColumns.push({ table: table.table, column, count });
       replacedValues += count;
     }
@@ -466,11 +518,19 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
     props.revision,
   );
   const multiTable = props.preview.tables.length > 1;
-  const formatClearedItem = (table: string, column: string, count: number, atLeast?: boolean) =>
-    `${multiTable ? `${tableLabel(table)} · ` : ""}${fieldLabel(table, column)} (${atLeast ? `at least ${count}` : count})`;
+  const formatClearedItem = (
+    table: string,
+    column: string,
+    count: number,
+    atLeast?: boolean,
+    fieldName?: string,
+  ) =>
+    `${multiTable ? `${tableLabel(table)} · ` : ""}${fieldName ?? fieldLabel(table, column)} (${atLeast ? `at least ${count}` : count})`;
   const confirmedClearedLabels = totals.clearedColumns
     .filter((item) => item.renamedTo === null)
-    .map((item) => formatClearedItem(item.table, item.column, item.count, item.atLeast));
+    .map((item) =>
+      formatClearedItem(item.table, item.column, item.count, item.atLeast, item.fieldName),
+    );
   const replacedLabels = totals.replacedColumns.map((item) =>
     formatClearedItem(item.table, item.column, item.count),
   );
@@ -516,7 +576,7 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
           {renamedColumnItems.map((item) => (
             <p key={`${item.table}:${item.column}:${item.renamedTo}`} className="m-0 text-muted">
               {multiTable ? `${tableLabel(item.table)} · ` : ""}
-              {fieldLabel(item.table, item.column)} renames column{" "}
+              {item.fieldName ?? fieldLabel(item.table, item.column)} renames column{" "}
               <code className="font-mono text-ink">{item.column}</code> to{" "}
               <code className="font-mono text-ink">{item.renamedTo}</code> ({item.count} unverified{" "}
               {item.count === 1 ? "value" : "values"}). Check the records below to confirm none were

@@ -533,6 +533,60 @@ it("shows replaced values in the summary banner and treats -0 and 0 as changed",
   expect(screen.getByText("-0.0").closest("details")).toBeNull();
   expect(screen.getByText("0.0").closest("details")).toBeNull();
 });
+it("reports renamed-field value loss even when a different field reuses the old SQL column name", () => {
+  const props = fixture();
+  props.previousRevision = {
+    definition: {
+      tables: [
+        {
+          tableId: "t-notes",
+          sqlName: "notes",
+          name: "Notes",
+          primaryKey: "id",
+          fields: [
+            { fieldId: "f-id", sqlColumn: "id", name: "ID" },
+            { fieldId: "f-body", sqlColumn: "body", name: "Body" },
+          ],
+        },
+      ],
+    },
+  } as DatasetRevision;
+  props.revision = {
+    definition: {
+      tables: [
+        {
+          tableId: "t-notes",
+          sqlName: "notes",
+          name: "Notes",
+          primaryKey: "id",
+          fields: [
+            { fieldId: "f-id", sqlColumn: "id", name: "ID" },
+            { fieldId: "f-body", sqlColumn: "summary", name: "Body" },
+            { fieldId: "f-new", sqlColumn: "body", name: "Tag" },
+          ],
+        },
+      ],
+    },
+  } as DatasetRevision;
+  props.preview.tables = [
+    {
+      table: "notes",
+      beforeRows: 3,
+      afterRows: 3,
+      changedRows: 3,
+      deletedRows: 0,
+      beforeValues: { id: 3, body: 3 },
+      afterValues: { id: 3, body: 3, summary: 1 },
+      clearedValues: { id: 0, body: 0 },
+      replacedValues: { id: 0, body: 0 },
+    },
+  ];
+  props.preview.firstPage = { changes: [], nextCursor: null };
+  render(<CollectionMigrationDataPreview {...props} />);
+  const summary = screen.getByTestId("migration-preview-summary").textContent;
+  expect(summary).toContain("Clears existing values in Body (at least 2).");
+  expect(summary).toContain("Body renames column body to summary (1 unverified value)");
+});
 it("rejects a cursor loop and reports through the shell without discarding the current page", async () => {
   const props = fixture();
   props.onLoad = vi.fn(async () => ({
