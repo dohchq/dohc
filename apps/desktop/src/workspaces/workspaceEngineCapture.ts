@@ -1,5 +1,5 @@
 import type { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
-import type { AccessRuleHold, CaptureFileHold } from "../ipc/bridgeContract";
+import type { CaptureFileHold } from "../ipc/bridgeContract";
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import { resolveEngineFileTargets } from "./resolveEngineFiles";
@@ -39,7 +39,6 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // The path floor is a cross-process security contract with a Rust twin, not
 // engine state — the same reason workspaceFiles/workspaceSearch
 // and the relay's shareFilter already read it from here.
-import { isAccessRulePath } from "@dohc/security-contract/access-rules";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
   VersionedTextStoreError,
@@ -47,7 +46,6 @@ import {
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
   type MomentWriteAuthor,
-  type AccessRuleMergeRefusal,
   type MomentMetadata,
   type SecretFileComparePage,
   type SecretFileMoment,
@@ -256,8 +254,6 @@ function moveRefusal(error: unknown, path: string, folder: boolean): Error | nul
 }
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
-// No file event says a program let go of a rule file, so while one holds it the poll comes sooner.
-export const LOCKED_ACCESS_RULE_POLL_MS = 1_000;
 
 export async function probeEngineStoreRefusal(
   workspace: AttachedEngineWorkspace,
@@ -427,6 +423,7 @@ export interface AuthoredPathChanges {
   // and any head History had for it is deleted. Refuses a file that is not a
   // regular file.
   recordDisk(path: string, files: readonly string[]): Promise<string[]>;
+  orderFilePaths?(paths: string[], deleting: boolean): Promise<string[]>;
   readDuplicate(operationId: string, path: string): Promise<{ path: string } | null>;
   hasPath(path: string): Promise<boolean>;
   duplicateFile(fromPath: string, toPath: string): Promise<{ path: string; materialized: boolean }>;
@@ -577,9 +574,6 @@ export interface WorkspaceEngineCapture {
   beginShutdown(): void;
   // Starts the daemon capture health poll on the capture chain.
   start(): void;
-  // Holds read outside the poll, such as after an access rule decision. One
-  // that another program holds brings the poll's next look forward.
-  noteHeldAccessRules(holds: readonly AccessRuleHold[]): void;
   noteWriteDeferred(path: string): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
   // non-throwing: the watcher's record chain never waits on the engine.
@@ -1031,7 +1025,6 @@ export interface WorkspaceEngineCaptureOptions {
   onRetainedCopies?: (summary: RetainedCopiesSummary) => void;
   onHeldFiles?: (files: CaptureFileHold[]) => void;
   onOutsideChanges?: (changes: OutsideChange[]) => void;
-  onHeldAccessRules?: (holds: AccessRuleHold[]) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -1384,83 +1377,6 @@ export class MergeStoppedPartwayError extends Error {
   constructor(cause: unknown) {
     super(cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause), { cause });
     this.name = "MergeStoppedPartwayError";
-  }
-}
-
-const RULE_REFUSAL_CAUSE: Record<AccessRuleMergeRefusal, string> = {
-  widens:
-    "In any order, these access rule changes would briefly give someone more access than Main gives them both before and after the merge.",
-  "too-many": "This version changes too many related access rules for dohc to check together.",
-  "folded-names":
-    "These access rules are in folders whose names dohc counts as the same, such as Team and team. dohc can order their changes only when the merge renames such a folder, keeps its access rules the same, and changes no other access rule above or inside it.",
-};
-
-// What to do before the merge: change the rules in Main a little at a time,
-// or, for folders whose names count as the same, use one spelling.
-const RULE_REFUSAL_NEXT: Record<AccessRuleMergeRefusal, string> = {
-  widens:
-    "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again.",
-  "too-many":
-    "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again.",
-  "folded-names":
-    "Nothing was merged. Use one spelling for each folder with access rules in Main and this version, then merge again.",
-};
-
-// The engine could not order a merge's rule changes so that none gives
-// anyone more than Main gives them before and after the merge. The first
-// line is the words; the cause and the rules follow, for Details.
-export class MergeWidensAccessError extends Error {
-  constructor(
-    readonly reason: AccessRuleMergeRefusal,
-    readonly rules: readonly string[],
-    stage: "before" | "during" = "before",
-  ) {
-    const words =
-      stage === "before"
-        ? RULE_REFUSAL_NEXT[reason]
-        : "Main or this version changed during the merge, so dohc stopped it. Merge again.";
-    super([words, RULE_REFUSAL_CAUSE[reason], ...rules].join("\n"));
-    this.name = "MergeWidensAccessError";
-  }
-}
-
-// A rule conflicted partway through a merge, and the rule changes after it
-// can no longer be made safely while Main keeps its copy. Or the engine
-// refused every order while a rule had an open conflict: the one refusal
-// with a known way out, though not proved to be the cause. The first line
-// is the words; the rules that could not be ordered follow, for Details.
-export class MergeRuleConflictError extends Error {
-  constructor(
-    readonly path: string,
-    readonly rules: readonly string[],
-    caused = true,
-  ) {
-    super(
-      [
-        caused
-          ? `dohc stopped the merge at a conflict in ${path}. Resolve that conflict, then merge again.`
-          : `dohc stopped the merge. ${path} has an open conflict. Resolve that conflict, then merge again.`,
-        ...rules,
-      ].join("\n"),
-    );
-    this.name = "MergeRuleConflictError";
-  }
-}
-
-// How many times one rule's merge plans its order again when the engine
-// refuses it, before the merge gives up.
-const RULE_ORDER_TRIES = 3;
-
-// The engine refused every order planned for a rule's merge. Main or the
-// version may have changed under each, or the engine's check ran out of
-// work, and dohc can't tell which, so the words name no cause. The merge's
-// result says whether files merged before it.
-export class MergeRuleOrderUnconfirmedError extends Error {
-  constructor() {
-    super(
-      "dohc could not confirm the order of this version's access rule changes against Main, so it stopped the merge. Merge again.",
-    );
-    this.name = "MergeRuleOrderUnconfirmedError";
   }
 }
 
@@ -1956,6 +1872,19 @@ function policyTracksPath(path: string, policy: WorkspaceEnginePolicySnapshot): 
 // deliberately not consulted: the floor can never be unmarked by.dohc files.
 function isSecretPath(path: string): boolean {
   return classifyEngineFilePath(path).kind === "secret";
+}
+
+async function orderFileSteps(
+  engine: CaptureVersionedTextStore,
+  steps: { path: string; delete: boolean }[],
+): Promise<string[]> {
+  if (
+    engine.orderFileSteps &&
+    steps.some(({ path }) => path.split("/").at(-1)?.toLowerCase() === ".dohc-access")
+  ) {
+    return engine.orderFileSteps(steps);
+  }
+  return steps.map(({ path }) => path);
 }
 
 function assertEngineWritablePath(
@@ -4575,18 +4504,6 @@ export function createWorkspaceEngineCapture(
     return policy;
   }
 
-  // deleteIfTracked and writeIfChanged record what is on disk, which the
-  // owner did not choose, as a deliberate write. An access rule changed
-  // outside dohc reaches History through capture alone, which holds a
-  // widening until the owner decides in Notices. The engine can't tell these
-  // records from an authored write, so they refuse a rule here.
-  function refuseOutsideRuleChange(path: string): void {
-    if (!isAccessRulePath(path)) return;
-    throw new Error(
-      `History has not recorded the change to ${path} made outside dohc. If Notices lists it, decide on it there, then try again.`,
-    );
-  }
-
   async function deleteIfTracked(
     engine: Pick<VersionedTextStore, "readTextFile" | "deleteTextFile">,
     versionId: string,
@@ -4597,7 +4514,6 @@ export function createWorkspaceEngineCapture(
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     if (!current) return false;
-    refuseOutsideRuleChange(path);
     await engine.deleteTextFile({
       workspaceId,
       versionId,
@@ -4627,7 +4543,6 @@ export function createWorkspaceEngineCapture(
       if (current?.contentKind === "binary" && current.sha256 === disk.sha256) {
         return false;
       }
-      refuseOutsideRuleChange(path);
       // A tracked text file whose bytes stop round-tripping as UTF-8 keeps its
       // object identity; the moment says so honestly instead of pretending it
       // was an ordinary update.
@@ -4657,7 +4572,6 @@ export function createWorkspaceEngineCapture(
     ) {
       return false;
     }
-    refuseOutsideRuleChange(path);
     // The mirror transition: a binary-tracked path whose content is UTF-8
     // text again continues as the same object with an honest moment.
     const becameText = current?.contentKind === "binary";
@@ -5139,24 +5053,14 @@ export function createWorkspaceEngineCapture(
     }
   }
 
-  function scheduleDaemonCaptureHealth(ms: number): void {
-    if (daemonCaptureHealthTimer !== null) clearTimeout(daemonCaptureHealthTimer);
+  function pollDaemonCaptureHealth(): void {
+    if (stopped || daemonCaptureHealthTimer !== null) return;
     const timer = setTimeout(() => {
       if (daemonCaptureHealthTimer === timer) daemonCaptureHealthTimer = null;
       pollDaemonCaptureHealth();
-    }, ms);
+    }, DAEMON_CAPTURE_HEALTH_POLL_MS);
     daemonCaptureHealthTimer = timer;
     daemonCaptureHealthTimer.unref?.();
-  }
-
-  function lookAgainIfLocked(holds: readonly AccessRuleHold[] | undefined): void {
-    if (!stopped && holds?.some((hold) => hold.unreadable === "locked"))
-      scheduleDaemonCaptureHealth(LOCKED_ACCESS_RULE_POLL_MS);
-  }
-
-  function pollDaemonCaptureHealth(): void {
-    if (stopped || daemonCaptureHealthTimer !== null) return;
-    scheduleDaemonCaptureHealth(DAEMON_CAPTURE_HEALTH_POLL_MS);
     if (daemonCaptureHealthQueued) return;
     daemonCaptureHealthQueued = true;
     enqueue("daemon capture health", () =>
@@ -5175,8 +5079,6 @@ export function createWorkspaceEngineCapture(
           options.onSecretKeyUnavailable?.(status.secretKeyUnavailable ?? null);
           options.onHeldFiles?.(status.heldFiles);
           options.onOutsideChanges?.(outsideChangesOf(status));
-          options.onHeldAccessRules?.(status.heldAccessRules);
-          lookAgainIfLocked(status.heldAccessRules);
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
         const healthy = captureWorks(status);
@@ -6863,10 +6765,6 @@ export function createWorkspaceEngineCapture(
       pollDaemonCaptureHealth();
     },
 
-    noteHeldAccessRules(holds) {
-      lookAgainIfLocked(holds);
-    },
-
     noteWriteDeferred(path) {
       if (!stopped && !shuttingDown) liveYDocSessions.get(path)?.changedOutside();
     },
@@ -7353,7 +7251,10 @@ export function createWorkspaceEngineCapture(
                   const single = files.length === 1 ? await readable(files[0]!) : undefined;
                   if (!single) for (const file of files) await readable(file);
                   const held: string[] = [];
-                  for (const file of files) {
+                  for (const file of await orderFileSteps(
+                    engine,
+                    files.map((path) => ({ path, delete: false })),
+                  )) {
                     const disk = single ?? (await readable(file));
                     if (disk.kind === "untracked-content") continue;
                     await writeIfChanged(engine, versionId, file, disk, {
@@ -7373,7 +7274,11 @@ export function createWorkspaceEngineCapture(
                     versionId,
                     under: path,
                   });
-                  for (const headPath of [path, ...heads.map((head) => head.path)]) {
+                  const headPaths = [path, ...heads.map((head) => head.path)];
+                  for (const headPath of await orderFileSteps(
+                    engine,
+                    headPaths.map((path) => ({ path, delete: true })),
+                  )) {
                     if (
                       !pathIsAtOrUnder(headPath, path) ||
                       kept.has(headPath) ||
@@ -7391,6 +7296,11 @@ export function createWorkspaceEngineCapture(
                   }
                   return held;
                 },
+                orderFilePaths: (paths, deleting) =>
+                  orderFileSteps(
+                    engine,
+                    paths.map((path) => ({ path, delete: deleting })),
+                  ),
                 readDuplicate: async (operationId, path) => {
                   const operation = await engine.readHistoryOperation({ workspaceId, operationId });
                   if (
@@ -7780,6 +7690,12 @@ export function createWorkspaceEngineCapture(
         const respelled = new Set(
           deletedPaths.filter((path) => writtenKeys.has(pathCollisionKey(path))),
         );
+        const mergeSteps = changedPaths.filter((path) => !respelled.has(path));
+        const ordered = await orderFileSteps(
+          engine,
+          mergeSteps.map((path) => ({ path, delete: deleted.has(path) })),
+        );
+        const mergeOrder = [...respelled, ...ordered];
         // Re-running the merge resumes: a path that already has an open
         // conflict for this version pair re-surfaces that conflict instead of
         // recording a duplicate. Only the paths are retained from the walk.
@@ -7806,117 +7722,27 @@ export function createWorkspaceEngineCapture(
             afterConflictId = page.nextAfterConflictId ?? undefined;
           } while (afterConflictId !== undefined);
         }
-        const openRuleConflict = [...openConflictPaths].find(isAccessRulePath);
-        if (openRuleConflict !== undefined)
-          throw new MergeRuleConflictError(openRuleConflict, [], false);
-        // A folder's rule merges before the files it covers, and its delete
-        // after them, so Main never journals a file its rule does not cover
-        // yet. A respelled rule's old spelling goes with the deletes: the
-        // engine keeps a file on disk that another head still reaches. The
-        // engine orders the rule writes, and then the deletes, by what each
-        // merge writes, so that no single one gives anyone more than Main
-        // gives them before and after the merge. It tries outer writes and
-        // inner deletes first. A conflicting rule stops the merge before files.
-        const depth = (path: string) => path.split("/").length;
-        const isRuleStep = isAccessRulePath;
-        const ruleDeletes = new Set(deletedPaths.filter(isRuleStep));
-        const orderRules = async (rules: string[], stage: "before" | "during") => {
-          const writes = rules
-            .filter((path) => !ruleDeletes.has(path))
-            .sort((a, b) => depth(a) - depth(b));
-          const deletes = rules
-            .filter((path) => ruleDeletes.has(path))
-            .sort((a, b) => depth(b) - depth(a));
-          if (rules.length === 0) return { first: [], writes, deletes };
-          const order = await engine.accessRuleMergeOrder({
-            workspaceId,
-            sourceVersionId,
-            targetVersionId: ENGINE_MAIN_VERSION_ID,
-            writes,
-            deletes,
-          });
-          if (order.kind === "refused")
-            throw new MergeWidensAccessError(order.reason, order.rules, stage);
-          // A rule the engine expects to stay as Main has it, or to conflict,
-          // writes nothing. It merges first, to record its conflict, and still
-          // carries the order, in case Main changed since.
-          const planned = new Set([...order.writes, ...order.deletes]);
-          return {
-            first: rules.filter((path) => !planned.has(path)),
-            writes: order.writes,
-            deletes: order.deletes,
-          };
-        };
-        const initial = await orderRules(changedPaths.filter(isRuleStep), "before");
-        const mergeOrder = [
-          ...initial.first,
-          ...initial.writes,
-          ...[...respelled, ...changedPaths.filter((path) => !respelled.has(path))].filter(
-            (path) => !isAccessRulePath(path),
-          ),
-          ...initial.deletes,
-        ];
-        // Orders the rule changes from `index` on again, from Main as it is
-        // now, keeping the other files where they were.
-        const replan = async (index: number) => {
-          const rest = mergeOrder.slice(index);
-          const order = await orderRules(rest.filter(isRuleStep), "during");
-          mergeOrder.splice(
-            index,
-            rest.length,
-            ...order.first,
-            ...order.writes,
-            ...rest.filter((path) => !isRuleStep(path)),
-            ...order.deletes,
-          );
-        };
         const materializations: MaterializeOperation[] = [];
         let conflictCount = 0;
         let unchangedFileCount = 0;
-        let tries = 0;
-        for (let index = 0; index < mergeOrder.length; index += 1) {
-          const path = mergeOrder[index]!;
+        for (const path of mergeOrder) {
           if (openConflictPaths.has(path)) {
             conflictCount += 1;
             continue;
           }
-          // The engine checks this order against Main as it writes the rule,
-          // and refuses, writing nothing, when Main changed under it.
-          const ruleOrder = isAccessRulePath(path)
-            ? { ruleOrder: mergeOrder.slice(index).filter(isRuleStep) }
-            : {};
-          let result: Awaited<ReturnType<typeof engine.mergeTextFileFromVersion>>;
-          try {
-            result = await engine.mergeTextFileFromVersion({
-              workspaceId,
-              targetVersionId: ENGINE_MAIN_VERSION_ID,
-              sourceVersionId,
-              path,
-              ...ruleOrder,
-              metadata,
-            });
-          } catch (error) {
-            const changed =
-              error instanceof DaemonRefusalError && error.message === "rule-merge-order-changed";
-            if (!changed) throw error;
-            if (++tries >= RULE_ORDER_TRIES) {
-              throw new MergeRuleOrderUnconfirmedError();
-            }
-            await replan(index);
-            index -= 1;
-            continue;
-          }
-          tries = 0;
+          const result = await engine.mergeTextFileFromVersion({
+            workspaceId,
+            targetVersionId: ENGINE_MAIN_VERSION_ID,
+            sourceVersionId,
+            path,
+            metadata,
+          });
           if (result.kind === "unchanged") {
             unchangedFileCount += 1;
             continue;
           }
           if (result.kind === "conflict") {
             conflictCount += 1;
-            // The rule keeps Main's copy. No files may follow it.
-            if (isAccessRulePath(path)) {
-              throw new MergeRuleConflictError(path, []);
-            }
             continue;
           }
           mergedFileCount += 1;
@@ -7988,10 +7814,7 @@ export function createWorkspaceEngineCapture(
       };
       return enqueueResult("merge version into Main", () =>
         merge().catch((error: unknown) => {
-          // A rule conflict says itself what to do, wherever the merge got to.
-          throw mergedFileCount > 0 && !(error instanceof MergeRuleConflictError)
-            ? new MergeStoppedPartwayError(error)
-            : error;
+          throw mergedFileCount > 0 ? new MergeStoppedPartwayError(error) : error;
         }),
       );
     },

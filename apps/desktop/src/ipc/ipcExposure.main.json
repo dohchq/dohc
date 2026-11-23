@@ -71,7 +71,6 @@
     "desktop:create-workspace-folder",
     "desktop:create-workspace-version",
     "desktop:dataset",
-    "desktop:decide-access-rule",
     "desktop:delete-relay-share-discussion-message",
     "desktop:delete-retained-copies",
     "desktop:delete-server-account",

@@ -28,8 +28,8 @@ use crate::capture_sink::{
     PolicyState, SecretKeyHealth, SelfWriteSuppression, StoreCaptureSink, StoreCaptureSinkParams,
 };
 use crate::{
-    CAPTURE_ACCESS_RULE_HELD_EVENT, CAPTURE_MOMENT_RECORDED_EVENT,
-    CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, CAPTURE_WRITE_DEFERRED_EVENT, EngineEvents,
+    CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, CAPTURE_WRITE_DEFERRED_EVENT,
+    EngineEvents,
 };
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
@@ -1366,7 +1366,6 @@ impl CaptureDriver {
                 scan: drive_scan,
                 import_priority: drive_import_priority,
                 no_atomic_placement_announced: false,
-                access_rules: AccessRuleFollow::default(),
                 first_import: None,
                 carried: None,
                 rules: None,
@@ -2356,7 +2355,6 @@ struct RealEnv {
     /// no atomic no-replace rename. Announced once; `watcher.status` stays
     /// the backstop for a dropped event.
     no_atomic_placement_announced: bool,
-    access_rules: AccessRuleFollow,
     /// The correlation id of the workspace's unfinished first import, read
     /// at each layer start from a readable seed.
     first_import: Option<String>,
@@ -2370,91 +2368,7 @@ struct RealEnv {
     quarantine_retry_at: Option<tokio::time::Instant>,
 }
 
-/// What capture last saw of the access-rule ordering step.
-#[derive(Default)]
-struct AccessRuleFollow {
-    waits_seen: u64,
-    holds_seen: u64,
-    /// The hold generation whose holds capture last read; behind
-    /// `holds_seen` while that read fails, so the next pass reads again.
-    holds_announced: u64,
-    rescan_at: Option<tokio::time::Instant>,
-    announced: std::collections::BTreeSet<(String, String, String, Option<String>)>,
-}
-
-fn access_rule_hold_message(
-    hold: &dohc_engine_storage::access_rule_holds::AccessRuleHold,
-) -> String {
-    let folder = if hold.folder.is_empty() {
-        "the workspace"
-    } else {
-        hold.folder.as_str()
-    };
-    if hold.reason == dohc_engine_storage::access_rule_holds::REMOVED {
-        format!("The access rule for {folder} was removed outside dohc")
-    } else {
-        format!("Access for {folder} was widened outside dohc")
-    }
-}
-
 impl RealEnv {
-    /// Offer paths again once a rule they waited for has had time to settle,
-    /// and when a hold is recorded or released; tell the owner about each
-    /// new hold.
-    async fn follow_access_rules(&mut self, files: &FilesHandle) {
-        let signals = self.actor.access_rule_signals();
-        let (waits, holds) = (signals.waits(), signals.holds());
-        let now = tokio::time::Instant::now();
-        let follow = &mut self.access_rules;
-        if waits != follow.waits_seen {
-            follow.waits_seen = waits;
-            follow.rescan_at = Some(now + dohc_engine_runtime::ACCESS_RULE_SETTLE);
-        }
-        if follow.rescan_at.is_some_and(|due| now >= due) {
-            follow.rescan_at = None;
-            files.request_rescan();
-        }
-        if holds != follow.holds_seen {
-            follow.holds_seen = holds;
-            files.request_rescan();
-        }
-        if holds == follow.holds_announced {
-            return;
-        }
-        let Ok(listed) = self
-            .actor
-            .access_rule_holds(self.workspace_id.clone())
-            .await
-        else {
-            return;
-        };
-        self.access_rules.holds_announced = holds;
-        let holds = listed;
-        let mut announced = std::collections::BTreeSet::new();
-        for hold in holds {
-            let key = (
-                hold.version_id.clone(),
-                hold.folder.clone(),
-                hold.reason.clone(),
-                hold.observed_sha256.clone(),
-            );
-            if !self.access_rules.announced.contains(&key) {
-                self.events.emit(
-                    CAPTURE_ACCESS_RULE_HELD_EVENT,
-                    serde_json::json!({
-                        "workspaceId": self.workspace_id,
-                        "versionId": hold.version_id,
-                        "folder": hold.folder,
-                        "reason": hold.reason,
-                        "message": access_rule_hold_message(&hold),
-                    }),
-                );
-            }
-            announced.insert(key);
-        }
-        self.access_rules.announced = announced;
-    }
-
     /// Announce, once, that a placement in this workspace had to fall back
     /// to a check-then-rename.
     fn announce_no_atomic_placement(&mut self) {
@@ -2864,7 +2778,6 @@ impl DriverEnv for RealEnv {
         // A write, or a recovery at open, fell back since the last tick; its
         // own rename is what woke this tick.
         self.announce_no_atomic_placement();
-        self.follow_access_rules(&layer.files.handle()).await;
         #[cfg(feature = "harness")]
         let gate_wait = self
             .apply_probe

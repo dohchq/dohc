@@ -1,5 +1,4 @@
 use super::ActorHandle;
-use super::access_order;
 use super::journal::{
     journal_moment_outbound_in_tx, journal_moment_outbound_with_batch_in_tx,
     journal_secret_delete_outbound_in_tx, journal_secret_put_outbound_in_tx,
@@ -24,7 +23,6 @@ use dohc_engine_domain::{
     capture_manifest_seed, capture_retire_in_tx, capture_retire_respelled_in_tx,
     capture_secret_retire_with, ensure_main_version_in_tx,
 };
-use dohc_engine_files::access_rules::sort_rule_changes;
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
 use dohc_engine_storage::capture_first_imports;
@@ -1210,7 +1208,7 @@ pub(super) fn validate_workspace_root(
     Ok(())
 }
 
-pub(super) enum CaptureIndexing {
+enum CaptureIndexing {
     Skip,
     ReadRoot(PathBuf),
     UseSnapshot(Arc<SearchPolicySnapshot>),
@@ -1302,7 +1300,6 @@ impl ActorHandle {
             Vec<CaptureFileHold>,
             Vec<HeldOutsideChange>,
             Vec<dohc_engine_domain::MergeRemoval>,
-            Vec<dohc_engine_storage::access_rule_holds::AccessRuleHold>,
         ),
         RuntimeError,
     > {
@@ -1313,7 +1310,6 @@ impl ActorHandle {
                     capture_file_holds::list_in(conn, &workspace_id)?,
                     held_outside_changes::list_in(conn, &workspace_id)?,
                     dohc_engine_domain::merge_removals_in(conn, &workspace_id)?,
-                    dohc_engine_storage::access_rule_holds::list_in(conn, &workspace_id)?,
                 ))
             })
         })
@@ -1951,7 +1947,7 @@ impl ActorHandle {
     }
 }
 
-pub(super) fn capture_ingest_on_store(
+fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
     indexing: &CaptureIndexing,
@@ -1959,34 +1955,7 @@ pub(super) fn capture_ingest_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
-    let touch = access_order::Touch::observed(&input.path, input.text.as_bytes());
-    access_order::order_capture(
-        store,
-        &input.workspace_id,
-        &input.version_id,
-        input.now_ms,
-        leases,
-        faults,
-        &[touch],
-    )?
-    .pop()
-    .unwrap_or(Ok(()))?;
-    let result = capture_ingest_unordered_on_store(store, input, indexing, leases, faults, token)?;
-    if result.deduped {
-        access_order::note_unchanged_rule(&input.workspace_id, &input.version_id, &input.path);
-    }
-    Ok(result)
-}
-
-/// Capture a text file whose rules [`access_order`] already put in order.
-pub(super) fn capture_ingest_unordered_on_store(
-    store: &mut EngineStore,
-    input: &CaptureIngest,
-    indexing: &CaptureIndexing,
-    leases: &LeaseRegistry,
-    faults: &dyn FaultInjector,
-    token: &CancellationToken,
-) -> Result<WriteResult, RuntimeError> {
+    super::store_root::check_root()?;
     #[cfg(feature = "fault-injection")]
     let mut phase = dohc_engine_storage::capture_phase::Phase::new(
         "actor_capture_text",
@@ -2643,6 +2612,7 @@ fn capture_ingest_batch_with_reader_on_store(
     workspace_root: (&std::path::Path, &dyn WorkspaceRootGuard),
     folds: Arc<Vec<dohc_engine_collab::reader_resolver::PreparedFold>>,
 ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    super::store_root::check_root()?;
     #[cfg(feature = "fault-injection")]
     let mut phase = dohc_engine_storage::capture_phase::Phase::new(
         "actor_capture_batch",
@@ -2680,63 +2650,6 @@ fn capture_ingest_batch_with_reader_on_store(
         .into());
     }
     validate_workspace_root(root_dir, Some(root_guard))?;
-    // Rules go first, and only the inputs whose folders admit them run.
-    let mut paths: Vec<(usize, &str)> = inputs
-        .iter()
-        .enumerate()
-        .map(|(index, input)| (index, input.path.as_str()))
-        .collect();
-    sort_rule_changes(&mut paths, |(_, path)| (path, false));
-    let sequence: Vec<usize> = paths.into_iter().map(|(index, _)| index).collect();
-    let touches: Vec<_> = sequence
-        .iter()
-        .map(|&index| {
-            access_order::Touch::observed(&inputs[index].path, inputs[index].text.as_bytes())
-        })
-        .collect();
-    let admissions = access_order::order_capture(
-        store,
-        &first.workspace_id,
-        &first.version_id,
-        first.now_ms,
-        leases,
-        faults,
-        &touches,
-    )?;
-    let mut refused: Vec<Option<RuntimeError>> = (0..inputs.len()).map(|_| None).collect();
-    let mut admitted = Vec::with_capacity(inputs.len());
-    for (&index, admission) in sequence.iter().zip(admissions) {
-        match admission {
-            Ok(()) => admitted.push(index),
-            Err(error) => refused[index] = Some(error),
-        }
-    }
-    let unchanged = admitted.iter().copied().eq(0..inputs.len());
-    let ordered: std::borrow::Cow<'_, [CaptureIngest]> = if unchanged {
-        std::borrow::Cow::Borrowed(inputs)
-    } else {
-        std::borrow::Cow::Owned(
-            admitted
-                .iter()
-                .map(|&index| inputs[index].clone())
-                .collect(),
-        )
-    };
-    let splice = |results: Vec<Result<WriteResult, RuntimeError>>| {
-        let mut slots: Vec<Option<Result<WriteResult, RuntimeError>>> =
-            refused.into_iter().map(|error| error.map(Err)).collect();
-        for (&index, result) in admitted.iter().zip(results) {
-            slots[index] = Some(result);
-        }
-        slots
-            .into_iter()
-            .map(|slot| slot.unwrap_or(Err(RuntimeError::Cancelled)))
-            .collect::<Vec<_>>()
-    };
-    if ordered.is_empty() {
-        return Ok(splice(Vec::new()));
-    }
-    let inputs: &[CaptureIngest] = &ordered;
     let bootstrap_main = {
         let versions = VersionedTextStore::new(store);
         let missing_main = versions.get_main_version(&first.workspace_id)?.is_none();
@@ -2768,7 +2681,6 @@ fn capture_ingest_batch_with_reader_on_store(
         // common case pays one savepoint per batch rather than one per file.
         tx.execute_batch("SAVEPOINT dohc_capture_batch_fast")
             .map_err(StorageError::persist_public)?;
-        let cleared = access_order::checkpoint();
         match capture_ingest_batch_all_or_none_in_tx(tx, inputs, &indexing, leases) {
             Ok(results) => {
                 tx.execute_batch("RELEASE dohc_capture_batch_fast")
@@ -2781,14 +2693,12 @@ fn capture_ingest_batch_with_reader_on_store(
                      RELEASE dohc_capture_batch_fast",
                 )
                 .map_err(StorageError::persist_public)?;
-                access_order::roll_back(cleared);
                 capture_ingest_batch_with_item_savepoints_in_tx(tx, inputs, &indexing, leases)
             }
         }
     })?;
     match outcome {
         TxnOutcome::Committed(results) => {
-            let results = splice(results);
             #[cfg(feature = "fault-injection")]
             {
                 phase.field(
@@ -2837,7 +2747,6 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
         let prior_capture = batch.capture.clone();
         tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
             .map_err(StorageError::persist_public)?;
-        let cleared = access_order::checkpoint();
         match capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch)) {
             Ok(result) => {
                 tx.execute_batch("RELEASE dohc_capture_batch_item")
@@ -2851,7 +2760,6 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
                 )
                 .map_err(StorageError::persist_public)?;
                 batch.capture = prior_capture;
-                access_order::roll_back(cleared);
                 if held_outside(&error) {
                     record_held_outside_change_in(tx, input)?;
                     results.push(Err(RuntimeError::CaptureFileHeld {
@@ -3106,40 +3014,14 @@ mod capture_batch_fast_path_tests {
     }
 }
 
-pub(super) fn capture_ingest_binary_on_store(
+fn capture_ingest_binary_on_store(
     store: &mut EngineStore,
     input: &CaptureIngestBinary,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
-    let touch = access_order::Touch::observed(&input.path, &input.bytes);
-    access_order::order_capture(
-        store,
-        &input.workspace_id,
-        &input.version_id,
-        input.now_ms,
-        leases,
-        faults,
-        &[touch],
-    )?
-    .pop()
-    .unwrap_or(Ok(()))?;
-    let result = capture_ingest_binary_unordered_on_store(store, input, leases, faults, token)?;
-    if result.deduped {
-        access_order::note_unchanged_rule(&input.workspace_id, &input.version_id, &input.path);
-    }
-    Ok(result)
-}
-
-/// Capture a binary file whose rules [`access_order`] already put in order.
-pub(super) fn capture_ingest_binary_unordered_on_store(
-    store: &mut EngineStore,
-    input: &CaptureIngestBinary,
-    leases: &LeaseRegistry,
-    faults: &dyn FaultInjector,
-    token: &CancellationToken,
-) -> Result<CaptureIngestBinaryResult, RuntimeError> {
+    super::store_root::check_root()?;
     #[cfg(feature = "fault-injection")]
     let mut phase = dohc_engine_storage::capture_phase::Phase::new(
         "actor_capture_binary",
@@ -3638,6 +3520,7 @@ fn capture_retire_on_store(
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
 ) -> Result<CaptureRetireResult, RuntimeError> {
+    super::store_root::check_root()?;
     #[cfg(feature = "fault-injection")]
     let mut phase = dohc_engine_storage::capture_phase::Phase::new(
         "actor_capture_retire",
@@ -3655,27 +3538,6 @@ fn capture_retire_on_store(
         input.now_ms,
         faults,
     )?;
-    let assets = super::versioned::scene_asset_paths(
-        store,
-        &input.workspace_id,
-        &input.version_id,
-        &input.path,
-    )?;
-    let touches: Vec<_> = std::iter::once(input.path.as_str())
-        .chain(assets.iter().map(String::as_str))
-        .map(access_order::Touch::delete)
-        .collect();
-    access_order::order_capture(
-        store,
-        &input.workspace_id,
-        &input.version_id,
-        input.now_ms,
-        leases,
-        faults,
-        &touches,
-    )?
-    .into_iter()
-    .collect::<Result<(), _>>()?;
     if confirm_absent {
         confirm_absent_on_disk(
             store,

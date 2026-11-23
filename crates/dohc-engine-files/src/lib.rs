@@ -24,7 +24,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod access_rules;
 pub mod actor;
 pub mod bounds;
 pub mod capture;
@@ -75,6 +74,7 @@ pub use reconcile::{
     ReconcileController, ReconcilePlan, ReconcileRun, Respelling, ScanGeneration, StdAbsenceProbe,
     disk_spelling, may_share_entry, stored_under_other_spelling,
 };
+pub use reconcile::{is_access_marker, marker_step_order};
 pub use scan::{
     FailedPath, FileEntry, ScanIoFaultInjector, ScanIoOperation, ScanListing, ScanOutcome, Scanner,
     SkipReason, SkippedPath,

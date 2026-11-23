@@ -101,20 +101,6 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
     read_scene_asset_delete_authority(tx, key, drawing_delete_moment_id)
 }
 
-/// The assets a delete of the drawing `key` deletes with it: the ones
-/// [`freeze_scene_asset_delete_authority_in_tx`] records. It only reads.
-pub fn scene_asset_delete_candidates(
-    conn: &Connection,
-    key: &DocKey,
-) -> Result<Vec<String>, CollabError> {
-    let Some(scopes) = scene_scopes(conn, key)? else {
-        return Ok(Vec::new());
-    };
-    Ok(owned_scene_assets(conn, key, &scopes)?
-        .into_keys()
-        .collect())
-}
-
 /// The drawing's asset folders, or `None` when the object is no drawing.
 fn scene_scopes(
     conn: &Connection,

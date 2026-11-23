@@ -60,7 +60,6 @@ export const ready: WatcherStatusResult = {
   mergeRemovals: [],
   heldFiles: [],
   outsideChanges: [],
-  heldAccessRules: [],
   retainedCopies: { count: 0, bytes: 0 },
 };
 

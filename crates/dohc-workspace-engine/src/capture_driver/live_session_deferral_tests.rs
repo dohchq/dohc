@@ -1100,7 +1100,6 @@ async fn started_env(
         scan: ScanGauge::default(),
         import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
-        access_rules: AccessRuleFollow::default(),
         first_import: None,
         carried,
         rules: None,

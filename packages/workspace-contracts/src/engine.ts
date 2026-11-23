@@ -105,15 +105,6 @@ export interface FileObjectRecord {
 
 type ActorNeutralWriteOrigin = "api" | "local-file" | "restore" | "sync" | "unknown";
 
-// Why the engine refused to order a merge's rule changes: no order keeps
-// everyone within bounds, its search ran out of work before finding one, or
-// a rule changes in a folder whose name folds together with another's.
-export type AccessRuleMergeRefusal = "widens" | "too-many" | "folded-names";
-
-export type AccessRuleMergeOrder =
-  | { kind: "ordered"; writes: string[]; deletes: string[] }
-  | { kind: "refused"; reason: AccessRuleMergeRefusal; rules: string[] };
-
 export interface ActorNeutralWriteMetadata {
   origin: ActorNeutralWriteOrigin;
   summary?: string;
@@ -663,16 +654,11 @@ export interface VersionedTextStore {
     sourceVersionId: VersionId;
     path: string;
   }): Promise<VersionedTextComparison>;
-  // A rule file's merge passes `ruleOrder`: the rule changes still to merge,
-  // itself first, as accessRuleMergeOrder planned them. The engine refuses
-  // with "rule-merge-order-changed", writing nothing, when that order no
-  // longer keeps everyone within bounds from the target as it is now.
   mergeTextFileFromVersion(input: {
     workspaceId: WorkspaceId;
     targetVersionId: VersionId;
     sourceVersionId: VersionId;
     path: string;
-    ruleOrder?: string[];
     metadata: ActorNeutralWriteMetadata;
   }): Promise<VersionedTextMergeResult>;
   // One page of the engine's whole-version comparison (`versions.compareFiles`):
@@ -684,19 +670,6 @@ export interface VersionedTextStore {
     targetVersionId: VersionId;
     afterPath?: string;
   }): Promise<VersionFileChangeEntryPage>;
-  // The order a Version merge writes, then deletes, these access rule files
-  // in, so that no single step gives anyone more than the target gives them
-  // both before and after the merge. Each rule is judged by what its merge
-  // writes; one the merge leaves alone, or that conflicts, is in neither list.
-  // Refused, with the rules it couldn't order, when no order does or the
-  // engine can't tell.
-  accessRuleMergeOrder(input: {
-    workspaceId: WorkspaceId;
-    sourceVersionId: VersionId;
-    targetVersionId: VersionId;
-    writes: string[];
-    deletes: string[];
-  }): Promise<AccessRuleMergeOrder>;
   // Page-shaped on purpose: the engine pages `conflicts.list` under a
   // byte budget, and a drain here is what let one caller undo that. A caller
   // that needs every row loops pages; most callers need one.

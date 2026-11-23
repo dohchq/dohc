@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "vitest";
 import { folderLevel, isAccessRulePath } from "@dohc/security-contract/access-rules";
 import { pathCollisionKey as contractCollisionKey } from "@dohc/workspace-contracts/path-floor";
@@ -115,44 +114,6 @@ function relay() {
       .map((row) => ({ ...row }));
   return { db, storageDb, statements, heads, append, blob, write, remove, rename, rows };
 }
-
-// The shared vectors' rule file cases, which the engine's merge order reads too.
-const ruleFileCases = (
-  JSON.parse(
-    readFileSync(
-      new URL(
-        "../../../../packages/security-contract/src/accessRules.vectors.json",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  ) as {
-    ruleFiles: {
-      name: string;
-      files: Record<string, string>;
-      folder: string;
-      email: string | null;
-      level: string | null;
-    }[];
-  }
-).ruleFiles;
-
-describe("the shared rule file vectors", () => {
-  it.each(ruleFileCases)("reaches $name", ({ files, folder, email, level }) => {
-    const r = relay();
-    try {
-      for (const [path, text] of Object.entries(files)) r.write(path, text);
-      for (const memberLevel of ["view", "comment", "edit"] as const) {
-        const viewer = { role: "member" as const, level: memberLevel, verifiedEmail: email };
-        expect(folderLevel(currentAccessRuleSet(r.storageDb, "ws"), viewer, folder)).toBe(
-          level === "member" ? memberLevel : level,
-        );
-      }
-    } finally {
-      r.db.close();
-    }
-  });
-});
 
 describe("the relay's access rule index", () => {
   it("fails closed on unknown identity and matches a person entry only through a verified email", () => {

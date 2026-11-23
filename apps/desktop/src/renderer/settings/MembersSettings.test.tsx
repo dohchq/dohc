@@ -162,7 +162,7 @@ describe("Members page", () => {
       "https://share.test/join#secret",
     );
     expect(screen.getByTestId("settings-members-level-words").textContent).toBe(
-      "Members can read files, post in Groups, and comment on files.",
+      "Members can read everything, post in Groups, and comment on files.",
     );
     expect(screen.getByTestId("settings-members-end")).toBeTruthy();
     expect(screen.queryByTestId("settings-members-leave")).toBeNull();
@@ -821,12 +821,8 @@ describe("Members page", () => {
   it("states the member level with no limit, and a member only the level in words", async () => {
     renderMembers();
     expect(
-      within(await screen.findByTestId("settings-members-level")).getByText("Default member level"),
+      within(await screen.findByTestId("settings-members-level")).getByText("Member level"),
     ).toBeTruthy();
-    expect(screen.getByTestId("settings-members-level-rules").textContent).toBe(
-      "A folder's access rule can set another level there, or hide the folder.",
-    );
-    expect(screen.getByTestId("settings-members-level").textContent).not.toContain("everything");
     expect(screen.queryByTestId("settings-members-limit")).toBeNull();
     cleanup();
     bridge.workspaceMembers.mockImplementation(async () => ({
@@ -835,7 +831,7 @@ describe("Members page", () => {
     }));
     renderMembers();
     expect(
-      within(await screen.findByTestId("settings-members-level")).getByText("Default member level"),
+      within(await screen.findByTestId("settings-members-level")).getByText("Member level"),
     ).toBeTruthy();
     expect(screen.queryByTestId("settings-members-limit")).toBeNull();
     cleanup();
@@ -846,30 +842,9 @@ describe("Members page", () => {
     renderMembers();
     const level = within(await screen.findByTestId("settings-members-level"));
     expect(level.getByText("What members can do")).toBeTruthy();
-    // Folder rules override the level, so no one reads it as all of their reach.
-    expect(screen.getByTestId("settings-members-level").textContent).toContain(
-      "A folder's access rule can set another level there, or hide the folder.",
-    );
-    expect(screen.getByTestId("settings-members-level").textContent).not.toContain("everything");
     // No bare level word sits where a control would.
     expect(level.queryByText("Edit")).toBeNull();
     expect(screen.queryByTestId("settings-members-limit")).toBeNull();
-  });
-
-  it("says when it saved a new member level, and not for a failed save", async () => {
-    const onLevelSaved = vi.fn();
-    renderMembers({ onLevelSaved });
-    await screen.findByTestId("settings-members-page");
-    bridge.workspaceMembers.mockRejectedValueOnce(new Error("relay down"));
-    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
-    await vi.waitFor(() => expect(requests().at(-1)).toEqual({ action: "level", level: "edit" }));
-    expect(onLevelSaved).not.toHaveBeenCalled();
-    bridge.workspaceMembers.mockResolvedValueOnce({
-      status: "ready",
-      view: ownerView({ memberLevel: "edit" }),
-    });
-    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
-    await vi.waitFor(() => expect(onLevelSaved).toHaveBeenCalledOnce());
   });
 
   it("shows the level spinner without taking room from the control", async () => {

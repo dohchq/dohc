@@ -799,7 +799,8 @@ async function prepareMoveWorkspacePath(
         // A replaced destination is named by its entry on disk.
         const destBase = dest?.relative ?? to.relative;
         const fromFiles = from.files.map((sub) => under(from.relative, sub));
-        const destFiles = (dest?.files ?? []).map((sub) => under(destBase, sub));
+        const replacedFiles = (dest?.files ?? []).map((sub) => under(destBase, sub));
+        const destFiles = (await engine?.orderFilePaths?.(replacedFiles, true)) ?? replacedFiles;
         // Oversized files and text with invalid UTF-8 move without a History row.
         const recorded = new Set((await engine?.recordDisk(from.relative, fromFiles)) ?? []);
         const destRecorded = new Set(
@@ -848,8 +849,8 @@ async function prepareMoveWorkspacePath(
               stopped.staged,
             );
             markChanged();
-            for (const sub of dest.files) {
-              const path = under(destBase, sub);
+            for (const path of destFiles) {
+              const sub = path.slice(destBase.length).replace(/^\//u, "");
               if (!destRecorded.has(path)) continue;
               change.destDeleted.push({ path, sub, momentId: await engine!.delete(path) });
             }
@@ -909,8 +910,7 @@ async function prepareMoveWorkspacePath(
               .catch(() => null);
             checkCaseRename(spelling, target, input);
           }
-          for (const file of fromFiles) {
-            if (!recorded.has(file)) continue;
+          for (const file of recorded) {
             await engine!.rename(file, rebase(file));
             change.renamed.push(file);
           }
@@ -1358,7 +1358,8 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
           );
           if (target.relative !== endpoint)
             throw new Error(`${path} now leads somewhere else. Check the path, then try again.`);
-          const files = target.files.map((sub) => under(target.relative, sub));
+          const targets = target.files.map((sub) => under(target.relative, sub));
+          const files = (await engine.orderFilePaths?.(targets, true)) ?? targets;
           const shown = (file: string) => target.path + file.slice(target.relative.length);
           // Oversized files and text with invalid UTF-8 go without a History row.
           const recorded = new Set(await engine.recordDisk(target.relative, files));
@@ -1390,7 +1391,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
               rootPath,
               staged,
               original,
-              target.files.slice(at),
+              files.slice(at).map((file) => file.slice(target.relative.length).replace(/^\//u, "")),
               at === 0,
             );
             const failedPath = shown(files[at] ?? target.relative);
@@ -1592,7 +1593,7 @@ export async function deleteWorkspacePathByHand(
         const recorded = await engine.recordDisk(endpoint, files);
         const trashed = await trash(recorded);
         gone = [endpoint];
-        for (const file of recorded) {
+        for (const file of (await engine.orderFilePaths?.(recorded, true)) ?? recorded) {
           try {
             await engine.delete(file);
           } catch (error) {

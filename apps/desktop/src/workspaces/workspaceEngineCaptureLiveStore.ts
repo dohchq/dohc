@@ -155,6 +155,7 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  orderFileSteps?: VersionedLiveAdapter["orderFileSteps"];
   readHistoryOperation: VersionedLiveAdapter["readHistoryOperation"];
   readHistoryPage: VersionedLiveAdapter["readHistoryPage"];
   resolveFiles: VersionedLiveAdapter["resolveFiles"];
@@ -1297,14 +1298,8 @@ export function createCaptureLiveStores(
       return await runRead(async (adapter) => await adapter.compareVersionFilesPage(input));
     },
 
-    async accessRuleMergeOrder(input: {
-      workspaceId: string;
-      sourceVersionId: string;
-      targetVersionId: string;
-      writes: string[];
-      deletes: string[];
-    }) {
-      return await runRead(async (adapter) => await adapter.accessRuleMergeOrder(input));
+    async orderFileSteps(steps: Array<{ path: string; delete: boolean }>) {
+      return runRead((adapter) => adapter.orderFileSteps(steps));
     },
 
     async mergeTextFileFromVersion(input: {
@@ -1312,7 +1307,6 @@ export function createCaptureLiveStores(
       targetVersionId: string;
       sourceVersionId: string;
       path: string;
-      ruleOrder?: string[];
       metadata: ActorNeutralWriteMetadata;
     }): ReturnType<VersionedTextStore["mergeTextFileFromVersion"]> {
       const before = await store.readTextFile({

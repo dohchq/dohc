@@ -1,4 +1,3 @@
-import { isAccessRulePath } from "@dohc/security-contract/access-rule-files";
 import { useCallback, useEffect, useRef } from "react";
 import type { KeptCopy } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -6,10 +5,6 @@ import { useRequestSequence } from "../useRequestSequence";
 import type { KeptCopyNotice } from "./useShellError";
 
 export function keptCopyMessage(path: string): string {
-  // What happened leads and the path ends it, so a clamp cuts only the path.
-  if (isAccessRulePath(path)) {
-    return `dohc kept a copy of the rule from outside dohc for ${path}.`;
-  }
   return `Another program changed ${path} while dohc was saving it. dohc kept both copies.`;
 }
 
@@ -51,7 +46,6 @@ export function useKeptCopyNotices(input: {
         keptCopies.map((copy) => ({
           id: copy.id,
           message: keptCopyMessage(copy.path),
-          accessRule: isAccessRulePath(copy.path),
           save: () => save(copy),
         })),
         more,

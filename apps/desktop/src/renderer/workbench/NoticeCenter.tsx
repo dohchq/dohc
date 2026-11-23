@@ -1442,8 +1442,6 @@ export function NoticeCenter(props: {
   // sentence for the row, such as why the target is gone. Nothing opens
   // once `signal` aborts.
   onOpenTarget?: (target: NoticeTarget, signal: AbortSignal) => RowOpen;
-  // Opens the panel at one workspace error's row; each new `seq` asks again.
-  showRequest?: { id: string; seq: number } | null;
   // Told each time an error's toast comes on screen.
   onWorkspaceErrorShown?: (id: string) => void;
   // Owner live delivery: the shell's trusted retry command, and the way into
@@ -1506,16 +1504,9 @@ export function NoticeCenter(props: {
   // someone dismisses it.
   automationStops?: readonly AutomationStopNotice[];
   onDismissAutomationStops?: (stops: readonly AutomationStopNotice[]) => void;
-  // Notices opened, so what its rows show can be read again.
-  onOpen?: () => void;
 }) {
   const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
-  const onOpen = useRef(props.onOpen);
-  onOpen.current = props.onOpen;
-  useEffect(() => {
-    if (open) onOpen.current?.();
-  }, [open]);
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastsRef = useRef<HTMLDivElement>(null);
@@ -1553,22 +1544,6 @@ export function NoticeCenter(props: {
   useEffect(() => {
     if (open) centerRef.current?.focus({ preventScroll: true });
   }, [open]);
-  // A request to show one workspace error's row opens the panel and moves
-  // focus to that row, once per request.
-  const { showRequest } = props;
-  const shownRequest = useRef<number | null>(null);
-  useEffect(() => {
-    if (!showRequest || shownRequest.current === showRequest.seq) return;
-    if (!open) {
-      setOpen(true);
-      return;
-    }
-    shownRequest.current = showRequest.seq;
-    const row = document.querySelector<HTMLElement>(`[data-testid="notice-${showRequest.id}"]`);
-    const control = row?.querySelector<HTMLElement>(ROW_OPEN) ?? row;
-    control?.scrollIntoView?.({ block: "nearest" });
-    control?.focus({ preventScroll: true });
-  }, [showRequest, open]);
   // Relative-time labels ("3m ago") are computed at render; tick every 30s
   // while the panel is open so they can't sit stale between state updates.
   const [, forceTick] = useState(0);

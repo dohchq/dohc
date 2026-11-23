@@ -54,20 +54,10 @@ type ReportError = (
 ) => void;
 
 export const LEVEL_WORDS: Record<MemberLevel, string> = {
-  view: "Members can read files and open apps.",
-  comment: "Members can read files, post in Groups, and comment on files.",
+  view: "Members can read everything and open apps.",
+  comment: "Members can read everything, post in Groups, and comment on files.",
   edit: "Members can read, comment, and edit pages and Collections.",
 };
-// The level is what members get where no folder rule says otherwise.
-export const RULE_WORDS = "A folder's access rule can set another level there, or hide the folder.";
-function levelDescription(level: MemberLevel) {
-  return (
-    <>
-      <span data-testid="settings-members-level-words">{LEVEL_WORDS[level]}</span>{" "}
-      <span data-testid="settings-members-level-rules">{RULE_WORDS}</span>
-    </>
-  );
-}
 const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
 const LINK_SECRET: CopySecret = {
   what: "the invite link",
@@ -179,8 +169,6 @@ export function MembersSettings(props: {
   onClearError?: (identity: string) => void;
   /** Opens New message in Chats with this member chosen. */
   onMessage?: (memberId: string) => void;
-  /** The members' level changed here. */
-  onLevelSaved?: () => void;
   /** The title bar says the server is unreachable, so its report covers a failure here. */
   serverNamed?: boolean;
 }) {
@@ -201,13 +189,11 @@ export function MembersSettings(props: {
   const report = useRef({
     onError: props.onError,
     onClearError: props.onClearError,
-    onLevelSaved: props.onLevelSaved,
     serverNamed: props.serverNamed,
   });
   report.current = {
     onError: props.onError,
     onClearError: props.onClearError,
-    onLevelSaved: props.onLevelSaved,
     serverNamed: props.serverNamed,
   };
   // One outage, one notice: while the title bar names the server, a failure
@@ -313,7 +299,6 @@ export function MembersSettings(props: {
         return false;
       }
       settle();
-      if (request.action === "level" && result.status === "ready") report.current.onLevelSaved?.();
       if (!scope.isCurrent(token)) return true;
       report.current.onClearError?.(identity);
       setEnded(request.action === "end" && result.status === "ready" ? scopeKey : null);
@@ -744,9 +729,11 @@ export function MembersPage(props: {
             }
           />
           <SettingRow
-            title="Default member level"
+            title="Member level"
             testId="settings-members-level"
-            description={levelDescription(level)}
+            description={
+              <span data-testid="settings-members-level-words">{LEVEL_WORDS[level]}</span>
+            }
           >
             {/* The spinner sits in the gap before the control and takes no
                 room, so the control never moves and lines up with the words
@@ -761,7 +748,7 @@ export function MembersPage(props: {
                 />
               ) : null}
               <SegmentedControl
-                label="Default member level"
+                label="Member level"
                 testId="settings-members-level-control"
                 value={level}
                 disabled={waiting}
@@ -782,7 +769,11 @@ export function MembersPage(props: {
           <SettingRow
             title="What members can do"
             testId="settings-members-level"
-            description={levelDescription(view.memberLevel)}
+            description={
+              <span data-testid="settings-members-level-words">
+                {LEVEL_WORDS[view.memberLevel]}
+              </span>
+            }
           />
         </SettingsSection>
       )}
