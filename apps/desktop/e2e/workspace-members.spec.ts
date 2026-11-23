@@ -253,6 +253,7 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
     member = await launchDesktopApp({ workspace: memberTemp });
     await openWorkspaceFromFirstRun(member.page, memberTemp);
     await member.page.getByTestId(activityPin("sharing")).click();
+    await member.page.getByTestId("sharing-lane-received").click();
     const received = member.page
       .getByTestId("sharing-received-row")
       .filter({ hasText: workspaceName });
@@ -294,6 +295,8 @@ async function showSharing(page: Page) {
   if (!(await page.getByTestId("sharing-view").isVisible()))
     await page.getByTestId(activityPin("sharing")).click();
   await expect(page.getByTestId("sharing-view")).toBeVisible();
+  // The view opens on what this person shares; every caller reads what they received.
+  await page.getByTestId("sharing-lane-received").click();
 }
 
 async function setTheme(page: Page, theme: "Light" | "Dark") {
