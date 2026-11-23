@@ -1441,7 +1441,7 @@ describe("a Data Collection's table", () => {
       within(popover.getByLabelText("Group by"))
         .getAllByRole("option")
         .map((option) => option.textContent),
-    ).toEqual(["Name", "Amount", "Status"]);
+    ).toEqual(["Status", "Name", "Amount"]);
     fireEvent.change(popover.getByLabelText("Group by"), { target: { value: status } });
     fireEvent.click(popover.getByRole("button", { name: "Create view" }));
     await waitFor(() =>

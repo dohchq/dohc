@@ -135,7 +135,7 @@ export function AgentToolPicker(props: {
                       : "Sign-in unknown"}
               </ToolReadiness>
               {!supported ? (
-                <span className="mt-1 block text-[12px] text-muted">No launch profile yet</span>
+                <span className="mt-1 block text-[12px] text-muted">Not supported in dohc yet</span>
               ) : null}
               {tool.id === "claude" && detected?.probe === "detected" && !compatible ? (
                 <span className="mt-1 block text-[12px] text-muted">

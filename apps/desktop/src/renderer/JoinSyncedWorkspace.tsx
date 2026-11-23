@@ -114,6 +114,20 @@ export function JoinSyncedWorkspace(
     if (needsPassphrase) passphraseField.current?.focus();
   }, [needsPassphrase]);
 
+  const onBackRef = useRef(props.onBack);
+  onBackRef.current = props.onBack;
+  useEffect(() => {
+    if (joining) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || isComposingKey(event)) return;
+      if (document.documentElement.dataset.menuOpen !== undefined) return;
+      event.preventDefault();
+      onBackRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [joining]);
+
   function setFieldError(field: keyof FieldErrors, message: string | undefined) {
     setFieldErrors((errors) => ({ ...errors, [field]: message }));
   }

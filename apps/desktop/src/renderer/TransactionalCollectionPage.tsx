@@ -2026,8 +2026,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         : {}),
       ...(kind === "calendar" ? { dateField: dateFields[0]?.fieldId } : {}),
     });
+  const groupableRank = (fieldType: string): number =>
+    fieldType === "select" ? 0 : fieldType === "checkbox" ? 1 : 2;
   const frameViews: CollectionFrameViews | undefined = saved && {
-    groupFields: groupable.map((field) => ({ id: field.fieldId, name: field.name })),
+    groupFields: [...groupable]
+      .sort((a, b) => groupableRank(a.type) - groupableRank(b.type))
+      .map((field) => ({ id: field.fieldId, name: field.name })),
     dateFields: dateFields.map((field) => ({ id: field.fieldId, name: field.name })),
     onAddDateField: props.onAddDateField,
     nameMaxLength: 100,

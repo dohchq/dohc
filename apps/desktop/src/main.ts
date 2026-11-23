@@ -394,6 +394,20 @@ import { deleteWorkspacePathByHand } from "./workspaces/workspaceFileMoves";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { scheduleHostHandlers } from "./ipc/scheduleHostIpc";
+import { workspaceSecretsHandlers } from "./ipc/workspaceSecretsIpc";
+import { workspaceSecretsOperations } from "./ipc/workspaceSecretsOperations";
+import {
+  createLocalWorkspaceSecretStore,
+  type LocalWorkspaceSecretStore,
+  WorkspaceSecretStorageUnavailableError,
+  WorkspaceSecretVaultCorruptError,
+} from "./workspaces/localWorkspaceSecretStore";
+import {
+  MAX_WORKSPACE_SECRETS,
+  WorkspaceSecretSummary,
+  type WorkspaceSecretsState,
+  type WorkspaceSecretWriteInput,
+} from "@dohc/workspace-contracts/workspace-secrets";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
 import { createUsageStore, USAGE_SNAPSHOT_NAME } from "./usage/usageStore";
 import { createRendererUsage } from "./usage/rendererUsage";
@@ -1602,6 +1616,31 @@ function chatWakeIntentsFile(): string {
 // Lazy, like the cloud login: safeStorage is only safe to touch after app ready.
 let cachedAgentThreads: ReturnType<typeof createAgentThreads> | null = null;
 let cachedT3Code: T3CodeConnection | null = null;
+let cachedLocalWorkspaceSecrets: LocalWorkspaceSecretStore | null = null;
+function localWorkspaceSecrets(): LocalWorkspaceSecretStore {
+  if (!cachedLocalWorkspaceSecrets) {
+    cachedLocalWorkspaceSecrets = createLocalWorkspaceSecretStore({
+      dir: stateDir(),
+      cipher: mayUseKeychain({
+        isPackaged: app.isPackaged,
+        platform: process.platform,
+        env: process.env,
+      })
+        ? {
+            isAvailable: () =>
+              safeStorage.isEncryptionAvailable() &&
+              encryptsWithSystemKey(
+                process.platform,
+                process.platform === "linux" ? safeStorage.getSelectedStorageBackend() : null,
+              ),
+            encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
+            decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
+          }
+        : undefined,
+    });
+  }
+  return cachedLocalWorkspaceSecrets;
+}
 function t3Code(): T3CodeConnection {
   // The home folder the process was given, as the agent tools are found. A
   // test run gives the app its own, so it never reaches the person's T3 Code.
@@ -5747,6 +5786,146 @@ const serverRuns = createServerRuns(async (workspaceId, request) => {
     },
   };
 });
+
+async function workspaceSecretsState(
+  workspaceId: string,
+  mutation?: { kind: "set"; secret: WorkspaceSecretWriteInput } | { kind: "delete"; name: string },
+): Promise<WorkspaceSecretsState> {
+  const entry = findWorkspace(workspaceId);
+  if (entry === null || entry.shareView !== undefined) return { kind: "none" };
+  if (entry.remote === undefined && entry.pausedRemote !== undefined) {
+    const message =
+      "Sync is paused for this workspace. Resume sync to view or change its server secrets.";
+    if (mutation) throw new Error(message);
+    return { kind: "unavailable", storage: "server", message };
+  }
+  if (entry.remote === undefined) {
+    const store = localWorkspaceSecrets();
+    if (!store.canKeep()) {
+      if (mutation) throw new WorkspaceSecretStorageUnavailableError();
+      return {
+        kind: "unavailable",
+        storage: "local",
+        message:
+          "This computer's system keychain is unavailable, so dohc cannot save workspace secrets here.",
+      };
+    }
+    try {
+      const secrets =
+        mutation?.kind === "set"
+          ? await store.set(workspaceId, mutation.secret)
+          : mutation?.kind === "delete"
+            ? await store.remove(workspaceId, mutation.name)
+            : await store.list(workspaceId);
+      return { kind: "ready", storage: "local", secrets, limit: MAX_WORKSPACE_SECRETS };
+    } catch (error) {
+      if (!mutation && error instanceof WorkspaceSecretVaultCorruptError) {
+        return { kind: "unavailable", storage: "local", message: error.message };
+      }
+      throw error;
+    }
+  }
+  let credentials: CloudSessionCredentials;
+  let credentialGeneration: number;
+  try {
+    ({ credentials, credentialGeneration } = await remoteForWorkspace(entry));
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Sign in to your server to manage this workspace's secrets.";
+    if (mutation) throw new Error(message);
+    return { kind: "unavailable", storage: "server", message };
+  }
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc accessed workspace secrets.");
+  }
+  const basePath = `/sync/${encodeURIComponent(workspaceId)}/secrets`;
+  const requestRelay = async (path: string, init: RequestInit) => {
+    const response = await relayShareResponseWithCredentials(credentials, path, {
+      ...init,
+      signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+    });
+    return { status: response.status, body: await response.json().catch(() => undefined) };
+  };
+  const parseRelaySecretsResponse = (body: unknown): WorkspaceSecretsState => {
+    if (!body || typeof body !== "object") {
+      throw new Error("dohc could not read this workspace's secrets.");
+    }
+    const rawSecrets = (body as { secrets?: unknown }).secrets;
+    const rawLimit = (body as { limit?: unknown }).limit;
+    if (!Array.isArray(rawSecrets)) {
+      throw new Error("dohc could not read this workspace's secrets.");
+    }
+    const secrets = rawSecrets.map((item) => WorkspaceSecretSummary.parse(item));
+    const limit =
+      typeof rawLimit === "number" && Number.isInteger(rawLimit) && rawLimit >= 1
+        ? rawLimit
+        : MAX_WORKSPACE_SECRETS;
+    return { kind: "ready", storage: "server", secrets, limit };
+  };
+  if (mutation) {
+    const answer =
+      mutation.kind === "set"
+        ? await requestRelay(`${basePath}/${encodeURIComponent(mutation.secret.name)}`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(
+              mutation.secret.usage === "http-header"
+                ? {
+                    mode: mutation.secret.mode,
+                    usage: mutation.secret.usage,
+                    value: mutation.secret.value,
+                    allowedHosts: mutation.secret.allowedHosts,
+                  }
+                : {
+                    mode: mutation.secret.mode,
+                    usage: mutation.secret.usage,
+                    value: mutation.secret.value,
+                  },
+            ),
+          })
+        : await requestRelay(`${basePath}/${encodeURIComponent(mutation.name)}`, {
+            method: "DELETE",
+          });
+    if (credentialCacheGeneration !== credentialGeneration) {
+      throw new Error("Your account changed while dohc updated workspace secrets.");
+    }
+    if (answer.status !== 200) {
+      const errorText =
+        answer.body && typeof (answer.body as { error?: unknown }).error === "string"
+          ? (answer.body as { error: string }).error
+          : "dohc could not update this workspace's secrets.";
+      throw new Error(errorText);
+    }
+    return parseRelaySecretsResponse(answer.body);
+  }
+  const listed = await requestRelay(basePath, { method: "GET" }).catch((error: unknown) => {
+    if (relayUnreachable(error)) return null;
+    throw error;
+  });
+  if (listed === null) {
+    return {
+      kind: "unavailable",
+      storage: "server",
+      message: "dohc could not reach your server to load workspace secrets.",
+    };
+  }
+  if (credentialCacheGeneration !== credentialGeneration) {
+    throw new Error("Your account changed while dohc loaded workspace secrets.");
+  }
+  if (listed.status === 503) {
+    return {
+      kind: "unavailable",
+      storage: "server",
+      message: "This server is not configured for workspace secrets.",
+    };
+  }
+  if (listed.status !== 200) {
+    throw new Error("dohc could not load this workspace's secrets.");
+  }
+  return parseRelaySecretsResponse(listed.body);
+}
 
 // Which of the owner's computers runs a workspace's schedules, for settings
 // and the ⚡ panel, after a choose or take-over when one is given. This
@@ -11319,6 +11498,19 @@ function registerIpcHandlers(): void {
     scheduleHostHandlers<WebContents, IpcMainInvokeEvent>({
       currentRendererSession: (sender) => rendererWorkspaceSessions.current(sender),
       scheduleHostState,
+    }),
+  );
+
+  registerOperations(
+    operationBoundary,
+    workspaceSecretsOperations,
+    workspaceSecretsHandlers<WebContents, IpcMainInvokeEvent>({
+      currentRendererSession: (sender) => rendererWorkspaceSessions.current(sender),
+      listWorkspaceSecrets: (workspaceId) => workspaceSecretsState(workspaceId),
+      setWorkspaceSecret: (workspaceId, secret) =>
+        workspaceSecretsState(workspaceId, { kind: "set", secret }),
+      deleteWorkspaceSecret: (workspaceId, name) =>
+        workspaceSecretsState(workspaceId, { kind: "delete", name }),
     }),
   );
 

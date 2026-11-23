@@ -101,7 +101,7 @@ export function ViewActions(props: {
   return slot ? createPortal(content, slot) : null;
 }
 
-export const LOSSY_NOTE_TITLE = "This note has parts dohc cannot show.";
+export const LOSSY_NOTE_TITLE = "This note has parts dohc cannot save without rewriting.";
 
 export const OPENING_TITLE = "You can edit this document when it finishes opening.";
 
@@ -126,8 +126,7 @@ export function OpeningState() {
 
 // A document's controls, the same pair in every phase of an open: the mode
 // toggle and the document menu. The toggle's box holds "Edit", "Source" and
-// "Editor", so the words it says on its own never move the menu or Share;
-// only a person's own click to "WYSIWYG" widens it. A truncated read never
+// "Editor", so the words never move the menu or Share. A truncated read never
 // has the whole document to copy, so it has no menu, and the menu's place
 // stays empty instead of closing up.
 export function DocumentControls(props: {
@@ -358,7 +357,7 @@ export function LossyNoteNoticeView(props: {
         {props.tooLarge
           ? SAVE_STATE["too-large"].title
           : props.held
-            ? "dohc held a change because saving it would rewrite parts it cannot show."
+            ? "dohc held a change because saving it would rewrite parts of this note."
             : LOSSY_NOTE_TITLE}
       </span>
       <span className="flex shrink-0 items-center gap-3">{props.children}</span>
@@ -480,7 +479,7 @@ export function LossyNoteNotice(props: {
           }}
         >
           <p>
-            Saving rewrites the parts dohc cannot show.
+            Saving rewrites the parts dohc cannot keep as written.
             {historyLine ? ` ${historyLine}` : null}
           </p>
         </ConfirmDialog>

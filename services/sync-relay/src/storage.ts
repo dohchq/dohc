@@ -152,6 +152,7 @@ import * as automationPressStorage from "./storage/automationPresses";
 import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetHost";
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
+import * as workspaceSecretStorage from "./storage/workspaceSecrets";
 import * as logStorage from "./storage/log";
 import * as linkChatStorage from "./storage/linkChat";
 import * as agentConnectionStorage from "./storage/agentConnections";
@@ -2570,6 +2571,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     updatedAtMs: number;
   }): DeviceHostCredentialResult {
     return hostControlStorage.revokeDeviceHostCredential(this, input);
+  }
+
+  listWorkspaceSecrets(workspaceId: string) {
+    return workspaceSecretStorage.listWorkspaceSecrets(this, workspaceId);
+  }
+
+  readWorkspaceSecretForExecution(workspaceId: string, name: string) {
+    return workspaceSecretStorage.readWorkspaceSecretForExecution(this, workspaceId, name);
+  }
+
+  upsertWorkspaceSecret(input: Parameters<typeof workspaceSecretStorage.upsertWorkspaceSecret>[1]) {
+    return workspaceSecretStorage.upsertWorkspaceSecret(this, input);
+  }
+
+  deleteWorkspaceSecret(workspaceId: string, ownerUserId: string, name: string) {
+    return workspaceSecretStorage.deleteWorkspaceSecret(this, workspaceId, ownerUserId, name);
   }
 }
 import { hasRelayWriteObservers, notifyRelayWrite } from "./relayWriteChanges";

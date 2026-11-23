@@ -80,7 +80,12 @@ import {
   type LinkMenuState,
 } from "./linkMenu";
 import type { WorkspaceLinkTarget } from "../linkActivation";
-import { makeWikilinkPlugin, type AutocompleteState, type WikilinkFile } from "./wikilinkPlugin";
+import {
+  makeWikilinkPlugin,
+  wikilinkPluginKey,
+  type AutocompleteState,
+  type WikilinkFile,
+} from "./wikilinkPlugin";
 import { makeMentionPlugin } from "./mentionTrigger";
 import { WikilinkPicker, type WikilinkPickerState } from "./WikilinkPicker";
 import { makeEmojiPlugin } from "./emojiTrigger";
@@ -509,7 +514,29 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {});
     const blockInsertRef = useRef<(pos: number) => void>(() => {});
     const blockMenuOpenRef = useRef<(pos: number, handle: HTMLElement) => void>(() => {});
-    const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
+    const knownFilesMap = useMemo(() => {
+      const map = new Map<string, WikilinkFile>();
+      const stemCounts = new Map<string, number>();
+      for (const file of knownFiles) {
+        const stem = file.path
+          .replace(/\.(md|markdown)$/i, "")
+          .split("/")
+          .pop();
+        if (stem) stemCounts.set(stem, (stemCounts.get(stem) ?? 0) + 1);
+      }
+      for (const file of knownFiles) {
+        map.set(file.path, file);
+        const withoutExt = file.path.replace(/\.(md|markdown)$/i, "");
+        map.set(withoutExt, file);
+        const stem = withoutExt.split("/").pop();
+        if (stem && stemCounts.get(stem) === 1 && !map.has(stem)) {
+          map.set(stem, file);
+        }
+      }
+      return map;
+    }, [knownFiles]);
+    const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(knownFilesMap);
+    knownFilesRef.current = knownFilesMap;
     const applyingPendingUndoRef = useRef(false);
     const appliedPendingUndoToken = useRef<number | null>(null);
     const includePlaceholdersRef = useRef(value.length <= LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS);
@@ -604,15 +631,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     useEffect(() => {
       blockMenuStateRef.current = blockMenuState;
     }, [blockMenuState]);
-
-    useEffect(() => {
-      const map = new Map<string, WikilinkFile>();
-      for (const file of knownFiles) {
-        map.set(file.path, file);
-        map.set(file.path.replace(/\.md$/i, ""), file);
-      }
-      knownFilesRef.current = map;
-    }, [knownFiles]);
 
     useEffect(() => {
       onOpenWikilinkRef.current = onOpenWikilink ?? null;
@@ -850,6 +868,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       // scheduling) in non-collab mode; nothing about the document changed.
       editor?.setEditable(!readOnly, false);
     }, [editor, readOnly]);
+
+    useEffect(() => {
+      if (!editor || editor.isDestroyed) return;
+      editor.view.dispatch(editor.state.tr.setMeta(wikilinkPluginKey, true));
+    }, [editor, knownFilesMap]);
 
     useEffect(() => {
       setChromeReady(false);

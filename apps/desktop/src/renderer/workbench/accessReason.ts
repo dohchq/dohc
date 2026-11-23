@@ -46,8 +46,8 @@ export function accessReasonForLane(
   if (cloud === "checking") return "checking";
   if (cloud === "unreadable") return "unexplained";
   if (lane === "received") return cloud.connected ? "unexplained" : "signed-out";
-  if (!cloud.workspaceSynced) return "not-synced";
   if (!cloud.connected) return "signed-out";
+  if (!cloud.workspaceSynced) return "not-synced";
   if (!cloud.workspaceSyncConnected) return "other-account";
   return "unexplained";
 }

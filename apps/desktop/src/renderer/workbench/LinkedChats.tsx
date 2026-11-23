@@ -572,7 +572,7 @@ export function LinkedChatsPanel(props: {
     // About covers a file or a conversation. A shared view has no
     // conversations, so there it names a file's own chats.
     const subject = readOnly ? "a file" : "a file or a conversation";
-    const shows = readOnly ? "its comments and access" : "who has access";
+    const shows = readOnly ? "its comments and access" : "its links, comments, history, and access";
     return (
       <EmptyState
         data-testid="linked-chats-empty"

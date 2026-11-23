@@ -2075,6 +2075,21 @@ export interface SyncRelayStorage {
   // proposal accept needs it because a proposal's changes carry no
   // coordinates: they were never a log, so the relay numbers them.
   maxOriginSeq(workspaceId: string, originId: string): number;
+  listWorkspaceSecrets(
+    workspaceId: string,
+  ): import("@dohc/workspace-contracts/workspace-secrets").WorkspaceSecretSummary[];
+  readWorkspaceSecretForExecution(
+    workspaceId: string,
+    name: string,
+  ): import("./workspaceSecrets").StoredWorkspaceSecret | null;
+  upsertWorkspaceSecret(
+    input: Parameters<typeof import("./workspaceSecrets").upsertWorkspaceSecret>[1],
+  ): import("./workspaceSecrets").UpsertWorkspaceSecretResult;
+  deleteWorkspaceSecret(
+    workspaceId: string,
+    ownerUserId: string,
+    name: string,
+  ): import("./workspaceSecrets").DeleteWorkspaceSecretResult;
 }
 
 // The two wire shapes a file-linked thread create carries, kept apart because

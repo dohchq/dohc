@@ -114,4 +114,22 @@ describe("makeWikilinkPlugin — edits", () => {
       );
     }
   });
+
+  it("refreshes resolved state when notified via plugin meta after knownFiles loads", () => {
+    let knownFiles = new Map<string, WikilinkFile>();
+    let state = EditorState.create({
+      doc: doc(paragraph("see [[Alpha Plan]]")),
+      plugins: [
+        makeWikilinkPlugin(
+          () => knownFiles,
+          () => {},
+        ),
+      ],
+    });
+    expect(wikilinkPluginKey.getState(state)?.previews[0]?.resolved).toBe(false);
+
+    knownFiles = new Map([["Alpha Plan", { path: "Projects/Alpha Plan.md", title: "Alpha Plan" }]]);
+    state = state.apply(state.tr.setMeta(wikilinkPluginKey, true));
+    expect(wikilinkPluginKey.getState(state)?.previews[0]?.resolved).toBe(true);
+  });
 });

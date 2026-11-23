@@ -1218,6 +1218,14 @@ describe("collection authoring", () => {
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
     expect(lastWrittenSchema(bridge).schema.views).toEqual([
       {
+        name: "Table",
+        kind: "table",
+        groupBy: null,
+        sort: [],
+        visibleFields: null,
+        dateField: null,
+      },
+      {
         name: "Board",
         kind: "board",
         groupBy: "status",
@@ -1235,7 +1243,10 @@ describe("collection authoring", () => {
     });
     fireEvent.click(screen.getByText("Save view"));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
-    expect(lastWrittenSchema(bridge).schema.views.map((view) => view.name)).toEqual(["My board"]);
+    expect(lastWrittenSchema(bridge).schema.views.map((view) => view.name)).toEqual([
+      "Table",
+      "My board",
+    ]);
 
     // Deleting a view drops its configuration, so one click only arms the
     // button; the confirming click runs the rewrite.
@@ -1245,13 +1256,13 @@ describe("collection authoring", () => {
     expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
     fireEvent.click(confirmButton);
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
-    expect(lastWrittenSchema(bridge).schema.views).toEqual([]);
+    expect(lastWrittenSchema(bridge).schema.views.map((view) => view.name)).toEqual(["Table"]);
   });
 
   it("adds a view from the + beside the tabs through one schema rewrite, and opens it", async () => {
     const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
     const onActiveViewChange = vi.fn();
-    renderPage(bridge, undefined, undefined, { onActiveViewChange });
+    const view = renderPage(bridge, undefined, undefined, { onActiveViewChange });
     await screen.findByText("Plan");
 
     fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
@@ -1261,8 +1272,8 @@ describe("collection authoring", () => {
       within(popover.getByLabelText("Group by"))
         .getAllByRole("option")
         .map((option) => option.textContent),
-    ).toEqual(["title", "status"]);
-    fireEvent.change(popover.getByLabelText("Group by"), { target: { value: "status" } });
+    ).toEqual(["status", "title"]);
+    expect((popover.getByLabelText("Group by") as HTMLSelectElement).value).toBe("status");
     fireEvent.change(popover.getByLabelText("Name"), { target: { value: "By status" } });
     fireEvent.click(popover.getByRole("button", { name: "Create view" }));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
@@ -1271,6 +1282,14 @@ describe("collection authoring", () => {
       expectedContentHash: hashFor(0),
     });
     expect(lastWrittenSchema(bridge).schema.views).toEqual([
+      {
+        name: "Table",
+        kind: "table",
+        groupBy: null,
+        sort: [],
+        visibleFields: null,
+        dateField: null,
+      },
       {
         name: "By status",
         kind: "board",
@@ -1282,6 +1301,10 @@ describe("collection authoring", () => {
     ]);
     await waitFor(() => expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("By status"));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a view" })).toBeNull());
+    view.rerender(
+      pageWithHost(undefined, undefined, { activeViewName: "By status", onActiveViewChange }),
+    );
+    expect(await screen.findByRole("button", { name: "Table" })).toBeTruthy();
     expect(
       (await screen.findByRole("button", { name: "By status" })).getAttribute("aria-pressed"),
     ).toBe("true");
@@ -1301,6 +1324,14 @@ describe("collection authoring", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create view" }));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
     expect(lastWrittenSchema(bridge).schema.views).toEqual([
+      {
+        name: "Table",
+        kind: "table",
+        groupBy: null,
+        sort: [],
+        visibleFields: null,
+        dateField: null,
+      },
       {
         name: "Calendar",
         kind: "calendar",
@@ -1493,7 +1524,7 @@ describe("collection authoring", () => {
       target: { value: "board" },
     });
     const groups = within(await screen.findByLabelText("Group by")).getAllByRole("option");
-    expect(groups.map((option) => option.getAttribute("value"))).toEqual(["", "title", "status"]);
+    expect(groups.map((option) => option.getAttribute("value"))).toEqual(["", "status", "title"]);
   });
 });
 

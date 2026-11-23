@@ -697,7 +697,7 @@ describe("collection folders", () => {
       "New file…",
       "New drawing",
       "New folder",
-      "New collection",
+      "New Collection",
       "Import files",
     ]) {
       expect(within(palette).queryByText(label)).toBeNull();

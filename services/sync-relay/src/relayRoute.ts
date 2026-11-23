@@ -38,6 +38,7 @@ import type { NamedShareTransportRoute } from "./namedShareTransportRoutes";
 import type { ShareProposalRoute, WorkspaceProposalRoute } from "./proposalRoutes";
 import type { CollectionWriteRoute, OwnerCollectionWriteRoute } from "./collectionWriteRoutes";
 import { parsePersonalAgentRoute, type PersonalAgentRoute } from "./personalAgents";
+import type { WorkspaceSecretRoute } from "./workspaceSecretRoutes";
 import { parseShareId, parseString, parseWorkspaceId, relayPathSegments } from "./requestInputs";
 import { notFound } from "./errors";
 import { MAX_ORIGIN_ID_CHARS } from "./wireLimits";
@@ -87,6 +88,7 @@ export type SyncRelayRoute =
   | WorkspaceBlobRoute
   | WorkspaceReplicationRoute
   | { route: "keys"; workspaceId: string }
+  | WorkspaceSecretRoute
   | WorkspaceShareCreationRoute
   | ShareInventoryRoute
   | ShareGrantTransitionRoute
@@ -559,6 +561,17 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "keys") {
     return { route: "keys", workspaceId };
+  }
+  if (parts[2] === "secrets") {
+    if (parts.length === 3) return { route: "workspace-secrets", workspaceId };
+    if (parts.length === 4 && parts[3]) {
+      return {
+        route: "workspace-secret",
+        workspaceId,
+        name: parseString(parts[3], "name", 64),
+      };
+    }
+    throw notFound();
   }
   if (
     parts.length === 7 &&

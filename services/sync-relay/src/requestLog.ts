@@ -89,6 +89,8 @@ export const RELAY_ROUTE_PATTERNS = {
   epoch: "/sync/:workspaceId/epoch",
   presence: "/sync/:workspaceId/presence",
   keys: "/sync/:workspaceId/keys",
+  "workspace-secrets": "/sync/:workspaceId/secrets",
+  "workspace-secret": "/sync/:workspaceId/secrets/:name",
   "share-link-agents": "/sync/:workspaceId/shares/:shareId/links/:grantId/agents",
   "share-link-agent-disconnect":
     "/sync/:workspaceId/shares/:shareId/links/:grantId/agents/:connectionId/disconnect",

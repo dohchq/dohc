@@ -413,8 +413,12 @@ import {
   setFolderExpanded,
   setExplorerMode,
   setOpenEditorsHeight,
+  ABOUT_MIN_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  effectivePanelWidth,
   setView,
   showView,
+  fitWorkbenchSidebars,
   toggleAbout,
   toggleFolderExpanded,
   togglePinned,
@@ -2025,6 +2029,10 @@ function WorkspaceShell(props: {
     () => new Set<string>(),
   );
 
+  const workbenchRef = useRef<HTMLDivElement | null>(null);
+  const workbenchWidthRef = useRef(0);
+  const [workbenchWidth, setWorkbenchWidth] = useState(0);
+
   // The one mutation seam for workbench state: every user-driven transition
   // routes through here. Loading stored state and restored-tab pruning are
   // the only other writers.
@@ -2036,7 +2044,7 @@ function WorkspaceShell(props: {
       // no user involved at all — cancelling on those would silently discard a
       // DM the user had just clicked.
       const current = wbRef.current;
-      const next = updater(current);
+      const next = fitWorkbenchSidebars(current, updater(current), workbenchWidthRef.current);
       if (next === current) return;
       if (
         next.activeEditorGroup !== current.activeEditorGroup ||
@@ -2048,6 +2056,27 @@ function WorkspaceShell(props: {
     },
     [writeWb],
   );
+
+  useEffect(() => {
+    const element = workbenchRef.current;
+    if (!element) return;
+    const syncWidth = (width: number) => {
+      const rounded = Math.round(width);
+      workbenchWidthRef.current = rounded;
+      setWorkbenchWidth((currentWidth) => (currentWidth === rounded ? currentWidth : rounded));
+      const current = wbRef.current;
+      const fitted = fitWorkbenchSidebars(current, current, rounded);
+      if (fitted !== current) writeWb(fitted);
+    };
+    syncWidth(element.getBoundingClientRect().width);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? element.getBoundingClientRect().width;
+      syncWidth(width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [writeWb]);
 
   const sidebarSettings = props.userSettings?.settings.sidebar ?? DEFAULT_SIDEBAR_SETTINGS;
   // A shared view has chat per file, in About, and no workspace-wide listing,
@@ -2062,9 +2091,21 @@ function WorkspaceShell(props: {
   // on what the person sees.
   const restoredSharedChats = isShareView && wb.activeView === "chats";
   const shownView: ActivityViewId = restoredSharedChats ? "explorer" : wb.activeView;
+  const shownSidebarWidth = effectivePanelWidth(wb.sidebarWidth, workbenchWidth, SIDEBAR_MIN_WIDTH);
+  const shownAboutWidth = effectivePanelWidth(wb.aboutWidth, workbenchWidth, ABOUT_MIN_WIDTH);
   const shownWb = useMemo(
-    () => (restoredSharedChats ? { ...wb, activeView: shownView } : wb),
-    [restoredSharedChats, shownView, wb],
+    () =>
+      restoredSharedChats ||
+      shownSidebarWidth !== wb.sidebarWidth ||
+      shownAboutWidth !== wb.aboutWidth
+        ? {
+            ...wb,
+            activeView: shownView,
+            sidebarWidth: shownSidebarWidth,
+            aboutWidth: shownAboutWidth,
+          }
+        : wb,
+    [restoredSharedChats, shownAboutWidth, shownSidebarWidth, shownView, wb],
   );
   useEffect(() => {
     if (!restoredSharedChats) return;
@@ -2214,7 +2255,7 @@ function WorkspaceShell(props: {
           // Order matters: writeWb (which sets wbRef), THEN enable flushes — a
           // beforeunload between "loaded" and the restored state's commit
           // must flush the restored state, never the stale default.
-          writeWb(parsed);
+          writeWb(fitWorkbenchSidebars(parsed, parsed, workbenchWidthRef.current));
           setRestoredTabPaths(new Set(allTabs(parsed).map((tab) => tab.path)));
         }
         restoredActiveFileSurface.current = restoredFileSurface;
@@ -2252,7 +2293,8 @@ function WorkspaceShell(props: {
       const shown = wbRef.current;
       if (stored) {
         const saved = parseUiState(stored);
-        writeWb(mergeSavedTabs(saved, shown));
+        const merged = mergeSavedTabs(saved, shown);
+        writeWb(fitWorkbenchSidebars(merged, merged, workbenchWidthRef.current));
         setRestoredTabPaths(new Set(allTabs(saved).map((tab) => tab.path)));
       } else {
         writeWb({ ...shown });
@@ -8512,6 +8554,7 @@ function WorkspaceShell(props: {
                             }
                           />
                           <div
+                            ref={workbenchRef}
                             data-testid="workspace-workbench"
                             inert={!workbenchRestored || workspaceStopped ? true : undefined}
                             className="flex min-w-0 flex-1"
@@ -9469,7 +9512,7 @@ function WorkspaceShell(props: {
             bring it back. The chat list lives in the left Chats view. */}
                             {wb.aboutVisible ? (
                               <ShellAboutRail
-                                wb={wb}
+                                wb={shownWb}
                                 mutateWb={mutateWb}
                                 captureAvailable={captureAvailable}
                                 captureDecided={captureDecided}
