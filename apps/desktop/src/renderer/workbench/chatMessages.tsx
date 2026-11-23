@@ -18,7 +18,7 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { retainChatParser } from "./chatMarkdownWorker";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { isComposingKey, isSendKey } from "../ui/keys";
-import { Ban, SmilePlus } from "lucide-react";
+import { Ban, Search, SmilePlus, X } from "lucide-react";
 import { EmptyState } from "../ui/controls";
 import {
   memo,
@@ -237,7 +237,7 @@ export const TOOLBAR_BUTTON =
 // the buttons stay in the Tab order. An open picker inside keeps it shown.
 // Hidden, it takes no pointer, so a click there reaches the row beneath.
 const ROW_TOOLBAR =
-  "dohc-popover absolute z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 text-muted pointer-events-none opacity-0 transition-opacity duration-75 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 has-[[popover]]:pointer-events-auto has-[[popover]]:opacity-100";
+  "dohc-popover absolute z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 text-muted pointer-events-none opacity-0 transition-opacity duration-75 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 has-[[popover]]:pointer-events-auto has-[[popover]]:opacity-100 [&>button]:size-7 [&>span>button]:size-7";
 
 export function RowToolbar(props: { testId?: string; className?: string; children: ReactNode }) {
   return (
@@ -296,6 +296,8 @@ export function MessageReactions(props: {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const pickerRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const emojiGridRef = useRef<HTMLDivElement | null>(null);
   const [pickerPosition, setPickerPosition] = useState({ left: 0, top: 0 });
   const pickerId = useId();
   const [query, setQuery] = useState("");
@@ -437,7 +439,8 @@ export function MessageReactions(props: {
     const group = byEmoji[at];
     if (!group) continue;
     group.records.push(record);
-    if (record.authorId === props.controls.viewerAuthorId) group.mine = true;
+    if (record.authorKind === "human" && record.authorId === props.controls.viewerAuthorId)
+      group.mine = true;
   }
 
   const toggle = (emoji: string, mine: boolean) => {
@@ -497,30 +500,95 @@ export function MessageReactions(props: {
         aria-label="Choose a reaction"
         className="dohc-popover dohc-pop-in fixed z-50 max-h-[calc(100vh-16px)] w-72 max-w-[calc(100vw-8px)] overflow-y-auto rounded-lg border border-line bg-panel p-2"
       >
-        <input
-          aria-label="Search emoji or paste any emoji"
-          placeholder="Search or paste an emoji"
-          value={query}
-          onChange={(event) => {
-            setQuery(event.currentTarget.value);
-            setVisibleCount(96);
-          }}
-          className="mb-2 w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-ink"
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !isComposingKey(event)) {
-              event.preventDefault();
-              if (choices[0]) {
-                toggle(
-                  choices[0],
-                  byEmoji.some((group) => group.emoji === choices[0] && group.mine),
+        <div className="relative mb-2 flex items-center">
+          <Search
+            size={13}
+            aria-hidden
+            className="pointer-events-none absolute left-2.5 text-subtle"
+          />
+          <input
+            ref={searchInputRef}
+            aria-label="Search emoji or paste any emoji"
+            placeholder="Search or paste an emoji"
+            value={query}
+            onChange={(event) => {
+              setQuery(event.currentTarget.value);
+              setVisibleCount(96);
+            }}
+            className="w-full rounded-md border border-line bg-bg py-1.5 pl-7 pr-7 text-[13px] text-ink placeholder:text-subtle"
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown" && !isComposingKey(event)) {
+                const firstChoice = emojiGridRef.current?.querySelector<HTMLButtonElement>(
+                  `[data-testid="${props.testIdPrefix}-reaction-choice"]`,
                 );
-                setPickerOpen(false);
-                triggerRef.current?.focus();
+                if (firstChoice) {
+                  event.preventDefault();
+                  firstChoice.focus();
+                }
+                return;
               }
+              if (event.key === "Enter" && !isComposingKey(event)) {
+                event.preventDefault();
+                if (choices[0]) {
+                  toggle(
+                    choices[0],
+                    byEmoji.some((group) => group.emoji === choices[0] && group.mine),
+                  );
+                  setPickerOpen(false);
+                  triggerRef.current?.focus();
+                }
+              }
+            }}
+          />
+          {query ? (
+            <button
+              type="button"
+              aria-label="Clear search"
+              title="Clear search"
+              onClick={() => {
+                setQuery("");
+                setVisibleCount(96);
+                searchInputRef.current?.focus();
+              }}
+              className="absolute right-1.5 grid size-5 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
+            >
+              <X size={12} aria-hidden />
+            </button>
+          ) : null}
+        </div>
+        <div
+          ref={emojiGridRef}
+          className="grid h-56 content-start grid-cols-8 gap-0.5 overflow-y-auto"
+          onKeyDown={(event) => {
+            const buttons = [
+              ...(emojiGridRef.current?.querySelectorAll<HTMLButtonElement>(
+                `[data-testid="${props.testIdPrefix}-reaction-choice"]`,
+              ) ?? []),
+            ];
+            if (buttons.length === 0) return;
+            const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+            if (current < 0) return;
+            const columns = 8;
+            let next: number | null = null;
+            if (event.key === "ArrowRight") next = Math.min(buttons.length - 1, current + 1);
+            else if (event.key === "ArrowLeft") next = Math.max(0, current - 1);
+            else if (event.key === "ArrowDown")
+              next = Math.min(buttons.length - 1, current + columns);
+            else if (event.key === "ArrowUp") {
+              if (current < columns) {
+                event.preventDefault();
+                searchInputRef.current?.focus();
+                return;
+              }
+              next = current - columns;
+            } else if (event.key === "Home") next = 0;
+            else if (event.key === "End") next = buttons.length - 1;
+            if (next !== null) {
+              event.preventDefault();
+              buttons[next]?.focus();
             }
           }}
-        />
-        <div className="grid h-56 content-start grid-cols-8 gap-0.5 overflow-y-auto">
+        >
           {choices.slice(0, visibleCount).map((emoji) => {
             const mine = index.has(emoji)
               ? (byEmoji[index.get(emoji) as number]?.mine ?? false)
@@ -533,7 +601,9 @@ export function MessageReactions(props: {
                 data-testid={`${props.testIdPrefix}-reaction-choice`}
                 data-emoji={emoji}
                 aria-label={emoji}
-                title={emojiNames.get(emoji) ?? emoji}
+                title={(emojiNames.get(emoji) ?? emoji)
+                  .replaceAll("\u2019", "'")
+                  .replaceAll("\u2018", "'")}
                 onClick={() => {
                   toggle(emoji, mine);
                   setPickerOpen(false);
@@ -595,10 +665,10 @@ export function MessageReactions(props: {
             // The emoji glyph is aria-hidden, so without this the button announces
             // as just its count. Expose emoji + count + reactor names, e.g.
             // "👍 3 — Sam, Nova".
-            aria-label={`${group.emoji} ${group.records.length} — ${reactionerNames(group.records)}`}
+            aria-label={`${group.emoji} ${group.records.length}, ${reactionerNames(group.records)}`}
             title={`${reactionerNames(group.records)} reacted with ${group.emoji}`}
             onClick={() => toggle(group.emoji, group.mine)}
-            className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors disabled:cursor-default aria-disabled:opacity-50 aria-disabled:cursor-default ${
+            className={`inline-flex h-6 items-center gap-1 rounded-full border px-1.5 text-[11px] leading-none transition-colors disabled:cursor-default aria-disabled:opacity-50 aria-disabled:cursor-default ${
               group.mine
                 ? "border-accent/60 bg-accent/15 text-ink"
                 : "border-line bg-bg text-muted hover:border-ink/40 hover:text-ink"
@@ -635,7 +705,12 @@ export function MessageReactions(props: {
           })}
           {trigger}
           {picker}
-          {props.toolbarActions}
+          {props.toolbarActions ? (
+            <>
+              <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-line" />
+              {props.toolbarActions}
+            </>
+          ) : null}
         </RowToolbar>
       ) : (
         <>
@@ -1095,7 +1170,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
           {message.id === props.firstUnreadMessageId ? (
             <span
               data-testid={`${props.testIdPrefix}-new-divider`}
-              className={`${sizes.divider} my-1.5 flex items-center gap-3 text-[12px] font-medium text-muted before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line`}
+              className={`${sizes.divider} my-1.5 flex items-center gap-3 text-[12px] font-medium text-danger before:h-px before:flex-1 before:bg-danger/40 after:h-px after:flex-1 after:bg-danger/40`}
             >
               New
             </span>
@@ -1245,7 +1320,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       >
         <div className={`px-5 ${props.column ? STREAM_COLUMN : ""}`}>
           {props.loading ? (
-            <SkeletonRows label="Loading..." className="pt-1" />
+            <SkeletonRows label="Loading…" className="pt-1" />
           ) : (
             <p className="m-0 py-4 text-[13px] text-muted">{props.emptyLabel}</p>
           )}
@@ -1258,13 +1333,15 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       {topDay ? (
         <div
           aria-hidden
-          data-testid={`${props.testIdPrefix}-sticky-day`}
-          className={`pointer-events-none absolute left-0 top-0 z-10 ${props.surface === "panel" ? "bg-panel" : "bg-bg"}`}
+          className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center"
           style={{ right: scrollbarWidth }}
         >
-          <div className={props.column ? STREAM_COLUMN : undefined}>
-            <span className={`${DENSITY[density].divider} ${DAY_DIVIDER}`}>{topDay}</span>
-          </div>
+          <span
+            data-testid={`${props.testIdPrefix}-sticky-day`}
+            className="dohc-popover rounded-full border border-line bg-panel px-3 py-0.5 text-[12px] font-medium text-muted"
+          >
+            {topDay}
+          </span>
         </div>
       ) : null}
       <LegendList
@@ -1291,8 +1368,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         alwaysRender={pinned}
         // The column keeps its place when a scrollbar appears.
         className={`min-h-0 flex-1 overflow-y-auto ${props.column ? "[scrollbar-gutter:stable]" : ""}`}
-        // A narrow row's hover bar rises above it, so the first row needs the room.
-        style={{ paddingTop: density === "narrow" ? 30 : 8, paddingBottom: 8 }}
+        // A narrow row's hover bar rises above it, and stream/thread toolbars
+        // hang above the top row, so give them clearance.
+        style={{ paddingTop: density === "narrow" ? 30 : 16, paddingBottom: 8 }}
         role="list"
         data-chat-virtualized="true"
         onKeyDown={(event) => {
@@ -1362,7 +1440,7 @@ export function ChatComposer(props: {
           data-testid={`${props.testIdPrefix}-composer`}
           value={props.value}
           disabled={props.sending}
-          rows={2}
+          rows={1}
           placeholder={props.placeholder}
           onChange={(event) => props.onChange(event.target.value)}
           onKeyDown={(event) => {
@@ -1377,7 +1455,7 @@ export function ChatComposer(props: {
               props.onEscape();
             }
           }}
-          className="block w-full resize-none rounded-md border border-line bg-bg py-1.5 pl-2.5 pr-10 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
+          className="field-sizing-content block max-h-40 min-h-[34px] w-full resize-none rounded-md border border-line bg-bg py-1.5 pl-2.5 pr-10 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
         />
         <div className="absolute bottom-1.5 right-1.5 flex">
           <ComposerSendButton

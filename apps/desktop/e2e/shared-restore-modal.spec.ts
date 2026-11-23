@@ -87,7 +87,7 @@ test.describe("shared restore review with a notice toast", () => {
     await beforeOpen?.();
     await page.getByRole("button", { name: "Open restore review" }).press("Enter");
     const dialog = page.getByRole("dialog", { name: "Restore shared file" });
-    await dialog.getByRole("button", { name: "Retry" }).press("Enter");
+    await dialog.getByRole("button", { name: "Try again" }).press("Enter");
     const restore = dialog.getByRole("button", { name: "Restore file", exact: true });
     await expect(restore).toBeEnabled();
     if (expand) {

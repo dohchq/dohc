@@ -48,7 +48,7 @@ export const CHANGE_ICONS: Record<CollectionChangeIcon, { icon: LucideIcon; tone
   rule: { icon: Shield, tone: "text-muted" },
   data: { icon: Database, tone: "text-muted" },
 };
-export const CHANGE_LOSS = "History can't undo this change.";
+export const CHANGE_LOSS = "History cannot undo this change.";
 
 export type CollectionChangeReviewLoad =
   | { kind: "loading" }
@@ -222,7 +222,7 @@ export function CollectionChangeReviewCard(props: {
         <h2 id={testId("title")} className="m-0 text-sm font-semibold text-ink">
           Review source change to {asked.proposal.name}
         </h2>
-        <span className="ml-auto flex items-center gap-1.5 text-[11px] text-subtle">
+        <span className="ml-auto flex items-center gap-1.5 text-[12px] text-subtle">
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd> Move <Kbd>Enter</Kbd> Open the file's changes
         </span>
@@ -232,11 +232,13 @@ export function CollectionChangeReviewCard(props: {
         {/* One message asks for one change, so there is nothing to pick yet. */}
         <span className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-md border border-line bg-bg px-2.5 py-[5px] text-[13px] text-ink">
           <span className="min-w-0 truncate">
-            Change to {asked.proposal.name} ·{" "}
-            {ready ? ready.files.length : asked.proposal.files.length} files
+            {(() => {
+              const fileCount = ready ? ready.files.length : asked.proposal.files.length;
+              return `Change to ${asked.proposal.name} · ${fileCount} ${fileCount === 1 ? "file" : "files"}`;
+            })()}
           </span>
           {authors.length ? (
-            <span className="shrink-0 text-[11px] text-subtle">{authors.join(", ")}</span>
+            <span className="shrink-0 text-[12px] text-subtle">{authors.join(", ")}</span>
           ) : null}
         </span>
       </div>
@@ -326,7 +328,7 @@ export function CollectionChangeReviewCard(props: {
 
 function Kbd(props: { children: string }) {
   return (
-    <kbd className="rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle">
+    <kbd className="rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle">
       {props.children}
     </kbd>
   );
@@ -373,12 +375,12 @@ function ReviewRow(props: {
             {words.danger ? (
               <CircleAlert size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
             ) : null}
-            <span className={words.file ? "font-mono text-[11px]" : undefined}>{words.effect}</span>
+            <span className={words.file ? "text-[12px]" : undefined}>{words.effect}</span>
           </span>
         ) : null}
         {source ? (
-          <span className="col-start-2 flex flex-wrap items-center gap-1.5 text-[11px] text-subtle">
-            <span className="font-mono">{source.path}</span>
+          <span className="col-start-2 flex flex-wrap items-center gap-1.5 text-[12px] text-subtle">
+            <span>{source.path}</span>
             {source.author ? (
               <>
                 <span aria-hidden>·</span>

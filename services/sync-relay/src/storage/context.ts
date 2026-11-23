@@ -18,7 +18,7 @@ export interface StorageContext extends SyncRelayStorage {
     >;
   }) => Promise<(() => boolean) | null>;
   readonly db: SqliteDb;
-  readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>;
+  readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets" | "opened">>;
   readonly newDiscussionId: () => string;
   quietTx<T>(run: () => T): T;
   tx<T>(run: () => T, scope?: RelayWriteScope): T;

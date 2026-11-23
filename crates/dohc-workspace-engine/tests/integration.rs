@@ -54,8 +54,12 @@ mod rpc_read_surface;
 mod rpc_received_ydoc;
 #[path = "rpc_relay.rs"]
 mod rpc_relay;
+#[path = "rpc_retrieval.rs"]
+mod rpc_retrieval;
 #[path = "rpc_search_page.rs"]
 mod rpc_search_page;
+#[path = "rpc_secret_queued_jobs.rs"]
+mod rpc_secret_queued_jobs;
 #[path = "rpc_source_capture.rs"]
 mod rpc_source_capture;
 #[path = "rpc_switch_barriers.rs"]
@@ -68,5 +72,7 @@ mod rpc_write_surface;
 mod rpc_ydoc;
 #[path = "shadow_replay.rs"]
 mod shadow_replay;
+#[path = "stop_signal.rs"]
+mod stop_signal;
 #[path = "ydoc_replay_parity.rs"]
 mod ydoc_replay_parity;

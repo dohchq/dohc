@@ -412,7 +412,7 @@ const WORKSPACE_DECODER_CASES: Array<{
   { method: WORKSPACE_METHOD.conflictsOpen, valid: { inserted: true } },
   {
     method: WORKSPACE_METHOD.conflictsResolve,
-    valid: { conflict, write: null, delete: null },
+    valid: { conflict, placed: true, write: null, delete: null },
   },
   {
     method: WORKSPACE_METHOD.collectionsList,
@@ -503,6 +503,7 @@ const WORKSPACE_DECODER_CASES: Array<{
       phase: "ready",
       noAtomicPlacement: false,
       recoveryUnavailable: false,
+      secretKeyChecked: true,
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [],
@@ -2220,6 +2221,7 @@ describe("VersionedLiveAdapter", () => {
 
     const resolved = decodeWorkspaceResult(WORKSPACE_METHOD.conflictsResolve, {
       conflict: withheld,
+      placed: true,
       write: null,
       delete: null,
     }) as { conflict: ConflictRecord };
@@ -2808,4 +2810,65 @@ it("binds edge pages to the workspace handle and validates the shared record bud
   });
   result = { ...result, unchecked: Array.from({ length: 100 }, () => "pending.md") };
   await expect(adapter.linkEdges({})).rejects.toThrow("100 records");
+});
+
+it("sends retrieval.query bound to the workspace handle and validates its result", async () => {
+  const requests: Request[] = [];
+  let result: JsonValue = {
+    versionId: "main",
+    results: [
+      {
+        id: "page:obj-1",
+        kind: "page",
+        title: "Tokyo Plan",
+        path: "Projects/tokyo.md",
+        objectId: "obj-1",
+        snippet: "Book Shinjuku hotel near station.",
+        matchedTerms: ["tokyo", "hotel"],
+        related: [],
+      },
+    ],
+    neighbors: [],
+    complete: true,
+    indexBuilding: false,
+    policyDegraded: false,
+    mountsCovered: true,
+    sharedChannelRowsUncovered: 0,
+    truncated: false,
+  };
+  const adapter = new VersionedLiveAdapter(
+    {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        return { id: request.id, result };
+      },
+    },
+    WORKSPACE,
+    { workspaceId: WORKSPACE },
+  );
+  expect(
+    await adapter.retrieveWorkspace({
+      query: "  tokyo hotel ",
+      surfaces: ["page", "record"],
+      pathPrefix: "Projects",
+      limit: 10,
+      includeNeighbors: false,
+    }),
+  ).toEqual(result);
+  expect(requests[0]).toMatchObject({
+    method: "retrieval.query",
+    workspace: WORKSPACE,
+    params: {
+      query: "tokyo hotel",
+      surfaces: ["page", "record"],
+      pathPrefix: "Projects",
+      limit: 10,
+      includeNeighbors: false,
+    },
+  });
+  await expect(adapter.retrieveWorkspace({ query: "   " })).rejects.toThrow();
+  await expect(adapter.retrieveWorkspace({ query: "tokyo", limit: 51 })).rejects.toThrow();
+  result = { ...(result as Record<string, JsonValue>), extraField: true };
+  await expect(adapter.retrieveWorkspace({ query: "tokyo" })).rejects.toThrow();
 });

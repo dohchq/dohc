@@ -115,6 +115,23 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn list_moments_with_bodies(
+        &self,
+        query: ListMomentsQuery,
+        hydrate_bodies: bool,
+    ) -> Result<MomentPage, RuntimeError> {
+        self.run(move |store, _| {
+            let store = VersionedTextStore::new(store);
+            if hydrate_bodies {
+                store.list_moments(&query)
+            } else {
+                store.list_moments_metadata(&query)
+            }
+            .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn history_page(
         &self,
         workspace_id: String,
@@ -261,7 +278,7 @@ struct SwitchProjection {
     inline_content: Option<Vec<u8>>,
 }
 
-fn projection_preimage(state: &ProjectionTargetState) -> Option<Preimage> {
+pub(super) fn projection_preimage(state: &ProjectionTargetState) -> Option<Preimage> {
     match state {
         ProjectionTargetState::Absent => Some(Preimage::Absent),
         ProjectionTargetState::Text { sha256 } | ProjectionTargetState::Binary { sha256 } => {
@@ -1411,6 +1428,45 @@ impl ActorHandle {
         })
         .await
     }
+
+    /// End the projection writes a pull page queued at the paths a desktop
+    /// page wrote itself.
+    pub async fn end_relay_page_projection_writes(
+        &self,
+        workspace_id: String,
+        root_dir: PathBuf,
+        changes: Vec<dohc_engine_sync::MomentMaterializationChange>,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _cache| {
+            if store.is_passive() {
+                return Ok(());
+            }
+            let active = VersionedTextStore::new(store)
+                .get_active_version(&workspace_id)?
+                .version_id;
+            let paths: Vec<String> = changes
+                .into_iter()
+                .filter(|change| change.version_id == active && change.operation == "write")
+                .map(|change| change.path)
+                .collect();
+            if paths.is_empty() {
+                return Ok(());
+            }
+            let holds = PlacementHolds::load(store, &workspace_id)?;
+            end_page_projection_writes(
+                store,
+                &root_dir,
+                &workspace_id,
+                self_writes.as_ref(),
+                &holds,
+                &paths,
+                now_ms,
+            )
+        })
+        .await
+    }
 }
 
 /// [`ActorHandle::materialize_relay_page`] on the writer's store.
@@ -1760,8 +1816,9 @@ pub(super) fn materialize_relay_page_on_store(
     Ok(())
 }
 
-/// End the file writes this page's Y.Doc projections queued. Only a server's
-/// copies call this page: its hosted replica and its automations copy. Each
+/// End the file writes this page's Y.Doc projections queued. A server's
+/// copies run this page: its hosted replica and its automations copy. A
+/// desktop writes its page itself, then ends the writes the same way. Each
 /// projection a pull applies queues a write of its document's file that
 /// expects the head before it, and the page then brings the file to the
 /// newest head through a job of its own. Nothing runs the queued writes while

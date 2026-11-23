@@ -5,6 +5,7 @@ import {
   CircleAlert,
   Clock,
   Eye,
+  Info,
   Link,
   LogIn,
   LogOut,
@@ -64,10 +65,13 @@ const REACH_SHOWN = {
   edit: { icon: Pencil, label: "Edit" },
 } as const;
 
-// What each level lets the agent do, in the sign-in screen's words.
 const REACH_MEANINGS =
   "View reads files and chats. Comment also posts in chats and Comments. " +
-  "Edit also changes Collections, but no other files.";
+  "Edit also changes Collections, and pages you have opened in dohc where the server hosts them, but no other files.";
+
+function outsideDohcWords(agentName: string): string {
+  return `${agentName} runs outside dohc. dohc limits what it reaches here, not what it does elsewhere.`;
+}
 
 // A joined row offers no Edit. The roster gives no member's level, so it
 // offers Comment even to a member who holds only View.
@@ -330,6 +334,13 @@ export function PersonalReachSheet(props: {
             <ReachNotes joined={joinedIn(listed)} />
           </div>
         )}
+        <p
+          data-testid="personal-agent-reach-outside-note"
+          className="m-0 flex items-start gap-2 rounded-lg bg-panel-2 px-3 py-2 text-[12px] text-muted"
+        >
+          <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+          <span className="min-w-0">{outsideDohcWords(agent.name)}</span>
+        </p>
         {failure ? (
           <p
             role="alert"
@@ -637,6 +648,13 @@ export function PersonalAgentPage(props: {
             </div>
           ) : null}
           {listed.length > 0 ? <ReachNotes joined={joinedIn(listed)} className="mt-1.5" /> : null}
+          <p
+            data-testid="personal-agent-outside-note"
+            className="m-0 mt-3 flex items-start gap-2 rounded-lg bg-panel-2 px-3 py-2 text-[12px] text-muted"
+          >
+            <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+            <span className="min-w-0">{outsideDohcWords(agent.name)}</span>
+          </p>
         </>
       )}
 

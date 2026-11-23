@@ -335,7 +335,7 @@ async fn accepted_frame_editor_case(case: EditorCase) {
             },
         ),
         bytes: update,
-        reservation: service.reserve_owner_delivery().unwrap(),
+        reservation: std::sync::Arc::new(()),
     };
     let request = Request {
         id: 4,

@@ -140,6 +140,84 @@ it.each(["view"] as const)(
     }
   },
 );
+it("shows the owner's latest save of a note that is not live, even when two computers saved from the same file", async () => {
+  const storage = await newStorage();
+  const h = handler(storage);
+  const link = await seed(h, "view");
+  const shown = async (path = "docs/shared.md") => {
+    const current = await json(await h(linkRequest(link.capability, "/sync/link/current")));
+    return (current.files as { path: string; blobSha256: string }[])
+      .filter((file) => file.path === path)
+      .map((file) => file.blobSha256);
+  };
+  const seqs = new Map<string, number>([["origin-a", 3]]);
+  const save = async (
+    originId: string,
+    text: string,
+    recordedAtMs: number,
+    {
+      path = "docs/shared.md",
+      objectId = "object-shared",
+      before = "# shared\n",
+    }: { path?: string; objectId?: string; before?: string | null } = {},
+  ) => {
+    const sha = await putBlob(h, text);
+    const seq = seqs.get(originId) ?? 0;
+    seqs.set(originId, seq + 1);
+    await appendMoments(
+      h,
+      [
+        moment(seq, path, text, recordedAtMs, {
+          objectId,
+          ...(before === null ? {} : { beforePath: path, beforeContent: before }),
+        }),
+      ],
+      { originId },
+    );
+    return sha;
+  };
+  const first = await save("origin-a", "first computer\n", 2_000);
+  expect(await shown()).toEqual([first]);
+  const second = await save("origin-b", "second computer\n", 2_001);
+  expect(await shown()).toEqual([second]);
+  await save("origin-c", "saved offline earlier\n", 1_500);
+  expect(await shown()).toEqual([second]);
+  await save("origin-d", "another note\n", 3_000, { objectId: "object-other" });
+  await save("origin-d", "another note again\n", 3_001, {
+    objectId: "object-other",
+    before: "another note\n",
+  });
+  expect(await shown()).toEqual([second]);
+
+  const member = await putBlob(h, "a member's edit\n");
+  storage.appendLogBatch({
+    workspaceId: WORKSPACE,
+    originId: "relay:share-member:share:recipient:device",
+    ops: [
+      moment(0, "docs/shared.md", "a member's edit\n", 5_000, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "second computer\n",
+      }),
+    ].map(({ payload, ...op }) => ({ ...op, payloadJson: JSON.stringify(payload) })),
+  });
+  expect(await shown()).toEqual([member]);
+  await save("origin-a", "owner after the member\n", 6_000);
+  expect(await shown()).toEqual([member]);
+
+  const records = await save("origin-a", "records: []\n", 4_000, {
+    path: "docs/tasks.yaml",
+    objectId: "object-tasks",
+    before: null,
+  });
+  await putBlob(h, "records: [old]\n");
+  await save("origin-a", "records: [mine]\n", 4_100, {
+    path: "docs/tasks.yaml",
+    objectId: "object-tasks",
+    before: "records: [old]\n",
+  });
+  expect(await shown("docs/tasks.yaml")).toEqual([records]);
+});
 it("serves one link-grant identity to browser and agent holders, separated from other grants and named users", async () => {
   const storage = await newStorage(),
     h = handler(storage);
@@ -596,7 +674,7 @@ describe("relay capability reads", () => {
         beforePath: "docs/shared.md",
         beforeContent: "# shared\n",
       }),
-      moment(4, "docs/shared.md", staleContent, 1_400, {
+      moment(4, "docs/shared.md", staleContent, 1_250, {
         objectId: "object-shared",
         beforePath: "docs/shared.md",
         beforeContent: "# shared\n",

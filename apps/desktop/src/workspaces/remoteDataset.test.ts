@@ -59,6 +59,7 @@ const approved = {
     revision: 0,
     digest: "0".repeat(64),
   },
+  checkpointSha256: "2".repeat(64),
 };
 const description = {
   datasetId: id(1),

@@ -131,7 +131,7 @@ export interface OwnerYDocDeliveryApplyInput extends OwnerYDocDeliveryTarget {
   readonly previousAcceptedCursor: number;
   readonly journalCursor: number;
   readonly updateBytes: Uint8Array;
-  /** A room's save: the last room position it holds, below its journal cursor. */
+  /** A room's save: the position through which every room row is saved, below its journal cursor. */
   readonly rowsThrough?: number;
 }
 export interface OwnerYDocDeliveryReceipt {
@@ -1220,11 +1220,12 @@ export class EngineClient implements EngineTransport {
    * Releases a Stop at the relay's retirement cursor, recording the kept
    * edits it takes when a snapshot is given. With only a snapshot it is a Try
    * again: it settles a release that already took exactly those edits, and
-   * starts none.
+   * starts none. A person's queued edits are credited to `personId`.
    */
   async ownerYDocRelease(
     request: OwnerYDocDeliveryRequest,
     binding: OwnerYDocDeliveryTarget["binding"],
+    personId: string,
     release: { acceptedCursor: number; keptSnapshot?: string } | { keptSnapshot: string },
     signal?: AbortSignal,
   ) {
@@ -1242,6 +1243,7 @@ export class EngineClient implements EngineTransport {
       "release",
       {
         binding,
+        personId,
         ...(acceptedCursor === undefined ? {} : { acceptedCursor }),
         ...(keptSnapshot === undefined ? {} : { keptSnapshot }),
       },
@@ -1377,6 +1379,8 @@ export class EngineClient implements EngineTransport {
       rowCursor: number;
       copyPath: string;
       keptSnapshot?: string;
+      /** The relay's copy of the paused room, as one update of its whole state. */
+      roomCopy?: Uint8Array;
     },
     signal?: AbortSignal,
   ) {
@@ -1399,6 +1403,15 @@ export class EngineClient implements EngineTransport {
         rowCursor: input.rowCursor,
         copyPath: input.copyPath,
         ...(input.keptSnapshot === undefined ? {} : { keptSnapshot: input.keptSnapshot }),
+        ...(input.roomCopy === undefined
+          ? {}
+          : {
+              roomCopyBase64: Buffer.from(
+                input.roomCopy.buffer,
+                input.roomCopy.byteOffset,
+                input.roomCopy.byteLength,
+              ).toString("base64"),
+            }),
       },
       signal,
     );
@@ -3628,11 +3641,11 @@ export async function createEngineClient(options: EngineClientSpawnOptions): Pro
       // proved this child answers nothing, and it is about to run code that
       // can block the event loop, which is where that timer lives. Signal now.
       if (force) {
-        child.kill();
+        child.kill("SIGKILL");
         return;
       }
       const killTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill();
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       }, 2_000);
       killTimer.unref();
       child.once("exit", () => clearTimeout(killTimer));

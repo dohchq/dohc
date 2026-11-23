@@ -80,7 +80,7 @@ describe("useCollectionsWaitingNotice", () => {
     const row = view.rows()[0]!;
     expect(row.title).toBe("Collection updates are waiting");
     expect(row.message).toBe(
-      "They continue once sync finishes. To work offline, pause sync in Settings.",
+      "Collection updates will continue once sync finishes. To work offline, pause sync in Settings.",
     );
     expect(row.tone).toBe("warning");
     expect(row.kind).toBe("collections-waiting");
@@ -191,7 +191,7 @@ describe("useCollectionsWaitingNotice", () => {
     const view = renderNotice({ waiting: "reopen" }, retry.retryCloudSync);
     expect(view.rows()[0]!.title).toBe("Collection updates are waiting");
     expect(view.rows()[0]!.message).toBe(
-      "dohc paused sync but could not reopen this workspace. They continue once it reopens.",
+      "dohc paused sync but could not reopen this workspace. Updates will continue once it reopens.",
     );
     act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
     await act(async () => retry.fail(new Error("open failed")));

@@ -489,19 +489,13 @@ fn rebuild_chat_index_for_workspace(
 ///
 /// Query-time `path_is_search_indexed` still fails FILE search closed while
 /// degraded regardless of what the frozen file index holds.
-pub fn ensure_search_index_for_version(
+pub(crate) fn is_search_index_certified(
     conn: &Connection,
-    root_dir: &Path,
+    policy: &SearchPolicySnapshot,
     workspace_id: &str,
     version_id: &str,
-    _now_ms: i64,
-    faults: &dyn FaultInjector,
-) -> Result<(), SearchError> {
-    let policy = read_engine_search_policy(root_dir);
+) -> Result<bool, SearchError> {
     let current_degraded = policy.is_degraded();
-
-    // The last-built degraded status and index generation for this version, if
-    // any. An older marker is deliberately not a current certification.
     let stored_state: Option<(bool, bool)> = conn
         .query_row(
             "SELECT file_policy_degraded, indexed_at_ms FROM engine_search_index_state \
@@ -519,7 +513,21 @@ pub fn ensure_search_index_for_version(
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             other => Err(SearchError::from(other)),
         })?;
-    if stored_state == Some((current_degraded, true)) {
+    Ok(stored_state == Some((current_degraded, true)))
+}
+
+pub fn ensure_search_index_for_version(
+    conn: &Connection,
+    root_dir: &Path,
+    workspace_id: &str,
+    version_id: &str,
+    _now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), SearchError> {
+    let policy = read_engine_search_policy(root_dir);
+    let current_degraded = policy.is_degraded();
+
+    if is_search_index_certified(conn, &policy, workspace_id, version_id)? {
         // Up to date: healthy-stable or degraded-stable. No rebuild, no per-query
         // chat wipe.
         return Ok(());

@@ -81,9 +81,9 @@ export function ForwardWorkspaceDialog(props: {
         >
           {/* dohc forwards only to an agent that is on, and only what comes after this. */}
           <p className="m-0">
-            {`${agent.enabled ? "From now on" : "Once Forward messages is on"}, dohc forwards messages from this workspace to ${agent.name}'s thread, which ${
+            {`${agent.enabled ? "dohc will forward" : "Once Forward messages is on, dohc will forward"} messages from this workspace to ${agent.name}'s thread, which ${
               others === 0
-                ? "keeps every message it already has, from any workspace"
+                ? "keeps every message it already has from any workspace"
                 : `also holds messages from ${others} other ${others === 1 ? "workspace" : "workspaces"}`
             }.`}
           </p>

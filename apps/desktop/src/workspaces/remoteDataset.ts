@@ -19,7 +19,7 @@ import type { ResolvedDatasetRequest as DatasetRequest } from "./datasetAddress"
 import {
   parseDatasetDescription,
   parseDatasetRevision,
-  type AppDatasetBinding,
+  type AppDatasetRevisionLookup,
   type DatasetDescription,
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
@@ -122,6 +122,7 @@ export interface OwnerDatasetData {
     operationSource: string;
     active: boolean;
     cursor: DatasetCursor;
+    checkpointSha256: string;
   }>;
   /** With `after`, the owner's server returns the journal from there, when it fits. */
   invoke(
@@ -196,6 +197,7 @@ const artifacts = z
         digest: sha256,
       })
       .strict(),
+    checkpointSha256: sha256,
   })
   .strict();
 
@@ -811,19 +813,29 @@ export function createRemoteDatasetTransferTarget(input: {
   };
 }
 
-export async function resolveRemoteDatasetRevision(
+export async function resolveRemoteDatasetArtifacts(
   data: Pick<OwnerDatasetData, "approvedArtifacts">,
-  binding: AppDatasetBinding,
-): Promise<DatasetRevision> {
+  binding: AppDatasetRevisionLookup,
+): Promise<{ revision: DatasetRevision; schemaSql: string }> {
   const approved = await data.approvedArtifacts(binding.datasetId);
   if (
     !approved.active ||
-    approved.revision.revision !== binding.revision ||
-    approved.revision.revisionSha256 !== binding.revisionSha256
+    (binding.revision !== undefined && approved.revision.revision !== binding.revision) ||
+    (binding.revisionSha256 !== undefined &&
+      approved.revision.revisionSha256 !== binding.revisionSha256)
   ) {
-    throw new Error("Collection rules changed. Reload the Collection and prepare the app again.");
+    throw new Error(
+      "Collection rules changed. Remove revision and revisionSha256 from app.publish.json (or update them) and prepare the app again.",
+    );
   }
-  return approved.revision;
+  return { revision: approved.revision, schemaSql: approved.schemaSql };
+}
+
+export async function resolveRemoteDatasetRevision(
+  data: Pick<OwnerDatasetData, "approvedArtifacts">,
+  binding: AppDatasetRevisionLookup,
+): Promise<DatasetRevision> {
+  return (await resolveRemoteDatasetArtifacts(data, binding)).revision;
 }
 
 export interface DatasetAuthorityRoute {

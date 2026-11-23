@@ -1,5 +1,7 @@
 use crate::common;
 
+#[cfg(target_vendor = "apple")]
+use common::FatVolume;
 use common::Scratch;
 use dohc_engine_files::{
     CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesHandle, IngestOutcome,
@@ -213,4 +215,218 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
     );
 
     watcher.stop().expect("stop");
+}
+
+/// A folder the watcher cannot read is reported as an error that names it,
+/// while the watch on the rest of the workspace keeps working. Taking that
+/// error for a lost watch attaches again, meets the same folder, and attaches
+/// again, rescanning each time. Once the folder can be read, changes inside it
+/// must be reported too, also when the permission changed on a folder above it.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_folder_is_not_taken_for_a_lost_watch() {
+    watch_while_a_folder_is_locked("locked", 0o000, "locked").await;
+    watch_while_a_folder_is_locked("parent", 0o400, "parent/child").await;
+}
+
+#[cfg(target_os = "linux")]
+async fn watch_while_a_folder_is_locked(lock: &str, bits: u32, inner: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let ws = Scratch::new();
+    ws.write(&format!("{inner}/note.md"), b"a note");
+    let locked = ws.path().join(lock);
+    let mode = |bits| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(bits));
+    mode(bits).expect("lock the folder");
+    if std::fs::read_dir(ws.path().join(inner)).is_ok() {
+        mode(0o755).expect("unlock the folder");
+        eprintln!("SKIP: this user can read a folder with mode {bits:o}");
+        return;
+    }
+    let dirty = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&dirty);
+    let mut watcher = NativeWatcher::start_metadata(
+        ws.path().to_path_buf(),
+        Arc::new(move || {
+            counted.fetch_add(1, Ordering::AcqRel);
+        }),
+    )
+    .await
+    .expect("watch start");
+
+    let settled = until_quiet(&dirty).await;
+    assert!(
+        settled && watcher.disruption_count() == 0,
+        "the watch was attached again {} times and marked dirty {} times",
+        watcher.disruption_count(),
+        dirty.load(Ordering::Acquire)
+    );
+    assert!(
+        write_is_reported(&ws, "after.md", &dirty).await,
+        "the write was not reported"
+    );
+
+    mode(0o755).expect("unlock the folder");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while watcher.disruption_count() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "unlocking {lock} was not noticed"
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut attempt = 0;
+    loop {
+        assert!(until_quiet(&dirty).await, "the watch never settled");
+        if write_is_reported(&ws, &format!("{inner}/later-{attempt}.md"), &dirty).await {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a write in {inner} was not reported after {lock} became readable"
+        );
+        attempt += 1;
+    }
+    watcher.stop().expect("stop");
+}
+
+#[cfg(target_os = "linux")]
+async fn until_quiet(dirty: &std::sync::atomic::AtomicU64) -> bool {
+    use std::sync::atomic::Ordering;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = dirty.load(Ordering::Acquire);
+    loop {
+        tokio::time::sleep(dohc_engine_files::watch::WATCH_SETTLE * 2).await;
+        let now = dirty.load(Ordering::Acquire);
+        if now == seen {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        seen = now;
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn write_is_reported(ws: &Scratch, rel: &str, dirty: &std::sync::atomic::AtomicU64) -> bool {
+    use std::sync::atomic::Ordering;
+    let before = dirty.load(Ordering::Acquire);
+    ws.write(rel, b"written");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dirty.load(Ordering::Acquire) == before {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    true
+}
+
+/// A FAT32 volume stores a name that is not UTF-8 percent-encoded but reports
+/// its raw bytes to FSEvents. A panic in the FSEvents callback cannot unwind
+/// through CoreServices and aborts the engine, so the watcher must keep
+/// reporting changes after such a name.
+#[cfg(target_vendor = "apple")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_watcher_survives_a_name_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let scratch = Scratch::new();
+    let Some(volume) = FatVolume::attach(scratch.path()) else {
+        eprintln!("SKIP: hdiutil could not attach a FAT32 image here");
+        return;
+    };
+    let root = volume.mount.join("ws");
+    std::fs::create_dir(&root).expect("workspace on the FAT32 volume");
+    let actor = dohc_engine_files::FilesActor::spawn_async(root.clone(), ScanBounds::default())
+        .await
+        .expect("actor");
+    let handle = actor.handle();
+    let ready = NativeWatcher::start(root.clone(), handle.clone(), CancellationToken::new())
+        .await
+        .expect("watch start");
+    let mut watcher = ready.watcher;
+    apply_and_ack(&handle, ready.initial_reconcile).await;
+
+    std::fs::write(root.join(std::ffi::OsStr::from_bytes(b"\xff.md")), b"raw")
+        .expect("FAT32 takes a name that is not UTF-8");
+    wait_dirty(&handle).await;
+    let run = handle
+        .reconcile_if_dirty(CancellationToken::new())
+        .await
+        .expect("reconcile the raw-byte name");
+    apply_and_ack(&handle, run).await;
+
+    std::fs::write(root.join("after.md"), b"after").expect("ordinary file");
+    wait_dirty(&handle).await;
+    let run = handle
+        .reconcile_if_dirty(CancellationToken::new())
+        .await
+        .expect("reconcile the ordinary file");
+    let plan = apply_and_ack(&handle, run).await;
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, CaptureOp::Ingest { path, .. } if path == "after.md")),
+        "{:?}",
+        plan.ops
+    );
+    watcher.stop().expect("stop");
+    drop(actor);
+}
+
+/// When a burst of changes overflows the `ReadDirectoryChangesW` buffer,
+/// Windows drops their details and completes the next read with zero bytes or
+/// `ERROR_NOTIFY_ENUM_DIR`. The backend must report that as a rescan, which the
+/// engine takes as a change like any other.
+#[cfg(windows)]
+#[test]
+fn windows_overflow_is_reported_as_a_rescan() {
+    use notify::{RecursiveMode, Watcher};
+    use std::sync::mpsc;
+
+    let scratch = Scratch::new();
+    let (events_tx, events) = mpsc::channel();
+    let (held_tx, held) = mpsc::channel();
+    let (release_tx, release) = mpsc::channel::<()>();
+    let mut hold = Some((held_tx, release));
+    let mut watcher = notify::RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| {
+            // Hold the backend's thread on the first event, so the burst below
+            // overflows the buffer before the backend reads it again.
+            if let Some((held_tx, release)) = hold.take() {
+                let _ = held_tx.send(());
+                let _ = release.recv();
+            }
+            let _ = events_tx.send(event);
+        },
+        notify::Config::default(),
+    )
+    .expect("watcher");
+    watcher
+        .watch(scratch.path(), RecursiveMode::Recursive)
+        .expect("watch");
+
+    std::fs::write(scratch.path().join("first.md"), b"first").expect("first change");
+    held.recv_timeout(Duration::from_secs(10))
+        .expect("the first change reached the handler");
+    // Each entry takes about 140 bytes, so 2000 files overflow the 64 KiB buffer.
+    let pad = "x".repeat(48);
+    for i in 0..2000 {
+        std::fs::write(scratch.path().join(format!("burst-{i:04}-{pad}.md")), b"")
+            .expect("burst file");
+    }
+    drop(release_tx);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ok(event)) if event.need_rescan() => break,
+            Ok(_) => {}
+            Err(_) => panic!("the overflow was never reported as a rescan"),
+        }
+    }
 }

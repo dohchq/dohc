@@ -192,7 +192,7 @@ function localNameProblem(
       if (!name) return "Enter an agent name.";
       return agentNameTaken(agents, agentId, name) || takenElsewhere(name) ? NAME_TAKEN : null;
     } catch (cause) {
-      return ipcErrorMessage(cause, "This name can't be used.");
+      return ipcErrorMessage(cause, "This name cannot be used.");
     }
   };
 }
@@ -278,7 +278,7 @@ function AutomationChip(props: { hue: AgentHue | undefined }) {
   return (
     <span
       data-testid="agent-for-automations"
-      className={`inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-current/14 pl-[5px] pr-[7px] text-[11px] font-medium ${ink}`}
+      className={`inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-current/14 pl-[5px] pr-[7px] text-[12px] font-medium ${ink}`}
     >
       <Workflow size={12} aria-hidden />
       For automations
@@ -928,8 +928,8 @@ export function AgentList(props: {
         else if (await stillListed(agent.id)) {
           onError?.(
             result.unconfirmed
-              ? `${agent.name} replied as Agent.`
-              : `${agent.name} didn't reply to the check.`,
+              ? `The agent ${agent.name} replied as Agent.`
+              : `The agent ${agent.name} did not reply to the check.`,
             undefined,
             () => check(agent),
             [
@@ -1045,7 +1045,7 @@ export function AgentList(props: {
           }
           const order = agentListRows(file.settings, file.agentProblems).map(rowId);
           if (!order.includes(agent.id)) {
-            onError?.(`Undo didn't move ${agent.name} because it isn't in your settings anymore.`);
+            onError?.(`Undo did not move ${agent.name} because it is no longer in your settings.`);
             return;
           }
           // Unless it still wakes automations, it goes back behind the agent that does.
@@ -1408,7 +1408,7 @@ export function AgentList(props: {
             className="mt-3 flex items-center gap-3 text-[12px] text-muted"
           >
             <span className="min-w-0">
-              A run is marking this workspace's changes as another agent's.
+              An active run is recording this workspace's changes under another agent.
             </span>
             <SecondaryButton
               data-testid="mcp-enable-toggle"

@@ -140,9 +140,7 @@ export class ChatsLiveAdapter {
 
   async ensureGeneralChannel(input: { workspaceId: string }): Promise<ChatChannel> {
     this.assertWorkspace(input.workspaceId);
-    return this.request(CHATS_METHOD.channelEnsureGeneral, {
-      channelId: this.createId("channel"),
-    });
+    return this.request(CHATS_METHOD.channelEnsureGeneral, {});
   }
 
   async ensureAgentChannel(input: {
@@ -152,7 +150,6 @@ export class ChatsLiveAdapter {
   }): Promise<ChatChannel> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.channelEnsureAgent, {
-      channelId: this.createId("channel"),
       agentId: input.agentId,
       name: input.name,
     });

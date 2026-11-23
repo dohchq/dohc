@@ -43,7 +43,7 @@ import {
 
 const GRANTER_TOKEN = "test:e2e-granter";
 const GRANTER_LABEL = "e2e-granter (e2e-granter@dohc.test)";
-const EDIT_BANNER = `Shared view from ${GRANTER_LABEL}. Markdown edits save to the live host. Other file changes need their acceptance.`;
+const EDIT_BANNER = `Shared view from ${GRANTER_LABEL}. Pages save as you type. Other files need Send changes.`;
 const UNUSED_CONTENT_HASH = "0".repeat(64);
 const RECIPIENT_TOKEN = "test:e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
@@ -208,17 +208,22 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     await page.getByTestId("explorer-menu-item-share").click();
     const dialog = page.getByTestId("share-dialog");
     await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText("docs/plan.md");
+    await expect(dialog.getByTitle("docs/plan.md")).toHaveText("plan.md");
 
     await dialog.getByTestId("share-email").fill(RECIPIENT_EMAIL);
     await dialog.getByTestId("share-create").click();
 
-    const code = dialog.getByTestId("share-code");
-    await expect(code).toBeVisible();
-    const shareCode = (await code.textContent()) ?? "";
+    const invited = dialog.getByTestId("share-invited");
+    await expect(invited).toContainText(`Invited ${RECIPIENT_EMAIL}.`);
+    const shareCode = await holdSystemClipboard(test.info(), async (remainingMs) => {
+      const copy = dialog.getByTestId("share-invitation-copy");
+      await copy.click({ timeout: remainingMs() });
+      await expect(copy).toHaveText("Invitation copied", { timeout: remainingMs() });
+      return desktop!.app.evaluate(({ clipboard }) => clipboard.readText());
+    });
     expect(shareCode.startsWith("dohc-share:")).toBe(true);
     const shareId = shareCode.split(":")[1]!;
-    await dialog.getByTestId("share-done").click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
 
     const recipientFetch = await relayJson(
       relay.baseUrl,
@@ -250,7 +255,9 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const confirm = page.getByTestId("sharing-end-confirm");
     await expect(confirm).toContainText(RECIPIENT_EMAIL);
     await confirm.getByTestId("sharing-end").click();
-    await expect(row.getByTestId("sharing-row-status")).toHaveText("Ended");
+    await expect(row).toHaveCount(0);
+    await page.getByTestId("sharing-granted-ended-toggle").click();
+    await expect(row).toHaveAttribute("data-status", "revoked");
 
     const revokedFetch = await relayJson(
       relay.baseUrl,
@@ -381,20 +388,23 @@ confidentialTest.describe("View link lifecycle", () => {
         await page.getByTestId("explorer-menu-item-share").click();
         let dialog = page.getByTestId("share-dialog");
         await expect(dialog).toBeVisible();
-        await expect(dialog).toContainText("docs/shared.md");
+        await expect(dialog.getByTitle("docs/shared.md")).toHaveText("shared.md");
 
-        const linkAccess = dialog.getByRole("radiogroup", { name: "Link access" });
-        await expect(linkAccess.getByRole("radio", { name: "Comment", exact: true })).toBeVisible();
-        await expect(linkAccess.getByRole("radio", { name: "View", exact: true })).toBeVisible();
-        await expect(dialog).toContainText(
-          "If files are added to this selection later, the link includes them.",
-        );
-        await expect(dialog).toContainText(
-          "The sync relay serves the link, so it can read this content.",
-        );
-        await expect(dialog).toContainText("Anyone with the link can open it without an account.");
+        const linkAccess = dialog.getByTestId("share-link-create-access");
+        await linkAccess.click();
+        await expect(
+          dialog.getByRole("menuitemradio", { name: "Can comment", exact: true }),
+        ).toBeVisible();
+        await expect(
+          dialog.getByRole("menuitemradio", { name: "Can view", exact: true }),
+        ).toBeVisible();
+        await expect(dialog).toContainText("The link includes files added later.");
+        await expect(dialog).toContainText("The sync relay can read this content.");
+        await expect(dialog).toContainText("Can read, not change.");
+        await page.keyboard.press("Escape");
 
         await dialog.getByRole("button", { name: "Create link", exact: true }).click();
+        await dialog.getByRole("button", { name: "Link details", exact: true }).click();
         const oneTimeUrl = await dialog.getByTestId("share-link-url").textContent();
         if (oneTimeUrl === null) throw new Error("The Share dialog did not expose the link.");
         const oldUrl = new URL(oneTimeUrl);
@@ -519,11 +529,14 @@ confidentialTest.describe("View link lifecycle", () => {
         const linkRow = linkRows.first();
         const linkRowTestId = await linkRow.getAttribute("data-testid");
         expect(linkRowTestId === `share-link-row-${linkGrantId}`).toBe(true);
+        await linkRow.getByRole("button", { name: "Link details", exact: true }).click();
         await expect(linkRow).toContainText(/Used .+ · Created /u);
         await expect(linkRow.getByTestId(`share-link-access-${linkGrantId}`)).toHaveText(
           "Can view",
         );
-        await expect(dialog.getByRole("button", { name: "Create separate link" })).toBeVisible();
+        await linkRow.getByRole("button", { name: "Link options" }).click();
+        await expect(dialog.getByRole("menuitem", { name: "New separate link" })).toBeVisible();
+        await page.keyboard.press("Escape");
         await expect(linkAccess).toHaveCount(0);
         const reachableRetuneTargets = await dialog
           .getByRole("button", { name: /^(?:View|Comment|Edit)$/u })
@@ -868,7 +881,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         engineYDocApply,
       };
     });
-    expect(bypassAttempts.agent).toContain("Agents can't run in a shared view");
+    expect(bypassAttempts.agent).toContain("Agents cannot run in a shared view");
     expect(bypassAttempts.sitePreview).toContain("disabled in a shared view");
     // The copyable MCP config for a shared view carries the share's level, so
     // the launched server registers only the write tools that level grants.
@@ -893,7 +906,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     expect(revoke.status).toBe(200);
     await page.getByTestId("shared-view-refresh").click();
     await expect(banner).toContainText("This share was ended");
-    await expect(banner).toContainText("Your copy stays readable but won't update anymore.");
+    await expect(banner).toContainText("Your copy stays readable but will not update anymore.");
     await expect(page.getByTestId("shared-view-refresh")).toHaveCount(0);
     await expect(page.getByText("The comet-tail draft, round two.")).toBeVisible();
   } finally {
@@ -1097,14 +1110,20 @@ test("mount side: an Edit code opens separately by default, and added to a works
     await expect(page.getByTestId("open-share-start")).toHaveText("Add share");
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("workspace-shell-notice")).toContainText(
-      "Added e2e-granter to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.",
+      "Added e2e-granter to shared-with-me as a read-only copy.",
     );
+    await expect(
+      page.getByTestId("workspace-shell-notice").getByRole("button", { name: "Open to edit" }),
+    ).toBeVisible();
     await expect(page.getByTestId("shell-notice")).toHaveCount(0);
     await revealExplorerPath(page, "shared-with-me/e2e-granter/docs/brief.md");
 
     await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
     await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
+    await expect(page.getByTestId("edit-copy-notice")).toHaveText(
+      "This copy is read-only.Open to edit",
+    );
     const refused = await page.evaluate(async () => {
       const api = (
         window as unknown as {
@@ -1144,9 +1163,12 @@ test("mount side: an Edit code opens separately by default, and added to a works
     expect(refused.write).toContain("reserved");
     expect(refused.submit).toContain("This workspace is not a shared view.");
 
-    await page.getByTestId("workspace-switcher").click();
-    await page.getByTestId("workspace-switcher-open-share").click();
-    await page.getByTestId("open-share-code").fill(shareCode);
+    await page
+      .getByTestId("edit-copy-notice")
+      .getByRole("button", { name: "Open to edit" })
+      .click();
+    await expect(page.getByTestId("open-shared-view")).toBeVisible();
+    await expect(page.getByTestId("open-share-code")).toHaveCount(0);
     await expect(page.getByTestId("open-share-mode-separate")).toHaveAttribute(
       "aria-checked",
       "true",
@@ -1156,6 +1178,37 @@ test("mount side: an Edit code opens separately by default, and added to a works
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("shared-view-banner")).toContainText(EDIT_BANNER);
     await expect(page.getByTestId("share-changes-send")).toBeVisible();
+
+    await expect(page.getByTestId("tab-docs/brief.md")).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByText("The lighthouse memo.")).toBeVisible();
+    await expect(page.getByTestId("edit-copy-notice")).toHaveCount(0);
+    const wrote = await page.evaluate(async () => {
+      const api = (
+        window as unknown as {
+          dohcDesktop: Pick<
+            DohcDesktopBridge,
+            "getWorkspaceRegistry" | "readWorkspaceText" | "writeWorkspaceText"
+          >;
+        }
+      ).dohcDesktop;
+      const { workspaces } = await api.getWorkspaceRegistry();
+      const workspaceId = workspaces.find((workspace) => workspace.shareView)!.workspaceId;
+      const relativePath = "docs/brief.md";
+      try {
+        const read = await api.readWorkspaceText({ workspaceId, relativePath });
+        if (read.truncated) return "the shared file read back truncated";
+        await api.writeWorkspaceText({
+          workspaceId,
+          relativePath,
+          text: "# Brief\n\nEdited in its own workspace.\n",
+          expectedContentHash: read.contentHash,
+        });
+        return "written";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    expect(wrote, "the share's own workspace takes the edit its copy refused").toBe("written");
   } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);

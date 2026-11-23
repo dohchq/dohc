@@ -322,7 +322,7 @@ export function compileClosedAppPage(
       );
     if (!inputs.has(path))
       throw new Error(
-        `${entry} links ${value}, which is not in the app. Add the file or fix the link.`,
+        `${entry} links ${value}, which is not in the app. Add the file, list it in app.publish.json, or fix the link.`,
       );
     used.set(path, inputs.get(path)!.bytes.byteLength);
     return path;

@@ -84,12 +84,14 @@ describe("GraphView", () => {
     await waitFor(() => expect(rowPaths()).toEqual(["alpha.md", "beta.md", "gamma.md"]));
     expect(screen.getAllByTestId("graph-file-row")[1]!.dataset.active).toBe("true");
     expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("3");
+    expect(screen.getByTestId("graph-local-badge").textContent).toBe("Local");
     expect(screen.getByTestId("graph-doc-count").textContent).toBe("5 files");
 
     view.rerender(
       <GraphView workspaceId="ws" activePath="nowhere.md" refreshKey="0" onOpenPath={vi.fn()} />,
     );
     await waitFor(() => expect(rowPaths()).toHaveLength(5));
+    expect(screen.queryByTestId("graph-local-badge")).toBeNull();
   });
 
   it("widens the local graph with its depth setting", async () => {
@@ -227,7 +229,7 @@ describe("GraphView", () => {
     expect(onOpenPath).toHaveBeenCalledWith("gamma.md");
     await user.clear(screen.getByTestId("graph-search"));
     await user.type(screen.getByTestId("graph-search"), "zzz");
-    expect(await screen.findByText('No files match "zzz". Try a shorter search.')).toBeTruthy();
+    expect(await screen.findByText('No files match "zzz".')).toBeTruthy();
   });
 
   it("moves keyboard focus onto the graph's nodes and opens one with Enter", async () => {
@@ -403,8 +405,8 @@ describe("GraphView", () => {
     render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />);
     expect(await screen.findAllByText("a.md")).toBeTruthy();
     expect(linksEdges).toHaveBeenCalledOnce();
-    expect(screen.getByText("Gathering linked mentions").textContent).toBe(
-      "Gathering linked mentions",
+    expect(screen.getByText("Gathering linked mentions…").textContent).toBe(
+      "Gathering linked mentions…",
     );
     act(() => {
       while (frames.pending) frames.runNext();
@@ -425,7 +427,7 @@ describe("GraphView", () => {
     expect(screen.getByTestId("graph-doc-count").parentElement?.title).toBe("3 files · 1 link");
     const row = screen.getAllByTestId("graph-file-row").find((row) => row.dataset.path === "a.md")!;
     expect(row.textContent).toBe("a.md1");
-    expect(screen.queryByText("Gathering linked mentions")).toBeNull();
+    expect(screen.queryByText("Gathering linked mentions…")).toBeNull();
   });
 
   it("rejects late workspace pages and routes a failed refresh to Notices with retry", async () => {
@@ -461,7 +463,7 @@ describe("GraphView", () => {
     vi.stubGlobal("dohcDesktop", { linksEdges });
     render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />);
     expect(await screen.findAllByText("a.md")).toBeTruthy();
-    expect(screen.queryByText("Gathering linked mentions")).toBeNull();
+    expect(screen.queryByText("Gathering linked mentions…")).toBeNull();
     expect(screen.getByTestId("graph-unresolved-count").getAttribute("aria-label")).toContain(
       "1 unchecked",
     );
@@ -520,7 +522,7 @@ describe("GraphView", () => {
       });
       expect(linksEdges).toHaveBeenCalledTimes(5);
       expect(screen.getByTestId("graph-view").dataset.state).toBe("loading");
-      expect(screen.getByText("Gathering linked mentions")).toBeTruthy();
+      expect(screen.getByText("Gathering linked mentions…")).toBeTruthy();
       expect(screen.queryByTestId("graph-retry")).toBeNull();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(750);
@@ -717,7 +719,7 @@ describe("GraphView", () => {
     await screen.findAllByText("Discussion");
     linksEdges.mockReturnValueOnce(held.promise);
     fireEvent.click(screen.getByLabelText("Refresh graph"));
-    await screen.findByText("Gathering linked mentions");
+    await screen.findByText("Gathering linked mentions…");
     expect(screen.getAllByText("Discussion")).toBeTruthy();
     expect(chatFileMentionsPage).toHaveBeenCalledOnce();
     await act(async () => held.resolve(page("a.md")));
@@ -774,12 +776,12 @@ it("paints the first chat page, continues once, and deduplicates attachments acr
       { workspaceId: "ws" },
       { workspaceId: "ws", cursor: "next" },
     ]);
-    expect(screen.getByText("Gathering linked mentions")).toBeTruthy();
+    expect(screen.getByText("Gathering linked mentions…")).toBeTruthy();
     await act(async () => later.resolve({ entries: [first, second], nextCursor: null }));
     await screen.findAllByText("Second discussion");
     expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
     expect(overlay.mock.lastCall?.[1]).toHaveLength(2);
-    expect(screen.queryByText("Gathering linked mentions")).toBeNull();
+    expect(screen.queryByText("Gathering linked mentions…")).toBeNull();
   } finally {
     overlay.mockRestore();
   }

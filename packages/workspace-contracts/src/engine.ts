@@ -364,6 +364,7 @@ type VersionedTextMergeResult =
 type VersionedTextConflictResolveResult = {
   kind: "resolved";
   conflict: VersionedTextConflictRecord;
+  placed: boolean;
   write?: VersionedTextWriteResult;
   delete?: VersionedTextDeleteResult;
 };
@@ -616,6 +617,9 @@ export interface VersionedTextStore {
     path: string;
     requestId?: string;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: WorkspaceObjectId;
+    expectedPathClearHeadMomentId?: VersionedTextMomentId;
     text: string;
     /** Publish after committing. Omit when recording bytes already on disk. */
     publish?: boolean;
@@ -624,6 +628,7 @@ export interface VersionedTextStore {
     metadata: ActorNeutralWriteMetadata;
     author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
+    beforeSend?: () => void;
   }): Promise<VersionedTextWriteResult>;
   writeBinaryFile(input: {
     workspaceId: WorkspaceId;
@@ -631,11 +636,15 @@ export interface VersionedTextStore {
     path: string;
     requestId?: string;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: WorkspaceObjectId;
+    expectedPathClearHeadMomentId?: VersionedTextMomentId;
     bytes: Uint8Array;
     createOnly?: boolean;
     metadata: ActorNeutralWriteMetadata;
     author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
+    beforeSend?: () => void;
   }): Promise<VersionedTextWriteResult>;
   readBinaryFile(input: {
     workspaceId: WorkspaceId;
@@ -707,6 +716,9 @@ export interface VersionedTextStore {
     path: string;
     expectedObjectId?: WorkspaceObjectId;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: WorkspaceObjectId;
+    expectedPathClearHeadMomentId?: VersionedTextMomentId;
     // Delete only if the path is still missing on disk when the engine applies
     // the delete. A caller that saw the file missing sets it: a replace can
     // empty the name for a moment.
@@ -717,6 +729,7 @@ export interface VersionedTextStore {
     momentId?: VersionedTextMomentId;
     // Refused once this `capture.hold` ended.
     captureHoldId?: string;
+    beforeSend?: () => void;
   }): Promise<VersionedTextDeleteResult>;
   // Fails closed (invalid-input) on sync record-only moments: divergent peer
   // history never rewrites the local materialized snapshot.
@@ -1102,11 +1115,14 @@ type ChatReactionState = "added" | "removed";
 
 // Who reacted. Solo this is the local user/agent; the design's verified relay
 // authorUserId later fills authorId. displayName/kind render the
-// reaction ("<User>" / "<Agent>") without a separate lookup.
+// reaction ("<User>" / "<Agent>") without a separate lookup. A person and
+// each of their agents react on their own: an agent's reaction has kind
+// "agent" and, when it has one, the id of the agent in Settings.
 interface ChatReactionAuthor {
   authorId: string;
   kind: "human" | "agent";
   displayName: string;
+  agentId?: string;
 }
 
 // One reaction cell as the store returns it. `listReactions` returns only
@@ -1281,9 +1297,9 @@ export interface LinkedChatStore {
     wakeAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
-    // Desktop's own thread in an agent DM, an automation's wake thread or the
-    // runner self-test, stays its own post instead of joining the DM's
-    // conversation. People, the CLI and MCP never set it.
+    // Desktop's own thread in an agent DM, such as an automation's wake thread,
+    // stays its own post instead of joining the DM's conversation. People, the
+    // CLI and MCP never set it.
     ownThread?: boolean;
     author: ChatWriteActor;
     // The sender's opaque relay user id (Better Auth user id). Caller supplies
@@ -1446,7 +1462,8 @@ export interface LinkedChatStore {
   listMentionsForHandle(workspaceId: WorkspaceId, handle: string): Promise<ChatMentionRecord[]>;
   // --- Reactions ----------------------------------------------------------
   // Set (add or remove) one author's emoji reaction on a message. A
-  // set-membership CRDT cell keyed by (messageId, emoji, author.authorId):
+  // set-membership CRDT cell keyed by (messageId, emoji, author.authorId,
+  // author.kind, author.agentId):
   // LWW-per-cell by (atMs, remove-wins tie), so the op is commutative and
   // re-applying is a no-op. It always persists locally. It journals a
   // `chat.reaction.set` op only when replicationAuthorId is present and

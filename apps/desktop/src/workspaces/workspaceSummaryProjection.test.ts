@@ -156,6 +156,21 @@ describe("workspace summary projection", () => {
     expect(summary.shareMounts?.[0]?.access).toBe("edit");
   });
 
+  it("says editing could not be turned on only for a readable copy that is not at Edit", () => {
+    const marked = (selector: unknown, extra: Record<string, unknown> = {}) =>
+      workspaceSummaryFor(
+        entry({ shareView: { ...shareView(selector), editingNotReady: true, ...extra } }),
+      ).shareView;
+    expect(marked(goodSelector)).toMatchObject({ access: "view", editingNotReady: true });
+    expect(marked({ ...goodSelector, access: "comment" })).toMatchObject({ editingNotReady: true });
+    expect(marked({ ...goodSelector, access: "edit" })).not.toHaveProperty("editingNotReady");
+    expect(marked(staleSelector)).not.toHaveProperty("editingNotReady");
+    expect(marked(goodSelector, { editingNotReady: "yes" })).not.toHaveProperty("editingNotReady");
+    expect(
+      workspaceSummaryFor(entry({ shareView: shareView(goodSelector) })).shareView,
+    ).not.toHaveProperty("editingNotReady");
+  });
+
   it("carries generic chat authority without deriving it from the level", () => {
     const writable = workspaceSummaryFor(
       entry({

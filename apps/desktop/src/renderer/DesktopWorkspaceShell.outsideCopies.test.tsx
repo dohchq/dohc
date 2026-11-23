@@ -93,7 +93,7 @@ it("shows one kept-copy list failure with its cause, retries, and clears it on r
   renderShell(bridge);
   const title = "dohc could not list every kept copy";
   const message =
-    "To find a copy that isn't listed, look beside its file for (kept copy) in the name.";
+    "To find a copy that is not listed, look beside its file for (kept copy) in the name.";
   const toast = await screen.findByTestId("workspace-shell-error");
   expect(within(toast).getByText(title)).toBeTruthy();
   expect(within(toast).getByText(message)).toBeTruthy();

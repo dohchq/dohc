@@ -167,11 +167,11 @@ describe("LinkAgentsList", () => {
     const list = await screen.findByRole("region", { name: "Agents" });
     const named = within(list).getByTestId("share-link-agent-c1");
     expect(named.querySelector("bdi")?.textContent).toBe(REVERSED_NAME);
-    expect(named.textContent).toContain("Name reported by the agent");
+    expect(named.textContent).toContain("Name reported by agent");
     expect(named.textContent).toContain("Last action");
     const unnamed = within(list).getByTestId("share-link-agent-c2");
     expect(unnamed.querySelector("bdi")?.textContent).toBe("Agent");
-    expect(unnamed.textContent).toContain("The agent reported no name");
+    expect(unnamed.textContent).toContain("No name reported");
     expect(unnamed.textContent).toContain("Signed in");
     expect(named.querySelector("[data-link-agent]")?.getAttribute("aria-hidden")).toBe("true");
   });

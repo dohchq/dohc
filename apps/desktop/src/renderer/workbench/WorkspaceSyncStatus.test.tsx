@@ -121,7 +121,7 @@ describe("sync status surface", () => {
     expect(dotOf()).toBe("working");
     expect(worded()).toBe(false);
     rerender(<WorkspaceSyncStatus syncStatus={busy} failedSaves={1} />);
-    expect(status.textContent).toBe("Couldn't save 1 file");
+    expect(status.textContent).toBe("Could not save 1 file");
     expect(dotOf()).toBe("attention");
   });
 
@@ -166,8 +166,8 @@ describe("sync status surface", () => {
       dot: "off",
     },
     "account-unconfirmed": {
-      words: "Couldn't confirm account",
-      description: "Not syncing. dohc couldn't confirm this workspace's account.",
+      words: "Could not confirm account",
+      description: "Not syncing. dohc could not confirm this workspace's account.",
       dot: "attention",
     },
     "sign-in-expired": {
@@ -186,7 +186,9 @@ describe("sync status surface", () => {
       expect(status.textContent).toBe(expected.words);
       expect(status.getAttribute("title")).toBe(expected.description);
       expect(status.textContent).not.toMatch(/server unreachable/i);
-      expect(`${status.textContent} ${status.getAttribute("title")}`).not.toMatch(/could not/);
+      expect(`${status.textContent} ${status.getAttribute("title")}`).not.toMatch(
+        /could not reach/i,
+      );
       for (const other of Object.values(BLOCKED_TITLE_BAR)) {
         if (other !== expected) expect(status.textContent).not.toBe(other.words);
       }
@@ -235,8 +237,8 @@ describe("sync status surface", () => {
   it("names the files that couldn't save instead of saved, and says saved again once they clear", () => {
     const { rerender } = renderStatus({ syncStatus: syncState("synced"), failedSaves: 1 });
     const status = screen.getByTestId("sync-status");
-    expect(status.textContent).toBe("Couldn't save 1 file");
-    expect(status.getAttribute("aria-label")).toBe("Couldn't save 1 file");
+    expect(status.textContent).toBe("Could not save 1 file");
+    expect(status.getAttribute("aria-label")).toBe("Could not save 1 file");
     expect(status.getAttribute("data-state")).toBe("save-failed");
     expect(dotOf()).toBe("attention");
     expect(worded()).toBe(true);
@@ -244,7 +246,7 @@ describe("sync status surface", () => {
 
     // It stays through a sync pass, so the mark does not flicker to Syncing.
     rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} failedSaves={2} />);
-    expect(status.textContent).toBe("Couldn't save 2 files");
+    expect(status.textContent).toBe("Could not save 2 files");
 
     rerender(<WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} />);
     expect(status.textContent).toBe("Local · saved");
@@ -332,7 +334,7 @@ describe("sync status surface", () => {
     {
       delivery: "retrying" as const,
       reason: "live-document-without-lineage" as const,
-      label: "Live editing can't start",
+      label: "Live editing cannot start",
     },
     {
       delivery: "retrying" as const,
@@ -342,17 +344,17 @@ describe("sync status surface", () => {
     {
       delivery: "retrying" as const,
       reason: "conflict-parent-withheld" as const,
-      label: "Live editing can't resume",
+      label: "Live editing cannot resume",
     },
     {
       delivery: "retrying" as const,
       reason: "live-history-over-budget" as const,
-      label: "Live editing can't start",
+      label: "Live editing cannot start",
     },
     {
       delivery: "retrying" as const,
       reason: "live-start-failing" as const,
-      label: "Live editing can't start",
+      label: "Live editing cannot start",
     },
   ])("labels $delivery owner live delivery as $label", ({ delivery, reason, label }) => {
     renderStatus({ syncStatus: liveDeliveryStatus(delivery, reason) });
@@ -456,7 +458,7 @@ describe("sync status surface", () => {
       failedSaves: 0,
     },
     {
-      label: "Couldn't confirm account",
+      label: "Could not confirm account",
       status: { state: "account-unconfirmed" as const },
       failedSaves: 0,
     },
@@ -466,7 +468,7 @@ describe("sync status surface", () => {
       failedSaves: 0,
     },
     {
-      label: "Couldn't save 1 file",
+      label: "Could not save 1 file",
       status: { state: "account-unconfirmed" as const },
       failedSaves: 1,
     },

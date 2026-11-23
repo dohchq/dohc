@@ -117,7 +117,7 @@ async function expectSent(page: Page, id: string) {
 }
 async function expectWaitingDraft(page: Page) {
   const drafts = page.getByTestId("collection-record-drafts");
-  await expect(drafts).toContainText("Saved on this computer. Waiting to send");
+  await expect(drafts).toContainText("Saved on this computer, waiting to send");
   await expect(drafts.getByRole("button", { name: "Try again", exact: true })).toBeVisible();
 }
 const creationOps = (ops: Op[]) =>
@@ -788,7 +788,7 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
       await openCollection(page);
       await closeRecordPanel(page);
       await expect(page.getByTestId("collection-record-drafts")).toContainText(
-        "Saved on this computer. Waiting to send",
+        "Saved on this computer, waiting to send",
       );
       await expect(
         page

@@ -103,7 +103,7 @@ function History(props: CollectionHistoryDialogProps) {
         <span>Saved changes</span>
         <span>Newest first</span>
       </div>
-      <p className="m-0 text-[11px] text-muted">Reads and refused requests do not appear here.</p>
+      <p className="m-0 text-[12px] text-muted">Reads and refused requests do not appear here.</p>
       {props.pendingUndo && (
         <div className="flex items-center gap-2 text-[12px] text-muted">
           <span>{props.undoBusy ? "Reversing edit…" : "Undo not confirmed"}</span>
@@ -125,7 +125,7 @@ function History(props: CollectionHistoryDialogProps) {
         ))}
       {page && !page.entries.length && (
         <p className="m-0 text-[13px] text-muted">
-          No saved operations on this page. Refresh to check for changes.
+          No saved actions on this page. Refresh to check for changes.
         </p>
       )}
       <div className="min-h-0 overflow-auto">
@@ -139,7 +139,7 @@ function History(props: CollectionHistoryDialogProps) {
                 className="shrink-0 text-muted group-open/entry:rotate-90"
               />
               <span
-                className="rounded border border-line bg-panel-2 px-1.5 py-0.5 font-mono text-[11px] text-muted"
+                className="rounded border border-line bg-panel-2 px-1.5 py-0.5 tabular-nums text-[12px] text-muted"
                 title="Revision"
               >
                 {entry.revision}
@@ -161,7 +161,7 @@ function History(props: CollectionHistoryDialogProps) {
               )}
               {entry.attachmentCount > 0 && (
                 <span
-                  className="flex items-center gap-1 font-mono text-[11px] text-muted"
+                  className="flex items-center gap-1 tabular-nums text-[12px] text-muted"
                   title="Attached files"
                 >
                   <Paperclip size={12} strokeWidth={1.9} aria-hidden />
@@ -204,8 +204,7 @@ function History(props: CollectionHistoryDialogProps) {
                 </dl>
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <span className="max-w-80 text-muted">
-                    Undo restores the shown values only if the record has not changed since that
-                    edit.
+                    Undo restores these values only if the record has not changed since.
                   </span>
                   <SecondaryButton
                     className="flex items-center gap-1.5"
@@ -263,7 +262,7 @@ function History(props: CollectionHistoryDialogProps) {
             if (page?.nextBeforeRevision) void load(page.nextBeforeRevision);
           }}
         >
-          Older operations
+          Older actions
         </SecondaryButton>
       </div>
     </Overlay>

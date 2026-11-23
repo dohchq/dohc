@@ -1,6 +1,14 @@
 import { endSession, listSessions, readAccount } from "./api";
-import { createServerClient, ServerError, type Fetch, type ServerClient } from "./client";
+import {
+  createServerClient,
+  ServerError,
+  type Fetch,
+  type ServerClient,
+  type ServerProblem,
+} from "./client";
 import { sleep, startDeviceSignIn, waitForDeviceToken } from "./deviceFlow";
+import { StoreError } from "./keptStore";
+import type { PendingSignOuts } from "./pushRegistration";
 
 // The phone's sign-in to one server, as the desktop's cloud login keeps its (apps/desktop/src/workspaces/cloudLogin.ts).
 //
@@ -9,14 +17,6 @@ import { sleep, startDeviceSignIn, waitForDeviceToken } from "./deviceFlow";
 // sign-out, so it changes the generation too. A change aborts every request of the generation before it. Anything
 // that would update state, the screen, the token store or a cache, checks its generation first, and gives up once it
 // has moved on.
-//
-// Ending a token deletes it from the store first, then revokes its session with the copy held in memory, so a phone
-// closed mid-way never keeps a token it signed out of. Writes to the store run one at a time, in order, so a delete
-// always lands after a save it raced.
-//
-// Sign out runs `onSignOut`, the outbox's delete, first. The sign-in ends, and its token goes, only when that hook
-// calls `leave`: once its delete can no longer be lost. A hook that rejects before then keeps the phone signed in, so
-// it never deletes the token while messages it said it deleted could still send.
 
 /** What the token store keeps for this phone: the server, the session token, and whose it is. */
 export interface StoredSignIn {
@@ -43,15 +43,18 @@ export interface SignIn {
 
 export type AccountState =
   | { readonly status: "loading" }
+  | { readonly status: "unreadable" }
   /**
    * `origin` is the last server, to sign in to again; `ended` when the server ended the session. `forgetFailed` while
-   * a token this phone signed out of is still in the store, because deleting it failed.
+   * a token this phone signed out of is still in the store, because deleting it failed. `pendingSignOut` while a
+   * Sign out waits for the server to end the session, and `failed` once that has failed.
    */
   | {
       readonly status: "signed-out";
       readonly origin: string | null;
       readonly ended: boolean;
       readonly forgetFailed: boolean;
+      readonly pendingSignOut: "running" | "failed" | null;
     }
   | { readonly status: "signed-in"; readonly signIn: SignIn };
 
@@ -60,7 +63,7 @@ export type SignInOutcome = "signed-in" | "denied" | "expired" | "cancelled";
 export interface Account {
   state(): AccountState;
   subscribe(listener: () => void): () => void;
-  /** Reads the saved sign-in, once, at launch. */
+  /** Reads the saved sign-in at launch, and again after `unreadable`. */
   restore(): Promise<void>;
   /**
    * Signs in to `origin` through the device flow, superseding any sign-in in progress. `onCode` gets the code and the
@@ -75,9 +78,10 @@ export interface Account {
   cancelSignIn(): void;
   /**
    * Signs the phone out, ending everything the sign-in started, also after the server ended the session. With
-   * `onSignOut`, the sign-in ends when the hook calls `leave`; without it, at once. Then it deletes the token and
-   * revokes its session, which may fail: a failed delete shows as `forgetFailed`. It rejects only when the hook rejects
-   * before `leave`, and then the phone stays signed in with its token.
+   * `onSignOut`, the sign-in ends when the hook calls `leave`; without it, at once. Then the server ends the session,
+   * and only then is the token deleted: a failed delete shows as `forgetFailed`. It rejects when the hook rejects
+   * before `leave`, and the phone stays signed in with its token; and when the server didn't end the session, and the
+   * Sign out stays pending until this is called again.
    */
   signOut(): Promise<void>;
   retryForget(): Promise<void>;
@@ -85,16 +89,23 @@ export interface Account {
 
 const REVOKE_TIMEOUT_MS = 5000;
 
+const isProblem = (error: unknown, ...problems: readonly ServerProblem[]) =>
+  error instanceof ServerError && problems.includes(error.problem);
+
 export function createAccount(options: {
   readonly store: SignInStore;
   readonly fetch: Fetch;
   readonly now?: () => number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /**
-   * Sign out's own cleanup. It calls `leave`, which ends the sign-in and deletes the token, once its cleanup can't be
-   * lost. Only Sign out runs it: a 401 and a launch never do.
+   * Sign out's own cleanup of `ending`, the account it signs out, or null after a 401. It calls `leave`, which ends the
+   * sign-in and deletes the token, once its cleanup can't be lost. Only Sign out runs it: a 401 never does.
    */
-  readonly onSignOut?: (leave: () => Promise<void>) => Promise<void>;
+  readonly onSignOut?: (
+    leave: () => Promise<void>,
+    ending: Pick<SignIn, "origin" | "userId"> | null,
+  ) => Promise<void>;
+  readonly pendingSignOuts?: PendingSignOuts;
 }): Account {
   const { store, fetch } = options;
   const now = options.now ?? Date.now;
@@ -106,20 +117,33 @@ export function createAccount(options: {
   let writes: Promise<unknown> = Promise.resolve();
   /** Tokens this phone ended whose delete failed, with their servers. */
   const unforgotten = new Map<string, string>();
+  let unrevoked: StoredSignIn | null = null;
+  let revokeFailed = false;
 
   function setState(next: AccountState) {
     state = next;
     for (const listener of listeners) listener();
   }
 
-  function signedOut(origin: string | null, ended: boolean): AccountState {
-    return { status: "signed-out", origin, ended, forgetFailed: unforgotten.size > 0 };
+  function signedOut(
+    origin: string | null,
+    ended: boolean,
+  ): Extract<AccountState, { status: "signed-out" }> {
+    return {
+      status: "signed-out",
+      origin,
+      ended,
+      forgetFailed: unforgotten.size > 0,
+      pendingSignOut: unrevoked === null ? null : revokeFailed ? "failed" : "running",
+    };
   }
 
-  /** Shows a delete that failed, or one that has now worked, on a signed-out phone. */
-  function showForgetState() {
-    if (state.status === "signed-out" && state.forgetFailed !== unforgotten.size > 0)
-      setState(signedOut(state.origin, state.ended));
+  function showSignedOut() {
+    const shown = state;
+    if (shown.status !== "signed-out") return;
+    const next = signedOut(shown.origin, shown.ended);
+    if (next.forgetFailed !== shown.forgetFailed || next.pendingSignOut !== shown.pendingSignOut)
+      setState(next);
   }
 
   /** The next generation. The one before it ends, and its requests abort. */
@@ -147,7 +171,7 @@ export function createAccount(options: {
     } catch {
       unforgotten.set(token, origin);
     }
-    showForgetState();
+    showSignedOut();
   }
 
   async function revoke(origin: string, token: string): Promise<void> {
@@ -158,8 +182,16 @@ export function createAccount(options: {
       signal: new AbortController().signal,
       timeoutMs: REVOKE_TIMEOUT_MS,
     });
-    const mine = (await listSessions(client)).find((session) => session.current);
-    if (mine) await endSession(client, mine.sessionId);
+    const sessions = await listSessions(client).catch((error: unknown) => {
+      if (isProblem(error, "signed-out")) return null;
+      throw error;
+    });
+    if (sessions === null) return;
+    const mine = sessions.find((session) => session.current);
+    if (!mine) throw new ServerError("invalid");
+    await endSession(client, mine.sessionId).catch((error: unknown) => {
+      if (!isProblem(error, "signed-out", "not-found")) throw error;
+    });
   }
 
   /** Deletes the token, then ends its session on the server. Never rejects. */
@@ -200,8 +232,8 @@ export function createAccount(options: {
   let signingOut: { readonly ending: StoredSignIn | null; readonly done: Promise<void> } | null =
     null;
   function signOut(): Promise<void> {
-    if (signingOut !== null && signingOut.ending === saved) return signingOut.done;
-    const ending = saved;
+    const ending = saved ?? unrevoked;
+    if (signingOut !== null && signingOut.ending === ending) return signingOut.done;
     const done: Promise<void> = endSignIn().finally(() => {
       if (signingOut?.done === done) signingOut = null;
     });
@@ -210,32 +242,86 @@ export function createAccount(options: {
   }
 
   async function endSignIn(): Promise<void> {
-    const ending = saved;
+    const ending = saved ?? unrevoked;
     const at = generation;
     const origin = ending?.origin ?? (state.status === "signed-out" ? state.origin : null);
-    let left = false;
-    const leave = async () => {
-      if (left) return;
-      left = true;
-      // A 401 or a newer sign-in may have moved the generation while the hook ran; what it holds now stays.
-      if (generation === at) {
-        advance();
-        saved = null;
-        setState(signedOut(origin, false));
+    const marked = ending !== null && ending === saved;
+    // A damaged kept.db takes no mark until the hook has deleted it, as the Sign out sheet warned.
+    let unmarked = false;
+    if (marked && options.pendingSignOuts)
+      await options.pendingSignOuts.begin(ending).catch((error: unknown) => {
+        if (!options.onSignOut || !(error instanceof StoreError && error.kind === "damaged"))
+          throw error;
+        unmarked = true;
+      });
+    let leaving: Promise<void> | null = null;
+    const leaveOnce = async () => {
+      // A 401 moved the generation while the hook ran: the server has ended the session, and what it holds now stays.
+      if (generation !== at) {
+        if (ending) await forget(ending.origin, ending.token);
+        return;
       }
-      if (ending) await forget(ending.origin, ending.token);
+      if (unmarked && ending) await options.pendingSignOuts?.begin(ending);
+      advance();
+      saved = null;
+      unrevoked = ending;
+      revokeFailed = false;
+      setState(signedOut(origin, false));
+      if (!ending) return;
+      try {
+        await revoke(ending.origin, ending.token);
+      } catch (error) {
+        revokeFailed = true;
+        showSignedOut();
+        throw error;
+      }
+      unrevoked = null;
+      showSignedOut();
+      await forget(ending.origin, ending.token);
+      if (!unforgotten.has(ending.token))
+        await options.pendingSignOuts?.end(ending).catch(() => undefined);
     };
-    const cleaning = options.onSignOut?.(leave);
+    const leave = () => (leaving ??= leaveOnce());
+    const cleaning = options.onSignOut?.(leave, ending);
     if (cleaning) {
       try {
         await cleaning;
       } catch (error) {
-        // Signed out already: the hook finishes its cleanup itself.
-        if (!left) throw error;
+        if (!leaving) {
+          if (marked && saved === ending)
+            await options.pendingSignOuts?.cancel(ending).catch(() => undefined);
+          throw error;
+        }
       }
     }
     await leave();
-    if (ending) await revoke(ending.origin, ending.token).catch(() => undefined);
+  }
+
+  let restoring: Promise<void> | null = null;
+  async function readSaved(): Promise<void> {
+    const current = { id: generation, signal: controller.signal };
+    const loaded = await write(() => store.load()).catch(() => null);
+    // A token this phone already signed out of is never signed in with again.
+    const stored = loaded && !unforgotten.has(loaded.token) ? loaded : null;
+    const pending =
+      stored && options.pendingSignOuts
+        ? await options.pendingSignOuts.isPending(stored).catch(() => null)
+        : false;
+    if (current.id !== generation) {
+      // Signed out while the store was read: the token it held goes too.
+      if (stored) void endToken(stored.origin, stored.token);
+      return;
+    }
+    if (pending === null) return setState({ status: "unreadable" });
+    if (pending && stored) {
+      unrevoked = stored;
+      setState(signedOut(stored.origin, false));
+      void signOut().catch(() => undefined);
+      return;
+    }
+    setState(
+      stored ? { status: "signed-in", signIn: signedIn(stored, current) } : signedOut(null, false),
+    );
   }
 
   return {
@@ -245,25 +331,14 @@ export function createAccount(options: {
       return () => listeners.delete(listener);
     },
 
-    async restore() {
-      const current = { id: generation, signal: controller.signal };
-      const loaded = await write(() => store.load()).catch(() => null);
-      // A token this phone already signed out of is never signed in with again.
-      const stored = loaded && !unforgotten.has(loaded.token) ? loaded : null;
-      if (current.id !== generation) {
-        // Signed out while the store was read: the token it held goes too.
-        if (stored) void endToken(stored.origin, stored.token);
-        return;
-      }
-      setState(
-        stored
-          ? { status: "signed-in", signIn: signedIn(stored, current) }
-          : signedOut(null, false),
-      );
+    restore() {
+      restoring ??= readSaved().finally(() => (restoring = null));
+      return restoring;
     },
 
     async signIn(origin, onCode) {
       if (state.status === "signed-in") throw new Error("This phone is already signed in.");
+      if (unrevoked) throw new Error("This phone is still signing out.");
       const attempt = advance();
       const isCurrent = () => attempt.id === generation;
       let token: string | null = null;
@@ -290,6 +365,7 @@ export function createAccount(options: {
           userId: account.userId,
           email: account.email,
         };
+        await options.pendingSignOuts?.end(stored).catch(() => undefined);
         await write(async () => {
           if (isCurrent()) await store.save(stored);
         });
@@ -306,7 +382,7 @@ export function createAccount(options: {
     },
 
     cancelSignIn() {
-      if (state.status === "signed-out") advance();
+      if (state.status === "signed-out" && !unrevoked) advance();
     },
 
     signOut,

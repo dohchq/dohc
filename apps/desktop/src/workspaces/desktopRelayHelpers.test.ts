@@ -120,12 +120,30 @@ describe("desktop relay helpers", () => {
       subjectName: null,
       sharerName: null,
       shareId: "share-a",
+      statedShareId: "share-a",
       granterUserId: "user-a",
       granterEmail: "owner@example.test",
       genericChatWritable: true,
       selector: { paths: ["docs"], versionId: "version-a", access: "edit" },
       createdAtMs: 42,
     });
+  });
+
+  it.each([
+    ["omits its share id", {}],
+    ["gives a share id that is not text", { shareId: 7 }],
+  ])("does not say a reply named the share when it %s", async (_name, stated) => {
+    const fetchMock = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({
+        ...stated,
+        genericChatWritable: false,
+        selector: { paths: ["docs"], versionId: null },
+        access: "edit",
+      }),
+    );
+    const read = await fetchShareViewInfo({ relay: relay(fetchMock), shareId: "share-a" });
+    expect(read.statedShareId).toBeUndefined();
+    expect(read.selector).toEqual({ paths: ["docs"], versionId: null, access: "edit" });
   });
 
   // The fetched selector becomes the grant every later pull is enforced

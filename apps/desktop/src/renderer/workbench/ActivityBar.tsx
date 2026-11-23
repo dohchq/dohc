@@ -1,4 +1,5 @@
 import { desktopPins, activityPin } from "../../testPins";
+import { shortcutTitle } from "../../shortcuts/shortcutRegistry";
 import { Settings, Users, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { pinnedAppInitial, type PinnedApp } from "./pinnedApps";
@@ -11,6 +12,7 @@ function RailGlyph(props: { Icon: LucideIcon }) {
 
 function RailButton(props: {
   label: string;
+  title?: string;
   testId: string;
   active?: boolean;
   badge?: "danger" | "success";
@@ -54,7 +56,7 @@ function RailButton(props: {
         <button
           type="button"
           data-testid={props.testId}
-          title={props.label}
+          title={props.title ?? props.label}
           aria-label={props.label}
           aria-current={props.active ? "page" : undefined}
           onClick={props.onClick}
@@ -94,6 +96,11 @@ export function ActivityBar(props: {
   viewsDisabled?: boolean;
   showSharing?: boolean;
 }) {
+  const platform = window.dohcDesktop?.platform;
+  const sidebarKey = shortcutTitle("toggle-sidebar", platform);
+  const settingsKey = shortcutTitle("settings", platform);
+  const pinnedApps = props.pinnedApps ?? [];
+  const conflictOnSharing = props.showSharing !== false;
   return (
     <nav
       aria-label="Activity bar"
@@ -108,26 +115,40 @@ export function ActivityBar(props: {
         inert={props.viewsDisabled || undefined}
         className="flex min-h-0 w-full flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1"
       >
-        {props.views.map((view) => (
-          <RailButton
-            key={view}
-            testId={activityPin(view)}
-            label={VIEW_IDENTITY[view].label}
-            // The rail reflects a collapsed panel: no active mark while hidden.
-            active={props.sidebarVisible && props.activeView === view}
-            badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
-            onClick={() => props.onSelectView(view)}
-            icon={<RailGlyph Icon={VIEW_IDENTITY[view].Icon} />}
-          />
-        ))}
-        {(props.pinnedApps ?? []).map((app) => {
+        {props.views.map((view) => {
+          const active = props.sidebarVisible && props.activeView === view;
+          const label = VIEW_IDENTITY[view].label;
+          return (
+            <RailButton
+              key={view}
+              testId={activityPin(view)}
+              label={label}
+              title={active ? `${label} (${sidebarKey})` : label}
+              // The rail reflects a collapsed panel: no active mark while hidden.
+              active={active}
+              badge={
+                !conflictOnSharing && view === "explorer" && props.hasConflict
+                  ? "danger"
+                  : undefined
+              }
+              onClick={() => props.onSelectView(view)}
+              icon={<RailGlyph Icon={VIEW_IDENTITY[view].Icon} />}
+            />
+          );
+        })}
+        {pinnedApps.length > 0 && props.views.length > 0 ? (
+          <div aria-hidden className="my-1 h-px w-6 shrink-0 bg-line" />
+        ) : null}
+        {pinnedApps.map((app) => {
           const viewId = appViewId(app.root);
+          const active = props.sidebarVisible && props.activeView === viewId;
           return (
             <RailButton
               key={viewId}
               testId="activity-pinned-app"
               label={app.label}
-              active={props.sidebarVisible && props.activeView === viewId}
+              title={active ? `${app.label} (${sidebarKey})` : app.label}
+              active={active}
               onClick={() => props.onSelectView(viewId)}
               onContextMenu={
                 props.onPinnedAppMenu ? () => props.onPinnedAppMenu?.(app.root) : undefined
@@ -153,6 +174,11 @@ export function ActivityBar(props: {
             <RailButton
               testId={activityPin(SHARING_VIEW_ID)}
               label="Sharing"
+              title={
+                props.sidebarVisible && props.activeView === SHARING_VIEW_ID
+                  ? `Sharing (${sidebarKey})`
+                  : "Sharing"
+              }
               active={props.sidebarVisible && props.activeView === SHARING_VIEW_ID}
               badge={props.hasConflict ? "danger" : undefined}
               onClick={() => props.onSelectView(SHARING_VIEW_ID)}
@@ -164,6 +190,7 @@ export function ActivityBar(props: {
         <RailButton
           testId={activityPin("settings")}
           label="Open settings"
+          title={`Open settings (${settingsKey})`}
           onClick={props.onOpenSettings}
           icon={<RailGlyph Icon={Settings} />}
         />

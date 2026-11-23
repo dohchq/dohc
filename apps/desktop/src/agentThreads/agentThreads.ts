@@ -190,8 +190,8 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
       const { refused } = dependencies.cli;
       throw new Error(
         refused === undefined
-          ? "dohc can't connect a thread, because it can't find its own program."
-          : `dohc can't connect a thread from where it is installed. The path of its folder has ${quoted(refused)}, which a command can't carry safely. Install dohc in a folder whose path has none.`,
+          ? "dohc cannot connect a thread, because it cannot find its own program."
+          : `dohc cannot connect a thread from where it is installed. The path of its folder has ${quoted(refused)}, which a command cannot carry safely. Install dohc in a folder whose path has none.`,
       );
     }
     const reaching = served(agent, workspace);

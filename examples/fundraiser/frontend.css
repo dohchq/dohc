@@ -163,8 +163,13 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .rows td { display: grid; grid-template-columns: 7rem 1fr; gap: .5rem; border: 0; padding: .2rem 0; text-align: left; }
   .rows td::before { content: attr(data-label); color: var(--muted); font-size: .85rem; }
   .rows td.num { text-align: left; }
+  .totals-table th, .totals-table td { padding: .35rem .18rem; font-size: .78rem; }
+  .totals-table th:first-child, .totals-table td:first-child { padding-left: 0; }
+  .totals-table th:last-child, .totals-table td:last-child { padding-right: 0; }
+  .nav-link, button, .tabs button, .toolbar select, .search input { min-height: 44px; }
+  .check { min-height: 36px; }
   .toolbar .field, .search { width: 100%; }
-  .detail { width: calc(100vw - 1rem); padding: 1rem; }
+  .detail { width: calc(100vw - 1rem); max-height: calc(100dvh - 2rem); padding: 1rem; }
 }
 @media (prefers-reduced-motion: no-preference) {
   button, .nav-link { transition: background-color 90ms, color 90ms; }

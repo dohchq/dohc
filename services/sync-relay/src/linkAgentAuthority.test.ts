@@ -36,7 +36,6 @@ import {
   testStorage,
   type HandlerOverrides,
 } from "./testing";
-import { fixture as replicaFixture } from "./testing/replicaLink";
 
 // A connected agent reads and writes its link through the routes share-web's
 // MCP tools call, with `Authorization: DohcAgent <access token>` and the MCP
@@ -660,38 +659,6 @@ describe("an agent reading its link", () => {
       end(f, f.storage, agent);
       await expect(reader.read()).rejects.toMatchObject({ code: "not_found" });
     });
-  });
-
-  // A relay serving current reads from the owner's replica authenticates the
-  // agent inside the replica read's own snapshot.
-  it("reads the replica's current files and streams its blobs", async () => {
-    const f = await replicaFixture();
-    try {
-      const exchangeKey = "e".repeat(64);
-      const resource = `https://viewer.dohc.test/mcp/s/${f.secret}`;
-      const agent = await connect(
-        f,
-        { shareId: "s", grantId: "link", secret: f.secret, resource },
-        exchangeKey,
-      );
-      const asAgent = (path: string) =>
-        f.h(agentRequest(agent, path, {}, { "x-dohc-relay-exchange-key": exchangeKey }));
-      const text = "x".repeat(200_000);
-      f.publish(text);
-
-      const current = await ok(await asAgent("/sync/link/current"));
-      expect(current.files).toEqual([
-        expect.objectContaining({ path: "docs/a.md", blobSha256: sha256(text) }),
-      ]);
-      expect(current).toEqual(await ok(await f.send("/sync/link/current")));
-      await ok(await asAgent("/sync/link/log?current=true&since=0"));
-      // Four chunks, each checked again inside the replica read.
-      const blob = await asAgent(`/sync/link/blobs/${sha256(text)}`);
-      expect(blob.status).toBe(200);
-      expect(await blob.text()).toBe(text);
-    } finally {
-      f.dispose();
-    }
   });
 });
 

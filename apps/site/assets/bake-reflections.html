@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Bake the studio reflections</title>
+<a download="figure-reflections.exr">Download the reflection map</a>
+<script type="module">
+  import { FloatType, PMREMGenerator, WebGLRenderer } from "three";
+  import { EXRExporter } from "three/addons/exporters/EXRExporter.js";
+  import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
+
+  const renderer = new WebGLRenderer();
+  const generator = new PMREMGenerator(renderer);
+  const studio = await new HDRLoader().loadAsync("./engine-studio-256.hdr");
+  const target = generator.fromEquirectangular(studio);
+  const bytes = await new EXRExporter().parse(renderer, target, { type: FloatType });
+  document.querySelector("a").href = URL.createObjectURL(new Blob([bytes]));
+  target.dispose();
+  studio.dispose();
+  generator.dispose();
+  renderer.dispose();
+</script>

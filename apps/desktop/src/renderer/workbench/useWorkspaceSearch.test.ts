@@ -189,7 +189,9 @@ describe("useWorkspaceSearch", () => {
         status: "idle",
       });
       expect(onError).toHaveBeenCalledTimes(1);
-      expect(onError.mock.calls[0]?.[0]).toEqual(new Error("Workspace is still updating."));
+      expect(onError.mock.calls[0]?.[0]).toEqual(
+        new Error("dohc could not search because the workspace is still updating."),
+      );
       const callsAtDeadline = bridgeMock.searchWorkspace.mock.calls.length;
 
       await act(async () => {

@@ -1,0 +1,1015 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { afterEach, expect, it } from "vitest";
+import { TokenBucketLimiter } from "@dohc/service-http";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
+import type { DatasetDefinition, DatasetDescription } from "@dohc/security-contract/dataset";
+import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
+import { createAccountFeedWaits } from "./accountFeed";
+import { createAccountOperationRoute } from "./accountOperationRoutes";
+import { createChatWakeWaits } from "./chatWakeRoutes";
+import { createRelayDatasetHost, type RelayDatasetHost } from "./datasetHost";
+import { fixture as baseFixture, limits, owner, pushFile } from "./datasetTestFixture";
+import { DiscussionActivityHub } from "./discussionActivity";
+import { errorResponse } from "./errors";
+import { createPhoneCollections, PHONE_COLLECTION_PAGE } from "./phoneCollections";
+import type { SyncRelayStorage } from "./storage";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+
+const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const DATASET = id(1),
+  PEOPLE = id(2),
+  KEY = id(3),
+  NAME = id(4),
+  PAID = id(5),
+  BUTTON = id(6),
+  CREATE = id(7),
+  READ = id(8),
+  NOTES = id(9),
+  TEXT = id(10),
+  NOTE_KEY = id(11),
+  ADD_NOTE = id(12),
+  EMAIL = id(13),
+  RECEIPT = id(14),
+  OTHER = id(15),
+  EDIT = id(16),
+  REMOVE = id(17),
+  GUESTS = id(18),
+  GUEST_KEY = id(19),
+  GUEST_NAME = id(20),
+  GUEST_PAID = id(21),
+  GUEST_STATUS = id(22),
+  GUEST_READ = id(23),
+  GUEST_CREATE = id(24),
+  GUEST_REMOVE = id(25);
+const definition: DatasetDefinition = {
+  formatVersion: 1,
+  datasetId: DATASET,
+  name: "Registrations",
+  schemaPath: "registrations/schema.sql",
+  operationsPath: "registrations/operations.js",
+  tables: [
+    {
+      tableId: PEOPLE,
+      name: "People",
+      sqlName: "people",
+      primaryKey: "id",
+      fields: [
+        { fieldId: KEY, name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+        {
+          fieldId: NAME,
+          name: "Name",
+          sqlColumn: "name",
+          type: "text",
+          required: true,
+          unique: false,
+        },
+        {
+          fieldId: PAID,
+          name: "Paid",
+          sqlColumn: "paid",
+          type: "checkbox",
+          required: false,
+          unique: false,
+        },
+        // The read leaves it out.
+        {
+          fieldId: EMAIL,
+          name: "Email",
+          sqlColumn: "email",
+          type: "text",
+          required: false,
+          unique: false,
+        },
+        {
+          fieldId: RECEIPT,
+          name: "Receipt",
+          sqlColumn: "receipt",
+          type: "attachment",
+          required: false,
+          unique: false,
+        },
+        { fieldId: BUTTON, name: "Remind", type: "button" },
+      ],
+    },
+    {
+      tableId: NOTES,
+      name: "Notes",
+      sqlName: "notes",
+      primaryKey: "id",
+      fields: [
+        {
+          fieldId: NOTE_KEY,
+          name: "ID",
+          sqlColumn: "id",
+          type: "text",
+          required: true,
+          unique: true,
+        },
+        {
+          fieldId: TEXT,
+          name: "Text",
+          sqlColumn: "text",
+          type: "text",
+          required: true,
+          unique: false,
+        },
+      ],
+    },
+    // As the desktop makes a table: the host gives each record its key, so a new record can start with defaults.
+    {
+      tableId: GUESTS,
+      name: "Guests",
+      sqlName: "guests",
+      primaryKey: "id",
+      fields: [
+        {
+          fieldId: GUEST_KEY,
+          name: "Record ID",
+          sqlColumn: "id",
+          type: "text",
+          required: true,
+          unique: true,
+          generated: "record-id",
+        },
+        {
+          fieldId: GUEST_NAME,
+          name: "Name",
+          sqlColumn: "name",
+          type: "text",
+          required: false,
+          unique: false,
+        },
+        {
+          fieldId: GUEST_PAID,
+          name: "Paid",
+          sqlColumn: "paid",
+          type: "checkbox",
+          required: true,
+          unique: false,
+        },
+        {
+          fieldId: GUEST_STATUS,
+          name: "Status",
+          sqlColumn: "status",
+          type: "select",
+          required: true,
+          unique: false,
+          default: "Unpaid",
+          options: ["Unpaid", "Paid"],
+        },
+      ],
+    },
+  ],
+  operations: [
+    {
+      operationId: CREATE,
+      name: "create",
+      label: "Create",
+      tableId: PEOPLE,
+      kind: "create",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [KEY, NAME, PAID, EMAIL, RECEIPT],
+    },
+    {
+      operationId: READ,
+      name: "read",
+      label: "Read",
+      tableId: PEOPLE,
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [KEY, NAME, PAID, RECEIPT],
+    },
+    // It changes neither the ID nor the receipt.
+    {
+      operationId: EDIT,
+      name: "edit",
+      label: "Edit",
+      tableId: PEOPLE,
+      kind: "edit",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [NAME, PAID],
+      reversible: true,
+    },
+    {
+      operationId: REMOVE,
+      name: "remove",
+      label: "Delete",
+      tableId: PEOPLE,
+      kind: "delete",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [],
+    },
+    // Notes take records but have no read.
+    {
+      operationId: ADD_NOTE,
+      name: "addNote",
+      label: "Add note",
+      tableId: NOTES,
+      kind: "create",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [NOTE_KEY, TEXT],
+    },
+    {
+      operationId: GUEST_READ,
+      name: "readGuests",
+      label: "Read guests",
+      tableId: GUESTS,
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [GUEST_KEY, GUEST_NAME, GUEST_PAID, GUEST_STATUS],
+    },
+    {
+      operationId: GUEST_CREATE,
+      name: "addGuest",
+      label: "Add guest",
+      tableId: GUESTS,
+      kind: "create",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [GUEST_NAME, GUEST_PAID, GUEST_STATUS],
+    },
+    {
+      operationId: GUEST_REMOVE,
+      name: "removeGuest",
+      label: "Delete guest",
+      tableId: GUESTS,
+      kind: "delete",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [],
+    },
+  ],
+};
+const schemaSql = `CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,paid INTEGER,email TEXT,receipt TEXT,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
+CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,text TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
+CREATE TABLE guests(id TEXT PRIMARY KEY NOT NULL,name TEXT,paid INTEGER NOT NULL,status TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
+const operationSource = generateDatasetOperations(definition);
+const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
+const scope = { workspaceId: "w", datasetId: DATASET };
+const collectionFile = {
+  path: "registrations/dataset.json",
+  text: JSON.stringify({ datasetId: DATASET }),
+};
+/** `r00` to `r50`: one more than a page. */
+const KEYS = Array.from(
+  { length: PHONE_COLLECTION_PAGE + 1 },
+  (_, n) => `r${String(n).padStart(2, "0")}`,
+);
+
+// `Bearer session:<user>:<session>:<kind>`, refused once the session is revoked.
+const revoked = new Set<string>();
+const resolveAccountSession: ResolveAccountSession = async (request) => {
+  const match = /^Bearer session:([\w-]+):([\w-]+):(phone|desktop)$/u.exec(
+    request.headers.get("authorization") ?? "",
+  );
+  if (!match || revoked.has(match[2]!)) throw new UnauthorizedError();
+  return {
+    userId: match[1]!,
+    sessionId: match[2]!,
+    expiresAtMs: Number.MAX_SAFE_INTEGER,
+    clientKind: match[3] as "phone" | "desktop",
+  };
+};
+
+/** The owner's workspace `w` with Registrations and its records, behind the account route on a server with no copies. */
+async function phone() {
+  revoked.clear();
+  const base = baseFixture(),
+    directory = await mkdtemp(join(tmpdir(), "phone-collections-"));
+  const host = await createRelayDatasetHost({
+    publicEditRelease: undefined,
+    storage: base.storage,
+    directory,
+    limits,
+    onShutdownError: (error) => {
+      throw error;
+    },
+  });
+  cleanups.push(async () => {
+    await host.close();
+    await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+  });
+  await host.activate(owner, {
+    ...scope,
+    revision,
+    schemaSql,
+    operationSource,
+    capacityBytes: 1024 * 1024,
+  });
+  pushFile(base.storage, "dataset", null, collectionFile);
+  for (const key of KEYS)
+    await host.invoke(owner, {
+      ...scope,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationId: CREATE,
+      input: {
+        values: {
+          [KEY]: key,
+          [NAME]: `Person ${key}`,
+          [PAID]: key === "r00",
+          [EMAIL]: `${key}@example.com`,
+        },
+      },
+      idempotencyKey: key,
+    });
+  const storage = base.storage as SyncRelayStorage;
+  // What the host does when it reads, which a test can add to, and how a test changes what it describes.
+  let during: () => void = () => undefined;
+  let describing = (description: DatasetDescription) => description;
+  const reading: Pick<RelayDatasetHost, "list" | "describe" | "invoke"> = {
+    list: host.list,
+    describe: (auth, input) => describing(host.describe(auth, input)),
+    invoke: async (auth, input) => {
+      during();
+      const answer = await host.invoke(auth, input);
+      during();
+      return answer;
+    },
+  };
+  const hub = new DiscussionActivityHub();
+  const route = createAccountOperationRoute({
+    storage,
+    resolveAccountSession,
+    copies: () => undefined,
+    nowMs: () => 2_000,
+    limiter: new TokenBucketLimiter(1_000, 1_000, 4_096),
+    feedWaits: createAccountFeedWaits(storage, hub),
+    wakeWaits: createChatWakeWaits(storage, hub),
+    phoneCollections: createPhoneCollections({ storage, host: reading }),
+  });
+  /** One Collection operation as `user:session:kind`, answered with its status and body. */
+  async function op(operation: string, args: unknown, as = "owner:phone-1:phone") {
+    const response = await route(
+      new Request(`http://relay.test/sync/w/ops/${operation}`, {
+        method: "POST",
+        headers: { authorization: `Bearer session:${as}`, "content-type": "application/json" },
+        body: JSON.stringify(args),
+      }),
+      { route: "account-operation", workspaceId: "w", operation },
+    ).catch((error: unknown) => errorResponse(error));
+    return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  }
+  return {
+    storage: base.storage,
+    showOnPhone: (showOnPhone: boolean) =>
+      storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: "w", showOnPhone }),
+    host,
+    op,
+    records: (after?: unknown, as?: string) =>
+      op(
+        "collectionRecords",
+        { datasetId: DATASET, tableId: PEOPLE, ...(after ? { after } : {}) },
+        as,
+      ),
+    during: (run: () => void) => {
+      during = run;
+    },
+    describing: (alter: typeof describing) => {
+      describing = alter;
+    },
+  };
+}
+
+/** Moves the Collection's folder under a hidden path, as a reader on this platform classifies it. */
+function hide(f: Awaited<ReturnType<typeof phone>>) {
+  const db = f.storage.db;
+  const sha = createHash("sha256").update(collectionFile.text).digest("hex");
+  const seq = Number(db.prepare("SELECT MAX(relay_seq) AS seq FROM sync_relay_log").get()!.seq) + 1;
+  db.prepare(
+    "INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES ('w','test',1,'ydoc.update','{}',2,?)",
+  ).run(seq);
+  db.prepare("DELETE FROM sync_relay_current_files WHERE workspace_id='w' AND path=?").run(
+    collectionFile.path,
+  );
+  db.prepare(
+    "INSERT INTO sync_relay_current_files VALUES ('w','main','a/.env/dataset.json',?,'text',?)",
+  ).run(sha, seq);
+  db.prepare(
+    `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+     VALUES ('w','dataset',?,'moment-hidden','main','a/.env/dataset.json',?,'text',?,1)`,
+  ).run(seq, sha, Buffer.byteLength(collectionFile.text));
+}
+
+const ok = (result: unknown) => ({ status: 200, body: { ok: true, result } });
+const notFound = { status: 404, body: expect.objectContaining({ ok: false, code: "not_found" }) };
+const rowKeys = (answer: { body: Record<string, unknown> }) =>
+  ((answer.body.result as { rows: { id: string }[] }).rows ?? []).map((row) => row.id);
+
+it("lists, describes, and reads a Collection's records a page at a time", async () => {
+  const f = await phone();
+  expect(await f.op("collections", {})).toEqual(
+    ok({ collections: [{ datasetId: DATASET, name: "Registrations" }], nextCursor: null }),
+  );
+  // Names, IDs, types and the primary field of what each table's read gives, and which an edit changes; never a
+  // button, a column, or an operation.
+  const field = (fieldId: string, name: string, type: string, edit = false) => ({
+    fieldId,
+    name,
+    type,
+    editable: edit,
+    reversible: edit,
+  });
+  expect(await f.op("collection", { datasetId: DATASET })).toEqual(
+    ok({
+      datasetId: DATASET,
+      name: "Registrations",
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      tables: [
+        {
+          tableId: PEOPLE,
+          name: "People",
+          primaryFieldId: KEY,
+          fields: [
+            field(KEY, "ID", "text"),
+            field(NAME, "Name", "text", true),
+            field(PAID, "Paid", "checkbox", true),
+            field(RECEIPT, "Receipt", "attachment"),
+          ],
+          // A new person needs an ID and a name, which have no defaults.
+          canCreate: false,
+          canDelete: true,
+        },
+        {
+          tableId: NOTES,
+          name: "Notes",
+          primaryFieldId: null,
+          fields: [],
+          canCreate: false,
+          canDelete: false,
+        },
+        // The host's own record key isn't shown.
+        {
+          tableId: GUESTS,
+          name: "Guests",
+          primaryFieldId: null,
+          fields: [
+            field(GUEST_NAME, "Name", "text"),
+            field(GUEST_PAID, "Paid", "checkbox"),
+            { ...field(GUEST_STATUS, "Status", "select"), options: ["Unpaid", "Paid"] },
+          ],
+          canCreate: true,
+          canDelete: true,
+        },
+      ],
+    }),
+  );
+  const first = await f.records();
+  expect(first.status).toBe(200);
+  expect(first.body.result).toMatchObject({
+    status: "ready",
+    nextCursor: { id: "r49", value: "r49" },
+    files: {},
+  });
+  expect(rowKeys(first)).toEqual(KEYS.slice(0, PHONE_COLLECTION_PAGE));
+  expect((first.body.result as { rows: unknown[] }).rows[0]).toEqual({
+    id: "r00",
+    version: 1,
+    values: { [KEY]: "r00", [NAME]: "Person r00", [PAID]: true, [RECEIPT]: null },
+  });
+  const next = await f.records({ id: "r49", value: "r49" });
+  expect(rowKeys(next)).toEqual(["r50"]);
+  expect(next.body.result).toMatchObject({ status: "ready", nextCursor: null });
+});
+
+it("names a page's attached files, but not one still waiting to attach or another Collection's", async () => {
+  const f = await phone();
+  const png = [137, 80, 78, 71, 13, 10, 26, 10];
+  const files = ["kept.png", "pending.png", "moved.png"].map(
+    (name, n) =>
+      f.host.ownerUpload(owner, {
+        ...scope,
+        revision: 1,
+        revisionSha256: revision.revisionSha256,
+        idempotencyKey: `upload-${name}`,
+        name,
+        contentType: "image/png",
+        bytesBase64: Buffer.from([...png, n]).toString("base64"),
+      }).file.fileId,
+  );
+  for (const [n, fileId] of files.entries())
+    await f.host.invoke(owner, {
+      ...scope,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationId: CREATE,
+      input: { values: { [KEY]: `f${n}`, [NAME]: `File ${n}`, [RECEIPT]: fileId } },
+      idempotencyKey: `f${n}`,
+    });
+  const [kept, pending, moved] = files as [string, string, string];
+  // As if `pending` hadn't attached yet, and `moved` were another Collection's.
+  const db = f.storage.db;
+  db.prepare("UPDATE sync_relay_dataset_files SET attached_revision=NULL WHERE file_id=?").run(
+    pending,
+  );
+  db.prepare("INSERT INTO sync_relay_dataset_usage VALUES ('w',?,0)").run(OTHER);
+  db.prepare("UPDATE sync_relay_dataset_files SET dataset_id=? WHERE file_id=?").run(OTHER, moved);
+  const answer = await f.records();
+  expect(rowKeys(answer).slice(0, 3)).toEqual(["f0", "f1", "f2"]);
+  expect((answer.body.result as { files: unknown }).files).toEqual({ [kept]: "kept.png" });
+});
+
+it("answers a table with no read with a refusal the phone can show", async () => {
+  const f = await phone();
+  expect(await f.op("collectionRecords", { datasetId: DATASET, tableId: NOTES })).toEqual(
+    ok({ status: "refused", reason: "no-read" }),
+  );
+});
+
+it("leaves out an archived Collection, and one whose dataset.json is hidden or gone, and answers each as not found", async () => {
+  const absent = async (f: Awaited<ReturnType<typeof phone>>) => {
+    expect(await f.op("collections", {})).toEqual(ok({ collections: [], nextCursor: null }));
+    expect(await f.op("collection", { datasetId: DATASET })).toEqual(notFound);
+    expect(await f.records()).toEqual(notFound);
+  };
+  const archived = await phone();
+  archived.host.archiveDataset(owner, scope);
+  await absent(archived);
+
+  const hidden = await phone();
+  hide(hidden);
+  await absent(hidden);
+  // A file naming no Collection, left where the moved one was, doesn't stand in for it.
+  pushFile(hidden.storage, "stub", null, { path: collectionFile.path, text: "{}" });
+  await absent(hidden);
+
+  const gone = await phone();
+  pushFile(gone.storage, "dataset", collectionFile, null);
+  await absent(gone);
+});
+
+it("refuses another account, Show on phone off, a revoked sign-in and a fenced account", async () => {
+  const f = await phone();
+  for (const operation of ["collections", "collection", "collectionRecords"]) {
+    const args = { datasetId: DATASET, tableId: PEOPLE };
+    const only =
+      operation === "collections" ? {} : operation === "collection" ? { datasetId: DATASET } : args;
+    expect(await f.op(operation, only, "intruder:phone-2:phone")).toEqual(notFound);
+  }
+  f.showOnPhone(false);
+  expect(await f.records()).toEqual(notFound);
+  f.showOnPhone(true);
+  revoked.add("phone-1");
+  expect((await f.records()).status).toBe(401);
+  revoked.clear();
+  initializeAccountDeletion(f.storage, "k".repeat(32));
+  fenceAccount(f.storage, "k".repeat(32), "owner", "owner@dohc.test");
+  expect(await f.records()).toEqual(notFound);
+});
+
+it("refuses the answer when Show on phone turns off, the sign-in is revoked, the account is fenced, or the Collection is archived during a read", async () => {
+  for (const change of ["hidden", "revoked", "fenced", "archived"] as const) {
+    const f = await phone();
+    let reads = 0;
+    // After the host has read the records, before the relay answers.
+    f.during(() => {
+      if (++reads !== 2) return;
+      if (change === "hidden") f.showOnPhone(false);
+      else if (change === "revoked") revoked.add("phone-1");
+      else if (change === "archived") f.host.archiveDataset(owner, scope);
+      else {
+        initializeAccountDeletion(f.storage, "k".repeat(32));
+        fenceAccount(f.storage, "k".repeat(32), "owner", "owner@dohc.test");
+      }
+    });
+    const answer = await f.records();
+    expect(answer.status).toBe(change === "revoked" ? 401 : 404);
+    expect(JSON.stringify(answer.body)).not.toContain("Person");
+  }
+  // Show on phone off as the read starts: the host's own check refuses it.
+  const f = await phone();
+  f.during(() => f.showOnPhone(false));
+  expect(await f.records()).toEqual(notFound);
+});
+
+// As the phone's app reads (phoneApps.ts), any sign-in of the owner's reads them: a computer's too. An agent has no
+// account sign-in to send, so the account route turns it away before any operation.
+it("gives a computer's sign-in of the owner what it gives the phone", async () => {
+  const f = await phone();
+  expect(await f.op("collections", {}, "owner:desktop-1:desktop")).toEqual(
+    await f.op("collections", {}),
+  );
+  expect(rowKeys(await f.records(undefined, "owner:desktop-1:desktop"))).toEqual(
+    KEYS.slice(0, PHONE_COLLECTION_PAGE),
+  );
+});
+
+/** One field's change to record `r01`, as the phone sends it. */
+const edit = (
+  f: Awaited<ReturnType<typeof phone>>,
+  change: Record<string, unknown> = {},
+  as?: string,
+) =>
+  f.op(
+    "collectionEdit",
+    {
+      datasetId: DATASET,
+      tableId: PEOPLE,
+      recordId: "r01",
+      fieldId: NAME,
+      value: "Maya",
+      expectedVersion: 1,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      idempotencyKey: id(100),
+      ...change,
+    },
+    as,
+  );
+/** Record `r01`, read again by its key. */
+const r01 = async (f: Awaited<ReturnType<typeof phone>>) => {
+  const answer = await f.op("collectionRecords", {
+    datasetId: DATASET,
+    tableId: PEOPLE,
+    recordId: "r01",
+  });
+  expect(answer.status).toBe(200);
+  const rows = (answer.body.result as { rows: { version: number; values: object }[] }).rows;
+  expect(rows).toHaveLength(1);
+  return rows[0]!;
+};
+
+it("saves a field's change, replays its retry, and undoes it with the prior value", async () => {
+  const f = await phone();
+  expect(await edit(f)).toEqual(ok({ saved: { version: 2, priorValue: "Person r01" } }));
+  expect(await r01(f)).toMatchObject({ version: 2, values: { [NAME]: "Maya" } });
+  // The same key and stamp answer the same receipt, with no second version.
+  expect(await edit(f)).toEqual(ok({ saved: { version: 2, priorValue: "Person r01" } }));
+  expect((await r01(f)).version).toBe(2);
+  // The same key with another payload: the phone never changes a change it resends, so the rules changed between tries.
+  expect(await edit(f, { value: "Maya L." })).toEqual(ok({ rulesChanged: true }));
+  expect(await r01(f)).toMatchObject({ version: 2, values: { [NAME]: "Maya" } });
+  // Undo: the prior value at the saved version, with a new key.
+  expect(
+    await edit(f, { value: "Person r01", expectedVersion: 2, idempotencyKey: id(101) }),
+  ).toEqual(ok({ saved: { version: 3, priorValue: "Maya" } }));
+  expect(await r01(f)).toMatchObject({ version: 3, values: { [NAME]: "Person r01" } });
+  // A checkbox takes a boolean, and an optional one null, which its Undo puts back.
+  expect(
+    await edit(f, { fieldId: PAID, value: null, expectedVersion: 3, idempotencyKey: id(102) }),
+  ).toEqual(ok({ saved: { version: 4, priorValue: false } }));
+  expect(
+    await edit(f, { fieldId: PAID, value: true, expectedVersion: 4, idempotencyKey: id(103) }),
+  ).toEqual(ok({ saved: { version: 5, priorValue: null } }));
+  expect(
+    await edit(f, { fieldId: PAID, value: null, expectedVersion: 5, idempotencyKey: id(104) }),
+  ).toEqual(ok({ saved: { version: 6, priorValue: true } }));
+});
+
+it("answers a stale version with the record's refusal, and a field no edit changes before any invoke", async () => {
+  const f = await phone();
+  await edit(f);
+  expect(await edit(f, { value: "Other", idempotencyKey: id(101) })).toEqual(
+    ok({
+      refused: {
+        code: "stale_record",
+        message: "This record changed. Refresh the table before editing it.",
+      },
+    }),
+  );
+  let invoked = 0;
+  f.during(() => void invoked++);
+  expect(await edit(f, { fieldId: KEY, value: "r99", idempotencyKey: id(102) })).toEqual(
+    ok({
+      refused: {
+        code: "forbidden",
+        message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+      },
+    }),
+  );
+  // Nor does a key that isn't random.
+  expect((await edit(f, { idempotencyKey: "r01-name" })).status).toBe(400);
+  expect(invoked).toBe(0);
+  // The operation refuses a value the field's type can't take.
+  expect(
+    await edit(f, { fieldId: PAID, value: "yes", expectedVersion: 2, idempotencyKey: id(103) }),
+  ).toEqual(ok({ refused: { code: "invalid_input", message: "Check the fields and try again." } }));
+  expect((await r01(f)).values).toMatchObject({ [NAME]: "Maya", [PAID]: false });
+});
+
+it("answers a change made under rules the Collection has replaced as rules changed", async () => {
+  const f = await phone();
+  const next = structuredClone(definition);
+  next.operations.find((operation) => operation.operationId === EDIT)!.fieldIds.push(EMAIL);
+  // Where the desktop puts a new revision, so the Collection's dataset.json stays in `registrations`.
+  next.schemaPath = `registrations/revisions/2-${id(99)}/schema.sql`;
+  next.operationsPath = `registrations/revisions/2-${id(99)}/operations.js`;
+  const nextSource = generateDatasetOperations(next);
+  const widened = describeDatasetRevision({
+    definition: next,
+    revision: 2,
+    schemaSql,
+    operationSource: nextSource,
+  });
+  const preview = await f.host.prepareMigration(owner, {
+    workspaceId: "w",
+    revision: widened,
+    schemaSql,
+    operationSource: nextSource,
+    expected: f.host.approvedArtifacts(owner, scope).cursor,
+    migrationSql: "SELECT 1;",
+  });
+  await f.host.approveMigration(owner, {
+    ...scope,
+    candidateId: preview.candidateId,
+    checkpointSha256: preview.checkpointSha256,
+  });
+  expect(await edit(f)).toEqual(ok({ rulesChanged: true }));
+  expect((await r01(f)).values).toMatchObject({ [NAME]: "Person r01" });
+  // Under the new rules' stamp, the same change saves.
+  const stamp = { revision: 2, revisionSha256: widened.revisionSha256 };
+  expect(await edit(f, { ...stamp, idempotencyKey: id(101) })).toEqual(
+    ok({ saved: { version: 2, priorValue: "Person r01" } }),
+  );
+  // The edit now changes Email too, but the read doesn't show it, so neither the description nor the edit offers it.
+  let invoked = 0;
+  f.during(() => void invoked++);
+  expect(
+    await edit(f, {
+      ...stamp,
+      fieldId: EMAIL,
+      value: "maya@example.test",
+      expectedVersion: 2,
+      idempotencyKey: id(102),
+    }),
+  ).toEqual(
+    ok({
+      refused: {
+        code: "forbidden",
+        message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+      },
+    }),
+  );
+  expect(invoked).toBe(0);
+});
+
+it("refuses a change from another account, with Show on phone off, a revoked sign-in, a fenced account, or an archived Collection", async () => {
+  const f = await phone();
+  expect(await edit(f, {}, "intruder:phone-2:phone")).toEqual(notFound);
+  f.showOnPhone(false);
+  expect(await edit(f)).toEqual(notFound);
+  f.showOnPhone(true);
+  revoked.add("phone-1");
+  expect((await edit(f)).status).toBe(401);
+  revoked.clear();
+  expect((await r01(f)).version).toBe(1);
+  initializeAccountDeletion(f.storage, "k".repeat(32));
+  fenceAccount(f.storage, "k".repeat(32), "owner", "owner@dohc.test");
+  expect(await edit(f)).toEqual(notFound);
+
+  const archived = await phone();
+  archived.host.archiveDataset(owner, scope);
+  expect(await edit(archived)).toEqual(notFound);
+});
+
+it("refuses a change when Show on phone turns off or its dataset.json goes as it starts, and its answer when it turns off after it ran", async () => {
+  const before = await phone();
+  before.during(() => before.showOnPhone(false));
+  expect(await edit(before)).toEqual(notFound);
+  before.during(() => undefined);
+  before.showOnPhone(true);
+  expect((await r01(before)).version).toBe(1);
+
+  // Its dataset.json gone as the edit starts: the edit's own guard refuses it, so nothing commits.
+  const gone = await phone();
+  gone.during(() => pushFile(gone.storage, "dataset", collectionFile, null));
+  expect(await edit(gone)).toEqual(notFound);
+  gone.during(() => undefined);
+  pushFile(gone.storage, "dataset-again", null, collectionFile);
+  expect((await r01(gone)).version).toBe(1);
+
+  const after = await phone();
+  let calls = 0;
+  after.during(() => {
+    if (++calls === 2) after.showOnPhone(false);
+  });
+  const answer = await edit(after);
+  expect(answer).toEqual(notFound);
+  expect(JSON.stringify(answer.body)).not.toContain("Person");
+});
+
+/** A new guest, as the phone asks for one. */
+const create = (
+  f: Awaited<ReturnType<typeof phone>>,
+  change: Record<string, unknown> = {},
+  as?: string,
+) =>
+  f.op(
+    "collectionCreate",
+    {
+      datasetId: DATASET,
+      tableId: GUESTS,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      idempotencyKey: id(200),
+      ...change,
+    },
+    as,
+  );
+/** Record `r01`'s deletion, as the phone asks for it. */
+const remove = (
+  f: Awaited<ReturnType<typeof phone>>,
+  change: Record<string, unknown> = {},
+  as?: string,
+) =>
+  f.op(
+    "collectionDelete",
+    {
+      datasetId: DATASET,
+      tableId: PEOPLE,
+      recordId: "r01",
+      expectedVersion: 1,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      idempotencyKey: id(300),
+      ...change,
+    },
+    as,
+  );
+const guests = async (f: Awaited<ReturnType<typeof phone>>) =>
+  rowKeys(await f.op("collectionRecords", { datasetId: DATASET, tableId: GUESTS }));
+const hasR01 = async (f: Awaited<ReturnType<typeof phone>>) =>
+  rowKeys(await f.op("collectionRecords", { datasetId: DATASET, tableId: PEOPLE, recordId: "r01" }))
+    .length === 1;
+
+it("adds a record with the desktop's starting values, replays its retry, and answers a reused key as rules changed", async () => {
+  const f = await phone();
+  const first = await create(f);
+  // Its key, which the phone reads it by, and never values the relay only sent.
+  expect(first).toEqual(ok({ saved: { id: expect.any(String), version: 1 } }));
+  const key = (first.body.result as { saved: { id: string } }).saved.id;
+  expect(await guests(f)).toEqual([key]);
+  // Each field's default, or its empty value.
+  const read = await f.op("collectionRecords", {
+    datasetId: DATASET,
+    tableId: GUESTS,
+    recordId: key,
+  });
+  expect((read.body.result as { rows: unknown[] }).rows).toEqual([
+    expect.objectContaining({
+      id: key,
+      version: 1,
+      values: expect.objectContaining({
+        [GUEST_NAME]: null,
+        [GUEST_PAID]: false,
+        [GUEST_STATUS]: "Unpaid",
+      }),
+    }),
+  ]);
+  // The same key and stamp answer the same receipt, with no second record.
+  expect(await create(f)).toEqual(first);
+  expect(await guests(f)).toEqual([key]);
+  // The key a deletion used before: the phone never changes what it resends, so the rules changed between tries.
+  expect(await remove(f, { idempotencyKey: id(200) })).toEqual(ok({ rulesChanged: true }));
+  expect(await hasR01(f)).toBe(true);
+});
+
+it("deletes a record, replays its retry, and refuses a stale version", async () => {
+  const f = await phone();
+  await edit(f);
+  // r01 is at version 2 now.
+  expect(await remove(f)).toEqual(
+    ok({
+      refused: {
+        code: "stale_record",
+        message: "This record changed. Refresh the table before editing it.",
+      },
+    }),
+  );
+  expect(await hasR01(f)).toBe(true);
+  expect(await remove(f, { expectedVersion: 2, idempotencyKey: id(301) })).toEqual(
+    ok({ saved: {} }),
+  );
+  expect(await hasR01(f)).toBe(false);
+  expect(await remove(f, { expectedVersion: 2, idempotencyKey: id(301) })).toEqual(
+    ok({ saved: {} }),
+  );
+  // A new guest, deleted.
+  const added = await create(f);
+  const key = (added.body.result as { saved: { id: string } }).saved.id;
+  expect(await remove(f, { tableId: GUESTS, recordId: key, idempotencyKey: id(302) })).toEqual(
+    ok({ saved: {} }),
+  );
+  expect(await guests(f)).toEqual([]);
+});
+
+it("refuses a new record or deletion that a table's operations don't allow, before any invoke", async () => {
+  const f = await phone();
+  let invoked = 0;
+  f.during(() => void invoked++);
+  const refused = ok({
+    refused: {
+      code: "forbidden",
+      message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+    },
+  });
+  // A new person needs an ID and a name, which have no defaults. Nothing reads Notes, so the phone can't show what it
+  // would add or delete there.
+  expect(await create(f, { tableId: PEOPLE })).toEqual(refused);
+  expect(await create(f, { tableId: NOTES })).toEqual(refused);
+  expect(await remove(f, { tableId: NOTES })).toEqual(refused);
+  expect(await create(f, { tableId: OTHER })).toEqual(notFound);
+  // Nor does a key that isn't random, a version that isn't one, or values from the phone.
+  expect((await create(f, { idempotencyKey: "new-guest" })).status).toBe(400);
+  expect((await create(f, { values: { [GUEST_NAME]: "Ada" } })).status).toBe(400);
+  expect((await remove(f, { expectedVersion: 0 })).status).toBe(400);
+  expect(invoked).toBe(0);
+});
+
+it("refuses a new record or deletion from another account, with Show on phone off, a revoked sign-in, a fenced account, an archived Collection, or a hidden dataset.json", async () => {
+  for (const write of [create, remove]) {
+    const f = await phone();
+    expect(await write(f, {}, "intruder:phone-2:phone")).toEqual(notFound);
+    f.showOnPhone(false);
+    expect(await write(f)).toEqual(notFound);
+    f.showOnPhone(true);
+    revoked.add("phone-1");
+    expect((await write(f)).status).toBe(401);
+    revoked.clear();
+    expect(await guests(f)).toEqual([]);
+    expect(await hasR01(f)).toBe(true);
+    initializeAccountDeletion(f.storage, "k".repeat(32));
+    fenceAccount(f.storage, "k".repeat(32), "owner", "owner@dohc.test");
+    expect(await write(f)).toEqual(notFound);
+
+    const archived = await phone();
+    archived.host.archiveDataset(owner, scope);
+    expect(await write(archived)).toEqual(notFound);
+
+    const hidden = await phone();
+    hide(hidden);
+    expect(await write(hidden)).toEqual(notFound);
+  }
+});
+
+it("refuses a new record or deletion when Show on phone turns off or its dataset.json goes as it starts, and its answer when Show on phone turns off after it ran", async () => {
+  for (const write of [create, remove]) {
+    const before = await phone();
+    before.during(() => before.showOnPhone(false));
+    expect(await write(before)).toEqual(notFound);
+    before.during(() => undefined);
+    before.showOnPhone(true);
+    expect(await guests(before)).toEqual([]);
+    expect(await hasR01(before)).toBe(true);
+
+    const gone = await phone();
+    gone.during(() => pushFile(gone.storage, "dataset", collectionFile, null));
+    expect(await write(gone)).toEqual(notFound);
+    gone.during(() => undefined);
+    pushFile(gone.storage, "dataset-again", null, collectionFile);
+    expect(await guests(gone)).toEqual([]);
+    expect(await hasR01(gone)).toBe(true);
+
+    const after = await phone();
+    let calls = 0;
+    after.during(() => {
+      if (++calls === 2) after.showOnPhone(false);
+    });
+    expect(await write(after)).toEqual(notFound);
+  }
+});
+
+it("adds no record where the phone couldn't read it back by its key", async () => {
+  const f = await phone();
+  let invoked = 0;
+  f.during(() => void invoked++);
+  f.describing((description) => ({
+    ...description,
+    operations: description.operations.map((operation) =>
+      operation.operationId === GUEST_READ
+        ? { ...operation, fieldIds: operation.fieldIds.filter((field) => field !== GUEST_KEY) }
+        : operation,
+    ),
+  }));
+  const described = await f.op("collection", { datasetId: DATASET });
+  expect(
+    (described.body.result as { tables: { tableId: string; canCreate: boolean }[] }).tables.find(
+      (table) => table.tableId === GUESTS,
+    )?.canCreate,
+  ).toBe(false);
+  expect(await create(f)).toEqual(
+    ok({
+      refused: {
+        code: "forbidden",
+        message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+      },
+    }),
+  );
+  expect(invoked).toBe(0);
+});

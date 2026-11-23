@@ -6,7 +6,9 @@ import { useForgetWorkspace, useWorkspaceMenu } from "./workspaceMenu";
 import { useWorkspaces } from "./Workspaces";
 
 // Design review only: opens one confirmation over Chats once, so its screenshot can be taken without a tap.
-// Deleting files and leaving a conversation have no phone surface yet; their sheets are shown here first.
+// Modes (dohcDemo, src/demo.ts): sheet-forget | sheet-forget-waiting | toast-forgot | sheet-delete-file |
+// sheet-delete-files | sheet-leave. Deleting files and leaving a conversation have no phone surface yet; their sheets
+// are shown here first.
 export function useDemoSheet() {
   const { current } = useWorkspaces();
   const opened = useRef(false);

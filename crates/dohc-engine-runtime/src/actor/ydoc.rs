@@ -1,6 +1,6 @@
 use super::ActorHandle;
 use super::capture::{WorkspaceRootGuard, validate_workspace_root};
-use super::journal::journal_moment_outbound_in_tx;
+use super::journal::{journal_moment_outbound_in_tx, journal_owner_save_outbound_in_tx};
 use super::materialization::{
     MaterializationReplayScope, SelfWriteRecorder, replay_materializations_in_order,
     replay_pending_materializations,
@@ -201,6 +201,7 @@ impl ActorHandle {
         document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
         accepted_cursor: Option<i64>,
         kept_snapshot: Option<String>,
+        person_id: Option<String>,
         action: String,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
@@ -233,10 +234,11 @@ impl ActorHandle {
                 "retired"=>release::retired_in_tx(tx,&key,now_ms).map(|()|vec![]),
                 "release"=>{
                     let b=binding.as_ref().ok_or(OwnerOutboxError::StopConflict)?;
+                    let person_id=person_id.as_deref().ok_or(OwnerOutboxError::InvalidInput("a release names its person"))?;
                     let ends=release::retired_by_relay_in(tx,&key)?;
                     let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
                     let path=path.as_deref().unwrap_or(&b.current_path);
-                    let row=dohc_engine_sync::unbind_owner_in_tx(tx,&key,owner_hold_error,|tx| release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
+                    let row=dohc_engine_sync::unbind_owner_in_tx(tx,&key,owner_hold_error,|tx| release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),person_id,now_ms,|tx,update,actor,attribution,outcome| {
                         journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,&preparations,outcome,now_ms).map(|_|())
                     }))?;
                     // A release that waits keeps its Stop and notice.
@@ -508,8 +510,8 @@ impl ActorHandle {
     }
 
     /// Main-owned authenticated feed only. A delivery ACK never calls this method.
-    /// A room's save names `rows_through`, the last room position it holds;
-    /// the owner's screen then drops the room's rows through it.
+    /// A room's save names `rows_through`, the position through which every room
+    /// row is saved; the owner's screen then drops the room's rows through it.
     #[allow(clippy::too_many_arguments)]
     pub async fn owner_ydoc_apply_accepted(
         &self,
@@ -621,6 +623,7 @@ impl ActorHandle {
                 if let Some(through) = rows_through {
                     cache.drop_owner_rows_through(&key, through);
                 }
+                cache.drop_owner_row_at(&key, input.journal_cursor);
                 dohc_engine_collab::compact_after_commit(store, &key, &NoFaults, now_ms);
                 decide_owner_holds_after_commit(store, cache, &key);
             }
@@ -846,6 +849,31 @@ impl ActorHandle {
                     &workspace_id,
                     &outbox_id,
                     &receipts,
+                ))
+            }
+        })
+        .await
+    }
+
+    /// The relay took the queue's first delivery; see
+    /// [`dohc_engine_collab::owner_outbox::acknowledge_taken`].
+    pub async fn owner_ydoc_outbox_acknowledge_taken(
+        &self,
+        workspace_id: String,
+        outbox_id: String,
+        receipt: OwnerDeliveryReceipt,
+        token: CancellationToken,
+    ) -> Result<Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(dohc_engine_collab::owner_outbox::acknowledge_taken(
+                    store,
+                    cache,
+                    &workspace_id,
+                    &outbox_id,
+                    &receipt,
                 ))
             }
         })
@@ -2823,6 +2851,28 @@ fn settlement_audit_error(
     }
 }
 
+fn send_unchanged_owner_save(
+    store: &mut EngineStore,
+    key: &DocKey,
+    moment_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    let publishes = store
+        .read_with(|conn| {
+            dohc_engine_collab::owner_outbox::release::owner_saves_publish_in(conn, key)
+        })
+        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+    if !publishes {
+        return Ok(());
+    }
+    match store.write_with(faults, |tx| {
+        journal_owner_save_outbound_in_tx(tx, key, moment_id)
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
 /// Record that the workspace file holds this lineage up to its current head,
 /// for a settle that proved it without writing. An open that finds the two
 /// still equal knows the lineage is not ahead of its file. For an accepted
@@ -3702,6 +3752,9 @@ fn ydoc_settle_attempt_on_store(
             publication_state_bytes.as_deref(),
             now_ms,
         )?;
+        if live_audit.is_none() {
+            send_unchanged_owner_save(store, key, &current.latest_moment_id, faults)?;
+        }
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
@@ -4024,13 +4077,24 @@ fn ydoc_settle_attempt_on_store(
         }
         // Live settlement export owns its companion moment, including when
         // enrollment defers the pair until earlier audit events are exported.
-        if kind == SettlementKind::CollectionAdoption && live_audit.is_none() {
+        let owner_saves = live_audit.is_none()
+            && dohc_engine_collab::owner_outbox::release::owner_saves_publish_in(tx, key)
+                .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+        if owner_saves && result.deduped {
+            journal_owner_save_outbound_in_tx(tx, key, &result.moment.moment_id)?;
+        } else if live_audit.is_none() && (kind == SettlementKind::CollectionAdoption || owner_saves) {
             journal_moment_outbound_in_tx(
                 tx,
                 &key.workspace_id,
                 &result.moment.moment_id,
                 result.deduped,
             )?;
+        } else if live_audit.is_none()
+            && !result.deduped
+            && dohc_engine_collab::owner_outbox::release::claimed_note_off_in(tx, key)
+                .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?
+        {
+            journal_owner_save_outbound_in_tx(tx, key, &result.moment.moment_id)?;
         }
         let reconcile_required = settled_collection_record_reconcile_required_in_tx(
             tx,

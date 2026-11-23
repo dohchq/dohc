@@ -141,7 +141,7 @@ const OPEN_AS_WORKSPACE = 0;
 export async function confirmOpenPathWorkspace(
   deps: {
     showMessageBox(options: {
-      type: "question";
+      type: "question" | "warning";
       message: string;
       detail: string;
       buttons: string[];
@@ -151,7 +151,27 @@ export async function confirmOpenPathWorkspace(
     }): Promise<{ response: number }>;
   },
   folder: OpenPathFolder,
+  cloudSync?: { service: string | null } | null,
 ): Promise<boolean> {
+  if (cloudSync) {
+    const provider = cloudSync.service;
+    const syncDetail = provider
+      ? `${provider} can corrupt your workspace data when syncing across computers. Move this folder outside ${provider} first, or open it here.`
+      : "Cloud sync can corrupt your workspace data across computers. Move this folder outside cloud sync first, or open it here.";
+    const { response } = await deps.showMessageBox({
+      type: "warning",
+      message: `Open "${basename(folder.rootPath)}" as a workspace?`,
+      detail: [
+        syncDetail,
+        ...(folder.file ? [`Then dohc opens ${basename(folder.file)}.`] : []),
+      ].join(" "),
+      buttons: ["Open anyway", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    return response === OPEN_AS_WORKSPACE;
+  }
   const { response } = await deps.showMessageBox({
     type: "question",
     message: `Open "${basename(folder.rootPath)}" as a workspace?`,

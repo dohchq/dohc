@@ -1,5 +1,13 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderBare,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import {
@@ -10,7 +18,14 @@ import {
 import type { AgentToolsResult } from "../../agents/agentToolCatalog";
 import { settingsWithAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { AddAgentForm } from "./AddAgentForm";
+
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="workspace-a">{children}</WorkspaceSessionProvider>;
+}
+
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: Session });
 
 const detected: AgentToolsResult = {
   workingDirectory: "C:\\Work",

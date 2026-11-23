@@ -276,6 +276,29 @@ describe("settleShareProposal", () => {
     );
   });
 
+  it("says which file is being edited live when the relay refuses an accept for it", async () => {
+    const words =
+      "dohc could not accept these changes because docs/a.md is being edited live. Stop live editing for it in Live documents, then accept them.";
+    const live = relayAnswering(
+      { ok: false, code: "proposal-file-live", error: words },
+      { status: 409 },
+    );
+    const settled = relayAnswering(
+      { ok: false, code: "conflict", error: "these changes were already accepted" },
+      { status: 409 },
+    );
+    const accept = (relay: typeof live.relay) =>
+      settleShareProposal({
+        relay,
+        workspaceId: "workspace-a",
+        proposalId: "proposal-1",
+        decision: "accept",
+      });
+
+    await expect(accept(live.relay)).rejects.toThrow(words);
+    await expect(accept(settled.relay)).rejects.toThrow("Proposal request failed (409)");
+  });
+
   it("refuses a settlement that answers about another proposal", async () => {
     const { relay } = relayAnswering({
       proposalId: "proposal-9",

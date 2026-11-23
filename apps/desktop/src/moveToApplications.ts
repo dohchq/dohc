@@ -53,7 +53,7 @@ export async function installedAppVersion(
 export function moveRefusal(runningVersion: string, installed: string | null): string | null {
   if (installed === null) return null;
   if (installed === "")
-    return "dohc cannot read the version of the dohc already in Applications. Open that copy, or replace it in Finder.";
+    return "dohc could not read the version of the copy in Applications. Open that copy, or replace it in Finder.";
   return (compareAppVersions(runningVersion, installed) ?? 0) > 0
     ? null
     : `Applications already has dohc ${installed}. Open that copy instead.`;
@@ -114,7 +114,7 @@ export async function offerMoveToApplications(deps: {
       ...(isTemporaryMacAppPath(deps.bundlePath)
         ? ["dohc is running from a disk image or a temporary copy."]
         : []),
-      "dohc moves itself to Applications and opens again.",
+      "dohc will move to Applications and reopen.",
       ...(installed !== null ? [`It replaces the older dohc ${installed} already there.`] : []),
     ].join(" "),
     buttons: ["Move to Applications", "Don't move"],

@@ -3,7 +3,7 @@ import { useAccount } from "../account/AccountProvider";
 import type { AccountWorkspace } from "../server/api";
 import { sampleBuild } from "../sampleBuild";
 import { workspaceMarkFills } from "../theme";
-import type { PhoneWorkspace } from "./sample";
+import type { PhoneWorkspace } from "./types";
 import { workspaceName } from "./workspaceName";
 
 // The sample's workspaces, in a sample build only (src/sampleBuild.ts).

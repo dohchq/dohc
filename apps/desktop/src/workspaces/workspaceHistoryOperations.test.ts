@@ -876,7 +876,7 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     try {
       expect(await f.undo(id)).toEqual(
         refused(
-          "Cannot undo the delete. This workspace's .dohc/local can't be read. Make sure you can open it, then try again.",
+          "Cannot undo the delete. This workspace's .dohc/local cannot be read. Check that you can open it, then try again.",
         ),
       );
     } finally {
@@ -1012,7 +1012,7 @@ describe("an Undo of a page this computer owns live", () => {
     f.history.undoHistoryOperation.mockRejectedValue(new Error("live-page-owned"));
     expect(await f.undo(moved.operationId!, true)).toEqual({
       ok: false,
-      reason: `dohc can't undo renaming "after.txt" while it has live editing on\n${body}`,
+      reason: `dohc cannot undo renaming "after.txt" while it has live editing on\n${body}`,
       refusal: { code: "live-page-owned", path: "after.txt" },
     });
     expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
@@ -1035,7 +1035,7 @@ describe("an Undo of a page this computer owns live", () => {
     f.history.undoHistoryOperation.mockRejectedValue(new Error("live-page-owned"));
     expect(await f.undo(otherId, true)).toEqual({
       ok: false,
-      reason: `dohc can't undo creating "folder/tracked.txt" while it has live editing on\n${body}`,
+      reason: `dohc cannot undo creating "folder/tracked.txt" while it has live editing on\n${body}`,
       refusal: { code: "live-page-owned", path: "folder/tracked.txt" },
     });
   });

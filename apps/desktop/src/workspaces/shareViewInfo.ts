@@ -43,6 +43,7 @@ export interface ShareViewInfo {
   subjectName?: string | null;
   sharerName?: string | null;
   shareId: string;
+  statedShareId?: string;
   granterUserId: string;
   granterEmail: string | null;
   genericChatWritable: boolean;
@@ -206,6 +207,7 @@ export async function fetchShareViewInfo(input: {
   return {
     receivedIdentity: receivedReferencePin(body),
     shareId: String(body.shareId ?? input.shareId),
+    ...(typeof body.shareId === "string" ? { statedShareId: body.shareId } : {}),
     granterUserId: String(body.granterUserId ?? ""),
     subjectName: normalizeShareLabel(body.subjectName),
     sharerName: normalizeShareLabel(body.sharerName, 320),
@@ -300,7 +302,7 @@ export async function probeShareViewLog(input: {
   // including group shares. Only shared-channel pulls pass a channel filter.
   const response = await shareFetch(
     input.relay,
-    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}${input.hold ? `&hold=${input.hold}` : ""}${input.hold && input.level ? `&level=${input.level}` : ""}`,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}&scan=page${input.hold ? `&hold=${input.hold}` : ""}${input.hold && input.level ? `&level=${input.level}` : ""}`,
     { signal: input.signal },
   );
   const body: unknown = await response.json();

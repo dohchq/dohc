@@ -118,6 +118,12 @@ pub trait CaptureSink {
 
     fn retire(&mut self, path: &str) -> Result<RetireOutcome, CaptureError>;
 
+    /// [`Self::retire`] for a path capture last saw holding `sha256`.
+    fn retire_seen(&mut self, path: &str, sha256: &str) -> Result<RetireOutcome, CaptureError> {
+        let _ = sha256;
+        self.retire(path)
+    }
+
     /// Retire `path`, a tracked spelling the reconcile proved respelled to
     /// `to`: the old spelling still opens the file, which is stored under the
     /// new one, and the plan ingests the new spelling. A head capture does not
@@ -419,7 +425,11 @@ pub fn apply_reconcile_plan_cancellable(
                     }
                     Err(error) => Err(error),
                 },
-                None => sink.retire(path).map(Applied::from),
+                None => match plan.removed_sha256.get(path) {
+                    Some(sha256) => sink.retire_seen(path, sha256),
+                    None => sink.retire(path),
+                }
+                .map(Applied::from),
             },
         };
         if outcome.is_ok() && should_crash(faults) {

@@ -135,7 +135,7 @@ describe("start surface recent", () => {
     const rows = recent.getAllByRole("button");
     expect(rows.map((row) => row.textContent)).toEqual([
       fileName("sketch.excalidraw"),
-      fileName("Lisbon trip/Trip plan.md"),
+      `${fileName("Lisbon trip/Trip plan.md")}Lisbon trip`,
     ]);
     expect(rows[1]!.title).toBe("Lisbon trip/Trip plan.md");
 

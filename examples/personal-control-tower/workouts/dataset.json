@@ -1,0 +1,55 @@
+{
+  "formatVersion": 2,
+  "datasetId": "11111111-1111-4111-8111-111111111102",
+  "name": "Workouts",
+  "tables": [
+    {
+      "name": "Workouts",
+      "sqlName": "workouts",
+      "primaryKey": "id",
+      "fields": [
+        { "name": "ID", "sqlColumn": "id", "type": "text", "required": true, "unique": true },
+        { "name": "Date", "sqlColumn": "done_on", "type": "date", "required": true },
+        { "name": "Activity", "sqlColumn": "activity", "type": "text", "required": true },
+        { "name": "Minutes", "sqlColumn": "minutes", "type": "number", "required": true },
+        {
+          "name": "Effort",
+          "sqlColumn": "effort",
+          "type": "select",
+          "required": true,
+          "options": ["Easy", "Moderate", "Hard"]
+        },
+        { "name": "Notes", "sqlColumn": "notes", "type": "text" }
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "name": "listWorkouts",
+      "label": "List workouts",
+      "table": "workouts",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fields": ["id", "done_on", "activity", "minutes", "effort", "notes"]
+    },
+    {
+      "name": "logWorkout",
+      "label": "Log workout",
+      "table": "workouts",
+      "kind": "create",
+      "access": "owner",
+      "readOnly": false,
+      "fields": ["done_on", "activity", "minutes", "effort", "notes"]
+    },
+    {
+      "name": "deleteWorkout",
+      "label": "Delete workout",
+      "table": "workouts",
+      "kind": "delete",
+      "access": "owner",
+      "readOnly": false,
+      "fields": []
+    }
+  ]
+}

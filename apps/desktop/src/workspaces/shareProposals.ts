@@ -130,8 +130,6 @@ export function shareProposalOpPath(op: {
  */
 export function assertShareProposalGranter(shareView: unknown): void {
   if (shareViewIsPresent(shareView)) {
-    throw new Error(
-      "This is a shared view — open the workspace you shared from to review changes.",
-    );
+    throw new Error("This is a shared view. Open the workspace you shared from to review changes.");
   }
 }

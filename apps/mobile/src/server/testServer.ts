@@ -161,3 +161,21 @@ export function noticePageBody(notices: readonly unknown[], fields: Record<strin
     ...fields,
   };
 }
+
+/** The server lists this phone's session and ends it when asked, as a Sign out needs. */
+export function serveSessionEnd(server: ReturnType<typeof testServer>) {
+  server.on("GET", "/sync/account/sessions", {
+    status: 200,
+    body: {
+      ok: true,
+      sessions: [
+        { sessionId: "s-other", createdAtMs: 1, client: "Mac", current: false },
+        { sessionId: "s-phone", createdAtMs: 2, client: "iPhone", current: true },
+      ],
+    },
+  });
+  server.on("POST", "/sync/account/sessions/s-phone/revoke", {
+    status: 200,
+    body: { ok: true, sessionId: "s-phone" },
+  });
+}

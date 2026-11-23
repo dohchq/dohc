@@ -382,6 +382,7 @@ export function applyCurrentFileOp(
   opKind: string,
   payloadJson: string,
   relaySeq: number,
+  replacesStoredFile: () => boolean = () => false,
 ): void {
   let parsed: unknown;
   try {
@@ -454,7 +455,17 @@ export function applyCurrentFileOp(
     if (!before) return;
     const current = statements.get.get(workspaceId, versionId, before.path);
     if (current !== undefined) {
-      if (current.blob_sha256 !== before.blobSha256) return;
+      if (
+        current.blob_sha256 !== before.blobSha256 &&
+        !(
+          operation === "write" &&
+          versionId === "main" &&
+          before.path === afterPath &&
+          payload.payloadAfterContentKind !== "binary" &&
+          replacesStoredFile()
+        )
+      )
+        return;
       if (
         before.path !== afterPath &&
         statements.get.get(workspaceId, versionId, afterPath) !== undefined
@@ -941,6 +952,18 @@ export function currentObjectFile(
     };
   const last = rows.at(-1);
   return last && Number(last.relay_seq) > Number(last.oldest_relay_seq) ? "reset" : null;
+}
+
+export function currentFileBlobSha256(
+  storage: StorageContext,
+  input: { workspaceId: string; versionId: string; path: string },
+): string | undefined {
+  const row = storage.db
+    .prepare(
+      "SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id = ? AND version_id = ? AND path = ?",
+    )
+    .get(input.workspaceId, input.versionId, input.path);
+  return typeof row?.blob_sha256 === "string" ? row.blob_sha256 : undefined;
 }
 
 export function currentFileObjectId(

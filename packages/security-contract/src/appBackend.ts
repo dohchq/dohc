@@ -47,6 +47,7 @@ export interface AppBackendInvokeRequest {
   operation: string;
   idempotencyKey: string;
   input: AppBackendJson;
+  dataset?: string;
 }
 export interface AppBackendUploadRequest {
   authorityRevision: number;
@@ -54,6 +55,7 @@ export interface AppBackendUploadRequest {
   name: string;
   contentType: string;
   bytesBase64: string;
+  dataset?: string;
 }
 export interface AppBackendFile {
   fileId: string;
@@ -84,6 +86,7 @@ export function parseAppBackendRefusal(value: unknown): AppBackendRefusal {
 const encoder = new TextEncoder();
 const forbiddenKeys = new Set(["__proto__", "prototype", "constructor"]);
 const operationPattern = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
+const datasetAliasPattern = /^[a-z][a-z0-9_-]{0,63}$/;
 const bytes = (value: string) => encoder.encode(value).byteLength;
 
 function record(value: unknown): Record<string, unknown> {
@@ -105,13 +108,21 @@ function record(value: unknown): Record<string, unknown> {
   }
   return value as Record<string, unknown>;
 }
-function exact(value: unknown, keys: string[]): Record<string, unknown> {
+function exact(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
   const row = record(value);
-  const actual = Object.keys(row).sort();
-  const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index]))
+  const actual = Object.keys(row);
+  if (
+    keys.some((key) => !Object.hasOwn(row, key)) ||
+    actual.some((key) => !keys.includes(key) && !optional.includes(key))
+  )
     throw new Error("Unexpected app backend fields.");
   return row;
+}
+function datasetAlias(value: unknown): string {
+  const result = text(value, 64);
+  if (!datasetAliasPattern.test(result) || forbiddenKeys.has(result))
+    throw new Error("Invalid app backend dataset alias.");
+  return result;
 }
 function text(value: unknown, maxBytes: number): string {
   if (
@@ -259,12 +270,17 @@ export function parseAppBackendCaller(value: unknown): AppBackendCaller {
 }
 
 export function parseAppBackendInvokeRequest(value: unknown): AppBackendInvokeRequest {
-  const row = exact(value, ["authorityRevision", "operation", "idempotencyKey", "input"]);
-  const request = {
+  const row = exact(
+    value,
+    ["authorityRevision", "operation", "idempotencyKey", "input"],
+    ["dataset"],
+  );
+  const request: AppBackendInvokeRequest = {
     authorityRevision: revision(row.authorityRevision),
     operation: name(row.operation),
     idempotencyKey: idempotencyKey(row.idempotencyKey),
     input: parseAppBackendJson(row.input, APP_BACKEND_INPUT_BYTES),
+    ...(Object.hasOwn(row, "dataset") ? { dataset: datasetAlias(row.dataset) } : {}),
   };
   if (bytes(JSON.stringify(request)) > APP_BACKEND_REQUEST_BYTES)
     throw new Error("App backend request exceeds its byte bound.");
@@ -272,13 +288,11 @@ export function parseAppBackendInvokeRequest(value: unknown): AppBackendInvokeRe
 }
 
 export function parseAppBackendUploadRequest(value: unknown): AppBackendUploadRequest {
-  const row = exact(value, [
-    "authorityRevision",
-    "idempotencyKey",
-    "name",
-    "contentType",
-    "bytesBase64",
-  ]);
+  const row = exact(
+    value,
+    ["authorityRevision", "idempotencyKey", "name", "contentType", "bytesBase64"],
+    ["dataset"],
+  );
   const encoded = row.bytesBase64;
   if (
     typeof encoded !== "string" ||
@@ -301,12 +315,13 @@ export function parseAppBackendUploadRequest(value: unknown): AppBackendUploadRe
   ) {
     throw new Error("Invalid app backend upload size or padding.");
   }
-  const request = {
+  const request: AppBackendUploadRequest = {
     authorityRevision: revision(row.authorityRevision),
     idempotencyKey: idempotencyKey(row.idempotencyKey),
     name: filename(row.name),
     contentType: contentType(row.contentType),
     bytesBase64: encoded,
+    ...(Object.hasOwn(row, "dataset") ? { dataset: datasetAlias(row.dataset) } : {}),
   };
   if (bytes(JSON.stringify(request)) > APP_BACKEND_UPLOAD_REQUEST_BYTES)
     throw new Error("App backend upload request exceeds its byte bound.");

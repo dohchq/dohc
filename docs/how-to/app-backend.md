@@ -2,7 +2,7 @@
 
 App authors and self-host operators use this guide to create, share, and manage a Collection-backed app.
 An already connected agent can use the same commands. Run the CLI from the owning workspace while dohc is open.
-Replace uppercase values with IDs returned by dohc. JSON examples work in PowerShell 7 and POSIX shells.
+Replace uppercase values with IDs returned by dohc. JSON examples work in POSIX shells. In PowerShell on Windows, pipe the JSON to `-` instead (for example `'{"workspaceId":"WORKSPACE_ID"}' | dohc dataset list -`) so `dohc.cmd` keeps double quotes intact; in Windows PowerShell 5.1, set `$OutputEncoding = [System.Text.UTF8Encoding]::new($false)` first so non-ASCII text is sent as UTF-8.
 
 ## Create the Collection first
 
@@ -118,6 +118,7 @@ Manage explicit data grants through **Access** or `dataset setGrant` and `datase
 Source-folder access alone does not grant Collection access. An app binding and a data grant are separate permissions.
 Run `dohc dataset --help` to list the verbs. Run `dohc dataset <verb> --help` for that verb's fields.
 The [CLI, MCP, and SDK reference](../reference/cli-mcp-sdk.md) also lists each verb's result, and shows how an app page calls an approved operation.
+For React, backend hooks, UI components, and charts without vendoring `node_modules`, see the [built-in app kit reference](../reference/app-kit.md).
 
 ## Read shared records offline
 

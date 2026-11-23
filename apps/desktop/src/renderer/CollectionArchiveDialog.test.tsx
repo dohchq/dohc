@@ -34,7 +34,7 @@ it("shows affected apps before archiving and confirms the reverse path", async (
   const p = props();
   render(<CollectionArchiveDialog {...p} />);
   expect(await screen.findByText("public-form")).toBeTruthy();
-  expect(screen.getByText(/Restore it from archived Collections/)).toBeTruthy();
+  expect(screen.getByText(/you can restore it from archived Collections/)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Archive" }));
   await waitFor(() => expect(p.onChanged).toHaveBeenCalledOnce());
   expect(backend.dataset).toHaveBeenLastCalledWith({
@@ -105,7 +105,7 @@ it("shows Try again in the list's place when a page fails, and reads that page a
   fireEvent.click(screen.getByRole("button", { name: "More apps" }));
   expect(await screen.findByTestId("collection-archive-apps-retry")).toBeTruthy();
   expect(p.onError).toHaveBeenCalledWith(
-    "Could not read the affected apps.",
+    "dohc could not read the affected apps.",
     expect.any(Error),
     expect.any(Function),
   );

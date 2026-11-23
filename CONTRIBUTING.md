@@ -10,7 +10,7 @@ dohc is still in development and has one maintainer. Contributions are limited f
 
 We're not accepting pull requests for new features, large changes, refactors, rewrites, new dependencies, or new tooling.
 
-For feature ideas, read [what dohc is trying to build](AGENTS.md#what-dohc-looks-like-in-practice), then start a [Discussion](https://github.com/dohchq/dohc/discussions) before writing code.
+For feature ideas, read [what dohc is trying to build](AGENTS.md#jobs-to-test-ideas-against), then start a [Discussion](https://github.com/dohchq/dohc/discussions) before writing code.
 
 ## Report a bug
 

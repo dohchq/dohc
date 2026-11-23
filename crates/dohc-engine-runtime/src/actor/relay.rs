@@ -283,7 +283,7 @@ enum RelayIoRequest {
     SharedChannelPull(SharedChannelRequest),
     ShareLogPush(ShareLogPushRequest),
     ShareViewPull(ShareViewRequest),
-    ShareBlob(ShareBlobRequest),
+    ShareBlobs(Vec<ShareBlobRequest>),
     ShareBlobUpload(ShareBlobUploadRequest),
     ShareProposalSubmit(ShareProposalSubmitRequest),
     ShareCollectionWrite(ShareCollectionWriteRequest),
@@ -303,7 +303,7 @@ impl RelayIoRequest {
                 | RelayIoRequest::DownloadKeyEnvelope(_)
                 | RelayIoRequest::SharedChannelPull(_)
                 | RelayIoRequest::ShareViewPull(_)
-                | RelayIoRequest::ShareBlob(_)
+                | RelayIoRequest::ShareBlobs(_)
         )
     }
 }
@@ -326,7 +326,7 @@ enum RelayIoResponse {
     SharedChannelPull(SharedChannelResponse),
     ShareLogPush(PushResponse),
     ShareViewPull(ShareViewResponse),
-    ShareBlob(BlobDownloadResponse),
+    ShareBlobs(Vec<Result<BlobDownloadResponse, RelayError>>),
     ShareBlobUpload,
     ShareProposalSubmit(ShareProposalSubmitResponse),
     ShareCollectionWrite(ShareCollectionWriteResponse),
@@ -405,7 +405,7 @@ impl DeferredRelayTransport {
                         | RelayIoRequest::DownloadBlobs(_)
                         | RelayIoRequest::UploadKeyEnvelope(_)
                         | RelayIoRequest::DownloadKeyEnvelope(_)
-                        | RelayIoRequest::ShareBlob(_)
+                        | RelayIoRequest::ShareBlobs(_)
                         | RelayIoRequest::ShareProposalSubmit(_)
                 );
             let projected = match &mut state.completed[index].1 {
@@ -748,13 +748,24 @@ impl RelayTransport for DeferredRelayTransport {
         ShareViewResponse,
         ShareViewPull
     );
-    relay_transport_method!(
-        share_blob,
-        ShareBlobRequest,
-        ShareBlob,
-        BlobDownloadResponse,
-        ShareBlob
-    );
+    fn share_blob(&self, request: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
+        self.share_blobs(vec![request])?
+            .pop()
+            .ok_or(RelayError::InvalidResponse)?
+    }
+
+    fn share_blobs(
+        &self,
+        requests: Vec<ShareBlobRequest>,
+    ) -> Result<Vec<Result<BlobDownloadResponse, RelayError>>, RelayError> {
+        self.resolve(
+            RelayIoRequest::ShareBlobs(requests),
+            |response| match response {
+                RelayIoResponse::ShareBlobs(results) => Some(std::mem::take(results)),
+                _ => None,
+            },
+        )
+    }
 
     fn share_blob_upload(&self, request: ShareBlobUploadRequest) -> Result<(), RelayError> {
         self.resolve(RelayIoRequest::ShareBlobUpload(request), |response| {
@@ -789,6 +800,10 @@ mod relay_push_tests;
 #[cfg(test)]
 #[path = "relay_base_repair_tests.rs"]
 mod relay_base_repair_tests;
+
+#[cfg(test)]
+#[path = "relay_share_blob_tests.rs"]
+mod relay_share_blob_tests;
 
 #[cfg(test)]
 #[path = "relay_hosted_origin_tests.rs"]
@@ -1593,21 +1608,26 @@ mod deferred_relay_tests {
     #[test]
     fn large_multi_blob_pull_does_not_retain_consumed_buffers() {
         let transport = DeferredRelayTransport::default();
-        for index in 0..64 {
-            let request = ShareBlobRequest {
-                share_id: "share".to_owned(),
-                sha256: format!("{index:064x}"),
-            };
-            let bytes = vec![u8::try_from(index).expect("byte"); 256 * 1024];
+        for batch in 0..8_u8 {
+            let requests = (0..dohc_engine_sync::MAX_SHARE_BLOB_BATCH)
+                .map(|index| ShareBlobRequest {
+                    share_id: "share".to_owned(),
+                    sha256: format!("{batch:032x}{index:032x}"),
+                })
+                .collect::<Vec<_>>();
+            let blobs = vec![
+                Ok(BlobDownloadResponse {
+                    bytes: vec![batch; 256 * 1024],
+                });
+                requests.len()
+            ];
             transport.complete(
-                RelayIoRequest::ShareBlob(request.clone()),
-                Ok(RelayIoResponse::ShareBlob(BlobDownloadResponse {
-                    bytes: bytes.clone(),
-                })),
+                RelayIoRequest::ShareBlobs(requests.clone()),
+                Ok(RelayIoResponse::ShareBlobs(blobs.clone())),
             );
             assert_eq!(
-                transport.share_blob(request).expect("consume blob").bytes,
-                bytes
+                transport.share_blobs(requests).expect("consume batch"),
+                blobs
             );
         }
 
@@ -1627,7 +1647,13 @@ mod deferred_relay_tests {
                         .map(|response| response.bytes.len())
                         .sum(),
                 ),
-                Ok(RelayIoResponse::ShareBlob(response)) => Some(response.bytes.len()),
+                Ok(RelayIoResponse::ShareBlobs(results)) => Some(
+                    results
+                        .iter()
+                        .filter_map(|result| result.as_ref().ok())
+                        .map(|response| response.bytes.len())
+                        .sum::<usize>(),
+                ),
                 _ => None,
             })
             .sum::<usize>();
@@ -3017,9 +3043,9 @@ fn execute_blocking_request<T: RelayTransport + ?Sized>(
         RelayIoRequest::ShareViewPull(request) => transport
             .share_view_pull(request)
             .map(RelayIoResponse::ShareViewPull),
-        RelayIoRequest::ShareBlob(request) => transport
-            .share_blob(request)
-            .map(RelayIoResponse::ShareBlob),
+        RelayIoRequest::ShareBlobs(requests) => transport
+            .share_blobs(requests)
+            .map(RelayIoResponse::ShareBlobs),
         RelayIoRequest::ShareBlobUpload(request) => transport
             .share_blob_upload(request)
             .map(|()| RelayIoResponse::ShareBlobUpload),

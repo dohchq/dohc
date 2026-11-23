@@ -21,6 +21,7 @@ describe("file observation failure copy", () => {
 describe("refused data store copy", () => {
   it.each([
     ["foreign-database", "dohc cannot read this workspace's data store."],
+    ["state-corrupt", "This workspace's data store is damaged."],
     [
       "unsupported-fingerprint",
       "This workspace's data store is not in the format this version of dohc uses.",

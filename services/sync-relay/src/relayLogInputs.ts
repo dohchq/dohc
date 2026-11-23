@@ -135,6 +135,15 @@ function objectOrEmpty(value: unknown): Record<string, unknown> {
     : {};
 }
 
+export function isOwnerLogOrigin(originId: string): boolean {
+  try {
+    assertUnreservedLogOrigin(originId, false);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void {
   if (originId.startsWith(SERVICE_HOST_ORIGIN_PREFIX) !== serviceHost) {
     throw badRequest(
@@ -259,7 +268,6 @@ export async function parseNamedShareLogOps(
   const snapshot = parseLiveAuthorSnapshot([{ kind: "human", humanId: actorUserId, humanName }]);
   for (const op of chatOps) {
     op.admittedAuthorSnapshot = snapshot;
-    if (op.opKind === "chat.reaction.set") continue;
     const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
     if (
       payload.authorKind !== "human" &&
@@ -464,11 +472,12 @@ export function assertChatAuthorship(rawOps: unknown[], actorUserId: string): vo
     // Only the relay writes a link post, from the link holder's own session
     // or the agent connection it signed in, and a personal agent's post.
     if (
-      opKind === "chat.message.append" &&
-      (bag.authorKind === "link" ||
-        ["linkGrantId", "linkPrincipalId", "agentConnectionId"].some((key) =>
-          Object.hasOwn(bag, key),
-        ) ||
+      (opKind === "chat.message.append" &&
+        (bag.authorKind === "link" ||
+          ["linkGrantId", "linkPrincipalId", "agentConnectionId"].some((key) =>
+            Object.hasOwn(bag, key),
+          ))) ||
+      ((opKind === "chat.message.append" || opKind === "chat.reaction.set") &&
         String(bag.authorAgentId).startsWith(PERSONAL_AGENT_ID_PREFIX))
     ) {
       throw relayError("authorship_mismatch");

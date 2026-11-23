@@ -55,6 +55,13 @@ const item = (label: string, id: ExplorerMenuCommand): ExplorerMenuEntry => ({
 });
 const separator: ExplorerMenuEntry = { kind: "separator" };
 
+/** Whether a path is a registered share's folder, or anything inside it. */
+export function pathInShareMount(path: string, mountLabels: readonly string[]): boolean {
+  return mountLabels.some(
+    (label) => path === `shared-with-me/${label}` || path.startsWith(`shared-with-me/${label}/`),
+  );
+}
+
 export function explorerMenuEntries(
   scope: ExplorerMenuScope,
   platform: string,
@@ -101,7 +108,7 @@ export function explorerMenuEntries(
         ? [
             item("New page", "new-file"),
             ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
-            ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
+            ...(canCreateCollection ? [item("New Collection…", "new-collection")] : []),
             separator,
             item("Import files…", "import-files"),
           ]
@@ -119,7 +126,7 @@ export function explorerMenuEntries(
       ? [
           item("New page", "new-file"),
           ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
-          ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
+          ...(canCreateCollection ? [item("New Collection…", "new-collection")] : []),
           // Folder-targeted import: files land IN this folder (the renderer
           // passes the folder as importWorkspaceFiles' targetDir, re-validated
           // main-side before any copy).

@@ -1,4 +1,4 @@
-import type { FormEvent, ReactNode } from "react";
+import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { Icon } from "./icons";
 import { AccountSetupRequiredError } from "./namedRecipient";
 
@@ -17,40 +17,64 @@ export function NamedSignIn(props: {
   onSignIn(credentials: { email: string; password: string }): void;
   children?: ReactNode;
 }) {
+  const emailId = useId();
+  const passwordId = useId();
+  const [showPassword, setShowPassword] = useState(false);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const form = event.currentTarget,
-      values = new FormData(form);
-    const credentials = {
-      email: String(values.get("email") ?? ""),
-      password: String(values.get("password") ?? ""),
-    };
-    form.reset();
-    props.onSignIn(credentials);
+    const form = event.currentTarget;
+    const values = new FormData(form);
+    const email = String(values.get("email") ?? "");
+    const password = String(values.get("password") ?? "");
+    const passwordInput = form.elements.namedItem("password");
+    if (passwordInput instanceof HTMLInputElement) {
+      passwordInput.value = "";
+    }
+    setShowPassword(false);
+    props.onSignIn({ email, password });
   };
   return (
-    <main className="download-card">
+    <main className="download-card named-sign-in">
       <h2>{props.title}</h2>
       <p>Use the account the owner invited.</p>
       <form className="comment-composer" onSubmit={submit}>
-        <label>
-          Email
-          <input name="email" type="email" autoComplete="username" required disabled={props.busy} />
-        </label>
-        <label>
-          Password
+        <label htmlFor={emailId}>Email</label>
+        <input
+          id={emailId}
+          name="email"
+          type="email"
+          autoComplete="username"
+          required
+          disabled={props.busy}
+        />
+        <label htmlFor={passwordId}>Password</label>
+        <div className="password-field">
           <input
+            id={passwordId}
             name="password"
-            type="password"
+            type={showPassword ? "text" : "password"}
             autoComplete="current-password"
             required
             disabled={props.busy}
           />
-        </label>
+          <button
+            type="button"
+            className="password-toggle"
+            aria-label={showPassword ? "Hide password" : "Show password"}
+            aria-pressed={showPassword}
+            disabled={props.busy}
+            onClick={() => setShowPassword((visible) => !visible)}
+          >
+            <Icon name={showPassword ? "eye-off" : "eye"} size={15} />
+          </button>
+        </div>
         <button className="handoff-button primary" disabled={props.busy}>
           Sign in
         </button>
       </form>
+      <p className="named-sign-in-links">
+        <a href="/account/forgot-password">Forgot your password?</a>
+      </p>
       {props.busy && <p role="status">Checking your account…</p>}
       {props.error && (
         <p role="alert">

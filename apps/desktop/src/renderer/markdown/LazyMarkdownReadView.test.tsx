@@ -82,7 +82,7 @@ describe("LazyMarkdownReadView", () => {
       />,
     );
 
-    expect(screen.getByTestId("markdown-read-loading").textContent).toBe("Loading document...");
+    expect(screen.getByTestId("markdown-read-loading").textContent).toBe("Loading document…");
     expect(onRendered).not.toHaveBeenCalled();
 
     const recoveredModule = await import("./IncrementalMarkdownDocument");
@@ -93,5 +93,35 @@ describe("LazyMarkdownReadView", () => {
 
     expect(await screen.findByRole("heading", { name: "Measured document" })).toBeTruthy();
     await waitFor(() => expect(onRendered).toHaveBeenCalledOnce());
+  });
+
+  it("resolves workspace-relative images and blocks escaping paths when imageContext is set", async () => {
+    render(
+      <LazyMarkdownReadView
+        body={[
+          "![Diagram](Assets/diagram.png)",
+          "![Spaced](Assets/my%20pic.png)",
+          "![Unicode](Assets/café.png)",
+          "![Escape](../../outside.png)",
+          "![EncodedEscape](..%2F..%2Foutside.png)",
+          "![EncodedAbsolute](%2Fetc%2Fpasswd)",
+          "![EncodedScheme](file%3A%2F%2F%2Fetc%2Fpasswd)",
+        ].join("\n\n")}
+        resetKey="workspace-1:notes/readme.md"
+        imageContext={{ workspaceId: "ws-1", docPath: "notes/readme.md" }}
+      />,
+    );
+    const diagram = await screen.findByAltText("Diagram");
+    expect(diagram.getAttribute("src")).toBe("dohc-file://ws-1/notes/Assets/diagram.png");
+    expect(screen.getByAltText("Spaced").getAttribute("src")).toBe(
+      "dohc-file://ws-1/notes/Assets/my%20pic.png",
+    );
+    expect(screen.getByAltText("Unicode").getAttribute("src")).toBe(
+      "dohc-file://ws-1/notes/Assets/caf%C3%A9.png",
+    );
+    expect(screen.getByAltText("Escape").getAttribute("src")).toBeNull();
+    expect(screen.getByAltText("EncodedEscape").getAttribute("src")).toBeNull();
+    expect(screen.getByAltText("EncodedAbsolute").getAttribute("src")).toBeNull();
+    expect(screen.getByAltText("EncodedScheme").getAttribute("src")).toBeNull();
   });
 });

@@ -522,3 +522,149 @@ it("accepts an expected Collection identity and derives migration source from it
     DatasetRequest.parse({ ...request, descriptorPath: "another/dataset.json" }),
   ).toThrow();
 });
+
+it("explains field mistakes, unrecognized keys, and definition errors before transport", async () => {
+  const send = vi.fn();
+
+  const wrongKey = await executeCli({
+    argv: [
+      "dataset",
+      "prepare",
+      JSON.stringify({ workspaceId: "workspace", datasetPath: "equipment/dataset.json" }),
+    ],
+    request: send,
+  });
+  expect(wrongKey.exitCode).toBe(1);
+  expect(wrongKey.stderr).toContain('Unrecognized key "datasetPath" for action "prepare"');
+  expect(wrongKey.stderr).toContain("descriptorPath");
+  expect(wrongKey.stderr).not.toContain("dohc_list_workspaces");
+
+  const secret = "SECRET_BEARER_TOKEN_999";
+  const badJson = await executeCli({
+    argv: ["dataset", "list", `{"token":"${secret}", bad}`],
+    request: send,
+  });
+  expect(badJson.exitCode).toBe(1);
+  expect(badJson.stderr).toMatch(
+    /invalid dataset list JSON \(at (?:line 1, column \d+|position \d+)\)/,
+  );
+  expect(badJson.stderr).not.toContain(secret);
+
+  const spoofedJson = await executeCli({
+    argv: ["dataset", "list", "position 8675309"],
+    request: send,
+  });
+  expect(spoofedJson.exitCode).toBe(1);
+  expect(spoofedJson.stderr).toContain("invalid dataset list JSON;");
+  expect(spoofedJson.stderr).not.toContain("8675309");
+
+  const badDef = structuredClone(definition);
+  badDef.operations[0]!.readOnly = false;
+  const badCreate = await executeCli({
+    argv: ["dataset", "create", JSON.stringify({ workspaceId: "workspace", definition: badDef })],
+    request: send,
+  });
+  expect(badCreate.exitCode).toBe(1);
+  expect(badCreate.stderr).toContain('readOnly must be true when kind is "read"');
+
+  const missingTake = await executeCli({
+    argv: ["app", "approve", JSON.stringify({ workspaceId: "workspace" })],
+    request: send,
+  });
+  expect(missingTake.exitCode).toBe(1);
+  expect(missingTake.stderr).toContain("approvalId");
+  expect(missingTake.stderr).toContain("from prepare");
+
+  expect(send).not.toHaveBeenCalled();
+
+  const fromStdin = await executeCli({
+    argv: ["dataset", "list", "-", "--json"],
+    readStdin: async () => JSON.stringify({ workspaceId: "workspace" }),
+    request: async (req) => {
+      send(req);
+      return { kind: "list", datasets: [], nextCursor: null };
+    },
+  });
+  expect(fromStdin.exitCode).toBe(0);
+  expect(send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      verb: "dataset",
+      args: expect.objectContaining({
+        request: { action: "list", workspaceId: "workspace" },
+      }),
+    }),
+  );
+});
+
+it("accepts formatVersion 2 Collection definitions in dataset create and mints datasetId when omitted", () => {
+  const parsed = DatasetRequest.parse({
+    action: "create",
+    workspaceId: "workspace",
+    definition: {
+      formatVersion: 2,
+      name: "Expenses",
+      schemaPath: "expenses/schema.sql",
+      operationsPath: "expenses/operations.js",
+      tables: [
+        {
+          sqlName: "expenses",
+          primaryKey: "id",
+          fields: [
+            { sqlColumn: "id", type: "text" },
+            { sqlColumn: "amount", type: "number", required: true },
+          ],
+        },
+      ],
+      operations: [
+        { name: "listExpenses", table: "expenses", kind: "read", fields: ["id", "amount"] },
+      ],
+    },
+  });
+  expect(parsed.action).toBe("create");
+  if (parsed.action === "create") {
+    expect(parsed.definition.formatVersion).toBe(1);
+    expect(parsed.definition.datasetId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(parsed.definition.operations[0]?.access).toBe("owner");
+    expect(parsed.definition.operations[0]?.readOnly).toBe(true);
+  }
+
+  // Refuses v2 create without explicit schemaPath and operationsPath so it cannot dump files at workspace root.
+  expect(() =>
+    DatasetRequest.parse({
+      action: "create",
+      workspaceId: "workspace",
+      definition: {
+        formatVersion: 2,
+        name: "Expenses",
+        tables: [
+          { sqlName: "expenses", primaryKey: "id", fields: [{ sqlColumn: "id", type: "text" }] },
+        ],
+        operations: [{ name: "listExpenses", table: "expenses", kind: "read", fields: ["id"] }],
+      },
+    }),
+  ).toThrow(/explicit schemaPath and operationsPath/);
+});
+
+it("reads BOM-prefixed UTF-8 JSON with non-ASCII text from stdin via -", async () => {
+  const send = vi.fn();
+  const result = await executeCli({
+    argv: ["dataset", "list", "-", "--json"],
+    cwd: "/workspace",
+    readStdin: async () => '\uFEFF{"workspaceId":"ws-café-漢"}',
+    request: async (req) => {
+      send(req);
+      return { kind: "list", datasets: [], nextCursor: null };
+    },
+  });
+  expect(result.exitCode).toBe(0);
+  expect(send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      verb: "dataset",
+      args: expect.objectContaining({
+        request: { action: "list", workspaceId: "ws-café-漢" },
+      }),
+    }),
+  );
+});

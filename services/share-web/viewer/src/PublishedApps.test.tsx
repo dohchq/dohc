@@ -180,3 +180,24 @@ it("keeps the list reachable when a page comes back empty with more to load", as
   );
   expect(states.at(-1)).toBe("some");
 });
+it("reports loaded publications to onPublications", async () => {
+  const reported: Array<readonly { publicationId: string; name: string }[]> = [];
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ publications: [row("a", "Trip poll")], nextCursor: null })),
+  );
+  await act(async () =>
+    root.render(
+      <PublishedApps
+        session="abcdefghijkl"
+        onPublications={(items) => {
+          reported.push(items);
+        }}
+      />,
+    ),
+  );
+  await settle(() => container.textContent!.includes("Trip poll"));
+  expect(reported.at(-1)).toEqual([row("a", "Trip poll")]);
+});

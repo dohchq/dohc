@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "entryPath": "index.tsx",
+  "datasets": {
+    "expenses": {
+      "kind": "dataset",
+      "datasetPath": "personal-control-tower/expenses/dataset.json",
+      "operations": ["listExpenses", "addExpense", "deleteExpense"]
+    },
+    "workouts": {
+      "kind": "dataset",
+      "datasetPath": "personal-control-tower/workouts/dataset.json",
+      "operations": ["listWorkouts", "logWorkout", "deleteWorkout"]
+    }
+  }
+}

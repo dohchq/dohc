@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { OwnerYDocOutbox } from "@dohc/workspace-engine-client";
+import { OwnerYDocOutbox, OwnerYDocOutboxReadChangedError } from "@dohc/workspace-engine-client";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import {
   OwnerKnownRefusals,
@@ -122,6 +122,20 @@ it("delivers the agent the queued edit declared with its entry", async () => {
       deliveryId: "delivery",
       agentDeclaration,
     });
+  } finally {
+    f.close();
+  }
+});
+
+it("reads the head again when the queue changed during the read, as it does while its owner types", async () => {
+  const f = fixture("active");
+  try {
+    f.outbox.readHead
+      .mockRejectedValueOnce(new OwnerYDocOutboxReadChangedError())
+      .mockRejectedValueOnce(new OwnerYDocOutboxReadChangedError());
+    expect(await f.drainer.drainOnce()).toBe("acknowledged");
+    expect(f.outbox.readHead).toHaveBeenCalledTimes(3);
+    expect(f.outbox.acknowledge).toHaveBeenCalledWith("outbox", [f.receipt]);
   } finally {
     f.close();
   }

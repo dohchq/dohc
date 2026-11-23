@@ -814,7 +814,7 @@ fn thread_bound_to_wire(
 /// present — mirroring `services/sync-relay/src/shareFilter.ts` moment.append
 /// all-paths visibility so a rename crossing the boundary cannot leak the
 /// outside path.
-fn enforce_share_view_boundary(
+pub(crate) fn enforce_share_view_boundary(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {

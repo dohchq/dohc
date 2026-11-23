@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import { explorerMenuEntries, type ExplorerMenuScope } from "./explorerMenu";
+import { explorerMenuEntries, pathInShareMount, type ExplorerMenuScope } from "./explorerMenu";
 
 // WHAT THE MENU OFFERS, driven rather than read.
 //
@@ -212,6 +212,18 @@ describe("a share mount inside an ordinary workspace", () => {
       "export-zip",
       "open-externally",
     ]);
+  });
+});
+
+describe("a path inside a share added to the workspace", () => {
+  it("counts the share's folder and everything in it, and nothing beside it", () => {
+    const labels = ["ice", "ana"];
+    expect(pathInShareMount("shared-with-me/ice", labels)).toBe(true);
+    expect(pathInShareMount("shared-with-me/ice/p1 idle.md", labels)).toBe(true);
+    expect(pathInShareMount("shared-with-me/ana/notes/plan.md", labels)).toBe(true);
+    expect(pathInShareMount("shared-with-me", labels)).toBe(false);
+    expect(pathInShareMount("shared-with-me/iceberg/a.md", labels)).toBe(false);
+    expect(pathInShareMount("shared-with-me/gone/a.md", labels)).toBe(false);
   });
 });
 

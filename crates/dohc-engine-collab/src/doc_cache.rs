@@ -327,6 +327,15 @@ impl WriterDocCache {
         }
     }
 
+    /// The relay applied the change at `cursor`. Rows and frames share one
+    /// count, so the only row there is a delivery the relay took before its
+    /// frame arrived.
+    pub fn drop_owner_row_at(&mut self, key: &DocKey, cursor: i64) {
+        if let Some(layer) = self.owner_layers.get_mut(key) {
+            layer.drop_at(cursor);
+        }
+    }
+
     pub(crate) fn put_owner_draft(
         &mut self,
         key: DocKey,

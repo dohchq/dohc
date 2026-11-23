@@ -83,10 +83,10 @@ export function parseDatasetCsv(text: string): CsvTable {
       if (char === "\r" && source[index + 1] === "\n") index++;
     } else if (char === '"' && value === "" && !closed) quoted = true;
     else if (closed || char === '"')
-      throw Error("The CSV contains a misplaced quote. Correct the file and try again.");
+      throw Error("The CSV has a misplaced quote. Fix the file and try again.");
     else value += char;
   }
-  if (quoted) throw Error("The CSV contains an unclosed quote. Correct the file and try again.");
+  if (quoted) throw Error("The CSV has an unclosed quote. Fix the file and try again.");
   if (value || row.length || closed) line();
   if (!rows.length || rows[0]!.every((header) => !header.trim()))
     throw Error("Add a header row to this CSV file.");
@@ -292,7 +292,7 @@ export async function runCsvImport(
           ? error.message
           : refusal
             ? "The create action refused this row."
-            : "The save could not be confirmed.";
+            : "dohc could not confirm the save.";
       checkpoint(structuredClone(next));
       if (!refusal) break;
       continue;
@@ -369,7 +369,7 @@ export async function exportDatasetCsv(input: {
         .join(",");
       bytes += encoder.encode(line).byteLength + 2;
       if (++count > 100_000 || bytes > 32 * 1024 * 1024)
-        throw Error("This export exceeds 100,000 rows or 32 MB. Export a smaller view.");
+        throw Error("This export is over the 100,000-row or 32 MB limit. Export a smaller view.");
       lines.push(line);
     }
     after = page.nextCursor;

@@ -94,11 +94,16 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
 // apps/desktop/src/ipc/ownerAppPublicationIpc.ts and
 // localOwnerAppPublication.ts answer with.
 export const APP_RESULTS: Record<AppAction, AppKind[]> = {
+  verifyFrontend: ["frontendVerified"],
   createLink: ["linkCreated", "urlUnavailable"],
   listLocal: ["localListed"],
   checkLocal: ["localChecked"],
   prepareLocal: ["prepared"],
   launchLocal: ["localLaunched"],
+  stage: ["staged"],
+  listStaged: ["stagedListed"],
+  approveStaged: ["stagedApproved"],
+  discardStaged: ["stagedDiscarded"],
   list: ["listed", "listUnavailable"],
   prepare: ["prepared"],
   approve: ["published"],
@@ -121,6 +126,8 @@ export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
   undo: "historyUndo",
   list: "moments",
   show: "moment",
+  "agent-run-plan": "planUndoAgentRun",
+  "undo-agent-run": "undoAgentRun",
 };
 
 export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
@@ -666,7 +673,155 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_read_held_change: "A shared view holds no saves of its own, so it does not offer this tool.",
   dohc_list_outside_changes:
     "The owning workspace holds outside changes. Shared profiles do not offer this read.",
+  dohc_search_workspace:
+    "Workspace search runs only on the owning workspace. Shared profiles do not offer this read.",
+  dohc_plan_agent_run_undo:
+    "Only the original workspace plans an agent run undo. Shared profiles do not offer this read.",
 };
+
+export const MCP_TOOL_GROUPS: readonly {
+  readonly id: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly tools: readonly string[];
+}[] = [
+  {
+    id: "core-building",
+    title: "Core everyday building",
+    summary:
+      "Start here for everyday apps, documents, Collections, SQLite imports, and workspace discovery.",
+    tools: [
+      "dohc_list_workspaces",
+      "dohc_workspace_status",
+      "dohc_search_workspace",
+      "dohc_read_document",
+      "dohc_create_document",
+      "dohc_edit_document",
+      "dohc_query_collection",
+      "dohc_read_record",
+      "dohc_create_record",
+      "dohc_set_record_fields",
+      "dohc_dataset",
+      "dohc_detect_apps",
+      "dohc_create_app",
+      "dohc_test_app",
+      "dohc_publish_app",
+      "dohc_import_data",
+      "dohc_query_database",
+      "dohc_list_notices",
+    ],
+  },
+  {
+    id: "files-and-links",
+    title: "Workspace files and links",
+    summary: "Read, write, search, organize ordinary workspace files, and inspect document links.",
+    tools: [
+      "dohc_list_files",
+      "dohc_read_file",
+      "dohc_search_files",
+      "dohc_write_file",
+      "dohc_create_directory",
+      "dohc_duplicate_file",
+      "dohc_move_path",
+      "dohc_delete_path",
+      "dohc_link",
+      "dohc_links_edges",
+      "dohc_links_in",
+      "dohc_links_resolve",
+    ],
+  },
+  {
+    id: "chat-and-groups",
+    title: "Chat and Groups",
+    summary:
+      "Read Groups and threads, post updates or polls, comment on files, and watch for replies.",
+    tools: [
+      "dohc_list_groups",
+      "dohc_create_group",
+      "dohc_read_chat",
+      "dohc_start_group_chat",
+      "dohc_reply_to_chat",
+      "dohc_list_file_chats",
+      "dohc_start_file_chat",
+      "dohc_wait_for_messages",
+      "dohc_retry_chat_run",
+      "dohc_chat_links",
+      "dohc_chat_file_mentions",
+    ],
+  },
+  {
+    id: "automations-and-buttons",
+    title: "Automations and Buttons",
+    summary:
+      "Inspect Collection automations, toggle them, press Button fields, and check run logs.",
+    tools: [
+      "dohc_list_automations",
+      "dohc_switch_automation",
+      "dohc_inspect_buttons",
+      "dohc_press_button",
+      "dohc_list_automation_runs",
+      "dohc_read_automation_run",
+      "dohc_retry_automation_run",
+    ],
+  },
+  {
+    id: "versions-and-history",
+    title: "Versions and History",
+    summary:
+      "Work in parallel workspace Versions, resolve merge conflicts, and inspect or undo History.",
+    tools: [
+      "dohc_list_versions",
+      "dohc_create_version",
+      "dohc_switch_version",
+      "dohc_compare_version",
+      "dohc_merge_version",
+      "dohc_list_version_conflicts",
+      "dohc_resolve_version_conflict",
+      "dohc_list_changes",
+      "dohc_read_change",
+      "dohc_read_operation",
+      "dohc_undo_operation",
+      "dohc_plan_agent_run_undo",
+    ],
+  },
+  {
+    id: "sharing-and-agents",
+    title: "Sharing and connected agents",
+    summary:
+      "Inspect owned share codes, manage agents connected through a share link, and manage the workspace's members.",
+    tools: [
+      "dohc_read_share_copy",
+      "dohc_list_link_agents",
+      "dohc_disconnect_link_agent",
+      "dohc_members",
+    ],
+  },
+  {
+    id: "sync-and-recovery",
+    title: "Internal sync, live-document, and recovery",
+    summary:
+      "Operational tools for pausing sync, managing live-editing sessions, held changes, outside edits, and retained/kept copies. Ordinary building rarely needs these.",
+    tools: [
+      "dohc_stop_workspace_sync",
+      "dohc_list_live_documents",
+      "dohc_stop_live_editing",
+      "dohc_resume_live_editing",
+      "dohc_read_held_change",
+      "dohc_held_note_change",
+      "dohc_save_recovery_copy",
+      "dohc_retry_kept_edits",
+      "dohc_stop_again",
+      "dohc_list_outside_changes",
+      "dohc_keep_outside_change",
+      "dohc_list_kept_copies",
+      "dohc_save_kept_copy",
+      "dohc_restore_protected_copy",
+      "dohc_discard_protected_copy",
+      "dohc_list_retained_copies",
+      "dohc_delete_retained_copies",
+    ],
+  },
+];
 
 async function mcpSection(): Promise<{ text: string; version: string }> {
   const { tools, version } = await listTools();
@@ -678,7 +833,30 @@ async function mcpSection(): Promise<{ text: string; version: string }> {
   const allTools = new Map(
     [...tools, ...sharedTools, ...commentTools, ...editableTools].map((tool) => [tool.name, tool]),
   );
-  const parts = [...allTools.values()].map((tool) => {
+  const groupedNames = MCP_TOOL_GROUPS.flatMap((group) => group.tools);
+  const seen = new Set<string>();
+  for (const name of groupedNames) {
+    if (seen.has(name)) throw new Error(`MCP_TOOL_GROUPS lists ${name} twice.`);
+    if (!allTools.has(name)) throw new Error(`MCP_TOOL_GROUPS names unknown tool ${name}.`);
+    seen.add(name);
+  }
+  const missing = [...allTools.keys()].filter((name) => !seen.has(name));
+  if (missing.length > 0) {
+    throw new Error(`MCP_TOOL_GROUPS is missing tools: ${missing.join(", ")}.`);
+  }
+
+  const indexTable = [
+    "New to building in dohc with an agent? Start with [Build with agents](../how-to/build-with-agents.md) and the public agent skill at [`skills/dohc/SKILL.md`](../../skills/dohc/SKILL.md). The table below separates everyday building tools from internal sync and recovery tools.",
+    "",
+    "| Category | Tools |",
+    "| --- | --- |",
+    ...MCP_TOOL_GROUPS.map(
+      (group) =>
+        `| **${group.title}** | ${group.tools.map((name) => `[\`${name}\`](#${name})`).join(", ")} |`,
+    ),
+  ].join("\n");
+
+  const renderTool = (tool: ListedTool) => {
     const shareLevels = (
       [
         ["view", sharedTools],
@@ -712,8 +890,16 @@ async function mcpSection(): Promise<{ text: string; version: string }> {
     ]
       .filter(Boolean)
       .join("\n\n");
-  });
-  return { text: parts.join("\n\n"), version };
+  };
+
+  const sections = MCP_TOOL_GROUPS.map((group) =>
+    [
+      `---\n\n**${group.title}.** ${group.summary}`,
+      ...group.tools.map((name) => renderTool(allTools.get(name)!)),
+    ].join("\n\n"),
+  );
+
+  return { text: [indexTable, ...sections].join("\n\n"), version };
 }
 
 function resultShapes(results: JsonSchema, key: string, values: readonly string[]): string[] {
@@ -774,29 +960,31 @@ function verbReturns(command: string, name: string): string {
       ? "fileDuplicate"
       : command === "links"
         ? declaredSocketVerbs("links")[name]
-        : command === "chat"
-          ? (CHAT_SOCKET_VERBS[name] ?? name)
-          : command === "history"
-            ? HISTORY_RESULTS[name]
-            : command === "document"
-              ? DOCUMENT_RESULTS[name]
-              : command === "automation"
-                ? AUTOMATION_RESULTS[name]
-                : command === "access"
-                  ? ACCESS_RESULTS[name]
-                  : command === "sync"
-                    ? SYNC_RESULTS[name]
-                    : command === "notices"
-                      ? NOTICES_RESULTS[name]
-                      : command === "share"
-                        ? SHARE_RESULTS[name]
-                        : command === "members"
-                          ? MEMBERS_RESULTS[name]
-                          : command === "version"
-                            ? VERSION_RESULTS[name]
-                            : command === "account"
-                              ? ACCOUNT_RESULTS[name]
-                              : undefined;
+        : command === "workspace"
+          ? declaredSocketVerbs("workspace")[name]
+          : command === "chat"
+            ? (CHAT_SOCKET_VERBS[name] ?? name)
+            : command === "history"
+              ? HISTORY_RESULTS[name]
+              : command === "document"
+                ? DOCUMENT_RESULTS[name]
+                : command === "automation"
+                  ? AUTOMATION_RESULTS[name]
+                  : command === "access"
+                    ? ACCESS_RESULTS[name]
+                    : command === "sync"
+                      ? SYNC_RESULTS[name]
+                      : command === "notices"
+                        ? NOTICES_RESULTS[name]
+                        : command === "share"
+                          ? SHARE_RESULTS[name]
+                          : command === "members"
+                            ? MEMBERS_RESULTS[name]
+                            : command === "version"
+                              ? VERSION_RESULTS[name]
+                              : command === "account"
+                                ? ACCOUNT_RESULTS[name]
+                                : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb))
       throw new Error(`dohc ${command} ${name} has no result schema.`);
@@ -899,6 +1087,9 @@ function commandSection(name: string, command: CliCommandSpec): string {
     name === "access" ? ACCESS_NOTES : "",
     name === "links"
       ? "`indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields."
+      : "",
+    name === "workspace"
+      ? "Works on the owning workspace only; standalone received shares and mounted shared folders are refused. `complete` is false when `indexBuilding` or `policyDegraded` is true, when `sharedChannelRowsUncovered` is non-zero, or when a short query exceeds its scan bound. `mountsCovered` is false when received folders are mounted under `shared-with-me/`. `truncated` is true when the response hit its 64 KiB wire cap."
       : "",
     name === "sync"
       ? "The pause result records who paused and when. A person author has kind person, personId, and self. Show you when self is true. Person pause labels do not use profile names. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority."

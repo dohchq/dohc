@@ -1,3 +1,4 @@
+use dohc_engine_domain::chats::{GENERAL_CHANNEL_ID, is_well_known_channel_id};
 use dohc_engine_domain::{AGENT_CHANNEL_WIRE_ID, GENERAL_CHANNEL_WIRE_ID};
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path};
 use dohc_engine_sync::{
@@ -10,6 +11,7 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 struct Fixture {
     wire_ids: WireIds,
+    fixed_channel_ids: FixedChannelIds,
     vectors: Vec<Vector>,
     share_version_ids: ShareVersionIds,
     share_access: ShareAccessFixture,
@@ -52,6 +54,18 @@ struct ShareVersionIdVector {
 }
 
 #[derive(Deserialize)]
+struct FixedChannelIds {
+    general: String,
+    vectors: Vec<FixedChannelIdVector>,
+}
+
+#[derive(Deserialize)]
+struct FixedChannelIdVector {
+    value: String,
+    fixed: bool,
+}
+
+#[derive(Deserialize)]
 struct WireIds {
     agent: String,
     general: String,
@@ -69,6 +83,20 @@ struct Vector {
 fn fixture() -> Fixture {
     serde_json::from_str(include_str!("fixtures/security-contract.json"))
         .expect("generated fixture parses")
+}
+
+#[test]
+fn the_relay_and_the_engine_agree_on_general_and_agent_chat_ids() {
+    let fixture = fixture().fixed_channel_ids;
+    assert_eq!(fixture.general, GENERAL_CHANNEL_ID);
+    for vector in fixture.vectors {
+        assert_eq!(
+            is_well_known_channel_id(&vector.value),
+            vector.fixed,
+            "{}",
+            vector.value
+        );
+    }
 }
 
 #[test]

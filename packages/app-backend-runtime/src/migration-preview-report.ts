@@ -17,8 +17,10 @@ export interface MigrationPreviewChange {
 }
 /**
  * `beforeValues` and `afterValues` count each column's non-empty cells.
- * `clearedValues` counts the cells a kept record lost, by column, so a review
- * can say what a change deletes without counting deleted records twice.
+ * `clearedValues` counts the cells a kept record lost, by column, and
+ * `replacedValues` counts non-empty cells overwritten with a different
+ * non-empty value, so a review can warn on destructive updates without
+ * counting deleted records twice.
  */
 export interface MigrationPreviewTableSummary {
   table: string;
@@ -29,6 +31,7 @@ export interface MigrationPreviewTableSummary {
   beforeValues: Record<string, number>;
   afterValues: Record<string, number>;
   clearedValues: Record<string, number>;
+  replacedValues: Record<string, number>;
 }
 export interface MigrationPreviewReportPage {
   changes: MigrationPreviewChange[];
@@ -172,12 +175,23 @@ export function createMigrationPreviewReport(input: {
         beforeValues: counts(before),
         afterValues: counts(after),
         clearedValues: counts(comparable ? before : undefined),
+        replacedValues: counts(comparable ? before : undefined),
       };
       const filled = (value: SQLOutputValue | undefined) =>
         value !== undefined && value !== null && value !== "";
       const tally = (values: Record<string, number>, row: Row, kept?: Row) => {
         for (const name of Object.keys(values))
           if (filled(row[name]) && (!kept || !filled(kept[name])))
+            values[name] = (values[name] ?? 0) + 1;
+      };
+      const tallyReplaced = (values: Record<string, number>, row: Row, kept: Row) => {
+        for (const name of Object.keys(values))
+          if (
+            Object.hasOwn(kept, name) &&
+            filled(row[name]) &&
+            filled(kept[name]) &&
+            !equalValue(row[name], kept[name])
+          )
             values[name] = (values[name] ?? 0) + 1;
       };
       if (before) assertRowsBound(input.before, table, before);
@@ -227,6 +241,7 @@ export function createMigrationPreviewReport(input: {
           ) {
             append("update", row, match);
             tally(summary.clearedValues, row, match);
+            tallyReplaced(summary.replacedValues, row, match);
           }
         }
       if (after)

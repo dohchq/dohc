@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -797,11 +805,18 @@ function passingCloudJobs() {
   return jobs.filter((job) => active.has(job.name));
 }
 
+function publishAggregate(outputDirectory, aggregate) {
+  const published = join(outputDirectory, "published");
+  mkdirSync(published, { recursive: true });
+  if (aggregate) writeFileSync(join(published, "js-result.json"), JSON.stringify(aggregate));
+  else copyFileSync(join(outputDirectory, "js-result.json"), join(published, "js-result.json"));
+}
+
 const apiEnv = {
   GITHUB_API_URL: "https://api.example.test",
   GITHUB_REPOSITORY: "test/repo",
   GITHUB_RUN_ID: "1",
-  GITHUB_RUN_ATTEMPT: "2",
+  GITHUB_RUN_ATTEMPT: "1",
   GITHUB_TOKEN: "fixture",
 };
 const apiResponse = (value, status = 200, etag = '"fixture"') =>
@@ -1124,7 +1139,7 @@ test("prepared artifact body aborts get one fresh transfer inside the preparatio
               jobs: [{ name: "shared preparation", status: "completed", conclusion: "success" }],
             });
           if (url.includes("/artifacts?"))
-            return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-2" }] });
+            return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-1" }] });
           downloads++;
           return new Response(
             downloads > failures
@@ -1146,7 +1161,7 @@ test("prepared artifact body aborts get one fresh transfer inside the preparatio
           assert.equal(error.cause, cause);
           assert.equal(
             error.message,
-            "Preparation artifact javascript-prepared-2 (42) body transfer failed after 120s (2 attempts).",
+            "Preparation artifact javascript-prepared-1 (42) body transfer failed after 120s (2 attempts).",
           );
           return true;
         });
@@ -1165,7 +1180,7 @@ test("prepared artifact body aborts get one fresh transfer inside the preparatio
           return apiResponse({ jobs: [{ name: "shared preparation", status: "in_progress" }] });
         if (url.includes("/artifacts?")) {
           clock = 850_000;
-          return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-2" }] });
+          return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-1" }] });
         }
         downloads++;
         return new Response(
@@ -1181,7 +1196,7 @@ test("prepared artifact body aborts get one fresh transfer inside the preparatio
         );
       },
     }),
-    /javascript-prepared-2.*body transfer failed after 50s \(1 attempt\)/u,
+    /javascript-prepared-1.*body transfer failed after 50s \(1 attempt\)/u,
   );
   assert.equal(downloads, 1, "the preparation deadline must prevent a second transfer");
 });
@@ -1297,7 +1312,7 @@ test("workflow reads retry transient responses and request errors within their c
             artifacts:
               failedRead === "jobs" && clock < 121_000
                 ? []
-                : [{ id: 42, name: "javascript-prepared-2" }],
+                : [{ id: 42, name: "javascript-prepared-1" }],
           });
         return apiResponse("archive");
       },
@@ -1400,7 +1415,7 @@ test("prepared artifact body timing excludes readiness retries", async (t) => {
             jobs: [{ name: "shared preparation", status: "completed", conclusion: "success" }],
           });
         if (url.includes("/artifacts?"))
-          return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-2" }] });
+          return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-1" }] });
         if (++downloads <= 2) return apiResponse(null, 404);
         return new Response(
           new ReadableStream(
@@ -1452,8 +1467,8 @@ for (const [scope, jobName, artifact] of [
           return apiResponse(
             {
               artifacts: [
-                { name: `${artifact}-1`, expired: false },
-                { name: `${artifact}-2`, expired: true },
+                { name: `${artifact}-10`, expired: false },
+                { name: `${artifact}-1`, expired: true },
               ],
             },
             200,
@@ -1462,7 +1477,7 @@ for (const [scope, jobName, artifact] of [
         assert.equal(headers["If-None-Match"], '"empty"');
         return artifactReads === 2
           ? apiResponse(null, 304)
-          : apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2`, expired: false }] });
+          : apiResponse({ artifacts: [{ id: 42, name: `${artifact}-1`, expired: false }] });
       },
     });
     assert.equal(result.artifact.id, 42);
@@ -1493,7 +1508,7 @@ for (const [scope, jobName, artifact] of [
           if (url.includes("/jobs?"))
             return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
           if (url.includes("/artifacts?"))
-            return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+            return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-1` }] });
           assert.equal(url, "https://api.example.test/repos/test/repo/actions/artifacts/42/zip");
           assert.equal(headers["If-None-Match"], undefined);
           return ++downloads < 3 ? apiResponse(null, status) : apiResponse("archive");
@@ -1532,7 +1547,7 @@ for (const [scope, jobName, artifact] of [
             if (url.includes("/jobs?"))
               return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
             if (url.includes("/artifacts?"))
-              return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+              return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-1` }] });
             downloads++;
             return apiResponse(null, status);
           },
@@ -1560,7 +1575,7 @@ for (const [scope, jobName, artifact] of [
           if (url.includes("/jobs?"))
             return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
           if (url.includes("/artifacts?"))
-            return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+            return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-1` }] });
           downloads++;
           if (!persistent && downloads === 2) return apiResponse("archive");
           const cause = new TypeError("fetch failed");
@@ -1572,7 +1587,7 @@ for (const [scope, jobName, artifact] of [
         await assert.rejects(waiting, (error) => {
           assert.equal(
             error.message,
-            `Preparation artifact ${artifact}-2 download timed out waiting for a response within its 30-second retry cap.`,
+            `Preparation artifact ${artifact}-1 download timed out waiting for a response within its 30-second retry cap.`,
           );
           assert.equal(error.cause, causes.at(-1));
           return true;
@@ -1599,7 +1614,7 @@ for (const [scope, jobName, artifact] of [
             if (url.includes("/jobs?"))
               return apiResponse({ jobs: [{ name: jobName, status: "in_progress" }] });
             if (url.includes("/artifacts?"))
-              return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+              return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-1` }] });
             if (++downloads === 1 && saw404) return apiResponse(null, 404);
             clock = 30_000;
             throw cause;
@@ -1610,8 +1625,8 @@ for (const [scope, jobName, artifact] of [
           assert.equal(
             error.message,
             saw404
-              ? `Preparation artifact ${artifact}-2 was listed but never became downloadable within its 30-second retry cap.`
-              : `Preparation artifact ${artifact}-2 download timed out waiting for a response within its 30-second retry cap.`,
+              ? `Preparation artifact ${artifact}-1 was listed but never became downloadable within its 30-second retry cap.`
+              : `Preparation artifact ${artifact}-1 download timed out waiting for a response within its 30-second retry cap.`,
           );
           return true;
         },
@@ -1641,7 +1656,7 @@ for (const [scope, jobName, artifact] of [
         if (reads <= 2)
           return apiResponse({ artifacts: [] }, 200, reads === 1 ? '"first"' : '"changed"');
         if (reads === 3) return apiResponse(null, 304);
-        return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-2` }] });
+        return apiResponse({ artifacts: [{ id: 42, name: `${artifact}-1` }] });
       },
     });
     assert.deepEqual(pauses, [2_500, 10_000, 10_000]);
@@ -1884,7 +1899,7 @@ test("polling waits for initially missing jobs and rejects invalid HTTP response
         ? apiResponse({
             jobs: ++reads === 1 ? [] : [{ name: "shared preparation", status: "in_progress" }],
           })
-        : apiResponse({ artifacts: [{ id: 1, name: "javascript-prepared-2" }] }),
+        : apiResponse({ artifacts: [{ id: 1, name: "javascript-prepared-1" }] }),
   });
   assert.equal(clock, 0);
   assert.equal(reads, 0);
@@ -1955,7 +1970,7 @@ function writeTimingReceipts(root, scope, commit) {
           })),
         ];
   for (const row of records) {
-    const directory = join(root, row.part);
+    const directory = join(root, `${row.part}-1`);
     mkdirSync(directory);
     writeFileSync(
       join(directory, "result.json"),
@@ -2031,6 +2046,7 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
         warningCount,
         "only final verification emits timing warnings",
       );
+      if (scope === "js") publishAggregate(outputDirectory);
       await verifyCompletedCloud(scope, { env, outputDirectory, readJobs: async () => jobs });
       const completed = JSON.parse(
         readFileSync(join(outputDirectory, `${scope}-completed-result.json`), "utf8"),
@@ -2052,6 +2068,45 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
       assert.equal(readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), completed.warning + "\n");
       assert.equal(warn.mock.calls.at(-1).arguments[0], "::warning::" + completed.warning);
     });
+});
+
+test("a re-run of failed jobs aggregates each part's receipt from the newest attempt that ran it", async (t) => {
+  t.mock.method(console, "log", () => {});
+  for (const scope of ["js", "rust"]) {
+    const root = mkdtempSync(join(tmpdir(), "partial-rerun-")),
+      outputDirectory = join(root, "aggregate"),
+      jobs = withoutWaits(),
+      commit = jobs[0].head_sha,
+      [part, rerun, final] =
+        scope === "js"
+          ? ["worker-3", "JS worker 3", "typecheck + tests"]
+          : ["tests-3", "Rust tests 3", "engine gate"];
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    writeTimingReceipts(root, scope, commit);
+    const first = join(root, `${part}-1`, "result.json"),
+      passed = readFileSync(first, "utf8");
+    mkdirSync(join(root, `${part}-2`));
+    writeFileSync(join(root, `${part}-2`, "result.json"), passed);
+    writeFileSync(first, JSON.stringify({ ...JSON.parse(passed), verdict: "FAIL", completed: [] }));
+    const rerunAt = Date.parse(jobs.find((job) => job.name === final).completed_at) + 3_600_000;
+    for (const job of jobs) {
+      job.created_at = new Date(rerunAt).toISOString();
+      if (job.name === rerun || job.name === final) job.started_at = job.created_at;
+      if (job.name === rerun) job.completed_at = new Date(rerunAt + 200_000).toISOString();
+    }
+    const run = () =>
+      aggregateCloud(scope, root.replaceAll("\\", "/"), {
+        env: { GITHUB_SHA: commit },
+        outputDirectory,
+        now: () => rerunAt + 300_000,
+        readJobs: async () => jobs,
+      });
+    const report = await run();
+    assert.equal(report.verdict, "PASS");
+    assert.equal(report.timing, "unmeasured");
+    rmSync(join(root, `${part}-2`), { recursive: true });
+    await assert.rejects(run(), new RegExp(`${part}|did not pass`, "u"));
+  }
 });
 
 test("job creation waits follow each gate's dependencies", async (t) => {
@@ -2102,11 +2157,7 @@ test("job creation waits follow each gate's dependencies", async (t) => {
       const aggregate = JSON.parse(
         readFileSync(join(outputDirectory, `${scope}-result.json`), "utf8"),
       );
-      if (scope === "js")
-        writeFileSync(
-          join(outputDirectory, "js-result.json"),
-          JSON.stringify({ verdict: "PASS", commit }),
-        );
+      if (scope === "js") publishAggregate(outputDirectory, { verdict: "PASS", commit });
       const completedRun = verifyCompletedCloud(scope, {
         env,
         outputDirectory,
@@ -2153,47 +2204,27 @@ test("job readiness falls back for later prerequisites and partial re-runs", () 
       /longest runner wait Rust tests 1: 31s/u,
     );
   }
-  for (const carried of [false, true])
-    for (const wait of [0, 31]) {
-      const jobs = withoutWaits();
-      jobs.forEach((job) => {
-        job.run_attempt = 1;
-      });
-      const selection = jobs[0],
-        job = jobs.find((job) => job.name === "shared preparation");
-      const final = jobs.find((job) => job.name === "typecheck + tests");
-      final.run_attempt = 2;
-      if (carried) {
-        selection.run_attempt = 2;
-        for (const field of ["created_at", "started_at", "completed_at"])
-          selection[field] = new Date(Date.parse(selection[field]) + 3_600_000).toISOString();
-        withRunnerWait(jobs, final.name, 0);
-        job.started_at = new Date(Date.parse(job.created_at) + wait * 1000).toISOString();
-        assert.ok(
-          Date.parse(selection.completed_at) > Date.parse(job.started_at),
-          "the later prerequisite completion must exercise the timestamp fallback",
-        );
-      } else {
-        // Re-running a failed job does not count an hour spent waiting for a human.
-        job.run_attempt = 2;
-        job.started_at = new Date(Date.parse(job.started_at) + 3_600_000).toISOString();
-        job.created_at = new Date(Date.parse(job.started_at) - wait * 1000).toISOString();
-        job.completed_at = new Date(Date.parse(job.started_at) + 1000).toISOString();
-      }
-      final.completed_at = new Date(
-        Math.max(Date.parse(selection.started_at), Date.parse(job.completed_at)) + 450_000,
-      ).toISOString();
-      if (!wait)
-        assert.throws(
-          () => completedGateTiming("js", jobs, jobs[0].head_sha),
-          (error) => error.timing.timing === "over budget",
-        );
-      else
-        assert.match(
-          completedGateTiming("js", jobs, jobs[0].head_sha).warning,
-          /longest runner wait shared preparation: 31s/u,
-        );
+  // Run 44053570685, attempt 2: GitHub lists each job that passed before under the new attempt,
+  // created with the attempt and keeping its first run's start and finish.
+  for (const wait of [0, 31]) {
+    const jobs = withoutWaits(),
+      rerunAt =
+        Date.parse(jobs.find((job) => job.name === "typecheck + tests").completed_at) + 3_600_000;
+    const fresh = ["JS worker 12", "typecheck + tests"];
+    for (const job of jobs) {
+      job.created_at = new Date(rerunAt).toISOString();
+      if (!fresh.includes(job.name)) continue;
+      job.started_at = new Date(rerunAt + (job.name === fresh[0] ? wait * 1000 : 0)).toISOString();
+      job.completed_at = new Date(rerunAt + 300_000).toISOString();
     }
+    const timing = completedGateTiming("js", jobs, jobs[0].head_sha);
+    assert.equal(timing.timing, "unmeasured");
+    assert.equal(timing.jobs.find((row) => row.name === "JS worker 12").runnerWaitSeconds, wait);
+    assert.equal(
+      timing.warning,
+      `js timing unmeasured: ${timing.seconds}s exceeds the 300s target; part of the gate passed in an earlier attempt and did not run again${wait ? `; longest runner wait JS worker 12: ${wait}s` : ""}.`,
+    );
+  }
 });
 
 test("timing warnings name the larger part of a job's scheduling wait", () => {
@@ -2404,11 +2435,7 @@ for (const [scope, finalJob, target, ceiling] of [
           assert.equal(warn.mock.calls.length, before, "the aggregate must not emit an annotation");
           assert.equal(existsSync(summary), false, "the aggregate must not write the step summary");
           // The completed check must independently catch reporting crossing the ceiling.
-          if (scope === "js")
-            writeFileSync(
-              join(outputDirectory, "js-result.json"),
-              JSON.stringify({ verdict: "PASS", commit }),
-            );
+          if (scope === "js") publishAggregate(outputDirectory, { verdict: "PASS", commit });
           const completedRun = verifyCompletedCloud(scope, {
             env,
             outputDirectory,
@@ -2555,11 +2582,7 @@ for (const [scope, finalJob, target, ceiling] of [
           const aggregate = JSON.parse(
             readFileSync(join(outputDirectory, `${scope}-result.json`), "utf8"),
           );
-          if (scope === "js")
-            writeFileSync(
-              join(outputDirectory, "js-result.json"),
-              JSON.stringify({ verdict: "PASS", commit }),
-            );
+          if (scope === "js") publishAggregate(outputDirectory, { verdict: "PASS", commit });
           const finalRun = verifyCompletedCloud(scope, {
             env,
             outputDirectory,
@@ -2640,6 +2663,7 @@ test("a saved 181-second receipt download is unmeasured in both timing checks", 
     readJobs: async () => jobs,
     now: () => Date.parse(calls++ === 0 ? verify.started_at : verify.completed_at),
   });
+  publishAggregate(outputDirectory);
   await verifyCompletedCloud("js", { env, outputDirectory, readJobs: async () => jobs });
   const completed = JSON.parse(
     readFileSync(join(outputDirectory, "js-completed-result.json"), "utf8"),
@@ -2685,7 +2709,7 @@ test("aggregate receipts use the same timing rule and remain incomplete", async 
       ...(!index ? { selfHostNative: {} } : {}),
     });
   for (const record of records) {
-    const directory = join(root, record.part);
+    const directory = join(root, `${record.part}-1`);
     mkdirSync(directory);
     writeFileSync(join(directory, "result.json"), JSON.stringify(record));
   }
@@ -2793,7 +2817,7 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
     assert.throws(() => aggregateJavascript(broken));
   }
   for (const record of records) {
-    const directory = join(root, record.part);
+    const directory = join(root, `${record.part}-1`);
     mkdirSync(directory);
     writeFileSync(join(directory, "result.json"), JSON.stringify(record));
   }
@@ -2811,6 +2835,7 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
     log.mock.calls.some((call) => call.arguments[0].startsWith("::warning")),
     false,
   );
+  publishAggregate(outputDirectory);
   await verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory });
   const completed = JSON.parse(
     readFileSync(join(outputDirectory, "js-completed-result.json"), "utf8"),
@@ -2837,11 +2862,20 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
     }),
     /aggregate.*commit/u,
   );
-  rmSync(join(outputDirectory, "js-result.json"));
+  rmSync(join(outputDirectory, "published"), { recursive: true });
   await assert.rejects(
     verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory }),
-    /ENOENT/u,
+    /Expected one JavaScript aggregate, found 0/u,
   );
+  for (const [attempt, verdict] of [
+    [1, "FAIL"],
+    [2, "PASS"],
+  ]) {
+    const published = join(outputDirectory, "published", `verification-js-${attempt}`);
+    mkdirSync(published, { recursive: true });
+    writeFileSync(join(published, "js-result.json"), JSON.stringify({ verdict, commit }));
+  }
+  await verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory });
 });
 test("preparation spends only artifact requests before two minutes", async (t) => {
   const log = t.mock.method(console, "log", () => {});
@@ -2855,8 +2889,8 @@ test("preparation spends only artifact requests before two minutes", async (t) =
   ]) {
     const [job, artifact] =
       scope === "rust"
-        ? ["engine gate", "rust-tests-2"]
-        : ["shared preparation", "javascript-prepared-2"];
+        ? ["engine gate", "rust-tests-1"]
+        : ["shared preparation", "javascript-prepared-1"];
     let clock = 0,
       jobs = 0,
       lists = 0,
@@ -2897,6 +2931,69 @@ test("preparation spends only artifact requests before two minutes", async (t) =
   }
 });
 
+test("a re-run of failed jobs reads a passed build from the attempt that ran it", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const env = { ...apiEnv, GITHUB_RUN_ATTEMPT: "3" };
+  for (const [scope, job, artifact] of [
+    ["js", "shared preparation", "javascript-prepared"],
+    ["rust", "engine gate", "rust-tests"],
+  ])
+    for (const [carried, published, expected] of [
+      [true, ["1"], `${artifact}-1`],
+      [true, ["1", "2"], `${artifact}-2`],
+      [false, ["1", "3"], `${artifact}-3`],
+      [true, [], /passed in an earlier attempt, but no earlier/u],
+    ]) {
+      let clock = 0;
+      const requested = [];
+      const waiting = waitForPreparation(scope, {
+        env,
+        now: () => clock,
+        pause: async (ms) => {
+          clock += ms;
+        },
+        request: async (url) => {
+          if (url.includes("/jobs?")) {
+            assert.match(url, /\/attempts\/3\/jobs/u);
+            return apiResponse({
+              jobs: [
+                carried
+                  ? {
+                      name: job,
+                      status: "completed",
+                      conclusion: "success",
+                      created_at: "2026-11-17T09:30:37Z",
+                      started_at: "2026-11-17T09:13:58Z",
+                    }
+                  : {
+                      name: job,
+                      status: "in_progress",
+                      created_at: "2026-11-17T09:30:37Z",
+                      started_at: "2026-11-17T09:30:40Z",
+                    },
+              ],
+            });
+          }
+          if (url.endsWith("/zip")) return apiResponse("archive");
+          const name = new URL(url).searchParams.get("name");
+          requested.push(name);
+          const attempt = name.slice(artifact.length + 1);
+          return apiResponse({
+            artifacts: published.includes(attempt) ? [{ id: Number(attempt), name }] : [],
+          });
+        },
+      });
+      if (expected instanceof RegExp) {
+        await assert.rejects(waiting, expected);
+        assert.equal(clock, 0);
+        continue;
+      }
+      assert.equal((await waiting).artifact.name, expected);
+      assert.equal(clock, 0);
+      assert.equal(requested.includes(`${artifact}-3`), !carried);
+    }
+});
+
 test("conditional jobs cache each page independently without slowing gate polls", async () => {
   const pages = [Array.from({ length: 100 }, (_, id) => ({ id })), [{ id: 100 }]];
   let poll = 0;
@@ -2927,7 +3024,7 @@ test("exhausted workflow allowance fails reads and downloads immediately with on
       const request = async (url) => {
         requests++;
         if (operation === "preparation download" && url.includes("/artifacts?"))
-          return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-2" }] });
+          return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-1" }] });
         return new Response(null, {
           status,
           headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1794587400" },

@@ -6,8 +6,19 @@ Read this before changing anything a person sees in the phone app.
 
 The phone uses the desktop's words and behaviour, which the dohc-interface skill gives (`.agents/skills/dohc-interface/SKILL.md`).
 Take shared words from `@dohc/interface-words`. Never copy them.
-[The phone app](../../.agents/skills/dohc-interface/phone.md#the-phone-app) in the skill lists what the phone does differently from the desktop.
-If a phone word or behaviour differs from the desktop, add it to that list, with its reason, in the PR that introduces it.
+The phone differs from the desktop on purpose in these ways:
+
+- Touch targets are at least 44 pt.
+- Use the system's tab bar, navigation, large titles, sheets, and haptics on iOS, and Material's on Android.
+- Body text is 17 pt, with Dynamic Type, in the system font.
+- Use SF Symbols only where iOS draws the control. Use lucide for dohc's own content.
+- A confirmation is an action sheet or a system alert, with the desktop's words. Delete, Forget, Leave, and Remove use the destructive style.
+- Every swipe and long-press has a visible control that does the same thing.
+- Toasts sit at the bottom, above the tab bar or the composer, with a visible ×.
+- The composer docks to the keyboard.
+- There are no tooltips.
+
+If a phone word or behaviour differs from the desktop in another way, say why in the PR.
 If a difference changes what another surface shows, get Ice's decision first.
 
 ## Screenshot comparisons
@@ -32,7 +43,7 @@ Any other build signs in to a server first (`src/account/Connect.tsx`), then rea
 Search shows "Not built yet".
 
 Phone writes are off by default, so a signed-in build stays read-only (`src/server/phoneWrites.ts`). Off, the outbox sends nothing, not even records an earlier build kept.
-Keep every write control behind `phoneWrites`: the composer, New post, Reply, reactions, a question's or poll's answers, Send and Discard on outbox messages and reactions, an app's Approve and Open, and editing a page.
+Keep every write control behind `phoneWrites`: the composer, New post, Reply, reactions, a question's or poll's answers, Send and Discard on outbox messages and reactions, an app's Approve and Open, editing a page, a Collection record's field editors and Undo (`collectionEdit`, `src/collections/FieldEditor.tsx`), and a Collection's New record and Delete (`collectionCreate`, `collectionDelete`).
 An app's Revoke is the one exception: an approval holds on every phone of the account, so every phone shows its way back (`src/apps/AppReview.tsx`).
 Apps open only on iOS (`src/apps/canOpenApps.ts`): on Android, react-native-webview doesn't ask about every frame's loads and saves downloads, so the runner's rules don't hold.
 A build made with `EXPO_PUBLIC_DOHC_PHONE_WRITES=1` turns writes on.
@@ -53,12 +64,14 @@ The server client is in `src/server`. Its files hold how each part works.
 - Check `SignIn.isCurrent()` before applying anything a request answered. A sign-in's generation changes at sign-out, at a 401 and when another sign-in starts, and the change aborts that sign-in's requests (`src/server/account.ts`).
 - Use `requestGenerations()` for results that replace each other (`src/server/client.ts`).
 - A page edited live opens with `openPage`, then its owner socket, which only the server client opens, so the token stays there. The page's one-use ticket goes only into the socket's protocols. The web view runs the provider and sees neither (`src/pages/pageLive.ts`, `src/pages/liveBridge.ts`).
+- A Collection record's field changes live in memory in its Collections store, one per record, sent while the app runs and never through the outbox. Try again sends a change with its own key and stamp (`src/collections/collectionStore.ts`).
 - The open workspace's reads live in one store per sign-in and workspace. The store stops when either changes, so a late answer can't reach another workspace's screen (`src/server/workspaceData.ts`).
 - The phone opens only workspaces the list marks `canOpen`. A 404 for the open workspace clears and stops its store, and the phone reads its workspace list again (`src/server/openWorkspace.ts`).
 - The read cache keeps a copy in cache.db, in Caches, so a relaunch opens the last workspace before the server answers. `src/server/cacheRows.ts` and the `ReadCache` in `src/server/workspaceData.ts` hold when it writes and deletes its rows. Every change of sign-in deletes cache.db. Its writes have their own connection and queue, so a cache save never delays a Send.
 - Raise `CACHE_FORMAT` when a cache table or a view's value changes shape: cache.db of another format, or a damaged one, is deleted and starts empty.
 - The account's Notices live in one store per sign-in, beside the workspace list, not in the open workspace's (`src/server/noticeStore.ts`). It reads the whole list again at each start, return from the background, refresh, and change to which workspaces show on the phone. Its list and waiting marks are kept.db rows. A mark shows and sends only once its row commits, and a mark the server took leaves kept.db in the same commit as the list it changed. Marks wait through a 401 for their own account; every change of sign-in deletes the list.
-- Ending a token deletes it from the keychain first, then revokes its session, so a phone closed between the two keeps no token (`src/server/account.ts`).
+- Sign out waits for the server. Its session ends there, with its alerts, before its token leaves the keychain. Its pending mark commits in the account's `push_registrations` row before anything else, or, for a damaged kept.db the person agreed to delete, just after the delete: the token stays, no sign-in starts, and a relaunch tries again. A launch that can't read the row doesn't sign in, and offers that delete when kept.db is damaged. A token dropped without Sign out, as a superseded sign-in's, is deleted first, then its session revoked (`src/server/account.ts`).
+- Alerts are iOS only, through expo-notifications with the APNs device token, never Expo's push service. The person turns them on in Settings, which asks the system then. A tap reads the workspace list from the server first, gives it to the workspace list store, and opens its message only when its binding generation matches the sign-in's row and the workspace shows on the phone; otherwise Home. Offline, it waits with Try again (`src/push/AlertTaps.tsx`).
 - Work the phone must not lose lives in kept.db, one SQLite file per install, never per sign-in, with each row's server and account (`src/server/keptStore.ts`). Run every statement through its one connection and queue, and write only through `transaction`, never expo-sqlite's transaction helpers: the exclusive one opens a connection without the durability settings. The `durable-file` module only prepares its folder: excluded from backup, and on iOS closed until the first unlock. Never replace a damaged kept.db; only the person deletes it, after a warning. Tests run real SQL on Node's `node:sqlite` (`src/server/testKeptDisk.ts`).
 - The outbox keeps the phone's chat writes in kept.db until the server saves them and a read shows them. Only the composer, reactions and answers add to it, while phone writes are on. A record is inserted withheld, and becomes sendable only through a second commit made after the insert's commit returned; enqueue says it kept the message only once that second commit returns. If that commit fails, the record stays withheld this run, with Send and Discard, but the failed commit may still stand, so a relaunch may send it; its row says so (`maySendOnReopen`). It sends a record only with a sign-in for the record's own server and account, one at a time per thread or stream, in order, and repeats the same operation ID until the write is saved or refused. A 401 keeps every record (`src/server/outbox.ts`).
 - `discard` deletes one record the person chooses. It withholds a record that may still send before deleting it, and refuses one a waiting reply needs (`src/server/outbox.ts`).

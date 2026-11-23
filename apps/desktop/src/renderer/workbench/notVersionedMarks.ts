@@ -75,11 +75,11 @@ export function notVersionedConfirmText(
         : `Move ${name} in Main too?`;
   const itself = paths.length === 1 && sources.length === 1 && paths[0] === sources[0];
   const why = itself
-    ? "It isn't versioned, so Main and every version have the same copy."
-    : `${paths.length === 1 ? "1 file here isn't" : `${paths.length} files here aren't`} versioned, so Main and every version have the same copy.`;
+    ? "It is not versioned, so Main and every version have the same copy."
+    : `${paths.length === 1 ? "1 file here is not" : `${paths.length} files here are not`} versioned, so Main and every version have the same copy.`;
   const body =
     action === "delete"
-      ? `${why} Deleted files go to the system trash, or to .dohc/local/trash in this workspace when the system trash refuses them.`
+      ? `${why} Deleted files go to the system trash, or to .dohc/local/trash if the system trash refuses them.`
       : why;
   const confirmLabel =
     action === "delete" ? "Delete anyway" : action === "rename" ? "Rename anyway" : "Move anyway";

@@ -7,9 +7,9 @@ type MessageDialog = { showMessageBox(options: MessageBoxOptions): Promise<Messa
 // What went wrong, for every failure but a failed startup, which already
 // showed its own error.
 const FAILURE_MESSAGES: Record<Exclude<UpdateFailure, "startup">, string> = {
-  "window-crash": "This dohc window keeps crashing.",
-  "window-load": "This dohc window could not load.",
-  "unfinished-launch": "dohc closed before it finished starting.",
+  "window-crash": "This dohc window keeps crashing",
+  "window-load": "This dohc window could not load",
+  "unfinished-launch": "dohc closed before it finished starting",
 };
 
 /**
@@ -23,7 +23,7 @@ export async function confirmDownloadDialog(
 ): Promise<boolean> {
   const { response } = await dialog.showMessageBox({
     type: "info",
-    message: failure === "startup" ? `Update ${version} is available.` : FAILURE_MESSAGES[failure],
+    message: failure === "startup" ? `Update ${version} is available` : FAILURE_MESSAGES[failure],
     detail:
       failure === "startup"
         ? "It may fix what stopped dohc from starting. Download it?"
@@ -49,7 +49,7 @@ export async function showDownloadingDialog(
 ): Promise<void> {
   await dialog.showMessageBox({
     type: "info",
-    message: failure === "startup" ? `Downloading update ${version}.` : FAILURE_MESSAGES[failure],
+    message: failure === "startup" ? `Downloading update ${version}` : FAILURE_MESSAGES[failure],
     detail:
       failure === "startup"
         ? "When it finishes, you can restart dohc on the new version."
@@ -76,13 +76,13 @@ export async function confirmRestartDialog(
     : "";
   const { response } = await dialog.showMessageBox({
     type: "info",
-    message: failure === "startup" ? `Update ${version} is downloaded.` : FAILURE_MESSAGES[failure],
+    message: failure === "startup" ? `Update ${version} is downloaded` : FAILURE_MESSAGES[failure],
     detail:
       failure === "startup"
         ? `Restart now to open dohc on the new version.${onQuit}`
         : quits
           ? `Update ${version} is downloaded. Restart now to open dohc on the new version.${onQuit}`
-          : `Update ${version} is downloaded. dohc closes and opens again on the new version.`,
+          : `Update ${version} is downloaded. dohc will close and reopen on the new version.`,
     buttons: ["Restart now", quits ? "Quit" : "Not now"],
     defaultId: 0,
     cancelId: 1,

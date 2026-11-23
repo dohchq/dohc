@@ -1,4 +1,4 @@
-import { each, isFields, okAnswer, segment, text } from "./api";
+import { accountOperations, each, isFields, text } from "./api";
 import { exchange, ServerError, statusProblem, type Fetch, type ServerClient } from "./client";
 
 // The account operations for a workspace's published apps (the relay's phoneApps.ts), and the launch exchange with the
@@ -149,51 +149,15 @@ function bootstrapAction(value: unknown): string | null {
 
 /** One workspace's app operations, for one sign-in's client. Each request ends when `signal` aborts. */
 export function appOperations(client: ServerClient, workspaceId: string, signal: AbortSignal) {
-  const run = <T>(
-    name: string,
-    args: object,
-    read: (result: unknown) => T | null,
-    own = signal,
-  ): Promise<T> =>
-    client.send(
-      "POST",
-      `/sync/${segment(workspaceId)}/ops/${name}`,
-      (body) => {
-        const answer = okAnswer(body);
-        return answer ? read(answer.result) : null;
-      },
-      args,
-      { signal: own },
-    );
+  const { run, all } = accountOperations(client, workspaceId, signal);
   const version = (app: Version) => ({
     publicationId: app.publicationId,
     authorityRevision: app.authorityRevision,
   });
 
   return {
-    /** Every app the phone can open. A cursor seen before, or more pages than CATALOG_PAGES, fails the read. */
-    async list(): Promise<readonly PhoneApp[]> {
-      const apps: PhoneApp[] = [];
-      const seen = new Set<string>();
-      let cursor: string | null = null;
-      for (let page = 0; page < CATALOG_PAGES; page++) {
-        const answer: { apps: PhoneApp[]; next: string | null } = await run(
-          "apps",
-          cursor === null ? {} : { cursor },
-          (result) => {
-            const listed = isFields(result) ? each(result.apps, readApp) : null;
-            const next = isFields(result) ? result.nextCursor : undefined;
-            return listed && (next === null || isPublication(next)) ? { apps: listed, next } : null;
-          },
-        );
-        apps.push(...answer.apps);
-        if (answer.next === null) return apps;
-        if (seen.has(answer.next)) break;
-        seen.add(answer.next);
-        cursor = answer.next;
-      }
-      throw new ServerError("invalid");
-    },
+    /** Every app the phone can open. */
+    list: (): Promise<readonly PhoneApp[]> => all("apps", CATALOG_PAGES, readApp, isPublication),
 
     review: (publicationId: string) =>
       run("appReview", { publicationId }, (result) => readReview(result, publicationId)),

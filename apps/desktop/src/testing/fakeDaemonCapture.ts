@@ -407,6 +407,23 @@ export function createFakeDaemonCapture(input: {
           }
           return response;
         }
+        case "conflicts.resolve": {
+          const response = await loopback.sendRequest(request);
+          const result = response.result as {
+            placed?: boolean;
+            conflict?: { path: string; targetVersionId: string };
+          };
+          const conflict = result.conflict;
+          if (result.placed && conflict && conflict.targetVersionId === (await activeVersionId())) {
+            const head = await call(VERSIONED_METHOD.textRead, {
+              versionId: conflict.targetVersionId,
+              path: conflict.path,
+            });
+            if (head) await writeHead(conflict.targetVersionId, conflict.path);
+            else await removePath(conflict.path);
+          }
+          return response;
+        }
         case VERSIONED_METHOD.secretsApply: {
           const response = await loopback.sendRequest(request);
           const result = response.result as { changed: boolean };

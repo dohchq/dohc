@@ -5,6 +5,7 @@
 //! pending: the file comes before the row.
 #![cfg(unix)]
 
+use dohc_engine_files::materialize::{PreparedTemps, materialize_one_ordinary_prepared};
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, KeptCopySave, MaterializeOptions, NoBackoff, StdReplacer,
     materialize_one, materialize_secret_one, run_pending_jobs, save_kept_displacement,
@@ -274,5 +275,51 @@ fn a_version_switch_flushes_each_file_then_its_folder_and_drains_once() {
         ws.flushes(&names),
         ordered(&["d0/f0.md", "d0", "d0/f1.md", "d0", "d1/f2.md", "d1"])
     );
+    ws.assert_drains_once();
+}
+
+/// A switch that writes its temps ahead flushes all of them before its first
+/// job ends, then each job flushes its folder while it is still pending. One
+/// drain still pays for every barrier.
+#[test]
+fn a_version_switch_flushes_its_prepared_temps_before_any_job_ends() {
+    let mut ws = Workspace::new("switch-prepared");
+    let files = ["d0/f0.md", "d0/f1.md", "d1/f2.md"];
+    for (n, rel) in files.into_iter().enumerate() {
+        std::fs::create_dir_all(ws.path(&rel[..2])).expect("folder");
+        let before = format!("before {n}");
+        std::fs::write(ws.path(rel), &before).expect("preimage");
+        ws.store
+            .put_binary_blob(before.as_bytes())
+            .expect("preimage blob");
+        let preimage = Preimage::Present(hex_sha256(before.as_bytes()));
+        let id = format!("version-switch-mat_{n:04}");
+        ws.enqueue(&id, rel, format!("after {n}").as_bytes(), preimage, false);
+    }
+    let jobs: Vec<_> = (0..files.len())
+        .map(|n| ws.job(&format!("version-switch-mat_{n:04}")))
+        .collect();
+    let ended = ws.watch_ended_jobs();
+    let prepared = PreparedTemps::prepare(
+        &ws.store,
+        &ws.path(""),
+        &jobs.iter().collect::<Vec<_>>(),
+        DurabilityPolicy::per_os(),
+    );
+    for job in &jobs {
+        let outcome =
+            materialize_one_ordinary_prepared(&ws.store, &ws.path(""), job, &options(), &prepared)
+                .expect("switch job");
+        assert_eq!(outcome, JobOutcome::Completed);
+    }
+    drop(prepared);
+    assert_eq!(*ended.lock().unwrap(), vec![0, 0, 0, 0, 1, 2]);
+    let names = ["d0/f0.md", "d0/f1.md", "d1/f2.md", "d0", "d1"];
+    let flushes = ws.flushes(&names);
+    let (temps, folders) = flushes.split_at(files.len());
+    let mut temps = temps.to_vec();
+    temps.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(temps, ordered(&files));
+    assert_eq!(folders, ordered(&["d0", "d0", "d1"]));
     ws.assert_drains_once();
 }

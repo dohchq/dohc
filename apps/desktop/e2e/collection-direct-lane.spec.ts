@@ -261,7 +261,7 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
     expect(await saveText(page, AUTOMATIONS_PATH, AUTOMATIONS_LATE)).toBe("written");
     const stale = page
       .getByTestId("workspace-shell-error")
-      .filter({ hasText: "changed before your change reached" });
+      .filter({ hasText: "changed before your update reached" });
     await expect(stale).toBeVisible({ timeout: 60_000 });
     expect(await directPaths(relay, ownerWorkspaceId)).toHaveLength(2);
     await stale.getByTestId("workspace-shell-error-action").click();

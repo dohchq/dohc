@@ -1,3 +1,4 @@
+import { AGENT_RUN_SCAN_MAX_PAGES } from "@dohc/workspace-contracts/agent-run-undo";
 import type { CliGrepContextMessage, CliGrepMatch, CliResultByVerb } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
 import {
@@ -489,6 +490,7 @@ const LIVE_REASON_WORDS = {
   "session-host-refused": "stopped by the server",
   "session-host-diverged": "server copy doesn't match",
   "live-document-without-lineage": "not started",
+  "live-document-too-large": "too large",
   "live-edit-unadmitted": "server copy is missing an edit",
   "conflict-parent-withheld": "can't resume",
   "live-history-over-budget": "history too long",
@@ -658,7 +660,9 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       const resumed = result as Extract<CliResultByVerb["liveResume"], { ok: true }>;
       return resumed.already
         ? `${lineSafe(resumed.path)} was already live.`
-        : `Resuming live editing for ${lineSafe(resumed.path)}`;
+        : resumed.ended
+          ? `${lineSafe(resumed.path)} was moved, deleted or replaced, so live editing stays off. Its pause has ended.`
+          : `Resuming live editing for ${lineSafe(resumed.path)}`;
     }
     case "liveStop": {
       const stopped = result as Extract<CliResultByVerb["liveStop"], { ok: true }>;
@@ -823,7 +827,140 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderAutomationPress(
         result as Extract<CliResultByVerb["automationPress"], { ok: true }>,
       );
+    case "workspaceSearch":
+      return renderWorkspaceSearch(result as CliResultByVerb["workspaceSearch"]);
+    case "planUndoAgentRun":
+      return renderPlanUndoAgentRun(result as CliResultByVerb["planUndoAgentRun"]);
+    case "undoAgentRun":
+      return renderUndoAgentRun(result as Extract<CliResultByVerb["undoAgentRun"], { ok: true }>);
     default:
       return JSON.stringify(result, null, 2);
   }
+}
+
+function renderPlanUndoAgentRun(result: CliResultByVerb["planUndoAgentRun"]): string {
+  if (result.policyUnreadable?.length) {
+    return `Could not read workspace rules (${result.policyUnreadable.map(lineSafe).join(", ")}).`;
+  }
+  const lines: string[] = [];
+  if (result.restorable.length === 0 && result.skipped.length === 0) {
+    lines.push("No file changes found for this agent run on the active version.");
+  } else {
+    lines.push(
+      `${counted(result.restorable.length, "file", "files")} can be undone · ${counted(result.skipped.length, "file", "files")} skipped`,
+    );
+    for (const item of result.restorable) {
+      lines.push(
+        `  undo (${item.action === "delete" ? "remove created file" : "restore"}): ${lineSafe(item.path)}`,
+      );
+    }
+    for (const item of result.skipped) {
+      lines.push(`  skip: ${lineSafe(item.path)} (${lineSafe(item.detail)})`);
+    }
+    if (result.restorable.length > 0) {
+      lines.push(`Plan token: ${lineSafe(result.planToken)}`);
+    }
+  }
+  if (result.truncated) {
+    lines.push(
+      `Note: checked the latest ${AGENT_RUN_SCAN_MAX_PAGES} History pages (${counted(result.scannedChanges, "change", "changes")} on this version). Older history was not checked.`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function renderUndoAgentRun(
+  result: Extract<CliResultByVerb["undoAgentRun"], { ok: true }>,
+): string {
+  if (result.policyUnreadable?.length) {
+    return `Could not read workspace rules (${result.policyUnreadable.map(lineSafe).join(", ")}).`;
+  }
+  const lines: string[] = [
+    `${counted(result.restored.length, "file", "files")} undone · ${counted(result.skipped.length, "file", "files")} skipped · ${counted(result.failed.length, "file", "files")} failed`,
+  ];
+  for (const item of result.restored) {
+    lines.push(`  ${item.restored === "deleted" ? "removed" : "restored"}: ${lineSafe(item.path)}`);
+  }
+  for (const item of result.skipped) {
+    lines.push(`  skipped: ${lineSafe(item.path)} (${lineSafe(item.detail)})`);
+  }
+  for (const item of result.failed) {
+    lines.push(`  failed: ${lineSafe(item.path)} (${lineSafe(item.detail)})`);
+  }
+  return lines.join("\n");
+}
+
+function renderWorkspaceSearch(result: CliResultByVerb["workspaceSearch"]): string {
+  const lines: string[] = [];
+  if (result.results.length === 0) {
+    lines.push("No matching pages, Collections, records, or chats.");
+  } else {
+    for (const hit of result.results) {
+      const tag =
+        hit.kind === "collection" && hit.collectionKind === "transactional" ? "dataset" : hit.kind;
+      const location =
+        hit.path ??
+        hit.collectionPath ??
+        hit.datasetPath ??
+        (hit.channelName && hit.threadId
+          ? `#${hit.channelName} (${hit.threadId})`
+          : (hit.threadId ?? hit.id));
+      lines.push(`[${tag}] ${lineSafe(hit.title)} — ${lineSafe(location)}`);
+      if (hit.matchedFields && hit.matchedFields.length > 0) {
+        const fields = hit.matchedFields
+          .map((field) => `${lineSafe(field.name)}=${lineSafe(field.value)}`)
+          .join(" · ");
+        lines.push(`  fields: ${fields}`);
+      }
+      if (hit.snippet.trim().length > 0) {
+        lines.push(`  ${lineSafe(hit.snippet)}`);
+      }
+      if (hit.related.length > 0) {
+        const links = hit.related
+          .map((edge) => {
+            const arrow = edge.direction === "out" ? "→" : "←";
+            const label = edge.field ? `${edge.edge}:${edge.field}` : edge.edge;
+            return `${arrow} [${edge.kind}] ${lineSafe(edge.title)} (${label})`;
+          })
+          .join(", ");
+        lines.push(`  related: ${links}`);
+      }
+    }
+  }
+  if (result.neighbors.length > 0) {
+    lines.push("");
+    lines.push("Connected:");
+    for (const neighbor of result.neighbors) {
+      const location = neighbor.path ?? neighbor.collectionPath ?? neighbor.threadId ?? neighbor.id;
+      const via = neighbor.via
+        .map((step) => {
+          const label = step.field ? `${step.edge}:${step.field}` : step.edge;
+          return `${step.direction === "out" ? "from" : "to"} ${lineSafe(step.fromTitle)} (${label})`;
+        })
+        .join("; ");
+      lines.push(
+        `  [${neighbor.kind}] ${lineSafe(neighbor.title)} — ${lineSafe(location)} (via ${via})`,
+      );
+    }
+  }
+  const notices: string[] = [];
+  if (result.indexBuilding) notices.push("index is still building");
+  if (result.policyDegraded) {
+    notices.push("visibility policy could not be read; filtered files excluded");
+  }
+  if (!result.mountsCovered) {
+    notices.push("mounted shared folders under shared-with-me/ are not searched");
+  }
+  if (result.sharedChannelRowsUncovered > 0) {
+    notices.push(
+      `${counted(result.sharedChannelRowsUncovered, "shared channel", "shared channels")} could not be refreshed`,
+    );
+  }
+  if (result.truncated) notices.push("output truncated to byte budget");
+  if (!result.complete && notices.length === 0) notices.push("partial coverage");
+  if (notices.length > 0) {
+    lines.push("");
+    lines.push(`Note: ${notices.join("; ")}.`);
+  }
+  return lines.join("\n");
 }

@@ -296,9 +296,10 @@ pub(crate) fn apply_replication_envelope_in_batch(
         ),
         OwnedRoute::Conflict => map_applied(
             crate::apply_conflict_envelope(store, envelope, faults, leases),
-            |conflict| {
+            |mut conflict| {
                 let conflicts_opened = i64::from(conflict.inserted == Some(true));
                 RoutedApply {
+                    record_facts: conflict.record_facts.take().into_iter().collect(),
                     conflict: Some(conflict),
                     conflicts_opened,
                     ..RoutedApply::default()

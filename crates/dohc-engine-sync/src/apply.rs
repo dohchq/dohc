@@ -10,23 +10,23 @@ use dohc_engine_domain::chats::{
     agent_id_for_channel_wire_id, bump_chat_conversation_revision, channel_collision_slug,
     chat_thread_display_title, deleted_message, erase_deleted_message, free_agent_channel_slug,
     index_replicated_chat_message_search_rows, insert_deleted_message, is_agent_channel_slug,
-    is_agent_id, normalize_reported_agent, normalize_work_report, personal_agent_may_post_in,
-    record_message_delete, replicated_source_origin, truncate_slug_base,
-    upsert_chat_search_index_row, work_report_json,
+    is_agent_id, is_well_known_channel_id, normalize_reported_agent, normalize_work_report,
+    personal_agent_may_post_in, record_message_delete, replicated_source_origin,
+    truncate_slug_base, upsert_chat_search_index_row, well_known_channel_id, work_report_json,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AccountThreadReadCell, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
-    ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution,
-    FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ReplicatedMessageAuthor,
-    ThreadMessageResolution, ThreadReadResolution, attachment_id_for, channel_slug_for_name,
-    encode_poll_options, has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
-    merge_account_thread_read, normalize_agent_owner_name, normalize_author_user_id,
-    normalize_body, normalize_channel_group, normalize_channel_name, normalize_display_name,
-    normalize_feed_identity, normalize_poll_options, normalize_reaction_author_id,
-    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
-    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
-    resolve_thread_read_coordinate, validate_addressable_plaintext_path,
-    validate_replicated_link_author,
+    ChatActorKind, ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError,
+    FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID,
+    ReplicatedMessageAuthor, ThreadMessageResolution, ThreadReadResolution, attachment_id_for,
+    channel_slug_for_name, encode_poll_options, has_projection_control_char, is_js_trim_ws,
+    is_reaction_emoji_verbatim, merge_account_thread_read, normalize_agent_owner_name,
+    normalize_author_user_id, normalize_body, normalize_channel_group, normalize_channel_name,
+    normalize_display_name, normalize_feed_identity, normalize_poll_options,
+    normalize_reaction_agent_id, normalize_reaction_author_id, normalize_replicated_chat_id,
+    parse_mention_handles, replay_ready_pending_chat_coordinates, resolve_feed_coordinate,
+    resolve_follow_target, resolve_thread_message, resolve_thread_read_coordinate,
+    validate_addressable_plaintext_path, validate_replicated_link_author,
 };
 
 use crate::error::local_corruption;
@@ -903,6 +903,8 @@ struct ReactionSet {
     emoji: String,
     author_id: String,
     author_kind: String,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    author_agent_id: Option<String>,
     author_display_name: String,
     at_ms: i64,
     state: String,
@@ -1063,6 +1065,13 @@ fn apply_channel(
     if channel_id != payload.channel_id
         || channel_id == GENERAL_CHANNEL_WIRE_ID
         || agent_id_for_channel_wire_id(&channel_id).is_some()
+        || (is_well_known_channel_id(&channel_id)
+            && payload
+                .wire_id
+                .as_deref()
+                .and_then(well_known_channel_id)
+                .as_deref()
+                != Some(channel_id.as_str()))
     {
         return Err(SyncError::InvalidInput {
             reason: "chat channel id is invalid",
@@ -1641,7 +1650,11 @@ fn resolve_or_create_placeholder(
         .ok_or(SyncError::InvalidInput {
             reason: "channel thread lacks an identity",
         })?;
-    let channel_id = format!("placeholder:{}:{}", op.origin_id, identity);
+    let channel_id = payload
+        .channel_wire_id
+        .as_deref()
+        .and_then(well_known_channel_id)
+        .unwrap_or_else(|| format!("placeholder:{}:{}", op.origin_id, identity));
     let requested_slug = payload.channel_slug.as_deref().unwrap_or(identity);
     let placeholder_name = channel_allocation_base(requested_slug);
     let allocation_identity = payload.channel_wire_id.as_deref().unwrap_or(&channel_id);
@@ -2259,28 +2272,43 @@ fn apply_reaction(
             reason: "chat reaction author id is invalid",
         });
     }
+    let author_kind = if p.author_kind == "agent" {
+        ChatActorKind::Agent
+    } else {
+        ChatActorKind::Human
+    };
+    let author_agent_id = normalize_reaction_agent_id(author_kind, p.author_agent_id.as_deref())
+        .map_err(|error| map_chat_rule(error, "chat reaction agent is invalid"))?;
     let author_display_name = normalize_display_name(&p.author_display_name)
         .map_err(|error| map_chat_rule(error, "chat reaction display name is invalid"))?;
     let prior_thread_id = tx
         .query_row(
             "SELECT thread_id FROM chat_reactions \
-             WHERE workspace_id=?1 AND message_id=?2 AND emoji=?3 AND author_id=?4",
-            params![op.workspace_id, p.message_id, p.emoji, author_id],
+             WHERE workspace_id=?1 AND message_id=?2 AND emoji=?3 AND author_id=?4 \
+               AND author_kind=?5 AND author_agent_id=?6",
+            params![
+                op.workspace_id,
+                p.message_id,
+                p.emoji,
+                author_id,
+                p.author_kind,
+                author_agent_id
+            ],
             |row| row.get::<_, String>(0),
         )
         .optional()
         .map_err(SyncError::corrupt)?;
     let updated = tx.execute(
         "INSERT INTO chat_reactions \
-         (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,author_display_name,state,at_ms,origin_id,origin_seq) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) \
-         ON CONFLICT(workspace_id,message_id,emoji,author_id) DO UPDATE SET \
-           reaction_id=excluded.reaction_id,thread_id=excluded.thread_id,author_kind=excluded.author_kind,
+         (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,author_agent_id,author_display_name,state,at_ms,origin_id,origin_seq) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) \
+         ON CONFLICT(workspace_id,message_id,emoji,author_id,author_kind,author_agent_id) DO UPDATE SET \
+           reaction_id=excluded.reaction_id,thread_id=excluded.thread_id,
            author_display_name=excluded.author_display_name,state=excluded.state,at_ms=excluded.at_ms,
            origin_id=excluded.origin_id,origin_seq=excluded.origin_seq \
          WHERE (excluded.at_ms, excluded.state, excluded.origin_id, excluded.origin_seq) > \
                (at_ms, state, origin_id, origin_seq)",
-        params![op.workspace_id,p.reaction_id,p.thread_id,p.message_id,p.emoji,author_id,p.author_kind,author_display_name,p.state,p.at_ms,op.origin_id,op.origin_seq],
+        params![op.workspace_id,p.reaction_id,p.thread_id,p.message_id,p.emoji,author_id,p.author_kind,author_agent_id,author_display_name,p.state,p.at_ms,op.origin_id,op.origin_seq],
     )
     .map_err(SyncError::persist)?;
     if updated > 0 {
