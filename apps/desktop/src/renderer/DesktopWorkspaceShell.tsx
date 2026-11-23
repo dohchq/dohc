@@ -2,7 +2,6 @@ import type { GraphNode } from "./workbench/graphData";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { useProtectedCopyNotices } from "./shell/useProtectedCopyNotices";
 import { useOutsideChangeNotices } from "./shell/useOutsideChangeNotices";
-import { useAccessRuleHoldNotices } from "./shell/useAccessRuleHoldNotices";
 import { isRefusalNoticeKind } from "../notices/refusalNoticeKind";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
@@ -8024,29 +8023,6 @@ export function DesktopWorkspaceShell(props: {
     reportShellFailure,
     clearIdentity,
   });
-  // Opens Notices at the row of one identity, such as a held folder that an
-  // inner folder's decision waits for.
-  const [noticeShown, setNoticeShown] = useState<{ id: string; seq: number } | null>(null);
-  const showNoticeRow = useCallback((identity: string) => {
-    const id = shellErrorsRef.current.find((error) => error.identity === identity)?.id;
-    if (id !== undefined) setNoticeShown((current) => ({ id, seq: (current?.seq ?? 0) + 1 }));
-  }, []);
-  const { readMemberLevel } = useAccessRuleHoldNotices({
-    workspaceId,
-    holds: shareView ? undefined : syncStatus?.heldAccessRules,
-    reportShellFailure,
-    clearIdentity,
-    showSuccessNotice,
-    showNotice: showNoticeRow,
-    openHistory: openHistoryView,
-    openMembers: () => openSettings("members"),
-  });
-  // A held rule's words name the members' level, which Settings can change.
-  const settingsWereOpen = useRef(settingsOpen);
-  useEffect(() => {
-    if (settingsWereOpen.current && !settingsOpen) readMemberLevel();
-    settingsWereOpen.current = settingsOpen;
-  }, [settingsOpen, readMemberLevel]);
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),
@@ -8473,7 +8449,6 @@ export function DesktopWorkspaceShell(props: {
                             notices={
                               <NoticeCenter
                                 workspaceId={workspaceId}
-                                onOpen={readMemberLevel}
                                 syncStatus={syncStatus}
                                 failedSaves={failedSaves}
                                 agentActive={agentActive}
@@ -8507,7 +8482,6 @@ export function DesktopWorkspaceShell(props: {
                                 onRetryLiveDelivery={retryLiveDelivery}
                                 onOpenSharingDeclined={openSharingDeclined}
                                 onOpenTarget={openNoticeRowTarget}
-                                showRequest={noticeShown}
                                 {...(shareView
                                   ? {}
                                   : {
@@ -10048,7 +10022,6 @@ export function DesktopWorkspaceShell(props: {
                               workspaceOpenFailed={!!workspaceOpenFailure}
                               onError={reportSettingsFailure}
                               onClearError={clearIdentity}
-                              onMemberLevelSaved={readMemberLevel}
                               serverNamed={chatsServerNamed}
                               onNotice={showSettingsNotice}
                               onWorkspaceSettingsRead={onWorkspaceSettingsRead}

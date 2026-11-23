@@ -426,6 +426,7 @@ describe("share-level tool profiles", () => {
               memberLevel: "comment",
               inviteLink: null,
               groupRules: null,
+              folderRules: null,
               people: [],
             },
           };
@@ -463,6 +464,7 @@ describe("share-level tool profiles", () => {
         memberLevel: "comment",
         inviteLink: null,
         groupRules: null,
+        folderRules: null,
         people: [],
       },
     });

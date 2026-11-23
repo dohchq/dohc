@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   GROUP_RULE_LEVELS,
+  FOLDER_RULE_STATES,
   isPaletteSlot,
   MAX_MEMBER_EMAIL_CHARS,
   MEMBER_STATES,
@@ -100,6 +101,20 @@ const InviteLinkSchema = z
     "An invite link has a URL exactly while it is on.",
   );
 
+const FolderRuleSchema = z
+  .object({
+    ruleId: z.string().regex(/^fr_[0-9a-f]{32}$/u),
+    revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    members: level.nullable(),
+    people: z
+      .array(z.object({ email: z.string().max(MAX_MEMBER_EMAIL_CHARS), level }).strict())
+      .max(1_000),
+    folders: z
+      .array(z.object({ path: z.string().max(4096), state: z.enum(FOLDER_RULE_STATES) }).strict())
+      .max(10_000),
+  })
+  .strict();
+
 /**
  * The relay's Members answer. A view that breaks a rule is unreadable, never
  * a narrower answer: the owner and admins get the invite link, and a member
@@ -121,6 +136,7 @@ const WorkspaceMembersViewSchema = z
           .strict(),
       )
       .nullable(),
+    folderRules: z.array(FolderRuleSchema).nullable(),
     people: z.array(WorkspacePersonSchema),
   })
   .strict()
@@ -131,6 +147,10 @@ const WorkspaceMembersViewSchema = z
   .refine(
     (view) => (view.viewer.role !== "member") === (view.groupRules !== null),
     "Only the owner and admins get Group rules.",
+  )
+  .refine(
+    (view) => (view.viewer.role !== "member") === (view.folderRules !== null),
+    "Only the owner and admins get folder rules.",
   )
   .refine(
     (view) =>

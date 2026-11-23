@@ -209,11 +209,11 @@ impl ShareReach {
         self.root_level
     }
 
-    /// The level at a file path, or `None` where the member has none. A rule
-    /// file or a copy of one is never the member's, as `levelAtPath` says.
+    /// The level at a file path, or `None` where the member has none. A
+    /// folder marker is never the member's, as `levelAtPath` says.
     pub fn level_at(&self, path: &str) -> Option<ShareAccess> {
         let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
-        if dohc_engine_files::floor::collision_key(name).contains("access.yaml") {
+        if dohc_engine_files::floor::collision_key(name) == ".dohc-access" {
             return None;
         }
         self.folder_level(folder)
@@ -1310,9 +1310,10 @@ mod share_view_boundary_tests {
         // Folders match exactly.
         assert_eq!(listed.level_at("plans/day-1.md"), Some(ShareAccess::View));
         assert_eq!(listed.level_at("Plans2/day-1.md"), Some(ShareAccess::View));
-        // A rule file and a copy of one are never the member's.
-        assert_eq!(listed.level_at("Plans/access.yaml"), None);
-        assert_eq!(listed.level_at("Plans/ACCESS.yaml.swp"), None);
+        // A folder marker, however it is spelled, is never the member's.
+        assert_eq!(listed.level_at("Plans/.dohc-access"), None);
+        assert_eq!(listed.level_at("Plans/.DOHC-ACCESS"), None);
+        assert_eq!(listed.level_at("Plans/access.yaml"), Some(ShareAccess::Edit));
         assert_eq!(listed.highest(), Some(ShareAccess::Edit));
 
         let hidden_root = reach(None, &[("Shared", ShareAccess::Comment)]);

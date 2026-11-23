@@ -87,7 +87,7 @@ Do what the Members page does, in a workspace you own or joined: list people, in
 
 - `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" } | { action: "group", group: string, level?: "comment" | "view" | "none" | null }`. Required.
 
-Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } } | { status: "refused" } | { status: "done" } | { status: "group", name, level, memberLevel }`.
+Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } } | { status: "refused" } | { status: "done" } | { status: "group", name, level, memberLevel }`.
 
 ### `dohc_dataset`
 
@@ -1094,7 +1094,7 @@ dohc members list [options]
 
 List people, invites, removed accounts, the member level, and the invite link.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members invite`
 
@@ -1104,7 +1104,7 @@ dohc members invite <email> [options]
 
 Invite someone by email. dohc sends no email: tell them to sign in to dohc with that address.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members remove`
 
@@ -1114,7 +1114,7 @@ dohc members remove <person> [options]
 
 Remove a person or cancel an invite. Copies already on their computer stay.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members level`
 
@@ -1124,7 +1124,7 @@ dohc members level <view|comment|edit> [options]
 
 Set what every member can do: view, comment, or edit. Admins and the owner always edit.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members admin`
 
@@ -1134,7 +1134,7 @@ dohc members admin <person> [options]
 
 Make a member an admin. Admins invite, remove members, and manage the invite link.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members member`
 
@@ -1144,7 +1144,7 @@ dohc members member <person> [options]
 
 Make an admin a member again.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members let-back-in`
 
@@ -1154,7 +1154,7 @@ dohc members let-back-in <person> [options]
 
 Let a removed account back in as a member.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members link`
 
@@ -1166,7 +1166,7 @@ Turn the invite link on or off, or reset it.
 
 Anyone with the link who signs in becomes a member. Turning it off or resetting it removes no one who already joined. Reset stops the old link working. dohc members list shows the link.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members group`
 
@@ -1181,7 +1181,7 @@ A Group is a name or id from dohc chat groups. General, direct messages and agen
 - `--level <post|view|none>`: Set the Group's access.
 - `--clear`: Remove the Group's access, so it takes the member level.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 #### `dohc members end`
 
@@ -1193,7 +1193,7 @@ End membership for everyone. Members lose access; copies already on their comput
 
 - `--everyone`: Required. Confirms that every member and admin loses access.
 
-With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
 ### `dohc document`
 

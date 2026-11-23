@@ -24,27 +24,6 @@ pub enum RuntimeError {
     ChatConversationLinksChanged,
     #[error("links-edges-source-changed")]
     LinksEdgesSourceChanged,
-    #[error("access-rule-held: {reason} {folder}")]
-    AccessRuleHeld {
-        folder: String,
-        reason: &'static str,
-    },
-    /// The owner decided on a rule that has changed on disk since.
-    #[error("access-rule-changed: {folder}")]
-    AccessRuleChanged { folder: String },
-    /// The owner decided on a hold the engine no longer lists for the
-    /// active Version: decided already, or its Version is no longer active.
-    #[error("access-rule-not-held")]
-    AccessRuleNotHeld,
-    /// A merge's rule write, made in the order planned for it, would now
-    /// widen someone midway: Main or the version changed since. Nothing was
-    /// written; the caller plans the rest again.
-    #[error("rule-merge-order-changed")]
-    RuleMergeOrderChanged,
-    #[error(
-        "dohc stopped the merge. {path} has an open conflict. Resolve that conflict, then merge again."
-    )]
-    RuleMergeConflict { path: String },
     #[error("capture-file-held: {path}")]
     CaptureFileHeld { path: String },
     #[error("capture-not-owned: {path}")]
@@ -201,11 +180,6 @@ impl RuntimeError {
             RuntimeError::ChatMentionVersionChanged => "chat-mention-version-changed",
             RuntimeError::ChatConversationLinksChanged => "chat-conversation-links-changed",
             RuntimeError::LinksEdgesSourceChanged => "links-edges-source-changed",
-            RuntimeError::AccessRuleHeld { .. } => "access-rule-held",
-            RuntimeError::AccessRuleChanged { .. } => "access-rule-changed",
-            RuntimeError::AccessRuleNotHeld => "access-rule-not-held",
-            RuntimeError::RuleMergeOrderChanged => "rule-merge-order-changed",
-            RuntimeError::RuleMergeConflict { .. } => "rule-merge-conflict",
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
             RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",
             RuntimeError::Identity { .. } => "identity-unresolved",

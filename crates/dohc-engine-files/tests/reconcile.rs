@@ -148,36 +148,65 @@ fn rename_looks_like_remove_plus_add() {
     assert_eq!(retire_paths(&p), ["old-name.md"]);
 }
 
-/// A folder moved with its access rule creates the rule at the destination
-/// before the files arrive, and deletes it at the source after they leave.
 #[test]
-fn a_moved_folder_plans_its_rule_create_first_and_its_delete_last() {
+fn capture_orders_marker_writes_before_and_deletes_after_contents() {
     let ws = Scratch::new();
-    ws.write("team/access.yaml", b"members: view\n");
-    ws.write("team/a.md", b"alpha\n");
+    for path in ["old/.DOHC-ACCESS", "old/-first.md", "old/z-last.md"] {
+        ws.write(path, b"old contents");
+    }
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let mut ctrl = ReconcileController::new();
     let token = CancellationToken::new();
     let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    ws.rename("old", "new");
 
-    ws.rename("team", "crew");
-
-    let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
-    let ops: Vec<_> = p
-        .ops
-        .iter()
-        .map(|op| match op {
-            CaptureOp::Ingest { path, .. } => format!("write {path}"),
-            CaptureOp::Retire { path } => format!("delete {path}"),
-        })
-        .collect();
+    let moved = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    let paths: Vec<_> = moved.ops.iter().map(CaptureOp::path).collect();
     assert_eq!(
-        ops,
+        paths,
         [
-            "write crew/access.yaml",
-            "write crew/a.md",
-            "delete team/a.md",
-            "delete team/access.yaml",
+            "new/.DOHC-ACCESS",
+            "new/-first.md",
+            "new/z-last.md",
+            "old/-first.md",
+            "old/z-last.md",
+            "old/.DOHC-ACCESS",
+        ]
+    );
+}
+
+#[test]
+fn capture_finds_markers_that_appeared_after_enumeration() {
+    struct DropMarkersDuringHash(std::path::PathBuf);
+    impl ScanIoFaultInjector for DropMarkersDuringHash {
+        fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
+            if path == "team/sub/notes.md" && operation == ScanIoOperation::Hash {
+                for path in [".dohc-access", "team/.DOHC-ACCESS", "team/sub/.dohc-access"] {
+                    std::fs::write(self.0.join(path), b"rule fr_1\n").expect("write marker");
+                }
+                std::fs::write(self.0.join("team/sub/.dohc-access.bak"), b"backup").unwrap();
+            }
+            None
+        }
+    }
+
+    let ws = Scratch::new();
+    ws.write("team/sub/notes.md", b"new contents");
+    let scanner = Scanner::new_with_io_faults(
+        ScanBounds::default(),
+        Arc::new(DropMarkersDuringHash(ws.path().to_path_buf())),
+    )
+    .expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let captured = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert_eq!(
+        ingest_paths(&captured, IngestReason::Added),
+        [
+            ".dohc-access",
+            "team/.DOHC-ACCESS",
+            "team/sub/.dohc-access",
+            "team/sub/notes.md",
         ]
     );
 }

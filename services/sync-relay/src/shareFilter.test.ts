@@ -2104,7 +2104,8 @@ describe("a new page under Edit", () => {
     expect(decide(memberAt("comment"), [page("drafts/idea.md")], true)).toEqual(REFUSED);
   });
 
-  it("refuses a member's change to a rule file or a copy of one, and serves the rule only to an admin", () => {
+  it("refuses a folder marker, however it is spelled, from a member or an admin by any lane", () => {
+    const admin: WorkspaceShareSelector = { ...member, role: "admin" };
     const change = (afterPath: string) => ({
       basedOnPath: null,
       basedOnBlobSha256: null,
@@ -2115,37 +2116,31 @@ describe("a new page under Edit", () => {
       afterByteLength: 14,
       recordedAtMs: 5,
     });
-    for (const path of ["docs/access.yaml", "docs/ACCESS.YAML", "docs/access.yaml~"]) {
-      expect(filterProposedChangeForShare(member, change(path)).allowed, path).toBe(false);
+    const markerWrite = (path: string) =>
+      JSON.stringify({
+        momentId: "m-marker",
+        versionId: "main",
+        objectId: "o-marker",
+        path,
+        recordedAtMs: 1,
+        operation: "write",
+        payloadBeforeBlobSha256: null,
+        payloadBeforePath: null,
+        payloadAfterBlobSha256: sha(6),
+        payloadAfterPath: path,
+        metadata: { origin: "user" },
+        beforePresent: "null",
+      });
+    for (const selector of [member, admin]) {
+      for (const path of ["docs/.dohc-access", "docs/.DOHC-Access", ".dohc-access"]) {
+        expect(filterProposedChangeForShare(selector, change(path)).allowed, path).toBe(false);
+        expect(filterOpForShare(selector, "moment.append", markerWrite(path)).allowed, path).toBe(
+          false,
+        );
+        expect(decide(selector, [page(path, { afterContentKind: "text" })], true)).toEqual(REFUSED);
+      }
     }
-    expect(decide(member, [page("docs/access.yaml.md")])).toEqual(REFUSED);
-    const ruleWrite = JSON.stringify({
-      momentId: "m-rule",
-      versionId: "main",
-      objectId: "o-rule",
-      path: "docs/access.yaml",
-      recordedAtMs: 1,
-      operation: "write",
-      payloadBeforeBlobSha256: null,
-      payloadBeforePath: null,
-      payloadAfterBlobSha256: sha(6),
-      payloadAfterPath: "docs/access.yaml",
-      metadata: { origin: "user" },
-      beforePresent: "null",
-    });
-    expect(filterOpForShare(member, "moment.append", ruleWrite).allowed).toBe(false);
-    expect(filterOpForShare({ ...member, role: "admin" }, "moment.append", ruleWrite).allowed).toBe(
-      true,
-    );
-  });
-
-  it("serves an admin the rule but refuses their change to it through a proposal or a Collection write", () => {
-    const admin: WorkspaceShareSelector = { ...member, role: "admin" };
-    const change = page("docs/access.yaml", { afterContentKind: "text" });
-    expect(filterProposedChangeForShare(admin, change).allowed).toBe(false);
-    expect(decide(admin, [change], true)).toEqual(REFUSED);
-    expect(decide(admin, [page("docs/access.yaml.md")], true)).toEqual(REFUSED);
-    // The same ordinary file is still theirs to change.
+    // The same ordinary file is still an admin's to change.
     expect(
       filterProposedChangeForShare(
         admin,

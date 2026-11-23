@@ -1,4 +1,6 @@
+import { parseAccessRule } from "@dohc/security-contract/access-rules";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
 import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -117,6 +119,35 @@ async function ownerWrite(h: SyncRelayHandler, path: string, text: string, befor
     }),
   ]);
   return sha;
+}
+
+// The owner sets, changes or clears a folder's rule as Members settings does.
+async function ownerRule(
+  h: SyncRelayHandler,
+  folder: string,
+  text: string | null,
+): Promise<string> {
+  const covers = (rule: { folders: Array<{ path: string }> }) =>
+    rule.folders.some((entry) => entry.path === folder);
+  const view = (await json(
+    await h(request(OWNER, `/sync/${WORKSPACE}/members`)),
+  )) as unknown as WorkspaceMembersView;
+  const held = view.folderRules!.find(covers);
+  const rule = text === null ? null : parseAccessRule(text)!;
+  const response = await post(h, OWNER, `/sync/${WORKSPACE}/members/folder-rules`, {
+    ...(held ? { ruleId: held.ruleId, revision: held.revision } : { folder }),
+    ...(rule === null
+      ? { clear: true }
+      : {
+          members: rule.members,
+          people: [...rule.people].map(([email, level]) => ({ email, level })),
+        }),
+  });
+  expect(response.status, await response.clone().text()).toBe(200);
+  return (
+    held?.ruleId ??
+    ((await response.json()) as WorkspaceMembersView).folderRules!.find(covers)!.ruleId
+  );
 }
 
 // The cookie names the person, as the account service would. Nothing else does.
@@ -274,8 +305,8 @@ describe("a member reads the workspace through the link read routes", () => {
         userId === "ana" ? email : `${userId}@dohc.test`,
     });
     const ana = await member(h, storage, "ana");
-    await ownerWrite(h, "Hidden Plans/access.yaml", "people:\n  ben@dohc.test: edit\n");
-    await ownerWrite(h, "docs/access.yaml", "people:\n  ana@dohc.test: edit\n");
+    await ownerRule(h, "Hidden Plans", "people:\n  ben@dohc.test: edit\n");
+    await ownerRule(h, "docs", "people:\n  ana@dohc.test: edit\n");
     const paths = async () =>
       (
         (await json(await memberRead(h, "/sync/link/current", ana.grantId, "ana"))).files as Array<{
@@ -312,9 +343,9 @@ describe("a member reads the workspace through the link read routes", () => {
     const { h, storage } = await seed();
     const ana = await member(h, storage, "ana");
     await setLevel(h, "comment");
-    await ownerWrite(h, "open/access.yaml", "members: edit\n");
+    await ownerRule(h, "open", "members: edit\n");
     await ownerWrite(h, "open/a.md", "open");
-    await ownerWrite(h, "view/access.yaml", "members: view\n");
+    await ownerRule(h, "view", "members: view\n");
     await ownerWrite(h, "view/b.md", "view");
     const read = async () => {
       const current = await json(await memberRead(h, "/sync/link/current", ana.grantId, "ana"));
@@ -337,19 +368,18 @@ describe("a member reads the workspace through the link read routes", () => {
       "open/a.md": "edit",
       "view/b.md": "view",
     });
-    await ownerWrite(h, "open/access.yaml", "members: view\n", "members: edit\n");
+    await ownerRule(h, "open", "members: view\n");
     const after = await read();
     expect(after.levels).toMatchObject({ "open/a.md": "view" });
     expect(after.reach).not.toBe(before.reach);
-    // An admin reads rule files, but edits none, as live editing judges.
+    // An admin edits every file, and no folder marker is listed.
     const role = await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, {
       role: "admin",
     });
     expect(role.status, await role.clone().text()).toBe(200);
-    expect((await read()).levels).toMatchObject({
-      "open/a.md": "edit",
-      "open/access.yaml": "comment",
-    });
+    const admin = await read();
+    expect(admin.levels).toMatchObject({ "open/a.md": "edit" });
+    expect(Object.keys(admin.levels).filter((path) => path.endsWith(".dohc-access"))).toEqual([]);
   });
 
   // A browser tells a workspace too large to list apart from a lost membership, and names the desktop app.
@@ -379,7 +409,7 @@ describe("a member reads the workspace through the link read routes", () => {
     const { h, storage } = await seed(undefined, { linkCurrentFileLimit: 1 });
     const ana = await member(h, storage, "ana");
     const ben = await member(h, storage, "ben");
-    await ownerWrite(h, "hidden/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
     await ownerWrite(h, "hidden/x.md", "private");
     const one = await memberRead(h, "/sync/link/current", ana.grantId, "ana");
     expect(one.status, await one.clone().text()).toBe(200);
@@ -514,7 +544,7 @@ describe("a member reads the workspace through the link read routes", () => {
     const { h, storage, planSha } = await seed();
     const ana = await member(h, storage, "ana");
     await ownerWrite(h, "docs/plan.md", "the new plan", "the plan");
-    await ownerWrite(h, "view/access.yaml", "members: view\n");
+    await ownerRule(h, "view", "members: view\n");
     const viewOld = await ownerWrite(h, "view/a.md", "view old");
     const viewCurrent = await ownerWrite(h, "view/a.md", "view current", "view old");
     const routes = {
@@ -554,7 +584,7 @@ describe("a member reads the workspace through the link read routes", () => {
     vi.setSystemTime(100_000);
     const { h, storage } = await seed();
     const ana = await member(h, storage, "ana");
-    await ownerWrite(h, "view/access.yaml", "members: view\n");
+    await ownerRule(h, "view", "members: view\n");
     await ownerWrite(h, "view/a.md", "view old");
     storage.claimWorkspaceIdentity({
       workspaceId: WORKSPACE,
@@ -611,17 +641,17 @@ describe("a member reads the workspace through the link read routes", () => {
     expect(history()).toEqual({ status: "denied" });
   });
 
-  // A workspace label is read with its reader's reach. A rule file stays out
-  // of it for everyone but the owner.
+  // A workspace label is read with its reader's reach. A folder marker stays
+  // out of it for everyone but the owner.
   it("keeps the file links its reader reaches in the workspace's label", async () => {
     const { h, storage } = await seed();
     const ana = await member(h, storage, "ana");
-    await ownerWrite(h, "hidden/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
     await ownerWrite(h, "hidden/x.md", "hidden work");
     storage.setShareLabels(
       ana.shareId,
       {
-        subjectName: "Community @[docs/plan.md] @[hidden] @[hidden/x.md] @[hidden/access.yaml]",
+        subjectName: "Community @[docs/plan.md] @[hidden] @[hidden/x.md] @[hidden/.dohc-access]",
       },
       0,
     );
@@ -843,7 +873,7 @@ describe("a member's Chats in a browser", () => {
 
   it("withholds a Group name's link to a folder the member can't see, in the list and a push", async () => {
     const { h, storage } = await seed();
-    await ownerWrite(h, "hidden/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
     await ownerWrite(h, "hidden/x.md", "hidden work");
     await ownerAppend(h, [
       logOp(
@@ -881,7 +911,7 @@ describe("a member's Chats in a browser", () => {
   it("withholds a link to a folder the member can't see from their Notice's title and body", async () => {
     const { h, storage } = await seed();
     await member(h, storage, "ana");
-    await ownerWrite(h, "hidden/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
     await ownerWrite(h, "hidden/x.md", "hidden work");
     recordAccountName(storage as unknown as StorageContext, "ana", "Ana");
     await ownerAppend(h, [
@@ -900,7 +930,7 @@ describe("a member's Chats in a browser", () => {
 
   it("withholds a Group message's link to a folder the member can't see", async () => {
     const { h, storage } = await seed();
-    await ownerWrite(h, "hidden/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerRule(h, "hidden", "people:\n  ben@dohc.test: edit\n");
     await ownerWrite(h, "hidden/x.md", "hidden work");
     await ownerAppend(h, [
       laneThread("t-links", GROUP),

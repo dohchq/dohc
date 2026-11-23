@@ -43,8 +43,6 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "documents.heldChange"
                 | "capture.reconcile"
                 | "capture.retryHeld"
-                | "capture.acceptAccessRule"
-                | "capture.restoreAccessRule"
                 | "capture.importRecovery"
                 | "versionedText.list"
                 | "versionedText.captureSources"
@@ -633,6 +631,23 @@ impl EngineService {
             "versionedBinary.writeBlob" => self.versioned_binary_write_blob(&ctx, request).await?,
             "versionedText.rename" => self.versioned_text_rename(&ctx, request).await?,
             "versionedText.checkMove" => self.versioned_text_check_move(&ctx, request).await?,
+            "versionedText.orderFileSteps" => {
+                #[derive(serde::Deserialize)]
+                struct Step {
+                    path: String,
+                    delete: bool,
+                }
+                #[derive(serde::Deserialize)]
+                struct Params {
+                    steps: Vec<Step>,
+                }
+                let Params { mut steps } = serde_json::from_value(request.params)
+                    .map_err(|_| WireError::new(ErrorCode::InvalidParams, "Invalid file steps"))?;
+                steps.sort_by_key(|step| {
+                    dohc_engine_files::marker_step_order(&step.path, step.delete)
+                });
+                json!(steps.into_iter().map(|step| step.path).collect::<Vec<_>>())
+            }
             "versionedText.delete" => self.versioned_text_delete(&ctx, request).await?,
             "versionedText.rollback" => self.versioned_text_rollback(&ctx, request).await?,
             "versionedText.merge" => self.versioned_text_merge(&ctx, request).await?,
@@ -642,10 +657,6 @@ impl EngineService {
             }
             "versions.compareFiles" => {
                 self.versions_compare_files(&ctx, request.workspace, request.params)
-                    .await?
-            }
-            "versions.ruleMergeOrder" => {
-                self.versions_rule_merge_order(&ctx, request.workspace, request.params)
                     .await?
             }
             "versions.createNamed" => self.versions_create_named(&ctx, request).await?,
@@ -769,24 +780,6 @@ impl EngineService {
             "capture.retryHeld" => {
                 self.capture_retry_held(&ctx, request.workspace, request.params)
                     .await?
-            }
-            "capture.acceptAccessRule" => {
-                self.capture_decide_access_rule(
-                    &ctx,
-                    request.workspace,
-                    request.params,
-                    dohc_engine_runtime::AccessRuleDecision::Accept,
-                )
-                .await?
-            }
-            "capture.restoreAccessRule" => {
-                self.capture_decide_access_rule(
-                    &ctx,
-                    request.workspace,
-                    request.params,
-                    dohc_engine_runtime::AccessRuleDecision::Restore,
-                )
-                .await?
             }
             "capture.setAuthor" => {
                 self.capture_set_author(&ctx, request.workspace, request.params)
@@ -1778,8 +1771,6 @@ mod tests {
             "capture.reconcile",
             "capture.retry",
             "capture.retryHeld",
-            "capture.acceptAccessRule",
-            "capture.restoreAccessRule",
             "capture.release",
             "capture.renew",
             "capture.setAuthor",
@@ -1935,6 +1926,7 @@ mod tests {
             "versionedText.list",
             "versionedText.captureSources",
             "versionedText.merge",
+            "versionedText.orderFileSteps",
             "versionedText.publicationApplied",
             "versionedText.read",
             "versionedText.readBlob",
@@ -1947,7 +1939,6 @@ mod tests {
             "versions.createNamed",
             "versions.ensureMain",
             "versions.list",
-            "versions.ruleMergeOrder",
             "versions.setActive",
             "watcher.status",
             "workReferences.make",

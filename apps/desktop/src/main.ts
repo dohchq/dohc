@@ -4512,7 +4512,6 @@ async function syncWorkspaceForDispatch(
               onKeptFiles: () => undefined,
               onRetainedCopies: () => undefined,
               onHeldFiles: () => undefined,
-              onHeldAccessRules: () => undefined,
             },
             requireEngineSessions(),
           );
@@ -9443,12 +9442,6 @@ function registerIpcHandlers(): void {
         const current = canonicalWorkspaceFor(lease);
         if (current.attachmentId !== workspace.attachmentId) return;
         workspaceActivity.recordHeldFiles(current, lease.state.activity, files);
-      }),
-    recordHeldAccessRules: (workspace, holds) =>
-      withWorkspaceActivityState(workspace.workspaceId, (lease) => {
-        const current = canonicalWorkspaceFor(lease);
-        if (current.attachmentId !== workspace.attachmentId) return;
-        workspaceActivity.recordHeldAccessRules(current, lease.state.activity, holds);
       }),
     // A shared view keeps no runs: its automations run on the owner's computer.
     signedInAccount: () => cachedCredentials?.userId ?? null,

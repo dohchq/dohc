@@ -509,9 +509,6 @@ const LISTED_CAPABILITIES = {
   "capture.recovery.read": capability("Read capture recovery status.", {
     ipc: ["getCaptureRecoveryStatus"],
   }),
-  "capture.access.decide": capability("Keep or restore an access rule that changed outside dohc.", {
-    ipc: ["decideAccessRule"],
-  }),
   "capture.held.retry": capability("Retry recording the outside edit to a held file.", {
     ipc: ["retryHeldCapture"],
   }),

@@ -37,10 +37,7 @@ import {
   LiveFolderError,
   liveFolderTitle,
   LivePageOwnedError,
-  MergeRuleConflictError,
-  MergeRuleOrderUnconfirmedError,
   MergeStoppedPartwayError,
-  MergeWidensAccessError,
   RestorePolicyRefusalError,
 } from "../workspaces/workspaceEngineCapture";
 import { EngineCaptureNotSettledError } from "../workspaces/workspaceEngineCaptureLiveStore";
@@ -694,68 +691,6 @@ describe("error words", () => {
     expect(
       isMergeStoppedPartway(acrossIpc(new Error("disk full"), "desktop:merge-workspace-version")),
     ).toBe(false);
-  });
-
-  const oneFolderAtATime =
-    "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again.";
-  it.each([
-    ["widens", oneFolderAtATime, /both before and after the merge/],
-    ["too-many", oneFolderAtATime, /too many related access rules/],
-    [
-      "folded-names",
-      "Nothing was merged. Use one spelling for each folder with access rules in Main and this version, then merge again.",
-      /names dohc counts as the same, such as Team and team\. .*only when the merge renames such a folder/,
-    ],
-  ] as const)(
-    "says a merge whose %s rules dohc could not order merged nothing, with the rules in Details",
-    (reason, next, cause) => {
-      const refused = new MergeWidensAccessError(reason, [
-        "team/access.yaml",
-        "team/sub/access.yaml",
-      ]);
-      const words = readError(acrossIpc(refused, "desktop:merge-workspace-version"));
-      expect(words).toMatchObject({ words: next, canRetry: false });
-      expect(words.cause).toMatch(cause);
-      expect(words.cause).toContain("\nteam/access.yaml\nteam/sub/access.yaml");
-    },
-  );
-
-  it("says Main or the version changed during a merge, not only Main", () => {
-    const stopped = new MergeWidensAccessError("widens", ["team/access.yaml"], "during");
-    expect(readError(acrossIpc(stopped, "desktop:merge-workspace-version"))).toMatchObject({
-      words: "Main or this version changed during the merge, so dohc stopped it. Merge again.",
-      canRetry: false,
-    });
-  });
-
-  it("says only that dohc could not confirm a merge's rule order, not why", () => {
-    const stopped = acrossIpc(
-      new MergeRuleOrderUnconfirmedError(),
-      "desktop:merge-workspace-version",
-    );
-    expect(readError(stopped)).toMatchObject({
-      words:
-        "dohc could not confirm the order of this version's access rule changes against Main, so it stopped the merge. Merge again.",
-      canRetry: false,
-    });
-    expect(isMergeStoppedPartway(stopped)).toBe(false);
-  });
-
-  it("says a merge stopped at a rule's conflict, and to resolve it first", () => {
-    const stopped = new MergeRuleConflictError("team/access.yaml", [
-      "team/sub/access.yaml",
-      "team/x/access.yaml",
-    ]);
-    const words = readError(acrossIpc(stopped, "desktop:merge-workspace-version"));
-    expect(words).toMatchObject({
-      words:
-        "dohc stopped the merge at a conflict in team/access.yaml. Resolve that conflict, then merge again.",
-      canRetry: false,
-    });
-    expect(words.cause).toContain("\nteam/sub/access.yaml\nteam/x/access.yaml");
-    expect(isMergeStoppedPartway(acrossIpc(stopped, "desktop:merge-workspace-version"))).toBe(
-      false,
-    );
   });
 
   it("keeps a shared live file's restore words within 500 characters, with what to do", () => {

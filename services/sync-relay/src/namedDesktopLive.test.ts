@@ -225,25 +225,6 @@ it.each(["comment", "view"] as const)(
   },
 );
 
-// An admin reads rule files and their copies but writes none, so a copy the
-// owner's desktop hosts opens for no admin's live edit.
-it("refuses an admin's live edit of a copy of a rule the owner hosts", async () => {
-  const f = await fixture({ hostsMemberDocuments: false });
-  expect(
-    f.storage.setWorkspaceMemberRole({
-      workspaceId: scope.workspaceId,
-      actorUserId: "owner-1",
-      memberId: "member-entry",
-      role: "admin",
-    }),
-  ).toEqual({ ok: true });
-  const copy = "docs/access.yaml.md";
-  f.raw.prepare("UPDATE sync_relay_object_moments SET path = ?").run(copy);
-  f.raw.prepare("UPDATE sync_relay_live_documents SET current_path = ?").run(copy);
-  expect((await f.post("open", { shareId: "members-share", path: copy })).status).toBe(404);
-  expect(f.tickets.mint).not.toHaveBeenCalled();
-});
-
 it.each([
   ["a path share's open", {}, { shareId: scope.shareId, path: binding.currentPath }, "reader"],
   [

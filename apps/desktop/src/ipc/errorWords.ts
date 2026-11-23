@@ -531,16 +531,6 @@ export function readError(error: unknown): ReadError {
   // The merge dialog words a merge that stopped partway, since only it knows
   // the version. The message is the failure's own text, for Copy details.
   if (name === "MergeStoppedPartwayError") return { words: null, mapped: false, cause: message };
-  // Trying again at once gives the same answer, so the words say what to do
-  // first. The first line is the words; the rest, with the rules dohc could
-  // not order, is for Details.
-  if (
-    name === "MergeWidensAccessError" ||
-    name === "MergeRuleConflictError" ||
-    name === "MergeRuleOrderUnconfirmedError"
-  ) {
-    return { words: message.split("\n")[0]!, mapped: false, cause: text, canRetry: false };
-  }
   if (
     name === "DaemonRefusalError" &&
     code === "INVALID_PARAMS" &&
@@ -1037,50 +1027,6 @@ export function isCaptureFileHeldRefusal(error: unknown): boolean {
     name === "DaemonRefusalError" &&
     code === "CONFLICT" &&
     message.startsWith("capture-file-held: ")
-  );
-}
-
-/**
- * The folder whose access rule also changed outside dohc, above the one the
- * owner decided on, which they decide first; empty for the workspace's own
- * rule. Null for any other error.
- */
-export function heldOuterAccessRuleFolder(error: unknown): string | null {
-  const { name, code, message } = parse(error);
-  if (
-    name !== "DaemonRefusalError" ||
-    code !== "CONFLICT" ||
-    !message.startsWith("access-rule-held:")
-  )
-    return null;
-  // `access-rule-held: <reason> <folder>`; the workspace's own folder is empty.
-  const rest = message.slice("access-rule-held:".length).trim();
-  const space = rest.indexOf(" ");
-  return space < 0 ? "" : rest.slice(space + 1);
-}
-
-/** The access rule changed again since the owner saw its Notice. The Notice already shows it as it is now. */
-export function isAccessRuleChangedRefusal(error: unknown): boolean {
-  const { name, code, message } = parse(error);
-  // The workspace's own rule names no folder, and `parse` trims the trailing space.
-  return (
-    name === "DaemonRefusalError" &&
-    code === "CONFLICT" &&
-    (message === "access-rule-changed:" || message.startsWith("access-rule-changed: "))
-  );
-}
-
-/** Another program had the file open, so the engine could not write it. */
-export function isFileLockedError(error: unknown): boolean {
-  const { name, message } = parse(error);
-  return name === "DaemonRefusalError" && message === "file-locked";
-}
-
-/** The hold was decided already, or its Version is no longer active. The list that follows drops its Notice. */
-export function isAccessRuleNotHeldRefusal(error: unknown): boolean {
-  const { name, code, message } = parse(error);
-  return (
-    name === "DaemonRefusalError" && code === "INVALID_PARAMS" && message === "access-rule-not-held"
   );
 }
 
