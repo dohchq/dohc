@@ -1336,6 +1336,11 @@ fn capture_manifest_seeds_a_placed_folder_marker_whoever_wrote_it() {
         .write_with(&NO_FAULTS, |tx| {
             write_text_in_tx(tx, &write("team/.dohc-access", "obj-placed-marker"))?;
             write_text_in_tx(tx, &write("team/notes.md", "obj-synced-note"))?;
+            // Fullwidth letters fold to the marker name on the owner's disk.
+            write_text_in_tx(
+                tx,
+                &write("fleet/.dohc-\u{ff41}\u{ff43}\u{ff43}\u{ff45}\u{ff53}\u{ff53}", "obj-wide-marker"),
+            )?;
             write_text_in_tx(tx, &write("crew/.DOHC-ACCESS", "obj-waiting-marker"))?;
             // A merge or restore writes its marker to disk through a job.
             tx.execute(
@@ -1351,16 +1356,23 @@ fn capture_manifest_seeds_a_placed_folder_marker_whoever_wrote_it() {
         })
         .expect("write synced files");
 
-    let seeded: Vec<String> = capture_manifest_seed(&store, WS, VERSION)
+    let mut seeded: Vec<String> = capture_manifest_seed(&store, WS, VERSION)
         .expect("capture manifest seed")
         .into_iter()
         .map(|entry| entry.path)
         .collect();
+    seeded.sort();
     // A folder renamed while dohc was closed must retire its old marker, so
     // the first scan has to know the marker was on disk. A marker a job has
     // yet to write, and other synced files, stay out. A pulled marker has no
     // job, so it counts as placed.
-    assert_eq!(seeded, vec!["team/.dohc-access".to_owned()]);
+    assert_eq!(
+        seeded,
+        vec![
+            "fleet/.dohc-\u{ff41}\u{ff43}\u{ff43}\u{ff45}\u{ff53}\u{ff53}".to_owned(),
+            "team/.dohc-access".to_owned()
+        ]
+    );
 }
 
 #[test]

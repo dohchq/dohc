@@ -2949,6 +2949,21 @@ describe("folder rules", () => {
     expect(ruled.sort()).toEqual(["Crew\uff0fPrivate", "Team", "team/private"].sort());
   });
 
+  it("matches a rule's folder name by name, not by its joined spelling", async () => {
+    const { h } = await seed();
+    // "a\uff0fb/c" and "A/B\uff0fC" fold to one key but are different folders.
+    await ownerWrite(h, "A/B\uff0fC/public.md", "public");
+    await created(h, "a／b/c", null);
+    // "Team\uff0fPrivate/a.md" sorts before the real case variant.
+    await ownerWrite(h, "Team\uff0fPrivate/a.md", "a");
+    await ownerWrite(h, "Team/Private/z.md", "z");
+    await created(h, "team/private", null);
+    const ruled = (await membersView(h, OWNER)).folderRules!.flatMap((entry) =>
+      entry.folders.map((folder) => `${folder.path} ${folder.state}`),
+    );
+    expect(ruled.sort()).toEqual(["Team/Private covered", "a／b/c covered"].sort());
+  });
+
   it("keeps rules and their spans when the workspace's sync identity rotates", async () => {
     const { h, storage } = await seed();
     const context = storage as unknown as StorageContext;
