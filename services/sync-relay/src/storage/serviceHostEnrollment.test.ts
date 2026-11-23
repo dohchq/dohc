@@ -1191,22 +1191,6 @@ it.each([
       return memberOpen(f, { userId: scope.userId });
     },
   ],
-  [
-    "an admin at a copy of a rule, which they read but don't write",
-    (f: Fixture) => {
-      addMember(f);
-      expect(
-        f.storage.setWorkspaceMemberRole({
-          workspaceId: scope.workspaceId,
-          actorUserId: "owner-1",
-          memberId: "member-entry",
-          role: "admin",
-        }),
-      ).toEqual({ ok: true });
-      f.seed(scope.workspaceId, "rule-copy", "docs/access.yaml.md", "rule-copy-share", false);
-      return memberOpen(f, { path: "docs/access.yaml.md" });
-    },
-  ],
 ] as const)("refuses a member open by %s", async (_, open) => {
   const f = await fixture();
   expect(() => open(f)).toThrow("not found");

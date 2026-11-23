@@ -501,18 +501,18 @@ describe("LinkEgressRateLimiter", () => {
 
 describe("relay capability reads", () => {
   it.each(["view", "comment"] as const)(
-    "keeps a folder's rule file out of a %s link's listing, blobs and current feed",
+    "keeps a folder marker out of a %s link's listing, blobs and current feed",
     async (access) => {
       const storage = await newStorage();
       const h = handler(storage);
       const seeded = await seed(h, access);
-      const rule = "people:\n  sam@example.com: edit\n";
+      const rule = `rule fr_${"7".repeat(32)}\n`;
       const ruleSha = await putBlob(h, rule);
       // A draft renamed into place: its earlier moment is in the share, and the
       // current feed must not name what the object became.
       await appendMoments(h, [
         moment(3, "docs/draft.md", rule, 1_300, { objectId: "object-rule" }),
-        moment(4, "docs/access.yaml", rule, 1_400, {
+        moment(4, "docs/.dohc-access", rule, 1_400, {
           objectId: "object-rule",
           operation: "rename",
           beforePath: "docs/draft.md",
@@ -532,7 +532,7 @@ describe("relay capability reads", () => {
         await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=500&current=true")),
       );
       const served = JSON.stringify(feed);
-      for (const secret of ["access.yaml", ruleSha, "sam@example.com"])
+      for (const secret of [".dohc-access", ruleSha, "fr_7777"])
         expect(served).not.toContain(secret);
       expect(
         (feed.ops as RelayOp[]).some(
