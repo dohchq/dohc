@@ -19,9 +19,12 @@ import {
 } from "./bodySequenceGrammar.js";
 import {
   blockHolding,
+  blockStartingAt,
+  boundaryAt,
   changes,
   createBodyReader,
   indexAt,
+  isAddedParagraph,
   positionAt,
   positionOf,
   shareAContainerId,
@@ -105,8 +108,11 @@ export function createBodySequenceHistory(
  * reading as the stored note. The plugin does this for the sequence it binds. A host that holds a
  * note's document with no editor on it calls this itself.
  *
- * Yjs has no setting for this. It decides after `afterTransaction`, from this field of the
- * transaction.
+ * Yjs has no setting for this, and decides it for a whole transaction: after `afterTransaction`,
+ * from this field of the transaction. So a transaction from elsewhere that changes the sequence
+ * also leaves alone the formatting items of any other text it changes in the same document.
+ * Those items change nothing that text reads as; they stay stored. A transaction that does not
+ * change the sequence is cleaned as Yjs cleans it.
  */
 export function keepBodySequenceFormatting(sequence: Y.Text): () => void {
   const doc = sequence.doc;
@@ -173,7 +179,7 @@ export function bodySequenceAnchorPosition(
   return positionAt(bound.reader.reading(), place.index);
 }
 
-type Held = { index: number; after: boolean };
+type Held = { index: number; after: boolean; added?: true };
 type Place = (reading: BodyReading, found: readonly Followed[], doc: ProseMirrorNode) => Selection;
 
 function holdSelection(
@@ -182,6 +188,14 @@ function holdSelection(
 ): { follow: number[]; place: Place } | null {
   const held: Held[] = [];
   const hold = (pos: number, first: boolean) => {
+    const block = blockHolding(reading, pos);
+    if (block >= 0 && pos === reading.starts[block]! + 1 && boundaryAt(reading, block) < 0) {
+      const follows = reading.blocks[block]!.shown[0];
+      if (follows) return held.push({ index: reading.bases[block]! + follows.index, after: false });
+      if (isAddedParagraph(reading, block))
+        return held.push({ index: reading.bases[block]!, after: false, added: true });
+      return held.push({ index: -1, after: true });
+    }
     const at = first ? tokenFrom(reading, pos) : null;
     if (at && at.piece !== null && at.block === blockHolding(reading, pos))
       return held.push({ index: at.index, after: false });
@@ -192,6 +206,12 @@ function holdSelection(
     if (each.index < 0) return positionAt(now, 0);
     const went = found[follow().indexOf(each.index)]!;
     const shown = went.alive ? positionOf(now, went.index) : -1;
+    if (shown >= 0 && each.added) {
+      const block = blockStartingAt(now, shown);
+      const inFront =
+        block > 0 && now.lines[block - 1] === now.lines[block] && isAddedParagraph(now, block - 1);
+      return inFront ? now.starts[block - 1]! + 1 : shown + 1;
+    }
     if (shown >= 0) return shown + (each.after ? 1 : 0);
     return positionAt(now, went.index + (went.alive && each.after ? 1 : 0));
   };
@@ -232,7 +252,10 @@ function holdSelection(
  *
  * The editor always shows what `readBodySequence` reads. A person's change is written to the
  * sequence step by step, each step by its own step map, and what the sequence then reads as is
- * shown again where it differs. A change of the sequence from elsewhere, and an undo or redo, is
+ * shown again where it differs. Editor transactions that are kept out of the history
+ * (`addToHistory` false) are written in a Yjs transaction of their own, apart from the ones the
+ * history follows. Where the host's own Yjs transaction is open around the editor's change, it
+ * takes the first of them and the rest are written when it ends. A change of the sequence from elsewhere, and an undo or redo, is
  * shown as one transaction that replaces what differs, keeps the nodes of the blocks it does not
  * touch, and keeps the selection around its letters. Such a transaction is never written back.
  *
@@ -303,6 +326,9 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       bound = here;
       const written = new WeakSet<Y.Transaction>();
       let shown: ProseMirrorNode | null = null;
+      let runs: { tracked: boolean; transactions: Transaction[] }[] = [];
+      let hostCarrier: Y.Transaction | null = null;
+      let writingRuns = false;
 
       const show = (select?: (transaction: Transaction, end: number) => void) => {
         const reading = reader.reading();
@@ -328,14 +354,44 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
         shown = view.state.doc;
       };
 
+      const writeRuns = () => {
+        if (writingRuns) return;
+        writingRuns = true;
+        try {
+          while (runs.length > 0 && hostCarrier === null) {
+            const run = runs.shift()!;
+            const hosted = doc._transaction !== null;
+            let whole = false;
+            doc.transact((carrier) => {
+              written.add(carrier);
+              if (hosted) hostCarrier = carrier;
+              if (run.tracked) carrier.meta.set(bodySequenceKey, origin);
+              const writing = { sequence, reader };
+              whole = run.transactions.every((each) => writeTransaction(writing, each));
+            }, origin);
+            if (!whole) runs = [];
+          }
+        } catch (error) {
+          runs = [];
+          throw error;
+        } finally {
+          writingRuns = false;
+          if (runs.length === 0) show();
+        }
+      };
+
       const onTransaction = (changed: Y.Transaction) => {
-        if (!changes(changed.changedParentTypes, sequence) && !changes(changed.changed, containers))
-          return;
+        const hostEnded = changed === hostCarrier;
+        if (hostEnded) hostCarrier = null;
+        const touched =
+          changes(changed.changedParentTypes, sequence) || changes(changed.changed, containers);
         if (written.has(changed)) {
-          reader.note(changed);
-          show();
+          if (touched) reader.note(changed);
+          if (hostEnded) writeRuns();
+          else if (touched && runs.length === 0 && !writingRuns) show();
           return;
         }
+        if (!touched) return;
         if (changed.origin === here.history) {
           reader.read({ transaction: changed });
           show((transaction, end) =>
@@ -355,21 +411,17 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       const write = () => {
         const pending = bodySequenceKey.getState(view.state) ?? NONE;
         if (pending === flushed) {
-          if (view.state.doc !== shown) show();
+          if (runs.length === 0 && !writingRuns && view.state.doc !== shown) show();
           return;
         }
         flushed = pending;
-        try {
-          doc.transact((carrier) => {
-            written.add(carrier);
-            if (pending.some((transaction) => transaction.getMeta(ADD_TO_HISTORY) !== false))
-              carrier.meta.set(bodySequenceKey, origin);
-            const writing = { sequence, reader };
-            for (const transaction of pending) if (!writeTransaction(writing, transaction)) break;
-          }, origin);
-        } finally {
-          show();
+        for (const transaction of pending) {
+          const tracked = transaction.getMeta(ADD_TO_HISTORY) !== false;
+          const last = runs.at(-1);
+          if (last?.tracked === tracked) last.transactions.push(transaction);
+          else runs.push({ tracked, transactions: [transaction] });
         }
+        writeRuns();
       };
 
       show();

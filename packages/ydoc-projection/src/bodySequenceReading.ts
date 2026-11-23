@@ -24,11 +24,7 @@ export type SequenceElement = Y.XmlElement<
 
 type Marks = ReadonlyMap<string, unknown>;
 
-/**
- * One boundary and what follows it up to the next boundary, as last read. The line before the
- * first boundary has no element, and reads as nothing when it holds nothing a reader shows.
- */
-export type SequenceLine = {
+type SequenceLine = {
   item: Y.Item | null;
   element: SequenceElement | null;
   length: number;
@@ -43,8 +39,9 @@ export type SequenceLine = {
 /**
  * What the sequence reads as, and the sequence positions behind each block of it. For the block at
  * one index: `starts` has where it starts in the document, `paths` the ids of the containers it
- * sits in, `lines` its line, and `bases` the sequence position where that line starts. A block the
- * reader added has the line its boundary would stand in front of.
+ * sits in, `lines` its line, and `bases` the sequence position where that line starts. A line is
+ * one boundary and what follows it up to the next. The line before the first boundary has no
+ * element. A block the reader added has the line its boundary would stand in front of.
  */
 export type BodyReading = {
   doc: ProseMirrorNode;
@@ -59,7 +56,7 @@ export type BodyReading = {
 /** One sequence item the editor shows: a block's boundary when `piece` is null, else one position of a piece. */
 export type SequenceToken = { index: number; block: number; piece: ShownPiece | null };
 
-export type SequenceChange = {
+type SequenceChange = {
   /** The finished Yjs transaction that changed the note. Without one, only touched lines are read again. */
   transaction?: Y.Transaction;
   /** Sequence positions from before the transaction, ascending, to find again after it. */
@@ -110,6 +107,13 @@ export function boundaryAt(reading: BodyReading, block: number): number {
 /** The element of a block's boundary, or null for a block with no boundary of its own. */
 export function boundaryElement(reading: BodyReading, block: number): SequenceElement | null {
   return boundaryAt(reading, block) < 0 ? null : reading.lines[block]!.element;
+}
+
+/** Whether a block is a paragraph the reader added in front of a list item's content. */
+export function isAddedParagraph(reading: BodyReading, block: number): boolean {
+  const read = reading.lines[block]?.read;
+  const shown = reading.blocks[block];
+  return read !== null && read !== undefined && read.own !== shown && read.after !== shown;
 }
 
 /** The index of the block that starts at a document position, or -1. */

@@ -12,6 +12,7 @@ import { BLOCK_ELEMENT } from "./bodySequenceGrammar.js";
 import {
   blockHolding,
   blockStartingAt,
+  isAddedParagraph,
   countBelow,
   boundaryAt,
   boundaryElement,
@@ -50,6 +51,24 @@ function replaces(map: StepMap): boolean {
   return found;
 }
 
+const LIST_ITEMS: ReadonlySet<string> = new Set(["listItem", "taskItem"]);
+
+function isInFirstBlockOfItem(doc: ProseMirrorNode, pos: number): boolean {
+  const $pos = doc.resolve(pos);
+  if (!$pos.parent.isTextblock || $pos.depth < 2) return false;
+  const item = $pos.depth - 1;
+  return LIST_ITEMS.has($pos.node(item).type.name) && $pos.index(item) === 0;
+}
+
+function startsBlock(doc: ProseMirrorNode, from: number, to: number): boolean {
+  let found = false;
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (holdsNoBlocks(node) && pos >= from) found = true;
+    return !found && !node.isInline && !node.isTextblock;
+  });
+  return found;
+}
+
 /**
  * Whether a step leaves every list, quote, callout and table as it is: it starts none, changes
  * none, and removes one only whole. The sequence takes such a step with no change to a path or to
@@ -60,6 +79,9 @@ function replaces(map: StepMap): boolean {
  * id: they would read as one. The container writer first gives the later one a fresh id, and
  * that write goes here too. `shareAnId` says whether the container that ends at one place of
  * `before` and the one that starts at another share an id.
+ *
+ * So is a step that splits the first block of a list item: section 4 gives the new line a new
+ * item, with a fresh id and its records. A split of a later block stays in its item and is taken.
  */
 export function keepsContainers(
   step: Step,
@@ -71,6 +93,8 @@ export function keepsContainers(
   let replaced = false;
   step.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
     replaced = true;
+    if (isInFirstBlockOfItem(before, oldStart) && startsBlock(after, newStart, newEnd))
+      kept = false;
     if (newStart === newEnd) {
       const $joint = after.resolve(newStart);
       const upper = $joint.nodeBefore;
@@ -275,7 +299,7 @@ function readerAddedParagraphBefore(reading: BodyReading, block: number, from: n
   return (
     added >= 0 &&
     reading.lines[added] === reading.lines[block] &&
-    reading.lines[added]?.read?.own !== reading.blocks[added] &&
+    isAddedParagraph(reading, added) &&
     reading.starts[added]! < from
   );
 }

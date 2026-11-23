@@ -1063,28 +1063,17 @@ describe("a note that has lists, a callout and a table, written by someone else"
       });
     a.select([1, 0], [3, 3]);
     expect(a.effects(() => a.toggle("bold")).made).toEqual({ ...quiet(), formats: 2 });
-    expect(a.effects(() => a.split(1, 3))).toMatchObject({ made: BOUNDARY, gone: quiet() });
-    expect(a.lines().slice(0, 4)).toEqual(["Top", "fix", "rst", "more of first"]);
-    expect(pathsOf(a).slice(0, 5)).toEqual(["", "L/a", "L/a", "L/a", "L/b"]);
-    const [, , rst] = a.boundaryIds();
-    const atStart = a.effects(() => a.split(2, 0));
-    expect(atStart).toMatchObject({ made: BOUNDARY, gone: quiet() });
-    expect(a.boundaryLines().slice(1, 4)).toMatchObject([
-      { text: "fix" },
-      { id: atStart.madeBoundaries[0], text: "" },
-      { id: rst, text: "rst" },
-    ]);
-    expect(pathsOf(a).slice(0, 6)).toEqual(["", "L/a", "L/a", "L/a", "L/a", "L/b"]);
-    expect(a.effects(() => a.join(3)).gone).toEqual(BOUNDARY);
-    expect(a.effects(() => a.join(2)).gone).toEqual(BOUNDARY);
-    expect(a.lines().slice(0, 3)).toEqual(["Top", "fixrst", "more of first"]);
+    expect(a.effects(() => a.split(4, 3))).toMatchObject({ made: BOUNDARY, gone: quiet() });
+    expect(a.lines().slice(4, 6)).toEqual(["inx", "side a callout"]);
+    expect(pathsOf(a).slice(3, 7)).toEqual(["L/b", "q", "q", "T/r/c1"]);
+    expect(a.effects(() => a.join(5)).gone).toEqual(BOUNDARY);
+    expect(a.lines()[4]).toBe("inxside a callout");
     expect(a.effects(() => a.split(5, 4)).made).toEqual(BOUNDARY);
     expect(pathsOf(a).slice(5, 8)).toEqual(["T/r/c1", "T/r/c1", "T/r/c2"]);
     a.expectMirror();
     exchange(a, b);
     b.expectMirror();
     expect(b.view.state.doc.toJSON()).toEqual(a.view.state.doc.toJSON());
-    expect(a.view.state.doc.child(1).firstChild!.childCount).toBe(2);
   });
 
   it("gives a to-do's added first paragraph a boundary with the item's path when it is typed in", () => {
@@ -1435,14 +1424,12 @@ describe("letters that are two units long", () => {
   it("refuses to delete, split, type or format between the two units of one", () => {
     const a = person(note(`a${FACE}b`), 10);
     const inside = 3;
-    const { tr } = a.view.state;
     const before = a.view.state.doc;
     a.view.dispatch(a.view.state.tr.delete(inside - 1, inside));
     a.view.dispatch(a.view.state.tr.delete(inside, inside + 1));
     a.view.dispatch(a.view.state.tr.split(inside));
     a.view.dispatch(a.view.state.tr.insertText("x", inside));
     a.view.dispatch(a.view.state.tr.addMark(1, inside, schema.marks.bold!.create()));
-    expect(tr.doc).toBe(before);
     expect(a.view.state.doc).toBe(before);
     expect(a.sent).toEqual([]);
     const whole = a.effects(() => a.view.dispatch(a.view.state.tr.delete(2, 4)));
@@ -1518,6 +1505,262 @@ describe("formatting items Yjs would delete on its own", () => {
   });
 });
 
+describe.each(["bare", "hosted"] as const)("on a %s page, a finding of the review", (shape) => {
+  it("keeps a caret at the start of the paragraph after a code block through a change from elsewhere", () => {
+    const baseline = noteOf(({ sequence }) => {
+      sequence.insertEmbed(0, boundary({ type: "codeBlock", language: null }), {});
+      sequence.insert(1, "code", {});
+      sequence.insertEmbed(5, element("wikilink", { target: "Page", label: null }), {});
+      sequence.insert(6, "rest", {});
+      sequence.insertEmbed(10, boundary(), {});
+      sequence.insert(11, "later", {});
+    });
+    const a = person(baseline, 10, shape);
+    const b = person(baseline, 20, shape);
+    a.select([1, 0]);
+    b.typeAt(2, 5, "!");
+    exchange(b, a);
+    expect(a.view.state.selection.$from.parent.type.name).toBe("paragraph");
+    expect(a.view.state.selection.$from.parentOffset).toBe(0);
+    a.type("x");
+    expect(a.blocks()).toEqual(["codeBlock", "paragraph", "paragraph"]);
+    expect(a.lines()).toEqual(["code", "xrest", "later!"]);
+    a.expectMirror();
+  });
+
+  it("keeps a caret in a list item's added first paragraph through a change from elsewhere", () => {
+    const baseline = noteOf(({ sequence, containers }) => {
+      for (const [id, type] of [
+        ["L", "bulletList"],
+        ["I", "listItem"],
+      ] as const)
+        for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
+          containers.set(key, value);
+      sequence.insertEmbed(0, boundary(), {});
+      sequence.insert(1, "Top", {});
+      sequence.insertEmbed(4, boundary({ type: "heading", level: 2, path: ["L", "I"] }), {});
+      sequence.insert(5, "Title", {});
+      sequence.insertEmbed(10, boundary(), {});
+      sequence.insert(11, "later", {});
+    });
+    const a = person(baseline, 10, shape);
+    const b = person(baseline, 20, shape);
+    expect(a.lines()).toEqual(["Top", "", "Title", "later"]);
+    a.select([1, 0]);
+    b.typeAt(3, 5, "!");
+    exchange(b, a);
+    a.type("x");
+    expect(a.lines()).toEqual(["Top", "x", "Title", "later!"]);
+    expect(pathsOf(a)).toEqual(["", "L/I", "L/I", ""]);
+    a.expectMirror();
+  });
+
+  it("keeps what a plugin appended outside the history when the person's change is undone", () => {
+    const appendsY = new Plugin({
+      appendTransaction(transactions, _before, state) {
+        if (!transactions.some((transaction) => transaction.getMeta("appendY") === true))
+          return null;
+        const lower = state.doc.child(0).nodeSize + 1;
+        return state.tr.insertText("Y", lower).setMeta("addToHistory", false);
+      },
+    });
+    const a = person(note("abc", "def"), 10, shape, [appendsY]);
+    const b = person(note("abc", "def"), 20, shape);
+    a.view.dispatch(a.view.state.tr.insertText("X", 2).setMeta("appendY", true));
+    expect(a.lines()).toEqual(["aXbc", "Ydef"]);
+    a.expectMirror();
+    exchange(a, b);
+    expect(b.lines()).toEqual(["aXbc", "Ydef"]);
+    expect(a.undo()).toBe(true);
+    expect(a.lines()).toEqual(["abc", "Ydef"]);
+    expect(a.undo()).toBe(false);
+    expect(a.redo()).toBe(true);
+    expect(a.lines()).toEqual(["aXbc", "Ydef"]);
+    a.expectMirror();
+    exchange(a, b);
+    b.expectMirror();
+    expect(b.lines()).toEqual(["aXbc", "Ydef"]);
+    expect(b.sent).toEqual([]);
+  });
+
+  it("keeps a tracked change in the history when it follows an untracked one in the same dispatch", () => {
+    const appendsY = new Plugin({
+      appendTransaction(transactions, _before, state) {
+        if (!transactions.some((transaction) => transaction.getMeta("appendY") === true))
+          return null;
+        return state.tr.insertText("Y", state.doc.child(0).nodeSize + 1);
+      },
+    });
+    const a = person(note("abc", "def"), 10, shape, [appendsY]);
+    a.view.dispatch(
+      a.view.state.tr.insertText("X", 2).setMeta("appendY", true).setMeta("addToHistory", false),
+    );
+    expect(a.lines()).toEqual(["aXbc", "Ydef"]);
+    expect(a.undo()).toBe(true);
+    expect(a.lines()).toEqual(["aXbc", "def"]);
+    expect(a.undo()).toBe(false);
+    a.expectMirror();
+  });
+});
+
+describe("a split inside a list item someone else stored", () => {
+  it("is refused for the item's first block, which section 4 gives a new item", () => {
+    const a = person(noteWithContainers(), 10);
+    const before = a.view.state.doc;
+    for (const [line, offset] of [
+      [1, 1],
+      [1, 0],
+      [1, 5],
+      [3, 2],
+      [7, 0],
+    ] as const) {
+      a.select([line, offset]);
+      a.press("Enter");
+    }
+    a.select([1, 2]);
+    a.view.pasteHTML("<p>Xx</p><p>Yy</p>", new window.Event("paste") as ClipboardEvent);
+    expect(a.view.state.doc).toBe(before);
+    expect(a.sent).toEqual([]);
+    a.expectMirror();
+  });
+
+  it("goes through for a later block of the item, which stays in the item", () => {
+    const a = person(noteWithContainers(), 10);
+    const [, , later] = a.boundaryIds();
+    expect(a.effects(() => a.split(2, 4))).toMatchObject({ made: BOUNDARY, gone: quiet() });
+    expect(a.lines().slice(1, 4)).toEqual(["first", "more", " of first"]);
+    const atStart = a.effects(() => a.split(2, 0));
+    expect(atStart).toMatchObject({ made: BOUNDARY, gone: quiet() });
+    expect(a.boundaryLines().slice(2, 4)).toEqual([
+      { id: atStart.madeBoundaries[0], text: "" },
+      { id: later, text: "more" },
+    ]);
+    expect(pathsOf(a).slice(0, 6)).toEqual(["", "L/a", "L/a", "L/a", "L/a", "L/b"]);
+    expect(a.view.state.doc.child(1).childCount).toBe(2);
+    a.expectMirror();
+  });
+});
+
+describe("a block deleted together with part of the text after it that it cannot hold", () => {
+  const types = (a: Person) =>
+    elementsOf(a.sequence, "boundary").map(
+      (token) =>
+        (JSON.parse(token.attrs) as [string, unknown][]).find(([key]) => key === "type")![1],
+    );
+
+  it("keeps the rule's boundary for the rest of that text, as a paragraph's", () => {
+    const a = person(
+      noteOf(({ sequence }) => {
+        sequence.insertEmbed(0, boundary({ type: "horizontalRule" }), {});
+        sequence.insert(1, "abc", {});
+      }),
+      10,
+    );
+    const [rule] = a.boundaryIds();
+    expect(a.blocks()).toEqual(["horizontalRule", "paragraph"]);
+    const effects = a.effects(() => a.view.dispatch(a.view.state.tr.delete(0, 4)));
+    expect(a.blocks()).toEqual(["paragraph"]);
+    expect(effects.goneLetters).toBe("ab");
+    expect(effects.madeLetters).toBe("");
+    expect(effects.goneBoundaries).toEqual([]);
+    expect(a.boundaryLines()).toEqual([{ id: rule, text: "c" }]);
+    expect(types(a)).toEqual(["paragraph"]);
+    a.expectMirror();
+  });
+
+  it("does the same below another rule, and below a line", () => {
+    const below = (upper: Record<string, unknown>, text: string) =>
+      noteOf(({ sequence }) => {
+        sequence.insertEmbed(0, boundary(upper), {});
+        sequence.insert(1, text, {});
+        sequence.insertEmbed(sequence.length, boundary({ type: "horizontalRule" }), {});
+        sequence.insert(sequence.length, "abc", {});
+      });
+    const a = person(below({ type: "horizontalRule" }, ""), 10);
+    const [, lower] = a.boundaryIds();
+    a.view.dispatch(a.view.state.tr.delete(1, 5));
+    expect(a.blocks()).toEqual(["horizontalRule", "paragraph"]);
+    expect(a.boundaryLines().at(-1)).toEqual({ id: lower, text: "c" });
+    expect(types(a)).toEqual(["horizontalRule", "paragraph"]);
+    a.expectMirror();
+
+    const b = person(below({}, "One"), 20);
+    const [, rule] = b.boundaryIds();
+    const from = b.view.state.doc.child(0).nodeSize;
+    b.view.dispatch(b.view.state.tr.delete(from, from + 4));
+    expect(b.lines()).toEqual(["One", "c"]);
+    expect(b.boundaryLines().at(-1)).toEqual({ id: rule, text: "c" });
+    expect(types(b)).toEqual(["paragraph", "paragraph"]);
+    b.expectMirror();
+  });
+
+  it("never leaves that text without a boundary that can hold it, for any delete in a small note", () => {
+    const upper: [Record<string, unknown> | null, string][] = [
+      [null, ""],
+      [null, "hh"],
+      [{}, "One"],
+      [{ type: "horizontalRule" }, ""],
+      [{ type: "horizontalRule" }, "zz"],
+      [{ type: "codeBlock", language: null }, "cc"],
+    ];
+    const blocks: [Record<string, unknown>, string][] = [
+      [{ type: "horizontalRule" }, ""],
+      [{ type: "mathBlock", tex: "x" }, ""],
+      [{ type: "codeBlock", language: null }, "kk"],
+    ];
+    let deletes = 0;
+    for (const [above, aboveText] of upper)
+      for (const [block, own] of blocks)
+        for (const path of [[], ["L", "I"]]) {
+          const baseline = noteOf(({ sequence, containers }) => {
+            for (const [id, type] of [
+              ["L", "bulletList"],
+              ["I", "listItem"],
+            ] as const)
+              for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
+                containers.set(key, value);
+            if (above) sequence.insertEmbed(0, boundary(above), {});
+            sequence.insert(sequence.length, aboveText, {});
+            sequence.insertEmbed(sequence.length, boundary({ ...block, path }), {});
+            sequence.insert(sequence.length, own, {});
+            if (own) sequence.insertEmbed(sequence.length, element("hardBreak", {}), {});
+            sequence.insert(sequence.length, "abc", {});
+          });
+          const size = readBodySequence(schema, person(baseline, 10).doc).content.size;
+          stopEveryone();
+          for (let from = 0; from < size; from++)
+            for (let to = from + 1; to <= size; to++) {
+              const a = person(baseline, 10);
+              const before = a.view.state.doc;
+              const blockId = a.boundaryIds().at(-1)!;
+              let deleted;
+              try {
+                deleted = a.view.state.tr.delete(from, to);
+              } catch {
+                stopEveryone();
+                continue;
+              }
+              a.view.dispatch(deleted);
+              deletes += 1;
+              a.expectMirror();
+              const line = a.boundaryLines().findLast((each) => each.text.endsWith("c"));
+              const startsOutsideText = !before.resolve(from).parent.isTextblock;
+              if (line && startsOutsideText && !a.boundaryIds().includes(blockId)) {
+                const holder = elementsOf(a.sequence, "boundary").find(
+                  (token) => token.id === line.id,
+                );
+                expect(
+                  holder?.attrs,
+                  `delete(${String(from)}, ${String(to)}) in ${before.toString()}`,
+                ).toMatch(/"type","(paragraph|heading|codeBlock)"/u);
+              }
+              stopEveryone();
+            }
+        }
+    expect(deletes).toBeGreaterThan(3000);
+  });
+});
+
 describe("two plain editors racing", () => {
   raceTests((baseline, at) => person(baseline, 10 * (at + 1)));
 });
@@ -1560,9 +1803,14 @@ const ITEMS = [
   ["rawInline", { source: "<i>" }],
 ] as const;
 
-type Run = { next: () => number; letter: () => string; keepLetters: boolean };
+type Run = {
+  next: () => number;
+  letter: () => string;
+  takeBack: (letters: number) => void;
+  keepLetters: boolean;
+};
 
-function editAtRandom(each: Person, { next, letter, keepLetters }: Run): string {
+function editAtRandom(each: Person, { next, letter, takeBack, keepLetters }: Run): string {
   const pick = (below: number) => Math.floor(next() * below);
   const { view } = each;
   const places = textPlaces(view.state.doc);
@@ -1642,8 +1890,11 @@ function editAtRandom(each: Person, { next, letter, keepLetters }: Run): string 
     caret(pos);
     const paragraph = (text: string) => schema.nodes.paragraph!.create(null, schema.text(text));
     const pasted = new Slice(Fragment.from([paragraph(letter()), paragraph(letter())]), 1, 1);
-    view.dispatch(view.state.tr.replaceSelection(pasted));
-    return `paste@${String(pos)}`;
+    const paste = view.state.tr.replaceSelection(pasted);
+    const refused = view.state.applyTransaction(paste).transactions.length === 0;
+    if (refused) takeBack(2);
+    else view.dispatch(paste);
+    return `paste@${String(pos)}${refused ? ":refused" : ""}`;
   }
   if (roll < 0.88) {
     const pos = place();
@@ -1838,7 +2089,10 @@ describe.each([
         const next = random(seed * 7919 + (keepLetters ? 1 : 0));
         let typed = 0;
         const letter = () => String.fromCharCode(0x4e00 + typed++);
-        const run: Run = { next, letter, keepLetters };
+        const takeBack = (letters: number) => {
+          typed -= letters;
+        };
+        const run: Run = { next, letter, takeBack, keepLetters };
         const editors = [
           person(baseline(), 10),
           person(baseline(), 20, "hosted"),

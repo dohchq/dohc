@@ -3,7 +3,7 @@ import * as Y from "yjs";
 import { baseKeymap, setBlockType, toggleMark } from "@tiptap/pm/commands";
 import { keymap } from "@tiptap/pm/keymap";
 import type { Attrs, Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { EditorState, TextSelection } from "@tiptap/pm/state";
+import { EditorState, TextSelection, type Plugin } from "@tiptap/pm/state";
 import { EditorView } from "@tiptap/pm/view";
 import {
   BLOCK_ELEMENT,
@@ -30,6 +30,12 @@ export type Token = { kind: "letter"; id: Id; text: string; marks: string } | El
 const sorted = (attrs: Record<string, unknown>) =>
   JSON.stringify(Object.entries(attrs).sort(([a], [b]) => a.localeCompare(b)));
 
+function isPlainObject(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  return prototype === Object.prototype || prototype === null;
+}
+
 /** Every letter, boundary and inline item of a sequence, in order, by the id of its Yjs item. */
 export function tokensOf(sequence: Y.Text): Token[] {
   const tokens: Token[] = [];
@@ -40,7 +46,7 @@ export function tokensOf(sequence: Y.Text): Token[] {
     if (content instanceof Y.ContentFormat) marks.set(content.key, content.value);
     else if (content instanceof Y.ContentString) {
       const on = [...marks]
-        .filter(([, value]) => typeof value === "object" && value !== null)
+        .filter(([, value]) => isPlainObject(value))
         .map(([key]) => key)
         .sort()
         .join(",");
@@ -202,7 +208,12 @@ export function page(baseline: Uint8Array, clientID: number, shape: HostShape = 
 export type Page = ReturnType<typeof page>;
 
 /** A person at a plain ProseMirror editor bound to the sequence. */
-export function person(baseline: Uint8Array, clientID: number, shape: HostShape = "bare") {
+export function person(
+  baseline: Uint8Array,
+  clientID: number,
+  shape: HostShape = "bare",
+  plugins: Plugin[] = [],
+) {
   const base = page(baseline, clientID, shape);
   const mount = window.document.createElement("div");
   window.document.body.append(mount);
@@ -214,6 +225,7 @@ export function person(baseline: Uint8Array, clientID: number, shape: HostShape 
       plugins: [
         bodySequencePlugin({ sequence: base.sequence, containers: base.containers, history }),
         keymap(baseKeymap),
+        ...plugins,
       ],
     }),
     dispatchTransaction(this: EditorView, transaction) {
