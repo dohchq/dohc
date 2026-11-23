@@ -1981,6 +1981,10 @@ export interface SyncRelayStorage {
   previewWorkspaceJoin: WorkspaceMembersMethod<"previewWorkspaceJoin">;
   joinWorkspace: WorkspaceMembersMethod<"joinWorkspace">;
   createWorkspaceGroup: WorkspaceMembersMethod<"createWorkspaceGroup">;
+  // Folder rules (storage/folderRules.ts).
+  changeFolderRule: FolderRulesMethod<"changeFolderRule">;
+  removeFolderMarkers: FolderRulesMethod<"removeFolderMarkers">;
+  readFolderRules: FolderRulesMethod<"readFolderRules">;
   // Direct messages (storage/directMessages.ts).
   resolveDirectPick: DirectMessagesMethod<"resolveDirectPick">;
   findDirectConversation: DirectMessagesMethod<"findDirectConversation">;
@@ -2262,6 +2266,13 @@ export interface LiveTicketStoragePolicy {
 }
 
 type WorkspaceMembersModule = typeof import("./workspaceMembers");
+type FolderRulesModule = typeof import("./folderRules");
+type FolderRulesMethod<K extends keyof FolderRulesModule> = FolderRulesModule[K] extends (
+  storage: never,
+  ...args: infer A
+) => infer R
+  ? (...args: A) => R
+  : never;
 type DirectMessagesModule = typeof import("./directMessages");
 type DirectMessagesMethod<K extends keyof DirectMessagesModule> = DirectMessagesModule[K] extends (
   storage: never,

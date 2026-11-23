@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { createReceivedIdentity } from "./receivedIdentity";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import type { TokenBucketLimiter } from "@dohc/service-http";
-import { visibleSharePath, type ShareAccess } from "@dohc/security-contract/share-selector";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
   DiscussionActivityCapacityError,
@@ -35,17 +35,6 @@ export type LinkReadRoute =
 // The current files are read before reach filters them, so the read is capped at this many times the listing limit.
 // Past the cap the relay refuses as for an unknown grant: the answer must not say how much work a member cannot see.
 const CURRENT_SCAN_FACTOR = 10;
-
-/**
- * A member's level on one file, which varies by folder. An admin reads rule
- * files but edits none, so Edit there reads as Comment, as live editing judges.
- */
-function memberFileAccess(files: ShareSelector, path: string): ShareAccess | null {
-  const level = pathLevel(files, path);
-  return level === "edit" && pathLevel({ ...files, ruleFiles: undefined }, path) !== "edit"
-    ? "comment"
-    : level;
-}
 
 export function createLinkReadRoutes(
   storage: Pick<
@@ -248,7 +237,7 @@ export function createLinkReadRoutes(
             blobSha256: file.blobSha256,
             contentKind: file.contentKind,
             ...(fresh.credential.kind === "member"
-              ? { access: memberFileAccess(fresh.effectiveSelector, file.path) }
+              ? { access: pathLevel(fresh.effectiveSelector, file.path) }
               : {}),
             ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml`
               ? {

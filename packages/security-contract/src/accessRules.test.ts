@@ -8,10 +8,11 @@ import {
   accessRuleSet,
   fileLevel,
   folderLevel,
+  folderMarkerText,
   formatAccessRule,
-  isAccessRulePath,
-  isAccessRuleRelatedPath,
+  isFolderMarkerPath,
   parseAccessRule,
+  parseFolderMarker,
   parseFormattedAccessRule,
 } from "./accessRules";
 import vectors from "./accessRules.vectors.json";
@@ -193,23 +194,37 @@ describe("folderLevel and fileLevel", () => {
 
   it("never limits owners and admins", () => {
     expect(folderLevel(set, { role: "admin" }, "Team")).toBe("edit");
-    expect(fileLevel(set, { role: "owner" }, "Team/access.yaml")).toBe("edit");
+    expect(fileLevel(set, { role: "owner" }, "Team/.dohc-access")).toBe("edit");
   });
 
-  it("hides rule files and their copies from members", () => {
-    expect(fileLevel(set, member("edit"), "Elsewhere/access.yaml")).toBeNull();
-    expect(fileLevel(set, member("edit"), "Elsewhere/Access.YAML")).toBeNull();
-    expect(fileLevel(set, member("edit"), "Elsewhere/access.yaml~")).toBeNull();
-    expect(fileLevel(set, member("edit"), "Elsewhere/.access.yaml.swp")).toBeNull();
+  it("hides folder markers from members, however they are spelled", () => {
+    expect(fileLevel(set, member("edit"), "Elsewhere/.dohc-access")).toBeNull();
+    expect(fileLevel(set, member("edit"), "Elsewhere/.DOHC-Access")).toBeNull();
+    expect(fileLevel(set, member("edit"), ".dohc-access")).toBeNull();
     expect(fileLevel(set, member("edit"), "Elsewhere/notes.md")).toBe("edit");
   });
 });
 
-describe("rule file names", () => {
-  it("knows a rule however it is spelled, and its copies", () => {
-    expect(isAccessRulePath("a/ACCESS.yaml")).toBe(true);
-    expect(isAccessRulePath("a/access.yaml~")).toBe(false);
-    expect(isAccessRuleRelatedPath("a/#access.yaml#")).toBe(true);
-    expect(isAccessRuleRelatedPath("a/access.yml")).toBe(false);
+describe("folder markers", () => {
+  const id = `fr_${"a1".repeat(16)}`;
+
+  it("knows a marker by its exact name and its case twins only", () => {
+    expect(isFolderMarkerPath("a/.dohc-access")).toBe(true);
+    expect(isFolderMarkerPath("a/.DOHC-ACCESS")).toBe(true);
+    expect(isFolderMarkerPath("a/.dohc-access~")).toBe(false);
+    expect(isFolderMarkerPath("a/.dohc-access/b.md")).toBe(false);
+  });
+
+  it("reads back the rule it names, whatever the revision", () => {
+    expect(parseFolderMarker(folderMarkerText(id, 1))).toBe(id);
+    expect(parseFolderMarker(folderMarkerText(id, 7).replaceAll("\n", "\r\n"))).toBe(id);
+    expect(folderMarkerText(id, 1)).not.toBe(folderMarkerText(id, 2));
+  });
+
+  it("names no rule when it can't be read", () => {
+    expect(parseFolderMarker("")).toBeNull();
+    expect(parseFolderMarker(`rule ${id}\nrule ${id}\n`)).toBeNull();
+    expect(parseFolderMarker(`rule ${id.toUpperCase()}\n`)).toBeNull();
+    expect(parseFolderMarker("members: view\n")).toBeNull();
   });
 });

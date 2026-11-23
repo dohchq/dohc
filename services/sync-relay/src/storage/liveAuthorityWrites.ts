@@ -30,6 +30,8 @@ export const LIVE_AUTHORITY_TABLES = [
   "sync_relay_object_moments",
   "sync_relay_blobs",
   "sync_relay_log",
+  "sync_relay_folder_rules",
+  "sync_relay_folder_rule_bindings",
 ] as const;
 
 const WRITES = "sync_relay_live_authority_writes";

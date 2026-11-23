@@ -1,4 +1,4 @@
-import { accessRuleFolder, isAccessRuleRelatedPath } from "./accessRuleFiles";
+import { accessRuleFolder, isFolderMarkerPath } from "./accessRuleFiles";
 import { SHARE_ACCESS_VALUES, shareAccessRank, type ShareAccess } from "./shareSelector";
 
 /**
@@ -80,12 +80,12 @@ export function listedFolderLevel(reach: ListedReach, folder: string): ShareAcce
 /**
  * The level a member has at a path, or null when they have none: an existing
  * file takes the level at its current path, a new file the level at the path
- * it would take. Members never reach a rule file. Every local gate asks this,
+ * it would take. Members never reach a folder marker. Every local gate asks this,
  * so a person and an agent get the same answer. The relay still decides each
  * write.
  */
 export function levelAtPath(reach: ListedReach, path: string): ShareAccess | null {
-  if (isAccessRuleRelatedPath(path)) return null;
+  if (isFolderMarkerPath(path)) return null;
   return listedFolderLevel(reach, accessRuleFolder(path));
 }
 
