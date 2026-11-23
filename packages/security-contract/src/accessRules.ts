@@ -146,6 +146,8 @@ export function parseFormattedAccessRule(text: string): AccessRule | null {
     const level = readLevel(line.value);
     if (!level || !looksLikeEmail(line.key)) return null;
     const email = normalizeRuleEmail(line.key);
+    // Lowercasing can lengthen a key, and the rule must read back as written.
+    if (email.length > MAX_EMAIL_CHARS) return null;
     if (people.has(email) || people.size >= ACCESS_RULE_MAX_PEOPLE) return null;
     people.set(email, level);
   }
