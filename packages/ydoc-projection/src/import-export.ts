@@ -36,6 +36,8 @@ import { assertSupportedListMarkdown } from "./list-markdown.js";
 import { sanitizeImageSrc } from "./image-src.js";
 import { backtickFence, codeBlockFence } from "./markdown-fence.js";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
+import { BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
+import { holdsBodySequence, readBodySequence } from "./bodySequenceYjs.js";
 import {
   FRONTMATTER_SOURCE_META_KEY,
   frontmatterBlockFor,
@@ -925,7 +927,15 @@ export function plainTextToYDoc(markdown: string): Y.Doc {
 }
 
 export function yDocToMarkdown(doc: Y.Doc): string {
-  const body = yDocBodyToMarkdown(doc).trimEnd();
+  return markdownWithBody(doc, yDocBodyToMarkdown(doc).trimEnd());
+}
+
+/** The properties block a note is written with, as a file that holds nothing else. */
+export function yDocPropertiesToMarkdown(doc: Y.Doc): string {
+  return markdownWithBody(doc, "");
+}
+
+function markdownWithBody(doc: Y.Doc, body: string): string {
   const frontmatter = orderFrontmatter(getDohcYDocFrontmatter(doc));
   const internalMeta = doc.getMap(META_FIELD);
   const usesCrlf =
@@ -1012,8 +1022,18 @@ function yDocBodyToMarkdown(doc: Y.Doc): string {
   return serializeRichdocBody(escapeHighlightMarkdown(yDocBodyToJSON(doc)));
 }
 
+/**
+ * Reads the body of a note that says its body is one sequence from that sequence when it holds
+ * any item, whatever a writer that does not know the format put under `body`. It reads such a
+ * note from `body` only when the sequence holds no item and `body` holds some: that is a
+ * first-format note a change marked, and what people wrote is there.
+ */
 function yDocBodyToJSON(doc: Y.Doc): JSONContent {
   const bodyFragment = getDohcYDocBodyFragment(doc);
+  const readsItsSequence =
+    holdsBodySequence(doc) &&
+    (bodyFragment._start === null || doc.share.get(BODY_SEQUENCE_FIELD)?._start != null);
+  if (readsItsSequence) return readBodySequence(schema, doc).toJSON() as JSONContent;
   return yXmlFragmentToProseMirrorRootNode(bodyFragment, schema).toJSON() as JSONContent;
 }
 

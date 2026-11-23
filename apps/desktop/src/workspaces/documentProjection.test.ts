@@ -40,3 +40,14 @@ it("says the text leaves out an edit that waits for one the state lacks", () => 
   expect(runDocumentProjection({ kind: "file", state: second })).toMatchObject({ leftOut: true });
   expect(runDocumentProjection({ kind: "file", state: first })).toMatchObject({ leftOut: false });
 });
+
+it("writes what people wrote under body when the copy says it is a note whose body is one sequence", () => {
+  const doc = markdownToYDoc("---\nstatus: draft\n---\n\nKept line\n");
+  doc.getMap("meta").set("schemaVersion", 2);
+  const state = Y.encodeStateAsUpdate(doc);
+  doc.destroy();
+  expect(runDocumentProjection({ kind: "file", state })).toEqual({
+    markdown: "---\nstatus: draft\n---\n\nKept line\n",
+    leftOut: false,
+  });
+});

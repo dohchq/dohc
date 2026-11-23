@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { closeElectronApplication } from "../../scripts/verification/close-electron.mjs";
 
 export async function verifyRestartInput({
@@ -10,6 +11,15 @@ export async function verifyRestartInput({
   if (!(await readEditedText()).includes(marker))
     throw Error("Restart did not restore the saved input");
   return true;
+}
+
+export async function fileTextOrEmpty(path) {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  }
 }
 
 export function benchmarkCancellation() {
