@@ -780,7 +780,6 @@ describe("shared view moment-diff tab", () => {
     expect(screen.getByTestId("engine-diff-open-file")).toBeTruthy();
     for (const control of [
       "engine-diff-restore-file",
-      "engine-diff-shared-restore",
       "engine-diff-stop-and-restore",
       "engine-diff-undo-restore",
     ]) {

@@ -150,7 +150,6 @@ import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNo
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useMergeRemovalNotices } from "./shell/useMergeRemovalNotices";
-import { useSharedRestore } from "./shell/useSharedRestore";
 import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import { ShellErrorReporter, ShellNoticeClear, useShellError } from "./shell/useShellError";
@@ -5013,20 +5012,6 @@ function WorkspaceShell(props: {
     [openMomentDiffTab, workspaceId],
   );
   const takeRestoreRequest = useCallback(() => setRestoreRequest(null), []);
-  const sharedRestore = useSharedRestore({
-    workspaceId,
-    // Unfinished shared restores get no Notices row. Retry on one says "File
-    // restored" but never reaches the file, and Decline doesn't bring live
-    // editing back.
-    enabled: false,
-    onBeforeRestore: beginLineageOperation,
-    onRestored: onHistoryRestored,
-    openChange: openMomentDiffTab,
-    reportRestoreError,
-    reportShellFailure,
-    showSuccessNotice,
-    clearIdentity,
-  });
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
       const current = wbRef.current;
@@ -10012,7 +9997,6 @@ function WorkspaceShell(props: {
                             onClose={closeConflictReview}
                           />
                         ) : null}
-                        {sharedRestore.dialog}
                         {agentRunUndoTarget &&
                         agentRunUndoTarget.workspaceId === workspaceId &&
                         canUndoAgentRun ? (

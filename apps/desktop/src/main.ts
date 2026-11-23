@@ -93,7 +93,6 @@ import {
   type DesktopWorkspaceCallbacksDependencies,
 } from "./workspaces/desktopWorkspaceCallbacks";
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
-import { readOwnerRestoreResponse } from "./ipc/readOwnerRestoreResponse";
 import { datasetResponseAction, readDatasetResponse } from "./ipc/readDatasetResponse";
 import {
   CollectionMoveUnfinishedError,
@@ -2089,8 +2088,7 @@ type RelayShareRetainedUnavailableResult<T> =
 type RelayShareJsonOptions =
   | { retainDependentSetConflict: true }
   | { retainNotFound: true }
-  | { retainUnavailable: true }
-  | { retainRestoreConflict: true };
+  | { retainUnavailable: true };
 
 const relayShareFetch = relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS);
 
@@ -2127,12 +2125,6 @@ async function relayShareResponseWithCredentials(
   return response;
 }
 
-async function relayShareJsonWithCredentials<T>(
-  credentials: CloudSessionCredentials,
-  path: string,
-  init: RequestInit | undefined,
-  options: { retainRestoreConflict: true },
-): Promise<T>;
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
@@ -2209,9 +2201,7 @@ async function relayShareJsonWithCredentials<T>(
           datasetRoute,
           init?.signal ?? new AbortController().signal,
         )
-      : options && "retainRestoreConflict" in options
-        ? await readOwnerRestoreResponse(response)
-        : await response.json().catch(() => null)
+      : await response.json().catch(() => null)
   ) as {
     ok?: boolean;
     error?: string;
@@ -2219,16 +2209,6 @@ async function relayShareJsonWithCredentials<T>(
     [key: string]: unknown;
   } | null;
   if (!response.ok || data?.ok === false) {
-    if (
-      options &&
-      "retainRestoreConflict" in options &&
-      response.status === 409 &&
-      data &&
-      "status" in data &&
-      "result" in data
-    ) {
-      return data as T;
-    }
     if (
       options &&
       "retainDependentSetConflict" in options &&
@@ -2258,9 +2238,7 @@ async function relayShareJsonWithCredentials<T>(
       liveStopRelayError(data) ?? new Error(relayShareErrorCopy(response.status, data));
     throw datasetRoute ? markDatasetServerNotFound(failure, response.status, data) : failure;
   }
-  if (options && !("retainRestoreConflict" in options)) {
-    return { kind: "success", body: data as T };
-  }
+  if (options) return { kind: "success", body: data as T };
   return data as T;
 }
 

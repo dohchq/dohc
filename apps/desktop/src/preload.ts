@@ -177,8 +177,6 @@ ipcRenderer.on(CHANNELS.menuCommand, (_event, raw: unknown) => {
 // reject IPC that the outgoing document queued while renderer reload cleanup
 // was draining on the same WebContents object.
 const rendererDocumentId = crypto.randomUUID();
-const relay = operationBridge(relayShareOperations, invoke);
-
 const bridge: DohcDesktopBridge = {
   ...operationBridge(workspaceFileOperations, invoke),
   ...operationBridge(explorerMenuOperations, invoke),
@@ -188,8 +186,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(shareMountOperations, invoke),
   ...operationBridge(shareProposalOperations, invoke),
   ...operationBridge(sharedChannelOperations, invoke),
-  ...relay,
-  ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
+  ...operationBridge(relayShareOperations, invoke),
   ...operationBridge(workspaceFolderNameOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(updateDownloadOperations, invoke),
