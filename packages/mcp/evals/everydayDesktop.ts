@@ -603,23 +603,17 @@ async function parseAppManifestForEval(root: string, appRootInput: string) {
   if (Object.hasOwn(row, "dataset")) {
     datasets.push({ reference: parseAppDatasetReference(row.dataset) });
   } else if (Object.hasOwn(row, "datasets")) {
-    if (!Array.isArray(row.datasets) || row.datasets.length === 0 || row.datasets.length > 16) {
+    if (!row.datasets || typeof row.datasets !== "object" || Array.isArray(row.datasets)) {
+      throw new Error(`${manifestRel} has a datasets field that is not an object.`);
+    }
+    const entries = Object.entries(row.datasets as Record<string, unknown>);
+    if (entries.length === 0 || entries.length > 16) {
       throw new Error(`${manifestRel} datasets must hold 1 to 16 entries.`);
     }
-    for (const item of row.datasets) {
-      if (!item || typeof item !== "object" || Array.isArray(item)) {
-        throw new Error(`${manifestRel} datasets entries must be objects.`);
-      }
-      const entry = item as Record<string, unknown>;
-      const alias = Object.hasOwn(entry, "alias") ? parseDatasetAlias(entry.alias) : undefined;
-      const refInput = Object.hasOwn(entry, "dataset") ? entry.dataset : entry;
-      const { alias: _ignored, ...rest } =
-        refInput && typeof refInput === "object" && !Array.isArray(refInput)
-          ? (refInput as Record<string, unknown>)
-          : {};
+    for (const [alias, reference] of entries) {
       datasets.push({
-        ...(alias !== undefined ? { alias } : {}),
-        reference: parseAppDatasetReference(rest),
+        alias: parseDatasetAlias(alias),
+        reference: parseAppDatasetReference(reference),
       });
     }
   }
@@ -2133,9 +2127,13 @@ export async function createEverydayDesktop(
           throw new Error("candidateDigest does not match prepared app.");
         }
         appApprovals.delete(req.approvalId);
+        const affectedDatasetIds = new Set<string>();
         if (pending.local) {
           for (const existing of appPublications.values()) {
-            if (existing.local && existing.appRoot === pending.appRoot) existing.active = false;
+            if (existing.local && existing.appRoot === pending.appRoot && existing.active) {
+              existing.active = false;
+              for (const cap of existing.capabilities) affectedDatasetIds.add(cap.datasetId);
+            }
           }
         }
         const publicationId = sha256(`pub:${pending.appRoot}:${pending.candidateDigest}`);
@@ -2154,10 +2152,9 @@ export async function createEverydayDesktop(
           ...(pending.shareId ? { shareId: pending.shareId } : {}),
           ...(pending.grantId ? { grantId: pending.grantId } : {}),
         });
-        for (const cap of pending.capabilities) {
-          for (const ds of datasetsByPath.values()) {
-            if (ds.revision.datasetId === cap.datasetId) reportSnapshot(ds);
-          }
+        for (const cap of pending.capabilities) affectedDatasetIds.add(cap.datasetId);
+        for (const ds of datasetsByPath.values()) {
+          if (affectedDatasetIds.has(ds.revision.datasetId)) reportSnapshot(ds);
         }
         return pending.local
           ? {

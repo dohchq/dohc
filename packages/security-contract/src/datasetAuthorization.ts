@@ -372,7 +372,19 @@ export function assessAppDatasetDrift(
     push("Previous Collection rules are unavailable to verify share-link access.");
   }
 
-  for (const restriction of parsed.createFields ?? []) {
+  const createChecks = [
+    ...(parsed.createFields ?? []),
+    ...parsed.operations
+      .filter((op) => !(parsed.createFields ?? []).some((e) => e.operationId === op.operationId))
+      .flatMap((op) => {
+        const next = targetOps.get(op.operationId);
+        const oldOp = pinnedOps.get(op.operationId);
+        return next?.kind === "create" && oldOp
+          ? [{ operationId: op.operationId, fieldIds: oldOp.fieldIds }]
+          : [];
+      }),
+  ];
+  for (const restriction of createChecks) {
     const next = targetOps.get(restriction.operationId);
     if (!next) continue;
     if (next.kind !== "create") {

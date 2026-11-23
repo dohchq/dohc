@@ -2816,7 +2816,9 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
             app.scope === "link" &&
             app.appRoot === "apps/pledge-form" &&
             app.status === "compatible" &&
-            app.pinnedRevision === snapshot.revision,
+            app.pinnedRevision === snapshot.revision &&
+            app.operationIds.length === 1 &&
+            app.operationIds[0] === uuid("f5000000", 7),
         ),
       );
       checks.push({

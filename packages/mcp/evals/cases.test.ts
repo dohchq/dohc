@@ -1299,6 +1299,25 @@ describe("eval cases", () => {
         (c) => !c.pass && c.name.includes("apps/pledge-form share-link publication is approved"),
       ),
     ).toBe(true);
+
+    const leakedSnapshot = structuredClone(driftSolved.run.datasetSnapshots!);
+    const linkEntry = leakedSnapshot["fundraiser/dataset.json"]!.boundApps!.find(
+      (app) => app.scope === "link" && app.appRoot === "apps/pledge-form",
+    )!;
+    linkEntry.operationIds = [
+      "f5000000-0000-4000-8000-000000000006",
+      "f5000000-0000-4000-8000-000000000007",
+    ];
+    const leakedSnapshotChecks = await grade(
+      drift.expect,
+      { ...driftSolved.run, datasetSnapshots: leakedSnapshot },
+      drift.gradeRun,
+    );
+    expect(
+      leakedSnapshotChecks.some(
+        (c) => !c.pass && c.name.includes("apps/pledge-form share-link publication is approved"),
+      ),
+    ).toBe(true);
   });
 
   it("keeps public skill automations.yaml examples valid under parseAutomationsFile", async () => {

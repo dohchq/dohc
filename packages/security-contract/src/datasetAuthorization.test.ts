@@ -228,6 +228,29 @@ describe("assessAppDatasetDrift", () => {
     expect(typeChangedDrift.status).toBe("incompatible");
     expect(typeChangedDrift.reasons[0]).toContain("changed the input format for Email");
 
+    const plainCreateCap = resolveAppDatasetCapability(
+      {
+        kind: "dataset",
+        datasetId: rev1.datasetId,
+        revision: rev1.revision,
+        revisionSha256: rev1.revisionSha256,
+        operationIds: [id(11)],
+      },
+      rev1,
+    );
+    const plainTypeChanged = assessAppDatasetDrift(
+      plainCreateCap,
+      makeRevision(typeChangedDef, 2),
+      {
+        scope: "local",
+        bindingCurrent: true,
+        preservesAccess: false,
+        pinnedRevision: rev1,
+      },
+    );
+    expect(plainTypeChanged.status).toBe("incompatible");
+    expect(plainTypeChanged.reasons[0]).toContain("changed the input format for Email");
+
     const requiredDef = structuredClone(rev1.definition);
     const reqEmail = requiredDef.tables[0]!.fields.find((f) => f.fieldId === id(5))!;
     if (reqEmail.type !== "button") reqEmail.required = true;
