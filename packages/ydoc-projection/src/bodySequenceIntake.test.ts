@@ -2288,11 +2288,39 @@ describe("the relay's setting", () => {
   });
 });
 
-describe("a copy that says its body is one sequence and holds its text under body, as a first-format note a change marked would", () => {
-  it("is written as a file with that text, not with a blank body", () => {
+describe("which root a note that says its body is one sequence is read from", () => {
+  const stray = (doc: Y.Doc) => {
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText("stray")]);
+    doc.getXmlFragment("body").insert(0, [paragraph]);
+  };
+
+  it("its text under body and no item in its sequence, as a first-format note a change marked: the file holds that text, not a blank body", () => {
     const doc = markdownToYDoc("---\nstatus: draft\n---\n\nKept line\n");
     doc.getMap("meta").set("schemaVersion", 2);
     expect(yDocToMarkdown(doc)).toBe("---\nstatus: draft\n---\n\nKept line\n");
+    doc.destroy();
+  });
+
+  it("its lines in its sequence and a paragraph a writer that does not know the format put under body: the file holds its lines", () => {
+    const doc = new Y.Doc({ gc: false });
+    Y.applyUpdate(doc, seededNote());
+    const lines = yDocToMarkdown(doc);
+    expect(lines.split("\n").filter((line) => line !== "").length).toBeGreaterThan(5);
+    stray(doc);
+    expect(yDocToMarkdown(doc)).toBe(lines);
+    doc.destroy();
+  });
+
+  it("every line of its sequence deleted and a paragraph under body: the file is the emptied note, since its sequence still holds items", () => {
+    const doc = new Y.Doc({ gc: false });
+    Y.applyUpdate(doc, seededNote());
+    const sequence = doc.getText(BODY_SEQUENCE_FIELD);
+    sequence.delete(0, sequence.length);
+    const emptied = yDocToMarkdown(doc);
+    stray(doc);
+    expect(yDocToMarkdown(doc)).toBe(emptied);
+    expect(emptied).not.toContain("stray");
     doc.destroy();
   });
 });

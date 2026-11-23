@@ -36,6 +36,7 @@ import { assertSupportedListMarkdown } from "./list-markdown.js";
 import { sanitizeImageSrc } from "./image-src.js";
 import { backtickFence, codeBlockFence } from "./markdown-fence.js";
 import { getDohcYDocBodyFragment } from "./body-fragment.js";
+import { BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
 import { holdsBodySequence, readBodySequence } from "./bodySequenceYjs.js";
 import {
   FRONTMATTER_SOURCE_META_KEY,
@@ -1022,14 +1023,17 @@ function yDocBodyToMarkdown(doc: Y.Doc): string {
 }
 
 /**
- * Reads the body from the note's sequence when the note says its body is one. Such a note has no
- * item under `body`, so one that says so and has items there is read from them: they are what
- * people wrote.
+ * Reads the body of a note that says its body is one sequence from that sequence when it holds
+ * any item, whatever a writer that does not know the format put under `body`. It reads such a
+ * note from `body` only when the sequence holds no item and `body` holds some: that is a
+ * first-format note a change marked, and what people wrote is there.
  */
 function yDocBodyToJSON(doc: Y.Doc): JSONContent {
   const bodyFragment = getDohcYDocBodyFragment(doc);
-  if (holdsBodySequence(doc) && bodyFragment._start === null)
-    return readBodySequence(schema, doc).toJSON() as JSONContent;
+  const readsItsSequence =
+    holdsBodySequence(doc) &&
+    (bodyFragment._start === null || doc.share.get(BODY_SEQUENCE_FIELD)?._start != null);
+  if (readsItsSequence) return readBodySequence(schema, doc).toJSON() as JSONContent;
   return yXmlFragmentToProseMirrorRootNode(bodyFragment, schema).toJSON() as JSONContent;
 }
 
