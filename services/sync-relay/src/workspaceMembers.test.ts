@@ -921,7 +921,7 @@ describe("what a member reaches", () => {
     expect(admin.marks).toEqual([]);
   });
 
-  it("changes the visibility signature only when what a member reaches changes, and lists both on every pull page", async () => {
+  it("changes the visibility signature only when what a member reaches or where they read History changes, and lists both on every pull page", async () => {
     const { h } = await seed();
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
@@ -957,6 +957,11 @@ describe("what a member reaches", () => {
     await expectChanged("content edit", false, false);
     await ownerWrite(h, "team/access.yaml", "members: view\n");
     await expectChanged("level-only rule change", true, false);
+    // History needs Edit, so the copy rebuilds when Edit starts or stops.
+    await ownerWrite(h, "team/access.yaml", "members: edit\n");
+    await expectChanged("promotion to Edit", true, true);
+    await ownerWrite(h, "team/access.yaml", "members: view\n");
+    await expectChanged("demotion below Edit", true, true);
     await ownerWrite(h, "team/access.yaml", "");
     await expectChanged("hiding a folder", true, true);
     await ownerWrite(h, "team/access.yaml", "members: edit\n");
@@ -982,7 +987,7 @@ describe("what a member reaches", () => {
     expect(
       (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
     ).toBe(200);
-    await expectChanged("member level change", true, false);
+    await expectChanged("member level change to Edit", true, true);
     // A held read that ends on a changed level lists the reach too.
     const ended = await h(
       request("ana", `/sync/shares/${shareId}/log?since=0&limit=10&hold=5000&level=comment`),

@@ -301,7 +301,8 @@ export interface ShareViewRefusal {
 export const MAX_REPORTED_REFUSALS = 20;
 
 // The two signatures of a member's reach: `signature` changes whenever its
-// levels do, `visibilitySignature` only when what it reaches does.
+// levels do, `visibilitySignature` only when what it reaches, or where it
+// reads History, does.
 export interface ShareReachSignatures {
   signature: string;
   visibilitySignature: string;
