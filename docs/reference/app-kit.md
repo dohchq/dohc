@@ -70,3 +70,48 @@ createRoot(document.getElementById("root")!).render(
   </AppProvider>,
 );
 ```
+
+## Minimal `app.publish.json`
+
+`inputs` and `packageMap` are optional. When `inputs` is omitted, dohc includes the supported source files in the app folder and leaves out `app.publish.json`, `dataset.json`, co-located Collection schemas and operations, strict Collection subfolders, top-level `changes/` and `revisions/`, `collection.yaml`, `automations.yaml`, `package.json`, `dohc.json`, `tsconfig*.json`, dotfiles, and `node_modules`. Relative script imports without extensions (for example `./Summary` or `./date.utils`) resolve unambiguously across `.tsx`, `.ts`, `.jsx`, `.js`, and `index.*`.
+
+A Collection binding can name operations directly and omit `revision` and `revisionSha256`; dohc pins them to the Collection's currently approved revision when preparing the app:
+
+```json
+{
+  "version": 1,
+  "entryPath": "main.tsx",
+  "dataset": {
+    "kind": "dataset",
+    "datasetPath": "expenses/dataset.json",
+    "operations": ["listExpenses", "addExpense"]
+  }
+}
+```
+
+## Slug-based `dataset.json` (`formatVersion: 2`)
+
+Collection definitions can use `formatVersion: 2` to declare tables, fields, and operations by SQL name instead of hand-writing UUIDs. `schemaPath` and `operationsPath` resolve relative to the `dataset.json` folder (defaulting to `schema.sql` and `operations.js`), and `schemaPath` must stay in that folder or a generated `revisions/` subfolder. Operation `access` defaults to `"owner"`. dohc derives stable RFC 4122 UUIDv5 identifiers from `datasetId` and the SQL names (or button display names) and validates the normalized definition under the same rules and 256 KB limit as `formatVersion: 1`. Before renaming a table, column, button, or operation on an existing Collection, pin its explicit `tableId`, `fieldId`, or `operationId` (renaming a table's `sqlName` also changes derived `fieldId`s for every column and button in that table, so pin those `fieldId`s too), and update any name-based `app.publish.json` bindings that reference renamed operations or fields. When passing a `formatVersion: 2` definition to `dohc dataset create`, include explicit workspace-relative `schemaPath` and `operationsPath`.
+
+```json
+{
+  "formatVersion": 2,
+  "datasetId": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "Expenses",
+  "tables": [
+    {
+      "sqlName": "expenses",
+      "primaryKey": "id",
+      "fields": [
+        { "sqlColumn": "id", "type": "text" },
+        { "sqlColumn": "merchant", "name": "Merchant", "type": "text", "required": true },
+        { "sqlColumn": "amount", "name": "Amount", "type": "number", "required": true }
+      ]
+    }
+  ],
+  "operations": [
+    { "name": "listExpenses", "table": "expenses", "kind": "read", "fields": ["id", "merchant", "amount"] },
+    { "name": "addExpense", "table": "expenses", "kind": "create", "fields": ["id", "merchant", "amount"] }
+  ]
+}
+```

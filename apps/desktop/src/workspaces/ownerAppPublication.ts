@@ -19,7 +19,9 @@ import {
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import {
   parseAppDatasetReference,
-  type AppDatasetBinding,
+  parseDatasetDefinition,
+  resolveAppDatasetReferenceBinding,
+  type AppDatasetRevisionLookup,
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
@@ -44,6 +46,47 @@ const staticAppFile = /\.(?:css|js|jsx|ts|tsx|json|png|jpe?g|gif|webp|avif|woff2
 const staticAppExcluded = (path: string) =>
   /(?:^|\/)(?:package\.json|dohc\.json|tsconfig(?:\.[^/]*)?\.json)$/.test(path) ||
   path.split("/").some((part) => part === "node_modules" || part.startsWith("."));
+const autoManifestExcludedNames = new Set([
+  "app.publish.json",
+  "dataset.json",
+  "collection.yaml",
+  "automations.yaml",
+]);
+function discoverAppInputs(
+  appRoot: string,
+  entryPath: string,
+  folder: readonly string[],
+  packageMapTargets: readonly string[],
+  extraExcluded?: ReadonlySet<string>,
+): string[] {
+  const collectionSubfolders = new Set<string>();
+  const prefix = `${appRoot}/`;
+  for (const path of folder) {
+    if (path === `${prefix}dataset.json` || path === `${prefix}collection.yaml`) continue;
+    if (path.endsWith("/dataset.json") || path.endsWith("/collection.yaml")) {
+      collectionSubfolders.add(posix.dirname(path));
+    }
+  }
+  const excluded = (path: string): boolean => {
+    if (staticAppExcluded(path)) return true;
+    if (extraExcluded?.has(path)) return true;
+    if (autoManifestExcludedNames.has(posix.basename(path))) return true;
+    if (path.startsWith(prefix)) {
+      const firstSegment = path.slice(prefix.length).split("/", 1)[0];
+      if (firstSegment === "changes" || firstSegment === "revisions") return true;
+    }
+    for (const sub of collectionSubfolders) {
+      if (path === sub || path.startsWith(`${sub}/`)) return true;
+    }
+    return false;
+  };
+  const discovered = folder.filter(
+    (path) => isPortableNamePath(path) && staticAppFile.test(path) && !excluded(path),
+  );
+  return [...new Set([entryPath, ...discovered, ...packageMapTargets])].sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+}
 export interface OwnerPublicationSelection {
   workspaceId: string;
   appRoot: string;
@@ -69,7 +112,7 @@ export interface AppPublicationPreparationDependencies {
   assertCurrent(): void;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   /** Resolves from the owner's approved catalog. Publication preparation cannot approve a dataset. */
-  resolveDatasetRevision?(binding: AppDatasetBinding): Promise<DatasetRevision>;
+  resolveDatasetRevision?(binding: AppDatasetRevisionLookup): Promise<DatasetRevision>;
 }
 function describeJsonSyntaxLocation(error: unknown): string | undefined {
   if (!(error instanceof Error)) return undefined;
@@ -84,7 +127,11 @@ function describeJsonSyntaxLocation(error: unknown): string | undefined {
  * Reads app.publish.json. Its paths are relative to the app folder, so the folder can move;
  * "../" reaches files beside it. Dataset references use workspace-relative dataset.json paths.
  */
-export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: string) {
+export function parseAppPublicationDeclaration(
+  bytes: Uint8Array,
+  appRoot: string,
+  discovery?: { folder: readonly string[]; extraExcluded?: ReadonlySet<string> },
+) {
   const manifestPath = `${appRoot}/app.publish.json`;
   if (bytes.byteLength > manifestLimit) throw new Error(`${manifestPath} is larger than 64 KB.`);
   let value: unknown;
@@ -98,7 +145,7 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(
-      `${manifestPath} must hold entryPath, inputs, and packageMap, and at most one of collection or dataset.`,
+      `${manifestPath} must hold entryPath, optional inputs and packageMap, and at most one of collection or dataset.`,
     );
   }
   const row = value as Record<string, unknown>;
@@ -131,22 +178,45 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
     return resolved;
   };
   const entryPath = resolve(row.entryPath, "entryPath");
-  if (!Array.isArray(row.inputs) || row.inputs.length === 0)
-    throw new Error(`${manifestPath} must list at least one input.`);
-  if (row.inputs.length >= inputBounds.maxInputFiles)
-    throw new Error(`${manifestPath} lists more than ${inputBounds.maxInputFiles - 1} inputs.`);
-  const inputs = row.inputs.map((path) => resolve(path, "input"));
-  const repeated = inputs.find((path, index) => inputs.indexOf(path) !== index);
-  if (repeated) throw new Error(`${manifestPath} lists ${repeated} twice.`);
-  if (!inputs.includes(entryPath))
-    throw new Error(`${manifestPath} must list its entryPath ${entryPath} among its inputs.`);
-  if (!row.packageMap || typeof row.packageMap !== "object" || Array.isArray(row.packageMap))
+  const rawPackageMap = Object.hasOwn(row, "packageMap") ? row.packageMap : {};
+  if (!rawPackageMap || typeof rawPackageMap !== "object" || Array.isArray(rawPackageMap))
     throw new Error(`${manifestPath} has a packageMap that is not an object.`);
-  const entries = Object.entries(row.packageMap).map(
+  const entries = Object.entries(rawPackageMap).map(
     ([name, path]) => [name, resolve(path, `packageMap target for ${name}`)] as const,
   );
   if (entries.length > inputBounds.maxInputFiles)
     throw new Error(`${manifestPath} maps more than ${inputBounds.maxInputFiles} packages.`);
+
+  let inputs: string[];
+  const explicitInputs = Object.hasOwn(row, "inputs");
+  if (explicitInputs) {
+    if (!Array.isArray(row.inputs) || row.inputs.length === 0)
+      throw new Error(`${manifestPath} must list at least one input.`);
+    if (row.inputs.length >= inputBounds.maxInputFiles)
+      throw new Error(`${manifestPath} lists more than ${inputBounds.maxInputFiles - 1} inputs.`);
+    inputs = row.inputs.map((path) => resolve(path, "input"));
+    const repeated = inputs.find((path, index) => inputs.indexOf(path) !== index);
+    if (repeated) throw new Error(`${manifestPath} lists ${repeated} twice.`);
+    if (!inputs.includes(entryPath))
+      throw new Error(`${manifestPath} must list its entryPath ${entryPath} among its inputs.`);
+  } else {
+    if (!discovery) {
+      throw new Error(
+        `${manifestPath} omits inputs; folder discovery is required to resolve its files.`,
+      );
+    }
+    inputs = discoverAppInputs(
+      appRoot,
+      entryPath,
+      discovery.folder,
+      entries.map(([, path]) => path),
+      discovery.extraExcluded,
+    );
+    if (inputs.length >= inputBounds.maxInputFiles)
+      throw new Error(
+        `${appRoot} has more than ${inputBounds.maxInputFiles - 1} files to publish. List the files to publish in ${manifestPath}.`,
+      );
+  }
   for (const [name, path] of entries) {
     if (isReservedAppPackage(name))
       throw new Error(
@@ -357,8 +427,53 @@ async function selectAppSources(
   const first = hasManifest ? await capture([manifestPath], manifestLimit) : null;
   const manifest = first && (await adapter.hydrateCapturedSources(first, signal))[0]!;
   assertCurrent();
+  let extraExcluded: Set<string> | undefined;
+  let colocatedDescriptorSha256: string | undefined;
+  let autoDiscovered = false;
+  const colocatedDescriptor = `${input.appRoot}/dataset.json`;
+  if (manifest) {
+    let parsedManifest: unknown;
+    try {
+      parsedManifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(manifest.bytes));
+    } catch {
+      parsedManifest = null;
+    }
+    autoDiscovered =
+      parsedManifest !== null &&
+      typeof parsedManifest === "object" &&
+      !Array.isArray(parsedManifest) &&
+      !Object.hasOwn(parsedManifest, "inputs");
+    if (autoDiscovered && folder.includes(colocatedDescriptor)) {
+      if (!allowed(colocatedDescriptor)) {
+        throw new Error(
+          `${colocatedDescriptor} is outside this link's shared files. List explicit inputs in ${manifestPath}.`,
+        );
+      }
+      const descriptorMeta = await capture([colocatedDescriptor], 256 * 1024);
+      const descriptorFile = (await adapter.hydrateCapturedSources(descriptorMeta, signal))[0];
+      assertCurrent();
+      signal.throwIfAborted();
+      if (!descriptorFile) {
+        throw new Error(
+          `${colocatedDescriptor} changed while dohc prepared the app. Prepare the app again.`,
+        );
+      }
+      colocatedDescriptorSha256 = descriptorFile.sha256;
+      try {
+        const def = parseDatasetDefinition(
+          JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(descriptorFile.bytes)),
+          { descriptorPath: colocatedDescriptor },
+        );
+        extraExcluded = new Set([def.operationsPath, def.schemaPath]);
+      } catch {
+        throw new Error(
+          `dohc could not read ${colocatedDescriptor} while selecting files for ${input.appRoot}. Fix ${colocatedDescriptor} or list explicit inputs in ${manifestPath}.`,
+        );
+      }
+    }
+  }
   const declared = manifest
-    ? parseAppPublicationDeclaration(manifest.bytes, input.appRoot)
+    ? parseAppPublicationDeclaration(manifest.bytes, input.appRoot, { folder, extraExcluded })
     : staticDeclaration(input.appRoot, folder);
   const schemaPath = declared.collection && `${declared.collection.collectionPath}/collection.yaml`;
   if (declared.collection && !allowed(declared.collection.collectionPath))
@@ -383,6 +498,40 @@ async function selectAppSources(
     metadata.files.find((file) => file.path === manifestPath)?.sha256 !== manifest.sha256
   )
     throw new Error("The app declaration changed. Prepare the app again.");
+  if (autoDiscovered) {
+    const afterList = await adapter.listTextFileMetadata({
+      workspaceId: input.workspaceId,
+      versionId,
+      under: input.appRoot,
+    });
+    assertCurrent();
+    signal.throwIfAborted();
+    const afterDescriptor = afterList.find((file) => file.path === colocatedDescriptor);
+    if (
+      (colocatedDescriptorSha256 !== undefined &&
+        afterDescriptor?.sha256 !== colocatedDescriptorSha256) ||
+      (colocatedDescriptorSha256 === undefined && afterDescriptor !== undefined)
+    ) {
+      throw new Error(
+        `${colocatedDescriptor} changed while dohc prepared the app. Prepare the app again.`,
+      );
+    }
+    const afterInputs = discoverAppInputs(
+      input.appRoot,
+      declared.entryPath,
+      afterList.map((file) => file.path),
+      Object.values(declared.packageMap),
+      extraExcluded,
+    );
+    if (
+      afterInputs.length !== declared.inputs.length ||
+      afterInputs.some((path, index) => path !== declared.inputs[index])
+    ) {
+      throw new Error(
+        `The files in ${input.appRoot} changed while dohc prepared the app. Prepare the app again.`,
+      );
+    }
+  }
   return { declared, schemaPath, metadata };
 }
 
@@ -407,7 +556,7 @@ async function prepareAppSources(
   if (declared.dataset) {
     if (!dependencies.resolveDatasetRevision)
       throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
-    const { datasetPath, ...reference } = declared.dataset;
+    const datasetPath = declared.dataset.datasetPath;
     assertSourcePathsNotDeferred(dependencies.deferredWrites, [datasetPath]);
     const datasetId = await resolveDatasetAddress(
       adapter,
@@ -418,10 +567,23 @@ async function prepareAppSources(
     );
     assertCurrent();
     signal.throwIfAborted();
-    const resolved = { ...reference, datasetId };
-    const approved = await dependencies.resolveDatasetRevision(resolved);
+    const { datasetPath: _path, ...rest } = declared.dataset;
+    const lookup: AppDatasetRevisionLookup =
+      "operationIds" in rest && rest.revision !== undefined
+        ? { ...rest, datasetId }
+        : {
+            datasetId,
+            ...(declared.dataset.revision !== undefined
+              ? {
+                  revision: declared.dataset.revision,
+                  revisionSha256: declared.dataset.revisionSha256,
+                }
+              : {}),
+          };
+    const approved = await dependencies.resolveDatasetRevision(lookup);
     assertCurrent();
     signal.throwIfAborted();
+    const resolved = resolveAppDatasetReferenceBinding(declared.dataset, datasetId, approved);
     const { linkReads: _requestedReads, ...binding } = resolved;
     capabilities.push(resolveAppDatasetCapability(binding, approved));
   }

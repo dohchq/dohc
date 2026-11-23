@@ -10252,7 +10252,7 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, appViewOperations, { appView: appViews.appView });
   const resolveDatasetArtifacts = async (
     workspace: DesktopRendererWorkspaceOperation["workspace"],
-    binding: import("@dohc/security-contract/dataset").AppDatasetBinding,
+    binding: import("@dohc/security-contract/dataset").AppDatasetRevisionLookup,
     signal: AbortSignal,
   ) =>
     resolveRemoteDatasetArtifacts(

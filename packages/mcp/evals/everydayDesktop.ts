@@ -18,7 +18,7 @@ import {
   describeApprovedDataset,
   parseAppDatasetReference,
   parseDatasetDefinition,
-  type AppDatasetBinding,
+  resolveAppDatasetReferenceBinding,
   type DatasetDefinition,
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
@@ -1404,17 +1404,11 @@ export async function createEverydayDesktop(
               `Collection reference broken: ${datasetPath}. Approve the Collection first or fix datasetPath in ${manifest.appRoot}/app.publish.json.`,
             );
           }
-          const binding: AppDatasetBinding = {
-            kind: "dataset",
-            datasetId: stored.revision.datasetId,
-            revision: manifest.dataset.revision,
-            revisionSha256: manifest.dataset.revisionSha256,
-            operationIds: manifest.dataset.operationIds,
-            ...(manifest.dataset.linkReads ? { linkReads: manifest.dataset.linkReads } : {}),
-            ...(manifest.dataset.createFields
-              ? { createFields: manifest.dataset.createFields }
-              : {}),
-          };
+          const binding = resolveAppDatasetReferenceBinding(
+            manifest.dataset,
+            stored.revision.datasetId,
+            stored.revision,
+          );
           capabilities.push(
             resolveAppDatasetCapability(binding, stored.revision, () => stored.generated),
           );

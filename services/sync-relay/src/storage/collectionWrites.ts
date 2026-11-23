@@ -990,7 +990,9 @@ function datasetDescriptor(
   const bytes = storedBlob(storage, workspaceId, descriptor.blobSha256, size);
   const text = bytes && utf8(bytes);
   if (text === null) return null;
-  const definition = parseDatasetDefinition(JSON.parse(text));
+  const definition = parseDatasetDefinition(JSON.parse(text), {
+    descriptorPath: `${folder}/dataset.json`,
+  });
   const result = {
     blobSha256: descriptor.blobSha256,
     expiresAtMs: now + DATASET_PREFLIGHT_CACHE_MS,

@@ -577,3 +577,54 @@ it("explains field mistakes, unrecognized keys, and definition errors before tra
 
   expect(send).not.toHaveBeenCalled();
 });
+
+it("accepts formatVersion 2 Collection definitions in dataset create and mints datasetId when omitted", () => {
+  const parsed = DatasetRequest.parse({
+    action: "create",
+    workspaceId: "workspace",
+    definition: {
+      formatVersion: 2,
+      name: "Expenses",
+      schemaPath: "expenses/schema.sql",
+      operationsPath: "expenses/operations.js",
+      tables: [
+        {
+          sqlName: "expenses",
+          primaryKey: "id",
+          fields: [
+            { sqlColumn: "id", type: "text" },
+            { sqlColumn: "amount", type: "number", required: true },
+          ],
+        },
+      ],
+      operations: [
+        { name: "listExpenses", table: "expenses", kind: "read", fields: ["id", "amount"] },
+      ],
+    },
+  });
+  expect(parsed.action).toBe("create");
+  if (parsed.action === "create") {
+    expect(parsed.definition.formatVersion).toBe(1);
+    expect(parsed.definition.datasetId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(parsed.definition.operations[0]?.access).toBe("owner");
+    expect(parsed.definition.operations[0]?.readOnly).toBe(true);
+  }
+
+  // Refuses v2 create without explicit schemaPath and operationsPath so it cannot dump files at workspace root.
+  expect(() =>
+    DatasetRequest.parse({
+      action: "create",
+      workspaceId: "workspace",
+      definition: {
+        formatVersion: 2,
+        name: "Expenses",
+        tables: [
+          { sqlName: "expenses", primaryKey: "id", fields: [{ sqlColumn: "id", type: "text" }] },
+        ],
+        operations: [{ name: "listExpenses", table: "expenses", kind: "read", fields: ["id"] }],
+      },
+    }),
+  ).toThrow(/explicit schemaPath and operationsPath/);
+});

@@ -461,6 +461,36 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
                 });
                 if (path === ".." || path.startsWith("../"))
                   return refuse(", which is outside the workspace.");
+                if (!css && !inputs.has(path) && !acceptedTypes.has(extension(path))) {
+                  const dirOnly = path.endsWith("/");
+                  const base = dirOnly ? path.slice(0, -1) : path;
+                  const indexTarget = base === "" || base === "." ? "index" : `${base}/index`;
+                  const candidates = [...inputs.keys()]
+                    .filter((candidate) => {
+                      const ext = extension(candidate);
+                      if (!scriptLoaders.has(ext)) return false;
+                      const stem = candidate.slice(0, -ext.length);
+                      return (
+                        (!dirOnly && base !== "" && base !== "." && stem === base) ||
+                        stem === indexTarget
+                      );
+                    })
+                    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+                  if (candidates.length === 1) return { path: candidates[0]!, namespace };
+                  if (candidates.length > 1) {
+                    return refuse(
+                      `, which matches multiple files (${candidates.join(", ")}). Add the file extension to choose one.`,
+                    );
+                  }
+                  if (extension(path) === "") {
+                    if (base !== "" && base !== "." && !isPortableNamePath(base)) {
+                      return refuse(`. ${appSourceNameAdvice(base)}`);
+                    }
+                    return refuse(
+                      ", which is not in the app. Add the file, or list it in app.publish.json.",
+                    );
+                  }
+                }
                 if (!isPortableNamePath(path)) return refuse(`. ${appSourceNameAdvice(path)}`);
                 if (!acceptedTypes.has(extension(path)))
                   return refuse(

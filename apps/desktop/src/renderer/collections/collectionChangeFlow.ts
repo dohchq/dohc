@@ -121,10 +121,13 @@ async function momentsOf(
 
 const sameDefinition = (a: DatasetDefinition, b: DatasetDefinition) =>
   datasetDefinitionDigestContent(a) === datasetDefinitionDigestContent(b);
-const definitionOf = (text: string | null | undefined): DatasetDefinition | null => {
+const definitionOf = (
+  text: string | null | undefined,
+  descriptorPath: string,
+): DatasetDefinition | null => {
   if (typeof text !== "string") return null;
   try {
-    return parseDatasetDefinition(JSON.parse(text));
+    return parseDatasetDefinition(JSON.parse(text), { descriptorPath });
   } catch {
     return null;
   }
@@ -139,12 +142,16 @@ async function definitionSteps(
   workspaceId: string,
   moments: readonly EngineMomentRecord[],
   base: DatasetDefinition,
+  descriptorPath: string,
 ): Promise<CollectionChangeStep[]> {
   const newer: CollectionChangeStep[] = [];
   for (const moment of moments.slice(0, 20)) {
     if (moment.operation !== "write") continue;
     const read = await api.readEngineMoment({ workspaceId, momentId: moment.id }).catch(() => null);
-    const definition = definitionOf(read && "moment" in read ? read.moment?.afterText : null);
+    const definition = definitionOf(
+      read && "moment" in read ? read.moment?.afterText : null,
+      descriptorPath,
+    );
     if (!definition) continue;
     if (sameDefinition(definition, base)) break;
     newer.push({ definition, author: momentAuthor(moment), atMs: moment.recordedAtMs });
@@ -186,7 +193,13 @@ async function attribute(
     definitionPath: proposal.datasetPath,
     operationsPath: base.operationsPath,
     files,
-    steps: await definitionSteps(api, workspaceId, before(proposal.datasetPath), base),
+    steps: await definitionSteps(
+      api,
+      workspaceId,
+      before(proposal.datasetPath),
+      base,
+      proposal.datasetPath,
+    ),
   });
   return { rows, paths, history };
 }
@@ -251,7 +264,7 @@ async function changeState(
     if (saved?.kind === "history-revision") return { kind: "applied", current: false };
   }
   const definitionText = await readText(api, selection.workspaceId, proposal.datasetPath);
-  const definition = definitionOf(definitionText);
+  const definition = definitionOf(definitionText, proposal.datasetPath);
   if (definition) {
     const [schemaSql, operationSource, migrationSql] = await Promise.all(
       [definition.schemaPath, definition.operationsPath, proposal.migrationPath].map((path) =>

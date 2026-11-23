@@ -83,6 +83,27 @@ const json = z.unknown().transform((value, context) => {
 });
 const definition = z.unknown().transform((value, context) => {
   try {
+    if (
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      (value as Record<string, unknown>).formatVersion === 2
+    ) {
+      const row = value as Record<string, unknown>;
+      const missing = ["schemaPath", "operationsPath"].filter((key) => !Object.hasOwn(row, key));
+      if (missing.length > 0) {
+        context.addIssue({
+          code: "custom",
+          message: `missing required field(s): ${missing.join(", ")}. For formatVersion 2 in dataset create, provide explicit schemaPath and operationsPath (for example expenses/schema.sql and expenses/operations.js).`,
+        });
+        return z.NEVER;
+      }
+      return parseDatasetDefinition(
+        Object.hasOwn(row, "datasetId")
+          ? row
+          : { ...row, datasetId: globalThis.crypto.randomUUID() },
+      );
+    }
     return parseDatasetDefinition(value);
   } catch (error) {
     context.addIssue({
