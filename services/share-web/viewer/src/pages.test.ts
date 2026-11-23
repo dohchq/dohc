@@ -48,6 +48,7 @@ it("loads only each route's own code before it renders", async () => {
     "chat.html": ["NamedChatApp.tsx"],
     "apps.html": ["NamedApp.tsx"],
   });
+  expect(loads(pages["index.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["chat.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["apps.html"]!, EDITOR)).toEqual([]);
 });

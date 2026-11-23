@@ -173,7 +173,7 @@ export function createAppDocument(
   // The document's own policy comes before any app markup, so the page can only narrow it.
   const policy =
     '<meta charset="utf-8">' +
-    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' +
     '<meta name="referrer" content="no-referrer">' +
     `<meta http-equiv="Content-Security-Policy" content="${csp}"><script>${FRAME_SCRIPT}</script>`;
   const html = page
