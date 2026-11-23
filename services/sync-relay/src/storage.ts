@@ -2401,6 +2401,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     versionId: string;
     selectorPaths: readonly string[];
     limit: number;
+    /** Lists only files at a path this passes, paging past the rest. */
+    visible?: (path: string) => boolean;
   }): CurrentFileStateSnapshot {
     return currentFilesStorage.readCurrentFileState(this, input);
   }

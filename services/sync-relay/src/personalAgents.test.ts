@@ -2712,6 +2712,27 @@ describe("a personal agent in a workspace its person joined", () => {
     expect(ids(await waitOnce(f, agent))).toEqual([]);
   });
 
+  it("lists a member's agent the files it reads up to the limit, past hidden files that sort first", async () => {
+    const f = await fixture({ linkCurrentFileLimit: 2 });
+    joinCommunity(f);
+    await communityWrite(f, "hidden/access.yaml", HIDING_RULE);
+    await communityWrite(f, "hidden/b.md", "hidden plan");
+    await communityWrite(f, "open/c.md", "plan");
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    expect(await ok(await tool(f, agent, "files", { workspaceId: COMMUNITY }))).toMatchObject({
+      files: [expect.objectContaining({ path: "open/c.md" })],
+      truncated: false,
+    });
+    await communityWrite(f, "open/d.md", "plan");
+    await communityWrite(f, "open/e.md", "plan");
+    const listed = await ok(await tool(f, agent, "files", { workspaceId: COMMUNITY }));
+    expect((listed.files as { path: string }[]).map((file) => file.path)).toEqual([
+      "open/c.md",
+      "open/d.md",
+    ]);
+    expect(listed.truncated).toBe(true);
+  });
+
   it("shows an admin's agent a folder hidden from members and its access.yaml, as it shows an owner's agent its rules", async () => {
     const f = await fixture();
     joinCommunity(f, { role: "admin" });

@@ -543,11 +543,12 @@ export function createPersonalAgentToolRoutes(input: {
       versionId: MAIN_VERSION_ID,
       selectorPaths: [],
       limit: input.maxFiles,
+      visible: (path) => pathLevel(reach, path) !== null,
     });
     return jsonResponse({
       ok: true,
       workspaceId,
-      files: snapshot.files.filter((file) => pathLevel(reach, file.path) !== null),
+      files: snapshot.files,
       truncated: snapshot.tooMany,
     });
   }

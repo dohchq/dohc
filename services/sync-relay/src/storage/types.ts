@@ -1757,6 +1757,8 @@ export interface SyncRelayStorage {
     versionId: string;
     selectorPaths: readonly string[];
     limit: number;
+    /** Lists only files at a path this passes, paging past the rest. */
+    visible?: (path: string) => boolean;
   }): CurrentFileStateSnapshot;
   currentFileBlobByteLength(input: {
     workspaceId: string;

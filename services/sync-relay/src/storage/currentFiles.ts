@@ -488,16 +488,20 @@ function currentFileSelectorClause(
   return { sql: ` AND (${ranges.join(" OR ")})`, params };
 }
 
-export function currentFileStateQuery(selectorPaths: readonly string[]): {
+export function currentFileStateQuery(
+  selectorPaths: readonly string[],
+  pastCursor = false,
+): {
   sql: string;
   selectorParams: string[];
 } {
   const selector = currentFileSelectorClause(selectorPaths);
+  const after = pastCursor ? " AND path > ?" : "";
   return {
     sql: `SELECT path, blob_sha256, content_kind
        FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_path
        WHERE workspace_id = ? AND version_id = ?
-         AND state_relay_seq > ? AND state_relay_seq <= ?${selector.sql}
+         AND state_relay_seq > ? AND state_relay_seq <= ?${selector.sql}${after}
        ORDER BY path
        LIMIT ?`,
     selectorParams: selector.params,
@@ -718,6 +722,8 @@ export function readCurrentFileState(
     versionId: string;
     selectorPaths: readonly string[];
     limit: number;
+    /** Lists only files at a path this passes, paging past the rest. */
+    visible?: (path: string) => boolean;
   },
 ): CurrentFileStateSnapshot {
   if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
@@ -742,27 +748,37 @@ export function readCurrentFileState(
       .get(input.workspaceId);
     const epochLogFloor = Number(workspace?.epoch_log_floor ?? 0);
     const nextCursor = Number(cursor?.relay_seq ?? 0);
-    const query = currentFileStateQuery(input.selectorPaths);
-    const rows = storage.db
-      .prepare(query.sql)
-      .all(
-        input.workspaceId,
-        input.versionId,
-        epochLogFloor,
-        nextCursor,
-        ...query.selectorParams,
-        input.limit + 1,
-      );
-    return {
-      files: rows.slice(0, input.limit).map((row) => ({
-        path: String(row.path),
-        blobSha256: String(row.blob_sha256),
-        contentKind: row.content_kind === "binary" ? "binary" : "text",
-      })),
-      nextCursor,
-      epochLogFloor,
-      tooMany: rows.length > input.limit,
-    };
+    const files: CurrentFileStateSnapshot["files"] = [];
+    let tooMany = false;
+    for (let afterPath: string | undefined; ;) {
+      const query = currentFileStateQuery(input.selectorPaths, afterPath !== undefined);
+      const rows = storage.db
+        .prepare(query.sql)
+        .all(
+          input.workspaceId,
+          input.versionId,
+          epochLogFloor,
+          nextCursor,
+          ...query.selectorParams,
+          ...(afterPath === undefined ? [] : [afterPath]),
+          input.limit + 1,
+        );
+      for (const row of rows) {
+        if (input.visible && !input.visible(String(row.path))) continue;
+        if (files.length === input.limit) {
+          tooMany = true;
+          break;
+        }
+        files.push({
+          path: String(row.path),
+          blobSha256: String(row.blob_sha256),
+          contentKind: row.content_kind === "binary" ? "binary" : "text",
+        });
+      }
+      if (tooMany || !input.visible || rows.length <= input.limit) break;
+      afterPath = String(rows.at(-1)!.path);
+    }
+    return { files, nextCursor, epochLogFloor, tooMany };
   });
 }
 
