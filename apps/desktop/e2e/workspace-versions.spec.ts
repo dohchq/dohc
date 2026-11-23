@@ -170,9 +170,10 @@ test("the wedge: create a version, edit in it, switch, and merge back to Main", 
     await expect(
       page.locator('[data-testid="version-compare-file"][data-compare-path="plan.md"]'),
     ).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByTestId("version-compare-scope")).toContainText("Agent link");
+    await expect(page.getByTestId("version-compare-back-to-main")).toBeVisible();
 
-    await openVersionMenu(page);
-    await page.getByTestId("version-merge").click();
+    await page.getByTestId("version-compare-keep-in-main").click();
     await expect(page.getByTestId("version-merge-dialog")).toBeVisible();
     await page.getByTestId("version-merge-confirm").click();
     await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, {
@@ -181,7 +182,12 @@ test("the wedge: create a version, edit in it, switch, and merge back to Main", 
     await page.getByTestId("version-merge-done").click();
     expect(engineSnapshotText(temp.rootPath, "main", "plan.md")).toBe("draft text\n");
 
-    await switchVersionViaMenu(page, "Main");
+    await expect(page.getByTestId("version-compare-empty")).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByTestId("version-compare-keep-in-main")).toHaveCount(0);
+    await page.getByTestId("version-compare-back-to-main").click();
+    await expectActiveVersion(page, "Main");
+    await expect(page.getByTestId("version-compare-page")).toBeVisible();
+    await expect(page.getByTestId("version-compare-back-to-main")).toHaveCount(0);
     await expect
       .poll(() => readWorkspaceText(temp.rootPath, "plan.md"), { timeout: 20_000 })
       .toBe("draft text\n");

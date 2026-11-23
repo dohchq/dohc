@@ -1189,6 +1189,7 @@ describe("VersionsPage", () => {
     expect(empty.textContent).toBe(
       "Create a version to try changes without touching Main.New version…",
     );
+    expect(screen.getByTestId("versions-page-note").textContent).toContain("Agent link");
     expect(screen.getAllByTestId("versions-page-new")).toHaveLength(1);
     await user.click(within(empty).getByTestId("versions-page-new"));
     expect(screen.getByTestId("version-new-same").textContent).toBe(
