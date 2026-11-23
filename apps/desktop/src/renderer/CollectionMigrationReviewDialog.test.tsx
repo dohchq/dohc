@@ -461,12 +461,49 @@ describe("CollectionMigrationReviewDialog", () => {
     setup({ initialPreparation: schemaChanged });
     expect(screen.queryByTestId("migration-destructive-warning")).toBeNull();
     expect(
-      screen.getByText(/Collection History cannot reverse field, constraint, or record changes\./),
+      screen.getByText(
+        /Collection History cannot reverse field, constraint, action, or record changes\./,
+      ),
     ).toBeTruthy();
     expect(screen.queryByText(/Collection History can rename/i)).toBeNull();
     expect(screen.getByRole("button", { name: "Approve change" }).className).not.toContain(
       "bg-danger-fill",
     );
+    cleanup();
+
+    const actionAdded = prep();
+    actionAdded.revision.definition = structuredClone(actionAdded.previousRevision.definition);
+    actionAdded.revision.schemaSha256 = actionAdded.previousRevision.schemaSha256;
+    actionAdded.revision.definition.operations.push({
+      operationId: id(13),
+      name: "list_all",
+      label: "List all",
+      tableId: actionAdded.revision.definition.tables[0]!.tableId,
+      kind: "read",
+      access: "helper",
+      readOnly: true,
+      fieldIds: [actionAdded.revision.definition.tables[0]!.fields[0]!.fieldId],
+    });
+    actionAdded.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 2,
+      afterRows: 2,
+      changedRows: 0,
+      deletedRows: 0,
+      beforeValues: { name: 2 },
+      afterValues: { name: 2 },
+      clearedValues: { name: 0 },
+      replacedValues: { name: 0 },
+    };
+    actionAdded.candidate.preview.firstPage = { changes: [], nextCursor: null };
+    setup({ initialPreparation: actionAdded });
+    expect(screen.queryByTestId("migration-destructive-warning")).toBeNull();
+    expect(
+      screen.getByText(
+        /Collection History cannot reverse field, constraint, action, or record changes\./,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Collection History can reverse/i)).toBeNull();
     cleanup();
 
     const buttonRemoved = prep();

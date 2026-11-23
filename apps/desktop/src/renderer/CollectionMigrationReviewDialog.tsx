@@ -1,11 +1,11 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Minus, Pencil, Plus, TriangleAlert } from "lucide-react";
 import {
-  datasetColumnFields,
   datasetRevisionsPreserveAccess,
   type DatasetRevision,
   type DatasetField,
 } from "@dohc/security-contract/dataset";
+import { datasetRevisionHistoryReversible } from "../workspaces/datasetHistoryReversibility";
 import { DatasetMigrationCandidate, type DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { Overlay } from "./Overlay";
@@ -59,16 +59,6 @@ type Change = {
   after?: string;
   button?: boolean;
 };
-function columnShape(tables: DatasetRevision["definition"]["tables"]): string {
-  return JSON.stringify(
-    tables.map((table) => ({
-      ...table,
-      name: "",
-      fields: datasetColumnFields(table).map((field) => ({ ...field, name: "" })),
-    })),
-  );
-}
-
 function fieldSummary(field: DatasetField): string {
   if (field.type === "button") return [field.name, field.type].join(" · ");
   return [
@@ -284,9 +274,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
     );
   const historyCanReverse =
     !!preparation &&
-    preparation.previousRevision.schemaSha256 === preparation.revision.schemaSha256 &&
-    columnShape(preparation.previousRevision.definition.tables) ===
-      columnShape(preparation.revision.definition.tables);
+    datasetRevisionHistoryReversible(preparation.previousRevision, preparation.revision);
   const namesOnly = !!props.generatedChange && preservesAccess && noRecordChanges;
   const previewTotals = useMemo(
     () =>
@@ -725,7 +713,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                     ? noRecordChanges
                       ? " Collection History can reverse name, button, and action changes."
                       : " Collection History can reverse name, button, and action changes. It cannot reverse record changes."
-                    : " Collection History cannot reverse field, constraint, or record changes."
+                    : " Collection History cannot reverse field, constraint, action, or record changes."
                 : ""}
             </p>
             {!namesOnly && (
