@@ -8,6 +8,7 @@ import {
   EyeOff,
   Link as LinkIcon,
   LogIn,
+  Table2,
   TriangleAlert,
   Unlink,
   X,
@@ -32,7 +33,7 @@ import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
 import { OwnerAppResponses } from "./OwnerAppResponses";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
-import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
+import { IconButton, Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { syncNamesServer } from "./workbench/WorkspaceSyncStatus";
 import { accessReasonForLane, serverName, type AccessContext } from "./workbench/accessReason";
@@ -1153,7 +1154,7 @@ function PublicationDialog(
                 <More>Approving applies these Collection rules and approves this app.</More>
               </StateLine>
               <StagedCollectionsBox collections={staged.collections} />
-              <AccessBox
+              <AppAccessSummary
                 capabilities={staged.capabilities}
                 approved={approval ? approvedCapabilities(approval) : null}
                 failed={false}
