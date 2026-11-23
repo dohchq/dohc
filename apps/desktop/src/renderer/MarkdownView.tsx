@@ -43,7 +43,11 @@ import {
 } from "./useAutosavedTextDraft";
 import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
-import { captureHeldLiveMessage, outsideVersionWaitingMessage } from "../ipc/errorWords";
+import {
+  captureHeldLiveMessage,
+  isPathTaken,
+  outsideVersionWaitingMessage,
+} from "../ipc/errorWords";
 import { sameFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { SkeletonRows } from "./ui/SkeletonRows";
@@ -953,16 +957,25 @@ export function MarkdownView(props: {
   const linkNavigationNonce = useRef(0);
   const openWikilinkRef = useRef<(target: string) => void>(() => undefined);
   const openWorkspaceLinkRef = useRef<(target: WorkspaceLinkTarget) => void>(() => undefined);
-  const navigationIdentity = useRef({ workspaceId: props.workspaceId, path: props.path });
+  const navigationIdentity = useRef({
+    workspaceId: props.workspaceId,
+    path: props.path,
+    reopenKey: props.reopenKey,
+  });
   if (
     navigationIdentity.current.workspaceId !== props.workspaceId ||
-    navigationIdentity.current.path !== props.path
+    navigationIdentity.current.path !== props.path ||
+    navigationIdentity.current.reopenKey !== props.reopenKey
   ) {
-    navigationIdentity.current = { workspaceId: props.workspaceId, path: props.path };
+    navigationIdentity.current = {
+      workspaceId: props.workspaceId,
+      path: props.path,
+      reopenKey: props.reopenKey,
+    };
   }
   useEffect(
     () => () => {
-      navigationIdentity.current = { workspaceId: "", path: "" };
+      navigationIdentity.current = { workspaceId: "", path: "", reopenKey: undefined };
     },
     [],
   );
@@ -972,8 +985,28 @@ export function MarkdownView(props: {
     const current = () =>
       navigationIdentity.current === identity && linkNavigationNonce.current === nonce;
     void resolveLinkNavigation(props.workspaceId, props.path, literal, kind, nonce)
-      .then((navigation) => {
-        if (current() && navigation) props.onOpenPath?.(navigation.path, navigation.headingTarget);
+      .then(async (navigation) => {
+        if (!current() || !navigation) return;
+        let targetPath = navigation.path;
+        if (navigation.create) {
+          if (props.forceReadOnly) {
+            props.onButtonNotice?.("This linked page does not exist yet.");
+            return;
+          }
+          try {
+            const created = await bridge().createWorkspaceFile({
+              workspaceId: props.workspaceId,
+              relativePath: navigation.path,
+              initialText: "",
+              exclusive: true,
+            });
+            targetPath = created.path;
+          } catch (error) {
+            if (!isPathTaken(error)) throw error;
+          }
+          if (!current()) return;
+        }
+        props.onOpenPath?.(targetPath, navigation.headingTarget);
       })
       .catch((error) => {
         if (current())
@@ -1006,6 +1039,7 @@ export function MarkdownView(props: {
       <LazyMarkdownReadView
         body={markdownEditorBody(savedBody)}
         resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}`}
+        imageContext={{ workspaceId: props.workspaceId, docPath: props.path }}
         onOpenWorkspaceLink={(target) => openWorkspaceLinkRef.current(target)}
         onRendered={onMarkdownRendered}
       />
@@ -1085,6 +1119,10 @@ export function MarkdownView(props: {
   // Invalid bytes read as U+FFFD can take a note's text past the live limit
   // while its file stays under it, and the check counts that text as lossy.
   const lossy = props.lossyNote === "lossy";
+  const largeForRichEditor = useMemo(
+    () => exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES),
+    [props.body],
+  );
   const tooLarge = useMemo(
     () => lossy && exceedsUtf8Bytes(props.body, WORKSPACE_TEXT_EDITOR_MAX_BYTES),
     [lossy, props.body],
@@ -2386,6 +2424,15 @@ export function MarkdownView(props: {
           }
         />
         {props.truncatedNotice}
+        {largeForRichEditor && !props.truncated && !props.recordBody ? (
+          <div
+            data-testid="large-note-notice"
+            role="status"
+            className="border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-muted"
+          >
+            This note is over 256 KB.
+          </div>
+        ) : null}
         {documentNotices}
         {showSource ? (
           // Raw markdown, monospaced and read-only — frontmatter included, so
@@ -2533,7 +2580,7 @@ export function MarkdownView(props: {
           <DocumentControls
             toggle={{
               label:
-                surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
+                surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "Editor",
               testId: "markdown-edit-toggle",
               disabled: readOnly || opening,
               title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
@@ -2580,6 +2627,15 @@ export function MarkdownView(props: {
         }
       />
       {props.truncatedNotice}
+      {largeForRichEditor && !opening && !props.truncated && !lossy ? (
+        <div
+          data-testid="large-note-notice"
+          role="status"
+          className="border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-muted"
+        >
+          This note is over 256 KB. Edits open in Markdown source.
+        </div>
+      ) : null}
       {/* "Try again" after a timed-out open. It retries and nothing
           else: the retry changes the request key, so `opening` flips true in
           that same render and the capture above sets a draft typed before the

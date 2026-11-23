@@ -11,7 +11,12 @@ import {
   SecondaryButton,
   SectionLabel,
 } from "../ui/controls";
-import { addView, deleteView, renameView } from "./schemaAuthoring";
+import {
+  addViewPreservingTable,
+  deleteView,
+  orderGroupFields,
+  renameView,
+} from "./schemaAuthoring";
 import { useSchemaRun, type SchemaApply } from "./FieldsDialog";
 import { inputClass, selectClass } from "./FieldForm";
 
@@ -52,10 +57,7 @@ export function ViewsDialog(props: {
   const { pending, error, setError, run } = useSchemaRun(props.apply);
 
   const viewNames = props.schema.views.map((view) => view.name);
-  // A board groups by stored values, and a button stores none.
-  const groupFieldNames = props.schema.fields
-    .filter((field) => field.type !== "button")
-    .map((field) => field.name);
+  const groupFieldNames = orderGroupFields(props.schema.fields).map((field) => field.name);
   const dateFieldNames = props.schema.fields
     .filter((field) => field.type === "date")
     .map((field) => field.name);
@@ -100,7 +102,11 @@ export function ViewsDialog(props: {
 
   async function create() {
     const name = newName.trim();
-    let problem = nameProblem(name, viewNames);
+    let problem =
+      nameProblem(name, viewNames) ??
+      (props.schema.views.length === 0 && newKind !== "table" && name.toLowerCase() === "table"
+        ? `A view named "${name}" already exists. Choose another name.`
+        : null);
     if (problem === null && newKind === "board" && newGroupBy === "") {
       problem = "Choose a field to group by.";
     }
@@ -120,7 +126,7 @@ export function ViewsDialog(props: {
     };
     await run(
       problem,
-      (schema) => addView(schema, view),
+      (schema) => addViewPreservingTable(schema, view),
       () => {
         setNewName("");
         setNewGroupBy("");

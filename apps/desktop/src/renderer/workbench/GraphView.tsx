@@ -870,6 +870,13 @@ export function GraphView(props: {
         {/* The side panel's own title names the Graph, so its row keeps the room for the counts. */}
         {variant === "page" ? (
           <GitFork size={13} aria-hidden className="shrink-0 text-subtle" />
+        ) : model.local ? (
+          <span
+            data-testid="graph-local-badge"
+            className="shrink-0 rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none text-muted"
+          >
+            Local
+          </span>
         ) : null}
         <span
           title={counts}

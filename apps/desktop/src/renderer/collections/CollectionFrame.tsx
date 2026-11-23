@@ -973,7 +973,14 @@ function AddViewForm(props: {
     if (pending || props.paused) return;
     const trimmed = name.trim();
     if (trimmed === "") return fail({ at: "name", text: NAME_MISSING });
-    if (taken.includes(trimmed)) return fail({ at: "name", text: nameTaken(trimmed) });
+    if (
+      taken.includes(trimmed) ||
+      (kind !== "table" &&
+        trimmed.toLowerCase() === "table" &&
+        taken.some((entry) => entry.toLowerCase() === "table"))
+    ) {
+      return fail({ at: "name", text: nameTaken(trimmed) });
+    }
     if (kind === "board" && chosenGroup === "")
       return fail({ at: "group", text: "Choose a field to group by." });
     if (kind === "calendar" && chosenDate === "")
@@ -1016,7 +1023,7 @@ function AddViewForm(props: {
         />
       </label>
       <div className="flex flex-col gap-1 text-[12px] text-muted">
-        <span id={`${ids}-layout`}>Layout</span>
+        <span id={`${ids}-layout`}>Type</span>
         <div
           role="radiogroup"
           aria-labelledby={`${ids}-layout`}

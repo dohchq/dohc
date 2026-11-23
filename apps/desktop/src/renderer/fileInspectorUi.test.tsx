@@ -26,7 +26,7 @@ const NO_RECOVERY: ReadonlySet<string> = new Set();
 describe("DocumentControls", () => {
   it.each([
     "dohc could not open this file.",
-    "This note has parts dohc cannot show.",
+    "This note has parts dohc cannot save without rewriting.",
     OPENING_TITLE,
   ])("keeps a disabled toggle reachable and describes why: %s", async (reason) => {
     const user = userEvent.setup();

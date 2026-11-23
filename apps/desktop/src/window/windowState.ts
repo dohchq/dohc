@@ -27,7 +27,7 @@ export const MANAGER_WINDOW_STATE_FILE = "dohc-manager-window-state.json";
 // The manager is a picker, not a workbench: small, and never below this.
 export const MANAGER_WINDOW_SIZE = { width: 880, height: 600 } as const;
 export const DEFAULT_WINDOW_SIZE = { width: 1280, height: 800 } as const;
-export const MIN_WINDOW_SIZE = { width: 840, height: 620 } as const;
+export const MIN_WINDOW_SIZE = { width: 720, height: 620 } as const;
 
 // How much of the window must remain on some display to trust saved bounds —
 // enough to grab the titlebar and drag it back.

@@ -8774,6 +8774,33 @@ describe("sharing that cannot work yet", () => {
     expect(bridgeMock.requestAccessRefresh).not.toHaveBeenCalled();
   });
 
+  it("prompts to connect a server directly when neither connected nor synced", async () => {
+    const context = accessContextFor({
+      connected: false,
+      workspaceSynced: false,
+      workspaceSyncConnected: false,
+    });
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={PLAN}
+        onClose={onClose}
+        accessContext={context}
+        server={null}
+      />,
+    );
+    const setup = screen.getByTestId("share-setup");
+    expect(setup.dataset.reason).toBe("signed-out");
+    expect([...setup.querySelectorAll("p")].map((line) => line.textContent)).toEqual([
+      "Connect a server to share.",
+    ]);
+    await user.click(within(setup).getByRole("button", { name: "Connect server" }));
+    expect(context.connect).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it("holds the forms, unexplained, until the server connection is read", () => {
     const view = render(
       <RelayShareDialog

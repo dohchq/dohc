@@ -135,7 +135,7 @@ describe("a note past read mode's size", () => {
     await answerChecks();
     await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalled());
     const notice = await screen.findByTestId("lossy-note-notice");
-    expect(notice.textContent).toContain("This note has parts dohc cannot show.");
+    expect(notice.textContent).toContain("This note has parts dohc cannot save without rewriting.");
     expect(within(notice).getByTestId("lossy-note-edit-anyway")).toBeTruthy();
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
@@ -156,7 +156,9 @@ describe("a note past read mode's size", () => {
     await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalled());
     const notice = await screen.findByTestId("lossy-note-notice");
     expect(notice.textContent).toContain("This file is too large to edit in dohc.");
-    expect(notice.textContent).not.toContain("This note has parts dohc cannot show.");
+    expect(notice.textContent).not.toContain(
+      "This note has parts dohc cannot save without rewriting.",
+    );
     expect(within(notice).getByTestId("lossy-note-open-externally")).toBeTruthy();
     expect(within(notice).queryByTestId("lossy-note-edit-anyway")).toBeNull();
     expect(screen.getByTestId("markdown-edit-toggle").getAttribute("title")).toBe(

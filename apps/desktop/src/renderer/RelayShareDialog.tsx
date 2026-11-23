@@ -592,16 +592,24 @@ function ShareSetup(props: {
           run={context.connect}
           onLeave={props.onLeave}
         >
-          <p className="m-0">
-            Not connected to{" "}
-            {server === null ? (
-              "this workspace's server"
-            ) : (
-              <span className="font-medium">{serverName(server)}</span>
-            )}
-            .
-          </p>
-          <p className="m-0 text-muted">Others may have access.</p>
+          {server === null &&
+          typeof context.facts.cloud === "object" &&
+          !context.facts.cloud.workspaceSynced ? (
+            <p className="m-0">Connect a server to share.</p>
+          ) : (
+            <>
+              <p className="m-0">
+                Not connected to{" "}
+                {server === null ? (
+                  "this workspace's server"
+                ) : (
+                  <span className="font-medium">{serverName(server)}</span>
+                )}
+                .
+              </p>
+              <p className="m-0 text-muted">Others may have access.</p>
+            </>
+          )}
         </SetupBand>
       );
     case "other-account":

@@ -137,6 +137,45 @@ export function addView(schema: CollectionSchema, view: ViewDefinition): Collect
   return { ...schema, views: [...schema.views, view] };
 }
 
+export function addViewPreservingTable(
+  schema: CollectionSchema,
+  view: ViewDefinition,
+): CollectionSchema {
+  const base =
+    schema.views.length === 0 && view.kind !== "table"
+      ? addView(schema, {
+          name: view.name.trim().toLowerCase() === "table" ? "All records" : "Table",
+          kind: "table",
+          groupBy: null,
+          sort: [],
+          visibleFields: null,
+          dateField: null,
+        })
+      : schema;
+  return addView(base, view);
+}
+
+function groupFieldRank(fieldType: FieldDefinition["type"]): number {
+  switch (fieldType) {
+    case "select":
+      return 0;
+    case "multi-select":
+      return 1;
+    case "checkbox":
+      return 2;
+    case "person":
+      return 3;
+    default:
+      return 4;
+  }
+}
+
+export function orderGroupFields(fields: readonly FieldDefinition[]): FieldDefinition[] {
+  return fields
+    .filter((field) => field.type !== "button")
+    .sort((a, b) => groupFieldRank(a.type) - groupFieldRank(b.type));
+}
+
 export function renameView(schema: CollectionSchema, from: string, to: string): CollectionSchema {
   return {
     ...schema,

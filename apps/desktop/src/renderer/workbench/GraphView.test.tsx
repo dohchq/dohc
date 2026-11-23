@@ -84,12 +84,14 @@ describe("GraphView", () => {
     await waitFor(() => expect(rowPaths()).toEqual(["alpha.md", "beta.md", "gamma.md"]));
     expect(screen.getAllByTestId("graph-file-row")[1]!.dataset.active).toBe("true");
     expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("3");
+    expect(screen.getByTestId("graph-local-badge").textContent).toBe("Local");
     expect(screen.getByTestId("graph-doc-count").textContent).toBe("5 files");
 
     view.rerender(
       <GraphView workspaceId="ws" activePath="nowhere.md" refreshKey="0" onOpenPath={vi.fn()} />,
     );
     await waitFor(() => expect(rowPaths()).toHaveLength(5));
+    expect(screen.queryByTestId("graph-local-badge")).toBeNull();
   });
 
   it("widens the local graph with its depth setting", async () => {

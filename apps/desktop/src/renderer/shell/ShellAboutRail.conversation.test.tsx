@@ -368,7 +368,7 @@ describe("About for an open conversation", () => {
 
     rerender(<Rail focusedTabPath={CHATS_TAB_PATH} searchChatTarget={null} />);
     expect((await screen.findByTestId("linked-chats-empty")).textContent).toBe(
-      "Open a file or a conversation to see who has access.",
+      "Open a file or a conversation to see its links, comments, history, and access.",
     );
     expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
     rerender(<Rail focusedTabPath={GRAPH_TAB_PATH} searchChatTarget={null} />);
@@ -455,7 +455,7 @@ describe("About for an open conversation", () => {
     publish("workspace-a", GENERAL, "none");
     render(<Rail />);
     expect((await screen.findByTestId("linked-chats-empty")).textContent).toBe(
-      "Open a file or a conversation to see who has access.",
+      "Open a file or a conversation to see its links, comments, history, and access.",
     );
   });
 

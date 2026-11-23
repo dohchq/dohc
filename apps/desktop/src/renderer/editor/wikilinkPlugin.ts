@@ -278,7 +278,7 @@ export function makeWikilinkPlugin(
           );
         },
         apply(tr, old, _oldState, newState) {
-          if (!tr.docChanged && !tr.selectionSet) return old;
+          if (!tr.docChanged && !tr.selectionSet && !tr.getMeta(wikilinkPluginKey)) return old;
           return wikilinkState(
             newState.doc,
             tr.docChanged ? mapWikilinkRanges(old.ranges, tr) : old.ranges,
