@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { cliResultSchemas } from "@dohc/cli/protocol";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { createDohcMcpServer } from "../src/server";
-import type { EvalCase, RunRecord } from "./case";
+import type { DatasetSnapshot, EvalCase, RunRecord } from "./case";
 import { CASES } from "./cases";
 import { seedWorkspace, workspaceFiles } from "./claude";
 import { fakeDesktop } from "./desktop";
@@ -26,16 +26,26 @@ const ALL_CASES: readonly EvalCase[] = [...CASES, ...EVERYDAY_CASES];
 async function replay(
   evalCase: EvalCase,
   mode: "solution" | "idle",
+  customRun?: (
+    callTool: (tool: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  ) => Promise<string | void>,
 ): Promise<{ run: RunRecord; unanswered: string; misshapen: string[] }> {
   const dir = await mkdtemp(join(tmpdir(), "dohc-eval-case-"));
   const root = join(dir, "workspace");
   const home = join(dir, "home");
   const unansweredLog = join(dir, "unanswered.log");
   const misshapen: string[] = [];
+  const datasetSnapshots: Record<string, DatasetSnapshot> = {};
   try {
     await seedWorkspace(root, evalCase, home);
     const answers = {
-      ...(evalCase.setupDesktop ? await evalCase.setupDesktop(root) : {}),
+      ...(evalCase.setupDesktop
+        ? await evalCase.setupDesktop(root, {
+            onDatasetSnapshot: (datasetPath, snapshot) => {
+              datasetSnapshots[datasetPath] = snapshot;
+            },
+          })
+        : {}),
       ...evalCase.desktop,
     };
     const desktop = fakeDesktop({ root, answers, unansweredLog });
@@ -64,7 +74,10 @@ async function replay(
       return (result.structuredContent as Record<string, unknown> | undefined) ?? {};
     };
     let text = evalCase.solution.text ?? "";
-    if (mode === "solution") {
+    if (customRun) {
+      const out = await customRun(callTool);
+      if (typeof out === "string") text = out;
+    } else if (mode === "solution") {
       if (evalCase.solution.run) {
         const out = await evalCase.solution.run(callTool);
         if (typeof out === "string") text = out;
@@ -83,6 +96,7 @@ async function replay(
         calls: recorded,
         text,
         files: await workspaceFiles(root),
+        ...(Object.keys(datasetSnapshots).length > 0 ? { datasetSnapshots } : {}),
       },
       unanswered: await readFile(unansweredLog, "utf8").catch(() => ""),
       misshapen,
@@ -444,6 +458,130 @@ describe("eval cases", () => {
     };
     const bookingChecks = await grade(booking.expect, brokenBookingRun, booking.gradeRun);
     expect(bookingChecks.some((c) => !c.pass && c.name.includes("8-seat capacity"))).toBe(true);
+
+    const stubBookingFrontendRun: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/index.html": "<!doctype html><h1>Pottery Workshop</h1>\n",
+        "apps/booking/app.publish.json": JSON.stringify(
+          {
+            ...JSON.parse(bookingSolved.run.files["apps/booking/app.publish.json"]!),
+            inputs: ["index.html"],
+          },
+          null,
+          2,
+        ),
+      },
+    };
+    delete stubBookingFrontendRun.files["apps/booking/app.js"];
+    const stubBookingChecks = await grade(booking.expect, stubBookingFrontendRun, booking.gradeRun);
+    expect(stubBookingChecks.some((c) => !c.pass && c.name.includes("booking controls"))).toBe(
+      true,
+    );
+
+    const unlistedScriptBookingRun: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/app.publish.json": JSON.stringify(
+          {
+            ...JSON.parse(bookingSolved.run.files["apps/booking/app.publish.json"]!),
+            inputs: ["index.html"],
+          },
+          null,
+          2,
+        ),
+      },
+    };
+    const unlistedScriptChecks = await grade(
+      booking.expect,
+      unlistedScriptBookingRun,
+      booking.gradeRun,
+    );
+    expect(
+      unlistedScriptChecks.some(
+        (c) => !c.pass && c.detail?.includes("not listed in app.publish.json"),
+      ),
+    ).toBe(true);
+
+    const migrate = EVERYDAY_CASES.find((c) => c.id === "everyday-add-field-and-migrate")!;
+    const renamedInsteadOfAddField = await replay(migrate, "solution", async (callTool) => {
+      const described = (await callTool("dohc_dataset", {
+        request: {
+          action: "describe",
+          workspaceId: "ws-everyday",
+          datasetPath: "clients/dataset.json",
+        },
+      })) as { dataset: { revision: number; revisionSha256: string } };
+      const prep = (await callTool("dohc_dataset", {
+        request: {
+          action: "prepareSchemaChange",
+          workspaceId: "ws-everyday",
+          datasetPath: "clients/dataset.json",
+          revision: described.dataset.revision,
+          revisionSha256: described.dataset.revisionSha256,
+          change: { kind: "renameCollection", name: "Clients Renamed" },
+        },
+      })) as {
+        preparationId: string;
+        approvalDigest: string;
+        revision: { revision: number; revisionSha256: string };
+      };
+      await callTool("dohc_dataset", {
+        request: {
+          action: "approveMigration",
+          workspaceId: "ws-everyday",
+          preparationId: prep.preparationId,
+          revisionSha256: prep.revision.revisionSha256,
+          approvalDigest: prep.approvalDigest,
+        },
+      });
+      await callTool("dohc_write_file", {
+        path: "apps/client-portal/app.publish.json",
+        content: JSON.stringify(
+          {
+            version: 1,
+            entryPath: "index.html",
+            inputs: ["index.html"],
+            packageMap: {},
+            dataset: {
+              kind: "dataset",
+              datasetPath: "clients/dataset.json",
+              revision: prep.revision.revision,
+              revisionSha256: prep.revision.revisionSha256,
+              operationIds: ["c1000000-0000-4000-8000-000000000006"],
+            },
+          },
+          null,
+          2,
+        ),
+      });
+      const appPrep = (await callTool("dohc_publish_app", {
+        request: {
+          action: "prepareLocal",
+          workspaceId: "ws-everyday",
+          appRoot: "apps/client-portal",
+        },
+      })) as { approvalId: string; candidateDigest: string };
+      await callTool("dohc_publish_app", {
+        request: {
+          action: "approve",
+          workspaceId: "ws-everyday",
+          approvalId: appPrep.approvalId,
+          candidateDigest: appPrep.candidateDigest,
+        },
+      });
+    });
+    const renamedChecks = await grade(
+      migrate.expect,
+      renamedInsteadOfAddField.run,
+      migrate.gradeRun,
+    );
+    expect(renamedChecks.some((c) => !c.pass && c.name.includes('"Tier"'))).toBe(true);
+    expect(renamedChecks.some((c) => !c.pass && c.name.includes("3 seeded client records"))).toBe(
+      true,
+    );
 
     const form = EVERYDAY_CASES.find((c) => c.id === "everyday-connected-form-relations")!;
     const formSolved = await replay(form, "solution");

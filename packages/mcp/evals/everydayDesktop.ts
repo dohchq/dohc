@@ -31,7 +31,7 @@ import { validateUserMaterializePath, validateUserReadPath } from "@dohc/workspa
 import { realRelativeInRoot, resolvedAreaRefusal } from "@dohc/workspace-core/realPath";
 import type { DatasetRequest, DatasetSchemaChange } from "@dohc/cli/dataset";
 import type { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
-import type { DesktopAnswer } from "./case";
+import type { DatasetSnapshot, DesktopAnswer } from "./case";
 import { workspaceVerbs } from "./desktop";
 
 type Args = Record<string, unknown>;
@@ -446,10 +446,21 @@ async function listWorkspaceTextFiles(root: string): Promise<Map<string, string>
 export async function createEverydayDesktop(
   root: string,
   seed: EverydayDesktopSeed = {},
-  options: { onWrite?: (path: string, contentSha256: string) => void } = {},
+  options: {
+    onWrite?: (path: string, contentSha256: string) => void;
+    onDatasetSnapshot?: (datasetPath: string, snapshot: DatasetSnapshot) => void;
+  } = {},
 ): Promise<Record<string, DesktopAnswer>> {
   const workspaceId = seed.workspaceId ?? "ws-everyday";
   const onWrite = options.onWrite;
+  const onDatasetSnapshot = options.onDatasetSnapshot;
+  function reportSnapshot(stored: StoredDataset): void {
+    onDatasetSnapshot?.(stored.datasetPath, {
+      revision: stored.revision.revision,
+      revisionSha256: stored.revision.revisionSha256,
+      databaseBase64: Buffer.from(stored.database).toString("base64"),
+    });
+  }
   let datasetQueue: Promise<void> = Promise.resolve();
   function serializeDataset<T>(fn: () => Promise<T>): Promise<T> {
     const next = datasetQueue.then(fn, fn);
@@ -575,7 +586,7 @@ export async function createEverydayDesktop(
       operationSource,
       revisionNumber: 1,
     });
-    datasetsByPath.set(spec.datasetPath, {
+    const stored: StoredDataset = {
       datasetPath: spec.datasetPath,
       revision: rev,
       schemaSql,
@@ -585,7 +596,9 @@ export async function createEverydayDesktop(
       generated: spec.generated ?? false,
       dataRevision,
       idempotency: new Map(),
-    });
+    };
+    datasetsByPath.set(spec.datasetPath, stored);
+    reportSnapshot(stored);
   }
 
   for (const spec of seed.datasets ?? []) {
@@ -752,7 +765,7 @@ export async function createEverydayDesktop(
         );
         await writeWorkspaceText(root, schemaPath, schemaSql + "\n", onWrite);
         await writeWorkspaceText(root, operationsPath, operationSource + "\n", onWrite);
-        datasetsByPath.set(datasetPath, {
+        const stored: StoredDataset = {
           datasetPath,
           revision: rev,
           schemaSql,
@@ -762,7 +775,9 @@ export async function createEverydayDesktop(
           generated: true,
           dataRevision: 1,
           idempotency: new Map(),
-        });
+        };
+        datasetsByPath.set(datasetPath, stored);
+        reportSnapshot(stored);
         return { kind: "approved", revision: rev };
       }
       case "prepare": {
@@ -833,7 +848,7 @@ export async function createEverydayDesktop(
           );
         }
         preparations.delete(req.preparationId);
-        datasetsByPath.set(prep.datasetPath, {
+        const stored: StoredDataset = {
           datasetPath: prep.datasetPath,
           revision: prep.revision,
           schemaSql: prep.schemaSql,
@@ -843,7 +858,9 @@ export async function createEverydayDesktop(
           generated: prep.generated,
           dataRevision: 1,
           idempotency: new Map(),
-        });
+        };
+        datasetsByPath.set(prep.datasetPath, stored);
+        reportSnapshot(stored);
         return { kind: "approved", revision: prep.revision };
       }
       case "prepareSchemaChange": {
@@ -1144,6 +1161,7 @@ export async function createEverydayDesktop(
         stored.database = pending.nextDatabase;
         stored.dataRevision += 1;
         migrations.delete(req.preparationId);
+        reportSnapshot(stored);
         return {
           kind: "migrated",
           revision: stored.revision,
@@ -1274,6 +1292,7 @@ export async function createEverydayDesktop(
           if (!op.readOnly) {
             stored.database = evaluated.database;
             stored.dataRevision += 1;
+            reportSnapshot(stored);
           }
           stored.idempotency.set(replayKey, {
             inputJson,

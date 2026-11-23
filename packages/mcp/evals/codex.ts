@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { EvalCase, RecordedCall, RunRecord } from "./case";
+import type { DatasetSnapshot, EvalCase, RecordedCall, RunRecord } from "./case";
 import {
   sampleEnvironment,
   seedWorkspace,
@@ -205,7 +205,7 @@ function unwrapWindowsCmdShim(
   const script = readFileSync(cmdPath, "utf8");
   const match = /["']?%~?dp0%?[\\/]+([^"'\r\n]+?\.(?:c|m)?js)["']?/i.exec(script);
   if (match?.[1]) {
-    const target = resolve(dirname(cmdPath), match[1]);
+    const target = resolve(dirname(cmdPath), match[1].replaceAll("\\", "/"));
     if (existsSync(target)) {
       return { command: nodeExecutable, args: [target, ...args] };
     }
@@ -333,6 +333,7 @@ export async function runCodexSample(input: {
   const codexHome = join(sampleDir, "codex-home");
   const unansweredLog = join(sampleDir, "unanswered.log");
   const writesLog = join(sampleDir, "mcp-writes.log");
+  const snapshotsFile = join(sampleDir, "datasets.json");
   const startedAt = Date.now();
   try {
     await seedWorkspace(root, input.evalCase, home);
@@ -347,6 +348,7 @@ export async function runCodexSample(input: {
       unansweredLog,
       home,
       writesLog,
+      snapshotsFile,
     ];
     const codexArgs = codexArguments({
       prompt: input.evalCase.prompt,
@@ -408,6 +410,15 @@ export async function runCodexSample(input: {
       };
     const mcpWritesRaw = await readFile(writesLog, "utf8").catch(() => "");
     const mcpWrittenHashes = parseMcpWritesLog(mcpWritesRaw);
+    const snapshotsRaw = await readFile(snapshotsFile, "utf8").catch(() => "");
+    let datasetSnapshots: Record<string, DatasetSnapshot> | undefined;
+    if (snapshotsRaw.trim()) {
+      try {
+        datasetSnapshots = JSON.parse(snapshotsRaw) as Record<string, DatasetSnapshot>;
+      } catch {
+        datasetSnapshots = undefined;
+      }
+    }
     const finalHashes = await workspaceFileHashes(root);
     const finalFiles = await workspaceFiles(root);
     const calls = appendUnmanagedFileWrites(
@@ -420,6 +431,7 @@ export async function runCodexSample(input: {
       calls,
       text: transcript.text,
       files: finalFiles,
+      ...(datasetSnapshots ? { datasetSnapshots } : {}),
     };
     return {
       harness: "Codex CLI",

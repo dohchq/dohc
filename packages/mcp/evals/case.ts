@@ -8,6 +8,12 @@ export type DesktopAnswer = unknown | ((args: Record<string, unknown>, root: str
 
 export type EvalSuite = "tool-use" | "everyday";
 
+export interface DatasetSnapshot {
+  revision: number;
+  revisionSha256: string;
+  databaseBase64: string;
+}
+
 export interface EvalCase {
   id: string;
   /** `tool-use` is focused single-flow tool selection; `everyday` is multi-step user jobs. */
@@ -27,7 +33,10 @@ export interface EvalCase {
   /** Builds fresh per-sample stateful desktop handlers (for example, SQLite-backed datasets). */
   setupDesktop?: (
     root: string,
-    options?: { onWrite?: (path: string, contentSha256: string) => void },
+    options?: {
+      onWrite?: (path: string, contentSha256: string) => void;
+      onDatasetSnapshot?: (datasetPath: string, snapshot: DatasetSnapshot) => void;
+    },
   ) => Record<string, DesktopAnswer> | Promise<Record<string, DesktopAnswer>>;
   /** What the person asks the agent. */
   prompt: string;
@@ -93,6 +102,8 @@ export interface RunRecord {
   text: string;
   /** The workspace's files after the run, by path. */
   files: Record<string, string>;
+  /** Final approved SQLite checkpoints recorded by stateful eval desktops, by datasetPath. */
+  datasetSnapshots?: Record<string, DatasetSnapshot>;
 }
 
 export interface Check {

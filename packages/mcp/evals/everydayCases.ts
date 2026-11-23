@@ -1217,6 +1217,106 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           },
         ),
       );
+      checks.push(
+        (() => {
+          const checkName =
+            "apps/booking frontend provides booking controls wired to dohc-app-channel bookSeat";
+          const rawManifest = run.files["apps/booking/app.publish.json"];
+          if (!rawManifest)
+            return { name: checkName, pass: false, detail: "missing app.publish.json" };
+          let entryPath: string;
+          let inputs: string[];
+          try {
+            const manifest = JSON.parse(rawManifest) as {
+              entryPath?: unknown;
+              inputs?: unknown;
+            };
+            entryPath = typeof manifest.entryPath === "string" ? manifest.entryPath : "";
+            inputs = Array.isArray(manifest.inputs)
+              ? manifest.inputs.filter((item): item is string => typeof item === "string")
+              : [];
+          } catch {
+            return { name: checkName, pass: false, detail: "invalid app.publish.json" };
+          }
+          const problems: string[] = [];
+          if (!entryPath || !inputs.includes(entryPath)) {
+            problems.push("entryPath must be listed in inputs");
+          }
+          for (const item of inputs) {
+            const rel = `apps/booking/${item.replace(/^\.\//, "")}`;
+            if (run.files[rel] === undefined) problems.push(`missing listed input ${item}`);
+          }
+          const entryHtml = run.files[`apps/booking/${entryPath.replace(/^\.\//, "")}`] ?? "";
+          const hasSubmitControl =
+            /<form\b/i.test(entryHtml) ||
+            /<button\b/i.test(entryHtml) ||
+            /type\s*=\s*["']submit["']/i.test(entryHtml);
+          const inputControlCount = (entryHtml.match(/<(?:input|select|textarea)\b/gi) ?? [])
+            .length;
+          if (!hasSubmitControl) problems.push("entry HTML has no form or submit button");
+          if (inputControlCount < 2) {
+            problems.push(`entry HTML needs name and seats inputs (found ${inputControlCount})`);
+          }
+          if (!/\bname\b/i.test(entryHtml) || !/\bseats?\b/i.test(entryHtml)) {
+            problems.push("entry HTML controls do not reference guest name and seats");
+          }
+          const normalizedInputs = new Set(inputs.map((item) => item.replace(/^\.\//, "")));
+          const scriptParts: string[] = [];
+          for (const match of entryHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+            const attrs = match[1] ?? "";
+            const body = match[2] ?? "";
+            const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
+            if (srcMatch?.[1]) {
+              const rawSrc = srcMatch[1].trim();
+              if (!/^(?:https?:|data:|blob:)/i.test(rawSrc)) {
+                const cleanSrc = rawSrc.replace(/[?#].*$/, "").replace(/^\.\//, "");
+                if (!normalizedInputs.has(cleanSrc)) {
+                  problems.push(`script src "${rawSrc}" is not listed in app.publish.json inputs`);
+                } else {
+                  const scriptFile = run.files[`apps/booking/${cleanSrc}`];
+                  if (scriptFile) scriptParts.push(scriptFile);
+                }
+              }
+            } else if (body.trim()) {
+              scriptParts.push(body);
+            }
+          }
+          for (const item of normalizedInputs) {
+            if (/\.(?:c|m)?[jt]sx?$/i.test(item)) {
+              const content = run.files[`apps/booking/${item}`];
+              if (content && !scriptParts.includes(content)) scriptParts.push(content);
+            }
+          }
+          const scriptText = scriptParts.join("\n");
+          if (!scriptText.trim()) {
+            problems.push("no published frontend script found");
+          } else {
+            if (!scriptText.includes("dohc-app-channel") || !/\bports\b/.test(scriptText)) {
+              problems.push("frontend script does not receive dohc-app-channel MessagePort");
+            }
+            if (!scriptText.includes("backend.invoke") || !scriptText.includes("bookSeat")) {
+              problems.push("frontend script does not call backend.invoke for bookSeat");
+            }
+            if (!scriptText.includes("idempotencyKey")) {
+              problems.push("frontend script omits idempotencyKey on backend.invoke");
+            }
+            if (!/(?:addEventListener|onsubmit|onclick)/i.test(scriptText)) {
+              problems.push("frontend script wires no submit or click handler");
+            }
+            if (!/\bname\b/.test(scriptText) || !/\bseats\b/.test(scriptText)) {
+              problems.push("frontend script does not pass name and seats inputs");
+            }
+            if (scriptText.includes("listBookings")) {
+              problems.push("public booking frontend must not call owner-only listBookings");
+            }
+          }
+          return {
+            name: checkName,
+            pass: problems.length === 0,
+            ...(problems.length > 0 ? { detail: problems.join("; ") } : {}),
+          };
+        })(),
+      );
       return checks;
     },
     solution: {
@@ -1246,7 +1346,66 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         });
         await callTool("dohc_write_file", {
           path: "apps/booking/index.html",
-          content: "<!doctype html><h1>Pottery Workshop</h1>\n",
+          content: [
+            "<!doctype html>",
+            "<html>",
+            "<body>",
+            "  <h1>Pottery Workshop</h1>",
+            '  <form id="booking-form">',
+            '    <label>Name <input id="guest-name" name="name" type="text" required /></label>',
+            '    <label>Seats <input id="seat-count" name="seats" type="number" min="1" max="8" value="1" required /></label>',
+            '    <button type="submit">Book seats</button>',
+            "  </form>",
+            '  <p id="status" role="status"></p>',
+            '  <script type="module" src="./app.js"></script>',
+            "</body>",
+            "</html>",
+            "",
+          ].join("\n"),
+        });
+        await callTool("dohc_write_file", {
+          path: "apps/booking/app.js",
+          content: [
+            "let channelPort;",
+            "const pending = new Map();",
+            "const queue = [];",
+            "function send(message) {",
+            "  return new Promise((resolve, reject) => {",
+            "    const id = crypto.randomUUID();",
+            "    const frame = { id, ...message };",
+            "    pending.set(id, { resolve, reject });",
+            "    if (channelPort) channelPort.postMessage(frame);",
+            "    else queue.push(frame);",
+            "  });",
+            "}",
+            'window.addEventListener("message", (event) => {',
+            '  if (channelPort || event.source !== window.parent || event.data?.kind !== "dohc-app-channel" || event.data?.version !== 1 || event.ports.length !== 1) return;',
+            "  channelPort = event.ports[0];",
+            "  channelPort.onmessage = ({ data }) => {",
+            "    const req = pending.get(data?.id);",
+            "    if (!req) return;",
+            "    pending.delete(data.id);",
+            '    if (data.ok) req.resolve(data.value); else req.reject(new Error(data.error?.message ?? "Booking failed"));',
+            "  };",
+            "  channelPort.start();",
+            "  while (queue.length) channelPort.postMessage(queue.shift());",
+            "});",
+            'const form = document.getElementById("booking-form");',
+            'const statusEl = document.getElementById("status");',
+            'form?.addEventListener("submit", async (event) => {',
+            "  event.preventDefault();",
+            "  const data = new FormData(form);",
+            '  const name = String(data.get("name") ?? "").trim();',
+            '  const seats = Number(data.get("seats") ?? 1);',
+            "  try {",
+            '    await send({ op: "backend.invoke", operation: "bookSeat", input: { name, seats }, idempotencyKey: crypto.randomUUID() });',
+            '    if (statusEl) statusEl.textContent = "Booked!";',
+            "  } catch (error) {",
+            "    if (statusEl) statusEl.textContent = error instanceof Error ? error.message : String(error);",
+            "  }",
+            "});",
+            "",
+          ].join("\n"),
         });
         await callTool("dohc_write_file", {
           path: "apps/booking/app.publish.json",
@@ -1255,7 +1414,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
               {
                 version: 1,
                 entryPath: "index.html",
-                inputs: ["index.html"],
+                inputs: ["index.html", "app.js"],
                 packageMap: {},
                 dataset: {
                   kind: "dataset",
@@ -1391,18 +1550,173 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         { tool: "dohc_publish_app", args: { "request.action": "approve" }, ok: true },
       ],
     },
-    gradeRun: (run) => [
-      checkDatasetJsonValid(run, "clients/dataset.json"),
-      checkAppPublishDataset(
-        run,
-        "apps/client-portal/app.publish.json",
-        "clients/dataset.json",
-        (ref) =>
-          ref.revision >= 2 && ref.revisionSha256 !== CLIENTS_REV1_SHA
-            ? null
-            : `still pinned to revision ${ref.revision}`,
-      ),
-    ],
+    gradeRun: async (run) => {
+      const checks: Check[] = [checkDatasetJsonValid(run, "clients/dataset.json")];
+      let def: DatasetDefinition | undefined;
+      try {
+        def = parseDatasetDefinition(JSON.parse(run.files["clients/dataset.json"] ?? ""));
+      } catch {
+        def = undefined;
+      }
+      const clientsTable = def?.tables.find(
+        (t) => t.tableId === uuid("c1000000", 2) || t.sqlName === "clients",
+      );
+      const tierField = clientsTable?.fields.find(
+        (f) => f.type !== "button" && f.name.trim().toLowerCase() === "tier",
+      );
+      const tierValid =
+        tierField !== undefined &&
+        tierField.type === "select" &&
+        tierField.required === true &&
+        Array.isArray(tierField.options) &&
+        tierField.options.length === 2 &&
+        tierField.options.includes("Standard") &&
+        tierField.options.includes("VIP") &&
+        tierField.default === "Standard";
+      checks.push({
+        name: 'clients/dataset.json defines required select field "Tier" (Standard, VIP; default Standard)',
+        pass: tierValid,
+        ...(tierValid
+          ? {}
+          : {
+              detail: tierField
+                ? `found Tier field with type=${tierField.type}, required=${String("required" in tierField ? tierField.required : false)}, options=${JSON.stringify("options" in tierField ? tierField.options : undefined)}, default=${JSON.stringify("default" in tierField ? tierField.default : undefined)}`
+                : "missing Tier field on Clients table",
+            }),
+      });
+      const snapshot = run.datasetSnapshots?.["clients/dataset.json"];
+      checks.push(
+        checkAppPublishDataset(
+          run,
+          "apps/client-portal/app.publish.json",
+          "clients/dataset.json",
+          (ref) => {
+            if (ref.revision < 2 || ref.revisionSha256 === CLIENTS_REV1_SHA) {
+              return `still pinned to revision ${ref.revision}`;
+            }
+            if (
+              snapshot &&
+              (ref.revision !== snapshot.revision || ref.revisionSha256 !== snapshot.revisionSha256)
+            ) {
+              return `manifest rev ${ref.revision} (${ref.revisionSha256.slice(0, 8)}) does not match approved snapshot rev ${snapshot.revision} (${snapshot.revisionSha256.slice(0, 8)})`;
+            }
+            if (def) {
+              const schemaSql = run.files[def.schemaPath];
+              const opSource = run.files[def.operationsPath];
+              if (schemaSql === undefined || opSource === undefined) {
+                return "missing migrated schema.sql or operations.js";
+              }
+              const schemaCandidates = [schemaSql, schemaSql.replace(/\r?\n$/, "")];
+              const opsCandidates = [opSource, opSource.replace(/\r?\n$/, "")];
+              const definitionSha256 = sha256(datasetDefinitionDigestContent(def));
+              const matchesDisk = schemaCandidates.some((s) =>
+                opsCandidates.some(
+                  (o) =>
+                    sha256(
+                      datasetRevisionDigestContent({
+                        datasetId: def.datasetId,
+                        revision: ref.revision,
+                        revisionSha256: "0".repeat(64),
+                        definitionSha256,
+                        schemaSha256: sha256(s),
+                        operationsSha256: sha256(o),
+                        definition: def,
+                      }),
+                    ) === ref.revisionSha256,
+                ),
+              );
+              if (!matchesDisk) {
+                return "manifest revisionSha256 does not match workspace clients/dataset.json";
+              }
+            }
+            return null;
+          },
+        ),
+      );
+      const recordsCheckName =
+        'all 3 seeded client records survive migration with Tier = "Standard"';
+      if (!snapshot || !def || !clientsTable || !tierField || tierField.type === "button") {
+        checks.push({
+          name: recordsCheckName,
+          pass: false,
+          detail: !snapshot ? "missing migrated dataset snapshot" : "missing valid Tier field",
+        });
+      } else {
+        const opSource = run.files[def.operationsPath];
+        const readOp =
+          def.operations.find((o) => o.operationId === uuid("c1000000", 6)) ??
+          def.operations.find((o) => o.kind === "read" && o.tableId === clientsTable.tableId);
+        if (!opSource || !readOp) {
+          checks.push({
+            name: recordsCheckName,
+            pass: false,
+            detail: "missing operations file or listClients read operation",
+          });
+        } else {
+          try {
+            const compiled = await compileDatasetOperations(opSource, def.operationsPath);
+            const evaluated = await evaluateAppOperation({
+              database: new Uint8Array(Buffer.from(snapshot.databaseBase64, "base64")),
+              source: compiled,
+              operation: readOp.name,
+              caller: { kind: "owner" },
+              input: {},
+              nowMs: 1_760_000_000_000,
+              requestId: "grade-clients-read",
+              tables: def.tables.map((t) => t.sqlName),
+              readOnly: true,
+            });
+            const resultObj =
+              evaluated.result && typeof evaluated.result === "object"
+                ? (evaluated.result as { rows?: unknown })
+                : undefined;
+            const rows = Array.isArray(resultObj?.rows) ? resultObj.rows : [];
+            const nameFieldId = uuid("c1000000", 4);
+            const emailFieldId = uuid("c1000000", 5);
+            const readCell = (row: unknown, fieldId: string, colName: string): unknown => {
+              if (!row || typeof row !== "object") return undefined;
+              const obj = row as Record<string, unknown>;
+              if (obj.values && typeof obj.values === "object" && !Array.isArray(obj.values)) {
+                const values = obj.values as Record<string, unknown>;
+                if (Object.hasOwn(values, fieldId)) return values[fieldId];
+                if (Object.hasOwn(values, colName)) return values[colName];
+              }
+              return obj[colName] ?? obj[fieldId];
+            };
+            const extracted = rows.map((row) => ({
+              name: readCell(row, nameFieldId, "name"),
+              email: readCell(row, emailFieldId, "email"),
+              tier: readCell(row, tierField.fieldId, tierField.sqlColumn),
+            }));
+            const expectedClients = [
+              { name: "Ava", email: "ava@example.com" },
+              { name: "Ben", email: "ben@example.com" },
+              { name: "Cam", email: "cam@example.com" },
+            ];
+            const allSurvived =
+              extracted.length === expectedClients.length &&
+              expectedClients.every((want) =>
+                extracted.some(
+                  (got) =>
+                    got.name === want.name && got.email === want.email && got.tier === "Standard",
+                ),
+              );
+            checks.push({
+              name: recordsCheckName,
+              pass: allSurvived,
+              ...(allSurvived ? {} : { detail: `rows=${JSON.stringify(extracted)}` }),
+            });
+          } catch (error) {
+            checks.push({
+              name: recordsCheckName,
+              pass: false,
+              detail: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
+      return checks;
+    },
     solution: {
       run: async (callTool) => {
         const described = (await callTool("dohc_dataset", {
