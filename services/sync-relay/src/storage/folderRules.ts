@@ -49,6 +49,13 @@ function ruleText(rule: AccessRule): string {
 const markerPath = (folder: string) =>
   folder === "" ? FOLDER_MARKER_FILE : `${folder}/${FOLDER_MARKER_FILE}`;
 
+// The owner's disk may spell a marker another way. Writing the usual spelling
+// beside it would make a twin, which hides the folder.
+function heldMarkerPath(statements: AccessRuleStatements, workspaceId: string, folder: string) {
+  const [held] = markersIn(statements, workspaceId, folder);
+  return held === undefined ? markerPath(folder) : String(held.path);
+}
+
 export function changeFolderRule(
   storage: StorageContext,
   input: { workspaceId: string; actorUserId: string; change: FolderRuleChange; nowMs: number },
@@ -123,7 +130,7 @@ export function changeFolderRule(
     writeMarkers(storage, statements, {
       workspaceId,
       markers: written.map((folder) => ({
-        path: markerPath(folder),
+        path: heldMarkerPath(statements, workspaceId, folder),
         text: change.kind === "clear" ? null : folderMarkerText(ruleId, revision),
       })),
       folders,

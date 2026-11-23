@@ -14,6 +14,7 @@ import { parseCollectionRecordIdentity } from "@dohc/workspace-contracts/collect
 import { accessRuleFolder, isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import {
   accessRuleStatements,
+  folderHasFiles,
   refreshFolderAccess,
   type AccessRuleStatements,
 } from "./accessRules";
@@ -304,8 +305,16 @@ function removeCurrentFile(
   relaySeq: number,
 ): void {
   statements.remove.run(workspaceId, versionId, path);
-  if (versionId === "main" && isFolderMarkerPath(path))
+  if (versionId !== "main") return;
+  if (isFolderMarkerPath(path))
     refreshFolderAccess(statements.rules, workspaceId, accessRuleFolder(path), relaySeq);
+  // A move in dohc renames a folder's marker before its other files, so the
+  // old path can be released only once its last file leaves.
+  for (const row of statements.rules.boundAbove.all(workspaceId, path, path)) {
+    const folder = String(row.folder);
+    if (!folderHasFiles(statements.rules, workspaceId, folder))
+      refreshFolderAccess(statements.rules, workspaceId, folder, relaySeq);
+  }
 }
 
 export function currentFileStatements(db: SqliteDb): CurrentFileStatements {

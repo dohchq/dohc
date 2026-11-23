@@ -79,11 +79,12 @@ impl CaptureOp {
     }
 }
 
-/// The marker name is shared with the relay. Case twins carry the same ordering.
+/// Whether a path is a folder marker, by the collision key the relay uses, so
+/// every spelling the relay treats as a marker carries the same ordering.
 pub fn is_access_marker(path: &str) -> bool {
     path.rsplit('/')
         .next()
-        .is_some_and(|name| name.eq_ignore_ascii_case(".dohc-access"))
+        .is_some_and(|name| crate::floor::collision_key(name) == ".dohc-access")
 }
 
 /// Stable sort key for file steps before they receive relay journal positions.
