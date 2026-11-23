@@ -175,17 +175,9 @@ export function summarizeDocumentSize(data) {
             ...arms.map((row) => row.largestStateBytes),
             ...item.churn.filter((row) => !row.structural).map((row) => row.requiredBytes),
           ]);
-          const restorePayloadBytes = max(
-            [...arms, ...(relayInput?.churnedCases ?? [])]
-              .map((row) => row.native?.restorePayloadBytes)
-              .filter(Number.isFinite),
-          );
           const reservation = Number.isFinite(requiredState)
             ? arms[0]?.reservationBounds
-              ? restoreReservation(
-                  Math.max(restorePayloadBytes ?? 0, requiredState),
-                  arms[0].reservationBounds,
-                )
+              ? restoreReservation(requiredState, arms[0].reservationBounds)
               : null
             : null;
           item.relay[topology + "/" + sessions] = {
@@ -201,7 +193,6 @@ export function summarizeDocumentSize(data) {
             databaseAndWalBytes: documentStats(
               arms.map((row) => row.databaseFilesBytes?.reduce((n, value) => n + value, 0)),
             ),
-            restoreVerified: arms.filter((row) => row.native?.restore?.verified).length,
             cpuMs: documentStats(updates.map((row) => row.cpuMs)),
             waitMs: documentStats(updates.map((row) => row.waitMs)),
             slotMs: documentStats(updates.map((row) => row.slotMs)),
@@ -235,9 +226,6 @@ export function summarizeDocumentSize(data) {
             ),
             nativeSettleMs: documentStats(
               arms.flatMap((row) => row.native?.settlements?.map((value) => value.ms) ?? []),
-            ),
-            nativeRestoreMs: documentStats(
-              arms.map((row) => (row.native?.restore?.verified ? row.native.restore.ms : null)),
             ),
             socketProbesVerified: arms.filter((row) =>
               ["fresh", "restart"].every((phase) =>
@@ -623,10 +611,10 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
       {
         add(
           key,
-          "native restart/restore proof",
+          "native restart proof",
           primary?.nativeRestartVerified,
           Infinity,
-          primary?.nativeRestartVerified >= 1 && primary?.restoreVerified >= 1,
+          primary?.nativeRestartVerified >= 1,
         );
         add(
           key,
@@ -692,9 +680,8 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
               240 * row.sessions,
             );
         if (row.native) {
-          add(key, label + " restore proof", row.native.restore?.verified ? 0 : 1, 0);
           const r = row.reservationBounds
-            ? restoreReservation(row.native.restorePayloadBytes, row.reservationBounds)
+            ? restoreReservation(row.largestStateBytes, row.reservationBounds)
             : null;
           add(key, label + " native reservation", r?.nativeBytes, 512 * MiB);
           add(

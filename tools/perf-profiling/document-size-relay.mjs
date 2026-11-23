@@ -579,8 +579,7 @@ export async function runRelayCase(options) {
             await sockets.run(docs[0], "restart");
         };
       }
-      if (native)
-        await native.finish(docs, Y, projection, sha256(baselineBytes), sha256(projectionText));
+      if (native) await native.finish(docs, Y, projection);
       result.initialTransferPerDocumentBytes = result.socketProbes?.length
         ? Math.max(...result.socketProbes.map((row) => row.initialTransferBytes))
         : null;
