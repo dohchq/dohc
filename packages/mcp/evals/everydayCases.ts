@@ -341,6 +341,15 @@ function checkAppPublishDataset(
   }
 }
 
+function referencedOperationIds(
+  ref: ReturnType<typeof parseAppDatasetReference>,
+  def: DatasetDefinition | undefined,
+): string[] {
+  if ("operationIds" in ref) return ref.operationIds;
+  const byName = new Map((def?.operations ?? []).map((op) => [op.name, op.operationId]));
+  return ref.operations.map((name) => byName.get(name) ?? name);
+}
+
 // Solution helper constants for deterministic replay tests
 const TRACKER_DEF: DatasetDefinition = {
   formatVersion: 1,
@@ -1209,9 +1218,10 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           "apps/booking/app.publish.json",
           "workshop/dataset.json",
           (ref) => {
-            if (!bookOpId || !ref.operationIds.includes(bookOpId))
+            const operationIds = referencedOperationIds(ref, def);
+            if (!bookOpId || !operationIds.includes(bookOpId))
               return "missing bookSeat operationId";
-            if (listOpId && ref.operationIds.includes(listOpId))
+            if (listOpId && operationIds.includes(listOpId))
               return "must not expose owner-only listBookings";
             return null;
           },
@@ -1591,14 +1601,18 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           "apps/client-portal/app.publish.json",
           "clients/dataset.json",
           (ref) => {
-            if (ref.revision < 2 || ref.revisionSha256 === CLIENTS_REV1_SHA) {
-              return `still pinned to revision ${ref.revision}`;
+            const { revision, revisionSha256 } = ref;
+            if (revision === undefined || revisionSha256 === undefined) {
+              return null;
+            }
+            if (revision < 2 || revisionSha256 === CLIENTS_REV1_SHA) {
+              return `still pinned to revision ${revision}`;
             }
             if (
               snapshot &&
-              (ref.revision !== snapshot.revision || ref.revisionSha256 !== snapshot.revisionSha256)
+              (revision !== snapshot.revision || revisionSha256 !== snapshot.revisionSha256)
             ) {
-              return `manifest rev ${ref.revision} (${ref.revisionSha256.slice(0, 8)}) does not match approved snapshot rev ${snapshot.revision} (${snapshot.revisionSha256.slice(0, 8)})`;
+              return `manifest rev ${revision} (${revisionSha256.slice(0, 8)}) does not match approved snapshot rev ${snapshot.revision} (${snapshot.revisionSha256.slice(0, 8)})`;
             }
             if (def) {
               const schemaSql = run.files[def.schemaPath];
@@ -1615,14 +1629,14 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
                     sha256(
                       datasetRevisionDigestContent({
                         datasetId: def.datasetId,
-                        revision: ref.revision,
+                        revision,
                         revisionSha256: "0".repeat(64),
                         definitionSha256,
                         schemaSha256: sha256(s),
                         operationsSha256: sha256(o),
                         definition: def,
                       }),
-                    ) === ref.revisionSha256,
+                    ) === revisionSha256,
                 ),
               );
               if (!matchesDisk) {
@@ -1967,54 +1981,58 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           "apps/signup-form/app.publish.json",
           "events/dataset.json",
           (ref) => {
-            if (ref.revision < 2) {
-              return `manifest still pinned to stale revision ${ref.revision}`;
-            }
-            if (approvedDef) {
-              const schemaSql = run.files[approvedDef.schemaPath];
-              const opSource = run.files[approvedDef.operationsPath];
-              if (schemaSql !== undefined && opSource !== undefined) {
-                const expectedRevSha = sha256(
-                  datasetRevisionDigestContent({
-                    datasetId: approvedDef.datasetId,
-                    revision: ref.revision,
-                    revisionSha256: "0".repeat(64),
-                    definitionSha256: sha256(datasetDefinitionDigestContent(approvedDef)),
-                    schemaSha256: sha256(schemaSql),
-                    operationsSha256: sha256(opSource),
-                    definition: approvedDef,
-                  }),
-                );
-                const expectedRevShaTrimmed = sha256(
-                  datasetRevisionDigestContent({
-                    datasetId: approvedDef.datasetId,
-                    revision: ref.revision,
-                    revisionSha256: "0".repeat(64),
-                    definitionSha256: sha256(datasetDefinitionDigestContent(approvedDef)),
-                    schemaSha256: sha256(schemaSql),
-                    operationsSha256: sha256(opSource.replace(/\n$/, "")),
-                    definition: approvedDef,
-                  }),
-                );
-                if (
-                  ref.revisionSha256 !== expectedRevSha &&
-                  ref.revisionSha256 !== expectedRevShaTrimmed
-                ) {
-                  return "manifest revisionSha256 does not match approved events/dataset.json";
+            const { revision, revisionSha256 } = ref;
+            if (revision !== undefined && revisionSha256 !== undefined) {
+              if (revision < 2) {
+                return `manifest still pinned to stale revision ${revision}`;
+              }
+              if (approvedDef) {
+                const schemaSql = run.files[approvedDef.schemaPath];
+                const opSource = run.files[approvedDef.operationsPath];
+                if (schemaSql !== undefined && opSource !== undefined) {
+                  const expectedRevSha = sha256(
+                    datasetRevisionDigestContent({
+                      datasetId: approvedDef.datasetId,
+                      revision,
+                      revisionSha256: "0".repeat(64),
+                      definitionSha256: sha256(datasetDefinitionDigestContent(approvedDef)),
+                      schemaSha256: sha256(schemaSql),
+                      operationsSha256: sha256(opSource),
+                      definition: approvedDef,
+                    }),
+                  );
+                  const expectedRevShaTrimmed = sha256(
+                    datasetRevisionDigestContent({
+                      datasetId: approvedDef.datasetId,
+                      revision,
+                      revisionSha256: "0".repeat(64),
+                      definitionSha256: sha256(datasetDefinitionDigestContent(approvedDef)),
+                      schemaSha256: sha256(schemaSql),
+                      operationsSha256: sha256(opSource.replace(/\n$/, "")),
+                      definition: approvedDef,
+                    }),
+                  );
+                  if (
+                    revisionSha256 !== expectedRevSha &&
+                    revisionSha256 !== expectedRevShaTrimmed
+                  ) {
+                    return "manifest revisionSha256 does not match approved events/dataset.json";
+                  }
                 }
               }
             }
-            if (ref.operationIds.includes(uuid("e2000000", 10))) {
+            const operationIds = referencedOperationIds(ref, approvedDef);
+            if (operationIds.includes(uuid("e2000000", 10))) {
               return "leaked private owner readSessions operation";
             }
-            if (!ref.operationIds.includes(uuid("e2000000", 11))) {
+            if (!operationIds.includes(uuid("e2000000", 11))) {
               return "missing createSignup operation";
             }
-            const unknownOp = ref.operationIds.find((opId) => !approvedById.has(opId));
+            const unknownOp = operationIds.find((opId) => !approvedById.has(opId));
             if (unknownOp) {
               return `operationId ${unknownOp} is not in approved events/dataset.json`;
             }
-            if (!ref.operationIds.some((opId) => validChoiceOps.has(opId))) {
+            if (!operationIds.some((opId) => validChoiceOps.has(opId))) {
               return "missing approved Title-only Sessions relation-choices read operation";
             }
             return null;
