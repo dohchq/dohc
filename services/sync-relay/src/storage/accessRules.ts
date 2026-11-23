@@ -144,8 +144,7 @@ export function accessRuleStatements(db: SqliteDb): AccessRuleStatements {
     ),
     keyUnder: db.prepare(
       `SELECT path FROM sync_relay_current_file_keys
-       WHERE workspace_id = ? AND version_id = 'main' AND collision_key >= ? AND collision_key < ?
-       LIMIT 1`,
+       WHERE workspace_id = ? AND version_id = 'main' AND collision_key >= ? AND collision_key < ?`,
     ),
     open: db.prepare(
       `SELECT rule_text, from_seq FROM sync_relay_access_rules
