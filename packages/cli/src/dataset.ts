@@ -90,11 +90,11 @@ const definition = z.unknown().transform((value, context) => {
       (value as Record<string, unknown>).formatVersion === 2
     ) {
       const row = value as Record<string, unknown>;
-      if (!Object.hasOwn(row, "schemaPath") || !Object.hasOwn(row, "operationsPath")) {
+      const missing = ["schemaPath", "operationsPath"].filter((key) => !Object.hasOwn(row, key));
+      if (missing.length > 0) {
         context.addIssue({
           code: "custom",
-          message:
-            "For formatVersion 2 in dataset create, provide explicit schemaPath and operationsPath (for example expenses/schema.sql and expenses/operations.js).",
+          message: `missing required field(s): ${missing.join(", ")}. For formatVersion 2 in dataset create, provide explicit schemaPath and operationsPath (for example expenses/schema.sql and expenses/operations.js).`,
         });
         return z.NEVER;
       }
