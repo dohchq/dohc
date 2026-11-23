@@ -70,13 +70,17 @@
   .named-recipient .named-draft-recovery { grid-column: auto; border-top: 0; border-left: 1px solid var(--viewer-line); }
 }
 
-@media (max-width: 720px) {
-  .named-recipient > header { flex-direction: row; align-items: center; padding: 20px; }
-  .named-recipient .header-actions { width: auto; margin-left: auto; justify-content: flex-end; }
+@media (max-width: 720px), (pointer: coarse) and (max-height: 500px) {
+  .named-recipient > header { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 14px max(16px, env(safe-area-inset-right)) 14px max(16px, env(safe-area-inset-left)); }
+  .named-recipient > header h1 { font-size: 20px; }
+  .named-recipient > header p { margin: 2px 0 0; }
+  .named-recipient .header-actions { width: auto; margin-left: auto; justify-content: flex-end; gap: 8px; }
+  .named-recipient .download-card { margin: 24px auto; padding: 20px; }
+  .named-recipient .handoff-button { min-height: 44px; }
   .named-recipient .named-recipient-layout { grid-template-columns: minmax(0, 1fr); }
-  .named-recipient .named-file-list { max-height: 240px; overflow-y: auto; padding: 16px 12px; }
+  .named-recipient .named-file-list { max-height: 240px; overflow-y: auto; padding: 16px max(12px, env(safe-area-inset-right)) 16px max(12px, env(safe-area-inset-left)); }
   .named-recipient .named-refresh { margin-top: 12px; }
-  .named-recipient .named-document { padding: 24px 20px 32px; }
+  .named-recipient .named-document { padding: 24px max(20px, env(safe-area-inset-right)) calc(32px + env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); }
   .named-recipient .named-draft-recovery { grid-column: 1; }
   .named-recipient .named-body-editor .ProseMirror { min-height: 360px; }
 }
