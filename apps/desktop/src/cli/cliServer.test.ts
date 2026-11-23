@@ -2137,6 +2137,192 @@ describe("CLI socket server", () => {
     ).toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
   });
 
+  it("runs undoAgentRun on an owner workspace as an agent undo and refuses human actor, active runs, runId, and read-only workspaces", async () => {
+    const agentRunUndo = vi.fn(
+      async (agentRunId: string, _planToken: string, _origin: unknown) => ({
+        agentRunId,
+        correlationId: "restore-agent-run-1",
+        truncated: false,
+        restored: [{ path: "notes/plan.md", restored: "text" as const, restoredMomentId: "m-9" }],
+        skipped: [],
+        failed: [],
+      }),
+    );
+    Object.assign(context, { agentRunUndo });
+
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toEqual({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      ok: true,
+      result: {
+        ok: true,
+        agentRunId: "run-1",
+        correlationId: "restore-agent-run-1",
+        truncated: false,
+        restored: [{ path: "notes/plan.md", restored: "text", restoredMomentId: "m-9" }],
+        skipped: [],
+        failed: [],
+      },
+    });
+    expect(agentRunUndo).toHaveBeenCalledWith(
+      "run-1",
+      "tok-1",
+      expect.objectContaining({
+        actorOriginId: "dohc-mcp",
+        attribution: expect.objectContaining({ onBehalfOf: "person-local" }),
+      }),
+    );
+
+    agentRunUndo.mockClear();
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "human", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: {
+        ok: false,
+        reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".`,
+      },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+
+    holdRun("active-run", "default");
+    expect(
+      await rawRequest({
+        token,
+        runSecret: RUN_SECRET,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { ok: false, reason: "Finish the active agent run before undoing an agent run." },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+    dispatchedRun = null;
+    dispatchedRunId = null;
+
+    agentRunDepth = 1;
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { ok: false, reason: "Finish the active agent run before undoing an agent run." },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+    agentRunDepth = 0;
+
+    agentWriteRunId = "run-settings-active";
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { ok: false, reason: "Finish the active agent run before undoing an agent run." },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+    agentWriteRunId = null;
+
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: {
+          cwd: workspaceRoot,
+          actor: "agent",
+          agentId: "terminal",
+          agentRunId: "run-1",
+          planToken: "tok-1",
+        },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: {
+        ok: false,
+        reason:
+          "Connected agents cannot undo an agent run. Undo from desktop History or the owner's local CLI.",
+      },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: {
+          cwd: workspaceRoot,
+          actor: "agent",
+          agentRunId: "run-1",
+          planToken: "tok-1",
+          runId: "run-1",
+        },
+      }),
+    ).toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
+
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1" },
+      }),
+    ).toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
+
+    agentRunUndo.mockClear();
+    context.readOnly = true;
+    const readOnlyReply = await rawRequest({
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "undoAgentRun",
+      args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+    });
+    expect(readOnlyReply).toMatchObject({
+      ok: true,
+      result: { ok: false, reason: expect.any(String) },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    const shareUndoReply = await rawRequest({
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "undoAgentRun",
+      args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+    });
+    expect(shareUndoReply).toMatchObject({ ok: false });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+
+    const sharePlanReply = await rawRequest({
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "planUndoAgentRun",
+      args: { cwd: workspaceRoot, actor: "human", agentRunId: "run-1" },
+    });
+    expect(sharePlanReply).toMatchObject({ ok: false });
+  });
+
   it("refuses owner and chat commands in a received share opened as its own workspace", async () => {
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;

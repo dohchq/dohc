@@ -999,6 +999,7 @@ impl ActorHandle {
                             Some(&WriteConditions {
                                 create_only: false,
                                 expected_sha256: Some(head.hash),
+                                path_clear_since: None,
                             }),
                             Some(&|tx| r.save(tx, false, &next)),
                             f.as_ref(),

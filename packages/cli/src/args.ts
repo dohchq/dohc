@@ -1,5 +1,6 @@
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
+import { PlanUndoAgentRunInput } from "@dohc/workspace-contracts/agent-run-undo";
 import { OutsideChangesInput } from "@dohc/workspace-contracts/outside-changes";
 import { RetrievalKind, WorkspaceSearchInput } from "@dohc/workspace-contracts/retrieval";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
@@ -1309,6 +1310,14 @@ const HISTORY_VERBS = {
       return { verb: "moment", id, side: input.flags.has("--before") ? "before" : "after" };
     },
   },
+  "undo-agent-run": declaredWrite("undoAgentRun", ({ operands }) => {
+    const [agentRunId, planToken, ...extra] = operands;
+    if (!agentRunId) fail("history undo-agent-run requires an agent run id");
+    if (!planToken)
+      fail("history undo-agent-run requires a plan token from history agent-run-plan");
+    noExtraArgs(extra, "history undo-agent-run");
+    return { agentRunId, planToken };
+  }),
 } satisfies Record<string, CliVerbSpec>;
 
 /** The Collection and automation every automation verb starts with, and one run when the verb takes one. */
@@ -2001,6 +2010,12 @@ const DECLARED_PARSERS: {
       cursor: lastValue(input, "--cursor"),
     });
   },
+  planUndoAgentRun: (input, command) => {
+    const [agentRunId, ...extra] = input.operands;
+    if (!agentRunId) fail(`${command} requires an agent run id`);
+    noExtraArgs(extra, command);
+    return PlanUndoAgentRunInput.parse({ agentRunId });
+  },
   outsideChanges: (input, command) => {
     noExtraArgs(input.operands, command);
     return OutsideChangesInput.parse({});
@@ -2545,7 +2560,7 @@ export function parseCliArguments(
     );
   if (help) return { help: [commandName, verbName] };
   const agent =
-    (commandName === "history" && verbName === "undo") ||
+    (commandName === "history" && (verbName === "undo" || verbName === "undo-agent-run")) ||
     commandName === "document" ||
     commandName === "file" ||
     global.actorFlag ||

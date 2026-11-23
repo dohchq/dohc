@@ -304,6 +304,12 @@
     ],
     "workspaceSearch": [
       "workspace.search"
+    ],
+    "planUndoAgentRun": [
+      "history.agent.run.plan"
+    ],
+    "undoAgentRun": [
+      "history.agent.run.undo"
     ]
   },
   "public": {
@@ -421,6 +427,8 @@
     "dataset cancelInvoke": "dataset.operation.cancel",
     "document outside-changes": "capture.outside.read",
     "document keep-outside-change": "capture.outside.keep",
-    "workspace search": "workspace.search"
+    "workspace search": "workspace.search",
+    "history agent-run-plan": "history.agent.run.plan",
+    "history undo-agent-run": "history.agent.run.undo"
   }
 }

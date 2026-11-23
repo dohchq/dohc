@@ -36,7 +36,7 @@ New to building in dohc with an agent? Start with [Build with agents](../how-to/
 | **Workspace files and links** | [`dohc_list_files`](#dohc_list_files), [`dohc_read_file`](#dohc_read_file), [`dohc_search_files`](#dohc_search_files), [`dohc_write_file`](#dohc_write_file), [`dohc_create_directory`](#dohc_create_directory), [`dohc_duplicate_file`](#dohc_duplicate_file), [`dohc_move_path`](#dohc_move_path), [`dohc_delete_path`](#dohc_delete_path), [`dohc_link`](#dohc_link), [`dohc_links_edges`](#dohc_links_edges), [`dohc_links_in`](#dohc_links_in), [`dohc_links_resolve`](#dohc_links_resolve) |
 | **Chat and Groups** | [`dohc_list_groups`](#dohc_list_groups), [`dohc_create_group`](#dohc_create_group), [`dohc_read_chat`](#dohc_read_chat), [`dohc_start_group_chat`](#dohc_start_group_chat), [`dohc_reply_to_chat`](#dohc_reply_to_chat), [`dohc_list_file_chats`](#dohc_list_file_chats), [`dohc_start_file_chat`](#dohc_start_file_chat), [`dohc_wait_for_messages`](#dohc_wait_for_messages), [`dohc_retry_chat_run`](#dohc_retry_chat_run), [`dohc_chat_links`](#dohc_chat_links), [`dohc_chat_file_mentions`](#dohc_chat_file_mentions) |
 | **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run) |
-| **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation) |
+| **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation), [`dohc_plan_agent_run_undo`](#dohc_plan_agent_run_undo) |
 | **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent) |
 | **Internal sync, live-document, and recovery** | [`dohc_stop_workspace_sync`](#dohc_stop_workspace_sync), [`dohc_list_live_documents`](#dohc_list_live_documents), [`dohc_stop_live_editing`](#dohc_stop_live_editing), [`dohc_resume_live_editing`](#dohc_resume_live_editing), [`dohc_read_held_change`](#dohc_read_held_change), [`dohc_held_note_change`](#dohc_held_note_change), [`dohc_save_recovery_copy`](#dohc_save_recovery_copy), [`dohc_retry_kept_edits`](#dohc_retry_kept_edits), [`dohc_stop_again`](#dohc_stop_again), [`dohc_list_outside_changes`](#dohc_list_outside_changes), [`dohc_keep_outside_change`](#dohc_keep_outside_change), [`dohc_list_kept_copies`](#dohc_list_kept_copies), [`dohc_save_kept_copy`](#dohc_save_kept_copy), [`dohc_restore_protected_copy`](#dohc_restore_protected_copy), [`dohc_discard_protected_copy`](#dohc_discard_protected_copy), [`dohc_list_retained_copies`](#dohc_list_retained_copies), [`dohc_delete_retained_copies`](#dohc_delete_retained_copies) |
 
@@ -714,6 +714,16 @@ Changes the workspace, so a shared view does not offer it.
 - `operationId`: `string`. Required.
 
 Returns `{ ok: false, reason, refusal: { code: "old-path-occupied", path } | { code: "live-page-owned", path } | { code: "unexplained" } } | { ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
+
+### `dohc_plan_agent_run_undo`
+
+Inspect which files saved during one agent run can be safely restored to before the run, and which files would be skipped because of later edits, renames, path collisions, live editing, or protection.
+
+Only the original workspace plans an agent run undo. Shared profiles do not offer this read.
+
+- `agentRunId`: `string`. Required.
+
+Returns `{ agentRunId, agentName, planToken, truncated, scannedChanges, restorable: { action, objectId, path, earliestMomentId, latestMomentId, momentCount }[], skipped: { path, reason, detail }[], policyUnreadable? }`.
 
 ---
 
@@ -2313,6 +2323,28 @@ Find the change's ID with history list. With --json, print both sides and the ch
 - `--before`: Print the text from before the change instead.
 
 With `--json`, prints `{ schemaVersion, ok: true, change: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } }`.
+
+#### `dohc history undo-agent-run`
+
+```sh
+dohc history undo-agent-run <agent-run-id> <plan-token> [options]
+```
+
+Undo safe file changes saved during an agent run.
+
+Pass the planToken returned by `dohc history agent-run-plan <agent-run-id>`. Recorded in History as an agent undo on behalf of the local owner; refused for connected agents, dohc-managed or active runs, automation chains, received shares, and read-only workspaces. Skips files with later edits, renames, path collisions, live editors, open desktop windows, Collections, created drawings, or protection.
+
+With `--json`, prints `{ schemaVersion, ok: true, agentRunId, correlationId, truncated, restored: { path, restored, restoredMomentId }[], skipped: { path, reason, detail }[], failed: { path, detail }[], policyUnreadable? }`.
+
+#### `dohc history agent-run-plan`
+
+```sh
+dohc history agent-run-plan <agent-run-id> [options]
+```
+
+List which files saved during an agent run can be safely undone.
+
+With `--json`, prints `{ schemaVersion, agentRunId, agentName, planToken, truncated, scannedChanges, restorable: { action, objectId, path, earliestMomentId, latestMomentId, momentCount }[], skipped: { path, reason, detail }[], policyUnreadable? }`.
 
 ### `dohc version`
 

@@ -838,6 +838,19 @@ const LISTED_CAPABILITIES = {
     mcpReason:
       "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
   }),
+  "history.agent.run.plan": capability(
+    "List which files saved during an agent run can be safely undone.",
+    {
+      ipc: [],
+      mcp: {},
+      mcpReason:
+        "Only the original workspace plans an agent run undo. Shared profiles omit this read; main admits the workspace.",
+    },
+  ),
+  "history.agent.run.undo": capability("Undo safe file changes saved during an agent run.", {
+    ipc: [],
+    mcp: {},
+  }),
   "history.read": capability("Print a file's text as one change left it.", {
     ipcReason: "Hand-registered IPC channel readEngineMoment has no operation-table row.",
     mcp: {

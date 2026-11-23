@@ -216,6 +216,23 @@ function fixture(
           undoDelete: async () => undefined,
         }),
     ) as Capture["changePathsAs"],
+    planUndoAgentRun: vi.fn(async (agentRunId: string) => ({
+      agentRunId,
+      agentName: null,
+      planToken: "plan-token",
+      truncated: false,
+      scannedChanges: 0,
+      restorable: [],
+      skipped: [],
+    })),
+    undoAgentRun: vi.fn<Capture["undoAgentRun"]>(async (agentRunId) => ({
+      agentRunId,
+      correlationId: null,
+      truncated: false,
+      restored: [],
+      skipped: [],
+      failed: [],
+    })),
   };
   const requestWorkspace = vi.fn(
     async (_root: string, _id: string, method: string, _input: unknown) =>
@@ -253,6 +270,15 @@ function fixture(
     reads: {
       chatFileMentions: vi.fn(async () => null),
       outsideChanges: vi.fn(async () => ({ outsideChanges: [] })),
+      planUndoAgentRun: vi.fn(async (_workspace, input: { agentRunId: string }) => ({
+        agentRunId: input.agentRunId,
+        agentName: null,
+        planToken: "plan-token",
+        truncated: false,
+        scannedChanges: 0,
+        restorable: [],
+        skipped: [],
+      })),
       workspaceSearch: vi.fn(async () => ({
         versionId: "main",
         results: [],
@@ -2898,4 +2924,54 @@ it("runs workspace search for CLI and MCP in the original workspace and refuses 
   const shareRefused = await cli(f.workspace.rootPath, "workspace", "search", "tokyo");
   expect(shareRefused.exitCode).not.toBe(0);
   expect(searchRead).not.toHaveBeenCalled();
+});
+
+it("passes open-window state and planToken through CLI agent-run undo", async () => {
+  const f = fixture(await createTestScratch("agent-run-undo-cli-"));
+  let windowOpen = true;
+  f.dependencies.hasOpenWorkspaceWindow = vi.fn(() => windowOpen);
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(
+      JSON.parse(
+        await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options()),
+      ),
+    );
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const cli = (cwd: string, ...argv: string[]) => executeCli({ argv, cwd, env: {}, request: send });
+
+  const openRun = await cli(
+    f.workspace.rootPath,
+    "history",
+    "undo-agent-run",
+    "run-1",
+    "plan-token-1",
+  );
+  expect(openRun.exitCode).toBe(0);
+  const firstCall = vi.mocked(f.capture.undoAgentRun).mock.lastCall;
+  expect(firstCall?.[0]).toBe("run-1");
+  expect(firstCall?.[1]).toEqual({
+    kind: "agent",
+    agentId: "dohc-mcp",
+    onBehalfOf: "person-local",
+  });
+  expect(firstCall?.[2]).toMatchObject({ expectedPlanToken: "plan-token-1" });
+  expect(firstCall?.[2]?.hasOtherWindow?.()).toBe(true);
+
+  windowOpen = false;
+  expect(firstCall?.[2]?.hasOtherWindow?.()).toBe(false);
+  const closedRun = await cli(
+    f.workspace.rootPath,
+    "history",
+    "undo-agent-run",
+    "run-1",
+    "plan-token-2",
+  );
+  expect(closedRun.exitCode).toBe(0);
+  const secondCall = vi.mocked(f.capture.undoAgentRun).mock.lastCall;
+  expect(secondCall?.[2]).toMatchObject({ expectedPlanToken: "plan-token-2" });
+  expect(secondCall?.[2]?.hasOtherWindow?.()).toBe(false);
 });

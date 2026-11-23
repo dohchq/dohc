@@ -1,3 +1,4 @@
+import { AGENT_RUN_SCAN_MAX_PAGES } from "@dohc/workspace-contracts/agent-run-undo";
 import type { CliGrepContextMessage, CliGrepMatch, CliResultByVerb } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
 import {
@@ -754,9 +755,65 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       );
     case "workspaceSearch":
       return renderWorkspaceSearch(result as CliResultByVerb["workspaceSearch"]);
+    case "planUndoAgentRun":
+      return renderPlanUndoAgentRun(result as CliResultByVerb["planUndoAgentRun"]);
+    case "undoAgentRun":
+      return renderUndoAgentRun(result as Extract<CliResultByVerb["undoAgentRun"], { ok: true }>);
     default:
       return JSON.stringify(result, null, 2);
   }
+}
+
+function renderPlanUndoAgentRun(result: CliResultByVerb["planUndoAgentRun"]): string {
+  if (result.policyUnreadable?.length) {
+    return `Could not read workspace rules (${result.policyUnreadable.map(lineSafe).join(", ")}).`;
+  }
+  const lines: string[] = [];
+  if (result.restorable.length === 0 && result.skipped.length === 0) {
+    lines.push("No file changes found for this agent run on the active version.");
+  } else {
+    lines.push(
+      `${counted(result.restorable.length, "file", "files")} can be undone · ${counted(result.skipped.length, "file", "files")} skipped`,
+    );
+    for (const item of result.restorable) {
+      lines.push(
+        `  undo (${item.action === "delete" ? "remove created file" : "restore"}): ${lineSafe(item.path)}`,
+      );
+    }
+    for (const item of result.skipped) {
+      lines.push(`  skip: ${lineSafe(item.path)} (${lineSafe(item.detail)})`);
+    }
+    if (result.restorable.length > 0) {
+      lines.push(`Plan token: ${lineSafe(result.planToken)}`);
+    }
+  }
+  if (result.truncated) {
+    lines.push(
+      `Note: checked the latest ${AGENT_RUN_SCAN_MAX_PAGES} History pages (${counted(result.scannedChanges, "change", "changes")} on this version). Older history was not checked.`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function renderUndoAgentRun(
+  result: Extract<CliResultByVerb["undoAgentRun"], { ok: true }>,
+): string {
+  if (result.policyUnreadable?.length) {
+    return `Could not read workspace rules (${result.policyUnreadable.map(lineSafe).join(", ")}).`;
+  }
+  const lines: string[] = [
+    `${counted(result.restored.length, "file", "files")} undone · ${counted(result.skipped.length, "file", "files")} skipped · ${counted(result.failed.length, "file", "files")} failed`,
+  ];
+  for (const item of result.restored) {
+    lines.push(`  ${item.restored === "deleted" ? "removed" : "restored"}: ${lineSafe(item.path)}`);
+  }
+  for (const item of result.skipped) {
+    lines.push(`  skipped: ${lineSafe(item.path)} (${lineSafe(item.detail)})`);
+  }
+  for (const item of result.failed) {
+    lines.push(`  failed: ${lineSafe(item.path)} (${lineSafe(item.detail)})`);
+  }
+  return lines.join("\n");
 }
 
 function renderWorkspaceSearch(result: CliResultByVerb["workspaceSearch"]): string {
