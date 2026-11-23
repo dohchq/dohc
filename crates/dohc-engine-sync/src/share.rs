@@ -1319,7 +1319,10 @@ mod share_view_boundary_tests {
         // A folder marker, however it is spelled, is never the member's.
         assert_eq!(listed.level_at("Plans/.dohc-access"), None);
         assert_eq!(listed.level_at("Plans/.DOHC-ACCESS"), None);
-        assert_eq!(listed.level_at("Plans/access.yaml"), Some(ShareAccess::Edit));
+        assert_eq!(
+            listed.level_at("Plans/access.yaml"),
+            Some(ShareAccess::Edit)
+        );
         assert_eq!(listed.highest(), Some(ShareAccess::Edit));
 
         let hidden_root = reach(None, &[("Shared", ShareAccess::Comment)]);
