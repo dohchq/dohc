@@ -899,6 +899,41 @@ it("shows a workspace listed while the reach sheet is open at the reach the agen
   });
 });
 
+it("drops the sheet's choices when the roster changes under it, and asks to check and save again", async () => {
+  await renderServer();
+  await openAgent("Grok Bot");
+  await userEvent.click(page().getByRole("button", { name: "Change what Grok Bot can reach" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
+  const budget = () =>
+    dialog
+      .getByRole("radiogroup", { name: "What Grok Bot can do in Budget" })
+      .querySelector("[aria-checked='true']")!.textContent;
+  const held = budget();
+  await userEvent.click(
+    within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Budget" })).getByRole(
+      "radio",
+      { name: held === "Comment" ? "View" : "Comment" },
+    ),
+  );
+  // A rejoin elsewhere moves the roster's revision while the sheet is open.
+  const base = account();
+  act(() =>
+    personalListener!({
+      accounts: [{ ...base, roster: { ...base.roster!, revision: 4 } }],
+    }),
+  );
+  expect(budget()).toBe(held);
+  await userEvent.click(dialog.getByRole("button", { name: "Save reach" }));
+  expect((await dialog.findByTestId("personal-agent-reach-error")).textContent).toBe(
+    "What Grok Bot can reach changed. Check it and save again.",
+  );
+  expect(bridgeMock.changePersonalAgent).not.toHaveBeenCalled();
+  await userEvent.click(dialog.getByRole("button", { name: "Save reach" }));
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ change: expect.objectContaining({ revision: 4 }) }),
+  );
+});
+
 it("says above the sheet's buttons why a reach save failed, and keeps the choices", async () => {
   const { onError } = await renderServer();
   bridgeMock.changePersonalAgent.mockResolvedValueOnce({

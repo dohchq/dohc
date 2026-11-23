@@ -196,6 +196,8 @@ export async function changePersonalAgent(
   }
 }
 
+const NO_CHOICES: ReadonlyMap<string, Reach> = new Map();
+
 /** Choose what an agent can reach in each workspace the account owns or joined on its server. */
 export function PersonalReachSheet(props: {
   account: PersonalAgentsAccount;
@@ -208,9 +210,15 @@ export function PersonalReachSheet(props: {
   const { agent, roster } = props;
   const id = useId();
   const listed = reachable(roster);
-  // The levels chosen in this sheet. A row not chosen shows what the agent holds,
-  // so a workspace listed while the sheet is open shows and saves its reach.
-  const [choices, setChoices] = useState<ReadonlyMap<string, Reach>>(() => new Map());
+  // The levels chosen in this sheet, against the roster revision they were
+  // chosen from. A row not chosen shows what the agent holds, so a workspace
+  // listed while the sheet is open shows and saves its reach. A new revision,
+  // such as a rejoin's, drops the choices.
+  const [draft, setDraft] = useState(() => ({
+    revision: roster.revision,
+    choices: new Map<string, Reach>() as ReadonlyMap<string, Reach>,
+  }));
+  const choices = draft.revision === roster.revision ? draft.choices : NO_CHOICES;
   const levelOf = (workspace: RosterWorkspace): Reach =>
     choices.get(workspace.workspaceId) ??
     shownLevel(
@@ -228,6 +236,11 @@ export function PersonalReachSheet(props: {
   );
   const save = async () => {
     if (saving) return;
+    if (draft.revision !== roster.revision && draft.choices.size > 0) {
+      setDraft({ revision: roster.revision, choices: NO_CHOICES });
+      setFailure(`What ${agent.name} can reach changed. Check it and save again.`);
+      return;
+    }
     // The sheet saves what each row shows. A workspace whose membership ended
     // stays as it was until its own Remove.
     const shown = new Set(listed.map((workspace) => workspace.workspaceId));
@@ -301,9 +314,12 @@ export function PersonalReachSheet(props: {
                         options={workspace.role === "owner" ? REACH_OPTIONS : JOINED_REACH_OPTIONS}
                         disabled={saving}
                         onChange={(level) =>
-                          setChoices((current) =>
-                            new Map(current).set(workspace.workspaceId, level),
-                          )
+                          setDraft((current) => ({
+                            revision: roster.revision,
+                            choices: new Map(
+                              current.revision === roster.revision ? current.choices : NO_CHOICES,
+                            ).set(workspace.workspaceId, level),
+                          }))
                         }
                       />
                     </span>

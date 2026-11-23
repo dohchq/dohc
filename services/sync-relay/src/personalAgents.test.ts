@@ -3059,11 +3059,12 @@ describe("a personal agent in a workspace its person joined", () => {
     inviteBack("member-ada-again");
     expect(reachOf(await roster(f), agent.agentId)).toEqual([{ workspaceId: WS_A, level: "view" }]);
 
-    // A rejoin that drops nothing leaves the roster as it was.
+    // A rejoin that drops nothing still moves the revision, so a reach sheet
+    // opened under the earlier membership starts over.
     await leave();
-    const unchanged = (await roster(f)).revision;
+    const before = (await roster(f)).revision;
     inviteBack("member-ada-third");
-    expect((await roster(f)).revision).toBe(unchanged);
+    expect((await roster(f)).revision).toBe(before + 1);
   });
 
   it("starts over when its person rejoins by the invite link or by claiming an email invite", async () => {
