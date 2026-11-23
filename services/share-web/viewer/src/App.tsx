@@ -1779,7 +1779,10 @@ export function App() {
                 title="Files"
                 aria-expanded={filesShown}
                 aria-controls="shared-files"
-                onClick={() => setFilesToggled((value) => !value)}
+                onClick={() => {
+                  if (narrow) setSurface(null);
+                  setFilesToggled((value) => !value);
+                }}
               >
                 <Icon name="panel-left" />
               </button>
@@ -1933,41 +1936,42 @@ export function App() {
         </header>
         <div className="layout">
           <div className="scroller" ref={scrollerRef}>
-            <div className={appLanding ? "column app-landing-column" : "column"}>
-              {appLanding && appToOpen !== null && ready && !editing ? (
-                <main className="content">
+            {appLanding && appToOpen !== null && ready && !editing ? (
+              <main className="column app-landing-column">
+                <OpenSharedApp
+                  key={ready.session}
+                  session={ready.session}
+                  publicationId={appToOpen}
+                  leading
+                  title={appTitle ?? undefined}
+                  onBrowseFiles={files.length > 0 ? () => setBrowsingFiles(true) : undefined}
+                />
+              </main>
+            ) : (
+              <div className="column">
+                {appToOpen !== null && ready && !editing ? (
                   <OpenSharedApp
                     key={ready.session}
                     session={ready.session}
                     publicationId={appToOpen}
-                    leading
                     title={appTitle ?? undefined}
-                    onBrowseFiles={files.length > 0 ? () => setBrowsingFiles(true) : undefined}
                   />
-                </main>
-              ) : (
-                <>
-                  {appToOpen !== null && ready && !editing ? (
-                    <OpenSharedApp
-                      key={ready.session}
-                      session={ready.session}
-                      publicationId={appToOpen}
-                      title={appTitle ?? undefined}
-                    />
-                  ) : null}
-                  {selected ? <h1 className="page-title">{fileTitle(selected.path)}</h1> : null}
-                  <main className="content">
-                    {editing ? (
-                      <EditorLoadBoundary
-                        key={`${editing.discriminator}:${editing.path}`}
-                        onError={() => setEditorLoadFailed(true)}
-                        fallback={
-                          <div className="edit-notice" role="alert">
-                            <p>
-                              dohc could not open the editor. Reload the page to get the latest
-                              version.
-                            </p>
-                            <div className="handoff-buttons">
+                ) : null}
+                {selected ? <h1 className="page-title">{fileTitle(selected.path)}</h1> : null}
+                <main className="content">
+                  {editing ? (
+                    <EditorLoadBoundary
+                      key={`${editing.discriminator}:${editing.path}`}
+                      onError={() => setEditorLoadFailed(true)}
+                      fallback={
+                        <div className="edit-notice" role="alert">
+                          <span className="tile bad">
+                            <Icon name="alert" />
+                          </span>
+                          <div>
+                            <p className="edit-notice-title">dohc could not open the editor.</p>
+                            <p>Reload the page to get the latest version.</p>
+                            <div className="edit-notice-actions">
                               <button
                                 className="handoff-button primary"
                                 type="button"
@@ -1984,34 +1988,32 @@ export function App() {
                               </button>
                             </div>
                           </div>
-                        }
-                      >
-                        <Suspense fallback={null}>{editor}</Suspense>
-                      </EditorLoadBoundary>
-                    ) : null}
-                    {reads && ready && selected ? (
-                      <FileView
-                        // A new file starts with empty preview state, so one file's text
-                        // never renders under another file's kind.
-                        key={`${ready.session}\n${selected.path}\n${selected.blobSha256}`}
-                        session={ready.session}
-                        file={selected}
-                        files={files}
-                        onSelect={setSelectedPath}
-                        onStaleBlob={refreshStaleBlob}
-                      />
-                    ) : !editing && apps === "none" ? (
-                      <div className="empty-state">
-                        {EMPTY_PICTURE}
-                        <p>
-                          No files on this link yet. This page shows them as soon as they arrive.
-                        </p>
-                      </div>
-                    ) : null}
-                  </main>
-                </>
-              )}
-            </div>
+                        </div>
+                      }
+                    >
+                      <Suspense fallback={null}>{editor}</Suspense>
+                    </EditorLoadBoundary>
+                  ) : null}
+                  {reads && ready && selected ? (
+                    <FileView
+                      // A new file starts with empty preview state, so one file's text
+                      // never renders under another file's kind.
+                      key={`${ready.session}\n${selected.path}\n${selected.blobSha256}`}
+                      session={ready.session}
+                      file={selected}
+                      files={files}
+                      onSelect={setSelectedPath}
+                      onStaleBlob={refreshStaleBlob}
+                    />
+                  ) : !editing && apps === "none" ? (
+                    <div className="empty-state">
+                      {EMPTY_PICTURE}
+                      <p>No files on this link yet. This page shows them as soon as they arrive.</p>
+                    </div>
+                  ) : null}
+                </main>
+              </div>
+            )}
           </div>
           {ready && (!editing || surface === "comments") ? (
             <div

@@ -5353,7 +5353,9 @@ describe("App", () => {
       await settle(() => container.querySelector(".app-landing h1")?.textContent === "Trip poll");
 
       expect(document.title).toBe("Trip poll · dohc");
-      expect(container.querySelector(".app-landing")).not.toBeNull();
+      expect(
+        container.querySelector("main.column.app-landing-column > section.app-landing"),
+      ).not.toBeNull();
       expect(container.querySelector(".app-landing")?.textContent).toContain(
         "This app can use external services. Its author decides where it sends data.",
       );
