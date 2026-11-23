@@ -1,16 +1,17 @@
 // Runs one eval sample with Codex CLI (`codex exec`) in a temporary workspace with only the
-// dohc MCP server configured. `--ignore-user-config` and `--ignore-rules` keep the person's
-// own MCP servers and settings out of the run; `--approve-for-me` runs inside the
-// `workspace-write` sandbox without prompting.
+// dohc MCP server configured and a fresh CODEX_HOME holding only auth.json (plus AGENTS.md
+// when --skill is passed).
 
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { EvalCase, RecordedCall, RunRecord } from "./case";
 import {
+  sampleEnvironment,
   seedWorkspace,
   workspaceFiles,
   workspacePaths,
@@ -35,6 +36,7 @@ interface CodexEvent {
     status?: string;
     text?: string;
     command?: string;
+    exit_code?: number | null;
     error?: { message?: string } | null;
     result?: {
       isError?: boolean;
@@ -78,7 +80,6 @@ export function readCodexTranscript(lines: readonly string[]): {
   let finished = false;
   let failed: string | undefined;
   const usage: SampleUsage = {
-    costUsd: 0,
     inputTokens: 0,
     outputTokens: 0,
     turns: 0,
@@ -109,6 +110,15 @@ export function readCodexTranscript(lines: readonly string[]): {
             ok: item.status !== "failed",
           });
         }
+      } else if (item.type === "command_execution") {
+        const ok =
+          item.status !== "failed" &&
+          (item.exit_code === undefined || item.exit_code === null || item.exit_code === 0);
+        calls.push({
+          tool: "Bash",
+          args: { command: item.command ?? "" },
+          ok,
+        });
       } else if (item.type === "agent_message" && typeof item.text === "string") {
         text = item.text;
       }
@@ -128,12 +138,98 @@ export function readCodexTranscript(lines: readonly string[]): {
   return { calls, refusals, text, finished, failed, usage };
 }
 
+/**
+ * Records any workspace file added, modified, or deleted outside dohc MCP tools so shell writes
+ * cannot bypass `notCalls` checks.
+ */
+export function appendUnmanagedFileWrites(
+  calls: readonly RecordedCall[],
+  initialFiles: Readonly<Record<string, string>>,
+  finalFiles: Readonly<Record<string, string>>,
+  mcpWrittenPaths: ReadonlySet<string>,
+): RecordedCall[] {
+  const out = [...calls];
+  const recordedPaths = new Set(
+    calls
+      .filter((c) => c.tool === "Write" || c.tool === "Edit")
+      .map((c) => (typeof c.args.file_path === "string" ? c.args.file_path : ""))
+      .filter(Boolean),
+  );
+  const allPaths = new Set([...Object.keys(initialFiles), ...Object.keys(finalFiles)]);
+  for (const relPath of [...allPaths].sort()) {
+    if (initialFiles[relPath] === finalFiles[relPath]) continue;
+    if (mcpWrittenPaths.has(relPath) || recordedPaths.has(relPath)) continue;
+    const tool = Object.hasOwn(initialFiles, relPath) ? "Edit" : "Write";
+    out.push({ tool, args: { file_path: relPath }, ok: true });
+  }
+  return out;
+}
+
 export function codexSampleEnvironment(
   env: Readonly<Record<string, string | undefined>>,
+  codexHome?: string,
 ): Record<string, string | undefined> {
-  return Object.fromEntries(
-    Object.entries(env).filter(([name]) => !/^(ANTHROPIC_|CLAUDE|T3CODE_)/i.test(name)),
+  const cleaned = Object.fromEntries(
+    Object.entries(sampleEnvironment(env)).filter(([name]) => !/^DOHC_/i.test(name)),
   );
+  if (codexHome) cleaned.CODEX_HOME = codexHome;
+  return cleaned;
+}
+
+function unwrapWindowsCmdShim(
+  cmdPath: string,
+  args: readonly string[],
+  env: Readonly<Record<string, string | undefined>>,
+  nodeExecutable: string,
+): { command: string; args: string[] } {
+  try {
+    const script = readFileSync(cmdPath, "utf8");
+    const match = /["']?%~?dp0%?[\\/]+([^"'\r\n]+?\.(?:c|m)?js)["']?/i.exec(script);
+    if (match?.[1]) {
+      const target = resolve(dirname(cmdPath), match[1]);
+      if (existsSync(target)) {
+        return { command: nodeExecutable, args: [target, ...args] };
+      }
+    }
+  } catch {
+    /* fall through to cmd.exe */
+  }
+  const comspec = env.ComSpec ?? env.COMSPEC ?? "cmd.exe";
+  return { command: comspec, args: ["/d", "/s", "/c", cmdPath, ...args] };
+}
+
+/**
+ * Resolves the Codex CLI command cleanly on Windows and POSIX, supporting native `codex.exe`,
+ * npm/pnpm `codex.cmd` shims (without `EINVAL`), and `CODEX_BIN`.
+ */
+export function resolveCodexCommand(
+  args: readonly string[],
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  platform: NodeJS.Platform = process.platform,
+  nodeExecutable: string = process.execPath,
+): { command: string; args: string[] } {
+  const explicit = env.CODEX_BIN?.trim();
+  if (explicit) {
+    if (platform === "win32" && /\.(?:cmd|bat)$/i.test(extname(explicit))) {
+      return unwrapWindowsCmdShim(explicit, args, env, nodeExecutable);
+    }
+    return { command: explicit, args: [...args] };
+  }
+  if (platform !== "win32") {
+    return { command: "codex", args: [...args] };
+  }
+  const pathValue = env.PATH ?? env.Path ?? "";
+  for (const dir of pathValue.split(delimiter).filter(Boolean)) {
+    for (const candidate of ["codex.exe", "codex.cmd", "codex.CMD", "codex.bat"]) {
+      const full = join(dir, candidate);
+      if (!existsSync(full)) continue;
+      if (/\.(?:cmd|bat)$/i.test(candidate)) {
+        return unwrapWindowsCmdShim(full, args, env, nodeExecutable);
+      }
+      return { command: full, args: [...args] };
+    }
+  }
+  return { command: "codex", args: [...args] };
 }
 
 /** The command line of one Codex sample, for --dry-run and for the run itself. */
@@ -143,7 +239,7 @@ export function codexArguments(input: {
   root: string;
   serverCommand: string;
   serverArgs: readonly string[];
-  skillPrompt?: string;
+  hasSkill?: boolean;
 }): string[] {
   return [
     "exec",
@@ -163,11 +259,25 @@ export function codexArguments(input: {
     `mcp_servers.dohc.args=${JSON.stringify(input.serverArgs)}`,
     "-c",
     "mcp_servers.dohc.startup_timeout_sec=30",
-    ...(input.skillPrompt
-      ? ["-c", `developer_instructions=${JSON.stringify(input.skillPrompt)}`]
-      : []),
+    ...(input.hasSkill ? ["-c", "project_doc_max_bytes=131072"] : []),
     input.prompt,
   ];
+}
+
+async function prepareIsolatedCodexHome(
+  codexHome: string,
+  env: Readonly<Record<string, string | undefined>>,
+  skillPrompt?: string,
+): Promise<void> {
+  await mkdir(codexHome, { recursive: true });
+  const sourceHome = env.CODEX_HOME?.trim() || join(homedir(), ".codex");
+  const authPath = join(sourceHome, "auth.json");
+  await copyFile(authPath, join(codexHome, "auth.json")).catch((error) => {
+    if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
+  });
+  if (skillPrompt) {
+    await writeFile(join(codexHome, "AGENTS.md"), skillPrompt, "utf8");
+  }
 }
 
 export async function runCodexSample(input: {
@@ -182,10 +292,14 @@ export async function runCodexSample(input: {
   const sampleDir = await mkdtemp(join(tmpdir(), "dohc-eval-codex-"));
   const root = join(sampleDir, "workspace");
   const home = join(sampleDir, "home");
+  const codexHome = join(sampleDir, "codex-home");
   const unansweredLog = join(sampleDir, "unanswered.log");
+  const writesLog = join(sampleDir, "mcp-writes.log");
   const startedAt = Date.now();
   try {
     await seedWorkspace(root, input.evalCase, home);
+    const initialFiles = await workspaceFiles(root);
+    await prepareIsolatedCodexHome(codexHome, process.env, input.skillPrompt);
     const serverArgs = [
       "--import",
       tsxLoader,
@@ -194,20 +308,23 @@ export async function runCodexSample(input: {
       root,
       unansweredLog,
       home,
+      writesLog,
     ];
-    // Write skill to a temp file outside workspace if very large? Wait: developer_instructions via
-    // -c works directly up to Windows cmdline limits (~32 KB); our skill is ~4-8 KB, well within.
-    const args = codexArguments({
+    const codexArgs = codexArguments({
       prompt: input.evalCase.prompt,
       model: input.model,
       root,
       serverCommand: process.execPath,
       serverArgs,
-      ...(input.skillPrompt ? { skillPrompt: input.skillPrompt } : {}),
+      hasSkill: Boolean(input.skillPrompt),
     });
-    const child = spawn("codex", args, {
+    const env = input.keepSessionRoute
+      ? { ...process.env, CODEX_HOME: codexHome }
+      : codexSampleEnvironment(process.env, codexHome);
+    const launch = resolveCodexCommand(codexArgs, env);
+    const child = spawn(launch.command, launch.args, {
       cwd: root,
-      env: input.keepSessionRoute ? process.env : codexSampleEnvironment(process.env),
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -225,9 +342,9 @@ export async function runCodexSample(input: {
         spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
       else child.kill("SIGKILL");
     }, input.timeoutMs);
-    const spawnError = await new Promise<Error | undefined>((resolve) => {
-      child.once("error", resolve);
-      child.once("close", () => resolve(undefined));
+    const spawnError = await new Promise<Error | undefined>((resolveExit) => {
+      child.once("error", resolveExit);
+      child.once("close", () => resolveExit(undefined));
     });
     clearTimeout(timer);
 
@@ -251,10 +368,24 @@ export async function runCodexSample(input: {
         harness: "Codex CLI",
         refusals: transcript.refusals,
       };
+    const mcpWritesRaw = await readFile(writesLog, "utf8").catch(() => "");
+    const mcpWrittenPaths = new Set(
+      mcpWritesRaw
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean),
+    );
+    const finalFiles = await workspaceFiles(root);
+    const calls = appendUnmanagedFileWrites(
+      workspacePaths(transcript.calls, root),
+      initialFiles,
+      finalFiles,
+      mcpWrittenPaths,
+    );
     const run: RunRecord = {
-      calls: workspacePaths(transcript.calls, root),
+      calls,
       text: transcript.text,
-      files: await workspaceFiles(root),
+      files: finalFiles,
     };
     return {
       harness: "Codex CLI",

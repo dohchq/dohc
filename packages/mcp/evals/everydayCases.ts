@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+import {
+  evaluateAppOperation,
+  initializeAppDatabase,
+  isAppBackendRuntimeError,
+} from "@dohc/app-backend-runtime";
+import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { fileVersionError } from "@dohc/workspace-contracts/file-version";
@@ -699,7 +705,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       "Building a personal finance and health control tower requires creating a multi-table transactional Collection, approving it, adding starter records, and wiring a local web app through app.publish.json and dohc-app-channel.",
     source: "everyday-job-1",
     workspaceId: WS,
-    setupDesktop: (root) => createEverydayDesktop(root, { workspaceId: WS }),
+    setupDesktop: (root, options) => createEverydayDesktop(root, { workspaceId: WS }, options),
     prompt:
       "Build a personal finance and health control tower in this workspace. Create a transactional Collection in `tracker/` with two tables: `expenses` (date, category, amount, note) and `checkins` (date, sleep_hours, workout_minutes). Approve it, add one expense (2026-11-22, Food, 18.5, Lunch) and one check-in (2026-11-22, 7.5 hours sleep, 40 workout minutes), then create a local web app in `apps/control-tower` connected to `tracker/dataset.json` via `app.publish.json` and `dohc-app-channel`, and prepare, approve, and launch it locally.",
     expect: {
@@ -729,16 +735,48 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         name: "apps/control-tower connects to dohc-app-channel and calls backend.invoke",
         pass: appText.includes("dohc-app-channel") && appText.includes("backend.invoke"),
       });
-      const invokes = run.calls.filter(
-        (c) =>
-          c.tool === "dohc_dataset" &&
-          c.ok &&
-          (c.args.request as Record<string, unknown> | undefined)?.action === "invoke",
-      );
+      let def: DatasetDefinition | undefined;
+      try {
+        def = parseDatasetDefinition(JSON.parse(run.files["tracker/dataset.json"] ?? ""));
+      } catch {
+        def = undefined;
+      }
+      const tableNames = (def?.tables ?? []).map((t) => `${t.name} ${t.sqlName}`.toLowerCase());
+      const hasBothTables =
+        (def?.tables.length ?? 0) >= 2 &&
+        tableNames.some((n) => n.includes("expense")) &&
+        tableNames.some((n) => n.includes("checkin") || n.includes("check-in"));
       checks.push({
-        name: "invoked approved Collection operations at least twice (expense + check-in)",
-        pass: invokes.length >= 2,
-        ...(invokes.length < 2 ? { detail: `invoked ${invokes.length} time(s)` } : {}),
+        name: "tracker/dataset.json declares both expenses and checkins tables",
+        pass: hasBothTables,
+        ...(hasBothTables ? {} : { detail: `tables: ${tableNames.join(", ") || "none"}` }),
+      });
+      const opById = new Map((def?.operations ?? []).map((op) => [op.operationId, op]));
+      const writeInvokes = run.calls
+        .filter((c) => c.tool === "dohc_dataset" && c.ok)
+        .map((c) => c.args.request as Record<string, unknown> | undefined)
+        .filter((req): req is Record<string, unknown> => {
+          if (req?.action !== "invoke" || typeof req.operationId !== "string") return false;
+          const op = opById.get(req.operationId);
+          return op !== undefined && !op.readOnly;
+        });
+      const expenseWrite = writeInvokes.find((req) => {
+        const text = JSON.stringify(req.input ?? {}).toLowerCase();
+        return text.includes("food") && text.includes("18.5");
+      });
+      const checkinWrite = writeInvokes.find((req) => {
+        const text = JSON.stringify(req.input ?? {}).toLowerCase();
+        return text.includes("7.5") && text.includes("40");
+      });
+      checks.push({
+        name: "saved the expense (Food, 18.5) via an approved write operation",
+        pass: expenseWrite !== undefined,
+        ...(expenseWrite ? {} : { detail: `saw ${writeInvokes.length} write invoke(s)` }),
+      });
+      checks.push({
+        name: "saved the check-in (7.5 sleep, 40 workout) via an approved write operation",
+        pass: checkinWrite !== undefined,
+        ...(checkinWrite ? {} : { detail: `saw ${writeInvokes.length} write invoke(s)` }),
       });
       return checks;
     },
@@ -845,7 +883,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       "Planning a family trip combines a document Collection (collection.yaml + Markdown records), an itinerary note created through document tools, and a decision poll in a Group.",
     source: "everyday-job-2",
     workspaceId: WS,
-    setupDesktop: (root) => createEverydayDesktop(root, { workspaceId: WS }),
+    setupDesktop: (root, options) => createEverydayDesktop(root, { workspaceId: WS }, options),
     prompt:
       'Set up a family trip planner for Kyoto. Create a document Collection in `trip/activities` with `collection.yaml` defining fields `Day` (number), `Status` (select: Idea, Booked, Done), and `Cost` (number). Add two records via dohc\'s Collection tool: "Fushimi Inari" (Day 1, Status Idea, Cost 0) and "Nishiki Market" (Day 2, Status Booked, Cost 45). Create `trip/itinerary.md` summarizing both activities, and post a poll in the Planning group asking whether to book the tea ceremony on "Day 2" or "Day 3".',
     expect: {
@@ -867,7 +905,11 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           ok: true,
         },
       ],
-      notCalls: [{ tool: "dohc_write_file", args: { path: "~.md" } }],
+      notCalls: [
+        { tool: "dohc_write_file", args: { path: "~.md" } },
+        { tool: "Write", args: { file_path: "~.md" } },
+        { tool: "Edit", args: { file_path: "~.md" } },
+      ],
       files: {
         "trip/itinerary.md": { contains: ["Fushimi Inari", "Nishiki Market"] },
       },
@@ -930,9 +972,9 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       "A small-business booking app requires a transactional Collection with custom QuickJS capacity enforcement (ctx.refuse) and a shared app publication that exposes only the public link operation, never owner reads.",
     source: "everyday-job-3",
     workspaceId: WS,
-    setupDesktop: (root) => createEverydayDesktop(root, { workspaceId: WS }),
+    setupDesktop: (root, options) => createEverydayDesktop(root, { workspaceId: WS }, options),
     prompt:
-      'I run a weekend pottery workshop with 8 seats. Create a transactional Collection in `workshop/` (`dataset.json`, `schema.sql`, `backend.ts`) with a `bookings` table (`id`, `name`, `seats`), a public `bookSeat` operation (`access: "link"`) that refuses via `ctx.refuse` when total seats would exceed 8, and an owner-only `listBookings` read. Prepare and approve the Collection, build `apps/booking` with `app.publish.json` exposing ONLY `bookSeat` (never `listBookings`), create a share link, and prepare and approve the shared publication.',
+      'I run a weekend pottery workshop with 8 seats. Create a transactional Collection in `workshop/` (`dataset.json`, `schema.sql`, `backend.ts`) with a `bookings` table (`id`, `name`, `seats`), a public `bookSeat` operation (`access: "link"`) taking `{ name, seats }` that refuses via `ctx.refuse` when total seats would exceed 8, and an owner-only `listBookings` read. Prepare and approve the Collection, build `apps/booking` with `app.publish.json` exposing ONLY `bookSeat` (never `listBookings`), create a share link, and prepare and approve the shared publication.',
     expect: {
       calls: [
         { tool: "dohc_dataset", args: { "request.action": "prepare" }, ok: true },
@@ -950,12 +992,13 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         { tool: "dohc_publish_app", args: { "request.action": "approve" }, ok: true },
       ],
     },
-    gradeRun: (run) => {
+    gradeRun: async (run) => {
       const checks: Check[] = [checkDatasetJsonValid(run, "workshop/dataset.json")];
+      let def: DatasetDefinition | undefined;
       let bookOpId: string | undefined;
       let listOpId: string | undefined;
       try {
-        const def = parseDatasetDefinition(JSON.parse(run.files["workshop/dataset.json"] ?? ""));
+        def = parseDatasetDefinition(JSON.parse(run.files["workshop/dataset.json"] ?? ""));
         const bookOp = def.operations.find((o) => o.name === "bookSeat");
         const listOp = def.operations.find((o) => o.name === "listBookings");
         bookOpId = bookOp?.operationId;
@@ -973,12 +1016,76 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       } catch {
         checks.push({ name: "bookSeat and listBookings declared cleanly", pass: false });
       }
-      const backendText =
-        run.files["workshop/backend.ts"] ?? run.files["workshop/operations.js"] ?? "";
-      checks.push({
-        name: "backend enforces capacity with ctx.refuse",
-        pass: backendText.includes("globalThis.operations") && backendText.includes("ctx.refuse"),
-      });
+      if (def) {
+        const schemaSql = run.files[def.schemaPath];
+        const opSource = run.files[def.operationsPath];
+        if (!schemaSql || !opSource) {
+          checks.push({
+            name: "bookSeat accepts 5 seats, refuses 4 more (>8), and accepts 3 more (=8)",
+            pass: false,
+            detail: "missing schema or operations file",
+          });
+        } else {
+          try {
+            const compiled = await compileDatasetOperations(opSource, def.operationsPath);
+            const tables = def.tables.map((t) => t.sqlName);
+            const db0 = await initializeAppDatabase({ schemaSql, tables });
+            const first = await evaluateAppOperation({
+              database: db0,
+              source: compiled,
+              operation: "bookSeat",
+              caller: { kind: "link", shareId: "s1", grantId: "g1" },
+              input: { name: "Alice", seats: 5 },
+              nowMs: 1_760_000_000_000,
+              requestId: "book-1",
+              tables,
+              readOnly: false,
+            });
+            let refusedOverCap = false;
+            try {
+              await evaluateAppOperation({
+                database: first.database,
+                source: compiled,
+                operation: "bookSeat",
+                caller: { kind: "link", shareId: "s1", grantId: "g1" },
+                input: { name: "Bob", seats: 4 },
+                nowMs: 1_760_000_001_000,
+                requestId: "book-2",
+                tables,
+                readOnly: false,
+              });
+            } catch (error) {
+              refusedOverCap = isAppBackendRuntimeError(error);
+            }
+            const exactCap = await evaluateAppOperation({
+              database: first.database,
+              source: compiled,
+              operation: "bookSeat",
+              caller: { kind: "link", shareId: "s1", grantId: "g1" },
+              input: { name: "Cara", seats: 3 },
+              nowMs: 1_760_000_002_000,
+              requestId: "book-3",
+              tables,
+              readOnly: false,
+            });
+            checks.push({
+              name: "bookSeat accepts 5 seats, refuses 4 more (>8), and accepts 3 more (=8)",
+              pass: refusedOverCap && exactCap.changed,
+              ...(refusedOverCap && exactCap.changed
+                ? {}
+                : {
+                    detail: `refusedOverCap=${String(refusedOverCap)}, exactCapChanged=${String(exactCap.changed)}`,
+                  }),
+            });
+          } catch (error) {
+            checks.push({
+              name: "bookSeat accepts 5 seats, refuses 4 more (>8), and accepts 3 more (=8)",
+              pass: false,
+              detail: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
       checks.push(
         checkAppPublishDataset(
           run,
@@ -1105,17 +1212,49 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           2,
         ) + "\n",
     },
-    setupDesktop: (root) =>
-      createEverydayDesktop(root, {
-        workspaceId: WS,
-        datasets: [
-          {
-            datasetPath: "clients/dataset.json",
-            generated: true,
-            seedSql: `INSERT INTO clients(id, name, email) VALUES ('r1','Ava','ava@example.com'),('r2','Ben','ben@example.com'),('r3','Cam','cam@example.com');`,
-          },
-        ],
-      }),
+    setupDesktop: (root, options) =>
+      createEverydayDesktop(
+        root,
+        {
+          workspaceId: WS,
+          datasets: [
+            {
+              datasetPath: "clients/dataset.json",
+              generated: true,
+              seedInvocations: [
+                {
+                  operationId: uuid("c1000000", 7),
+                  input: {
+                    values: {
+                      [uuid("c1000000", 4)]: "Ava",
+                      [uuid("c1000000", 5)]: "ava@example.com",
+                    },
+                  },
+                },
+                {
+                  operationId: uuid("c1000000", 7),
+                  input: {
+                    values: {
+                      [uuid("c1000000", 4)]: "Ben",
+                      [uuid("c1000000", 5)]: "ben@example.com",
+                    },
+                  },
+                },
+                {
+                  operationId: uuid("c1000000", 7),
+                  input: {
+                    values: {
+                      [uuid("c1000000", 4)]: "Cam",
+                      [uuid("c1000000", 5)]: "cam@example.com",
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        options,
+      ),
     prompt:
       'Add a required select field called "Tier" (options: "Standard", "VIP", default: "Standard") to the Clients Collection (`clients/dataset.json`) safely without losing the 3 existing client records. Then update `apps/client-portal/app.publish.json` to the new approved revision and prepare and approve `apps/client-portal` locally.',
     expect: {
@@ -1233,7 +1372,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       "expenses/collection.yaml":
         "version: 1\nname: Expenses\nfields:\n  Amount:\n    type: number\n  Category:\n    type: text\n  Status:\n    type: select\n    options:\n      - Open\n      - Needs Review\n      - Approved\n  Flagged On:\n    type: date\n",
     },
-    setupDesktop: (root) => createEverydayDesktop(root, { workspaceId: WS }),
+    setupDesktop: (root, options) => createEverydayDesktop(root, { workspaceId: WS }, options),
     prompt:
       "Add an automation to the `expenses` Collection (`expenses/automations.yaml`) so whenever a record's `Amount` field changes and `Amount` is over 500, it sets `Status` to \"Needs Review\", sets `Flagged On` to today's date using `today()`, and posts a message to the `Finance` group showing the amount. Verify with `dohc_list_automations` that it loads with zero errors.",
     expect: {
@@ -1286,7 +1425,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       "pricing.md": "# Pricing\n\n- Starter: $19/month\n- Pro: $49/month\n",
       "README.md": "# Store\n",
     },
-    setupDesktop: (root) => createEverydayDesktop(root, { workspaceId: WS }),
+    setupDesktop: (root, options) => createEverydayDesktop(root, { workspaceId: WS }, options),
     prompt:
       'Use dohc Versions to test a pricing update safely: create a new Version named `q4-pricing-test`, edit `pricing.md` with dohc\'s document tools to change Starter from "$19/month" to "$29/month", compare `q4-pricing-test` against Main, and merge `q4-pricing-test` into Main.',
     expect: {
@@ -1302,7 +1441,11 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         "dohc_compare_version",
         "dohc_merge_version",
       ],
-      notCalls: ["dohc_write_file"],
+      notCalls: [
+        "dohc_write_file",
+        { tool: "Write", args: { file_path: "pricing.md" } },
+        { tool: "Edit", args: { file_path: "pricing.md" } },
+      ],
       files: { "pricing.md": { contains: ["$29/month"], lacks: ["$19/month"] } },
     },
     solution: {
@@ -1330,11 +1473,15 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       "events/schema.sql": EVENTS_SCHEMA,
       "events/operations.js": EVENTS_OPS,
     },
-    setupDesktop: (root) =>
-      createEverydayDesktop(root, {
-        workspaceId: WS,
-        datasets: [{ datasetPath: "events/dataset.json", generated: true }],
-      }),
+    setupDesktop: (root, options) =>
+      createEverydayDesktop(
+        root,
+        {
+          workspaceId: WS,
+          datasets: [{ datasetPath: "events/dataset.json", generated: true }],
+        },
+        options,
+      ),
     prompt:
       "Create a public signup form in `apps/signup-form` for the `Signups` table in `events/dataset.json`. Guests should pick a `Session` by its `Title` without exposing `Internal Notes`. Prepare and approve public relation choices for the Session field first, then create the form.",
     expect: {
@@ -1365,10 +1512,18 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         run,
         "apps/signup-form/app.publish.json",
         "events/dataset.json",
-        (ref) =>
-          ref.operationIds.includes(uuid("e2000000", 10))
-            ? "leaked private owner readSessions operation"
-            : null,
+        (ref) => {
+          if (ref.operationIds.includes(uuid("e2000000", 10))) {
+            return "leaked private owner readSessions operation";
+          }
+          if (!ref.operationIds.includes(uuid("e2000000", 11))) {
+            return "missing createSignup operation";
+          }
+          if (ref.operationIds.length < 2) {
+            return "missing generated relation-choices read operation";
+          }
+          return null;
+        },
       ),
     ],
     solution: {
@@ -1453,7 +1608,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         "",
       ].join("\n"),
     },
-    setupDesktop: (root) => createEverydayDesktop(root, { workspaceId: WS }),
+    setupDesktop: (root, options) => createEverydayDesktop(root, { workspaceId: WS }, options),
     prompt:
       "Import `exports/sales.csv` into a visible database `data/sales.sqlite` as table `sales`, query total revenue by category, and create a Markdown summary document `reports/sales-summary.md` listing each category's total (Coffee, Bakery, Tea).",
     expect: {
@@ -1471,7 +1626,11 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         { tool: "dohc_create_document", args: { path: "reports/sales-summary.md" }, ok: true },
       ],
       order: ["dohc_import_data", "dohc_query_database", "dohc_create_document"],
-      notCalls: [{ tool: "dohc_write_file", args: { path: "reports/sales-summary.md" } }],
+      notCalls: [
+        { tool: "dohc_write_file", args: { path: "reports/sales-summary.md" } },
+        { tool: "Write", args: { file_path: "reports/sales-summary.md" } },
+        { tool: "Edit", args: { file_path: "reports/sales-summary.md" } },
+      ],
       files: {
         "reports/sales-summary.md": { contains: ["300", "150", "140"] },
       },
@@ -1549,7 +1708,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           2,
         ) + "\n",
     },
-    setupDesktop: (root) => createEverydayDesktop(root, { workspaceId: WS }),
+    setupDesktop: (root, options) => createEverydayDesktop(root, { workspaceId: WS }, options),
     prompt:
       "This workspace has validation errors in `inventory/dataset.json`, `inventory/actions.ts`, `inventory/automations.yaml`, and `apps/stock/app.publish.json`. Diagnose and fix all four files, prepare and approve the `inventory` Collection, prepare and approve `apps/stock` locally, and verify with `dohc_list_automations` that `inventory/automations.yaml` loads cleanly.",
     expect: {

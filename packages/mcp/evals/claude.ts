@@ -17,8 +17,8 @@ const BUILT_IN_TOOLS = "Read,Glob,Grep,Edit,Write";
 const MCP_PREFIX = "mcp__dohc__";
 
 export interface SampleUsage {
-  /** What the tokens would cost at API prices. A subscription run is not billed this. */
-  costUsd: number;
+  /** What the tokens would cost at API prices, when the harness reports it. */
+  costUsd?: number;
   inputTokens: number;
   outputTokens: number;
   turns: number;

@@ -122,7 +122,7 @@ async function sample(
       error: outcome.error ?? "unknown error",
       usage: outcome.usage,
     };
-  const checks = grade(evalCase.expect, outcome.run, evalCase.gradeRun);
+  const checks = await grade(evalCase.expect, outcome.run, evalCase.gradeRun);
   return {
     ...base,
     ...harness,
@@ -243,14 +243,17 @@ function summary(input: {
   }
   if (regressions.length > 0)
     lines.push("", `Regressions against the baseline: ${regressions.join(", ")}.`);
-  const cost = input.rows.reduce((total, row) => total + row.usage.costUsd, 0);
+  const hasCost = input.rows.some((row) => row.usage.costUsd !== undefined);
+  const cost = input.rows.reduce((total, row) => total + (row.usage.costUsd ?? 0), 0);
   const tokens = input.rows.reduce(
     (total, row) => total + row.usage.inputTokens + row.usage.outputTokens,
     0,
   );
   lines.push(
     "",
-    `${input.rows.length} samples used ${tokens.toLocaleString("en-US")} tokens, which is $${cost.toFixed(2)} at API prices. A subscription run is not billed this amount.`,
+    hasCost
+      ? `${input.rows.length} samples used ${tokens.toLocaleString("en-US")} tokens, which is $${cost.toFixed(2)} at API prices. A subscription run is not billed this amount.`
+      : `${input.rows.length} samples used ${tokens.toLocaleString("en-US")} tokens (API cost unavailable for this harness).`,
     "",
   );
   return { text: lines.join("\n"), regressions };
@@ -294,10 +297,10 @@ async function main(argv: readonly string[]): Promise<number> {
               root: "<workspace>",
               serverCommand: "node",
               serverArgs: ["<server.ts>", evalCase.id],
-              ...(skillPrompt ? { skillPrompt: `<skill:${options.skill}>` } : {}),
+              hasSkill: Boolean(skillPrompt),
             })
               .map((part) => JSON.stringify(part))
-              .join(" ")}`
+              .join(" ")}${skillPrompt ? ` (CODEX_HOME/AGENTS.md <- ${options.skill})` : ""}`
           : `claude ${claudeArguments({
               prompt: evalCase.prompt,
               model,

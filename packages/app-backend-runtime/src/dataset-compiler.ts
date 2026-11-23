@@ -29,35 +29,31 @@ function installedCompiler(): string {
   );
 }
 
-function sanitizeCompilerDiagnostic(stderr: string): string {
-  const cleaned = stderr
-    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/gu, "")
-    .replace(/[A-Za-z]:\\[^\s:"]+/g, "<path>")
-    .replace(/\/(?:Users|home|tmp|var|opt|etc|private|Volumes|mnt)\/[^\s:"]+/g, "<path>");
-  const lines = cleaned
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^[\s✘x]+/, "").trim())
-    .filter(
-      (line) =>
-        line.length > 0 &&
-        !/^\d+\s*[|│]/.test(line) &&
-        !/^[╷╵~^]+/.test(line) &&
-        !/^\d+\s+errors?$/.test(line),
-    );
-  const preferred = lines.filter((line) => /\[ERROR\]|ERROR:|<stdin>:/i.test(line));
-  const picked = (preferred.length > 0 ? preferred : lines).slice(0, 3).join(" ");
-  return picked.length > 300 ? `${picked.slice(0, 297)}...` : picked;
+function extractCompilerLocations(stderr: string): string | undefined {
+  const locations: string[] = [];
+  const seen = new Set<string>();
+  for (const match of stderr.matchAll(/<stdin>:(\d+):(\d+)/g)) {
+    const label = `line ${match[1]}, column ${match[2]}`;
+    if (!seen.has(label)) {
+      seen.add(label);
+      locations.push(label);
+      if (locations.length >= 3) break;
+    }
+  }
+  return locations.length > 0 ? locations.join("; ") : undefined;
 }
 
 function compilerFailureMessage(error: unknown, stderr: string): string {
   const execError = error as { killed?: boolean; code?: string | number; signal?: string } | null;
+  if (execError?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+    return "dohc could not build these Collection actions within this host's limits. Simplify the source. Then approve again.";
+  }
   if (execError?.killed || execError?.signal === "SIGTERM" || execError?.code === "ETIMEDOUT") {
     return "dohc timed out while building these Collection actions. Simplify the source. Then approve again.";
   }
-  const detail = sanitizeCompilerDiagnostic(stderr);
-  if (detail) {
-    return `dohc could not build these Collection actions: ${detail} Fix the source. Then approve again.`;
+  const locations = extractCompilerLocations(stderr);
+  if (locations) {
+    return `dohc could not build these Collection actions: syntax error at ${locations}. Fix the source. Then approve again.`;
   }
   return "dohc could not build these Collection actions within this host's limits. Check the source. Then approve again.";
 }
@@ -67,12 +63,14 @@ function assertClosedScript(source: string): void {
   try {
     root = parse(source, { ecmaVersion: "latest", sourceType: "script" });
   } catch (error) {
-    const detail = error instanceof Error ? sanitizeCompilerDiagnostic(error.message) : "";
+    const loc = (error as { loc?: { line?: number; column?: number } } | null)?.loc;
+    const location =
+      typeof loc?.line === "number" && typeof loc?.column === "number"
+        ? ` at line ${loc.line}, column ${loc.column}`
+        : "";
     throw new DatasetCompilerError(
       "invalid",
-      detail
-        ? `dohc could not parse the compiled Collection actions: ${detail} Fix the source. Then approve again.`
-        : "dohc could not parse the compiled Collection actions. Check the source. Then approve again.",
+      `dohc could not parse the compiled Collection actions${location}. Fix the source. Then approve again.`,
       { cause: error },
     );
   }

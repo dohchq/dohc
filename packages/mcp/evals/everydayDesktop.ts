@@ -1,8 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createRequire, stripTypeScriptTypes } from "node:module";
-import { dirname, join, posix } from "node:path";
-import { Script, createContext } from "node:vm";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, posix, relative, sep } from "node:path";
+import {
+  evaluateAppOperation,
+  initializeAppDatabase,
+  isAppBackendRuntimeError,
+  type JsonValue,
+} from "@dohc/app-backend-runtime";
+import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
+import { openPersistentAppBackend } from "@dohc/app-backend-runtime/persistent";
 import {
   datasetColumnFields,
   datasetDefinitionDigestContent,
@@ -18,45 +25,82 @@ import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-aut
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { automationDefinitionList } from "@dohc/workspace-contracts/automation-controls";
 import { fileVersionError } from "@dohc/workspace-contracts/file-version";
+import { WorkspaceSearchInput, WorkspaceSearchResult } from "@dohc/workspace-contracts/retrieval";
+import { validateUserMaterializePath, validateUserReadPath } from "@dohc/workspace-core/paths";
+import { realRelativeInRoot, resolvedAreaRefusal } from "@dohc/workspace-core/realPath";
 import type { DatasetRequest, DatasetSchemaChange } from "@dohc/cli/dataset";
 import type { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import type { DesktopAnswer } from "./case";
 import { workspaceVerbs } from "./desktop";
 
 type Args = Record<string, unknown>;
-type SqlParam = string | number | null;
-interface NodeSqliteDatabase {
-  exec(sql: string): void;
-  prepare(sql: string): {
-    all(...params: SqlParam[]): Record<string, unknown>[];
-    run(...params: SqlParam[]): { changes: number | bigint };
-  };
-  close(): void;
-}
-type NodeSqliteModule = { DatabaseSync: new (path: string) => NodeSqliteDatabase };
 
-const require = createRequire(import.meta.url);
 const AT = 1_760_000_000_000;
-
-function openMemorySqlite(): NodeSqliteDatabase {
-  const mod = require("node:sqlite") as NodeSqliteModule;
-  return new mod.DatabaseSync(":memory:");
-}
+const MANIFEST_LIMIT_BYTES = 64 * 1024;
+const MAX_MANIFEST_INPUTS = 512;
 
 function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
-function readWorkspaceText(root: string, relPath: string): string | null {
-  const full = join(root, relPath);
-  if (!existsSync(full)) return null;
-  return readFileSync(full, "utf8");
+function describeJsonSyntaxLocation(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const lineCol = /\bline (\d+) column (\d+)\b/i.exec(error.message);
+  if (lineCol) return `at line ${lineCol[1]}, column ${lineCol[2]}`;
+  const position = /\bposition (\d+)\b/i.exec(error.message);
+  if (position) return `at position ${position[1]}`;
+  return undefined;
 }
 
-function writeWorkspaceText(root: string, relPath: string, content: string): void {
-  const full = join(root, relPath);
-  mkdirSync(dirname(full), { recursive: true });
-  writeFileSync(full, content, "utf8");
+async function resolveWorkspacePath(
+  root: string,
+  relPath: string,
+  access: "read" | "write",
+): Promise<{ absolute: string; normalized: string; realRelative: string }> {
+  const validated =
+    access === "read"
+      ? validateUserReadPath(relPath, { platform: process.platform })
+      : validateUserMaterializePath(relPath, { platform: process.platform });
+  if (!validated.ok) {
+    throw new Error(`path rejected (${validated.reason}): ${relPath}`);
+  }
+  const absolute = join(root, validated.normalized);
+  const target = await realRelativeInRoot(root, absolute);
+  if (!target.ok) {
+    throw new Error(`path rejected (${target.reason}): ${relPath}`);
+  }
+  const refused = resolvedAreaRefusal(target.relative, access);
+  if (refused) {
+    throw new Error(`path rejected: ${refused.explain}`);
+  }
+  return {
+    absolute: target.resolvedAbsolute,
+    normalized: validated.normalized,
+    realRelative: target.relative,
+  };
+}
+
+async function readWorkspaceText(root: string, relPath: string): Promise<string | null> {
+  const resolved = await resolveWorkspacePath(root, relPath, "read");
+  try {
+    return await readFile(resolved.absolute, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw error;
+  }
+}
+
+async function writeWorkspaceText(
+  root: string,
+  relPath: string,
+  content: string,
+  onWrite?: (path: string) => void,
+): Promise<void> {
+  const resolved = await resolveWorkspacePath(root, relPath, "write");
+  await mkdir(dirname(resolved.absolute), { recursive: true });
+  await writeFile(resolved.absolute, content, "utf8");
+  onWrite?.(resolved.normalized);
 }
 
 function sqlIdent(name: string): string {
@@ -67,6 +111,10 @@ function sqlColumnType(type: string): string {
   if (type === "number") return "REAL";
   if (type === "checkbox") return "INTEGER";
   return "TEXT";
+}
+
+function tableSqlNames(definition: DatasetDefinition): string[] {
+  return definition.tables.map((table) => table.sqlName);
 }
 
 function generateSchemaSql(definition: DatasetDefinition): string {
@@ -87,59 +135,13 @@ function generateSchemaSql(definition: DatasetDefinition): string {
     .join("\n\n");
 }
 
-class GuestRefusal extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-type OperationsMap = Record<string, (ctx: unknown, input: unknown) => unknown>;
-
-function compileOperationsForEval(source: string, path: string): OperationsMap {
-  if (/\b(?:import|export)\b/.test(source) || /\brequire\s*\(/.test(source)) {
-    throw new Error("Collection actions cannot import modules or use require.");
-  }
-  const js = path.endsWith(".ts") ? stripTypeScriptTypes(source, { mode: "strip" }) : source;
-  const sandbox: Record<string, unknown> = {
-    Math,
-    Date,
-    JSON,
-    Number,
-    String,
-    Boolean,
-    Array,
-    Object,
-    Set,
-    Map,
-    RegExp,
-    Error,
-    TypeError,
-    RangeError,
-    parseInt,
-    parseFloat,
-    isNaN,
-    isFinite,
-  };
-  sandbox.globalThis = sandbox;
-  const script = new Script(js, { filename: path });
-  script.runInContext(createContext(sandbox), { timeout: 1_000 });
-  const operations = sandbox.operations;
-  if (!operations || typeof operations !== "object") {
-    throw new Error(`${path} must assign operation functions to globalThis.operations = { ... }.`);
-  }
-  return operations as OperationsMap;
-}
-
 interface StoredDataset {
   datasetPath: string;
   revision: DatasetRevision;
   schemaSql: string;
   operationSource: string;
-  operations: OperationsMap;
-  db: NodeSqliteDatabase;
+  compiledSource: string;
+  database: Uint8Array;
   generated: boolean;
   dataRevision: number;
   idempotency: Map<string, { inputJson: string; result: unknown; revision: number }>;
@@ -151,7 +153,8 @@ interface PendingPreparation {
   revision: DatasetRevision;
   schemaSql: string;
   operationSource: string;
-  operations: OperationsMap;
+  compiledSource: string;
+  database: Uint8Array;
   generated: boolean;
 }
 
@@ -162,8 +165,9 @@ interface PendingMigration {
   nextRevision: DatasetRevision;
   schemaSql: string;
   operationSource: string;
+  compiledSource: string;
   migrationSql: string;
-  operations: OperationsMap;
+  nextDatabase: Uint8Array;
   generated: boolean;
   approvalDigest: string;
   changeSha256: string;
@@ -194,7 +198,7 @@ interface StoredAppPublication {
 export interface SeededDatasetSpec {
   datasetPath: string;
   generated?: boolean;
-  seedSql?: string;
+  seedInvocations?: Array<{ operationId: string; input: JsonValue }>;
 }
 
 export interface EverydayDesktopSeed {
@@ -268,20 +272,68 @@ function recordIdFor(index: number): string {
   return `rec_${value}`;
 }
 
-function parseAppManifestForEval(root: string, appRoot: string) {
+async function runAuthorizedMigration(input: {
+  workspaceId: string;
+  stored: StoredDataset;
+  nextSchemaSql: string;
+  nextTables: string[];
+  migrationSql: string;
+}) {
+  const migDir = await mkdtemp(join(tmpdir(), "dohc-eval-mig-"));
+  const workerDir = join(migDir, "worker");
+  const inPath = join(migDir, "before.sqlite");
+  const outPath = join(migDir, "after.sqlite");
+  const reportPath = join(migDir, "report.sqlite");
+  await mkdir(workerDir, { recursive: true });
+  await writeFile(inPath, input.stored.database);
+  const worker = await openPersistentAppBackend({
+    directory: workerDir,
+    checkpointPath: inPath,
+    schemaSql: input.stored.schemaSql,
+    tables: tableSqlNames(input.stored.revision.definition),
+    scope: {
+      workspaceId: input.workspaceId,
+      datasetId: input.stored.revision.datasetId,
+      hostEpoch: "eval-host-epoch",
+      approvedRevisionHash: input.stored.revision.revisionSha256,
+    },
+    cursor: { revision: 0, digest: sha256("eval-mig-open") },
+  });
+  try {
+    const migrated = await worker.migrateCheckpoint({
+      path: outPath,
+      schemaSql: input.nextSchemaSql,
+      tables: input.nextTables,
+      migrationSql: input.migrationSql,
+      reportPath,
+    });
+    const nextDatabase = new Uint8Array(await readFile(outPath));
+    return { nextDatabase, previewTables: migrated.report?.tables ?? [] };
+  } finally {
+    await worker.close().catch(() => {});
+    await rm(migDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+}
+
+async function parseAppManifestForEval(root: string, appRootInput: string) {
+  const appRoot = (await resolveWorkspacePath(root, appRootInput, "read")).normalized;
   const manifestRel = posix.join(appRoot, "app.publish.json");
-  const raw = readWorkspaceText(root, manifestRel);
+  const raw = await readWorkspaceText(root, manifestRel);
   if (raw === null) {
     throw new Error(
       `${manifestRel} is missing. Add app.publish.json with version: 1, entryPath, inputs, packageMap, and optional dataset binding.`,
     );
   }
+  if (Buffer.byteLength(raw, "utf8") > MANIFEST_LIMIT_BYTES) {
+    throw new Error(`${manifestRel} is larger than 64 KB.`);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
+    const location = describeJsonSyntaxLocation(error);
     throw new Error(
-      `${manifestRel} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      `${manifestRel} is not valid JSON${location ? ` (${location})` : ""}. Check its syntax.`,
     );
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -297,13 +349,10 @@ function parseAppManifestForEval(root: string, appRoot: string) {
   if (unknownKey) {
     throw new Error(`${manifestRel} has an unknown key: ${unknownKey}.`);
   }
-  if (typeof row.entryPath !== "string" || !row.entryPath) {
-    throw new Error(`${manifestRel} names no file in entryPath.`);
+  if (Object.hasOwn(row, "collection") && Object.hasOwn(row, "dataset")) {
+    throw new Error(`${manifestRel} must hold at most one of collection or dataset.`);
   }
-  if (!Array.isArray(row.inputs) || row.inputs.length === 0) {
-    throw new Error(`${manifestRel} must list at least one input.`);
-  }
-  const resolveRel = (value: unknown, field: string): string => {
+  const resolveRel = async (value: unknown, field: string): Promise<string> => {
     if (typeof value !== "string" || !value)
       throw new Error(`${manifestRel} names no file in ${field}.`);
     if (value.startsWith("/")) {
@@ -315,34 +364,72 @@ function parseAppManifestForEval(root: string, appRoot: string) {
     if (resolved === ".." || resolved.startsWith("../")) {
       throw new Error(`${manifestRel} lists ${value}, which is outside the workspace.`);
     }
-    return resolved;
+    return (await resolveWorkspacePath(root, resolved, "read")).normalized;
   };
-  const entryPath = resolveRel(row.entryPath, "entryPath");
-  const inputs = row.inputs.map((entry) => resolveRel(entry, "input"));
+  const entryPath = await resolveRel(row.entryPath, "entryPath");
+  if (!Array.isArray(row.inputs) || row.inputs.length === 0) {
+    throw new Error(`${manifestRel} must list at least one input.`);
+  }
+  if (row.inputs.length >= MAX_MANIFEST_INPUTS) {
+    throw new Error(`${manifestRel} lists more than ${MAX_MANIFEST_INPUTS - 1} inputs.`);
+  }
+  const inputs: string[] = [];
+  for (const entry of row.inputs) {
+    inputs.push(await resolveRel(entry, "input"));
+  }
+  const repeated = inputs.find((path, index) => inputs.indexOf(path) !== index);
+  if (repeated) {
+    throw new Error(`${manifestRel} lists ${repeated} twice.`);
+  }
   if (!inputs.includes(entryPath)) {
     throw new Error(`${manifestRel} must list its entryPath ${entryPath} among its inputs.`);
   }
   if (!row.packageMap || typeof row.packageMap !== "object" || Array.isArray(row.packageMap)) {
     throw new Error(`${manifestRel} has a packageMap that is not an object.`);
   }
+  for (const [name, target] of Object.entries(row.packageMap)) {
+    if (name.length > 256) {
+      throw new Error(`${manifestRel} maps a package name longer than 256 characters.`);
+    }
+    const mapped = await resolveRel(target, `packageMap target for ${name}`);
+    if (!inputs.includes(mapped)) {
+      throw new Error(`${manifestRel} maps ${name} to ${mapped}, which is not among its inputs.`);
+    }
+  }
   for (const inputPath of inputs) {
-    if (readWorkspaceText(root, inputPath) === null) {
+    if ((await readWorkspaceText(root, inputPath)) === null) {
       throw new Error(`${manifestRel} lists ${inputPath}, which does not exist.`);
     }
   }
   const dataset = Object.hasOwn(row, "dataset") ? parseAppDatasetReference(row.dataset) : undefined;
-  return { entryPath, inputs, dataset };
+  return { appRoot, entryPath, inputs, dataset };
+}
+
+async function listWorkspaceTextFiles(root: string): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  const entries = await readdir(root, { recursive: true, withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const absolute = join(entry.parentPath, entry.name);
+    const rel = relative(root, absolute).split(sep).join("/");
+    if (rel === ".dohc" || rel.startsWith(".dohc/")) continue;
+    const text = await readWorkspaceText(root, rel).catch(() => null);
+    if (text !== null) files.set(rel, text);
+  }
+  return files;
 }
 
 /**
- * Stateful desktop stand-in for everyday building evals. Runs real dohc contracts
- * (dataset definitions, app bindings, automations.yaml) and real SQLite/JS execution.
+ * Stateful desktop stand-in for everyday building evals. Runs real dohc contracts,
+ * path/symlink containment, esbuild/acorn compilation, and isolated QuickJS + SQLite workers.
  */
-export function createEverydayDesktop(
+export async function createEverydayDesktop(
   root: string,
   seed: EverydayDesktopSeed = {},
-): Record<string, DesktopAnswer> {
+  options: { onWrite?: (path: string) => void } = {},
+): Promise<Record<string, DesktopAnswer>> {
   const workspaceId = seed.workspaceId ?? "ws-everyday";
+  const onWrite = options.onWrite;
   const datasetsByPath = new Map<string, StoredDataset>();
   const preparations = new Map<string, PendingPreparation>();
   const migrations = new Map<string, PendingMigration>();
@@ -417,22 +504,42 @@ export function createEverydayDesktop(
       kind: "main",
       createdAtMs: AT,
       canMergeIntoMain: false,
-      snapshots: new Map(),
+      snapshots: await listWorkspaceTextFiles(root),
     },
   ];
   let recordCounter = 0;
 
-  function loadSeededDataset(spec: SeededDatasetSpec): void {
-    const rawDef = readWorkspaceText(root, spec.datasetPath);
-    if (!rawDef) throw new Error(`Seeded dataset missing: ${spec.datasetPath}`);
+  async function loadSeededDataset(spec: SeededDatasetSpec): Promise<void> {
+    const rawDef = await readWorkspaceText(root, spec.datasetPath);
+    if (rawDef === null) throw new Error(`Seeded dataset missing: ${spec.datasetPath}`);
     const definition = parseDatasetDefinition(JSON.parse(rawDef));
-    const schemaSql = readWorkspaceText(root, definition.schemaPath) ?? "";
-    const operationSource = readWorkspaceText(root, definition.operationsPath) ?? "";
-    const operations = compileOperationsForEval(operationSource, definition.operationsPath);
-    const db = openMemorySqlite();
-    db.exec("PRAGMA foreign_keys = ON;");
-    db.exec(schemaSql);
-    if (spec.seedSql) db.exec(spec.seedSql);
+    const schemaSql = (await readWorkspaceText(root, definition.schemaPath)) ?? "";
+    const operationSource = (await readWorkspaceText(root, definition.operationsPath)) ?? "";
+    const compiledSource = await compileDatasetOperations(
+      operationSource,
+      definition.operationsPath,
+    );
+    const tables = tableSqlNames(definition);
+    let database = await initializeAppDatabase({ schemaSql, tables });
+    let dataRevision = 1;
+    for (let index = 0; index < (spec.seedInvocations ?? []).length; index += 1) {
+      const seedInvoke = spec.seedInvocations![index]!;
+      const op = definition.operations.find((o) => o.operationId === seedInvoke.operationId);
+      if (!op) throw new Error(`Seeded operationId missing: ${seedInvoke.operationId}`);
+      const res = await evaluateAppOperation({
+        database,
+        source: compiledSource,
+        operation: op.name,
+        caller: { kind: "owner" },
+        input: seedInvoke.input,
+        nowMs: AT + index,
+        requestId: `seed-${index + 1}`,
+        tables,
+        readOnly: false,
+      });
+      database = res.database;
+      dataRevision += 1;
+    }
     const rev = buildDatasetRevision({
       definition,
       schemaSql,
@@ -444,28 +551,17 @@ export function createEverydayDesktop(
       revision: rev,
       schemaSql,
       operationSource,
-      operations,
-      db,
+      compiledSource,
+      database,
       generated: spec.generated ?? false,
-      dataRevision: 1,
+      dataRevision,
       idempotency: new Map(),
     });
   }
 
   for (const spec of seed.datasets ?? []) {
-    loadSeededDataset(spec);
+    await loadSeededDataset(spec);
   }
-
-  function snapshotTrackedFiles(): Map<string, string> {
-    const snap = new Map<string, string>();
-    for (const rel of ["pricing.md", "README.md"]) {
-      const content = readWorkspaceText(root, rel);
-      if (content !== null) snap.set(rel, content);
-    }
-    return snap;
-  }
-
-  versions[0]!.snapshots = snapshotTrackedFiles();
 
   function assertWorkspace(requested: string): void {
     if (requested !== workspaceId) {
@@ -511,6 +607,8 @@ export function createEverydayDesktop(
           `Adding required field "${change.field.name}" requires a default value for existing records.`,
         );
       }
+      const oldCols = [...datasetColumnFields(table).map((f) => f.sqlColumn)];
+      if (!oldCols.includes("_record_version")) oldCols.push("_record_version");
       table.fields.push({
         fieldId: newFieldId,
         name: change.field.name,
@@ -539,8 +637,16 @@ export function createEverydayDesktop(
                 ? "1"
                 : "0"
               : String(change.field.default);
-      const notNull = change.field.required ? ` NOT NULL DEFAULT ${defaultLiteral}` : "";
-      migrationSql = `ALTER TABLE ${sqlIdent(table.sqlName)} ADD COLUMN ${sqlIdent(colName)} ${sqlColumnType(change.field.type)}${notNull};`;
+      const tmp = `migration_${randomUUID().replaceAll("-", "")}`;
+      const newTableDdl = generateSchemaSql({ ...nextDefinition, tables: [table] });
+      const oldColList = oldCols.map(sqlIdent).join(", ");
+      migrationSql = [
+        `CREATE TABLE ${sqlIdent(tmp)} AS SELECT ${oldColList} FROM ${sqlIdent(table.sqlName)};`,
+        `DROP TABLE ${sqlIdent(table.sqlName)};`,
+        newTableDdl,
+        `INSERT INTO ${sqlIdent(table.sqlName)} (${oldColList}, ${sqlIdent(colName)}) SELECT ${oldColList}, ${defaultLiteral} FROM ${sqlIdent(tmp)};`,
+        `DROP TABLE ${sqlIdent(tmp)};`,
+      ].join("\n");
     } else if (change.kind === "addButton") {
       const table = nextDefinition.tables.find((t) => t.tableId === change.tableId);
       if (!table) throw new Error(`Unknown tableId: ${change.tableId}.`);
@@ -556,7 +662,7 @@ export function createEverydayDesktop(
     return { nextDefinition, schemaSql, operationSource, migrationSql };
   }
 
-  function handleDataset(req: DatasetRequest): unknown {
+  async function handleDataset(req: DatasetRequest): Promise<unknown> {
     assertWorkspace(req.workspaceId);
     switch (req.action) {
       case "list": {
@@ -567,40 +673,63 @@ export function createEverydayDesktop(
         };
       }
       case "describe": {
-        const stored = datasetsByPath.get(req.datasetPath);
+        const datasetPath = (await resolveWorkspacePath(root, req.datasetPath, "read")).normalized;
+        const stored = datasetsByPath.get(datasetPath);
         if (!stored) {
           throw new Error(
-            `Collection reference broken: ${req.datasetPath}. Run dohc_dataset with action "list" to find approved dataset.json paths, or prepare and approve it first.`,
+            `Collection reference broken: ${datasetPath}. Run dohc_dataset with action "list" to find approved dataset.json paths, or prepare and approve it first.`,
           );
         }
         return { kind: "description", dataset: describeStored(stored) };
       }
       case "create": {
         const definition = parseDatasetDefinition(req.definition);
-        const folder = dirname(definition.schemaPath).replaceAll("\\", "/");
-        const datasetPath = folder === "." ? "dataset.json" : posix.join(folder, "dataset.json");
-        const schemaSql = generateSchemaSql(definition);
-        const operationSource = generateDatasetOperations(definition);
-        const operations = compileOperationsForEval(operationSource, definition.operationsPath);
-        const db = openMemorySqlite();
-        db.exec("PRAGMA foreign_keys = ON;");
-        db.exec(schemaSql);
+        const schemaPath = (await resolveWorkspacePath(root, definition.schemaPath, "write"))
+          .normalized;
+        const operationsPath = (
+          await resolveWorkspacePath(root, definition.operationsPath, "write")
+        ).normalized;
+        const folder = dirname(schemaPath).replaceAll("\\", "/");
+        const datasetPath = (
+          await resolveWorkspacePath(
+            root,
+            folder === "." ? "dataset.json" : posix.join(folder, "dataset.json"),
+            "write",
+          )
+        ).normalized;
+        const normalizedDef: DatasetDefinition = {
+          ...definition,
+          schemaPath,
+          operationsPath,
+        };
+        const schemaSql = generateSchemaSql(normalizedDef);
+        const operationSource = generateDatasetOperations(normalizedDef);
+        const compiledSource = await compileDatasetOperations(operationSource, operationsPath);
+        const database = await initializeAppDatabase({
+          schemaSql,
+          tables: tableSqlNames(normalizedDef),
+        });
         const rev = buildDatasetRevision({
-          definition,
+          definition: normalizedDef,
           schemaSql,
           operationSource,
           revisionNumber: 1,
         });
-        writeWorkspaceText(root, datasetPath, JSON.stringify(definition, null, 2) + "\n");
-        writeWorkspaceText(root, definition.schemaPath, schemaSql + "\n");
-        writeWorkspaceText(root, definition.operationsPath, operationSource + "\n");
+        await writeWorkspaceText(
+          root,
+          datasetPath,
+          JSON.stringify(normalizedDef, null, 2) + "\n",
+          onWrite,
+        );
+        await writeWorkspaceText(root, schemaPath, schemaSql + "\n", onWrite);
+        await writeWorkspaceText(root, operationsPath, operationSource + "\n", onWrite);
         datasetsByPath.set(datasetPath, {
           datasetPath,
           revision: rev,
           schemaSql,
           operationSource,
-          operations,
-          db,
+          compiledSource,
+          database,
           generated: true,
           dataRevision: 1,
           idempotency: new Map(),
@@ -608,43 +737,39 @@ export function createEverydayDesktop(
         return { kind: "approved", revision: rev };
       }
       case "prepare": {
-        const raw = readWorkspaceText(root, req.descriptorPath);
+        const descriptorPath = (await resolveWorkspacePath(root, req.descriptorPath, "read"))
+          .normalized;
+        const raw = await readWorkspaceText(root, descriptorPath);
         if (raw === null) {
-          throw new Error(`Descriptor file not found: ${req.descriptorPath}.`);
+          throw new Error(`Descriptor file not found: ${descriptorPath}.`);
         }
         let parsedJson: unknown;
         try {
           parsedJson = JSON.parse(raw);
         } catch (error) {
+          const location = describeJsonSyntaxLocation(error);
           throw new Error(
-            `${req.descriptorPath} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+            `${descriptorPath} is not valid JSON${location ? ` (${location})` : ""}. Check its syntax.`,
           );
         }
         const definition = parseDatasetDefinition(parsedJson);
-        const schemaSql = readWorkspaceText(root, definition.schemaPath);
+        const schemaSql = await readWorkspaceText(root, definition.schemaPath);
         if (schemaSql === null) {
           throw new Error(`Schema file not found: ${definition.schemaPath}.`);
         }
-        const operationSource = readWorkspaceText(root, definition.operationsPath);
+        const operationSource = await readWorkspaceText(root, definition.operationsPath);
         if (operationSource === null) {
           throw new Error(`Operations file not found: ${definition.operationsPath}.`);
         }
-        const operations = compileOperationsForEval(operationSource, definition.operationsPath);
-        for (const op of definition.operations) {
-          if (typeof operations[op.name] !== "function") {
-            throw new Error(
-              `Operation "${op.name}" declared in ${req.descriptorPath} is missing from globalThis.operations in ${definition.operationsPath}.`,
-            );
-          }
-        }
-        const checkDb = openMemorySqlite();
-        try {
-          checkDb.exec("PRAGMA foreign_keys = ON;");
-          checkDb.exec(schemaSql);
-        } finally {
-          checkDb.close();
-        }
-        const existing = datasetsByPath.get(req.descriptorPath);
+        const compiledSource = await compileDatasetOperations(
+          operationSource,
+          definition.operationsPath,
+        );
+        const database = await initializeAppDatabase({
+          schemaSql,
+          tables: tableSqlNames(definition),
+        });
+        const existing = datasetsByPath.get(descriptorPath);
         const nextNumber = existing ? existing.revision.revision + 1 : 1;
         const rev = buildDatasetRevision({
           definition,
@@ -655,11 +780,12 @@ export function createEverydayDesktop(
         const preparationId = randomUUID();
         preparations.set(preparationId, {
           preparationId,
-          datasetPath: req.descriptorPath,
+          datasetPath: descriptorPath,
           revision: rev,
           schemaSql,
           operationSource,
-          operations,
+          compiledSource,
+          database,
           generated: false,
         });
         return {
@@ -678,16 +804,13 @@ export function createEverydayDesktop(
           );
         }
         preparations.delete(req.preparationId);
-        const db = openMemorySqlite();
-        db.exec("PRAGMA foreign_keys = ON;");
-        db.exec(prep.schemaSql);
         datasetsByPath.set(prep.datasetPath, {
           datasetPath: prep.datasetPath,
           revision: prep.revision,
           schemaSql: prep.schemaSql,
           operationSource: prep.operationSource,
-          operations: prep.operations,
-          db,
+          compiledSource: prep.compiledSource,
+          database: prep.database,
           generated: prep.generated,
           dataRevision: 1,
           idempotency: new Map(),
@@ -695,8 +818,9 @@ export function createEverydayDesktop(
         return { kind: "approved", revision: prep.revision };
       }
       case "prepareSchemaChange": {
-        const stored = datasetsByPath.get(req.datasetPath);
-        if (!stored) throw new Error(`Collection reference broken: ${req.datasetPath}.`);
+        const datasetPath = (await resolveWorkspacePath(root, req.datasetPath, "read")).normalized;
+        const stored = datasetsByPath.get(datasetPath);
+        if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
         if (
           stored.revision.revision !== req.revision ||
           stored.revision.revisionSha256 !== req.revisionSha256
@@ -709,7 +833,17 @@ export function createEverydayDesktop(
           stored,
           req.change,
         );
-        const operations = compileOperationsForEval(operationSource, nextDefinition.operationsPath);
+        const compiledSource = await compileDatasetOperations(
+          operationSource,
+          nextDefinition.operationsPath,
+        );
+        const migrated = await runAuthorizedMigration({
+          workspaceId,
+          stored,
+          nextSchemaSql: schemaSql,
+          nextTables: tableSqlNames(nextDefinition),
+          migrationSql,
+        });
         const nextRevision = buildDatasetRevision({
           definition: nextDefinition,
           schemaSql,
@@ -720,25 +854,21 @@ export function createEverydayDesktop(
         const approvalDigest = sha256(`approve:${nextRevision.revisionSha256}:${migrationSql}`);
         const changeSha256 = sha256(migrationSql);
         const expected = makeCursor(workspaceId, stored);
-        const firstTable = nextDefinition.tables[0]!;
-        const countRow = stored.db
-          .prepare(`SELECT COUNT(*) AS c FROM ${sqlIdent(firstTable.sqlName)}`)
-          .all()[0];
-        const rowCount = Number(countRow?.c ?? 0);
         migrations.set(preparationId, {
           preparationId,
-          datasetPath: req.datasetPath,
+          datasetPath,
           previousRevision: stored.revision,
           nextRevision,
           schemaSql,
           operationSource,
+          compiledSource,
           migrationSql,
-          operations,
+          nextDatabase: migrated.nextDatabase,
           generated: stored.generated,
           approvalDigest,
           changeSha256,
           updatedFiles: {
-            [req.datasetPath]: JSON.stringify(nextDefinition, null, 2) + "\n",
+            [datasetPath]: JSON.stringify(nextDefinition, null, 2) + "\n",
             [nextDefinition.schemaPath]: schemaSql + "\n",
             ...(stored.generated
               ? { [nextDefinition.operationsPath]: operationSource + "\n" }
@@ -759,18 +889,7 @@ export function createEverydayDesktop(
             changeSha256,
             expiresAtMs: Date.now() + 600_000,
             preview: {
-              tables: [
-                {
-                  table: firstTable.name,
-                  beforeRows: rowCount,
-                  afterRows: rowCount,
-                  changedRows: rowCount,
-                  deletedRows: 0,
-                  beforeValues: {},
-                  afterValues: {},
-                  clearedValues: {},
-                },
-              ],
+              tables: migrated.previewTables,
               firstPage: { changes: [], nextCursor: null },
             },
           },
@@ -783,8 +902,9 @@ export function createEverydayDesktop(
         };
       }
       case "prepareRelationChoices": {
-        const stored = datasetsByPath.get(req.datasetPath);
-        if (!stored) throw new Error(`Collection reference broken: ${req.datasetPath}.`);
+        const datasetPath = (await resolveWorkspacePath(root, req.datasetPath, "read")).normalized;
+        const stored = datasetsByPath.get(datasetPath);
+        if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
         if (
           stored.revision.revision !== req.revision ||
           stored.revision.revisionSha256 !== req.revisionSha256
@@ -828,7 +948,10 @@ export function createEverydayDesktop(
         const operationSource = stored.generated
           ? generateDatasetOperations(nextDefinition)
           : `${stored.operationSource}\nglobalThis.operations.${opName} = function(ctx) { return { rows: ctx.db.query("SELECT ${sqlIdent(targetPrimary.sqlColumn)} AS id, ${sqlIdent(labelField.sqlColumn)} AS label FROM ${sqlIdent(targetTable.sqlName)}") }; };\n`;
-        const operations = compileOperationsForEval(operationSource, nextDefinition.operationsPath);
+        const compiledSource = await compileDatasetOperations(
+          operationSource,
+          nextDefinition.operationsPath,
+        );
         const nextRevision = buildDatasetRevision({
           definition: nextDefinition,
           schemaSql,
@@ -842,18 +965,19 @@ export function createEverydayDesktop(
         const expected = makeCursor(workspaceId, stored);
         migrations.set(preparationId, {
           preparationId,
-          datasetPath: req.datasetPath,
+          datasetPath,
           previousRevision: stored.revision,
           nextRevision,
           schemaSql,
           operationSource,
+          compiledSource,
           migrationSql,
-          operations,
+          nextDatabase: stored.database,
           generated: stored.generated,
           approvalDigest,
           changeSha256,
           updatedFiles: {
-            [req.datasetPath]: JSON.stringify(nextDefinition, null, 2) + "\n",
+            [datasetPath]: JSON.stringify(nextDefinition, null, 2) + "\n",
             [nextDefinition.operationsPath]: operationSource + "\n",
           },
         });
@@ -881,19 +1005,42 @@ export function createEverydayDesktop(
         };
       }
       case "prepareMigration": {
-        const stored = datasetsByPath.get(req.datasetPath);
-        if (!stored) throw new Error(`Collection reference broken: ${req.datasetPath}.`);
-        const rawDef = readWorkspaceText(root, req.datasetPath);
-        const migrationSql = readWorkspaceText(root, req.migrationPath);
-        if (rawDef === null) throw new Error(`Descriptor missing: ${req.datasetPath}.`);
+        const datasetPath = (await resolveWorkspacePath(root, req.datasetPath, "read")).normalized;
+        const migrationPath = (await resolveWorkspacePath(root, req.migrationPath, "read"))
+          .normalized;
+        const stored = datasetsByPath.get(datasetPath);
+        if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
+        const rawDef = await readWorkspaceText(root, datasetPath);
+        const migrationSql = await readWorkspaceText(root, migrationPath);
+        if (rawDef === null) throw new Error(`Descriptor missing: ${datasetPath}.`);
         if (migrationSql === null || !migrationSql.trim()) {
-          throw new Error(`Migration SQL file missing or empty: ${req.migrationPath}.`);
+          throw new Error(`Migration SQL file missing or empty: ${migrationPath}.`);
         }
-        const nextDefinition = parseDatasetDefinition(JSON.parse(rawDef));
-        const schemaSql = readWorkspaceText(root, nextDefinition.schemaPath) ?? stored.schemaSql;
+        let parsedDef: unknown;
+        try {
+          parsedDef = JSON.parse(rawDef);
+        } catch (error) {
+          const location = describeJsonSyntaxLocation(error);
+          throw new Error(
+            `${datasetPath} is not valid JSON${location ? ` (${location})` : ""}. Check its syntax.`,
+          );
+        }
+        const nextDefinition = parseDatasetDefinition(parsedDef);
+        const schemaSql =
+          (await readWorkspaceText(root, nextDefinition.schemaPath)) ?? stored.schemaSql;
         const operationSource =
-          readWorkspaceText(root, nextDefinition.operationsPath) ?? stored.operationSource;
-        const operations = compileOperationsForEval(operationSource, nextDefinition.operationsPath);
+          (await readWorkspaceText(root, nextDefinition.operationsPath)) ?? stored.operationSource;
+        const compiledSource = await compileDatasetOperations(
+          operationSource,
+          nextDefinition.operationsPath,
+        );
+        const migrated = await runAuthorizedMigration({
+          workspaceId,
+          stored,
+          nextSchemaSql: schemaSql,
+          nextTables: tableSqlNames(nextDefinition),
+          migrationSql,
+        });
         const nextRevision = buildDatasetRevision({
           definition: nextDefinition,
           schemaSql,
@@ -906,13 +1053,14 @@ export function createEverydayDesktop(
         const expected = makeCursor(workspaceId, stored);
         migrations.set(preparationId, {
           preparationId,
-          datasetPath: req.datasetPath,
+          datasetPath,
           previousRevision: stored.revision,
           nextRevision,
           schemaSql,
           operationSource,
+          compiledSource,
           migrationSql,
-          operations,
+          nextDatabase: migrated.nextDatabase,
           generated: stored.generated,
           approvalDigest,
           changeSha256,
@@ -930,7 +1078,10 @@ export function createEverydayDesktop(
             checkpointSha256: sha256(`ckpt:${nextRevision.revisionSha256}`),
             changeSha256,
             expiresAtMs: Date.now() + 600_000,
-            preview: { tables: [], firstPage: { changes: [], nextCursor: null } },
+            preview: {
+              tables: migrated.previewTables,
+              firstPage: { changes: [], nextCursor: null },
+            },
           },
           sourceDigest: nextRevision.revisionSha256,
           approvalDigest,
@@ -952,18 +1103,16 @@ export function createEverydayDesktop(
         }
         const stored = datasetsByPath.get(pending.datasetPath);
         if (!stored) throw new Error(`Collection reference broken: ${pending.datasetPath}.`);
-        if (!pending.migrationSql.trim().startsWith("--")) {
-          stored.db.exec(pending.migrationSql);
-        }
         if (pending.updatedFiles) {
           for (const [relPath, content] of Object.entries(pending.updatedFiles)) {
-            writeWorkspaceText(root, relPath, content);
+            await writeWorkspaceText(root, relPath, content, onWrite);
           }
         }
         stored.revision = pending.nextRevision;
         stored.schemaSql = pending.schemaSql;
         stored.operationSource = pending.operationSource;
-        stored.operations = pending.operations;
+        stored.compiledSource = pending.compiledSource;
+        stored.database = pending.nextDatabase;
         stored.dataRevision += 1;
         migrations.delete(req.preparationId);
         return {
@@ -973,8 +1122,10 @@ export function createEverydayDesktop(
         };
       }
       case "createForm": {
-        const stored = datasetsByPath.get(req.datasetPath);
-        if (!stored) throw new Error(`Collection reference broken: ${req.datasetPath}.`);
+        const datasetPath = (await resolveWorkspacePath(root, req.datasetPath, "read")).normalized;
+        const appRoot = (await resolveWorkspacePath(root, req.appRoot, "write")).normalized;
+        const stored = datasetsByPath.get(datasetPath);
+        if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
         if (
           stored.revision.revision !== req.revision ||
           stored.revision.revisionSha256 !== req.revisionSha256
@@ -1017,35 +1168,43 @@ export function createEverydayDesktop(
           packageMap: {},
           dataset: {
             kind: "dataset",
-            datasetPath: req.datasetPath,
+            datasetPath,
             revision: stored.revision.revision,
             revisionSha256: stored.revision.revisionSha256,
             operationIds: opIds,
           },
         };
-        const htmlPath = posix.join(req.appRoot, "index.html");
-        const jsPath = posix.join(req.appRoot, "form.js");
-        const manifestPath = posix.join(req.appRoot, "app.publish.json");
-        writeWorkspaceText(
+        const htmlPath = posix.join(appRoot, "index.html");
+        const jsPath = posix.join(appRoot, "form.js");
+        const manifestPath = posix.join(appRoot, "app.publish.json");
+        await writeWorkspaceText(
           root,
           htmlPath,
           `<!doctype html><title>${req.title ?? table.name}</title><script type="module" src="./form.js"></script>\n`,
+          onWrite,
         );
-        writeWorkspaceText(
+        await writeWorkspaceText(
           root,
           jsPath,
           `// Connected form for ${table.name}\nwindow.addEventListener("message", () => {});\n`,
+          onWrite,
         );
-        writeWorkspaceText(root, manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+        await writeWorkspaceText(
+          root,
+          manifestPath,
+          JSON.stringify(manifest, null, 2) + "\n",
+          onWrite,
+        );
         return {
           kind: "form-created",
-          appRoot: req.appRoot,
+          appRoot,
           paths: [htmlPath, jsPath, manifestPath],
         };
       }
       case "invoke": {
-        const stored = datasetsByPath.get(req.datasetPath);
-        if (!stored) throw new Error(`Collection reference broken: ${req.datasetPath}.`);
+        const datasetPath = (await resolveWorkspacePath(root, req.datasetPath, "read")).normalized;
+        const stored = datasetsByPath.get(datasetPath);
+        if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
         if (
           stored.revision.revision !== req.revision ||
           stored.revision.revisionSha256 !== req.revisionSha256
@@ -1058,8 +1217,6 @@ export function createEverydayDesktop(
           (candidate) => candidate.operationId === req.operationId,
         );
         if (!op) throw new Error(`Unknown operationId: ${req.operationId}.`);
-        const fn = stored.operations[op.name];
-        if (!fn) throw new Error(`Operation "${op.name}" is missing from compiled operations.`);
         const replayKey = `${op.operationId}:${req.idempotencyKey}`;
         const inputJson = JSON.stringify(req.input);
         const prev = stored.idempotency.get(replayKey);
@@ -1073,54 +1230,40 @@ export function createEverydayDesktop(
           }
           return { kind: "invoked", result: prev.result, revision: prev.revision, replayed: true };
         }
-        const ctx = {
-          requestId: req.idempotencyKey,
-          nowMs: Date.now(),
-          secret: sha256(`${req.idempotencyKey}:${stored.dataRevision}`).slice(0, 43),
-          caller: { kind: "owner" },
-          db: {
-            query(sql: string, params: SqlParam[] = []) {
-              return stored.db.prepare(sql).all(...params);
-            },
-            execute(sql: string, params: SqlParam[] = []) {
-              if (op.readOnly)
-                throw new Error("Read-only operations cannot write to the database.");
-              const out = stored.db.prepare(sql).run(...params);
-              return { changes: Number(out.changes) };
-            },
-          },
-          refuse(code: string, message: string): never {
-            throw new GuestRefusal(code, message);
-          },
-          files: {
-            attach(): never {
-              throw new GuestRefusal("file_not_found", "File attachment not available in eval.");
-            },
-          },
-        };
-        if (!op.readOnly) stored.db.exec("BEGIN;");
         try {
-          const rawResult = fn(ctx, req.input);
-          const result = rawResult === undefined ? null : JSON.parse(JSON.stringify(rawResult));
+          const evaluated = await evaluateAppOperation({
+            database: stored.database,
+            source: stored.compiledSource,
+            operation: op.name,
+            caller: { kind: "owner" },
+            input: req.input as JsonValue,
+            nowMs: Date.now(),
+            requestId: req.idempotencyKey,
+            tables: tableSqlNames(stored.revision.definition),
+            readOnly: op.readOnly,
+          });
           if (!op.readOnly) {
-            stored.db.exec("COMMIT;");
+            stored.database = evaluated.database;
             stored.dataRevision += 1;
           }
           stored.idempotency.set(replayKey, {
             inputJson,
-            result,
+            result: evaluated.result,
             revision: stored.dataRevision,
           });
           return {
             kind: "invoked",
-            result,
+            result: evaluated.result,
             revision: stored.dataRevision,
             replayed: false,
           };
         } catch (error) {
-          if (!op.readOnly) stored.db.exec("ROLLBACK;");
-          if (error instanceof GuestRefusal) {
-            return { kind: "refused", code: error.code, message: error.message };
+          if (isAppBackendRuntimeError(error)) {
+            return {
+              kind: "refused",
+              code: error.refusal.code,
+              message: error.refusal.message,
+            };
           }
           throw error;
         }
@@ -1130,10 +1273,11 @@ export function createEverydayDesktop(
     }
   }
 
-  function handleAppPublication(req: OwnerAppPublicationRequest): unknown {
+  async function handleAppPublication(req: OwnerAppPublicationRequest): Promise<unknown> {
     assertWorkspace(req.workspaceId);
     switch (req.action) {
       case "createLink": {
+        const appRoot = (await resolveWorkspacePath(root, req.appRoot, "read")).normalized;
         const existing = [...links.values()].find((l) => l.operationId === req.operationId);
         if (existing) {
           return {
@@ -1148,7 +1292,10 @@ export function createEverydayDesktop(
         }
         const shareId = `share_${randomUUID().slice(0, 8)}`;
         const grantId = `grant_${randomUUID().slice(0, 8)}`;
-        const paths = req.paths ?? [req.appRoot];
+        const paths: string[] = [];
+        for (const p of req.paths ?? [appRoot]) {
+          paths.push((await resolveWorkspacePath(root, p, "read")).normalized);
+        }
         const url = `https://share.dohc.local/s/${shareId}#secret_${grantId}`;
         links.set(`${shareId}:${grantId}`, {
           shareId,
@@ -1169,8 +1316,9 @@ export function createEverydayDesktop(
         };
       }
       case "listLocal": {
+        const appRoot = (await resolveWorkspacePath(root, req.appRoot, "read")).normalized;
         const publications = [...appPublications.values()]
-          .filter((p) => p.local && p.appRoot === req.appRoot)
+          .filter((p) => p.local && p.appRoot === appRoot)
           .map((p) => ({
             publicationId: p.publicationId,
             authorityRevision: p.authorityRevision,
@@ -1182,26 +1330,30 @@ export function createEverydayDesktop(
         return { kind: "localListed", publications };
       }
       case "checkLocal": {
-        const manifest = parseAppManifestForEval(root, req.appRoot);
-        const sourceRevision = sha256(
-          manifest.inputs.map((p) => `${p}:${readWorkspaceText(root, p) ?? ""}`).join("\n"),
+        const manifest = await parseAppManifestForEval(root, req.appRoot);
+        const contents = await Promise.all(
+          manifest.inputs.map(async (p) => `${p}:${(await readWorkspaceText(root, p)) ?? ""}`),
         );
+        const sourceRevision = sha256(contents.join("\n"));
         return {
           kind: "localChecked",
-          appRoot: req.appRoot,
+          appRoot: manifest.appRoot,
           sourceRevision,
           sourcePaths: manifest.inputs,
         };
       }
       case "prepareLocal":
       case "prepare": {
-        const manifest = parseAppManifestForEval(root, req.appRoot);
+        const manifest = await parseAppManifestForEval(root, req.appRoot);
         const capabilities = [];
         if (manifest.dataset) {
-          const stored = datasetsByPath.get(manifest.dataset.datasetPath);
+          const datasetPath = (
+            await resolveWorkspacePath(root, manifest.dataset.datasetPath, "read")
+          ).normalized;
+          const stored = datasetsByPath.get(datasetPath);
           if (!stored) {
             throw new Error(
-              `Collection reference broken: ${manifest.dataset.datasetPath}. Approve the Collection first or fix datasetPath in ${req.appRoot}/app.publish.json.`,
+              `Collection reference broken: ${datasetPath}. Approve the Collection first or fix datasetPath in ${manifest.appRoot}/app.publish.json.`,
             );
           }
           const binding: AppDatasetBinding = {
@@ -1219,12 +1371,13 @@ export function createEverydayDesktop(
             resolveAppDatasetCapability(binding, stored.revision, () => stored.generated),
           );
         }
-        const sourceRevision = sha256(
-          manifest.inputs.map((p) => `${p}:${readWorkspaceText(root, p) ?? ""}`).join("\n"),
+        const contents = await Promise.all(
+          manifest.inputs.map(async (p) => `${p}:${(await readWorkspaceText(root, p)) ?? ""}`),
         );
+        const sourceRevision = sha256(contents.join("\n"));
         const approvalId = randomUUID();
         const candidateDigest = sha256(
-          `${req.appRoot}:${sourceRevision}:${JSON.stringify(capabilities)}`,
+          `${manifest.appRoot}:${sourceRevision}:${JSON.stringify(capabilities)}`,
         );
         const isLocal = req.action === "prepareLocal";
         let audience:
@@ -1248,7 +1401,7 @@ export function createEverydayDesktop(
         appApprovals.set(approvalId, {
           approvalId,
           candidateDigest,
-          appRoot: req.appRoot,
+          appRoot: manifest.appRoot,
           local: isLocal,
           sourceRevision,
           ...(audience
@@ -1259,7 +1412,7 @@ export function createEverydayDesktop(
           kind: "prepared",
           approvalId,
           candidateDigest,
-          appRoot: req.appRoot,
+          appRoot: manifest.appRoot,
           versionId: "main",
           sourceRevision,
           ...(audience ? { audience } : {}),
@@ -1322,19 +1475,130 @@ export function createEverydayDesktop(
     }
   }
 
+  async function handleWorkspaceSearch(args: Args) {
+    const input = WorkspaceSearchInput.parse({
+      query: args.query,
+      ...(args.surfaces !== undefined ? { surfaces: args.surfaces } : {}),
+      ...(args.pathPrefix !== undefined ? { pathPrefix: args.pathPrefix } : {}),
+      ...(args.collectionPath !== undefined ? { collectionPath: args.collectionPath } : {}),
+      ...(args.includeNeighbors !== undefined ? { includeNeighbors: args.includeNeighbors } : {}),
+      ...(args.limit !== undefined ? { limit: args.limit } : {}),
+    });
+    const terms = input.query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((term) => term.length > 0);
+    const allowedSurfaces = new Set(input.surfaces ?? ["page", "collection", "record", "chat"]);
+    const pathPrefix = input.pathPrefix
+      ? (await resolveWorkspacePath(root, input.pathPrefix, "read")).normalized
+      : undefined;
+    const collectionFilter = input.collectionPath
+      ? (await resolveWorkspacePath(root, input.collectionPath, "read")).normalized
+      : undefined;
+    const limit = input.limit ?? 20;
+    const hits: WorkspaceSearchResult["results"] = [];
+    const files = await listWorkspaceTextFiles(root);
+
+    if (allowedSurfaces.has("page") || allowedSurfaces.has("collection")) {
+      for (const [relPath, text] of files.entries()) {
+        if (pathPrefix && relPath !== pathPrefix && !relPath.startsWith(`${pathPrefix}/`)) continue;
+        const lower = `${relPath}\n${text}`.toLowerCase();
+        const matchedTerms = terms.filter((term) => lower.includes(term));
+        if (matchedTerms.length === 0) continue;
+        const isCollection =
+          relPath === "collection.yaml" ||
+          relPath.endsWith("/collection.yaml") ||
+          relPath === "dataset.json" ||
+          relPath.endsWith("/dataset.json");
+        if (isCollection && allowedSurfaces.has("collection")) {
+          const folder = dirname(relPath).replaceAll("\\", "/");
+          const colPath = folder === "." ? "" : folder;
+          if (collectionFilter && colPath !== collectionFilter) continue;
+          const isDataset = relPath.endsWith("dataset.json");
+          hits.push({
+            id: `collection:${relPath}`,
+            kind: "collection",
+            title: colPath || relPath,
+            path: relPath,
+            collectionKind: isDataset ? "transactional" : "document",
+            ...(colPath ? { collectionPath: colPath } : {}),
+            ...(isDataset ? { datasetPath: relPath } : {}),
+            snippet: text.slice(0, 180).replace(/\s+/g, " ").trim(),
+            matchedTerms,
+            related: [],
+          });
+        } else if (relPath.endsWith(".md") && allowedSurfaces.has("page") && !collectionFilter) {
+          hits.push({
+            id: `page:${relPath}`,
+            kind: "page",
+            title: posix.basename(relPath, ".md"),
+            path: relPath,
+            snippet: text.slice(0, 180).replace(/\s+/g, " ").trim(),
+            matchedTerms,
+            related: [],
+          });
+        }
+      }
+    }
+
+    if (allowedSurfaces.has("record")) {
+      for (const [colPath, rows] of collections.entries()) {
+        if (collectionFilter && colPath !== collectionFilter) continue;
+        if (pathPrefix && colPath !== pathPrefix && !colPath.startsWith(`${pathPrefix}/`)) continue;
+        for (const row of rows) {
+          const serialized = `${row.path} ${JSON.stringify(row.values)}`.toLowerCase();
+          const matchedTerms = terms.filter((term) => serialized.includes(term));
+          if (matchedTerms.length === 0) continue;
+          hits.push({
+            id: `record:${row.id}`,
+            kind: "record",
+            title: posix.basename(row.path, ".md"),
+            path: row.path,
+            collectionPath: colPath,
+            recordId: row.id,
+            matchedFields: Object.entries(row.values)
+              .filter(([, value]) =>
+                matchedTerms.some((term) => String(value).toLowerCase().includes(term)),
+              )
+              .map(([name, value]) => ({ name, value: String(value) })),
+            snippet: JSON.stringify(row.values).slice(0, 180),
+            matchedTerms,
+            related: [],
+          });
+        }
+      }
+    }
+
+    const truncated = hits.length > limit;
+    return WorkspaceSearchResult.parse({
+      versionId: activeVersionId,
+      results: hits.slice(0, limit),
+      neighbors: [],
+      complete: true,
+      indexBuilding: false,
+      policyDegraded: false,
+      mountsCovered: true,
+      sharedChannelRowsUncovered: 0,
+      truncated,
+    });
+  }
+
   return {
     dataset: (args: Args) => handleDataset(args.request as DatasetRequest),
     appPublication: (args: Args) =>
       handleAppPublication(args.request as OwnerAppPublicationRequest),
-    automationList: (args: Args) => {
-      const colPath = String(args.collectionPath);
+    workspaceSearch: (args: Args) => handleWorkspaceSearch(args),
+    automationList: async (args: Args) => {
+      const colPath = (await resolveWorkspacePath(root, String(args.collectionPath), "read"))
+        .normalized;
       const filePath = posix.join(colPath, "automations.yaml");
-      const text = readWorkspaceText(root, filePath);
+      const text = await readWorkspaceText(root, filePath);
       const content = text === null ? null : { text, contentHash: sha256(text), truncated: false };
       return { ok: true, definitions: automationDefinitionList(content, true) };
     },
-    collectionQuery: (args: Args) => {
-      const colPath = String(args.collectionPath);
+    collectionQuery: async (args: Args) => {
+      const colPath = (await resolveWorkspacePath(root, String(args.collectionPath), "read"))
+        .normalized;
       const rows = collections.get(colPath) ?? [];
       return {
         ok: true,
@@ -1354,13 +1618,16 @@ export function createEverydayDesktop(
         nextCursor: null,
       };
     },
-    collectionCreateRecord: (args: Args) => {
-      const colPath = String(args.collectionPath);
+    collectionCreateRecord: async (args: Args) => {
+      const colPath = (await resolveWorkspacePath(root, String(args.collectionPath), "write"))
+        .normalized;
       const name = String(args.name);
       const fields = (args.fields as Record<string, unknown> | undefined) ?? {};
       const recordId =
         typeof args.recordId === "string" ? args.recordId : recordIdFor(recordCounter++);
-      const recordPath = posix.join(colPath, `${name}.md`);
+      const recordPath = (
+        await resolveWorkspacePath(root, posix.join(colPath, `${name}.md`), "write")
+      ).normalized;
       const frontmatterLines = [
         "---",
         `dohc_record_id: ${recordId}`,
@@ -1369,14 +1636,14 @@ export function createEverydayDesktop(
         "",
         typeof args.body === "string" ? args.body : "",
       ];
-      writeWorkspaceText(root, recordPath, frontmatterLines.join("\n"));
+      await writeWorkspaceText(root, recordPath, frontmatterLines.join("\n"), onWrite);
       const rows = collections.get(colPath) ?? [];
       rows.push({ id: recordId, path: recordPath, values: { ...fields } });
       collections.set(colPath, rows);
       return { ok: true, recordId, recordPath };
     },
-    collectionSetFields: (args: Args) => {
-      const path = String(args.path);
+    collectionSetFields: async (args: Args) => {
+      const path = (await resolveWorkspacePath(root, String(args.path), "write")).normalized;
       const fields = (args.fields as Record<string, unknown>) ?? {};
       for (const rows of collections.values()) {
         const hit = rows.find((row) => row.path === path);
@@ -1389,7 +1656,7 @@ export function createEverydayDesktop(
       versions: versions.map(({ snapshots: _s, ...v }) => v),
       activeVersionId,
     }),
-    versionCreate: (args: Args) => {
+    versionCreate: async (args: Args) => {
       const name = String(args.name);
       if (versions.some((v) => v.name === name)) {
         return { ok: false, reason: `A version named "${name}" already exists.` };
@@ -1402,22 +1669,22 @@ export function createEverydayDesktop(
         createdAtMs: AT + versions.length * 1000,
         canMergeIntoMain: activeVersionId === "version-main",
         madeFromVersionId: activeVersionId,
-        snapshots: snapshotTrackedFiles(),
+        snapshots: await listWorkspaceTextFiles(root),
       };
       versions.push(created);
       activeVersionId = id;
       return { ok: true, version: { id: created.id, name: created.name } };
     },
-    versionSwitch: (args: Args) => {
+    versionSwitch: async (args: Args) => {
       const wanted = String(args.version);
       const target = versions.find((v) => v.id === wanted || v.name === wanted);
       if (!target) return { ok: false, reason: `No version named "${wanted}".` };
       const current = versions.find((v) => v.id === activeVersionId);
-      if (current) current.snapshots = snapshotTrackedFiles();
+      if (current) current.snapshots = await listWorkspaceTextFiles(root);
       let changed = 0;
       for (const [path, text] of target.snapshots.entries()) {
-        if (readWorkspaceText(root, path) !== text) {
-          writeWorkspaceText(root, path, text);
+        if ((await readWorkspaceText(root, path)) !== text) {
+          await writeWorkspaceText(root, path, text, onWrite);
           changed += 1;
         }
       }
@@ -1428,12 +1695,12 @@ export function createEverydayDesktop(
         changedFileCount: changed,
       };
     },
-    versionCompare: (args: Args) => {
+    versionCompare: async (args: Args) => {
       const wanted = String(args.version);
       const target = versions.find((v) => v.id === wanted || v.name === wanted);
       if (!target) return { ok: false, reason: `No version named "${wanted}".` };
       const current = versions.find((v) => v.id === activeVersionId);
-      if (current) current.snapshots = snapshotTrackedFiles();
+      if (current) current.snapshots = await listWorkspaceTextFiles(root);
       const mainSnap = versions[0]!.snapshots;
       const targetSnap = target.snapshots;
       const allPaths = new Set([...mainSnap.keys(), ...targetSnap.keys()]);
@@ -1462,19 +1729,19 @@ export function createEverydayDesktop(
         nextAfterPath: null,
       };
     },
-    versionMerge: (args: Args) => {
+    versionMerge: async (args: Args) => {
       const wanted = String(args.version);
       const target = versions.find((v) => v.id === wanted || v.name === wanted);
       if (!target) return { ok: false, reason: `No version named "${wanted}".` };
       const current = versions.find((v) => v.id === activeVersionId);
-      if (current) current.snapshots = snapshotTrackedFiles();
+      if (current) current.snapshots = await listWorkspaceTextFiles(root);
       const main = versions[0]!;
       let merged = 0;
       let unchanged = 0;
       for (const [path, text] of target.snapshots.entries()) {
         if (main.snapshots.get(path) !== text) {
           main.snapshots.set(path, text);
-          writeWorkspaceText(root, path, text);
+          await writeWorkspaceText(root, path, text, onWrite);
           merged += 1;
         } else {
           unchanged += 1;
@@ -1549,9 +1816,9 @@ export function createEverydayDesktop(
       threadId: "thread-file-1",
       messageId: "message-file-1",
     }),
-    documentRead: (args: Args) => workspaceVerbs.documentRead!(root, args),
-    documentEdit: (args: Args) => workspaceVerbs.documentEdit!(root, args),
-    documentCreate: (args: Args) => workspaceVerbs.documentCreate!(root, args),
-    fileWrite: (args: Args) => workspaceVerbs.fileWrite!(root, args),
+    documentRead: (args: Args) => workspaceVerbs.documentRead!(root, args, onWrite),
+    documentEdit: (args: Args) => workspaceVerbs.documentEdit!(root, args, onWrite),
+    documentCreate: (args: Args) => workspaceVerbs.documentCreate!(root, args, onWrite),
+    fileWrite: (args: Args) => workspaceVerbs.fileWrite!(root, args, onWrite),
   };
 }

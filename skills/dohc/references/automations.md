@@ -39,7 +39,23 @@ A trigger is a mapping with exactly one kind key (or a bare string for argument-
 | `starts-matching` | bare JS condition expression | `table` |
 | `button` | button field name | `table` |
 | `group-message` | Group name | `starts-with` |
-| `schedule` | mapping `{ every: hour\|day\|weekday\|week\|month, timezone: "Asia/Singapore", at?: "09:00", days?: [...] }` | none |
+| `schedule` | frequency scalar (`hour`, `day`, `weekday`, `week`, or `month`) | `timezone` (required IANA timezone, e.g. `Asia/Singapore`), `at` (`"HH:MM"`, or `":MM"` for `hour`), `days` (for `week`: `mon..sun`; for `month`: `1..31`) |
+
+Example scheduled trigger (note `timezone` and `at` are sibling keys under `when:`, not nested under `schedule:`):
+
+```yaml
+version: 1
+automations:
+  - id: daily-digest
+    name: Daily morning digest
+    when:
+      schedule: day
+      timezone: Asia/Singapore
+      at: '09:00'
+    do:
+      - post: 'Daily check-in reminder'
+        group: General
+```
 
 ## Steps (`do:`)
 
@@ -53,8 +69,8 @@ Each step in `do:` is a mapping with exactly one kind key:
 | `invoke` | dataset operation name | `collection`, `input: { key: value }` |
 | `if` | bare JS condition expression | `do` (required list of steps), `otherwise` (optional list of steps) |
 | `post` | message template string | `group` (required Group name) |
-| `notify` | message template string | `to` (list of person IDs or formulas) |
-| `direct-message` | message template string | `to` (list of person IDs or formulas) |
+| `notify` | message template string | `to` (required list of person IDs or formulas) |
+| `direct-message` | message template string | `to` (required list of person IDs or formulas) |
 | `run` | JS function body reading `ctx` | `as` |
 | `run-file` | relative script path inside the Collection folder | `as` |
 

@@ -70,6 +70,15 @@ export interface AppPublicationPreparationDependencies {
   /** Resolves from the owner's approved catalog. Publication preparation cannot approve a dataset. */
   resolveDatasetRevision?(binding: AppDatasetBinding): Promise<DatasetRevision>;
 }
+function describeJsonSyntaxLocation(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const lineCol = /\bline (\d+) column (\d+)\b/i.exec(error.message);
+  if (lineCol) return `at line ${lineCol[1]}, column ${lineCol[2]}`;
+  const position = /\bposition (\d+)\b/i.exec(error.message);
+  if (position) return `at position ${position[1]}`;
+  return undefined;
+}
+
 /**
  * Reads app.publish.json. Its paths are relative to the app folder, so the folder can move;
  * "../" reaches files beside it. Dataset references use workspace-relative dataset.json paths.
@@ -81,8 +90,9 @@ export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: strin
   try {
     value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch (error) {
+    const location = describeJsonSyntaxLocation(error);
     throw new Error(
-      `${manifestPath} is not valid JSON: ${error instanceof Error ? error.message : "check syntax"}.`,
+      `${manifestPath} is not valid JSON${location ? ` (${location})` : ""}. Check its syntax.`,
     );
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {

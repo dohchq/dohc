@@ -2359,7 +2359,9 @@ export async function dataset(ctx: ToolContext, input: unknown) {
     return { ok: false as const, reason: "Collections require the owning workspace." };
   const parsed = DatasetRequest.safeParse(input);
   if (!parsed.success) {
-    const datasetPathIssue = parsed.error.issues.find((issue) => issue.path[0] === "datasetPath");
+    const datasetPathIssue = parsed.error.issues.find(
+      (issue) => issue.path[0] === "datasetPath" && issue.code === "custom",
+    );
     return {
       ok: false as const,
       reason:

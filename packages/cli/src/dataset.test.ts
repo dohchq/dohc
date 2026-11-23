@@ -537,13 +537,18 @@ it("explains field mistakes, unrecognized keys, and definition errors before tra
   expect(wrongKey.exitCode).toBe(1);
   expect(wrongKey.stderr).toContain('Unrecognized key "datasetPath" for action "prepare"');
   expect(wrongKey.stderr).toContain("descriptorPath");
+  expect(wrongKey.stderr).not.toContain("dohc_list_workspaces");
 
+  const secret = "SECRET_BEARER_TOKEN_999";
   const badJson = await executeCli({
-    argv: ["dataset", "list", "{not-json"],
+    argv: ["dataset", "list", `{"token":"${secret}", bad}`],
     request: send,
   });
   expect(badJson.exitCode).toBe(1);
-  expect(badJson.stderr).toContain("invalid dataset list JSON");
+  expect(badJson.stderr).toMatch(
+    /invalid dataset list JSON \(at (?:line 1, column \d+|position \d+)\)/,
+  );
+  expect(badJson.stderr).not.toContain(secret);
 
   const badDef = structuredClone(definition);
   badDef.operations[0]!.readOnly = false;

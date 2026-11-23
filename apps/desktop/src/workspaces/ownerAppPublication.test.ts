@@ -226,7 +226,7 @@ describe("app.publish.json paths", () => {
   it("names the manifest path when app.publish.json is not valid JSON", () => {
     expect(() =>
       parseAppPublicationDeclaration(new TextEncoder().encode("{bad json"), "apps/shop"),
-    ).toThrow(/apps\/shop\/app\.publish\.json is not valid JSON:/);
+    ).toThrow(/apps\/shop\/app\.publish\.json is not valid JSON \(at .+\)\. Check its syntax\./);
   });
   const manifest = {
     entryPath: "main.ts",
@@ -637,3 +637,19 @@ it.each(["会议", "Cafe\u0301"])(
     });
   },
 );
+
+it("reports malformed app.publish.json on one line without disclosing input contents", () => {
+  const secret = "SECRET_MANIFEST_TOKEN_999";
+  const malformed = new TextEncoder().encode(`{\n  "token": "${secret}",\n  broken\n}`);
+  let message = "";
+  try {
+    parseAppPublicationDeclaration(malformed, "app");
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+  expect(message).toMatch(
+    /^app\/app\.publish\.json is not valid JSON \(at .+\)\. Check its syntax\.$/,
+  );
+  expect(message).not.toContain(secret);
+  expect(message).not.toContain("\n");
+});

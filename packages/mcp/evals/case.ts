@@ -25,12 +25,15 @@ export interface EvalCase {
   /** What the dohc app answers, by request verb. An unlisted verb ends the sample as an error. */
   desktop?: Record<string, DesktopAnswer>;
   /** Builds fresh per-sample stateful desktop handlers (for example, SQLite-backed datasets). */
-  setupDesktop?: (root: string) => Record<string, DesktopAnswer>;
+  setupDesktop?: (
+    root: string,
+    options?: { onWrite?: (path: string) => void },
+  ) => Record<string, DesktopAnswer> | Promise<Record<string, DesktopAnswer>>;
   /** What the person asks the agent. */
   prompt: string;
   expect: Expectation;
   /** Optional deterministic checks on the finished workspace, calls, and final answer. */
-  gradeRun?: (run: RunRecord) => Check[];
+  gradeRun?: (run: RunRecord) => Check[] | Promise<Check[]>;
   /**
    * Calls that meet `expect`, and the answer that goes with them. cases.test.ts replays them
    * against the real server with no model, so a case that cannot pass fails in CI.

@@ -111,21 +111,6 @@ const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
     .strict(),
   z.object({ ...publication, manifestUnavailable: z.literal(true) }).strict(),
 ]);
-const APP_PUBLICATION_ACTIONS = [
-  "createLink",
-  "listLocal",
-  "checkLocal",
-  "prepareLocal",
-  "launchLocal",
-  "list",
-  "prepare",
-  "approve",
-  "cancel",
-  "withdraw",
-  "revokeCollection",
-  "reviewReactivation",
-] as const;
-
 function appPublicationAction<Shape extends z.ZodRawShape>(shape: Shape) {
   const names = Object.keys(shape);
   const action = (shape.action as { value?: string } | undefined)?.value ?? "";
@@ -138,92 +123,98 @@ function appPublicationAction<Shape extends z.ZodRawShape>(shape: Shape) {
   });
 }
 
+const APP_PUBLICATION_REQUEST_OPTIONS = [
+  appPublicationAction({
+    action: z.literal("createLink"),
+    workspaceId: id,
+    appRoot: z.string().min(1).max(1024),
+    paths: selector.shape.paths.optional(),
+    access: access.default("view"),
+    operationId: z.string().uuid(),
+    agentLabel: z.string().min(1).max(160).optional(),
+  }),
+  appPublicationAction({
+    action: z.literal("listLocal"),
+    workspaceId: id,
+    appRoot: z.string().min(1).max(1024),
+  }),
+  appPublicationAction({
+    action: z.literal("checkLocal"),
+    workspaceId: id,
+    appRoot: z.string().min(1).max(1024),
+  }),
+  appPublicationAction({
+    action: z.literal("prepareLocal"),
+    workspaceId: id,
+    appRoot: z.string().min(1).max(1024),
+  }),
+  appPublicationAction({
+    action: z.literal("launchLocal"),
+    workspaceId: id,
+    publicationId: hash,
+  }),
+  appPublicationAction({
+    action: z.literal("list"),
+    workspaceId: id,
+    appRoot: z.string().min(1).max(1024),
+    cursor: hash.optional(),
+  }),
+  appPublicationAction({
+    action: z.literal("prepare"),
+    workspaceId: id,
+    appRoot: z.string().min(1).max(1024),
+    shareId: id,
+    grantId: id,
+  }),
+  appPublicationAction({
+    action: z.literal("approve"),
+    workspaceId: id,
+    approvalId: z.string().uuid(),
+    candidateDigest: hash,
+    agentLabel: z.string().min(1).max(160).optional(),
+    linkReads: z
+      .array(
+        z
+          .object({
+            operationId: z.string().uuid(),
+            fieldIds: z.array(z.string().uuid()).max(128),
+          })
+          .strict(),
+      )
+      .max(128)
+      .optional(),
+  }),
+  appPublicationAction({
+    action: z.literal("cancel"),
+    workspaceId: id,
+    approvalId: z.string().uuid(),
+  }),
+  appPublicationAction({
+    action: z.literal("withdraw"),
+    workspaceId: id,
+    publicationId: hash,
+    expectedAuthorityRevision: z.number().int().positive(),
+  }),
+  appPublicationAction({
+    action: z.literal("revokeCollection"),
+    workspaceId: id,
+    publicationId: hash,
+    expectedAuthorityRevision: z.number().int().positive(),
+  }),
+  appPublicationAction({
+    action: z.literal("reviewReactivation"),
+    workspaceId: id,
+    publicationId: hash,
+  }),
+] as const;
+
+const APP_PUBLICATION_ACTIONS = APP_PUBLICATION_REQUEST_OPTIONS.map(
+  (option) => option.shape.action.value,
+);
+
 export const OwnerAppPublicationRequest = z.discriminatedUnion(
   "action",
-  [
-    appPublicationAction({
-      action: z.literal("createLink"),
-      workspaceId: id,
-      appRoot: z.string().min(1).max(1024),
-      paths: selector.shape.paths.optional(),
-      access: access.default("view"),
-      operationId: z.string().uuid(),
-      agentLabel: z.string().min(1).max(160).optional(),
-    }),
-    appPublicationAction({
-      action: z.literal("listLocal"),
-      workspaceId: id,
-      appRoot: z.string().min(1).max(1024),
-    }),
-    appPublicationAction({
-      action: z.literal("checkLocal"),
-      workspaceId: id,
-      appRoot: z.string().min(1).max(1024),
-    }),
-    appPublicationAction({
-      action: z.literal("prepareLocal"),
-      workspaceId: id,
-      appRoot: z.string().min(1).max(1024),
-    }),
-    appPublicationAction({
-      action: z.literal("launchLocal"),
-      workspaceId: id,
-      publicationId: hash,
-    }),
-    appPublicationAction({
-      action: z.literal("list"),
-      workspaceId: id,
-      appRoot: z.string().min(1).max(1024),
-      cursor: hash.optional(),
-    }),
-    appPublicationAction({
-      action: z.literal("prepare"),
-      workspaceId: id,
-      appRoot: z.string().min(1).max(1024),
-      shareId: id,
-      grantId: id,
-    }),
-    appPublicationAction({
-      action: z.literal("approve"),
-      workspaceId: id,
-      approvalId: z.string().uuid(),
-      candidateDigest: hash,
-      agentLabel: z.string().min(1).max(160).optional(),
-      linkReads: z
-        .array(
-          z
-            .object({
-              operationId: z.string().uuid(),
-              fieldIds: z.array(z.string().uuid()).max(128),
-            })
-            .strict(),
-        )
-        .max(128)
-        .optional(),
-    }),
-    appPublicationAction({
-      action: z.literal("cancel"),
-      workspaceId: id,
-      approvalId: z.string().uuid(),
-    }),
-    appPublicationAction({
-      action: z.literal("withdraw"),
-      workspaceId: id,
-      publicationId: hash,
-      expectedAuthorityRevision: z.number().int().positive(),
-    }),
-    appPublicationAction({
-      action: z.literal("revokeCollection"),
-      workspaceId: id,
-      publicationId: hash,
-      expectedAuthorityRevision: z.number().int().positive(),
-    }),
-    appPublicationAction({
-      action: z.literal("reviewReactivation"),
-      workspaceId: id,
-      publicationId: hash,
-    }),
-  ],
+  APP_PUBLICATION_REQUEST_OPTIONS,
   {
     error: (issue) =>
       issue.code === "invalid_union"

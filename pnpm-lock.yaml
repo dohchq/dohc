@@ -854,6 +854,9 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@dohc/app-backend-runtime':
+        specifier: workspace:*
+        version: link:../app-backend-runtime
       '@dohc/app-browser':
         specifier: workspace:*
         version: link:../app-browser

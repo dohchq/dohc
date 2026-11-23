@@ -51,11 +51,11 @@ function describe(match: CallMatch): string {
   return `${match.tool}${args}${outcome}`;
 }
 
-export function grade(
+export async function grade(
   expect: Expectation,
   run: RunRecord,
-  extraChecks?: (run: RunRecord) => Check[],
-): Check[] {
+  extraChecks?: (run: RunRecord) => Check[] | Promise<Check[]>,
+): Promise<Check[]> {
   const checks: Check[] = [];
   const called = run.calls.map((call) => call.tool).join(", ") || "no tools";
 
@@ -139,7 +139,7 @@ export function grade(
     }
   }
 
-  if (extraChecks) checks.push(...extraChecks(run));
+  if (extraChecks) checks.push(...(await extraChecks(run)));
 
   return checks;
 }
