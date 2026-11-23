@@ -206,6 +206,30 @@ describe("the relay's folder rule spans", () => {
     }
   });
 
+  it("releases the old path when a move renames the marker before the folder's other files", () => {
+    const r = relay();
+    try {
+      r.rule(R, VIEW);
+      const first = r.mark("A", R);
+      r.write("A/x.md", "x");
+      r.write("A/sub/y.md", "y");
+      const moved = r.rename("A/.dohc-access", "B/.dohc-access");
+      r.rename("A/x.md", "B/x.md");
+      expect(r.bindings()).toEqual([
+        [R, "A"],
+        [R, "B"],
+      ]);
+      const last = r.rename("A/sub/y.md", "B/sub/y.md");
+      expect(r.rows()).toEqual([
+        { folder: "A", rule_text: VIEW, from_seq: first, to_seq: last },
+        { folder: "B", rule_text: VIEW, from_seq: moved, to_seq: null },
+      ]);
+      expect(r.bindings()).toEqual([[R, "B"]]);
+    } finally {
+      r.db.close();
+    }
+  });
+
   it("keeps a copied folder's rule on both paths, and a path ruled while a file is left in it", () => {
     const r = relay();
     try {
