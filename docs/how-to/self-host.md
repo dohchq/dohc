@@ -573,7 +573,18 @@ Each server release serves a range of relay API versions, and `GET /ready` on th
 A desktop newer than that range tells its user that the server runs an older version of dohc.
 Upgrade the server to serve that desktop again.
 
-For an upgrade, stop the deployment and save a snapshot and private archive.
+An upgrade needs one stop.
+Stop the deployment first, then save a relay snapshot and a private archive:
+
+```sh
+node tools/self-host/bootstrap.mjs stop
+node scripts/self-host/recovery.mjs backup /srv/dohc-backups/relay-before-upgrade
+node scripts/self-host/recovery.mjs archive /srv/dohc-backups/deployment-before-upgrade
+```
+
+Both recovery commands leave a stopped deployment stopped.
+If the deployment is running, each of them stops it and starts it again, so the server goes away three times instead of once.
+
 Replace the shipped Compose files, scripts, and documentation with the new release bundle.
 Keep your `.env.self-host`, including `DOHC_DEPLOYMENT_NAME`, and all existing data volumes.
 Do not rerun `init`.
@@ -583,7 +594,8 @@ Load the new release image, then select it:
 node tools/self-host/bootstrap.mjs upgrade --image dohc-self-host:NEW_VERSION
 ```
 
-The upgrade preserves volumes and secrets and saves the previous configuration privately.
+The upgrade starts the deployment and checks readiness.
+It preserves volumes and secrets and saves the previous configuration privately.
 If the configuration has no `DOHC_SHARE_WEB_SESSION_SEAL_KEY`, the upgrade adds one. With it, open share pages go on working when the server restarts.
 It can apply database migrations. If it fails, preserve the data and follow the recovery procedure.
 On a large relay log, the first start after an upgrade can take several minutes.

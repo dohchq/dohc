@@ -48,6 +48,7 @@ function runner({
   missingVolume = false,
   mounts = [{ Type: "volume", Name: "recovery_data", RW: true }],
   volumes = {},
+  running = "sync-relay\nshare-web\n",
 } = {}) {
   const calls = [];
   const known = { recovery_data: bound("/mnt/disk/dohc/sync-relay"), ...volumes };
@@ -74,7 +75,7 @@ function runner({
             Config: { Labels: { "com.docker.compose.project": "other" } },
           },
         ]);
-      if (args.includes("ps")) return "sync-relay\nshare-web\n";
+      if (args.includes("ps")) return running;
       if (args.includes("run") && failMaintenance) throw new Error("refused");
       return "done";
     },
@@ -99,6 +100,27 @@ test("backup stops before maintenance and resumes only previously running servic
       mock.calls.findIndex((args) => args.includes("stop")),
   );
   assert.deepEqual(mock.calls.at(-1), ["compose", "start", "sync-relay", "share-web"]);
+});
+
+test("backup leaves a deployment that was already stopped stopped", async (t) => {
+  const root = await fixture(t),
+    mock = runner({ running: "" }),
+    logged = [];
+  await runRecovery(
+    parseRecoveryArguments(["backup", join(root, "snapshot")]),
+    mock.run,
+    (line) => logged.push(line),
+    ["compose"],
+  );
+  assert.equal(
+    mock.calls.some((args) => args.includes("run")),
+    true,
+  );
+  assert.equal(
+    mock.calls.some((args) => args.includes("start")),
+    false,
+  );
+  assert.match(logged.at(-1), /^Services remain stopped\./);
 });
 
 test("missing deployment volumes refuse every maintenance operation before stop", async (t) => {
