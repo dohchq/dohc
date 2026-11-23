@@ -946,6 +946,39 @@ describe("what a member reaches", () => {
     expect(admin.marks).toEqual([]);
   });
 
+  it("refuses an admin's move across a folder rule, which would leave the rule behind", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    await ownerRule(h, "finance", "");
+    await ownerWrite(h, "finance/budget.md", "numbers");
+    const move = (to: string, id: string) =>
+      post(h, "ana", `/sync/shares/${shareId}/proposals`, {
+        submitId: id,
+        ops: [
+          {
+            basedOnPath: "finance/budget.md",
+            basedOnBlobSha256: sha256("numbers"),
+            operation: "write",
+            afterPath: to,
+            afterBlobSha256: sha256("numbers"),
+            afterContentKind: "text",
+            afterByteLength: "numbers".length,
+            recordedAtMs: 20,
+          },
+        ],
+      });
+    expect(await (await move("finance 2026/budget.md", "out")).json()).toMatchObject({
+      code: "share_op_rejected",
+      error: "Ask the owner to move this.",
+    });
+    const inside = await move("finance/2026 budget.md", "inside");
+    expect(inside.status, await inside.clone().text()).toBe(200);
+  });
+
   it("checks proposals, pages and Comments at the folder target, including hidden and folded ancestors", async () => {
     const { h, storage } = await seed();
     await invited(h, "ana");
