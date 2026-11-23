@@ -131,7 +131,7 @@ export interface OwnerYDocDeliveryApplyInput extends OwnerYDocDeliveryTarget {
   readonly previousAcceptedCursor: number;
   readonly journalCursor: number;
   readonly updateBytes: Uint8Array;
-  /** A room's save: the last room position it holds, below its journal cursor. */
+  /** A room's save: the position through which every room row is saved, below its journal cursor. */
   readonly rowsThrough?: number;
 }
 export interface OwnerYDocDeliveryReceipt {

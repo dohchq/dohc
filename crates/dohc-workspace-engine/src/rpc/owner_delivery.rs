@@ -125,7 +125,7 @@ pub(crate) struct OwnerUploadParams {
     pub byte_length: usize,
     pub digest: String,
     pub host_vector_byte_length: Option<usize>,
-    /// The last room position a room's save holds, below its journal cursor.
+    /// The position through which a room's save leaves every row saved, below its journal cursor.
     #[serde(default)]
     pub rows_through: Option<i64>,
 }

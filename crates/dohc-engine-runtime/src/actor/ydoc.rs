@@ -510,8 +510,8 @@ impl ActorHandle {
     }
 
     /// Main-owned authenticated feed only. A delivery ACK never calls this method.
-    /// A room's save names `rows_through`, the last room position it holds;
-    /// the owner's screen then drops the room's rows through it.
+    /// A room's save names `rows_through`, the position through which every room
+    /// row is saved; the owner's screen then drops the room's rows through it.
     #[allow(clippy::too_many_arguments)]
     pub async fn owner_ydoc_apply_accepted(
         &self,
