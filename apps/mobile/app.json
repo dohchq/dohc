@@ -5,6 +5,7 @@
     "scheme": "dohc",
     "version": "0.1.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "app.dohc.mobile",
@@ -18,7 +19,12 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store",
+      [
+        "expo-secure-store",
+        {
+          "faceIDPermission": false
+        }
+      ],
       "./plugins/apsEnvironmentPerBuild",
       "expo-notifications",
       "./plugins/iosCameraWithoutBarcodeCompanion",
