@@ -757,6 +757,7 @@ export const MCP_TOOL_GROUPS: readonly {
       "dohc_read_change",
       "dohc_read_operation",
       "dohc_undo_operation",
+      "dohc_plan_agent_run_undo",
     ],
   },
   {
