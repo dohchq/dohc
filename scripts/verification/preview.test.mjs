@@ -50,6 +50,16 @@ async function until(predicate) {
   }
 }
 
+function exited(pid) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    if (error.code === "ESRCH") return true;
+    throw error;
+  }
+}
+
 async function delivery(t, { smoke = "passed" } = {}) {
   const root = scratch(t);
   const app = join(root, "app");
@@ -329,15 +339,7 @@ test(
       assert.equal(await (await fetch(`http://127.0.0.1:${app.port}`)).text(), "running");
       assert.match(readFileSync(session.log, "utf8"), /app log after launcher exit/u);
       await fetch(`http://127.0.0.1:${app.port}/quit`);
-      await until(() => {
-        try {
-          process.kill(app.pid, 0);
-          return false;
-        } catch (error) {
-          if (error.code === "ESRCH") return true;
-          throw error;
-        }
-      });
+      await until(() => exited(app.pid));
       app = undefined;
     } finally {
       if (launcher.exitCode === null && launcher.signalCode === null) launcher.kill();
@@ -368,17 +370,15 @@ test(
     try {
       const result = await launchPreview(root, {
         log: () => {},
-        spawnApp: (_executable, _args, options) => {
-          const child = spawn(process.env.ComSpec, ["/d", "/q"], {
-            ...options,
-            windowsHide: true,
-            stdio: ["pipe", options.stdio[1], options.stdio[2]],
-          });
-          child.stdin.end(
-            `@echo off\r\nstart "" /b "${process.execPath}" "${script}" "${record}"\r\nexit\r\n`,
-          );
-          return child;
-        },
+        spawnApp: (_executable, _args, options) =>
+          spawn(
+            process.execPath,
+            [
+              "-e",
+              `require("node:child_process").spawn(process.execPath, ${JSON.stringify([script, record])}, { detached: true, stdio: ["ignore", "inherit", "inherit"] }).unref();`,
+            ],
+            options,
+          ),
       });
       assert.equal(result.code, 0);
       assert.ok(
@@ -397,6 +397,7 @@ test(
         } catch (error) {
           if (error.code !== "ESRCH") throw error;
         }
+        await until(() => exited(descendantPid));
       }
     }
   },
