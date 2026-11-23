@@ -190,10 +190,6 @@ function sameValue(one: unknown, other: unknown): boolean {
   return one.every((value, at) => sameValue(value, other[at]));
 }
 
-function samePath(one: readonly string[], other: readonly string[]): boolean {
-  return one.length === other.length && one.every((id, at) => id === other[at]);
-}
-
 function markAttributes(marks: readonly Mark[]): Attributes {
   return Object.fromEntries(marks.map((mark) => [mark.type.name, { ...mark.attrs }]));
 }
@@ -404,7 +400,13 @@ function writeRange(
   const opened = blockStartingAt(reading, oldStart);
   const startsIn = holder >= 0 ? holder : opened >= 0 ? opened : first?.block;
   const continuesLaterBlock = replaced && startsIn !== undefined && ends > startsIn;
-  if (continuesLaterBlock && boundaryAt(reading, ends) >= 0) {
+  const putsBlocksInFront =
+    replaced &&
+    holder < 0 &&
+    opened >= 0 &&
+    ends === opened &&
+    tokens.filter((token) => "block" in token).length > 1;
+  if ((continuesLaterBlock || putsBlocksInFront) && boundaryAt(reading, ends) >= 0) {
     const kept = boundaryAt(reading, ends);
     const continued = tokens.findLastIndex((token) => "block" in token);
     const path = pathAt(reading, oldStart);
@@ -417,7 +419,7 @@ function writeRange(
         path,
         formattingInForceAfter(sequence, index),
       ),
-      { delete: kept - index },
+      ...(kept > index ? [{ delete: kept - index }] : []),
       { retain: 1 },
       ...inserts(tokens.slice(continued + 1), path, behind),
       ...(last.index > kept ? [{ delete: last.index - kept }] : []),
@@ -428,13 +430,18 @@ function writeRange(
     return;
   }
   const kept = countBelow(reading.starts, oldEnd);
-  if (replaced && first.piece === null && startsWithBlock && !continuesLaterBlock) {
-    const path = pathAt(reading, oldStart);
+  const keepsItsStart =
+    replaced &&
+    first.piece === null &&
+    first.block === opened &&
+    startsWithBlock &&
+    !continuesLaterBlock;
+  if (keepsItsStart) {
     setBoundary(
       boundaryElement(reading, first.block)!,
       reading.blocks[first.block]!.node,
       start.block,
-      samePath(path, reading.paths[first.block]!) ? null : path,
+      null,
     );
     rest = rest.slice(1);
     index += 1;
@@ -706,9 +713,10 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  * What a map keeps, keeps its items. A replaced range that starts with a block's start, replaced
  * by one that starts with a block's start, keeps that boundary and sets its attributes, and so
  * does one inline item replaced by one of its kind. A block start put at the very start of a block
- * that has text goes in front of that block's boundary, so the boundary stays with its text. Steps
- * that replace nothing are written as formatting and as attributes of the same elements. Every
- * new boundary carries the formatting in force where it goes, and its path.
+ * that has text goes in front of that block's boundary, so the boundary stays with its text; so do
+ * the blocks a range puts in front of a block whose start it replaces and whose text it keeps.
+ * Steps that replace nothing are written as formatting and as attributes of the same elements.
+ * Every new boundary carries the formatting in force where it goes, and its path.
  *
  * A step that deletes a block and keeps text that followed it never reuses that block's boundary:
  * the text keeps its own boundary. So does the text of a later block that a range starting
@@ -775,12 +783,19 @@ function marksOfLetters(block: ProseMirrorNode): string {
  * written, by their index in what the sequence reads as now. The transactions are the ones of
  * one dispatch, and the first starts from that reading.
  *
- * Nothing is written and nothing is copied. Each step says what it touches: the block its range
- * starts in is edited, and so is each block a mark or an attribute step changes; a block whose
- * start a range takes away or replaces, and a block a range splits or ends, can alter the
- * paragraph after it and its list item's added first paragraph. `linesGiven`, the rule the
- * reference writer asks too, turns that into the blocks to give. A block whose own start the
- * dispatch takes away gets none, as a paragraph that Backspace joins away.
+ * Nothing is written and nothing is copied. Each step says what it touches, as the reference
+ * writer's operations do. The block a range starts in is edited, and so is each block a mark or
+ * an attribute step changes. A block a range starts a block in is split, also when the range
+ * replaces a selection. A block put right under another splits that one at its end, as a new
+ * line under it does, and the end of an empty block is its start too. One put first in the note,
+ * in a container or in a list item's stored content splits the block under it at its start, and
+ * so do blocks put in front of a block whose start the range replaces and whose text it keeps.
+ * A block whose start a range replaces with a start of another kind changes kind; with a start
+ * of its own kind it only changes an attribute. A block whose start a range takes away goes. A
+ * block that is split, changes kind or goes can alter the paragraph after it, and one that goes,
+ * changes kind or is split at its start its list item's added first paragraph. `linesGiven`,
+ * the rule the reference writer asks too, turns that into the blocks to give. A block whose own
+ * start the dispatch takes away gets none, as a paragraph that Backspace joins away.
  */
 export function linesGivenBoundaries(
   writing: BodyWriting,
@@ -801,6 +816,11 @@ export function linesGivenBoundaries(
   const touch = (block: number) => {
     after.add(block);
     above.add(block);
+  };
+  const splitAt = (block: number, atItsStart: boolean) => {
+    edits.add(block);
+    after.add(block);
+    if (atItsStart) above.add(block);
   };
 
   for (const transaction of transactions)
@@ -829,38 +849,52 @@ export function linesGivenBoundaries(
           )
             return;
           const from = back(oldStart, -1);
-          const to = back(oldEnd, 1);
+          const to = oldEnd === oldStart ? from : back(oldEnd, 1);
           const tokens = tokensBetween(now, newStart, newEnd);
-          const startsBlock = tokens.some((token) => "block" in token);
+          const started = tokens.filter((token) => "block" in token);
           const holder = blockHolding(reading, from);
-          if (holder >= 0) edits.add(holder);
-          if (to === from) {
-            if (!startsBlock) return;
-            after.add(holder >= 0 ? holder : countBelow(reading.starts, from) - 1);
-            if (holder >= 0 && from === reading.starts[holder]! + 1) above.add(holder);
-            return;
-          }
+          const endsIn = to > from ? blockHolding(reading, to) : holder;
           const first = tokens[0];
-          const endsIn = blockHolding(reading, to);
+          const startsWithBlock = first !== undefined && "block" in first;
+          if (holder >= 0) {
+            edits.add(holder);
+            const startsALaterBlockAgain = endsIn > holder ? 1 : 0;
+            if (started.length > startsALaterBlockAgain) {
+              after.add(holder);
+              if (startsWithBlock && was.resolve(oldStart).parentOffset === 0) above.add(holder);
+            }
+          } else if (to === from && started.length > 0) {
+            const upper = countBelow(reading.starts, from) - 1;
+            const lower = blockStartingAt(reading, from);
+            const over = reading.blocks[upper]?.node;
+            const isUnderIt =
+              over !== undefined &&
+              reading.starts[upper]! + over.nodeSize === from &&
+              !isAddedParagraph(reading, upper);
+            if (isUnderIt) splitAt(upper, over.content.size === 0);
+            else if (lower >= 0) splitAt(lower, true);
+          }
+          const last = started.at(-1);
           for (
             let block = countBelow(reading.starts, from);
             block < reading.blocks.length && reading.starts[block]! < to;
             block++
           ) {
+            const kind = reading.blocks[block]!.node.type;
             const keepsItsStart =
-              first !== undefined &&
-              "block" in first &&
-              reading.starts[block] === from &&
-              endsIn <= block;
-            const startsAgain = block === endsIn && startsBlock && !keepsItsStart;
-            const again = tokens.findLast((token) => "block" in token);
-            const asAnotherKind =
-              startsAgain &&
-              again !== undefined &&
-              "block" in again &&
-              again.block.type !== reading.blocks[block]!.node.type;
-            if (keepsItsStart) edits.add(block);
-            else gone.add(block);
+              startsWithBlock && reading.starts[block] === from && endsIn <= block;
+            if (keepsItsStart) {
+              const putInFront = endsIn === block && started.length > 1;
+              const own = putInFront ? last : first;
+              edits.add(block);
+              if (started.length > 1) after.add(block);
+              if (putInFront) above.add(block);
+              if (own !== undefined && "block" in own && own.block.type !== kind) touch(block);
+              continue;
+            }
+            gone.add(block);
+            const startsAgain = block === endsIn && started.length > 0;
+            const asAnotherKind = last !== undefined && "block" in last && last.block.type !== kind;
             if (!startsAgain || asAnotherKind) touch(block);
           }
         });

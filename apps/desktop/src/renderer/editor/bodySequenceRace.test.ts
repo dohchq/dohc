@@ -19,6 +19,7 @@ import {
 import { BodySequence } from "@dohc/ydoc-projection/body-sequence-tiptap";
 import {
   boundary,
+  element,
   exchange,
   LINES,
   note,
@@ -435,6 +436,88 @@ it.skipIf(!process.env.BODY_SEQUENCE_COMMANDS)(
     console.log(report.join("\n"));
   },
 );
+
+describe("the desktop's commands next to a line with no boundary of its own", () => {
+  const WIKILINK = () => element("wikilink", { target: "Page", label: null });
+  const codeThenTextItCannotHold = () =>
+    noteOf(({ sequence }) => {
+      sequence.insertEmbed(0, boundary({ type: "codeBlock", language: null }), {});
+      sequence.insert(1, "ab", {});
+      sequence.insertEmbed(3, WIKILINK(), {});
+      sequence.insert(4, "cd", {});
+    });
+  const mathThenText = () =>
+    noteOf(({ sequence }) => {
+      sequence.insertEmbed(0, boundary({ type: "mathBlock", tex: "a+b" }), {});
+      sequence.insert(1, "spilled text", {});
+    });
+
+  it("sends one change for a code block's new language, and gives the paragraph after the code no boundary", () => {
+    const a = desktop(codeThenTextItCannotHold(), 10);
+    expect(a.view.state.doc.toString()).toBe('doc(codeBlock("ab"), paragraph(wikilink, "cd"))');
+    a.select([0, 1]);
+    const effects = a.effects(() =>
+      a.editor.commands.updateAttributes("codeBlock", { language: "js" }),
+    );
+    expect(a.view.state.doc.child(0).attrs.language).toBe("js");
+    expect(a.sent).toHaveLength(1);
+    expect(effects.madeBoundaries).toEqual([]);
+    a.expectMirror();
+  });
+
+  it("sends one change for a math block's new TeX, and gives the paragraph after it no boundary", () => {
+    const a = desktop(mathThenText(), 10);
+    expect(a.view.state.doc.toString()).toBe('doc(mathBlock, paragraph("spilled text"))');
+    const effects = a.effects(() =>
+      a.view.dispatch(a.view.state.tr.setNodeMarkup(0, undefined, { tex: "a+b+c" })),
+    );
+    expect(a.view.state.doc.child(0).attrs.tex).toBe("a+b+c");
+    expect(a.sent).toHaveLength(1);
+    expect(effects.madeBoundaries).toEqual([]);
+    a.expectMirror();
+  });
+
+  it("gives the paragraph after a code block its boundary first when setHorizontalRule replaces a selection in the code, so a letter typed at that paragraph's start stays there when the divider is undone", () => {
+    const a = desktop(codeThenTextItCannotHold(), 10);
+    const b = person(codeThenTextItCannotHold(), 20);
+    a.select([0, 1], [0, 2]);
+    expect(a.editor.commands.setHorizontalRule()).toBe(true);
+    expect(a.view.state.doc.toString()).toBe(
+      'doc(codeBlock("a"), horizontalRule, paragraph(wikilink, "cd"))',
+    );
+    expect(a.sent).toHaveLength(2);
+    exchange(a, b);
+    b.typeAt(2, 0, "P");
+    exchange(b, a);
+    expect(a.undo()).toBe(true);
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.view.state.doc.toString()).toBe(
+        'doc(codeBlock("ab"), paragraph("P", wikilink, "cd"))',
+      );
+    }
+  });
+
+  it("puts setHorizontalRule's divider in front of a line's own boundary when the caret is at the line's start, so the line is still the heading someone else made it at the same moment", () => {
+    const a = desktop(note(...LINES), 10);
+    const b = person(note(...LINES), 20);
+    const [first, second, third] = a.boundaryIds();
+    a.select([1, 0]);
+    const effects = a.effects(() => a.editor.commands.setHorizontalRule());
+    expect(effects.goneBoundaries).toEqual([]);
+    expect(effects.madeBoundaries).toHaveLength(1);
+    expect(a.boundaryIds()).toEqual([first, effects.madeBoundaries[0], second, third]);
+    b.select([1, 0]);
+    b.retype("heading", { level: 2 });
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.blocks()).toEqual(["paragraph", "horizontalRule", "h2", "paragraph"]);
+      expect(each.lines()).toEqual(["One one", "", "Two two two", "Three"]);
+    }
+  });
+});
 
 describe("the desktop editor's own plugins, which add to a change", () => {
   const ADDRESS = "https://example.com";
