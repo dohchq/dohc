@@ -9,6 +9,7 @@ import { useTheme } from "../theme";
 import { waitingToSend } from "../demo";
 import type { PhoneWorkspace } from "./types";
 import { useWorkspaceMenu } from "./workspaceMenu";
+import { symbolFallback } from "../symbolFallback";
 
 // The sample's "you", in a sample build only (src/sampleBuild.ts).
 // src/routes.test.ts reads the next statement as text, on one line.
@@ -63,7 +64,7 @@ export function ChatsHeader({
             weight="semibold"
             tintColor={theme.muted}
             style={styles.chevron}
-            fallback={null}
+            fallback={symbolFallback("chevron.down", 13, theme.muted)}
           />
         </Pressable>
       ) : (

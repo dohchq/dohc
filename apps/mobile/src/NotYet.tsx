@@ -1,5 +1,6 @@
 import { SymbolView, type SymbolViewProps } from "expo-symbols";
 import { StyleSheet, Text, View } from "react-native";
+import { symbolFallback } from "./symbolFallback";
 import { useTheme } from "./theme";
 
 // A screen that isn't built yet says so plainly instead of showing pretend content.
@@ -7,7 +8,12 @@ export function NotYet({ symbol, title }: { symbol: SymbolViewProps["name"]; tit
   const theme = useTheme();
   return (
     <View style={[styles.screen, { backgroundColor: theme.bg }]}>
-      <SymbolView name={symbol} size={40} tintColor={theme.subtle} fallback={null} />
+      <SymbolView
+        name={symbol}
+        size={40}
+        tintColor={theme.subtle}
+        fallback={symbolFallback(symbol, 40, theme.subtle)}
+      />
       {title ? <Text style={[styles.title, { color: theme.ink }]}>{title}</Text> : null}
       <Text style={[styles.body, { color: theme.muted }]}>Not built yet</Text>
     </View>
