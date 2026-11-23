@@ -1000,6 +1000,7 @@ describe("the owner's controls", () => {
         await owner(f, `${path}/reach`, {
           method: "PUT",
           body: {
+            revision: (await roster(f)).revision,
             reach: [
               { workspaceId: WS_A, level: "comment" },
               { workspaceId: WS_B, level: "view" },
@@ -1051,8 +1052,11 @@ describe("the owner's controls", () => {
   it("sets reach only to the account's own workspaces, at View, Comment, or Edit", async () => {
     const f = await fixture();
     const agent = await signIn(f);
-    const setReach = (reach: unknown) =>
-      owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach } });
+    const setReach = async (reach: unknown) =>
+      owner(f, `/${agent.agentId}/reach`, {
+        method: "PUT",
+        body: { reach, revision: (await roster(f)).revision },
+      });
     expect((await setReach([{ workspaceId: OTHER_WS, level: "view" }])).status).toBe(400);
     expect((await setReach([{ workspaceId: WS_A, level: "admin" }])).status).toBe(400);
     expect(
@@ -1067,6 +1071,25 @@ describe("the owner's controls", () => {
     expect((await owner(f, `/${agent.agentId}/reach`, { method: "POST" })).status).toBe(405);
     expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
     await ok(await setReach([{ workspaceId: WS_A, level: "edit" }]));
+    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "edit" }]);
+  });
+
+  it("refuses a reach save made from an older roster, such as one shown before a rejoin dropped reach", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const shown = (await roster(f)).revision;
+    await ok(
+      await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Research" } }),
+    );
+    const save = (revision: unknown) =>
+      owner(f, `/${agent.agentId}/reach`, {
+        method: "PUT",
+        body: { reach: [{ workspaceId: WS_A, level: "edit" }], revision },
+      });
+    await expectCode(await save(shown), 409, "conflict");
+    expect((await save("1")).status).toBe(400);
+    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
+    await ok(await save(shown + 1));
     expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "edit" }]);
   });
 
@@ -1221,8 +1244,9 @@ function setOwner(f: Fixture, workspaceId: string, userId: string): void {
   }
 }
 
-function setReach(f: Fixture, agent: Signed, reach: Reach): Promise<Response> {
-  return owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach } });
+async function setReach(f: Fixture, agent: Signed, reach: Reach): Promise<Response> {
+  const { revision } = await roster(f);
+  return owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach, revision } });
 }
 
 const BOTH_VIEW: Reach = [

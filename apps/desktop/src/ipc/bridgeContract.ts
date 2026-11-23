@@ -8638,6 +8638,8 @@ export const PersonalAgentChange = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("reach"),
     reach: z.array(PersonalAgentReach).max(PERSONAL_AGENT_REACH_LIMIT),
+    // The roster revision the choice was made from. The relay refuses a stale one.
+    revision: z.number().int().nonnegative(),
   }),
   z.strictObject({ kind: z.literal("sign-out") }),
   z.strictObject({ kind: z.literal("remove") }),

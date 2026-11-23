@@ -467,11 +467,14 @@ async function fixture() {
     } as never);
   }
   async function reach(agentId: string, choices: { workspaceId: string; level: string }[]) {
+    const { revision } = (await (await h(request(OWNER, "/sync/personal-agents"))).json()) as {
+      revision: number;
+    };
     const response = await h(
       request(OWNER, `/sync/personal-agents/${agentId}/reach`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ reach: choices }),
+        body: JSON.stringify({ reach: choices, revision }),
       }),
     );
     expect(response.status, await response.clone().text()).toBe(200);

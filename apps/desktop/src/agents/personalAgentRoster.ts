@@ -113,7 +113,7 @@ function requestFor(
       ? { name: change.name }
       : change.kind === "hue"
         ? { hue: change.hue }
-        : { reach: change.reach };
+        : { reach: change.reach, revision: change.revision };
   return {
     path: `${base}/${change.kind}`,
     init: {
@@ -316,7 +316,13 @@ export function createPersonalAgentRoster(deps: {
           errors: {
             400: () => new Refusal(invalidWords(change, host), change.kind === "reach"),
             404: () => new Refusal(`dohc could not find ${name} on ${host}.`, true),
-            409: () => new Refusal(`Sign out ${name} before you remove it.`, true),
+            409: () =>
+              new Refusal(
+                change.kind === "reach"
+                  ? `What ${name} can reach changed. Check it and save again.`
+                  : `Sign out ${name} before you remove it.`,
+                true,
+              ),
             503: () =>
               new Refusal(`${host} could not change ${name} right now. Try again shortly.`, false),
           },

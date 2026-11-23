@@ -689,7 +689,7 @@ it("changes what an agent can reach from its sheet", async () => {
   expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
     accountKey: ACCOUNT_KEY,
     agentId: GROK_ID,
-    change: { kind: "reach", reach: [{ workspaceId: "ws-1", level: "comment" }] },
+    change: { kind: "reach", reach: [{ workspaceId: "ws-1", level: "comment" }], revision: 3 },
     what: "change what Grok Bot can reach",
   });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -750,6 +750,7 @@ it("lists joined workspaces after owned ones, marked Member or Admin, with no Ed
         { workspaceId: "ws-4", level: "view" },
         { workspaceId: "ws-5", level: "comment" },
       ],
+      revision: 3,
     },
     what: "change what Grok Bot can reach",
   });
@@ -807,6 +808,7 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
         { workspaceId: "ws-1", level: "comment" },
         { workspaceId: "ws-3", level: "edit" },
       ],
+      revision: 3,
     },
     what: "remove Old club from Grok Bot's reach",
   });
@@ -891,6 +893,7 @@ it("shows a workspace listed while the reach sheet is open at the reach the agen
         { workspaceId: "ws-2", level: "view" },
         { workspaceId: "ws-3", level: "comment" },
       ],
+      revision: 3,
     },
     what: "change what Grok Bot can reach",
   });
@@ -1024,7 +1027,7 @@ it("opens the agent a notice names on a page of its own, with that agent's reach
   expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
     accountKey: ACCOUNT_KEY,
     agentId: irisId,
-    change: { kind: "reach", reach: [{ workspaceId: "ws-2", level: "comment" }] },
+    change: { kind: "reach", reach: [{ workspaceId: "ws-2", level: "comment" }], revision: 3 },
     what: "change what Iris can reach",
   });
 });

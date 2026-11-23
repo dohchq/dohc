@@ -247,7 +247,7 @@ export function PersonalReachSheet(props: {
     const result = await changePersonalAgent(
       props.account,
       agent,
-      { kind: "reach", reach },
+      { kind: "reach", reach, revision: roster.revision },
       `change what ${agent.name} can reach`,
     );
     if (!open.current) {
@@ -376,6 +376,7 @@ export function PersonalAgentPage(props: {
       {
         kind: "reach",
         reach: agent.reach.filter((entry) => entry.workspaceId !== workspace.workspaceId),
+        revision: roster.revision,
       },
       `remove ${workspace.name ?? "this workspace"} from ${agent.name}'s reach`,
     );

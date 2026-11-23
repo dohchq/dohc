@@ -255,11 +255,14 @@ export async function personalRouteFixture(
     read: () => f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath),
     /** The owner sets the agent's reach in the workspace to `level`, as Settings › Agents does. */
     async reach(agentId: string, level: "view" | "comment" | "edit") {
+      const { revision } = (await (
+        await h(request("owner-1", "/sync/personal-agents"))
+      ).json()) as { revision: number };
       const response = await h(
         request("owner-1", `/sync/personal-agents/${agentId}/reach`, {
           method: "PUT",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ reach: [{ workspaceId: scope.workspaceId, level }] }),
+          body: JSON.stringify({ reach: [{ workspaceId: scope.workspaceId, level }], revision }),
         }),
       );
       expect(response.status, await response.text()).toBe(200);

@@ -78,7 +78,12 @@ function fakeRelay(agents: RelayAgent[] = [relayAgent()]): FakeRelay {
       const [, id, kind] = /^\/sync\/personal-agents\/([^/]+)\/([a-z-]+)$/u.exec(path) ?? [];
       const agent = relay.agents.find((entry) => entry.agentId === decodeURIComponent(id ?? ""));
       if (!agent) return Response.json({ ok: false, error: "not found" }, { status: 404 });
-      const body = request.method === "PUT" ? ((await request.json()) as Partial<RelayAgent>) : {};
+      const body =
+        request.method === "PUT"
+          ? ((await request.json()) as Partial<RelayAgent> & { revision?: number })
+          : {};
+      if (kind === "reach" && body.revision !== relay.revision)
+        return Response.json({ ok: false, error: "conflict" }, { status: 409 });
       if (kind === "name" && body.name) agent.name = body.name;
       if (kind === "hue" && body.hue) agent.hue = body.hue;
       if (kind === "reach" && body.reach) agent.reach = body.reach;
@@ -182,13 +187,33 @@ describe("the personal agents roster in main", () => {
     const result = await roster.change(
       KEY,
       AGENT_ID,
-      { kind: "reach", reach: [] },
+      { kind: "reach", reach: [], revision: 0 },
       "remove Garden club from Sprout's reach",
     );
     expect(result).toEqual({
       ok: false,
       error: "dohc could not remove Garden club from Sprout's reach. Check your connection.",
     });
+  });
+
+  it("asks for a reach saved from an older roster to be checked again, and reads the roster again", async () => {
+    const relay = fakeRelay();
+    const { roster } = setup(relay);
+    await roster.read(false);
+    relay.revision += 1;
+    relay.requests.length = 0;
+
+    const reach = [{ workspaceId: "ws-1", level: "edit" as const }];
+    expect(
+      await roster.change(
+        KEY,
+        AGENT_ID,
+        { kind: "reach", reach, revision: 3 },
+        "change what Grok Bot can reach",
+      ),
+    ).toEqual({ ok: false, error: "What Grok Bot can reach changed. Check it and save again." });
+    await vi.waitFor(() => expect(relay.requests).toContain("GET /sync/personal-agents"));
+    expect(relay.agents[0]?.reach).toEqual([{ workspaceId: "ws-1", level: "view" }]);
   });
 
   it("ends the session when the relay refuses its token", async () => {

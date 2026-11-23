@@ -1164,7 +1164,9 @@ export function membershipName(storage: StorageContext, workspaceId: string): st
 export type PersonalAgentChange =
   | { kind: "name"; name: string }
   | { kind: "hue"; hue: AgentHue }
-  | { kind: "reach"; reach: readonly PersonalReachChoice[] }
+  // The roster revision the person chose from. A rejoin drops reach, so a
+  // choice made before it would bring that reach back.
+  | { kind: "reach"; reach: readonly PersonalReachChoice[]; revision: number }
   | { kind: "sign-out" }
   | { kind: "remove" }
   | { kind: "restore" };
@@ -1228,6 +1230,8 @@ export function changePersonalAgent(
           .run(input.change.hue, agent.agentId);
         break;
       case "reach": {
+        if (personalRosterRevision(storage, input.ownerUserId) !== input.change.revision)
+          return { ok: false, reason: "conflict" };
         if (!reachIsAllowed(storage, input.ownerUserId, input.change.reach, agent.reach))
           return { ok: false, reason: "invalid" };
         const kept = new Map(
