@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   AGENT_ONLY_MAX_DOCUMENTS,
   AGENT_ONLY_MAX_WORKSPACES,
+  LIVE_NOTE_START_MAX_MS,
   RECLAIM_MIN_HOLD_MS,
   RECLAIM_RETENTION_MS,
   SERVICE_HOST_MAX_DOCUMENTS,
@@ -72,7 +73,7 @@ it("refuses a document with no native history at once, and holds one with no sha
     ok: false,
     code: "live-start-failing",
     error:
-      "The server can't start live editing for this document. It keeps trying, and its owner can resume it to try now.",
+      "The server can't start live editing for this document. Its owner can resume it to try again.",
   });
   expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
   f.host.failing.mockReturnValue(undefined);
@@ -112,7 +113,11 @@ it("answers live_paused_by_owner for a Stopped document, and enrolls one retired
   const retired = await fixture();
   retired.storage.ensureOwnedLiveDocument({ intent: "share", ...retired.input });
   retired.revoke();
-  expect(retired.release()).toMatchObject({ retired: true, ownerStop: null });
+  expect(retired.release()).toMatchObject({
+    retired: true,
+    ownerStop: null,
+    note: { generation: 1, state: "off", reason: "access-ended" },
+  });
   const held = retired.agent("editor").open();
   await retired.holding(1, 1);
   expect(retired.read()).toMatchObject({
@@ -121,6 +126,7 @@ it("answers live_paused_by_owner for a Stopped document, and enrolls one retired
     ownerStop: null,
     ownerDemand: false,
     demandAtMs: 2_000,
+    note: { generation: 2, state: "starting", changedBy: "agent:connection-editor" },
   });
   retired.ready();
   retired.route.evaluateWaiting();
@@ -228,7 +234,7 @@ it("never reclaims an owner-opened document for an agent's open, and reclaims on
   expect(await body(await held, 200)).toEqual(ready);
 });
 
-it("clears the demand a refused note's open left once it is idle past retention, and keeps it until then", async () => {
+it("leaves a refused note's open to its start clock, which turns it off past 10 minutes", async () => {
   const f = await fixture(),
     a = f.agent("editor");
   f.revoke();
@@ -243,16 +249,19 @@ it("clears the demand a refused note's open left once it is idle past retention,
   });
   expect(f.storage.reclaimIdleLiveDocuments(2_000 + RECLAIM_RETENTION_MS)).toEqual([]);
   expect(f.read()).toEqual(refused);
-  expect(f.storage.reclaimIdleLiveDocuments(2_000 + RECLAIM_RETENTION_MS + 1)).toMatchObject([
+  expect(f.storage.reclaimIdleLiveDocuments(2_000 + RECLAIM_RETENTION_MS + 1)).toEqual([]);
+  expect(f.read()).toEqual(refused);
+  expect(
+    f.storage.failLapsedLiveNoteStarts(2_000 + LIVE_NOTE_START_MAX_MS, () => "no-lineage"),
+  ).toMatchObject([
     {
       objectId: binding.objectId,
       enabled: false,
       retired: true,
-      ownerStop: null,
-      ownerDemand: false,
-      demandAtMs: null,
+      note: { state: "off", reason: "start-failed", cause: "no-lineage" },
     },
   ]);
+  await expectCode(await a.open(), 409, "live-document-without-lineage");
 });
 
 it("ends a held open when its owner signs the agent out, and answers one whose agent stays signed in", async () => {
@@ -416,6 +425,7 @@ it("enrolls a document once when two agents open it at once, and gives both the 
   const responses = await Promise.all([first.open(), second.open()]);
   for (const response of responses) expect(await body(response, 200)).toEqual(ready);
   expect(f.storage.listServiceHostEnrollments()).toEqual([f.read()]);
+  expect(f.read()?.note.generation).toBe(1);
 });
 
 it("refuses an open at a renamed document's new path, and answers ready at the path it is enrolled at", async () => {

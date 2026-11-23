@@ -79,6 +79,7 @@ export interface OrdinaryActivationProof {
 export type OrdinaryActivationValidation =
   | { kind: "accepted"; baseline: OrdinaryActivationBaseline; proof?: OrdinaryActivationProof }
   | { kind: "refused"; message: string }
+  | { kind: "baseline-refused"; message: string }
   | { kind: "over-budget"; message: string }
   | { kind: "capacity-refused" }
   | { kind: "retry"; reason: "admission-unavailable" };
@@ -154,7 +155,10 @@ export function validateOrdinaryActivation(
     validateRegistration = createLiveMarkdownRegistrationValidator(policy);
   const base = validateRegistration({ document, currentPath, checkpoint: baselineBytes });
   if (base.kind !== "accepted")
-    return { kind: "refused", message: "Native activation does not match the ordinary source." };
+    return {
+      kind: "baseline-refused",
+      message: "Native activation does not match the ordinary source.",
+    };
   const baseline = {
     checkpoint: {
       updateDigest: base.evidence.checkpoint.updateDigest,

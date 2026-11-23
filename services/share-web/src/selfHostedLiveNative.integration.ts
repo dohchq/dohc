@@ -3072,6 +3072,14 @@ it(
         // The share enrolled it and Stop leaves demand as it is, so nothing asked for it.
         ownerDemand: false,
         demandAtMs: null,
+        note: {
+          generation: 1,
+          state: "off",
+          reason: "stopped",
+          cause: null,
+          sinceMs: expect.any(Number),
+          changedBy: `person:${proof.ownerUserId}`,
+        },
       });
       const parking = { status: "pending", reason: "parking" },
         onlyParking = () => expect(harness.releases).toEqual(harness.releases.map(() => parking));

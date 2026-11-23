@@ -86,6 +86,12 @@ export function retainServiceActivation(
       binding.lineageClaimId,
       completed ? "{}" : null,
     );
+  if (completed)
+    raw
+      .prepare(
+        "UPDATE sync_relay_service_host_enrollments SET state='live',changed_by='server' WHERE workspace_id=? AND object_id=? AND state='starting'",
+      )
+      .run(scope.workspaceId, binding.objectId);
   return activationId;
 }
 /**

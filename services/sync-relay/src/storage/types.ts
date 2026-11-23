@@ -776,6 +776,17 @@ export interface SyncRelayStorage {
     objectId: string;
     nowMs: number;
   }): boolean;
+  /** Moves one note's live record. See `moveLiveNote` in `serviceHostEnrollment`. */
+  moveLiveNote(
+    input: import("./serviceHostEnrollment").MoveLiveNoteInput,
+  ): import("./serviceHostEnrollment").MoveLiveNoteResult;
+  /** Moves each note still starting past its start period to off (start-failed). Returns those it moved. */
+  failLapsedLiveNoteStarts(
+    nowMs: number,
+    cause: (
+      enrollment: import("./serviceHostEnrollment").ServiceHostEnrollment,
+    ) => import("./serviceHostEnrollment").LiveNoteStartFailure,
+  ): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   /** Reclaims the documents only recorded demand keeps that went unused for the retention period. Returns those it reclaimed. */
   reclaimIdleLiveDocuments(
     nowMs: number,
