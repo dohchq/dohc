@@ -68,7 +68,7 @@ export class EngineStoreRecoveryFailedError extends Error {
   constructor(cause: unknown) {
     const driftDetail = cause instanceof EngineStoreManifestDriftError ? ` ${cause.message}` : "";
     super(
-      `dohc could not finish rebuilding this workspace's data store.${driftDetail} Rebuild files remain at ${ENGINE_STORE_BACKUP_DIR}. Open this workspace again to retry.`,
+      `dohc could not finish rebuilding this workspace's data store.${driftDetail} Rebuild files remain at ${ENGINE_STORE_BACKUP_DIR}. Reopen this workspace to try again.`,
       { cause },
     );
     this.name = "EngineStoreRecoveryFailedError";
@@ -452,7 +452,7 @@ const engineStoreRebuildRequestMessages: Record<EngineStoreRebuildRequestFailure
   "agent-run-active":
     "An agent is working in this workspace. Wait for it to finish, then try again.",
   "close-failed":
-    "dohc could not finish closing this workspace's data store. Nothing moved. Try again.",
+    "dohc could not finish closing this workspace's data store. Nothing moved. Quit dohc and open this workspace again, then choose Rebuild.",
 };
 
 export class EngineStoreRebuildRequestError extends Error {

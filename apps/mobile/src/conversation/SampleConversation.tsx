@@ -6,7 +6,8 @@ import { SymbolView } from "expo-symbols";
 import { documentWords } from "@dohc/interface-words/documents";
 import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { FileText } from "lucide-react-native";
+import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Composer } from "./Composer";
 import {
   blockedBy,
@@ -50,6 +51,7 @@ import {
   useReact,
   type AnswerActions,
 } from "./useOutbox";
+import { HeaderButton } from "../AndroidHeader";
 import { chatSubtitle, chatTitle } from "../chats/chatLabels";
 import { sampleChat } from "../chats/sample";
 import { demoMode } from "../demo";
@@ -350,27 +352,35 @@ export function SampleConversation() {
           headerTintColor: theme.ink,
           // A file's chat opens its page from the header. It has no "Members and details", which did nothing.
           headerRight: pagePath
-            ? () => (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={documentWords.openPage(title)}
-                  hitSlop={8}
-                  onPress={() =>
-                    router.push({
-                      pathname: "/page",
-                      params: { path: pagePath, t0: String(Date.now()) },
-                    })
-                  }
-                >
-                  <SymbolView
-                    name="doc.text"
-                    size={20}
-                    weight="medium"
-                    tintColor={theme.ink}
-                    fallback={null}
+            ? () => {
+                const openPage = () =>
+                  router.push({
+                    pathname: "/page",
+                    params: { path: pagePath, t0: String(Date.now()) },
+                  });
+                return Platform.OS === "ios" ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={documentWords.openPage(title)}
+                    hitSlop={8}
+                    onPress={openPage}
+                  >
+                    <SymbolView
+                      name="doc.text"
+                      size={20}
+                      weight="medium"
+                      tintColor={theme.ink}
+                      fallback={null}
+                    />
+                  </Pressable>
+                ) : (
+                  <HeaderButton
+                    icon={FileText}
+                    label={documentWords.openPage(title)}
+                    onPress={openPage}
                   />
-                </Pressable>
-              )
+                );
+              }
             : undefined,
         }}
       />

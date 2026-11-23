@@ -26,6 +26,7 @@ import { pathCollisionKey } from "./pathCollisionKey";
 import {
   GENERAL_CHANNEL_WIRE_ID,
   agentIdForChannelWireId,
+  isFixedChatChannelId,
 } from "@dohc/security-contract/chat-wire-ids";
 import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 import {
@@ -868,7 +869,7 @@ function servedChatPayload(
 ): Record<string, unknown> {
   const served = pickServed(record, SERVED_CHAT_FIELDS[opKind]);
   if (
-    opKind === "chat.message.append" &&
+    (opKind === "chat.message.append" || opKind === "chat.reaction.set") &&
     typeof record.authorAgentId === "string" &&
     record.authorAgentId.startsWith(PERSONAL_AGENT_ID_PREFIX)
   ) {
@@ -1522,6 +1523,14 @@ export function filterOpForShareAppend(
     return { allowed: false };
   }
   if (opKind === "chat.decision.set" && !decisionPollFieldsValid(payload)) {
+    return { allowed: false };
+  }
+  const channelId = asRecord(payload)?.channelId;
+  if (
+    opKind === "chat.channel.create" &&
+    typeof channelId === "string" &&
+    isFixedChatChannelId(channelId)
+  ) {
     return { allowed: false };
   }
   if (isWorkspaceSelector(selector)) {

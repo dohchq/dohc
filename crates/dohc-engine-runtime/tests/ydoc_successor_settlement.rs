@@ -129,6 +129,7 @@ fn resolve_document_conflict(store: &mut EngineStore) {
             },
             |tx, result, prepared| {
                 dohc_engine_sync::commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                    .map(drop)
                     .map_err(sync_as_domain)
             },
         )

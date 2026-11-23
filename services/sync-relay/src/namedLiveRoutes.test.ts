@@ -248,6 +248,94 @@ it("tells a link holder a held note whose file moved stopped, not to try again",
   expect(await ask()).toEqual([503, linkRefusalBody("link_live_stopped")]);
 });
 
+it("says in the server log why a link holder was told to try again, once for each reason and with no id of the note, workspace or link", async () => {
+  const f = await fixture(limits, true);
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const told = () =>
+    logged.mock.calls
+      .map(([line]) => String(line))
+      .filter((line) => line.includes("live open told to try again"));
+  f.raw
+    .prepare("UPDATE sync_relay_shares SET selector_json=?")
+    .run(JSON.stringify({ paths: ["docs"], versionId: null }));
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+      VALUES (?, ?, 99, 'moved', 'main', 'docs/moved.md', ?, 'text', 1, 2)`,
+    )
+    .run(binding.workspaceId, binding.objectId, "b".repeat(64));
+  const ask = async () =>
+    (
+      await f.post("/sync/live/link-tickets", {
+        discriminator: f.discriminator,
+        objectId: binding.objectId,
+      })
+    ).status;
+  expect([await ask(), await ask()]).toEqual([503, 503]);
+  f.sessionHostBlocked.mockReturnValue("held");
+  expect(await ask()).toBe(503);
+  expect(told()).toHaveLength(2);
+  expect(told()[0]).toMatch(
+    /^\[sync-relay\] live open told to try again: the note has no binding \((host-unavailable|stale-document)\), host says stopped \(1x\)$/u,
+  );
+  expect(told()[1]).toMatch(/the note has no binding \([a-z-]+\), host says held \(1x\)$/u);
+  for (const line of told())
+    for (const secret of [binding.objectId, binding.workspaceId, f.discriminator])
+      expect(line).not.toContain(secret);
+});
+
+it("names a live host failure it knows in the server log, and only the class of any other", async () => {
+  const f = await fixture(limits, true);
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const told = () =>
+    logged.mock.calls
+      .map(([line]) => String(line))
+      .filter((line) => line.includes("live open told to try again"));
+  const ask = async () =>
+    (
+      await f.post("/sync/live/link-tickets", {
+        discriminator: f.discriminator,
+        objectId: binding.objectId,
+      })
+    ).status;
+  f.captureNative.mockRejectedValue(new Error("Service document activation is incomplete."));
+  expect(await ask()).toBe(503);
+  f.captureNative.mockRejectedValue(new Error("Cannot open /srv/notes/private-plan.md"));
+  expect(await ask()).toBe(503);
+  expect(told()).toEqual([
+    "[sync-relay] live open told to try again: the open failed: Service document activation is incomplete. (1x)",
+    "[sync-relay] live open told to try again: the open failed: Error (1x)",
+  ]);
+});
+
+it("writes no try-again line for an invited editor's refused open or for a link holder's not found", async () => {
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const told = () =>
+    logged.mock.calls
+      .map(([line]) => String(line))
+      .filter((line) => line.includes("live open told to try again"));
+  const named = await fixture(limits, false);
+  named.sessionHostBlocked.mockReturnValue("stopped");
+  expect(
+    (
+      await named.post("/sync/live/named-tickets", {
+        discriminator: named.discriminator,
+        objectId: binding.objectId,
+      })
+    ).status,
+  ).toBe(404);
+  const link = await fixture(limits, true);
+  expect(
+    (
+      await link.post("/sync/live/link-tickets", {
+        discriminator: link.discriminator,
+        objectId: "hidden-object",
+      })
+    ).status,
+  ).toBe(404);
+  expect(told()).toEqual([]);
+});
+
 it.each([false, true])(
   "asks a link holder or agent to try again while its share of tickets is full; link=%s",
   async (link) => {
@@ -1669,6 +1757,8 @@ describe("a desktop's opens while a host is away", () => {
       return { token: "ticket", expiresAtMs: Date.now() + 60_000 };
     });
     const answers: (number | undefined)[] = [];
+    const ended = new AbortController();
+    cleanups.push(async () => ended.abort());
     const open = (path: string, person: "reader" | "other" = "reader") => {
       const index = answers.push(undefined) - 1;
       void f
@@ -1677,8 +1767,15 @@ describe("a desktop's opens while a host is away", () => {
           { shareId: person === "reader" ? scope.shareId : "other-person-share", path },
           "",
           person === "reader" ? {} : { authorization: "Bearer other-token" },
+          ended.signal,
         )
-        .then((response) => (answers[index] = response.status));
+        .then(
+          (response) => (answers[index] = response.status),
+          (error: unknown) => {
+            if (!ended.signal.aborted || (error as Error).cause !== ended.signal.reason)
+              throw error;
+          },
+        );
       return index;
     };
     const returns = () => {

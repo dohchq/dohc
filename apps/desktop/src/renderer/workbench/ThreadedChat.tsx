@@ -52,9 +52,9 @@ const SIDE_BY_SIDE_PX = 720;
 // a thread from one never opens in another.
 export function ThreadedChat(props: {
   testIdPrefix: string;
-  // The conversation's thread, once it has one, so an agent's notice about
+  // The conversation's threads, once it has one, so an agent's notice about
   // a run shown here is skipped.
-  chatId?: string | null;
+  chatIds?: readonly string[];
   messages: readonly ChatMessageRecord[];
   loading: boolean;
   emptyLabel: string;
@@ -143,12 +143,13 @@ export function ThreadedChat(props: {
     return () => observer.disconnect();
   }, []);
 
-  const { chatId } = props;
+  const chatIds = props.chatIds?.join("\n") ?? "";
   useEffect(() => {
     const node = rootRef.current;
-    if (!node || !chatId) return;
-    return showChat(chatId, node);
-  }, [chatId]);
+    if (!node || !chatIds) return;
+    const hides = chatIds.split("\n").map((id) => showChat(id, node));
+    return () => hides.forEach((hide) => hide());
+  }, [chatIds]);
 
   const threads = useMemo(() => splitThreads(props.messages), [props.messages]);
   const stream = threads.top;
@@ -381,6 +382,7 @@ export function ThreadedChat(props: {
           label="Copy text"
           getText={() => message.body}
           testId={`${prefix}-copy-text`}
+          className="size-7"
         />
         <CopyMessageLink messageId={message.id} testId={`${prefix}-copy-link`} />
         {moreAction(message, `${prefix}-more`)}
@@ -396,6 +398,7 @@ export function ThreadedChat(props: {
           label="Copy text"
           getText={() => message.body}
           testId={`${prefix}-thread-copy-text`}
+          className="size-7"
         />
         <CopyMessageLink messageId={message.id} testId={`${prefix}-thread-copy-link`} />
         {moreAction(message, `${prefix}-thread-more`)}
@@ -450,18 +453,32 @@ export function ThreadedChat(props: {
           <span role="status" aria-live="polite" className="sr-only">
             {newCount > 0 ? `${newCount} ${newCount === 1 ? "new message" : "new messages"}` : ""}
           </span>
-          {newCount > 0 ? (
+          {!atEnd ? (
             <div className="relative h-0">
-              <button
-                type="button"
-                data-testid={`${prefix}-new-messages`}
-                onClick={() => streamListRef.current?.scrollToEnd()}
-                className="dohc-pop-in absolute bottom-2 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-medium text-ink shadow-sm transition-colors hover:bg-line"
-              >
-                <ArrowDown size={11} aria-hidden />
-                <span className="tabular-nums">{newCount}</span>
-                {newCount === 1 ? "new message" : "new messages"}
-              </button>
+              {newCount > 0 ? (
+                <button
+                  type="button"
+                  data-testid={`${prefix}-new-messages`}
+                  onClick={() => streamListRef.current?.scrollToEnd()}
+                  className="dohc-popover dohc-pop-in absolute bottom-2 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full border border-line bg-panel px-3 py-1 text-[12px] font-medium text-ink transition-colors hover:bg-hover active:bg-selected"
+                >
+                  <ArrowDown size={12} aria-hidden />
+                  <span className="tabular-nums">{newCount}</span>
+                  {newCount === 1 ? "new message" : "new messages"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  data-testid={`${prefix}-scroll-to-end`}
+                  aria-label="Jump to latest"
+                  title="Jump to latest"
+                  onClick={() => streamListRef.current?.scrollToEnd()}
+                  className="dohc-popover dohc-pop-in absolute bottom-2 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[12px] font-medium text-muted transition-colors hover:bg-hover hover:text-ink active:bg-selected"
+                >
+                  <ArrowDown size={13} aria-hidden />
+                  Latest
+                </button>
+              )}
             </div>
           ) : null}
           <div

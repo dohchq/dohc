@@ -14,6 +14,7 @@ import {
   snapshotTicketHostReport,
 } from "./liveTicketInputs.js";
 import { hashLiveTicketToken, mintLiveTicketToken } from "./liveTicketSecurity.js";
+import { LiveTicketFailure } from "./liveOpenRefusalLog";
 
 export interface LiveTicketOptions {
   readonly storage: Pick<
@@ -116,8 +117,8 @@ export function createLiveTickets(options: LiveTicketOptions) {
           tokenHash,
         });
         return minted === null ? refuseUnlessHostChanged(report) : { token, ...minted };
-      } catch {
-        throw new Error("Live-ticket operation failed.");
+      } catch (cause) {
+        throw new LiveTicketFailure(cause);
       }
     },
     async redeem(

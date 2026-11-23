@@ -111,27 +111,27 @@ function shareUnjournalableLines(paths: readonly UnjournalableSharePath[]): stri
     } else if (reason === "non-file-replacement") {
       lines.push(
         `dohc could not track changes in ${files}. ` +
-          `${one ? "A folder or another entry replaces it" : "Folders or other entries replace them"}. ` +
-          `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting entry" : "the conflicting entries"}, then refresh.`,
+          `${one ? "A folder or another item is in its place" : "Folders or other items are in their place"}. ` +
+          `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting item" : "the conflicting items"}, then refresh.`,
       );
     } else if (reason === "local-collision") {
       const yours = new Set(group.map((entry) => entry.owner ?? entry.path)).size === 1;
       lines.push(
         `dohc could not receive ${files}. ` +
-          `${yours ? "A file from this machine is in the way" : "Files from this machine are in the way"}. ` +
+          `${yours ? "A file on this computer is in the way" : "Files on this computer are in the way"}. ` +
           `Move or rename ${yours ? "your file" : "your files"}, then refresh.`,
       );
     } else if (reason === "spelling-collision") {
       lines.push(
         `dohc could not receive ${files}. ` +
           (one && group[0]!.owner !== undefined
-            ? "This machine treats its name and another shared file's as the same name. Ask the person who shared the files to rename one of them."
-            : "This machine treats each name as the same as another shared file's. Ask the person who shared the files to rename them."),
+            ? "This computer treats its name and another shared file's name as the same. Ask the person who shared the files to rename one of them."
+            : "This computer treats each name as the same as another shared file's name. Ask the person who shared the files to rename them."),
       );
     } else {
       lines.push(
         `dohc could not read ${files}. ` +
-          `Close anything using ${one ? "it" : "them"}, or wait, then refresh.`,
+          `Close any app using ${one ? "it" : "them"}, then refresh.`,
       );
     }
   }

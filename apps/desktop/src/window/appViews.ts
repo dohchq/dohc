@@ -164,6 +164,23 @@ const issuedByOwner = new Map<number, Map<string, Entry>>();
 let admitted: Entry | undefined;
 const installedOwners = new WeakSet<WebContents>();
 
+export function hardenAppSession(
+  isolated: Electron.Session,
+  onDownload?: (item: Electron.DownloadItem, contents: WebContents | undefined) => void,
+): void {
+  isolated.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  isolated.setPermissionCheckHandler(() => false);
+  isolated.setDevicePermissionHandler(() => false);
+  isolated.setDisplayMediaRequestHandler((_request, callback) => callback({}));
+  isolated.on("will-download", (_event, item, contents) => {
+    try {
+      onDownload?.(item, contents);
+    } finally {
+      item.cancel();
+    }
+  });
+}
+
 export function appViewGuestPreferences(
   partition: string,
   packaged: boolean,
@@ -306,13 +323,8 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
       partitions.set(name, entries);
       const partitionViews = entries;
       const isolated = session.fromPartition(name);
-      isolated.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-      isolated.setPermissionCheckHandler(() => false);
-      isolated.setDevicePermissionHandler(() => false);
-      isolated.setDisplayMediaRequestHandler((_request, callback) => callback({}));
-      isolated.on("will-download", (_event, item, contents) => {
+      hardenAppSession(isolated, (item, contents) => {
         const filename = item.getFilename();
-        item.cancel();
         const entry = contents && partitionViews.get(contents.id);
         if (entry) emit(entry, { kind: "download-blocked", viewId: entry.viewId, filename });
       });
@@ -524,7 +536,7 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
         }
         operation.assertCurrent();
         const url = appViewLaunchUrl(launch.url);
-        if (!url) throw Error("The app address is not on this device. Open the app again.");
+        if (!url) throw Error("The app address is not on this computer. Open the app again.");
         entry.publicationId = publicationId;
         // An ended approval removes the page. Any other ending keeps it on screen until the tab reloads or closes.
         const ended = () => {

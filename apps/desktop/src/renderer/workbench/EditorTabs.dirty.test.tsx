@@ -54,7 +54,7 @@ describe("EditorTabs unsaved dot", () => {
     const slot = closeOf("plan.md").parentElement;
     expect(dot.parentElement).toBe(slot);
     expect(slot).toBe(tab.lastElementChild);
-    expect(classes(slot!)).toEqual(expect.arrayContaining(["size-4", "shrink-0"]));
+    expect(classes(slot!)).toEqual(expect.arrayContaining(["size-5", "shrink-0"]));
   });
 
   it("swaps the dot for the close on hover and keyboard focus, in the same slot", () => {

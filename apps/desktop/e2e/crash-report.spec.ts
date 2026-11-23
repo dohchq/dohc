@@ -47,7 +47,7 @@ test("an engine crash leaves a notice and sends its report only after the person
     await waitForFreshEngineDaemon(appPid, victims);
 
     const toast = page.getByTestId("crash-report-toast");
-    await expect(toast).toContainText("The workspace engine failed");
+    await expect(toast).toContainText("dohc's workspace engine stopped unexpectedly");
     expect(received).toEqual([]);
 
     const answerDialog = async (response: number) =>
@@ -112,7 +112,7 @@ test("a closed crash toast stays closed after a restart, and its row stays in No
     await waitForFreshEngineDaemon(appPid, victims);
 
     const toast = page.getByTestId("crash-report-toast");
-    await expect(toast).toContainText("The workspace engine failed");
+    await expect(toast).toContainText("dohc's workspace engine stopped unexpectedly");
     await page.getByRole("button", { name: "Close crash report notice" }).click();
     await expect(toast).toHaveCount(0);
     await expect
@@ -135,7 +135,7 @@ test("a closed crash toast stays closed after a restart, and its row stays in No
     // here and its toast after Notices closes.
     await next.getByTestId("notice-center-toggle").click();
     const row = next.getByTestId("notice-crash-report");
-    await expect(row).toContainText("The workspace engine failed");
+    await expect(row).toContainText("dohc's workspace engine stopped unexpectedly");
     await expect(next.getByTestId("notice-crash-report-unread")).toHaveCount(0);
     await expect(next.getByTestId("notice-crash-report-dismiss")).toBeVisible();
     await next.getByTestId("notice-center-toggle").click();

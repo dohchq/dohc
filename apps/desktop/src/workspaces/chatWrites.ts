@@ -757,7 +757,9 @@ export function createChatWrites(dependencies: {
       authorUserId !== undefined && authorUserId !== localAuthorId;
     const admission = await admit(place, target);
     const { authorUserId } = admission;
-    const { author } = await personActorFor(input.writer);
+    const actor = await personActorFor(input.writer);
+    const agentId = "authorAgentId" in actor ? actor.authorAgentId : undefined;
+    const author = { ...actor.author, ...(agentId ? { agentId } : {}) };
     const existing =
       input.state === "toggle" || (input.state === "removed" && aliased(authorUserId))
         ? await store.listReactions({ workspaceId, threadId: input.threadId })
@@ -767,7 +769,9 @@ export function createChatWrites(dependencies: {
         (reaction) =>
           reaction.messageId === input.messageId &&
           reaction.emoji === input.emoji &&
-          reaction.author.authorId === authorId,
+          reaction.author.authorId === authorId &&
+          reaction.author.kind === author.kind &&
+          reaction.author.agentId === agentId,
       );
     const hasLocalAlias = reacted(localAuthorId);
     const hasCurrent = authorUserId !== undefined && reacted(authorUserId);

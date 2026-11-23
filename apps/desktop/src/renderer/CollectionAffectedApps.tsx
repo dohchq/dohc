@@ -36,7 +36,10 @@ export function CollectionAffectedApps(props: {
                 <div className="truncate font-mono" title={app.appId}>
                   {app.appId}
                 </div>
-                <div className="text-muted">{app.binding.operationIds.length} approved actions</div>
+                <div className="text-muted">
+                  {app.binding.operationIds.length} approved{" "}
+                  {app.binding.operationIds.length === 1 ? "action" : "actions"}
+                </div>
               </li>
             ))}
           </ul>

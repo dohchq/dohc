@@ -117,7 +117,7 @@ describe("LazyMarkdownEditor", () => {
 
     const editor = screen.getByTestId("markdown-editor");
     expect(editor.textContent).toBe("first");
-    expect(screen.queryByText("Loading editor...")).toBeNull();
+    expect(screen.queryByText("Loading editor…")).toBeNull();
     expect(committed).toHaveBeenCalledTimes(1);
     const handle = ref.current;
     expect(handle?.getMarkdown()).toBe("first");
@@ -144,7 +144,7 @@ describe("LazyMarkdownEditor", () => {
     );
     const { rerender } = render(view("cold"));
 
-    expect(screen.getByText("Loading editor...")).toBeTruthy();
+    expect(screen.getByText("Loading editor…")).toBeTruthy();
     expect(committed).not.toHaveBeenCalled();
     await requestedEditorModule();
     await act(resolveEditorModule);
@@ -189,7 +189,7 @@ describe("LazyMarkdownEditor", () => {
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(error).toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Render again" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(screen.getByTestId("editor-crash-recovery")).toBeTruthy();
     expect(screen.queryByTestId("markdown-editor")).toBeNull();

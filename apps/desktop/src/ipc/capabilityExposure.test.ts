@@ -53,6 +53,13 @@ function assertAdmission(
     expect(row.guard).toBe("trusted-sender");
     return;
   }
+  // Set-aside drafts are this device's storage, like their writes. The workspace picks which
+  // drafts a rename moves. The move must start as it arrives, so it queues behind earlier writes.
+  if (row.channel === "desktop:move-set-aside-drafts") {
+    expect(row.scope).toBe("device");
+    expect(row.guard).toBe("trusted-sender");
+    return;
+  }
   const workspacePayload = carriesWorkspaceId(row.payload);
   expect(["device", "workspace"]).toContain(row.scope);
   if (row.guard === "active-workspace" || workspacePayload)
@@ -262,6 +269,8 @@ describe("main inventories", () => {
       "desktop:pause-relay-share-discussion",
       "desktop:resume-relay-share-discussion",
       "desktop:promote-relay-share-grant",
+      "desktop:retune-relay-share-grant",
+      "desktop:resend-relay-share-invitation",
       "desktop:revoke-relay-share-grant",
     ];
     const ownerRows = rows.filter((row) => channels.includes(row.channel));

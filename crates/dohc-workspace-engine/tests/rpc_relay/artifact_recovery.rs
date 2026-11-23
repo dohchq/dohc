@@ -159,7 +159,7 @@ impl Notes {
                 .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &source)
                 .unwrap();
             let claim = call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({"expectedLineageClaimId":opened["lineageClaimId"],"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)})).await["lineageClaimId"].clone();
-            let settled = call(
+            call(
                 &b_transport,
                 &b,
                 &mut b_id,
@@ -167,7 +167,6 @@ impl Notes {
                 json!({"sessionId":session}),
             )
             .await;
-            journal_editor_settlement(&b_scratch, WORKSPACE, settled["momentId"].as_str().unwrap());
             let db = Connection::open(engine_db_path(&b_scratch).unwrap()).unwrap();
             let object: String = db
                 .query_row(
@@ -266,7 +265,7 @@ impl Notes {
             doc.apply(&loaded.blob_egress.unwrap().bytes).unwrap();
             let claim = &loaded.response.result["lineageClaimId"];
             call(&self.b_transport, &self.b, &mut self.b_id, "ydoc.recordUpdate", json!({"expectedLineageClaimId":claim,"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.richdoc_append_paragraph("Accepted remote edit"))})).await;
-            let settled = call(
+            call(
                 &self.b_transport,
                 &self.b,
                 &mut self.b_id,
@@ -274,11 +273,6 @@ impl Notes {
                 json!({"sessionId":session}),
             )
             .await;
-            journal_editor_settlement(
-                &self.b_scratch,
-                WORKSPACE,
-                settled["momentId"].as_str().unwrap(),
-            );
         }
         self.push_on_b().await;
     }

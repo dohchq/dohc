@@ -316,7 +316,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
         <div className="dohc-elevated w-130 max-w-[85vw] rounded-xl border border-line bg-panel p-5">
           <h2 className="m-0 text-base font-semibold text-ink">Create form</h2>
           <p className="mt-2 text-[13px] text-muted">
-            This collection has no approved public create action.
+            This Collection has no approved public create action.
           </p>
           <SecondaryButton className="mt-3" onClick={close}>
             Close
@@ -392,7 +392,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
             ) : null}
             <fieldset disabled={pending} className="m-0 flex flex-col border-0 p-0">
               <legend className="text-[12px] font-medium text-ink">Fields shown on form</legend>
-              <p className="m-0 mb-2 text-[11px] text-muted">
+              <p className="m-0 mb-2 text-[12px] text-muted">
                 This form can submit only these fields.
               </p>
               {allowed.map((field) => (
@@ -416,7 +416,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                     {required.includes(field) ? (
                       <span
                         title="Required"
-                        className="flex items-center gap-1 text-[11px] text-muted"
+                        className="flex items-center gap-1 text-[12px] text-muted"
                       >
                         <LockKeyhole size={12} strokeWidth={1.9} aria-hidden="true" />
                         Required
@@ -467,7 +467,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                             Create public choices
                           </summary>
                           <p className="text-[12px] text-muted">
-                            The new action can expose every related record's key and selected label.
+                            The new action exposes every related record's ID and selected label.
                             Choose a label safe to share.
                           </p>
                           <label className="text-[12px] text-muted">
@@ -497,11 +497,11 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                             </select>
                           </label>
                           <p className="text-[12px] text-muted">
-                            This changes the rules. Existing apps need review before they can use
-                            the new revision.
+                            This changes the Collection's rules. Existing apps need review before
+                            using the new revision.
                           </p>
                           <p className="text-[12px] text-muted">
-                            After approval, choose Create form again and select the new public
+                            After approving, open Create form again and choose the new public
                             action.
                           </p>
                           <SecondaryButton
@@ -518,8 +518,8 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                         </details>
                       ) : choiceActions(field).length === 0 ? (
                         <p className="m-0 text-[12px] text-muted">
-                          Approve a public read action for the related key and label in this
-                          dataset, then reopen this form.
+                          Approve a public read action for the related ID and label in this
+                          Collection, then reopen this form.
                         </p>
                       ) : null}
                     </div>
@@ -540,10 +540,10 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                 {source ? (
                   <details open>
                     <summary className="text-[12px] text-ink">Approved action source</summary>
-                    <p className="break-all font-mono text-[11px] text-muted">
+                    <p className="break-all text-[12px] text-muted">
                       {source.path}
                       <br />
-                      {source.sha256}
+                      <span className="font-mono">{source.sha256}</span>
                     </p>
                     <pre className="max-h-60 overflow-auto rounded-md border border-line bg-bg p-2 text-[12px] text-ink">
                       {source.source}
@@ -561,7 +561,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                   className="mr-1.5 inline-block"
                 />
                 Source folder{" "}
-                <span className="ml-2 break-all font-mono text-[11px] text-muted">{appRoot}</span>
+                <span className="ml-2 break-all text-[12px] text-muted">{appRoot}</span>
               </summary>
               <div className="mt-2">
                 <p className="mb-2 mt-0">The app source stays in this workspace folder.</p>
@@ -571,7 +571,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
                     aria-label="App folder"
                     value={appRoot}
                     disabled={pending}
-                    className={`${inputClass} mt-1 font-mono`}
+                    className={`${inputClass} mt-1`}
                     onChange={(event) => setAppRoot(event.target.value)}
                   />
                 </label>

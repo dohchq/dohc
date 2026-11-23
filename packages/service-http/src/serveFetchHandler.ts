@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { Readable } from "node:stream";
 import { DRAIN_TIMEOUT_HEADER, pipeResponseBody } from "./pipeResponseBody";
 import type { RequestLog } from "./requestLog";
@@ -28,6 +29,11 @@ export interface ServeFetchHandlerOptions {
    * upload it carries stays unread.
    */
   streamBody?: (url: URL, method: string) => boolean;
+  /**
+   * Whether a request only waits for news, as a long poll does. A shutdown closes its connection at once.
+   * Any other request gets the grace period to finish.
+   */
+  waits?: (url: URL, method: string) => boolean;
   /** The answer to an upload that crosses the cap; the socket closes after it flushes. */
   oversized: (url: URL) => Response;
   /** The answer when the handler throws. */
@@ -53,8 +59,8 @@ export class ClientClosedRequest extends DOMException {
 }
 
 /**
- * The request signal's abort reason, and its body's error, when the server refused the body and already sent the
- * refusal. The handler's own answer to that request is never sent.
+ * The request signal's abort reason, and its body's error, when the server refused the body. The server sends its own
+ * refusal, and the handler's answer to that request is never sent.
  */
 export class RefusedRequest extends DOMException {}
 
@@ -62,6 +68,29 @@ const BODY_RECEIPT_MS = 300_000;
 const REFUSAL_LINGER_MS = 2_000;
 // The stream window a body read on demand already holds.
 const READ_FIRST_BYTES = 64 * 1024;
+
+/**
+ * Says whether a request is a read that waits for news. Such a read names the longest time it may wait, in
+ * milliseconds, in one of `fields` of its query.
+ */
+export const waitsOnQuery =
+  (...fields: string[]) =>
+  (url: URL, method: string): boolean =>
+    method === "GET" && fields.some((field) => Number(url.searchParams.get(field)) > 0);
+
+// For each server, the requests each of its connections has not answered yet: those that only wait, and the rest.
+type Unanswered = { waiting: number; working: number };
+const unansweredByServer = new WeakMap<Server, Map<Socket, Unanswered>>();
+
+/**
+ * Closes each connection whose unanswered requests all only wait. One that also carries a working request is
+ * left alone: closing it would end that request too. `closeServer` calls this once the server has stopped
+ * listening, and again while it closes.
+ */
+export function closeWaitingConnections(server: Server): void {
+  for (const [socket, unanswered] of unansweredByServer.get(server) ?? [])
+    if (unanswered.waiting > 0 && unanswered.working === 0) socket.destroy();
+}
 
 /**
  * How long a connection may wait between requests. A gateway in front keeps its connections to a server
@@ -85,6 +114,7 @@ const IDLE_CONNECTION_MS = 150_000;
 export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
   let bytesInFlight = 0;
   const callerBytesInFlight = new Map<string, number>();
+  const unanswered = new Map<Socket, Unanswered>();
   // Headers stay bounded to 60s; the adapter or a streaming handler bounds the body.
   const server = createServer(
     { requestTimeout: 0, headersTimeout: 60_000, keepAliveTimeout: IDLE_CONNECTION_MS },
@@ -98,7 +128,20 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       }
       const arrivedAtMs = Date.now();
       const method = incoming.method ?? "GET";
+      if (options.waits) {
+        // A connection can carry several unanswered requests at once, so each is counted, not the connection.
+        const { socket } = incoming;
+        const kind = options.waits(url, method) ? "waiting" : "working";
+        const counts = unanswered.get(socket) ?? { waiting: 0, working: 0 };
+        unanswered.set(socket, counts);
+        counts[kind] += 1;
+        outgoing.once("close", () => {
+          counts[kind] -= 1;
+          if (counts.waiting === 0 && counts.working === 0) unanswered.delete(socket);
+        });
+      }
       let answered = false;
+      let draining = false;
       let reserved = 0;
       let caller = "";
       const release = () => {
@@ -111,7 +154,8 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       };
       let request: Request | undefined;
       const answer = (response: Response, closeAfter?: IncomingMessage): Promise<void> => {
-        if (answered) return response.body?.cancel().catch(() => undefined) ?? Promise.resolve();
+        if (answered || draining)
+          return response.body?.cancel().catch(() => undefined) ?? Promise.resolve();
         answered = true;
         release();
         options.requestLog?.write(request, method, response.status, arrivedAtMs);
@@ -159,6 +203,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
           return reason;
         };
         const bodyTimer = setTimeout(() => {
+          draining = false;
           bounded.abort(
             refuse(
               options.timedOut?.(url) ?? new Response(null, { status: 408 }),
@@ -173,58 +218,76 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
         outgoing.once("close", clearBodyTimer);
         const bounded = new AbortController();
         let received = 0;
-        body = upload().pipeThrough(
-          new TransformStream<Uint8Array, Uint8Array>({
-            start(controller) {
-              bounded.signal.addEventListener(
-                "abort",
-                () => controller.error(bounded.signal.reason),
-                {
-                  once: true,
-                },
-              );
-            },
-            transform(chunk, controller) {
-              received += chunk.byteLength;
-              if (received > maxBodyBytes) {
-                controller.error(
-                  refuse(
-                    options.oversized(url),
-                    new RefusedRequest("Request body too large", "AbortError"),
-                  ),
+        const tooLarge = () =>
+          refuse(
+            options.oversized(url),
+            new RefusedRequest("Request body too large", "AbortError"),
+          );
+        // A caller refused for the budget has passed its handler's check. Its client may read
+        // nothing until it has sent the whole body, so the rest is read and dropped before the answer.
+        const drain = async (source: ReadableStream<Uint8Array>) => {
+          if (!draining) return;
+          const reader = source.getReader();
+          for (;;) {
+            const next = await reader.read().catch(() => null);
+            if (next === null || !draining) return;
+            if (next.done) break;
+            received += next.value.byteLength;
+            if (received > maxBodyBytes) {
+              draining = false;
+              tooLarge();
+              return;
+            }
+          }
+          clearTimeout(bodyTimer);
+          draining = false;
+          void answer(options.busy?.(url) ?? new Response(null, { status: 503 }));
+        };
+        const source = upload();
+        const counted = new TransformStream<Uint8Array, Uint8Array>({
+          start(controller) {
+            bounded.signal.addEventListener(
+              "abort",
+              () => controller.error(bounded.signal.reason),
+              {
+                once: true,
+              },
+            );
+          },
+          transform(chunk, controller) {
+            received += chunk.byteLength;
+            if (received > maxBodyBytes) {
+              controller.error(tooLarge());
+              return;
+            }
+            const budget = options.bodiesInFlight;
+            if (budget && !readFirst) {
+              if (reserved === 0) caller = budget.caller(headers);
+              const callerBytes = callerBytesInFlight.get(caller) ?? 0;
+              if (
+                bytesInFlight + chunk.byteLength > budget.maxBytes ||
+                callerBytes + chunk.byteLength > budget.maxBytesPerCaller
+              ) {
+                const reason = new RefusedRequest(
+                  "Request bodies in flight are at their budget",
+                  "AbortError",
                 );
+                draining = true;
+                release();
+                disconnect.abort(reason);
+                controller.error(reason);
                 return;
               }
-              const budget = options.bodiesInFlight;
-              if (budget && !readFirst) {
-                if (reserved === 0) caller = budget.caller(headers);
-                const callerBytes = callerBytesInFlight.get(caller) ?? 0;
-                if (
-                  bytesInFlight + chunk.byteLength > budget.maxBytes ||
-                  callerBytes + chunk.byteLength > budget.maxBytesPerCaller
-                ) {
-                  controller.error(
-                    refuse(
-                      options.busy?.(url) ?? new Response(null, { status: 503 }),
-                      new RefusedRequest(
-                        "Request bodies in flight are at their budget",
-                        "AbortError",
-                      ),
-                    ),
-                  );
-                  return;
-                }
-                bytesInFlight += chunk.byteLength;
-                callerBytesInFlight.set(caller, callerBytes + chunk.byteLength);
-                reserved += chunk.byteLength;
-              }
-              controller.enqueue(chunk);
-            },
-          }),
-          // A handler that stops reading early still answers before the
-          // connection closes.
-          { preventCancel: true },
-        );
+              bytesInFlight += chunk.byteLength;
+              callerBytesInFlight.set(caller, callerBytes + chunk.byteLength);
+              reserved += chunk.byteLength;
+            }
+            controller.enqueue(chunk);
+          },
+        });
+        // A handler that stops reading early still answers before the connection closes.
+        void source.pipeTo(counted.writable, { preventCancel: true }).catch(() => drain(source));
+        body = counted.readable;
       }
       const start = (body: ReadableStream<Uint8Array> | ArrayBuffer | null) => {
         const init: RequestInit & { duplex: "half" } = {
@@ -259,6 +322,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       } else start(body);
     },
   );
+  unansweredByServer.set(server, unanswered);
   return server;
 }
 

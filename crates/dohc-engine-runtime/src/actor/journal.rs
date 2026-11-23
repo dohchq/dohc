@@ -74,6 +74,19 @@ pub(super) fn journal_moment_outbound_with_batch_in_tx(
         .map_err(outbound_domain)
 }
 
+pub(super) fn journal_owner_save_outbound_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &dohc_engine_collab::DocKey,
+    moment_id: &str,
+) -> Result<(), DomainError> {
+    if !dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, &key.workspace_id)
+        .map_err(outbound_domain)?
+    {
+        return Ok(());
+    }
+    dohc_engine_sync::journal_owner_save_in_tx(tx, key, moment_id).map_err(outbound_domain)
+}
+
 pub(super) fn journal_secret_put_outbound_in_tx(
     tx: &rusqlite::Transaction<'_>,
     result: &SecretWriteResult,

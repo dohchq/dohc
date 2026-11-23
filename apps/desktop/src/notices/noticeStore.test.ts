@@ -904,10 +904,10 @@ describe("notices for another person", () => {
 
     await expect(
       owner.store.postNotice({ ...failed, noticeId: "x", target: { path: "budget" } }),
-    ).rejects.toThrow(new NoticeNotSentError("This person can't open what the notice points to."));
+    ).rejects.toThrow(new NoticeNotSentError("This person cannot open what the Notice points to."));
     await expect(owner.store.postNotice({ ...failed, noticeId: "y" })).rejects.toThrow(
       new NoticeNotSentError(
-        "Too many notices went to other people. Wait a minute, then try again.",
+        "Too many Notices went to other people. Wait a minute, then try again.",
       ),
     );
     owner.reach.clear();
@@ -1134,7 +1134,7 @@ it("rejects a refusal dismissal without shown coordinates", async () => {
   const [shown] = (await first.store.list()).notices;
   await expect(
     first.store.mark([{ ...shown!, refusalCoordinates: [] }], "dismissed", null),
-  ).rejects.toThrow("The engine could not dismiss this Notice. Try again.");
+  ).rejects.toThrow("dohc could not dismiss this Notice. Try again.");
   expect(dismissRefusal).not.toHaveBeenCalled();
   expect((await first.store.list()).notices).toHaveLength(1);
 });

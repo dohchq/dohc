@@ -12,6 +12,7 @@ use dohc_engine_files::{
 };
 use dohc_engine_storage::{
     EngineStore, MaterializationJob, MaterializationJobSpec, NoFaults, Preimage, enqueue_job,
+    hex_sha256,
 };
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -111,7 +112,12 @@ fn a_secret_stays_owner_only_over_a_shared_file() {
     std::fs::write(&env, b"OLD=1\n").unwrap();
     set_mode(&env, 0o644);
     let mut store = EngineStore::open(&scratch.path().join("engine.db"), 0).unwrap();
-    let job = queue(&mut store, ".env", b"encrypted", Preimage::Absent);
+    let job = queue(
+        &mut store,
+        ".env",
+        b"encrypted",
+        Preimage::Present(hex_sha256(b"OLD=1\n")),
+    );
 
     assert_eq!(
         materialize_secret_one(&store, scratch.path(), &job, b"SECRET=1\n", &options()).unwrap(),

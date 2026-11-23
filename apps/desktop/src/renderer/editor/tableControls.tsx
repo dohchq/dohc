@@ -560,7 +560,7 @@ export function buildTableMenu(
   // outline, so the frame draws none of its own.
   menu.className = `dohc-table-menu ${MENU_FRAME} outline-none`;
   menu.setAttribute("role", "menu");
-  menu.setAttribute("aria-label", "table controls");
+  menu.setAttribute("aria-label", "Table controls");
   menu.tabIndex = -1;
   menu.id = menuId;
   const buttons = rows.map((row, index) => {
@@ -1036,10 +1036,11 @@ function updateTableDragTarget(
   }
   if (changed) {
     const label = drag.band === "row" ? "row" : "column";
+    const titledLabel = drag.band === "row" ? "Row" : "Column";
     announceTableDrag(
       view,
       target.destination === drag.index
-        ? `${label} ${drag.index + 1}, original position.`
+        ? `${titledLabel} ${drag.index + 1}, original position.`
         : `Move ${label} ${drag.index + 1} ${target.side} ${label} ${target.index + 1}.`,
     );
   }
@@ -1092,7 +1093,7 @@ function finishTableDrop(
       view,
       moved
         ? `${drag.band === "row" ? "Row" : "Column"} ${drag.index + 1} moved to position ${target.destination + 1}.`
-        : `Could not move ${drag.band} ${drag.index + 1}.`,
+        : `dohc could not move ${drag.band} ${drag.index + 1}.`,
     );
   }
   runtime.activeDrag = null;
@@ -1483,7 +1484,7 @@ function buildColumnGrip(
   button.type = "button";
   button.className = "dohc-table-grip dohc-table-grip--col";
   button.dataset.col = String(colIndex);
-  button.title = `Column ${colIndex + 1} - drag to reorder, click for options`;
+  button.title = `Column ${colIndex + 1}. Drag to reorder, click for options.`;
   button.setAttribute("aria-label", `Select column ${colIndex + 1}`);
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");
@@ -1513,7 +1514,7 @@ function buildRowGrip(
   button.type = "button";
   button.className = "dohc-table-grip dohc-table-grip--row";
   button.dataset.row = String(rowIndex);
-  button.title = `Row ${rowIndex + 1} - drag to reorder, click for options`;
+  button.title = `Row ${rowIndex + 1}. Drag to reorder, click for options.`;
   button.setAttribute("aria-label", `Select row ${rowIndex + 1}`);
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");

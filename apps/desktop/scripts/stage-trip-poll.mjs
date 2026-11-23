@@ -1,9 +1,8 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-/** Copies inspectable example source and installed React dependencies into a workspace. */
+/** Copies inspectable example source into a workspace using dohc's built-in React runtime. */
 export async function stageTripPoll(workspaceRoot) {
   if (!isAbsolute(workspaceRoot)) throw new Error("The example workspace path must be absolute.");
   const appRoot = join(workspaceRoot, "trip-poll");
@@ -17,63 +16,26 @@ export async function stageTripPoll(workspaceRoot) {
     )
   )
     throw new Error("The trip-poll folder already exists.");
-  const require = createRequire(import.meta.url);
-  const react = dirname(require.resolve("react/package.json"));
-  const dom = dirname(require.resolve("react-dom/package.json"));
-  const scheduler = dirname(
-    createRequire(join(dom, "package.json")).resolve("scheduler/package.json"),
-  );
   const sources = ["main.tsx", "Poll.tsx", "broker.ts", "style.css", "style.d.ts"];
-  const dependencies = [
-    [react, "react", "index.js"],
-    [react, "react", "cjs/react.production.js"],
-    [react, "react", "jsx-runtime.js"],
-    [react, "react", "cjs/react-jsx-runtime.production.js"],
-    [dom, "react-dom", "index.js"],
-    [dom, "react-dom", "cjs/react-dom.production.js"],
-    [dom, "react-dom", "client.js"],
-    [dom, "react-dom", "cjs/react-dom-client.production.js"],
-    [scheduler, "scheduler", "index.js"],
-    [scheduler, "scheduler", "cjs/scheduler.production.js"],
-  ];
-  // Resolve every source before creating the destination.
   const template = fileURLToPath(new URL("../../../examples/trip-poll/", import.meta.url));
   const files = await Promise.all([
     ...sources.map(async (path) => [path, await readFile(join(template, path))]),
-    ...dependencies.map(async ([root, name, path]) => [
-      `deps/${name}/${path}`,
-      await readFile(join(root, path)),
-    ]),
-    ...[
-      [react, "react"],
-      [dom, "react-dom"],
-      [scheduler, "scheduler"],
-    ].map(async ([root, name]) => [`deps/${name}/LICENSE`, await readFile(join(root, "LICENSE"))]),
     readFile(join(template, "responses/collection.yaml")).then((bytes) => [
       "responses/collection.yaml",
       bytes,
     ]),
   ]);
   await mkdir(workspaceRoot, { recursive: true });
-  await mkdir(appRoot); // Refuse a concurrent creator instead of overwriting work.
+  await mkdir(appRoot);
   for (const [path, bytes] of files) {
     await mkdir(dirname(join(appRoot, path)), { recursive: true });
     await writeFile(join(appRoot, path), bytes);
   }
-  // Paths are relative to the app folder, so the staged folder can move.
-  const inputs = [...sources, ...dependencies.map(([, name, path]) => `deps/${name}/${path}`)];
-  const packageMap = {
-    react: "deps/react/index.js",
-    "react/jsx-runtime": "deps/react/jsx-runtime.js",
-    "react-dom": "deps/react-dom/index.js",
-    "react-dom/client": "deps/react-dom/client.js",
-    scheduler: "deps/scheduler/index.js",
-  };
   const declaration = {
     version: 1,
     entryPath: "main.tsx",
-    inputs,
-    packageMap,
+    inputs: sources,
+    packageMap: {},
     collection: {
       kind: "collection-create",
       collectionPath: "responses",

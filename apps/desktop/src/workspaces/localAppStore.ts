@@ -225,6 +225,34 @@ export function createLocalAppStore(options: {
       authority.revision === value.authorityRevision
     );
   }
+  function readPublication(publicationId: string) {
+    const checked = row(publicationId),
+      storage = source(checked.kind);
+    const files = checked.candidate.files.map((metadata) => {
+      const stored = db
+        .prepare(
+          "SELECT content FROM " + storage.artifactTable + " WHERE publication_id=? AND path=?",
+        )
+        .get(publicationId, metadata.path);
+      if (
+        !stored ||
+        !(stored.content instanceof Uint8Array) ||
+        stored.content.byteLength !== metadata.byteLength ||
+        hash(stored.content) !== metadata.sha256
+      )
+        throw new Error("App bundle integrity check failed.");
+      return { ...metadata, bytes: Uint8Array.from(stored.content) };
+    });
+    return {
+      publicationId,
+      authorityRevision: checked.authorityRevision,
+      appRoot: checked.appRoot,
+      kind: checked.kind,
+      resourceId: checked.resourceId,
+      candidate: checked.candidate,
+      files,
+    };
+  }
   return {
     row,
     held,
@@ -232,6 +260,10 @@ export function createLocalAppStore(options: {
       return !!lookup(publicationId);
     },
     list,
+    heldRow(publicationId: string) {
+      const value = lookup(publicationId);
+      return value && held(value) ? value : null;
+    },
     /** `displaced` is another kind's publication that holds the root; the commit deactivates it. */
     activate(
       input: {
@@ -392,29 +424,11 @@ export function createLocalAppStore(options: {
       return { kind: checked.kind, publicationId, authorityRevision };
     },
     browserPublication(publicationId: string) {
-      const checked = row(publicationId),
-        storage = source(checked.kind);
-      const files = checked.candidate.files.map((metadata) => {
-        const stored = db
-          .prepare(
-            "SELECT content FROM " + storage.artifactTable + " WHERE publication_id=? AND path=?",
-          )
-          .get(publicationId, metadata.path);
-        if (
-          !stored ||
-          !(stored.content instanceof Uint8Array) ||
-          stored.content.byteLength !== metadata.byteLength ||
-          hash(stored.content) !== metadata.sha256
-        )
-          throw new Error("App bundle integrity check failed.");
-        return { ...metadata, bytes: Uint8Array.from(stored.content) };
-      });
-      return {
-        publicationId,
-        authorityRevision: checked.authorityRevision,
-        appRoot: checked.appRoot,
-        files,
-      };
+      const { authorityRevision, appRoot, files } = readPublication(publicationId);
+      return { publicationId, authorityRevision, appRoot, files };
+    },
+    verificationPublication(publicationId: string) {
+      return readPublication(publicationId);
     },
     deleteResources(kind: LocalAppKind, resourceId: string) {
       options.assertCurrent();
@@ -441,6 +455,29 @@ export function createLocalAppStore(options: {
       db.prepare(
         "DELETE FROM " + storage.publicationTable + " WHERE " + storage.resourceColumn + "=?",
       ).run(resourceId);
+    },
+    deletePublications(kind: LocalAppKind, publicationIds: readonly string[]) {
+      options.assertCurrent();
+      if (publicationIds.length === 0) return;
+      const storage = source(kind);
+      for (const publicationId of publicationIds) {
+        assertCanAdvance(
+          "SELECT revision FROM local_app_roots WHERE active_kind=? AND active_publication_id=?",
+          [kind, publicationId],
+        );
+        db.prepare(
+          "UPDATE local_app_roots SET revision=revision+1,active_kind=NULL,active_publication_id=NULL WHERE active_kind=? AND active_publication_id=?",
+        ).run(kind, publicationId);
+        db.prepare("DELETE FROM local_app_approval_provenance WHERE publication_id=?").run(
+          publicationId,
+        );
+        db.prepare("DELETE FROM " + storage.artifactTable + " WHERE publication_id=?").run(
+          publicationId,
+        );
+        db.prepare("DELETE FROM " + storage.publicationTable + " WHERE publication_id=?").run(
+          publicationId,
+        );
+      }
     },
   };
 }

@@ -39,11 +39,11 @@ describe("where this workspace's schedules run, in Notices", () => {
     } as const;
     expect(scheduleHostNoticeText(elsewhere)).toEqual({
       message:
-        "This workspace's schedules and Group messages run on Ice's laptop, not this computer. If you take over while Ice's laptop is on, a run can repeat.",
+        "This workspace's schedules and Group messages run on Ice's laptop, not this computer. If you take over while Ice's laptop is on, a scheduled run could repeat.",
       failed: false,
     });
     expect(scheduleHostNoticeText({ ...elsewhere, sameName: true })?.message).toBe(
-      "This workspace's schedules and Group messages run on Ice's laptop, which has this computer's name. It may be an earlier installation of dohc here. If you take over while Ice's laptop is on, a run can repeat.",
+      "This workspace's schedules and Group messages run on Ice's laptop, which has this computer's name. It could be an earlier dohc installation here. If you take over while Ice's laptop is on, a scheduled run could repeat.",
     );
     expect(
       scheduleHostNoticeText({ ...elsewhere, waits: false }),

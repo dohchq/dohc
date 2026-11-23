@@ -1670,7 +1670,7 @@ describe("rebuildEngineStoreRequest", () => {
     await expect(rebuilding).rejects.toMatchObject({
       reason: "close-failed",
       message:
-        "dohc could not finish closing this workspace's data store. Nothing moved. Try again.",
+        "dohc could not finish closing this workspace's data store. Nothing moved. Quit dohc and open this workspace again, then choose Rebuild.",
       cause: closeError,
     });
     expect(d.probeStoreRefusal).not.toHaveBeenCalled();

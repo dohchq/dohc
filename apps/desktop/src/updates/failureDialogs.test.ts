@@ -45,7 +45,7 @@ describe("confirmDownloadDialog", () => {
     const startup = await asked("startup", 0);
     expect(startup.accepted).toBe(true);
     expect(startup.options).toMatchObject({
-      message: "Update 1.2.4 is available.",
+      message: "Update 1.2.4 is available",
       detail: "It may fix what stopped dohc from starting. Download it?",
       buttons: ["Download", "Quit"],
       defaultId: 0,

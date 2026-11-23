@@ -30,12 +30,14 @@ import {
   resetOrphanedDrafts,
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
-import { ORPHANED_DRAFT_STORAGE_PREFIX } from "./orphanedDraftStorage";
+import { draftFilesForTests } from "./orphanedDraftFiles.testHarness";
 import { deferred } from "../testing/deferred";
 
+let disk = draftFilesForTests();
+
 function seedStoredDraft(): void {
-  localStorage.setItem(
-    `${ORPHANED_DRAFT_STORAGE_PREFIX}previous-run`,
+  disk.set(
+    "00000000-0000-4000-8000-000000000007",
     JSON.stringify({
       id: 7,
       workspaceId: "ws-1",
@@ -61,6 +63,7 @@ function stubBridge(overrides: Record<string, unknown> = {}): void {
     answerExitRound: async () => undefined,
     holdQuit: async () => undefined,
     resumeQuit: async () => undefined,
+    ...disk.calls,
     ...overrides,
   });
 }
@@ -97,16 +100,15 @@ function roundBridge(overrides: Record<string, unknown> = {}) {
 
 // Every test gets the full contract; overrides replace it where asserted on.
 //
-// Storage refuses every write here. A persisted draft comes back on
-// the next launch and the guard rightly ignores it, so a suite about the
+// Main's draft files refuse every write here. A persisted draft comes back
+// on the next launch and the guard rightly ignores it, so a suite about the
 // guard must produce the drafts persistence cannot save — which is exactly
-// what a full quota produces. The block below covers the drafts that can be
+// what a full disk produces. The block below covers the drafts that can be
 // persisted, and the secret-path floor is pinned in orphanedDrafts.test.ts.
 beforeEach(() => {
+  disk = draftFilesForTests();
+  disk.fail(new Error("No space left on device"));
   stubBridge();
-  vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-    throw new Error("QuotaExceededError");
-  });
 });
 
 afterEach(async () => {
@@ -666,7 +668,7 @@ describe("RecoveryCloseGuard", () => {
 describe("RecoveryCloseGuard with working storage", () => {
   beforeEach(() => {
     // Undo the suite-wide refusal above; these tests need storage to work.
-    vi.restoreAllMocks();
+    disk.fail(null);
   });
 
   it("warns about the drafts storage could not take, and lists only those", async () => {
@@ -732,14 +734,10 @@ describe("main.tsx composition", () => {
     const container = document.createElement("div");
     container.id = "root";
     document.body.appendChild(container);
-    // A stored recovery from the last run, seeded through real storage; the
-    // capture after it goes back to the suite's full quota, so it stays
-    // at-risk and the guard still has something to announce.
-    vi.restoreAllMocks();
+    // A stored recovery from the last run; the capture after it meets the
+    // suite's full disk, so it stays at-risk and the guard still has
+    // something to announce.
     seedStoredDraft();
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("QuotaExceededError");
-    });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     // main.tsx renders outside act, so the crash screen's DOM can land one
     // commit before the guard's passive effect adds this listener — wait for

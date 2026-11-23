@@ -83,7 +83,7 @@ function expectTabStop(path: string) {
 }
 
 async function tabIntoTree(user: ReturnType<typeof userEvent.setup>, path: string) {
-  screen.getByRole("button", { name: "Collapse folders in explorer" }).focus();
+  screen.getByRole("button", { name: "New folder" }).focus();
   await user.tab();
   expect(document.activeElement).toBe(row(path));
   expectTabStop(path);
@@ -104,9 +104,7 @@ describe("Explorer tree tab stop", () => {
     await user.tab({ shift: true });
     expect(document.activeElement).toBe(row("notes.md"));
     await user.tab({ shift: true });
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "Collapse folders in explorer" }),
-    );
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "New folder" }));
   });
 
   it("re-enters at the selected row", async () => {

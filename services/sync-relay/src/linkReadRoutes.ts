@@ -8,7 +8,7 @@ import {
   linkLogWaitGroup,
   type DiscussionActivityHub,
 } from "./discussionActivity";
-import { notFound, relayError, RelayError } from "./errors";
+import { notFound, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import {
   isMemberRequest,
@@ -64,7 +64,6 @@ export function createLinkReadRoutes(
   admitLinkBlobBytes: (grantId: string, byteLength: number) => (() => void) | null,
   respondWithLinkBytes: ReturnType<typeof createLinkResponseStreams>["respondWithLinkBytes"],
   linkKey?: string | Uint8Array,
-  replica?: ReturnType<SyncRelayStorage["createReplicaLinkReadService"]>,
   lookupUserDisplayName?: LookupUserDisplayName,
 ) {
   const identity = createReceivedIdentity(linkKey);
@@ -151,19 +150,6 @@ export function createLinkReadRoutes(
         capability.credential.kind === "member"
           ? await levelChangedBy(share.workspaceId, capability.credential.userId)
           : {};
-      if (replica) {
-        const body = replica.inventory(
-          { grantId: capability.grantId, generation: capability.generation },
-          () => requireFresh(),
-          new URL(request.url).searchParams.get("collectionPath"),
-        );
-        if (body.files.length > linkCurrentFileLimit) throw notFound();
-        return linkJsonResponse(
-          capability,
-          { ...changed, ...body, ...linkChannel(capability.grantId) },
-          request.signal,
-        );
-      }
       const snapshot = storage.readCurrentFileState({
         workspaceId: share.workspaceId,
         versionId: targetVersionId(capability.effectiveSelector),
@@ -248,49 +234,6 @@ export function createLinkReadRoutes(
     if (route.route === "link-log") {
       const url = new URL(request.url);
       const currentOnly = url.searchParams.get("current") === "true";
-      if (replica && currentOnly) {
-        const input = { grantId: capability.grantId, generation: capability.generation };
-        let since = parseCursor(url.searchParams.get("since"));
-        if (!Number.isSafeInteger(since)) throw notFound();
-        const limit = parseLimit(url.searchParams.get("limit")),
-          hold = parseLinkLogHold(url.searchParams.get("hold"));
-        const deadline = Date.now() + hold;
-        const read = () => replica.feed(input, () => requireFresh(), since, limit);
-        let page = read();
-        while (
-          hold > 0 &&
-          !page.ops.length &&
-          !page.hasMore &&
-          Date.now() < deadline &&
-          !request.signal.aborted
-        ) {
-          since = page.nextCursor;
-          try {
-            await discussionActivity.wait(
-              linkLogWaitGroup(share.workspaceId),
-              `link:${capability.callerKey}`,
-              {
-                holdMs: Math.max(0, deadline - Date.now()),
-                signal: request.signal,
-                shouldPark: () => {
-                  try {
-                    const checked = read();
-                    return !checked.ops.length && !checked.hasMore;
-                  } catch {
-                    return false;
-                  }
-                },
-              },
-            );
-          } catch (error) {
-            if (error instanceof DiscussionActivityCapacityError)
-              throw relayError("link_read_rate_limited");
-            throw error;
-          }
-          page = read();
-        }
-        return linkJsonResponse(capability, { ok: true, ...page }, request.signal);
-      }
       if (!currentOnly && capability.access !== "edit") throw notFound();
       const freshRead = () => {
         const fresh = requireFresh();
@@ -445,47 +388,25 @@ export function createLinkReadRoutes(
     }
 
     assertSha256(route.sha256);
-    const replicaInput = { grantId: capability.grantId, generation: capability.generation };
-    const readReplicaBlob = (includeBytes = true) =>
-      replica!.blob(replicaInput, () => requireFresh(), route.sha256, includeBytes);
-    let historicalByteLength: number | null | undefined;
-    const historicalLength = () =>
-      historicalByteLength === undefined
-        ? (historicalByteLength =
-            capability.access === "edit"
-              ? linkRevisionByteLength(
-                  share.workspaceId,
-                  capability.effectiveSelector,
-                  route.sha256,
-                  epochLogFloor,
-                )
-              : null)
-        : historicalByteLength;
-    let replicaMetadata: ReturnType<typeof readReplicaBlob> = null;
-    if (replica) {
-      try {
-        replicaMetadata = readReplicaBlob(false);
-      } catch (error) {
-        if (
-          !(error instanceof RelayError) ||
-          error.code !== "link_read_rate_limited" ||
-          historicalLength() === null
-        )
-          throw error;
-      }
-    }
     // A current file first, then an earlier revision of a file still in the share.
-    const currentByteLength = replica
-      ? (replicaMetadata?.byteLength ?? null)
-      : storage.currentFileBlobByteLength({
-          workspaceId: share.workspaceId,
-          versionId: targetVersionId(capability.effectiveSelector),
-          selectorPaths: capability.effectiveSelector.paths,
-          sha256: route.sha256,
-          epochLogFloor,
-          visible: (path) => visibleSharePath(capability.effectiveSelector, path) !== null,
-        });
-    const byteLength = currentByteLength ?? historicalLength();
+    const currentByteLength = storage.currentFileBlobByteLength({
+      workspaceId: share.workspaceId,
+      versionId: targetVersionId(capability.effectiveSelector),
+      selectorPaths: capability.effectiveSelector.paths,
+      sha256: route.sha256,
+      epochLogFloor,
+      visible: (path) => visibleSharePath(capability.effectiveSelector, path) !== null,
+    });
+    const byteLength =
+      currentByteLength ??
+      (capability.access === "edit"
+        ? linkRevisionByteLength(
+            share.workspaceId,
+            capability.effectiveSelector,
+            route.sha256,
+            epochLogFloor,
+          )
+        : null);
     if (
       byteLength === null ||
       !Number.isSafeInteger(byteLength) ||
@@ -508,29 +429,18 @@ export function createLinkReadRoutes(
     }
     let streamOwnsAdmission = false;
     try {
-      const replicaBlob = replicaMetadata ? readReplicaBlob() : null;
-      const blob = replicaMetadata
-        ? replicaBlob?.bytes
-        : storage.getBlob(share.workspaceId, route.sha256);
+      const blob = storage.getBlob(share.workspaceId, route.sha256);
       if (!blob || blob.byteLength !== byteLength) throw notFound();
       const fresh = requireFresh();
       if (currentByteLength === null && fresh.access !== "edit") throw notFound();
       // An agent's download checks its token before every chunk, so it stops
       // once the token expires or its connection or link ends.
-      const replicaGuard = replicaBlob?.guard;
-      const agentGuard =
+      const guard =
         capability.credential.kind === "agent"
           ? () => {
               requireFresh();
             }
           : undefined;
-      const guard =
-        replicaGuard && agentGuard
-          ? () => {
-              replicaGuard();
-              agentGuard();
-            }
-          : (replicaGuard ?? agentGuard);
       const response = respondWithLinkBytes(
         blob,
         capability.shareId,

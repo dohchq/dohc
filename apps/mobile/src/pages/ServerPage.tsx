@@ -10,12 +10,14 @@ import {
   useSyncExternalStore,
   type ComponentRef,
 } from "react";
-import { Alert, PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
+import { EllipsisVertical } from "lucide-react-native";
+import { Alert, PixelRatio, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { useReducedMotion } from "react-native-reanimated";
 import { WebView } from "react-native-webview";
 import { PageScrollTop } from "../../modules/page-scroll-top";
 import { useAccount, useSignIn } from "../account/AccountProvider";
+import { HeaderButton } from "../AndroidHeader";
 import { copyText } from "../copy";
 import { pageTitle } from "../home/homeModel";
 import { phoneWrites } from "../server/phoneWrites";
@@ -23,6 +25,7 @@ import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
+import { documentActions } from "./documentActions";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
 import { createPageHost } from "./pageHost";
 import { createPageLive, holdsPage, holdsUnsent, liveMark, type PageLiveState } from "./pageLive";
@@ -99,6 +102,7 @@ function PageScreen({ path }: { path: string }) {
   // The web view's page, prepared once; Try again after a lost page prepares it again.
   const [uri, setUri] = useState<string | null>(null);
   const [lostPage, setLostPage] = useState<false | "failed" | "noSpace">(false);
+  const [needsNewer, setNeedsNewer] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [host] = useState(() =>
     createPageHost({ inject: (script) => web.current?.injectJavaScript(script) }),
@@ -173,6 +177,7 @@ function PageScreen({ path }: { path: string }) {
     if (data.kind === "painted") host.painted(from);
     // The page's fonts didn't load, so it didn't draw: Try again mounts a fresh page.
     if (data.kind === "fontsFailed") setLostPage("failed");
+    if (data.kind === "unsupportedFormat") setNeedsNewer(true);
     // The answer to the one Copy as Markdown waiting for it; the page can't copy unasked.
     if (data.kind === "markdown" || data.kind === "markdownUnavailable") {
       const done = copying.current;
@@ -235,6 +240,8 @@ function PageScreen({ path }: { path: string }) {
   const gap = useWorkspaceGap();
   const failure = gap ? (
     <NoWorkspace />
+  ) : needsNewer ? (
+    <ScreenFailure text={documentWords.needsNewerDohc} />
   ) : state.value?.kind === "missing" && !deleted && !holding ? (
     <ScreenFailure text={documentWords.noLongerAvailable} />
   ) : state.value?.kind === "too-large" && !holding ? (
@@ -315,9 +322,22 @@ function PageScreen({ path }: { path: string }) {
                 <Mark markKey={markKey} theme={theme} />
               </Pressable>
             ),
+          headerRight:
+            Platform.OS === "android" && markdown !== null
+              ? () =>
+                  typing ? (
+                    <HeaderButton label="Done" onPress={endEditing} />
+                  ) : (
+                    <HeaderButton
+                      icon={EllipsisVertical}
+                      label={documentWords.documentActions}
+                      onPress={() => void documentActions(() => copyMarkdown())}
+                    />
+                  )
+              : undefined,
         }}
       />
-      {markdown === null ? null : (
+      {Platform.OS !== "ios" || markdown === null ? null : (
         <Stack.Toolbar placement="right">
           {typing ? (
             <Stack.Toolbar.Button variant="done" onPress={endEditing}>

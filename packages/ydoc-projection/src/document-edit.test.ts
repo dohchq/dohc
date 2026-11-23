@@ -14,6 +14,7 @@ import {
 import {
   getDohcProseMirrorSchema,
   markdownToYDoc,
+  parseRichdocMarkdown,
   startsWithFrontmatter,
   yDocToMarkdown,
 } from "./import-export.js";
@@ -52,6 +53,33 @@ describe("documentMarkdown", () => {
     expect(settledDocumentMarkdown("# Kyoto\n\n* Day one\n")).toBe("# Kyoto\n\n- Day one\n");
     expect(markdownOf(new Y.Doc())).toBe("");
   });
+
+  test.each([
+    ["an empty paragraph", editorDoc([paragraph("A"), paragraph()]), "A\n"],
+    ["spaces", editorDoc([paragraph("Hello ")]), "Hello\n"],
+    ["only an empty paragraph", editorDoc([paragraph()]), ""],
+  ])("reads a document that ends in %s as its file does", (_, doc, file) => {
+    expect(yDocToMarkdown(doc)).toBe(file);
+    expect(markdownOf(doc)).toBe(file);
+  });
+
+  test("reads a note with only frontmatter as before", () => {
+    const doc = markdownToYDoc("---\ntitle: Trip\n---\n");
+    expect(markdownOf(doc)).toBe("---\ntitle: Trip\n---\n\n");
+  });
+
+  test("leaves the read as the file after an edit that ends in a blank line", () => {
+    const doc = markdownToYDoc("Budget 400");
+    edited(doc, { find: "400\n", replacement: "450\n\n" });
+    expect(markdownOf(doc)).toBe("Budget 450\n");
+    expect(markdownOf(doc)).toBe(yDocToMarkdown(doc));
+    edited(doc, { find: "450\n", replacement: "500\n" });
+    expect(markdownOf(doc)).toBe("Budget 500\n");
+    const spaced = editorDoc([paragraph("Intro"), paragraph("Hello  ")]);
+    edited(spaced, { find: "Hello\n", replacement: "Hello there.\n" });
+    expect(markdownOf(spaced)).toBe("Intro\n\nHello there.\n");
+    expect(yDocToMarkdown(spaced)).toBe("Intro\n\nHello there.\n");
+  });
 });
 
 describe("documentEditUpdate", () => {
@@ -64,6 +92,41 @@ describe("documentEditUpdate", () => {
 
     expect(markdownOf(doc)).toBe("# Kyoto\n\nDay one: temples and tea.\n\nDay two: markets.\n");
     expect(body.toArray()).toEqual([heading, dayOne, dayTwo]);
+  });
+
+  test("keeps raw HTML, references and picture links as the file spells them", () => {
+    const sealed = [
+      "<details>\n<summary>Setup</summary>\n\nRun it.\n\n</details>",
+      "[![build](https://img.example/b.svg)](https://ci.example/run) see [the docs][docs].",
+      "[docs]: https://example.com/docs",
+    ];
+    const doc = markdownToYDoc(["Status: draft.", ...sealed].join("\n\n"));
+    edited(doc, { find: "draft", replacement: "ready" });
+    expect(markdownOf(doc)).toBe(`${["Status: ready.", ...sealed].join("\n\n")}\n`);
+    edited(doc, { find: "the docs", replacement: "the guide" });
+    expect(markdownOf(doc)).toBe(
+      `${["Status: ready.", ...sealed].join("\n\n").replace("the docs", "the guide")}\n`,
+    );
+  });
+
+  test("edits text beside a link through a definition in another block", () => {
+    const doc = markdownToYDoc("See [docs][x] for details.\n\n[x]: https://example.com");
+    edited(doc, { find: "for details", replacement: "for more" });
+    expect(markdownOf(doc)).toBe("See [docs][x] for more.\n\n[x]: https://example.com\n");
+    const emphasis = markdownToYDoc("Read *[foo*] here*.\n\n[foo*]: /guide");
+    edited(emphasis, { find: "Read", replacement: "See" });
+    expect(markdownOf(emphasis)).toBe("See *[foo*] here*.\n\n[foo*]: /guide\n");
+    const appended = markdownToYDoc("Intro.\n\n[x]: /old");
+    edited(appended, { replacement: "Read [a &copy; b][x]." });
+    expect(markdownOf(appended)).toBe("Intro.\n\n[x]: /old\n\nRead [a &copy; b][x].\n");
+    const named = "[constructor] and [__proto__] here.";
+    expect(JSON.stringify(parseRichdocMarkdown(named, "source", named))).not.toContain("rawInline");
+  });
+
+  test("reads a link as text once the same edit removes its definition", () => {
+    const doc = markdownToYDoc("[x]: /x\n\nText.");
+    edited(doc, { find: "[x]: /x\n\nText.", replacement: "Text [x]." }, closed);
+    expect(String(doc.toJSON().body)).toBe("<paragraph>Text [x].</paragraph>");
   });
 
   test("adds a section written as Markdown", () => {
@@ -81,7 +144,7 @@ describe("documentEditUpdate", () => {
     const doc = editorDoc([paragraph("Notes"), paragraph()]);
     const cursorBlock = getDohcYDocBodyFragment(doc).get(1);
     edited(doc, { replacement: "## Next\n\nCall the hotel." });
-    expect(markdownOf(doc)).toBe("Notes\n\n## Next\n\nCall the hotel.\n\n");
+    expect(markdownOf(doc)).toBe("Notes\n\n## Next\n\nCall the hotel.\n");
     const body = getDohcYDocBodyFragment(doc);
     expect(body.get(body.length - 1)).toBe(cursorBlock);
   });
@@ -89,7 +152,7 @@ describe("documentEditUpdate", () => {
   test("adds text to a document with no blocks and to one with only an empty paragraph", () => {
     expect(markdownOf(edited(new Y.Doc(), { replacement: "First line." }))).toBe("First line.\n");
     expect(markdownOf(edited(editorDoc([paragraph()]), { replacement: "First line." }))).toBe(
-      "First line.\n\n",
+      "First line.\n",
     );
   });
 

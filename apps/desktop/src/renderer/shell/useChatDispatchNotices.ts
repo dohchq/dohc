@@ -64,7 +64,7 @@ export function useChatDispatchNotices(
           if (isCurrent())
             report({
               message:
-                "dohc could not try the agent requests again. Open this workspace again to try again.",
+                "dohc could not retry the agent requests. Reopen this workspace to try again.",
               cause,
             });
         });
@@ -186,7 +186,7 @@ export function useChatDispatchNotices(
                       if (shown.get(row) === notice.id) shown.delete(row);
                       report({
                         message:
-                          "dohc could not dismiss this notice. Open this workspace again to try again.",
+                          "dohc could not dismiss this Notice. Reopen this workspace to try again.",
                         cause,
                       });
                     });
@@ -203,7 +203,7 @@ export function useChatDispatchNotices(
         if (isCurrent())
           report({
             message:
-              "dohc could not load notices about agent replies. Open this workspace again to try again.",
+              "dohc could not load Notices about agent replies. Reopen this workspace to try again.",
             cause,
           });
       });

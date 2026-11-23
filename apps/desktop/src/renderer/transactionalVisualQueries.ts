@@ -15,9 +15,7 @@ export const BOARD_GROUP_PAGE_SIZE = 8;
 export type GroupCursor = { value: AppBackendJson };
 export type DateRange = { fieldId: string; start: string; end: string };
 const unsupported = () =>
-  new Error(
-    "This Collection's read action does not support this view. Update its rules, then try again.",
-  );
+  new Error("This Collection's read action does not support this view. Update its rules.");
 
 export function calendarRange(fieldId: string, month: Date): DateRange {
   const first = new Date(month.getFullYear(), month.getMonth(), 1);

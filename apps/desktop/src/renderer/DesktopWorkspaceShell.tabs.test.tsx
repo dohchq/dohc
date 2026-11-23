@@ -244,7 +244,7 @@ describe("shell tab surfaces", () => {
         expect(await pane.findByTestId("start-surface")).toBeTruthy();
         expect(pane.queryByTestId(editorTabTestId(path))).toBeNull();
       } else if (fallback === "collection error") {
-        expect(await pane.findByText("dohc could not open this collection")).toBeTruthy();
+        expect(await pane.findByText("dohc could not open this Collection.")).toBeTruthy();
         expect(pane.getByRole("button", { name: "Close tab" })).toBeTruthy();
         expect(pane.getByTestId(editorTabTestId(path))).toBeTruthy();
       } else {
@@ -290,7 +290,7 @@ describe("shell tab surfaces", () => {
     renderShell(bridge);
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
-        "Could not read Collections.",
+        "dohc could not read Collections.",
       ),
     );
     bridge.dataset.mockImplementation(list);

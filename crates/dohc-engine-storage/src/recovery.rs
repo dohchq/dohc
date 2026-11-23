@@ -11,7 +11,7 @@
 //! the copy runs the ordinary migrations and is then read.
 
 use crate::backup::FreeSpaceProbe;
-use crate::error::StorageError;
+use crate::error::{SpaceShortfall, StorageError};
 use crate::migration::LedgerState;
 use crate::store::EngineStore;
 use rusqlite::config::DbConfig;
@@ -231,8 +231,10 @@ fn prepare(
     let folder = folder().map_err(|error| {
         if error.kind() == std::io::ErrorKind::StorageFull {
             StorageError::DiskFull {
-                needed,
-                available: 0,
+                shortfall: Some(SpaceShortfall {
+                    needed,
+                    available: 0,
+                }),
             }
             .into()
         } else {
@@ -241,7 +243,10 @@ fn prepare(
     })?;
     let available = free_space.available_bytes(&folder)?;
     if available < needed {
-        return Err(StorageError::DiskFull { needed, available }.into());
+        return Err(StorageError::DiskFull {
+            shortfall: Some(SpaceShortfall { needed, available }),
+        }
+        .into());
     }
     let copy = folder.join("engine.db");
     let mut target = crate::open_store(
@@ -352,33 +357,26 @@ fn copy_snapshot(
     }
 }
 
-/// `error`, or [`StorageError::DiskFull`] when SQLite ran out of room for the
-/// copy or its migrations.
+/// `error`, with the space the copy needed and the space left when SQLite ran
+/// out of room for the copy or its migrations.
 fn full(
     error: RecoveryError,
     needed: u64,
     free_space: &dyn FreeSpaceProbe,
     folder: &Path,
 ) -> RecoveryError {
-    let RecoveryError::Storage(storage) = &error else {
-        return error;
-    };
-    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(storage);
-    while let Some(current) = cause {
-        if current
-            .downcast_ref::<rusqlite::Error>()
-            .and_then(rusqlite::Error::sqlite_error_code)
-            == Some(rusqlite::ErrorCode::DiskFull)
-        {
-            return StorageError::DiskFull {
-                needed,
-                available: free_space.available_bytes(folder).unwrap_or(0),
+    match error {
+        RecoveryError::Storage(StorageError::DiskFull { shortfall: None }) => {
+            StorageError::DiskFull {
+                shortfall: Some(SpaceShortfall {
+                    needed,
+                    available: free_space.available_bytes(folder).unwrap_or(0),
+                }),
             }
-            .into();
+            .into()
         }
-        cause = current.source();
+        error => error,
     }
-    error
 }
 
 /// Create the store at `path` as a build that defined every migration but
@@ -685,8 +683,10 @@ mod tests {
             matches!(
                 refused,
                 RecoveryError::Storage(StorageError::DiskFull {
-                    available: 1024,
-                    ..
+                    shortfall: Some(SpaceShortfall {
+                        available: 1024,
+                        ..
+                    })
                 })
             ),
             "{refused:?}"
@@ -710,7 +710,9 @@ mod tests {
         assert!(
             matches!(
                 failed,
-                RecoveryError::Storage(StorageError::DiskFull { available: 7, .. })
+                RecoveryError::Storage(StorageError::DiskFull {
+                    shortfall: Some(SpaceShortfall { available: 7, .. })
+                })
             ),
             "{failed:?}"
         );

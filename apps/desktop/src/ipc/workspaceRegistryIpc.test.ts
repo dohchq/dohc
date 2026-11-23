@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { CHANNELS } from "./channels";
+import { isCloudSyncFolderCancelled } from "./errorWords";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { type SyncStatusResult, type WorkspaceSummary } from "./bridgeContract";
 import {
@@ -472,5 +473,96 @@ describe("forget and reveal", () => {
     await expect(h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-9" })).rejects.toThrow(
       "not in the registry",
     );
+  });
+});
+
+describe("pickWorkspaceRoot confirmation", () => {
+  it("returns null and does not approve the root when confirmPickedFolder declines", async () => {
+    const home = await createTestScratch("pick-confirm-");
+    const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
+    const roots = createWorkspaceRootApproval(() => home);
+    const picked = join(home, "OneDrive", "Notes");
+    const confirmPickedFolder = vi.fn(async () => false);
+    registerWorkspaceRegistryIpcHandlers<Event>({
+      registerHandler: (channel, handler) => {
+        handlers.set(channel, handler);
+      },
+      assertTrustedSender: () => {},
+      app: { isPackaged: false },
+      dialog: { showOpenDialog: vi.fn(async () => ({ canceled: false, filePaths: [picked] })) },
+      confirmPickedFolder,
+      roots,
+      effectiveHome: () => home,
+      stateDir: () => "dohc-state",
+      workspaceSummaries: () => [],
+      prioritizePreferredWorkspace: (rows) => rows,
+      createWorkspaceFolder: vi.fn(),
+      registerPhysicalWorkspace: vi.fn(),
+      thisComputer: () => ({ installId: "install-here", label: "This PC" }),
+      trustNewWorkspace: vi.fn(async () => undefined),
+      forgetWorkspace: vi.fn(async () => undefined),
+      showItemInFolder: vi.fn(),
+      openWorkspaceWindow: vi.fn(async () => undefined),
+      openWorkspaceManager: vi.fn(),
+      closeWindowOf: vi.fn(),
+      forgottenShareViews: { reopen: async (w) => w },
+      refreshNativeWorkspaceSurfaces: vi.fn(),
+      desktopMarks: { mark: vi.fn(), measureSince: vi.fn() },
+    });
+    const pick = handlers.get(CHANNELS.pickWorkspaceRoot)!;
+    await expect(pick({ trusted: true }, undefined)).resolves.toBe(null);
+    expect(confirmPickedFolder).toHaveBeenCalledWith(picked, { trusted: true });
+    expect(() => roots.usableRoot(picked)).toThrow("must be chosen through dohc");
+
+    confirmPickedFolder.mockResolvedValueOnce(true);
+    await expect(pick({ trusted: true }, undefined)).resolves.toBe(picked);
+    expect(roots.usableRoot(picked)).toBeTruthy();
+  });
+
+  it("checks the final destination before createLocalWorkspace writes anything", async () => {
+    const home = await createTestScratch("create-confirm-");
+    const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
+    const roots = createWorkspaceRootApproval(() => home);
+    const defaultRoot = join(home, "dohc");
+    roots.approveRoot(defaultRoot);
+    const createWorkspaceFolder = vi.fn();
+    const confirmNewWorkspaceFolder = vi.fn(async () => false);
+    registerWorkspaceRegistryIpcHandlers<Event>({
+      registerHandler: (channel, handler) => {
+        handlers.set(channel, handler);
+      },
+      assertTrustedSender: () => {},
+      app: { isPackaged: false },
+      dialog: { showOpenDialog: vi.fn(async () => ({ canceled: true, filePaths: [] })) },
+      confirmNewWorkspaceFolder,
+      roots,
+      effectiveHome: () => home,
+      stateDir: () => "dohc-state",
+      workspaceSummaries: () => [],
+      prioritizePreferredWorkspace: (rows) => rows,
+      createWorkspaceFolder,
+      registerPhysicalWorkspace: vi.fn(),
+      thisComputer: () => ({ installId: "install-here", label: "This PC" }),
+      trustNewWorkspace: vi.fn(async () => undefined),
+      forgetWorkspace: vi.fn(async () => undefined),
+      showItemInFolder: vi.fn(),
+      openWorkspaceWindow: vi.fn(async () => undefined),
+      openWorkspaceManager: vi.fn(),
+      closeWindowOf: vi.fn(),
+      forgottenShareViews: { reopen: async (w) => w },
+      refreshNativeWorkspaceSurfaces: vi.fn(),
+      desktopMarks: { mark: vi.fn(), measureSince: vi.fn() },
+    });
+    const create = handlers.get(CHANNELS.createLocalWorkspace)!;
+    const target = join(defaultRoot, "Personal");
+    let caught: unknown;
+    try {
+      await create({ trusted: true }, { rootPath: target, kind: "personal" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(isCloudSyncFolderCancelled(caught)).toBe(true);
+    expect(confirmNewWorkspaceFolder).toHaveBeenCalledTimes(1);
+    expect(createWorkspaceFolder).not.toHaveBeenCalled();
   });
 });

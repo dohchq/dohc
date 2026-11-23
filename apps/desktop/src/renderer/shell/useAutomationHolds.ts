@@ -18,7 +18,7 @@ const NO_SERVER_HOLDS: ListAutomationHoldsResult["holds"] = [];
 
 function unidentifiedMessage(path: string): string {
   const name = path.split("/").at(-1) ?? path;
-  return `Automation steps in "${name}" wait because dohc cannot tell which Collection "${path}/automations.yaml" belongs to in one version of the workspace. Fix its collection.yaml or dataset.json in that version.`;
+  return `Automation steps in "${name}" are waiting because dohc cannot match "${path}/automations.yaml" to a Collection in one version of this workspace. Fix collection.yaml or dataset.json in that version.`;
 }
 
 /**
@@ -139,7 +139,7 @@ export function useAutomationHolds(
         if (asked !== token.current) return;
         if (result.status === "roster-unknown") {
           reportShellError(
-            "Couldn't reset automation holds.",
+            "dohc could not reset automation holds.",
             new Error("dohc cannot check who can edit this workspace yet. Try again in a moment."),
           );
           return;
@@ -147,13 +147,16 @@ export function useAutomationHolds(
         await reload(asked);
       })
       .catch((error: unknown) => {
-        if (asked === token.current) reportShellError("Couldn't reset automation holds.", error);
+        if (asked === token.current)
+          reportShellError("dohc could not reset automation holds.", error);
       });
   }, [workspaceId, reload, reportShellError]);
   const revealAutomationHolds = useCallback(() => {
     void bridge()
       .revealAutomationHolds({ workspaceId })
-      .catch((error: unknown) => reportShellError("Couldn't open the automations folder.", error));
+      .catch((error: unknown) =>
+        reportShellError("dohc could not open the automations folder.", error),
+      );
   }, [workspaceId, reportShellError]);
   const allowAutomationHold = useCallback(
     (hold: AutomationHoldNotice) =>
@@ -168,7 +171,7 @@ export function useAutomationHolds(
             ...(hold.recipient ? { recipient: hold.recipient } : {}),
             onServer: hold.onServer,
           }),
-        "Couldn't allow that automation step.",
+        "dohc could not allow that automation step.",
       ),
     [workspaceId, change],
   );
@@ -185,7 +188,7 @@ export function useAutomationHolds(
               seq,
             })),
           }),
-        "Couldn't dismiss the stopped automations notice.",
+        "dohc could not dismiss the stopped automations Notice.",
       ),
     [workspaceId, change],
   );

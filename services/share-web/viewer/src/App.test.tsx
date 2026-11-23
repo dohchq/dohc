@@ -4,7 +4,30 @@ import {
   SHARE_WEB_API_VERSION_HEADER,
 } from "@dohc/workspace-contracts/relay-values";
 // App discovery has its own request, cancellation, and rendering tests.
-vi.mock("./PublishedApps", () => ({ PublishedApps: () => null }));
+let mockPublishedApps: Array<{ publicationId: string; name: string }> | null = null;
+vi.mock("./PublishedApps", async () => {
+  const { useEffect } = await import("react");
+  return {
+    PublishedApps: ({
+      onState,
+      onPublications,
+    }: {
+      onState?: (state: "loading" | "some" | "none") => void;
+      onPublications?: (items: readonly { publicationId: string; name: string }[]) => void;
+    }) => {
+      useEffect(() => {
+        if (!mockPublishedApps) return;
+        onPublications?.(mockPublishedApps);
+        onState?.(mockPublishedApps.length > 0 ? "some" : "none");
+      }, [onState, onPublications]);
+      return mockPublishedApps && mockPublishedApps.length > 0 ? (
+        <div data-testid="mock-published-apps">
+          {mockPublishedApps.map((item) => item.name).join(",")}
+        </div>
+      ) : null;
+    },
+  };
+});
 import { jsonResponse, requestPath as fullRequestPath, settle, setControlValue } from "./testing";
 import { act } from "react";
 import { LINK_REFUSALS, linkRefusalBody } from "@dohc/security-contract/link-refusal";
@@ -230,6 +253,7 @@ describe("App", () => {
     container.remove();
     vi.useRealTimers();
     exposeHeldLogQuery = false;
+    mockPublishedApps = null;
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -5294,6 +5318,166 @@ describe("App", () => {
       expect(container.textContent).toContain("dohc couldn't open the shared files.");
       expect(logPaths).toHaveLength(1);
       expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
+  describe("direct app links", () => {
+    const PUBLICATION_ID = "a".repeat(64);
+
+    it("shows a focused launch card without loading shared files until Browse shared files is clicked", async () => {
+      const files: SharedFile[] = [
+        { path: "apps/trip-poll/broker.ts", blobSha256: "b".repeat(64), contentKind: "text" },
+      ];
+      mockPublishedApps = [{ publicationId: PUBLICATION_ID, name: "Trip poll" }];
+      history.replaceState(null, "", `/s/${SESSION}?app=${PUBLICATION_ID}`);
+      let blobRequests = 0;
+      const fallback = viewerFetch(() => {
+        throw new Error("Unexpected handoff");
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const route = requestPath(input);
+          if (route === "/api/view/current") return currentPage(files, 0);
+          if (route === "/api/view/log?since=0&limit=500") return logPage(files);
+          if (route.startsWith("/api/view/blob/")) {
+            blobRequests += 1;
+            return new Response("export const broker = true;");
+          }
+          return fallback(input, init);
+        }),
+      );
+
+      await renderApp();
+      await settle(() => container.querySelector(".app-landing h1")?.textContent === "Trip poll");
+
+      expect(document.title).toBe("Trip poll · dohc");
+      expect(
+        container.querySelector("main.column.app-landing-column > section.app-landing"),
+      ).not.toBeNull();
+      expect(container.querySelector(".app-landing")?.textContent).toContain(
+        "This app can use external services. Its author decides where it sends data.",
+      );
+      expect(container.querySelector("h1.page-title")).toBeNull();
+      expect(container.querySelector(".code")).toBeNull();
+      expect(blobRequests).toBe(0);
+      expect(buttonNamed("Open app")).toBeDefined();
+      expect(buttonNamed("Browse shared files")).toBeDefined();
+
+      clickButton("Browse shared files");
+      await settle(() => container.textContent.includes("export const broker = true;"));
+
+      expect(container.querySelector(".app-landing")).toBeNull();
+      expect(blobRequests).toBe(1);
+    });
+
+    it("does not overlap #link-apps.apps-lead with the direct ?app= launch card on an app-only share", async () => {
+      mockPublishedApps = [{ publicationId: PUBLICATION_ID, name: "Trip poll" }];
+      history.replaceState(null, "", `/s/${SESSION}?app=${PUBLICATION_ID}`);
+      vi.stubGlobal(
+        "fetch",
+        viewerFetch(() => {
+          throw new Error("Unexpected handoff");
+        }),
+      );
+
+      await renderApp();
+      await settle(() => container.querySelector(".app-landing h1")?.textContent === "Trip poll");
+
+      expect(container.querySelector(".app-landing")).not.toBeNull();
+      expect(buttonNamed("Browse shared files")).toBeUndefined();
+      expect(container.querySelector("#link-apps")?.classList.contains("apps-lead")).toBe(false);
+    });
+
+    it("keeps #link-apps.apps-lead when opening an app-only share without ?app=", async () => {
+      mockPublishedApps = [{ publicationId: PUBLICATION_ID, name: "Trip poll" }];
+      vi.stubGlobal(
+        "fetch",
+        viewerFetch(() => {
+          throw new Error("Unexpected handoff");
+        }),
+      );
+
+      await renderApp();
+      await settle(
+        () => container.querySelector("#link-apps")?.classList.contains("apps-lead") === true,
+      );
+
+      expect(container.querySelector(".app-landing")).toBeNull();
+    });
+
+    it.each(["", "not-a-publication-id"])(
+      "ignores empty or malformed ?app=%s and keeps the normal share view",
+      async (badApp) => {
+        const files: SharedFile[] = [
+          { path: "note.md", blobSha256: "b".repeat(64), contentKind: "text" },
+        ];
+        history.replaceState(null, "", `/s/${SESSION}?app=${badApp}`);
+        const fallback = viewerFetch(() => {
+          throw new Error("Unexpected handoff");
+        });
+        vi.stubGlobal(
+          "fetch",
+          vi.fn<typeof fetch>(async (input, init) => {
+            const route = requestPath(input);
+            if (route === "/api/view/current") return currentPage(files, 0);
+            if (route === "/api/view/log?since=0&limit=500") return logPage(files);
+            if (route.startsWith("/api/view/blob/")) return new Response("# Shared note");
+            return fallback(input, init);
+          }),
+        );
+
+        await renderApp();
+        await settle(() => container.textContent.includes("Shared note"));
+
+        expect(container.querySelector(".app-landing")).toBeNull();
+        expect(buttonNamed("Open app")).toBeUndefined();
+      },
+    );
+
+    it("aborts an in-flight app launch when Browse shared files is clicked", async () => {
+      const files: SharedFile[] = [
+        { path: "note.md", blobSha256: "b".repeat(64), contentKind: "text" },
+      ];
+      mockPublishedApps = [{ publicationId: PUBLICATION_ID, name: "Trip poll" }];
+      history.replaceState(null, "", `/s/${SESSION}?app=${PUBLICATION_ID}`);
+      let launchSignal: AbortSignal | undefined;
+      const fallback = viewerFetch(() => {
+        throw new Error("Unexpected handoff");
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const route = requestPath(input);
+          if (route === "/api/view/current") return currentPage(files, 0);
+          if (route === "/api/view/log?since=0&limit=500") return logPage(files);
+          if (route.startsWith("/api/view/blob/")) return new Response("# Shared note");
+          if (route === "/api/apps/launch") {
+            launchSignal = init?.signal ?? undefined;
+            return await new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener(
+                "abort",
+                () => reject(new DOMException("Aborted", "AbortError")),
+                { once: true },
+              );
+            });
+          }
+          return fallback(input, init);
+        }),
+      );
+
+      await renderApp();
+      await settle(() => container.querySelector(".app-landing h1")?.textContent === "Trip poll");
+
+      clickButton("Open app");
+      await settle(() => launchSignal !== undefined);
+      expect(launchSignal?.aborted).toBe(false);
+
+      clickButton("Browse shared files");
+      await settle(() => container.textContent.includes("Shared note"));
+
+      expect(launchSignal?.aborted).toBe(true);
+      expect(container.querySelector(".app-landing")).toBeNull();
     });
   });
 });

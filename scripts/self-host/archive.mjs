@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { apnsKeyTarget, realPath } from "../../tools/self-host/config.mjs";
 
 const archiveVolumeScript = `
 const {spawnSync}=require('node:child_process');
@@ -9,7 +10,7 @@ const fs=require('node:fs');
 const [name,uid,gid]=process.argv.slice(1);
 const path='/backup/'+name;
 process.umask(0o077);
-const result=spawnSync('tar',['--numeric-owner','--create','--gzip','--file',path,'-C','/source','.'],{stdio:'inherit'});
+const result=spawnSync('tar',['--numeric-owner','--create','--use-compress-program','gzip -1','--file',path,'-C','/source','.'],{stdio:'inherit'});
 if(result.error || result.status!==0) process.exit(1);
 fs.chmodSync(path,0o600);
 if(uid!=='none') fs.chownSync(path,Number(uid),Number(gid));
@@ -48,15 +49,17 @@ export async function archiveDeployment(options, config, run) {
     ),
   ];
   await save("images.json", run(["image", "inspect", ...images]));
-  const bindSources = [
-    ...new Set(
-      Object.values(config.services).flatMap((service) =>
-        (service.volumes ?? [])
-          .filter((volume) => volume.type === "bind")
-          .map((volume) => volume.source),
-      ),
-    ),
+  const binds = Object.values(config.services).flatMap((service) =>
+    (service.volumes ?? []).filter((volume) => volume.type === "bind"),
+  );
+  const sources = (keep) => [
+    ...new Set(binds.filter((volume) => keep(volume.target)).map((volume) => volume.source)),
   ];
+  const apnsKeys = sources((target) => target === apnsKeyTarget);
+  const apnsFiles = new Set(apnsKeys.map(realPath));
+  const bindSources = sources((target) => target !== apnsKeyTarget).filter(
+    (source) => !apnsFiles.has(realPath(source)),
+  );
   for (const [index, source] of bindSources.entries()) {
     if (!(await stat(source)).isFile())
       throw new Error(
@@ -66,9 +69,7 @@ export async function archiveDeployment(options, config, run) {
     await save(name, await readFile(source));
     files.at(-1).source = source;
   }
-  const volumes = Object.entries(config.volumes ?? {}).filter(
-    ([, volume]) => volume.labels?.["dohc.backup"] !== "skip",
-  );
+  const volumes = Object.entries(config.volumes ?? {});
   // Inspect before docker run: mounting a missing name must never fabricate a replacement volume.
   if (volumes.length) run(["volume", "inspect", ...volumes.map(([, volume]) => volume.name)]);
   for (const [index, [key, volume]] of volumes.entries()) {
@@ -127,6 +128,10 @@ export async function archiveDeployment(options, config, run) {
           "No automatic restore is supported. Never replace current continuity with an older archived copy.",
           "An archive does not prove this host accepted no later work. Restoring it can resurrect revoked authority.",
           "Use a separate relay snapshot for exact-continuity repair or offline content salvage.",
+          ...apnsKeys.map(
+            (source) =>
+              `Leaves out the APNs auth key ${source}. Keep your own copy: Apple lets you download it only once.`,
+          ),
         ],
       },
       null,

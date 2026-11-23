@@ -64,7 +64,7 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
       context.chatsAvailable && !(parseTab(context.focusedTabPath)?.kind === "chat") ? (
         <HeaderButton
           testId="chats-open-tab"
-          label="Open chats in tab"
+          label="Open Chats in tab"
           onClick={context.openChatsTab}
         >
           {openInTabIcon}
@@ -77,7 +77,7 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
       // each one takes over from the last without blinking.
       <SkeletonSlot>
         {context.chatsAvailable ? (
-          <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats..." />}>
+          <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats…" />}>
             <LazyChatsView key={context.workspaceId} {...context.chatsNavigatorProps} />
           </Suspense>
         ) : context.captureDecided ? (
@@ -94,7 +94,7 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
           </div>
         ) : (
           // Main has not decided yet — a load state, not a claim.
-          <SkeletonRows inSlot layout="panel" label="Loading Chats..." />
+          <SkeletonRows inSlot layout="panel" label="Loading Chats…" />
         )}
       </SkeletonSlot>
     ),
@@ -110,14 +110,14 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
     actions: (context) => (
       <HeaderButton
         testId="graph-open-tab"
-        label="Open graph in tab"
+        label="Open Graph in tab"
         onClick={context.openGraphTab}
       >
         {openInTabIcon}
       </HeaderButton>
     ),
     render: (context) => (
-      <Suspense fallback={<SkeletonRows layout="panel" label="Loading graph..." />}>
+      <Suspense fallback={<SkeletonRows layout="panel" label="Loading Graph…" />}>
         <LazyGraphView
           workspaceId={context.workspaceId}
           activePath={context.activeDocumentPath}
@@ -136,7 +136,7 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
     actions: (context) => (
       <HeaderButton
         testId="history-open-tab"
-        label="Open history in tab"
+        label="Open History in tab"
         onClick={context.openHistoryTab}
       >
         {openInTabIcon}

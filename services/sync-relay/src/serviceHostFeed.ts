@@ -2,10 +2,11 @@ import type { DiscussionActivityHub } from "./discussionActivity";
 import { jsonResponse } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { badRequest, notFound, relayError } from "./errors";
+import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
 import { assertSha256, parseCursor, parseLimit, readJsonObject } from "./requestInputs";
-import { MAX_RAW_ROWS_PER_LINK_PAGE, scanFilteredLog } from "./shareReadQueries";
+import { serverLogLine } from "./serverLogWords";
+import { MAX_RAW_ROWS_PER_SHARE_PAGE, scanFilteredLog } from "./shareReadQueries";
 import type { LogAuthorNameLookup } from "./relayLogInputs";
 import type { SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
 import { referencedBlobShas } from "./storage/blobReferences";
@@ -398,7 +399,7 @@ export function createServiceHostFeed(
       const since = Math.max(requestedSince, epochLogFloor);
       const page = scanFilteredLog(
         storage,
-        { workspaceId, since, limit, maxRawRows: MAX_RAW_ROWS_PER_LINK_PAGE },
+        { workspaceId, since, limit, maxRawRows: MAX_RAW_ROWS_PER_SHARE_PAGE },
         (row) => {
           const decision = hostedRowDecision(scope, row);
           if (!decision.allowed) return null;
@@ -424,13 +425,23 @@ export function createServiceHostFeed(
         batched = false;
       // Verified output of a retiring note that stays, kept ordinary until confirmed.
       const staying = new WeakSet<SyncRelayLogInput>();
-      // Whether a retiring note stays in place: its enrollment has no owner Stop and the note is still at its path.
       const staysInPlace = ({ workspaceId, objectId, path }: ServiceActivationRetirement) =>
-        storage.readServiceHostEnrollmentByObjectId(workspaceId, objectId)?.ownerStop === null &&
         storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) === objectId;
       const admission: HostedAdmission = {
         async screen(originId, ops) {
-          await warmReach(workspaceId);
+          // A push with no rows names no blob, and a host sends one at each start to confirm its origin. In a
+          // new process the reach is not built, and building it reads every shared document's history. So that
+          // push starts the build and does not wait for it. The first request that checks a blob waits.
+          const warming = warmReach(workspaceId);
+          if (ops.length > 0) await warming;
+          else
+            void warming.catch((error: unknown) => {
+              // A workspace with no scope fails the build, and `currentScope` below gives this push the same
+              // answer. Any other failure reaches the next request that checks a blob. It is logged here in
+              // case none follows.
+              if (!(error instanceof RelayError && error.code === "not_found"))
+                console.error("[sync-relay] hosted blob reach", serverLogLine(error));
+            });
           guard();
           pushOrigin = originId;
           const scope = currentScope(workspaceId),
@@ -478,6 +489,23 @@ export function createServiceHostFeed(
         admit(ops) {
           const scope = currentScope(workspaceId),
             known = blobReach.known(scope);
+          const files = new Map<string, string | undefined>();
+          const fileAt = (path: string) =>
+            files.has(path)
+              ? files.get(path)
+              : storage.currentFileBlobSha256({ workspaceId, versionId: "main", path });
+          const fileMovedSince = (op: SyncRelayLogInput) => {
+            if (op.opKind !== "moment.append") return false;
+            const save = asRecord(JSON.parse(op.payloadJson));
+            const path = save?.path,
+              before = save?.payloadBeforeBlobSha256,
+              after = save?.payloadAfterBlobSha256;
+            if (typeof path !== "string" || typeof before !== "string") return false;
+            const current = fileAt(path);
+            if (current !== undefined && current !== before) return true;
+            files.set(path, typeof after === "string" ? after : undefined);
+            return false;
+          };
           const batch = {
             originId: pushOrigin,
             ops: new Map(ops.map((op) => [op.originSeq, op])),
@@ -488,12 +516,9 @@ export function createServiceHostFeed(
             const decision = hostedPublication(scope, known, op);
             if (decision.kind === "refused") refuse(op, decision.reason);
             else if (decision.kind === "retiring") {
-              // Verified retirement output keeps its history. A note that stays, as when its Edit access
-              // ended, takes it as ordinary output, so the stored note holds its last save. A Stop's,
-              // moved or deleted note's departs.
               const refusal = storage.admitRetirementPublication(decision.retirement, op, batch);
               if (refusal !== null) refuse(op, refusal);
-              else if (staysInPlace(decision.retirement)) staying.add(op);
+              else if (staysInPlace(decision.retirement) && !fileMovedSince(op)) staying.add(op);
               else op.relayAdmission = "departed";
             } else if (decision.kind === "departed") op.relayAdmission = "departed";
           }

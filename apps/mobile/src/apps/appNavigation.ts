@@ -33,13 +33,24 @@ const within = (host: string, domain: string) => host === domain || host.endsWit
  * host under the app domain.
  */
 export function externalLink(url: string, bootstrap: string, serverOrigin: string): string | null {
+  return outsideLink(
+    url,
+    serverOrigin,
+    bare(new URL(bootstrap).hostname).split(".").slice(1).join("."),
+  );
+}
+
+/**
+ * The address to open in the system browser for a link the person tapped, or null: only HTTPS, never on the dohc
+ * server or, when one is given, the app domain.
+ */
+export function outsideLink(url: string, serverOrigin: string, appDomain = ""): string | null {
   let target: URL;
   try {
     target = new URL(url);
   } catch {
     return null;
   }
-  const appDomain = bare(new URL(bootstrap).hostname).split(".").slice(1).join(".");
   const host = bare(target.hostname);
   if (
     target.protocol !== "https:" ||

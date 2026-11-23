@@ -10,6 +10,7 @@ use dohc_engine_protocol::transport::ServiceResponse;
 use dohc_engine_protocol::wire::Request;
 use dohc_engine_protocol::wire::Response;
 use dohc_engine_protocol::wire::WorkspaceHandle;
+use dohc_engine_runtime::LifecycleState;
 use serde_json::Value;
 use serde_json::json;
 
@@ -22,6 +23,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || method.starts_with("share.")
         || method.starts_with("links.")
         || method.starts_with("search.")
+        || method.starts_with("retrieval.")
         || method.starts_with("collections.")
         // A recovery store has no capture to wait for.
         || (method.starts_with("liveApplication.")
@@ -620,13 +622,17 @@ impl EngineService {
                 self.share_record_creation_statuses(&ctx, request.workspace, request.params)
                     .await?
             }
-            "versionedText.writeBlob" => self.versioned_text_write_blob(&ctx, request).await?,
-            "versionedText.write" => self.versioned_text_write(&ctx, request).await?,
-            "versionedBinary.write" => self.versioned_binary_write(&ctx, request).await?,
-            "versionedBinary.writeBlob" => self.versioned_binary_write_blob(&ctx, request).await?,
+            "versionedText.writeBlob" => {
+                Box::pin(self.versioned_text_write_blob(&ctx, request)).await?
+            }
+            "versionedText.write" => Box::pin(self.versioned_text_write(&ctx, request)).await?,
+            "versionedBinary.write" => Box::pin(self.versioned_binary_write(&ctx, request)).await?,
+            "versionedBinary.writeBlob" => {
+                Box::pin(self.versioned_binary_write_blob(&ctx, request)).await?
+            }
             "versionedText.rename" => self.versioned_text_rename(&ctx, request).await?,
             "versionedText.checkMove" => self.versioned_text_check_move(&ctx, request).await?,
-            "versionedText.delete" => self.versioned_text_delete(&ctx, request).await?,
+            "versionedText.delete" => Box::pin(self.versioned_text_delete(&ctx, request)).await?,
             "versionedText.rollback" => self.versioned_text_rollback(&ctx, request).await?,
             "versionedText.merge" => self.versioned_text_merge(&ctx, request).await?,
             "versionedText.compare" => {
@@ -665,6 +671,10 @@ impl EngineService {
             }
             "ydoc.ownerOutbox.acknowledge" => {
                 self.owner_ydoc_outbox_acknowledge(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.ownerOutbox.acknowledgeTaken" => {
+                self.owner_ydoc_outbox_acknowledge_taken(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.ownerOutbox.quarantine" => {
@@ -723,6 +733,10 @@ impl EngineService {
             }
             "search.ensureIndex" => {
                 self.search_ensure_index(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "retrieval.query" => {
+                self.retrieval_query(&ctx, request.workspace, request.params)
                     .await?
             }
             "collections.list" => {
@@ -1305,16 +1319,20 @@ impl EngineService {
         let Some(handle) = handle else {
             return Ok(());
         };
-        let (projects_collections, read_only, passive) = lock(&self.handles)
+        let (projects_collections, read_only, passive, damaged) = lock(&self.handles)
             .get(handle)
             .map(|open| {
                 (
                     open.projects_collections(),
                     open.mode == WorkspaceOpenMode::ReadOnly,
                     open.mode == WorkspaceOpenMode::Passive,
+                    open.actor.lifecycle() == LifecycleState::Damaged,
                 )
             })
             .unwrap_or_default();
+        if damaged && method != "workspace.close" {
+            return Err(WireError::new(ErrorCode::Internal, "state-corrupt"));
+        }
         if passive
             && !matches!(
                 method,
@@ -1387,6 +1405,12 @@ impl EngineService {
                     "received shares do not make work references",
                 ));
             }
+            if method == "retrieval.query" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not support workspace retrieval",
+                ));
+            }
         }
         if read_only
             && !matches!(
@@ -1397,6 +1421,7 @@ impl EngineService {
                     | "links.resolve"
                     | "files.changesSince"
                     | "files.drain"
+                    | "retrieval.query"
                     | "search.queryChatMessagesGranular"
                     | "chats.readState.listUnreadFileThreads"
                     | "history.page"
@@ -1846,6 +1871,7 @@ mod tests {
             "keys.upload",
             "moments.get",
             "moments.list",
+            "retrieval.query",
             "search.ensureIndex",
             "search.queryChatMessagesGranular",
             "search.queryPage",

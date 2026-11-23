@@ -28,7 +28,7 @@ describe("the question before changing them", () => {
   it("names the file and says Main changes too", () => {
     expect(notVersionedConfirmText("delete", ["Media/clip.mp4"], ["Media/clip.mp4"])).toEqual({
       title: "Delete clip.mp4 from Main too?",
-      body: "It isn't versioned, so Main and every version have the same copy. Deleted files go to the system trash, or to .dohc/local/trash in this workspace when the system trash refuses them.",
+      body: "It is not versioned, so Main and every version have the same copy. Deleted files go to the system trash, or to .dohc/local/trash if the system trash refuses them.",
       confirmLabel: "Delete anyway",
     });
     expect(notVersionedConfirmText("rename", ["Media/clip.mp4"], ["Media/clip.mp4"]).title).toBe(
@@ -41,11 +41,11 @@ describe("the question before changing them", () => {
       notVersionedConfirmText("move", ["Media", "Notes/a.md"], ["Media/clip.mp4", "Media/raw.mov"]),
     ).toEqual({
       title: "Move 2 items in Main too?",
-      body: "2 files here aren't versioned, so Main and every version have the same copy.",
+      body: "2 files here are not versioned, so Main and every version have the same copy.",
       confirmLabel: "Move anyway",
     });
     expect(notVersionedConfirmText("delete", ["Media"], ["Media/clip.mp4"]).body).toBe(
-      "1 file here isn't versioned, so Main and every version have the same copy. Deleted files go to the system trash, or to .dohc/local/trash in this workspace when the system trash refuses them.",
+      "1 file here is not versioned, so Main and every version have the same copy. Deleted files go to the system trash, or to .dohc/local/trash if the system trash refuses them.",
     );
   });
 });

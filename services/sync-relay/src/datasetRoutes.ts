@@ -40,7 +40,7 @@ export function datasetRequestBytes(action: DatasetRoute["action"]): number {
     : action === "activate" || action === "prepare-migration"
       ? 1024 * 1024
       : // An app candidate up to its bound, inside the `localApp` wrapper.
-        action === "binding"
+        action === "binding" || action === "local-app"
         ? APP_PUBLICATION_MAX_METADATA_BYTES + 1024
         : 128 * 1024;
 }
@@ -106,6 +106,7 @@ export interface DatasetRoute {
     | "permissions"
     | "grant"
     | "binding"
+    | "local-app"
     | "upload"
     | "file"
     | "history"
@@ -779,6 +780,22 @@ export function createDatasetRoutes(
           const catchUp = journalAfter(host, auth, scope, after);
           return catchUp ? { ...result, catchUp } : result;
         }
+        if (route.action === "local-app") {
+          if (auth.grantId) throw notFound();
+          if (raw && typeof raw === "object" && Object.hasOwn(raw, "localApp")) {
+            return host.approveLocalAppWorkspace(auth, {
+              workspaceId: route.workspaceId,
+              candidate: record(raw, ["localApp"]).localApp,
+            });
+          }
+          const body = record(raw, ["publicationId", "enabled"]);
+          if (body.enabled !== false) throw badRequest("Invalid app binding.");
+          host.withdrawLocalAppWorkspace(auth, {
+            workspaceId: route.workspaceId,
+            publicationId: digest(body.publicationId),
+          });
+          return { ok: true };
+        }
         if (route.action === "binding") {
           // An app the owner approved on their own computer, which runs here as itself.
           if (raw && typeof raw === "object" && Object.hasOwn(raw, "localApp"))
@@ -881,16 +898,18 @@ export function createDatasetAppRoutes(
     /** A phone launch: only a publication runs, never an app approved on a computer. */
     publishedOnly = false,
   ): Promise<Response> => {
-    const published = host.publication(auth, route.publicationId);
+    const published = host.servedPublication(auth, route.publicationId);
+    const get =
+      route.action === "descriptor" || route.action === "summary" || route.action === "blob";
     if (
       !published ||
       (!options.publications && !published.local) ||
-      (publishedOnly && published.local)
+      (publishedOnly && published.local) ||
+      // An app with no dataset serves only its files.
+      (!published.capabilities.length && !get)
     )
       throw notFound();
-    const { authority, workspaceId, datasetId, authorityRevision, capability } = published;
-    const get =
-      route.action === "descriptor" || route.action === "summary" || route.action === "blob";
+    const { authority, workspaceId, authorityRevision, capabilities } = published;
     const signal = AbortSignal.any([
       request.signal,
       storage.unavailable,
@@ -907,11 +926,44 @@ export function createDatasetAppRoutes(
           );
     // A phone launch's reach may have ended while its body arrived.
     if (raw !== undefined && auth.kind === "named") await auth.launch?.recheck();
+    let targetCapability = published.capability;
+    let targetDatasetAlias: string | undefined;
+    if (!get && route.action !== "activate" && capabilities.length > 0) {
+      if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.hasOwn(raw, "dataset")) {
+        const value = (raw as Record<string, unknown>).dataset;
+        if (
+          typeof value !== "string" ||
+          !/^[a-z][a-z0-9_-]{0,63}$/.test(value) ||
+          value === "prototype" ||
+          value === "constructor"
+        ) {
+          throw auth.kind === "link" ? notFound() : badRequest("Invalid app dataset alias.");
+        }
+        targetDatasetAlias = value;
+      }
+      if (capabilities.length === 1) {
+        const only = capabilities[0]!;
+        if (targetDatasetAlias !== undefined && only.alias !== targetDatasetAlias) throw notFound();
+        targetCapability = only;
+      } else {
+        if (targetDatasetAlias === undefined) {
+          throw badRequest("Choose which Collection this app action targets.");
+        }
+        const matched = capabilities.find((cap) => cap.alias === targetDatasetAlias);
+        if (!matched) throw notFound();
+        targetCapability = matched;
+      }
+    }
+    const admissionDatasetId = targetCapability?.datasetId ?? published.datasetId;
     let release: () => void;
     try {
       release = admit(
         {
-          dataset: JSON.stringify([workspaceId, datasetId]),
+          dataset: JSON.stringify(
+            admissionDatasetId === null
+              ? [workspaceId, null, route.publicationId]
+              : [workspaceId, admissionDatasetId],
+          ),
           participant: authority.principalKey,
           ...(authority.caller.kind === "link"
             ? { link: JSON.stringify([workspaceId, authority.caller.grantId]) }
@@ -960,7 +1012,7 @@ export function createDatasetAppRoutes(
           const sharerName =
             (await options.shareSenderLabel?.(share.granterUserId).catch(() => null)) ?? null;
           signal.throwIfAborted();
-          const current = host.publication(auth, route.publicationId);
+          const current = host.servedPublication(auth, route.publicationId);
           if (!current || current.authority.caller.kind !== "named") throw notFound();
           return {
             ...storage.getShareLabels(grant.shareId, "member"),
@@ -976,13 +1028,15 @@ export function createDatasetAppRoutes(
             files: published.candidate.files,
           };
         }
+        if (!targetCapability) throw notFound();
+        const targetDatasetId = targetCapability.datasetId;
         if (route.action === "attempt") {
           const body = record(
             raw,
             ["authorityRevision", "operation", "action"],
-            ["idempotencyKey", "input", "token"],
+            ["idempotencyKey", "input", "token", "dataset"],
           );
-          const { authorityRevision: expected, operation, ...attempt } = body;
+          const { authorityRevision: expected, operation, dataset: _dataset, ...attempt } = body;
           let parsed;
           try {
             parsed = parseDatasetAttemptRequest(attempt);
@@ -992,7 +1046,12 @@ export function createDatasetAppRoutes(
           return host.attempt(
             auth,
             route.publicationId,
-            { authorityRevision: positive(expected), operation: text(operation), request: parsed },
+            {
+              authorityRevision: positive(expected),
+              operation: text(operation),
+              ...(targetDatasetAlias === undefined ? {} : { dataset: targetDatasetAlias }),
+              request: parsed,
+            },
             signal,
           );
         }
@@ -1006,7 +1065,11 @@ export function createDatasetAppRoutes(
           return host.upload(auth, route.publicationId, body, signal);
         }
         if (route.action === "file") {
-          const body = record(raw, ["authorityRevision", "fileId", "operation", "input"]);
+          const body = record(
+            raw,
+            ["authorityRevision", "fileId", "operation", "input"],
+            ["dataset"],
+          );
           return host.readFile(
             auth,
             route.publicationId,
@@ -1015,19 +1078,25 @@ export function createDatasetAppRoutes(
               fileId: text(body.fileId, 128),
               operation: text(body.operation),
               input: input(body.input),
+              ...(targetDatasetAlias === undefined ? {} : { dataset: targetDatasetAlias }),
             },
             signal,
           );
         }
         if (route.action === "activate") {
+          if (published.local || capabilities.length !== 1) throw notFound();
           const body = record(raw, ["authorityRevision"]);
           if (body.authorityRevision !== authorityRevision) throw notFound();
           host.bindPublication(auth, {
             workspaceId,
-            datasetId,
+            datasetId: targetDatasetId,
             publicationId: route.publicationId,
           });
-          return { publicationId: route.publicationId, authorityRevision, datasetId };
+          return {
+            publicationId: route.publicationId,
+            authorityRevision,
+            datasetId: targetDatasetId,
+          };
         }
         if (route.action !== "invoke") throw notFound();
         // The owner's computer names the agent that drives an app the owner approved there.
@@ -1045,15 +1114,15 @@ export function createDatasetAppRoutes(
           throw badRequest("Invalid app operation.");
         }
         if (body.authorityRevision !== authorityRevision) throw notFound();
-        const operation = capability.operations.find(
+        const operation = targetCapability.operations.find(
           (operation) => operation.name === body.operation,
         );
         if (!operation) throw notFound();
         return host.invoke(agent && auth.kind === "named" ? { ...auth, agent } : auth, {
           workspaceId,
-          datasetId,
-          revision: capability.revision,
-          revisionSha256: capability.revisionSha256,
+          datasetId: targetDatasetId,
+          revision: targetCapability.revision,
+          revisionSha256: targetCapability.revisionSha256,
           operationId: operation.operationId,
           input: body.input,
           idempotencyKey: body.idempotencyKey,

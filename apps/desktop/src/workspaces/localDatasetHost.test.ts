@@ -286,6 +286,25 @@ it("refuses a restore in a workspace whose Collections are on its server", async
   expect(target.host.keptDatasetIds()).toEqual([]);
 });
 
+it("asks for a send of a Collection it made here while the workspace started syncing", async () => {
+  // The create looks once, before the workspace syncs. It has synced when the Collection is saved.
+  let looks = 0;
+  const kept = vi.fn();
+  const { host } = await open({
+    collectionsServer: () => (looks++ === 0 ? null : ({} as never)),
+    keptAfterSyncStarted: kept,
+  });
+  await activate(host);
+  expect(host.keptDatasetIds()).toEqual([id(1)]);
+  expect(kept).toHaveBeenCalledOnce();
+
+  // A Collection made in a workspace that doesn't sync asks for nothing.
+  const quiet = vi.fn();
+  const local = await open({ collectionsServer: () => null, keptAfterSyncStarted: quiet });
+  await activate(local.host);
+  expect(quiet).not.toHaveBeenCalled();
+});
+
 it("finishes a restore that dohc quit partway through", async () => {
   const sourceHost = await open(),
     approved = await activate(sourceHost.host);

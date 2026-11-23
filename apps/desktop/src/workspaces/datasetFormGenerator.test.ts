@@ -106,8 +106,6 @@ describe("dataset form generation", () => {
     expect(manifest.dataset).toEqual({
       kind: "dataset",
       datasetPath: "data/dataset.json",
-      revision: 1,
-      revisionSha256: approvedRevision.revisionSha256,
       operationIds: [id(7)],
       createFields: [{ operationId: id(7), fieldIds: [id(4), id(5)] }],
     });

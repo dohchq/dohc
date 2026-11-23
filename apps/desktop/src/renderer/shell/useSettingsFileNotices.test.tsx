@@ -38,7 +38,7 @@ describe("settingsFileNotice", () => {
     expect(
       settingsFileNotice("dohc-settings.json", user([{ key: "accent", reason: "unknown" }])),
     ).toBe(
-      "dohc ignored accent in dohc-settings.json because it is not a setting dohc knows. The other settings apply.",
+      "dohc ignored accent in dohc-settings.json because dohc does not recognize that setting. The other settings apply.",
     );
     expect(
       settingsFileNotice(
@@ -105,7 +105,7 @@ describe("useSettingsFileNotices", () => {
       },
     );
     expect(result.current.shellErrors.map((row) => row.message)).toEqual([
-      "dohc ignored accent in dohc-settings.json because it is not a setting dohc knows. The other settings apply.",
+      "dohc ignored accent in dohc-settings.json because dohc does not recognize that setting. The other settings apply.",
     ]);
     expect(getWorkspaceSettings).not.toHaveBeenCalled();
 
@@ -115,7 +115,7 @@ describe("useSettingsFileNotices", () => {
     expect(
       result.current.shellErrors.find((row) => row.kind === "workspace-settings-file")?.message,
     ).toBe(
-      "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+      "dohc ignored theme in .dohc/local/settings.local.json because dohc does not recognize that setting. The other settings apply.",
     );
 
     const userRow = result.current.shellErrors[0]!;
@@ -175,7 +175,7 @@ describe("useSettingsFileNotices", () => {
     act(() => listeners.forEach((listener) => listener({ workspaceId: "ws-a" })));
     await waitFor(() =>
       expect(result.current.shellErrors.map((row) => row.message)).toEqual([
-        "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+        "dohc ignored theme in .dohc/local/settings.local.json because dohc does not recognize that setting. The other settings apply.",
       ]),
     );
     expect(listeners.size).toBe(0);
@@ -240,7 +240,7 @@ describe("useSettingsFileNotices", () => {
     );
     await waitFor(() =>
       expect(result.current.shellErrors.map((row) => row.message)).toEqual([
-        "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+        "dohc ignored theme in .dohc/local/settings.local.json because dohc does not recognize that setting. The other settings apply.",
       ]),
     );
   });
@@ -275,7 +275,7 @@ describe("useSettingsFileNotices", () => {
     });
     await waitFor(() =>
       expect(result.current.shellErrors.map((row) => row.message)).toEqual([
-        "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+        "dohc ignored theme in .dohc/local/settings.local.json because dohc does not recognize that setting. The other settings apply.",
       ]),
     );
     expect(getWorkspaceSettings).toHaveBeenCalledTimes(2);

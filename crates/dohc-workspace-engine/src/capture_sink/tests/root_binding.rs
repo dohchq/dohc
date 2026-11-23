@@ -615,6 +615,7 @@ fn queued_materialized_retire_refuses_replacement_root_before_db_changes() {
             },
             command_root,
             false,
+            None,
             command_self_writes,
             command_leases,
             Arc::new(NoFaults),

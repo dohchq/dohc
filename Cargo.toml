@@ -29,7 +29,6 @@ members = [
 exclude = [
     "vendor/yrs-0.27.3",
     "vendor/file-guard-0.2.0",
-    "vendor/notify-8.2.0",
     # Agent worktrees check the repo out inside it. Without this, a crate in
     # a nested checkout walks up past its own workspace root and tries to
     # attach to this one, and cargo fails with "believes it's in a workspace
@@ -41,7 +40,6 @@ exclude = [
 [patch.crates-io]
 yrs = { path = "vendor/yrs-0.27.3" }
 file-guard = { path = "vendor/file-guard-0.2.0" }
-notify = { path = "vendor/notify-8.2.0" }
 
 # Shared package metadata. Members opt in per field via `field.workspace = true`.
 # `edition` is intentionally NOT centralized here: dohc-engine-protocol is
@@ -50,10 +48,11 @@ notify = { path = "vendor/notify-8.2.0" }
 [workspace.package]
 version = "0.1.0"
 license = "AGPL-3.0-only"
-# time 0.3.47 needs this floor. The resolver still prefers versions that build
-# on the lowest member floor (1.82), so a plain `cargo update` can move `time`
-# back. Pin it with `cargo update -p time --precise`; cargo-audit fails if it slips.
-rust-version = "1.88"
+# notify 9.0.0 needs this floor, and time 0.3.47 needs 1.88. The resolver still
+# prefers versions that build on the lowest member floor (1.82), so a plain
+# `cargo update` can move `time` back. Pin it with `cargo update -p time --precise`;
+# cargo-audit fails if it slips.
+rust-version = "1.91"
 publish = false
 
 # `unsafe_code = "forbid"` is enforced in Cargo so the compiler rejects any

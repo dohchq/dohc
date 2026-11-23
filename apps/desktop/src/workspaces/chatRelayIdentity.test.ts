@@ -197,7 +197,7 @@ describe("assertSharedChannelMessageIdentity", () => {
         authorUserId: "user-1",
         resolvedAuthorUserId: "user-1",
       }),
-    ).toThrowError("Sign in to the cloud server this was shared from.");
+    ).toThrowError("Sign in to the server this was shared from.");
   });
 
   it("requires the account that joined the shared channel", () => {
@@ -254,7 +254,7 @@ describe("assertSyncEnrollmentCredentials", () => {
         ...credentials,
         serverUrl: "https://other-cloud.test",
       }),
-    ).toThrowError("Sign in to the cloud server this workspace uses.");
+    ).toThrowError("Sign in to the server this workspace uses.");
     expect(() =>
       assertSyncEnrollmentCredentials(workspace(), {
         ...credentials,

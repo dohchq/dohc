@@ -95,7 +95,7 @@ it("shows a collaborator's unapplied edit as its own row with its author", async
   await screen.findByTestId("lane-change-card");
   expect(within(row("Makes Email unique")).getByText(`Ice · ${formatClock(1_000)}`)).toBeTruthy();
   expect(within(row("Adds the field Due date")).queryByText(/Claude Code/u)).toBeNull();
-  expect(screen.getByText("History can't undo this change.")).toBeTruthy();
+  expect(screen.getByText("History cannot undo this change.")).toBeTruthy();
 });
 
 it("draws its frame and heading from the attached file, with one quiet line until the rows arrive", async () => {
@@ -193,7 +193,7 @@ it("applies nothing when records changed so that the change deletes more, and po
   fireEvent.click(apply);
   const failed = await screen.findByTestId("lane-change-failed");
   expect(failed.textContent).toBe(
-    "Records changed after it was sent, and it would now delete 13 values, not 12. Review the source change to apply it.",
+    "Records changed after this was sent, and applying it would now delete 13 values, not 12. Review the source change to apply it.",
   );
   expect(screen.queryByTestId("lane-change-apply")).toBeNull();
   expect(screen.getByTestId("lane-change-review")).toBeTruthy();
@@ -287,7 +287,7 @@ it("says the files changed when Try again finds they no longer make the change s
   (onError.mock.calls[0]![2] as () => void)();
   await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
   expect(onError).toHaveBeenLastCalledWith(
-    "Its files changed after it was sent. Review the change to apply it.",
+    "These files changed after this was sent. Review the change to apply it.",
     null,
     undefined,
   );
@@ -504,7 +504,7 @@ it("tells a teammate in a shared view to ask the owner, with the lock and no Try
   const failed = await screen.findByTestId("lane-change-load-failed");
   expect(screen.getByTestId("lane-change-loading").textContent).toContain("Change to Volunteers");
   expect(failed.textContent).toBe(
-    "You can't apply changes to Volunteers. Ask its owner to apply it.",
+    "You cannot apply changes to Volunteers. Ask its owner to apply them.",
   );
   expect(within(failed).getByTestId("lane-change-owner-only")).toBeTruthy();
   expect(within(failed).getByRole("button", { name: "Copy" })).toBeTruthy();

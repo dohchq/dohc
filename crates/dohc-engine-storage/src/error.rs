@@ -77,11 +77,12 @@ pub enum StorageError {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// A destructive/space-consuming operation was refused because the target
-    /// volume lacks the preflighted free space. Fails closed before touching the
-    /// only valid source, which is never deleted on disk-full.
-    #[error("insufficient free space: need {needed} bytes, {available} available")]
-    DiskFull { needed: u64, available: u64 },
+    /// The volume is out of space: a preflight found too little, which it
+    /// names, or SQLite or the filesystem refused a write for lack of room.
+    /// Nothing was half-written, so freeing space and retrying succeeds. The
+    /// only valid source is never deleted to make room.
+    #[error("the disk is full{}", shortfall_words(*.shortfall))]
+    DiskFull { shortfall: Option<SpaceShortfall> },
 
     /// A filesystem operation was denied by permissions. Distinguished from
     /// corruption and transient locks so recovery does not misclassify an ACL
@@ -110,6 +111,54 @@ pub enum StorageError {
     BlobTooLarge { actual: usize },
 }
 
+/// The free space an operation needed and the space the volume had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceShortfall {
+    pub needed: u64,
+    pub available: u64,
+}
+
+fn shortfall_words(shortfall: Option<SpaceShortfall>) -> String {
+    shortfall.map_or_else(String::new, |SpaceShortfall { needed, available }| {
+        format!(": need {needed} bytes, {available} available")
+    })
+}
+
+enum Cause {
+    Busy,
+    Full,
+    Damaged,
+    Denied,
+}
+
+fn cause(source: &(dyn std::error::Error + 'static)) -> Option<Cause> {
+    std::iter::successors(Some(source), |error| error.source()).find_map(|error| {
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            match io.kind() {
+                std::io::ErrorKind::StorageFull => return Some(Cause::Full),
+                std::io::ErrorKind::PermissionDenied => return Some(Cause::Denied),
+                _ => {}
+            }
+        }
+        match error
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)?
+        {
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
+                Some(Cause::Busy)
+            }
+            rusqlite::ErrorCode::DiskFull => Some(Cause::Full),
+            rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase => {
+                Some(Cause::Damaged)
+            }
+            rusqlite::ErrorCode::CannotOpen
+            | rusqlite::ErrorCode::PermissionDenied
+            | rusqlite::ErrorCode::ReadOnly => Some(Cause::Denied),
+            _ => None,
+        }
+    })
+}
+
 impl StorageError {
     /// The stable kebab-case machine code. This is the compatibility surface
     /// (tests assert it); the `Display` message is best-effort human text.
@@ -132,121 +181,54 @@ impl StorageError {
         }
     }
 
-    /// Wrap an unexpected error as `migration-failed` with the source attached.
-    ///
-    /// A busy database did not fail to migrate. Every shipped migration is
-    /// transactional (`MigrationKind`), so contention rolls the whole step
-    /// back — body, `user_version` stamp, integrity result and ledger row
-    /// together — leaving the store exactly as it was and the work still to
-    /// do. `migration-failed` is what a store nobody should reopen answers;
-    /// this one should simply be opened again.
-    ///
-    /// A retry is genuinely collected here: the open ladder in
-    /// `engineWorkspaceSessions` waits and re-sends any `afterBackoff`
-    /// refusal of `workspace.open`, which is the call this failure aborts.
-    pub(crate) fn migration(source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        if Self::is_busy(&source) {
-            return StorageError::FileLocked;
-        }
-        StorageError::MigrationFailed {
-            source: Some(Box::new(source)),
-        }
-    }
-
-    /// Wrap an unexpected error as `backup-failed` with the source attached.
-    ///
-    /// `VACUUM INTO` meeting a busy database says nothing about the store's
-    /// health, and `backup-failed` routes to the diagnostics that treat a
-    /// backup failure as evidence about the store. The transient lock is
-    /// classified `CorruptionKind::TransientLock` instead, which is the
-    /// difference between "try again" and "this store is suspect".
-    pub(crate) fn backup(source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        if Self::is_busy(&source) {
-            return StorageError::FileLocked;
-        }
-        StorageError::BackupFailed {
-            source: Some(Box::new(source)),
-        }
-    }
-
-    /// Classify a raw [`std::io::Error`] from a filesystem step into the
-    /// recovery taxonomy (distinguish permission,
-    /// disk-full, transient lock from corruption). Anything unrecognized becomes
-    /// `backup-failed`/caller-mapped rather than silently swallowed.
-    pub(crate) fn classify_io(err: std::io::Error) -> Self {
-        use std::io::ErrorKind;
-        match err.kind() {
-            ErrorKind::PermissionDenied => StorageError::PermissionDenied {
-                source: Some(Box::new(err)),
+    fn classified(
+        source: impl std::error::Error + Send + Sync + 'static,
+        otherwise: fn(Option<Box<dyn std::error::Error + Send + Sync>>) -> Self,
+    ) -> Self {
+        match cause(&source) {
+            Some(Cause::Busy) => StorageError::FileLocked,
+            Some(Cause::Full) => StorageError::DiskFull { shortfall: None },
+            Some(Cause::Damaged) => StorageError::StateCorrupt {
+                source: Some(Box::new(source)),
             },
-            // `StorageFull` is nightly-only as a variant; disk-full also arrives
-            // as raw OS errors, so callers preflight explicitly. Treat an
-            // out-of-space raw error conservatively as backup-failed here.
-            _ => StorageError::backup(err),
+            Some(Cause::Denied) => StorageError::PermissionDenied {
+                source: Some(Box::new(source)),
+            },
+            None => otherwise(Some(Box::new(source))),
         }
     }
 
-    /// The question `is_busy` answers, for a caller holding a raw
-    /// `rusqlite::Error`.
-    ///
-    /// `SearchError::Storage` keeps the rusqlite failure rather than wrapping
-    /// it in this taxonomy, so it never reaches this type's constructors and
-    /// would answer a busy index maintenance as a terminal search failure.
-    pub fn is_transient_lock(error: &rusqlite::Error) -> bool {
-        Self::is_busy(error)
+    pub(crate) fn migration(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::classified(source, |source| StorageError::MigrationFailed { source })
     }
 
-    /// Whether SQLite refused this operation because the database was busy,
-    /// rather than because anything is wrong with it.
-    ///
-    /// `SQLITE_BUSY` is another connection holding a lock this one needs;
-    /// `SQLITE_LOCKED` is the same conflict inside one connection. Both are
-    /// raised only after `ENGINE_SQLITE_BUSY_TIMEOUT_MS` of waiting, so
-    /// reaching here already means the store's own retry budget is spent —
-    /// which is exactly what [`StorageError::FileLocked`] describes.
-    ///
-    /// Recognized here because this is the last boundary that still holds the
-    /// typed `rusqlite::Error`. Above it the error is a boxed source and the
-    /// result code is unreadable, so a busy database would reach callers as
-    /// `persist-failed` or `state-corrupt`: both terminal, both wrong about a
-    /// condition that clears by waiting.
-    fn is_busy(source: &(dyn std::error::Error + 'static)) -> bool {
-        source
-            .downcast_ref::<rusqlite::Error>()
-            .and_then(rusqlite::Error::sqlite_error_code)
-            .is_some_and(|code| {
-                matches!(
-                    code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                )
-            })
+    pub(crate) fn backup(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::classified(source, |source| StorageError::BackupFailed { source })
     }
 
-    /// Wrap an unexpected error as `state-corrupt` with the source attached —
-    /// the catch-all conversion at the open/validate boundary.
-    ///
-    /// A busy database is not corruption, and calling it corruption is the
-    /// louder of the two mistakes: it sends a transient lock to the recovery
-    /// path that quarantines a store.
+    pub(crate) fn classify_io(err: std::io::Error) -> Self {
+        StorageError::backup(err)
+    }
+
+    /// The named cause of a raw SQLite failure, for a caller that keeps the
+    /// `rusqlite::Error`, as the search index does. `None` when the failure
+    /// is none of a busy database, a full disk, a damaged file, or a denied
+    /// open.
+    pub fn named_cause(error: &rusqlite::Error) -> Option<Self> {
+        Some(match cause(error)? {
+            Cause::Busy => StorageError::FileLocked,
+            Cause::Full => StorageError::DiskFull { shortfall: None },
+            Cause::Damaged => StorageError::StateCorrupt { source: None },
+            Cause::Denied => StorageError::PermissionDenied { source: None },
+        })
+    }
+
     pub(crate) fn corrupt(source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        if Self::is_busy(&source) {
-            return StorageError::FileLocked;
-        }
-        StorageError::StateCorrupt {
-            source: Some(Box::new(source)),
-        }
+        Self::classified(source, |source| StorageError::StateCorrupt { source })
     }
 
-    /// Wrap an unexpected error as `persist-failed` with the source attached.
-    ///
-    /// A busy database did not fail to persist; it has not tried yet.
     pub(crate) fn persist(source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        if Self::is_busy(&source) {
-            return StorageError::FileLocked;
-        }
-        StorageError::PersistFailed {
-            source: Some(Box::new(source)),
-        }
+        Self::classified(source, |source| StorageError::PersistFailed { source })
     }
 
     /// Public `state-corrupt` constructor for downstream crates that compose
@@ -267,40 +249,45 @@ impl StorageError {
 #[cfg(test)]
 mod tests {
     use super::StorageError;
+    use rusqlite::ffi;
 
-    /// The classifier serves every SQLite-specific wrapper, not just the two
-    /// on the read/write path.
-    ///
-    /// A busy database met during a migration was boxed as
-    /// `migration-failed` — the code a store nobody should reopen answers —
-    /// and during a backup as `backup-failed`, which the diagnostics read as
-    /// evidence about the store's health. Both are the same transient
-    /// contention and both are retryable: every shipped migration is
-    /// transactional, so contention rolls the whole step back and leaves the
-    /// store exactly as it was.
-    ///
+    fn sqlite(code: i32) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(ffi::Error::new(code), None)
+    }
+
     #[test]
-    fn every_sqlite_wrapper_tells_a_busy_database_apart() {
-        let busy = || {
-            rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(5), // SQLITE_BUSY
-                Some("database is locked".to_owned()),
-            )
-        };
-        // The two on the read/write path, which the contention test exercises
-        // end to end but only through `persist`.
-        assert_eq!(StorageError::persist(busy()).code(), "file-locked");
-        assert_eq!(StorageError::corrupt(busy()).code(), "file-locked");
-        assert_eq!(StorageError::migration(busy()).code(), "file-locked");
-
-        let locked = rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(6), // SQLITE_LOCKED
-            Some("database table is locked".to_owned()),
+    fn every_wrapper_names_a_busy_database_a_full_disk_a_damaged_file_and_a_denied_open() {
+        let wrappers: [fn(rusqlite::Error) -> StorageError; 4] = [
+            StorageError::persist,
+            StorageError::corrupt,
+            StorageError::migration,
+            StorageError::backup,
+        ];
+        for wrap in wrappers {
+            assert_eq!(wrap(sqlite(ffi::SQLITE_BUSY)).code(), "file-locked");
+            assert_eq!(wrap(sqlite(ffi::SQLITE_LOCKED)).code(), "file-locked");
+            assert_eq!(wrap(sqlite(ffi::SQLITE_FULL)).code(), "disk-full");
+            assert_eq!(wrap(sqlite(ffi::SQLITE_CORRUPT)).code(), "state-corrupt");
+            assert_eq!(wrap(sqlite(ffi::SQLITE_NOTADB)).code(), "state-corrupt");
+            assert_eq!(
+                wrap(sqlite(ffi::SQLITE_CANTOPEN)).code(),
+                "permission-denied"
+            );
+            assert_eq!(wrap(sqlite(ffi::SQLITE_PERM)).code(), "permission-denied");
+            assert_eq!(
+                wrap(sqlite(ffi::SQLITE_READONLY)).code(),
+                "permission-denied"
+            );
+        }
+        assert_eq!(
+            StorageError::classify_io(std::io::ErrorKind::StorageFull.into()).code(),
+            "disk-full"
         );
-        assert_eq!(StorageError::backup(locked).code(), "file-locked");
-
-        // Narrowness: an ordinary failure keeps its own terminal code, so the
-        // recognizer cannot turn every wrapper into a retry.
+        assert_eq!(
+            StorageError::corrupt(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                .code(),
+            "permission-denied"
+        );
         assert_eq!(
             StorageError::migration(rusqlite::Error::InvalidQuery).code(),
             "migration-failed"
@@ -308,6 +295,10 @@ mod tests {
         assert_eq!(
             StorageError::backup(rusqlite::Error::InvalidQuery).code(),
             "backup-failed"
+        );
+        assert_eq!(
+            StorageError::persist(sqlite(ffi::SQLITE_IOERR)).code(),
+            "persist-failed"
         );
     }
 }

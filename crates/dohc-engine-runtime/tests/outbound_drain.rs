@@ -6,11 +6,11 @@ use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
     CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret, CaptureSecretRetire,
     CreateNamedVersion, DeleteTextFile, MergeTextFileFromVersion, RenameTextFile,
-    RollbackTextFileMutation, SecretDelete, SecretDiskIntent, SecretWrite, VersionedTextStore,
-    WriteBinary, WriteText, rollback_compensating_moment_id,
+    RollbackTextFileMutation, SecretDelete, SecretWrite, VersionedTextStore, WriteBinary,
+    WriteText, rollback_compensating_moment_id,
 };
 use dohc_engine_runtime::{
-    ActorHandle, CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor,
+    ActorHandle, CancellationToken, NoFaults, RuntimeError, SecretWriteDisk, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
@@ -685,11 +685,11 @@ async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
             metadata_summary: None,
             metadata_correlation_id: None,
             now_ms: 10 + index as i64,
-            disk_intent: SecretDiskIntent::AlreadyOnDisk,
         };
         until_admitted("write source secret", || {
             actor.write_secret_file(
                 input(),
+                SecretWriteDisk::AlreadyOnDisk,
                 secret_key(),
                 Arc::new(NoFaults),
                 CancellationToken::new(),
@@ -977,7 +977,9 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 metadata_summary: Some("Updated .env".to_owned()),
                 metadata_correlation_id: None,
                 now_ms: 90,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretWriteDisk::Queue {
+                root_dir: root_dir.to_path_buf(),
             },
             secret_key(),
             Arc::new(NoFaults),
@@ -1002,6 +1004,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
         .expect("create named version");
     actor
         .delete_secret_file(
+            root_dir.to_path_buf(),
             SecretDelete {
                 workspace_id: workspace_id.to_owned(),
                 version_id: "main".to_owned(),
@@ -1129,7 +1132,9 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 165,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretWriteDisk::Queue {
+                root_dir: root_dir.to_path_buf(),
             },
             secret_key(),
             Arc::new(NoFaults),
@@ -1139,6 +1144,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
         .expect("write apply put source");
     actor
         .apply_secret_file(
+            root_dir.to_path_buf(),
             workspace_id.to_owned(),
             ".apply-put.env".to_owned(),
             "version-plan".to_owned(),
@@ -1166,7 +1172,9 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 175,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretWriteDisk::Queue {
+                root_dir: root_dir.to_path_buf(),
             },
             secret_key(),
             Arc::new(NoFaults),
@@ -1176,6 +1184,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
         .expect("write apply delete target");
     actor
         .delete_secret_file(
+            root_dir.to_path_buf(),
             SecretDelete {
                 workspace_id: workspace_id.to_owned(),
                 version_id: "version-plan".to_owned(),
@@ -1193,6 +1202,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
         .expect("delete apply source");
     actor
         .apply_secret_file(
+            root_dir.to_path_buf(),
             workspace_id.to_owned(),
             ".env".to_owned(),
             "version-plan".to_owned(),
@@ -1220,7 +1230,9 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 190,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretWriteDisk::Queue {
+                root_dir: root_dir.to_path_buf(),
             },
             secret_key(),
             Arc::new(NoFaults),
@@ -1230,6 +1242,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
         .expect("write restore source");
     actor
         .delete_secret_file(
+            root_dir.to_path_buf(),
             SecretDelete {
                 workspace_id: workspace_id.to_owned(),
                 version_id: "main".to_owned(),
@@ -1247,6 +1260,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
         .expect("delete restore source");
     actor
         .restore_secret_file(
+            root_dir.to_path_buf(),
             workspace_id.to_owned(),
             ".restore.env".to_owned(),
             "secret-restore-delete".to_owned(),

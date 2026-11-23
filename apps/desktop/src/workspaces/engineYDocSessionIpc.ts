@@ -9,6 +9,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   isOwnerOutboxFrozenRefusal,
+  isRestoreFencedRefusal,
   isYdocArtifactAssetsInvalidRefusal,
   isYdocAuthorCapacityRefusal,
   YdocOwnerDraftPendingError,
@@ -77,8 +78,23 @@ import {
   isDocumentTooDenseCause,
   type EngineYDocSaveEvent,
   type WorkspaceEngineCapture,
+  type WorkspaceEngineYDocOpenedSession,
   type WorkspaceEngineYDocProviderSession,
 } from "./workspaceEngineCapture";
+
+// Main records each editor update as one engine row. While the server has
+// paused a note's live editing, each row becomes one delivery at Resume, and
+// the relay takes about one a second. An update per keystroke left thousands
+// waiting. The editor gathers up to a second of typing per update for such a
+// note instead, and sends what it gathered at once when the note closes or
+// the app quits. Every other note sends each update at once, so a crash
+// loses no more of it than before.
+const PAUSED_TYPING_BATCH_MS = 1_000;
+// Saving a note to its file holds the engine, and typing that arrives
+// meanwhile is recorded only when the save ends. Updates a second apart would
+// let the usual 0.8 s pause start that save mid-typing, so a paused note waits
+// for a gathered second plus that pause.
+const PAUSED_SAVE_DELAY_MS = 2_000;
 
 /** The session holds no claim yet, and every binding names one. */
 class OwnerClaimNotLearned extends Error {
@@ -101,6 +117,7 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
   liveWritable?(): boolean;
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
   savedToHost?(): Promise<void>;
+  lineageAtOpen?: WorkspaceEngineYDocOpenedSession["lineageAtOpen"];
 };
 export interface EngineYDocSessionCapture {
   waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
@@ -152,12 +169,20 @@ interface EngineYDocSessionIpcOptions {
   // A shared note's current text when no editor holds it, edits still on
   // their way to the server included. Null for a note that is not shared.
   ownerDraftState?: (workspace: EngineYDocWorkspace, path: string) => Promise<Uint8Array | null>;
-  resolveDocumentPath: (workspace: EngineYDocWorkspace, path: string) => Promise<string | null>;
+  resolveDocumentPath: (
+    workspace: EngineYDocWorkspace,
+    path: string,
+    access: "read" | "write",
+  ) => Promise<string | null>;
   onError: (message: string, error?: unknown) => void;
   /** dohc refused an edit to `path` because its queue for the server takes no more. */
   onLiveEditsPaused?: (workspaceId: string, path: string) => void;
+  /** The server has paused live editing of this note until its owner resumes it. */
+  livePaused?: (workspaceId: string, objectId: string) => boolean;
   /** The owner opened a document of their own workspace in an editor here, not a shared view's, that the engine holds an owner binding for. */
   onOwnerOpened?: (workspaceId: string, path: string) => void;
+  // An owner's edit of a shared note is in its queue for the server.
+  onOwnerEdit?: (workspaceId: string) => void;
   /** The person typing on this computer: the account, or this installation's id when signed out. */
   localPersonId: () => string;
 }
@@ -510,7 +535,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #resolveDocumentPath: EngineYDocSessionIpcOptions["resolveDocumentPath"];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
   readonly #onLiveEditsPaused: EngineYDocSessionIpcOptions["onLiveEditsPaused"];
+  readonly #livePaused: EngineYDocSessionIpcOptions["livePaused"];
   readonly #onOwnerOpened: EngineYDocSessionIpcOptions["onOwnerOpened"];
+  readonly #onOwnerEdit: EngineYDocSessionIpcOptions["onOwnerEdit"];
   readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
   readonly #arrivals = new EngineYDocArrivals();
   readonly #admissionWaits = new Map<EngineYDocIpcSender, Map<string, SharedAdmissionWait>>();
@@ -536,7 +563,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
     this.#onLiveEditsPaused = options.onLiveEditsPaused;
+    this.#livePaused = options.livePaused;
     this.#onOwnerOpened = options.onOwnerOpened;
+    this.#onOwnerEdit = options.onOwnerEdit;
     this.#localPersonId = options.localPersonId;
     this.#documentReservations = new DocumentMutationReservations();
     this.#owner = new EngineYDocSessionOwner({
@@ -606,7 +635,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     const generation = rendererSession.generation;
     let canonicalPath: string | null;
     try {
-      canonicalPath = await this.#resolveDocumentPath(workspace, validatedPath.normalized);
+      canonicalPath = await this.#resolveDocumentPath(workspace, validatedPath.normalized, "write");
     } catch (error) {
       this.#onError(
         `[desktop] engine Y.Doc open could not resolve ${validatedPath.normalized}:`,
@@ -707,7 +736,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
     let currentPath: string | null;
     try {
-      currentPath = await this.#resolveDocumentPath(workspace, requestedPath);
+      currentPath = await this.#resolveDocumentPath(workspace, requestedPath, "write");
     } catch (error) {
       this.#onError(`[desktop] engine Y.Doc open could not recheck ${canonicalPath}:`, error);
       return unavailableOpen({ documentUnavailable: true });
@@ -772,6 +801,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                   `dohc is handing ${canonicalPath} to its live session, and nothing changed. Try again.`,
                 );
             },
+            onOwnerEditQueued: () => this.#onOwnerEdit?.(workspace.workspaceId),
             onEditRefused: (requestId, message, paused) => {
               if (paused) this.#onLiveEditsPaused?.(workspace.workspaceId, canonicalPath);
               publish(() =>
@@ -1048,6 +1078,38 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     await settle;
   }
 
+  /**
+   * Runs `leave` between the edits of each editor here that edits the note
+   * at `path` live, given the edits the engine has not taken from them. Once
+   * it succeeds, those editors show the note as the engine holds it. `late`
+   * gets the edits that reached them while `leave` ran.
+   */
+  async leaveLiveEditing<T>(
+    workspaceId: string,
+    path: string,
+    leave: (unsent: Uint8Array[]) => Promise<T>,
+    late?: (edits: Uint8Array) => void,
+  ): Promise<T> {
+    const authority = this.#acquireWorkspace(workspaceId);
+    const editors: ((next: (unsent: Uint8Array) => Promise<T>) => Promise<T>)[] = [];
+    try {
+      authority.assertCurrent();
+      if (!this.#isSharedView(authority.workspace))
+        this.#owner.forEachSessionUnderPath(authority.workspace.attachmentId, path, (session) => {
+          const { provider } = session;
+          if (provider.path === path && provider.ownerBound && provider.leaveLiveEditing)
+            editors.push((next) => provider.leaveLiveEditing!(next, late));
+        });
+    } finally {
+      authority.release();
+    }
+    const run = (unsent: Uint8Array[]): Promise<T> => {
+      const editor = editors[unsent.length];
+      return editor ? editor((edits) => run([...unsent, edits])) : leave(unsent);
+    };
+    return run([]);
+  }
+
   // Save it again, on a document whose file was deleted outside dohc. Its
   // session can outlive its tab: the close was refused, so the session still
   // holds the text, and saving lets that close finish.
@@ -1099,11 +1161,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           },
           this.#localPersonId,
         );
+        const sharedView = this.#isSharedView(owned.workspace);
+        const objectId = owned.provider.objectId;
+        const paused =
+          !sharedView &&
+          objectId !== undefined &&
+          this.#livePaused?.(owned.workspace.workspaceId, objectId) === true;
         try {
           owned.provider.applyLocalUpdate(
             input.update,
             () => noteLocalEdit(owned.saveSeq, input.seq),
-            this.#isSharedView(owned.workspace)
+            sharedView
               ? {
                   idempotencyKey: input.requestId,
                   attribution: { actorKind: "human", onBehalfOf: person },
@@ -1112,6 +1180,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                   idempotencyKey: input.requestId,
                   actorOriginId: person,
                   attribution: { actorKind: "human", onBehalfOf: person, depth: 0 },
+                  ...(paused ? { settleDelayMs: PAUSED_SAVE_DELAY_MS } : {}),
                 },
           );
         } catch (error) {
@@ -1120,7 +1189,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           }
           throw error;
         }
-        return { accepted: true };
+        return paused
+          ? { accepted: true, batchDelayMs: PAUSED_TYPING_BATCH_MS }
+          : { accepted: true };
       },
     );
     if (applied.kind === "refused") {
@@ -1146,7 +1217,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
       authority.assertCurrent();
-      const path = await this.#markdownDocumentPath(authority.workspace, input.path);
+      const path = await this.#markdownDocumentPath(authority.workspace, input.path, "read");
       authority.assertCurrent();
       if (this.#isSharedView(authority.workspace)) return { path, state: null };
       const held = this.#owner.documentSession(authority.workspace.attachmentId, path);
@@ -1175,7 +1246,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       if (this.#isSharedView(workspace) && !this.#sharedCaptureFor) {
         throw new Error("Documents in a shared view change through the share, not this workspace.");
       }
-      const path = await this.#markdownDocumentPath(workspace, input.path);
+      const path = await this.#markdownDocumentPath(workspace, input.path, "write");
       const key = `${workspace.workspaceId}\u0000${path}`;
       const turn = (this.#documentEdits.get(key) ?? Promise.resolve())
         .catch(() => undefined)
@@ -1222,7 +1293,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       const workspace = authority.workspace;
       if (!this.#isSharedView(workspace) || !this.#sharedCaptureFor)
         throw new Error("Only a shared view's notes open here.");
-      const path = await this.#markdownDocumentPath(workspace, requested);
+      const path = await this.#markdownDocumentPath(workspace, requested, "write");
       const capture = await this.#sharedCaptureFor(workspace);
       authority.assertCurrent();
       if (!capture) throw new Error("dohc could not open this page for editing.");
@@ -1236,34 +1307,29 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
   }
 
-  /**
-   * Opens and closes a note with no window, which starts its live history
-   * here, so the server can host a note its owner never opened in dohc. An
-   * editor that holds the note starts it itself.
-   */
-  async startLiveHistory(workspaceId: string, requested: string): Promise<void> {
-    const authority = this.#acquireWorkspace(workspaceId);
+  async startLiveInBackground(input: {
+    workspaceId: string;
+    path: string;
+  }): Promise<"seeded" | "existing" | "held"> {
+    const authority = this.#acquireWorkspace(input.workspaceId);
     try {
       authority.assertCurrent();
       const workspace = authority.workspace;
       if (this.#isSharedView(workspace)) {
-        throw new Error("Documents in a shared view change through the share, not this workspace.");
+        throw new Error("A shared view's documents start live editing on their host.");
       }
-      const path = await this.#markdownDocumentPath(workspace, requested);
+      const path = await this.#markdownDocumentPath(workspace, input.path, "write");
+      authority.assertCurrent();
       const attachment = workspace.attachmentId;
-      if (this.#owner.documentSession(attachment, path)) return;
-      await this.#documentReservations
-        .runMutation(
+      const ownsDocument = () => this.#owner.ownsDocument(attachment, path);
+      if (ownsDocument()) return "held";
+      try {
+        return await this.#documentReservations.runMutation(
           attachment,
           path,
-          () => this.#owner.ownsDocument(attachment, path),
+          ownsDocument,
           async () => {
-            authority.assertCurrent();
-            let capture = this.#captureFor(workspace);
-            if (!capture) {
-              await this.#ensureCaptureFor(workspace);
-              capture = this.#captureFor(workspace);
-            }
+            const capture = this.#captureFor(workspace);
             if (!capture) throw new Error("The workspace engine is not running.");
             const provider = await capture.openYDocSession({
               path,
@@ -1271,11 +1337,13 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
               onRemoteUpdate: () => undefined,
             });
             await provider.close();
+            return provider.lineageAtOpen === "existing" ? "existing" : "seeded";
           },
-        )
-        .catch((error: unknown) => {
-          if (!(error instanceof LiveDocumentOwnedError)) throw error;
-        });
+        );
+      } catch (error) {
+        if (error instanceof LiveDocumentOwnedError) return "held";
+        throw error;
+      }
     } finally {
       authority.release();
     }
@@ -1305,11 +1373,15 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
   }
 
-  async #markdownDocumentPath(workspace: EngineYDocWorkspace, requested: string): Promise<string> {
+  async #markdownDocumentPath(
+    workspace: EngineYDocWorkspace,
+    requested: string,
+    access: "read" | "write",
+  ): Promise<string> {
     if (liveDocumentKindForPath(requested) !== "richdoc") {
       throw new Error(`${requested} is not a Markdown document.`);
     }
-    const path = await this.#resolveDocumentPath(workspace, requested);
+    const path = await this.#resolveDocumentPath(workspace, requested, access);
     if (path === null) throw new Error(`No document at ${requested}.`);
     if (liveDocumentKindForPath(path) !== "richdoc") {
       throw new Error(`${requested} is not a Markdown document.`);
@@ -1609,6 +1681,28 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     });
   }
 
+  /** Whether an editor here has `path` open as the owner of its shared note. */
+  ownerHasOpen(workspaceId: string, path: string): boolean {
+    let authority: ReturnType<EngineYDocSessionIpcOptions["acquireWorkspace"]>;
+    try {
+      authority = this.#acquireWorkspace(workspaceId);
+    } catch {
+      return false;
+    }
+    try {
+      authority.assertCurrent();
+      if (this.#isSharedView(authority.workspace)) return false;
+      return (
+        this.#owner.documentSession(authority.workspace.attachmentId, path)?.session.provider
+          .ownerBound === true
+      );
+    } catch {
+      return false;
+    } finally {
+      authority.release();
+    }
+  }
+
   async close(sender: EngineYDocIpcSender, payload: ClosePayload): Promise<void> {
     const input = CloseEngineYDocSessionPayload.parse(payload);
     this.#admissionWaits.get(sender)?.get(input.sessionId)?.cancel.abort();
@@ -1799,9 +1893,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     if (isEngineWorkspaceOpenRefusedError(error) || isYDocSessionUnreleasedError(error)) {
       return unavailableOpen({ engineMayHoldDocument: true });
     }
-    return unavailableOpen();
+    const held = OPEN_REFUSALS_THAT_HOLD_EDITING.find(({ refused }) => refused(error));
+    return held
+      ? unavailableOpen({ engineRefusedOpen: { detail: held.detail } })
+      : unavailableOpen();
   }
 }
+
+const OPEN_REFUSALS_THAT_HOLD_EDITING = [
+  { refused: isOwnerOutboxFrozenRefusal, detail: "INVALID_PARAMS owner-outbox-frozen" },
+  { refused: isRestoreFencedRefusal, detail: "INVALID_PARAMS restore-fenced" },
+] as const;
 
 export const DOCUMENT_EDIT_PENDING_WARNING =
   "Saved locally. The shared file update is pending. Do not repeat this edit.";

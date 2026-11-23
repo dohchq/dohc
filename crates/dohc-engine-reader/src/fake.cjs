@@ -26,6 +26,7 @@ function answer(r) {
   const fault = r.currentPath;
   if (fault === 'crash' || mode === 'request-crash') return process.exit(17);
   if (fault === 'hang') return;
+  if (fault === 'slow') return setTimeout(() => answer({...r, currentPath: 'ok'}), 500);
   if (fault === 'memory') {const allocations = []; for (let i = 0; i < 80; i++) allocations.push(Buffer.alloc(16 * 1024 * 1024, 1));}
   // Commits about 711 MiB on Windows, above the real reader's highest accepted peak of 659 MiB.
   if (fault === 'peak') {const held = []; for (let i = 0; i < 640; i++) held.push(new Array(65536).fill(i + 0.5)); for (let i = 0; i < 12; i++) held.push(Buffer.alloc(16 * 1024 * 1024, 1));}

@@ -54,16 +54,16 @@ function isHighlightableLanguage(language: string): boolean {
 // Minimal structural shape of the hast tree lowlight returns — narrow enough
 // to avoid pulling in `@types/hast` directly, wide enough for hljs output
 // (which only ever emits `root` > `element`/`text`).
-type HastNode = {
+export type HighlightHastNode = {
   type: string;
   value?: string;
   properties?: { className?: unknown };
-  children?: HastNode[];
+  children?: HighlightHastNode[];
 };
 
 type HighlightSpan = { start: number; end: number; className: string };
 
-function classNameOf(node: HastNode): string | null {
+function classNameOf(node: HighlightHastNode): string | null {
   const className = node.properties?.className;
   if (!Array.isArray(className) || className.length === 0) return null;
   const names = className.filter((name): name is string => typeof name === "string");
@@ -74,7 +74,7 @@ function classNameOf(node: HastNode): string | null {
 // range with just that element's own class — nested elements (e.g. a
 // hljs-doctag inside a hljs-comment) naturally produce overlapping spans,
 // which `Decoration.inline` supports directly.
-function collectSpans(nodes: HastNode[], offset: number, spans: HighlightSpan[]): number {
+function collectSpans(nodes: HighlightHastNode[], offset: number, spans: HighlightSpan[]): number {
   let pos = offset;
   for (const node of nodes) {
     if (node.type === "text") {
@@ -89,19 +89,27 @@ function collectSpans(nodes: HastNode[], offset: number, spans: HighlightSpan[])
   return pos;
 }
 
+export function highlightCodeTree(language: string, text: string): HighlightHastNode[] {
+  if (!isHighlightableLanguage(language) || text.length === 0) return [];
+  try {
+    const tree = lowlight.highlight(language, text) as unknown as {
+      children: HighlightHastNode[];
+    };
+    return tree.children;
+  } catch {
+    return [];
+  }
+}
+
 /** Pure: tokenize `text` as `language` and return highlight spans relative
  *  to the start of `text`. Returns `[]` for unregistered languages or if
  *  hljs itself throws (malformed input should never crash the editor). */
 export function highlightSpans(language: string, text: string): HighlightSpan[] {
-  if (!isHighlightableLanguage(language) || text.length === 0) return [];
-  try {
-    const tree = lowlight.highlight(language, text) as unknown as { children: HastNode[] };
-    const spans: HighlightSpan[] = [];
-    collectSpans(tree.children, 0, spans);
-    return spans;
-  } catch {
-    return [];
-  }
+  const children = highlightCodeTree(language, text);
+  if (children.length === 0) return [];
+  const spans: HighlightSpan[] = [];
+  collectSpans(children, 0, spans);
+  return spans;
 }
 
 type CodeHighlightRange = { from: number; to: number; className: string };

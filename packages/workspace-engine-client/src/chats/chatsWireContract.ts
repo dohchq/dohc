@@ -145,7 +145,6 @@ type ChatChannelCreateParams = ChatsJsonObject & {
   nowMs?: number;
 };
 type ChatChannelEnsureParams = ChatsJsonObject & {
-  channelId: string;
   nowMs?: number;
 };
 type ChatChannelEnsureAgentParams = ChatChannelEnsureParams & {
@@ -675,6 +674,7 @@ const ChatReactionAuthorSchema = mutableStruct({
   authorId: Schema.String,
   kind: ReactorKindSchema,
   displayName: Schema.String,
+  agentId: Schema.optionalKey(Schema.String),
 });
 const ChatReactionSchema = mutableStruct({
   reactionId: Schema.String,

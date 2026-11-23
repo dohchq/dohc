@@ -20,16 +20,14 @@ const run: RunRecord = {
   files: { "notes/plan.md": "# Plan\n\nWe launch on Thursday.\n" },
 };
 
-function failures(expectation: Expectation): string[] {
-  return grade(expectation, run)
-    .filter((check) => !check.pass)
-    .map((check) => check.name);
+async function failures(expectation: Expectation): Promise<string[]> {
+  return (await grade(expectation, run)).filter((check) => !check.pass).map((check) => check.name);
 }
 
 describe("eval grading", () => {
-  it("passes a run that meets every kind of expectation", () => {
+  it("passes a run that meets every kind of expectation", async () => {
     expect(
-      failures({
+      await failures({
         calls: [
           {
             tool: "dohc_edit_document",
@@ -55,54 +53,56 @@ describe("eval grading", () => {
     ).toEqual([]);
   });
 
-  it("fails each expectation the run does not meet, and only that one", () => {
-    expect(failures({ calls: [{ tool: "dohc_create_document" }] })).toEqual([
+  it("fails each expectation the run does not meet, and only that one", async () => {
+    expect(await failures({ calls: [{ tool: "dohc_create_document" }] })).toEqual([
       "calls dohc_create_document",
     ]);
-    expect(failures({ calls: [{ tool: "dohc_read_document", ok: false }] })).toEqual([
+    expect(await failures({ calls: [{ tool: "dohc_read_document", ok: false }] })).toEqual([
       "calls dohc_read_document that was refused",
     ]);
     expect(
-      failures({ calls: [{ tool: "dohc_edit_document", args: { path: "todo.txt" } }] }),
+      await failures({ calls: [{ tool: "dohc_edit_document", args: { path: "todo.txt" } }] }),
     ).toEqual(['calls dohc_edit_document {"path":"todo.txt"}']);
-    expect(failures({ notCalls: ["dohc_read_document"] })).toEqual([
+    expect(await failures({ notCalls: ["dohc_read_document"] })).toEqual([
       "does not call dohc_read_document",
     ]);
-    expect(failures({ notCalls: ["dohc_*"] })).toEqual(["does not call dohc_*"]);
-    expect(failures({ notCalls: ["Edit*", { tool: "dohc_*", args: { requestId: "*" } }] })).toEqual(
-      [],
-    );
-    expect(failures({ notCalls: [{ tool: "dohc_edit_document", args: { find: "*" } }] })).toEqual([
-      'does not call dohc_edit_document {"find":"*"}',
-    ]);
-    expect(failures({ notCalls: [{ tool: "dohc_edit_document", ok: false }] })).toEqual([
+    expect(await failures({ notCalls: ["dohc_*"] })).toEqual(["does not call dohc_*"]);
+    expect(
+      await failures({ notCalls: ["Edit*", { tool: "dohc_*", args: { requestId: "*" } }] }),
+    ).toEqual([]);
+    expect(
+      await failures({ notCalls: [{ tool: "dohc_edit_document", args: { find: "*" } }] }),
+    ).toEqual(['does not call dohc_edit_document {"find":"*"}']);
+    expect(await failures({ notCalls: [{ tool: "dohc_edit_document", ok: false }] })).toEqual([
       "does not call dohc_edit_document that was refused",
     ]);
-    expect(failures({ order: ["dohc_edit_document", "dohc_read_document"] })).toEqual([
+    expect(await failures({ order: ["dohc_edit_document", "dohc_read_document"] })).toEqual([
       "calls in order dohc_edit_document, dohc_read_document",
     ]);
-    expect(failures({ maxCalls: { dohc_edit_document: 1 } })).toEqual([
+    expect(await failures({ maxCalls: { dohc_edit_document: 1 } })).toEqual([
       "calls dohc_edit_document at most 1 times",
     ]);
-    expect(failures({ text: ["friday"] })).toEqual(["answer matches /friday/"]);
-    expect(failures({ notText: ["thursday"] })).toEqual(["answer does not match /thursday/"]);
-    expect(failures({ files: { "notes/plan.md": { contains: ["Friday"] } } })).toEqual([
+    expect(await failures({ text: ["friday"] })).toEqual(["answer matches /friday/"]);
+    expect(await failures({ notText: ["thursday"] })).toEqual(["answer does not match /thursday/"]);
+    expect(await failures({ files: { "notes/plan.md": { contains: ["Friday"] } } })).toEqual([
       'notes/plan.md contains "Friday"',
     ]);
-    expect(failures({ files: { "notes/plan.md": { lacks: ["Thursday"] } } })).toEqual([
+    expect(await failures({ files: { "notes/plan.md": { lacks: ["Thursday"] } } })).toEqual([
       'notes/plan.md lacks "Thursday"',
     ]);
-    expect(failures({ files: { "notes/plan.md": { absent: true } } })).toEqual([
+    expect(await failures({ files: { "notes/plan.md": { absent: true } } })).toEqual([
       "notes/plan.md does not exist",
     ]);
-    expect(failures({ files: { "notes/plan.md": { times: { Thursday: 2 } } } })).toEqual([
+    expect(await failures({ files: { "notes/plan.md": { times: { Thursday: 2 } } } })).toEqual([
       'notes/plan.md has "Thursday" 2 times',
     ]);
-    expect(failures({ files: { "gone.md": { times: { x: 0 } } } })).toEqual([
+    expect(await failures({ files: { "gone.md": { times: { x: 0 } } } })).toEqual([
       'gone.md has "x" 0 times',
     ]);
     // A file that is missing meets neither `contains` nor `lacks`: the run did not leave it to check.
-    expect(failures({ files: { "gone.md": { lacks: ["x"] } } })).toEqual(['gone.md lacks "x"']);
+    expect(await failures({ files: { "gone.md": { lacks: ["x"] } } })).toEqual([
+      'gone.md lacks "x"',
+    ]);
   });
 
   it("matches arguments by dotted path, missing key, and text contained in any case", () => {

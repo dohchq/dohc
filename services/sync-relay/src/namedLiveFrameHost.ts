@@ -39,6 +39,7 @@ import type {
   LiveHostConnectionCoordinate,
   SyncRelayStorage,
 } from "./storage.js";
+import type { LiveRoomAuthority } from "./storage/types.js";
 import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.js";
 import type { CapacityLiveAdmissionValidator, LiveCheckTiming } from "./ownerOutboxDelivery.js";
 import type { JournalCutReadTiming } from "./storage/types.js";
@@ -71,6 +72,8 @@ export interface NamedFrameRoomHost extends NamedFrameHostSession {
     view(): LiveObjectBinding;
     /** Who an edit from this connection is credited to, or null if it may not claim that. */
     sender(context: LiveAuthorContext | undefined): LiveAuthorSnapshot | null;
+    /** The access this connection's edits come in under now. Null for a personal agent. */
+    authority(): LiveRoomAuthority | null;
   };
 }
 import { RelayError } from "./errors.js";
@@ -558,7 +561,7 @@ function captureLiveFrameHost(options: {
         (!trustedAutomation || actor.kind !== "owner" || trustedAutomationPress)
       )
         return { result: "refused", reason: "authority-refused" };
-      // A live room saves on the owner's capture, naming the people whose edits the save holds.
+      // A live room saves on the owner's capture.
       const room = input.room;
       if (room && (actor.kind !== "owner" || trustedAutomation || input.authorContext))
         return { result: "refused", reason: "authority-refused" };
@@ -791,6 +794,10 @@ function captureLiveFrameHost(options: {
     close,
     room: {
       document,
+      authority() {
+        check();
+        return authority.principalKind === "personal" ? null : authority;
+      },
       view() {
         check();
         return wireBinding!;

@@ -60,21 +60,32 @@ const excalidraw = vi.hoisted(() => {
   };
 });
 
-vi.mock("@excalidraw/excalidraw", () => ({
-  CaptureUpdateAction: { NEVER: "never" },
-  Excalidraw: (props: Record<string, unknown>) => {
-    excalidraw.props = props;
-    excalidraw.beginRender();
-    try {
-      excalidraw.receiveApiCallback(props.excalidrawAPI as ((api: unknown) => void) | undefined);
-    } finally {
-      excalidraw.endRender();
-    }
-    return null;
-  },
-  restore: vi.fn(),
-  serializeAsJSON: vi.fn(),
-}));
+vi.mock("@excalidraw/excalidraw", () => {
+  const MainMenu = Object.assign(() => null, {
+    DefaultItems: {
+      ClearCanvas: () => null,
+      SaveAsImage: () => null,
+      ChangeCanvasBackground: () => null,
+      Help: () => null,
+    },
+  });
+  return {
+    CaptureUpdateAction: { NEVER: "never" },
+    MainMenu,
+    Excalidraw: (props: Record<string, unknown>) => {
+      excalidraw.props = props;
+      excalidraw.beginRender();
+      try {
+        excalidraw.receiveApiCallback(props.excalidrawAPI as ((api: unknown) => void) | undefined);
+      } finally {
+        excalidraw.endRender();
+      }
+      return null;
+    },
+    restore: vi.fn(),
+    serializeAsJSON: vi.fn(),
+  };
+});
 
 import ExcalidrawCanvas from "./ExcalidrawCanvas";
 import { EMPTY_EXCALIDRAW_DOCUMENT, parseExcalidrawDocument } from "./excalidrawDocument";

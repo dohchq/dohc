@@ -38,6 +38,16 @@ const context = (conversation: unknown, wakes: PhoneChatWake[], wakeCursor: stri
     result: { ok: true, conversation, mentions: [], wakes, wakeCursor },
   },
 });
+const MAYA = { kind: "person", handle: "maya", label: "Maya" } as const;
+const NOVA = { kind: "agent", handle: "nova", label: "Nova", computers: ["Ice's Mac"] } as const;
+const mentioning = (conversation: unknown, mentions: unknown[], wakeCursor: string): Answer => ({
+  status: 200,
+  body: {
+    ok: true,
+    cursor: "0.1.1",
+    result: { ok: true, conversation, mentions, wakes: [], wakeCursor },
+  },
+});
 const changes = (body: Record<string, unknown>): Answer => ({
   status: 200,
   body: { ok: true, ...body },
@@ -290,6 +300,47 @@ describe("createChatWakes", () => {
     wakes.want("w1", STREAM, SHOWN);
     wakes.resume();
     expect(callsTo(CONTEXT)).toHaveLength(1);
+  });
+
+  it("keeps the read's mention candidates with its wakes, through a failed read", async () => {
+    const { server, wakes } = setup();
+    server.on("POST", CONTEXT, mentioning(thread("thread-1"), [MAYA, NOVA], "7"));
+    server.on("GET", waitPath("7"), "offline");
+    wakes.want("w1", THREAD, SHOWN);
+    await vi.waitFor(() => expect(wakes.view("w1", THREAD)?.failed).toBe(true));
+    expect(wakes.view("w1", THREAD)?.mentions).toEqual([MAYA, NOVA]);
+  });
+
+  it("drops a late answer's candidates after the screen moves to another conversation", async () => {
+    const { server, wakes, callsTo } = setup();
+    const late = deferred<Answer>();
+    server.on("POST", CONTEXT, (call) =>
+      (call.body as { threadId?: string }).threadId === "thread-1"
+        ? late.promise
+        : mentioning(stream, [NOVA], "7"),
+    );
+    server.on("GET", waitPath("7"), never);
+    const release = wakes.want("w1", THREAD, SHOWN);
+    await vi.waitFor(() => expect(callsTo(CONTEXT)).toHaveLength(1));
+    wakes.want("w1", STREAM, SHOWN);
+    release();
+    await vi.waitFor(() => expect(wakes.view("w1", STREAM)?.mentions).toEqual([NOVA]));
+    late.resolve(mentioning(thread("thread-1"), [MAYA], "6"));
+    await late.promise;
+    expect(wakes.view("w1", THREAD)).toBeNull();
+    expect(wakes.view("w1", STREAM)?.mentions).toEqual([NOVA]);
+  });
+
+  it("drops a late answer's candidates once the workspace's wakes stop", async () => {
+    const { server, wakes, callsTo } = setup();
+    const late = deferred<Answer>();
+    server.on("POST", CONTEXT, () => late.promise);
+    wakes.want("w1", THREAD, SHOWN);
+    await vi.waitFor(() => expect(callsTo(CONTEXT)).toHaveLength(1));
+    wakes.stop();
+    late.resolve(mentioning(thread("thread-1"), [MAYA], "7"));
+    await late.promise;
+    expect(wakes.view("w1", THREAD)).toBeNull();
   });
 
   it("keeps each workspace's wait apart", async () => {

@@ -6,7 +6,7 @@ import { editorTabTestId } from "../../testPins";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
 import { isMacContextClick } from "../ui/keys";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
-import { ChevronDown, Columns2, Share2, X } from "lucide-react";
+import { ChevronDown, Columns2, Plus, Share2, X } from "lucide-react";
 import { shortcutAria, shortcutText } from "../../shortcuts/shortcutRegistry";
 import { NARROW_GROUP_HIDDEN, NARROW_GROUP_NO_MIN_WIDTH } from "./tabRowActions";
 import { UnreadPill } from "./ChatsControls";
@@ -270,7 +270,7 @@ const Tab = memo(function Tab(props: {
           the close swap the dot for the close, at once. The dot is an image,
           so every browser reads its label into the tab's name; ARIA does not
           name a span with no role. */}
-      <span className="grid size-4 shrink-0 place-items-center">
+      <span className="grid size-5 shrink-0 place-items-center">
         {props.dirty ? (
           <span
             data-testid="tab-dirty"
@@ -290,7 +290,7 @@ const Tab = memo(function Tab(props: {
             event.stopPropagation();
             props.onClose(props.groupId, props.path);
           }}
-          className={`grid size-4 place-items-center rounded text-subtle hover:bg-hover hover:text-ink ${CLOSE_SLOT} ${
+          className={`grid size-5 place-items-center rounded text-subtle hover:bg-hover hover:text-ink ${CLOSE_SLOT} ${
             props.dirty
               ? DIRTY_CLOSE_SWAP
               : props.active
@@ -773,6 +773,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   ) => void;
   onCreateGroupRight: (groupId: string) => void;
   onCloseGroup?: (groupId: string) => void;
+  // Opens a new page when the workspace is writable.
+  onNewPage?: () => void;
   // Shares the active tab's file. Absent where its view draws no Share file.
   onShare?: (path: string) => void;
   // The element the open document's actions render into (tabRowActions).
@@ -1069,6 +1071,18 @@ export const EditorTabs = memo(function EditorTabs(props: {
             onDragStart={drag.begin}
           />
         ))}
+        {props.onNewPage ? (
+          <button
+            type="button"
+            data-testid="editor-tabs-new-page"
+            aria-label="New page"
+            title="New page"
+            onClick={props.onNewPage}
+            className="grid h-8 w-7 shrink-0 self-end place-items-center border-b border-line text-subtle transition-colors hover:bg-hover hover:text-ink focus-visible:-outline-offset-2"
+          >
+            <Plus size={14} aria-hidden />
+          </button>
+        ) : null}
         {/* Continues the hairline across the empty strip — only the active
             tab interrupts it. */}
         <div
@@ -1110,7 +1124,13 @@ export const EditorTabs = memo(function EditorTabs(props: {
         type="button"
         data-testid="create-editor-group-right"
         aria-label="New editor group right"
-        title="New editor group right"
+        title={
+          empty
+            ? "Open a tab to split"
+            : TAB_KINDS[parseTab(props.activeTab)?.kind ?? "removed"].singleton
+              ? "This view cannot be split"
+              : "New editor group right"
+        }
         disabled={empty || TAB_KINDS[parseTab(props.activeTab)?.kind ?? "removed"].singleton}
         onClick={() => props.onCreateGroupRight(props.groupId)}
         className={`${STRIP_BUTTON} ${empty ? "" : NARROW_GROUP_HIDDEN} hover:bg-hover disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted`}

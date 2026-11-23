@@ -449,4 +449,45 @@ describe("local apps in a workspace whose Collections another computer keeps", (
     expect(h.activate).not.toHaveBeenCalled();
     expect(await readdir(join(root, ".dohc"))).toEqual(["collections.json"]);
   });
+
+  it("dispatches verifyFrontend locally and refuses when verifier dependency is absent", async () => {
+    const h = harness();
+    await expect(
+      h.handler(
+        { action: "verifyFrontend", workspaceId: "w", appRoot: "app" },
+        "caller",
+        h.operation,
+      ),
+    ).rejects.toThrow("App frontend verification is unavailable.");
+
+    const verifyFrontend = vi.fn(async () => ({
+      kind: "frontendVerified" as const,
+      ok: true,
+      stage: "complete" as const,
+      target: { kind: "candidate" as const, appRoot: "app", sourceRevision: hash },
+      startupOk: true,
+      stepsOk: true,
+      handshake: { delivered: true, messageCount: 0 },
+      brokerCalls: [],
+      steps: [],
+      diagnostics: [],
+      externalRequestsBlocked: 0,
+    }));
+    const wired = createLocalOwnerAppPublicationHandler({
+      datasetForWorkspace: h.datasetForWorkspace,
+      approvedArtifacts: vi.fn(),
+      launchLocalDataset: h.launchLocalDataset,
+      flushCapture: h.flushCapture,
+      withAdapter: async (_workspace, work) => work({} as never),
+      compile: vi.fn(),
+      verifyFrontend,
+    });
+    const out = await wired(
+      { action: "verifyFrontend", workspaceId: "w", publicationId: hash },
+      "caller",
+      h.operation,
+    );
+    expect(out).toMatchObject({ kind: "frontendVerified", ok: true });
+    expect(verifyFrontend).toHaveBeenCalledTimes(1);
+  });
 });

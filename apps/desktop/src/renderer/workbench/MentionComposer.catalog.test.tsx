@@ -387,7 +387,7 @@ describe("the poll block", () => {
     expect(screen.queryByTestId("chats-poll-error")).toBeNull();
     fireEvent.change(choices()[1]!, { target: { value: " Soup" } });
     const error = screen.getByTestId("chats-poll-error");
-    expect(error.textContent).toBe("Soup is already a choice.");
+    expect(error.textContent).toBe("Already a choice: Soup.");
     expect(choices()[1]!.getAttribute("aria-invalid")).toBe("true");
     expect(error.id).toBe(choices()[1]!.getAttribute("aria-describedby"));
     expect(choices()[1]!.closest("div")!.nextElementSibling).toBe(error);
@@ -401,8 +401,8 @@ describe("the poll block", () => {
     render(<Harness initialValue="Lunch?" initialPoll={["Soup", "Soup", "Pie", "Pie", "Pie"]} />);
     const errors = screen.getAllByTestId("chats-poll-error");
     expect(errors.map((error) => error.textContent)).toEqual([
-      "Soup is already a choice.",
-      "Pie is already a choice.",
+      "Already a choice: Soup.",
+      "Already a choice: Pie.",
     ]);
     expect(choices()[1]!.closest("div")!.nextElementSibling).toBe(errors[0]);
     expect(choices()[3]!.closest("div")!.nextElementSibling).toBe(errors[1]);

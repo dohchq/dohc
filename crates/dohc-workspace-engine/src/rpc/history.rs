@@ -64,6 +64,8 @@ struct MomentsListParams {
     limit: Option<i64>,
     #[serde(default)]
     before_moment_order: Option<i64>,
+    #[serde(default)]
+    metadata_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -189,11 +191,23 @@ pub(super) fn withheld_moment_json(moment: &MomentRecord) -> Value {
     moment_wire_json(moment, MomentBodies::Withheld)
 }
 
+#[cfg(test)]
 fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError> {
+    encode_moment_page_with_bodies(page, MomentBodies::Capped)
+}
+
+fn encode_moment_page_with_bodies(
+    page: &MomentPage,
+    bodies: MomentBodies,
+) -> Result<EncodedMomentPage, WireError> {
     // A row COUNT cannot bound the frame: authorJson alone may be a 64 KiB
     // string. The measured serialized cut is shared by moments.list and the
     // aggregate history page so their text page and cursor stay identical.
-    let mut rows: Vec<Value> = page.moments.iter().map(moment_json).collect();
+    let mut rows: Vec<Value> = page
+        .moments
+        .iter()
+        .map(|moment| moment_wire_json(moment, bodies))
+        .collect();
     // A first row may legitimately exceed the page budget. Degrade that row
     // to metadata so the cursor still makes progress, exactly as moments.list
     // did before the history aggregate existed.
@@ -563,25 +577,31 @@ impl EngineService {
         }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
+        let query = dohc_engine_domain::ListMomentsQuery {
+            workspace_id: open.workspace_id.clone(),
+            version_id: params.version_id,
+            object_id: params.object_id,
+            // Clamped: an unbounded page would load a workspace's whole
+            // history in one actor turn and then fail the wire's
+            // collection cap at encode anyway.
+            // TS normalizeMomentListLimit contract: default 200, cap 500
+            // — page boundaries and cursors must match across engines.
+            limit: params.limit.unwrap_or(200).min(500),
+            before_moment_order: params.before_moment_order,
+        };
+        let bodies = if params.metadata_only {
+            MomentBodies::Withheld
+        } else {
+            MomentBodies::Capped
+        };
         let page = Self::read_under_ctx(
             &cancellation,
             "moments.list",
             open.actor
-                .list_moments(dohc_engine_domain::ListMomentsQuery {
-                    workspace_id: open.workspace_id.clone(),
-                    version_id: params.version_id,
-                    object_id: params.object_id,
-                    // Clamped: an unbounded page would load a workspace's whole
-                    // history in one actor turn and then fail the wire's
-                    // collection cap at encode anyway.
-                    // TS normalizeMomentListLimit contract: default 200, cap 500
-                    // — page boundaries and cursors must match across engines.
-                    limit: params.limit.unwrap_or(200).min(500),
-                    before_moment_order: params.before_moment_order,
-                }),
+                .list_moments_with_bodies(query, !params.metadata_only),
         )
         .await?;
-        Ok(encode_moment_page(&page)?.into_json())
+        Ok(encode_moment_page_with_bodies(&page, bodies)?.into_json())
     }
 
     pub(super) async fn history_operation(

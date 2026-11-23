@@ -16,7 +16,6 @@ import {
   revokeShareInTransaction,
 } from "./shares";
 import type { SqliteDb } from "./types";
-import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 import { workspaceAdminOrigin } from "../relayLogInputs";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import { workspaceUsageBytes } from "./workspaces";
@@ -589,7 +588,6 @@ export function inviteWorkspaceMember(
       }),
     );
     queueAddedNotice(storage, grantId, nowMs);
-    if (recipient !== null) forgetReplicaCurrentViewCaches(storage, input.workspaceId);
     return { ok: true };
   });
 }
@@ -609,7 +607,6 @@ function retuneGrants(
     const access = accessFor(membership, entry.role);
     update.run(access, entry.grantId, membership.shareId, access);
   }
-  forgetReplicaCurrentViewCaches(storage, membership.workspaceId);
 }
 
 /** Sets what members can do. With no membership yet, as before the first invite or after one ended, the name starts one. */
@@ -761,7 +758,6 @@ export function letWorkspaceMemberBackIn(
       }),
     );
     queueAddedNotice(storage, grantId, nowMs);
-    forgetReplicaCurrentViewCaches(storage, input.workspaceId);
     return { ok: true };
   });
 }
@@ -961,7 +957,6 @@ export function joinWorkspace(
         principal: { kind: "user", userId: input.userId },
       }),
     );
-    forgetReplicaCurrentViewCaches(storage, membership.workspaceId);
     return joined(grantId);
   });
 }
@@ -1013,7 +1008,6 @@ export function claimWorkspaceInvitesInTransaction(
         `UPDATE ${MEMBERS} SET user_id = ?, email = NULL, state = 'active', joined_at_ms = ? WHERE member_id = ?`,
       )
       .run(userId, Math.trunc(nowMs), invite.memberId);
-    forgetReplicaCurrentViewCaches(storage, invite.workspaceId);
   }
 }
 

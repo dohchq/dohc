@@ -357,17 +357,17 @@ describe("chat runner process", () => {
         { name: "owner", enabled: true },
         { name: "off", enabled: false },
       ]),
-      "Codex would also start `owner`, so dohc didn't start it. dohc turns off only the MCP servers named in your Codex config.toml.",
+      "Codex would also start `owner`, so dohc did not start it. dohc turns off only the MCP servers named in your Codex config.toml.",
     ],
     [
       "dohc's server is missing",
       JSON.stringify([{ name: "owner", enabled: false }]),
-      "Codex didn't list dohc's MCP server, so dohc didn't start it.",
+      "Codex did not list dohc's MCP server, so dohc did not start it.",
     ],
     [
       "the list isn't JSON",
       "Usage: codex",
-      "Codex didn't list dohc's MCP server, so dohc didn't start it.",
+      "Codex did not list dohc's MCP server, so dohc did not start it.",
     ],
   ])(
     "starts no reply-only Codex run when %s, and says why in the run's log",
@@ -392,7 +392,7 @@ describe("chat runner process", () => {
     await expect(
       spawn("", () => undefined, { tool: "codex", executable: process.execPath }, "reply"),
     ).rejects.toThrow(
-      "Codex couldn't list its MCP servers, so dohc didn't start it. Run `codex mcp list` to see why.",
+      "Codex could not list its MCP servers, so dohc did not start it. Run `codex mcp list` to see why.",
     );
     expect(calls).toEqual([]);
   });
@@ -644,7 +644,7 @@ describe("chat runner process", () => {
   it("refuses a runner Windows can't find on PATH instead of searching the workspace", async () => {
     const { calls, root, spawn } = await runnerFixture("win32");
     const reason =
-      "Couldn't find dohc-missing-runner on PATH. Use its full path in the runner command.";
+      "dohc could not find dohc-missing-runner on PATH. Use its full path in the runner command.";
     await expect(spawn("dohc-missing-runner --print")).rejects.toThrow(reason);
     expect(calls).toEqual([]);
     expect(readFileSync(join(root, "logs", "run.log"), "utf8")).toBe(`${reason}\n`);
@@ -676,7 +676,7 @@ describe("chat runner process", () => {
         expect(calls).toHaveLength(1);
       } else {
         await expect(started).rejects.toThrow(
-          "Your organization's Codex settings don't allow automations to start this agent.",
+          "Your organization's Codex settings do not allow automations to start this agent.",
         );
         expect(calls).toEqual([]);
         expect(checks).toEqual([]);
@@ -687,7 +687,7 @@ describe("chat runner process", () => {
   it("says a relative runner path that doesn't exist doesn't exist", async () => {
     const { spawn } = await runnerFixture("win32");
     await expect(spawn(String.raw`.\tools\agent.cmd`)).rejects.toThrow(
-      String.raw`.\tools\agent.cmd doesn't exist. Use its full path in the runner command.`,
+      String.raw`.\tools\agent.cmd does not exist. Use its full path in the runner command.`,
     );
   });
 
@@ -699,7 +699,7 @@ describe("chat runner process", () => {
       const shim = join(root, "agent.cmd");
       writeFileSync(shim, "@echo off\r\n");
       await expect(spawn(`"${shim}"`)).rejects.toThrow(
-        "Windows' command interpreter (ComSpec) isn't set to a full path. Set ComSpec to the full path of cmd.exe, then restart dohc.",
+        "Windows' command interpreter, ComSpec, is not set to a full path. Set ComSpec to the full path of cmd.exe, then restart dohc.",
       );
     },
   );
@@ -816,7 +816,7 @@ describe("chat runner process", () => {
           assertMayStart: () => undefined,
         });
       await expect(start(root)).rejects.toThrow(
-        "Codex can't start here because this folder's path has an apostrophe and Codex was installed with npm. Rename the folder, or install Codex with OpenAI's installer.",
+        "Codex cannot start here because this folder's path has an apostrophe and Codex was installed with npm. Rename the folder, or install Codex with OpenAI's installer.",
       );
       expect(existsSync(join(root, "args.json"))).toBe(false);
       // Without one in the workspace's path, the same Codex starts, and dohc's

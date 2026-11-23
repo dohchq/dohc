@@ -132,8 +132,8 @@ function Pending(props: CollectionPendingResponsesDialogProps) {
         <SecondaryButton onClick={props.onClose}>Close</SecondaryButton>
       </div>
       <p className="m-0 text-[12px] text-muted">
-        These responses may have been saved before the participant lost confirmation. Review each
-        result before clearing or cancelling it.
+        These responses might have saved before the person saw a confirmation. Review each result
+        before clearing or canceling it.
       </p>
       {/* Lines stand in only for a page not yet shown; a refresh or a change keeps its page and says so. */}
       {busy &&
@@ -149,9 +149,7 @@ function Pending(props: CollectionPendingResponsesDialogProps) {
           <SkeletonRows label="Loading pending responses…" />
         ))}
       {page && !page.entries.length && (
-        <p className="m-0 text-[13px] text-muted">
-          No pending responses. Refresh to check for changes.
-        </p>
+        <p className="m-0 text-[13px] text-muted">No pending responses.</p>
       )}
       <div className="min-h-0 overflow-auto">
         {page?.entries.map((entry) => (
@@ -173,7 +171,7 @@ function Pending(props: CollectionPendingResponsesDialogProps) {
             <p className="m-0 mt-1 text-[12px] text-muted">
               {entry.outcome === "committed"
                 ? `Saved in revision ${entry.revision}.`
-                : "No saved result is confirmed yet."}
+                : "dohc has not confirmed a saved result yet."}
               {entry.attachmentCount
                 ? ` ${entry.attachmentCount} attached file${entry.attachmentCount === 1 ? "" : "s"}.`
                 : ""}
@@ -227,8 +225,8 @@ function Pending(props: CollectionPendingResponsesDialogProps) {
           </h2>
           <p className="m-0 text-[13px] text-muted">
             {selected.outcome === "committed"
-              ? "The response is saved. The participant may not have seen its confirmation. Clearing lets them submit again. This cannot be undone."
-              : "Cancellation stops this response and prevents its old retry from saving later. The participant must start again. This cannot be undone."}
+              ? "The response is saved, though the person might not have seen a confirmation. Clearing it lets them submit again. This cannot be undone."
+              : "Canceling stops this response so an older retry cannot save later. The person must start over. This cannot be undone."}
           </p>
           <div className="flex justify-end gap-2">
             <SecondaryButton disabled={busy} onClick={() => setSelected(null)}>

@@ -1,5 +1,5 @@
 import { agentCardWords } from "./agentCard";
-import type { ChatKind, ChatRowData } from "./sample";
+import type { ChatKind, ChatRowData } from "./types";
 
 // The words for a chat's header, from the desktop's AgentBadge.tsx and reportedAgent.ts. The header shows no reported
 // text: the claim is on the agent's card, with its "(as reported)".

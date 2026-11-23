@@ -67,7 +67,6 @@ impl ActorHandle {
     pub async fn chat_channel_ensure_general(
         &self,
         workspace_id: String,
-        channel_id: String,
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
@@ -76,7 +75,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .ensure_general_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
+                    .ensure_general_channel(&workspace_id, now_ms, &NoFaults)
                     .map_err(RuntimeError::from)
             }
         })
@@ -86,7 +85,6 @@ impl ActorHandle {
     pub async fn chat_channel_ensure_agent(
         &self,
         workspace_id: String,
-        channel_id: String,
         agent_id: String,
         agent_name: String,
         now_ms: i64,
@@ -97,14 +95,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .ensure_agent_channel(
-                        &workspace_id,
-                        &channel_id,
-                        &agent_id,
-                        &agent_name,
-                        now_ms,
-                        &NoFaults,
-                    )
+                    .ensure_agent_channel(&workspace_id, &agent_id, &agent_name, now_ms, &NoFaults)
                     .map_err(RuntimeError::from)
             }
         })

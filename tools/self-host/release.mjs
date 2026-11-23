@@ -69,6 +69,7 @@ try {
     "tools/self-host/compose.private.yml",
     "tools/self-host/compose.data-disk.yml",
     "tools/self-host/compose.external-postgres.yml",
+    "tools/self-host/compose.apns.yml",
     "scripts/self-host/move.mjs",
     "tools/self-host/Caddyfile.cloudflare",
     "tools/self-host/compose.cloudflare.yml",

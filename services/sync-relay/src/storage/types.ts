@@ -19,7 +19,6 @@ import type {
   StopRestorePlanInput,
 } from "./liveRestoreOperation";
 import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
-import type { ReplicaLiveJournalRead, ReplicaLiveJournalPage } from "./liveUpdateJournal";
 import type {
   AdmittedLiveUpdate,
   AdmittedLiveUpdateMetadata,
@@ -713,10 +712,20 @@ export interface LiveUpdateJournalCommitInput {
   readonly receivedAtMs: number;
   readonly room?: LiveRoomSave;
 }
-/** A live room's save: several people's edits, committed under the owner's authority. */
+/** The access a live room edit came in under: the note's owner's, or a share's. */
+export type LiveRoomAuthority = Exclude<
+  ServerDerivedLiveUpdateAuthority,
+  { readonly principalKind: "personal" }
+>;
+/**
+ * A live room's save: one sender's edits, committed on the owner's capture and stored under the
+ * access the sender had when the room took them.
+ */
 export interface LiveRoomSave {
-  /** Everyone whose taken edits the save holds. */
+  /** The sender, as the room credited the edits when it took them. */
   readonly authors: import("@dohc/live-session-contract/live-authorship").LiveAuthorSnapshot;
+  /** The sender's access when the room took the edits. */
+  readonly authority: LiveRoomAuthority;
   /**
    * Runs inside the transaction that commits the save, with the save's journal cursor. What it
    * returns runs once that transaction has committed.
@@ -786,6 +795,7 @@ export interface SyncRelayStorage {
     workspaceId: string,
     path: string,
   ): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  isHostedForLiveEditing(workspaceId: string, objectId: string): boolean;
   readServiceHostEnrollmentByObjectId(
     workspaceId: string,
     objectId: string,
@@ -999,7 +1009,10 @@ export interface SyncRelayStorage {
   ): import("@dohc/workspace-contracts/relay").RelayNoticePage;
   /** The recipient's Notice change head; zero for a list that never changed. */
   noticeHead(recipientUserId: string): number;
-  markNotices(input: import("./notices").MarkNoticesInput): string[];
+  markNotices(input: import("./notices").MarkNoticesInput): {
+    dismissed: string[];
+    repeated: string[];
+  };
   noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
   pendingShareNotices(
     recipientUserId: string,
@@ -1264,7 +1277,7 @@ export interface SyncRelayStorage {
   ): import("./publications").LinkAppPublicationAuthority;
   readAppPublication(
     input: import("./publications").ReadAppPublicationInput,
-  ): import("./publications").AppPublicationRow;
+  ): ReturnType<typeof import("./publications").readAppPublication>;
   listAppPublications(
     input: import("./publications").ListAppPublicationsInput,
   ): ReturnType<typeof import("./publications").listAppPublications>;
@@ -1329,7 +1342,6 @@ export interface SyncRelayStorage {
     document: LiveDocumentKey;
     journalCursor: number;
   }): CommittedLiveUpdateResult;
-  readReplicaLiveJournal(input: ReplicaLiveJournalRead): Promise<ReplicaLiveJournalPage>;
 
   close(): void;
   invalidate(): void;
@@ -1455,73 +1467,6 @@ export interface SyncRelayStorage {
   }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
   workspaceOwner(workspaceId: string): string | null;
-  discardReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
-  releaseReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
-  bindReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
-  replicaCurrentViewSelectors(
-    workspaceId: string,
-  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentViewSelector[];
-  stageReplicaCurrentView(
-    lease: import("../replicaReadPrincipal").ReplicaReadLease,
-    view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
-    observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[],
-  ): import("./replicaCurrentViews").StagedCurrentView;
-  flipReplicaCurrentView(
-    lease: import("../replicaReadPrincipal").ReplicaReadLease,
-    staged: import("./replicaCurrentViews").StagedCurrentView,
-  ): void;
-  /** Supervisor only. The caller must prove that the stored files and omissions equal this view. */
-  advanceReplicaCurrentView(
-    lease: import("../replicaReadPrincipal").ReplicaReadLease,
-    view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
-    previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
-  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
-  storeReplicaCurrentView(
-    lease: import("../replicaReadPrincipal").ReplicaReadLease,
-    view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView,
-    observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[],
-  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
-  nextReplicaHistoryPinAt(workspaceId: string): number | null;
-  sampleReplicaHistory(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
-  createReplicaLinkReadService(
-    source: import("../replicaLinkReadService").DevelopmentReplicaReads,
-    watches: Pick<import("../replicaWatches").ReplicaWatches, "holdReader">,
-    activity: Pick<import("../discussionActivity").DiscussionActivityHub, "wakeLog">,
-    freshness: ReturnType<
-      typeof import("../shareReadQueries").createShareReadQueries
-    >["newestFilteredOpFreshness"],
-    key?: string | Uint8Array,
-  ): ReturnType<typeof import("../replicaLinkReadService").createReplicaLinkReadService>;
-  listReplicaHistoryPins(
-    input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput,
-    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
-  ): import("../replicaHistoryReads").ReplicaHistoryList;
-  readReplicaHistoryPin(
-    input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & { pinId: string },
-    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
-  ): import("../replicaHistoryReads").ReplicaHistoryRead;
-  readReplicaCurrentView(
-    workspaceId: string,
-  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView | null;
-  currentViewFilesAtFences(
-    workspaceId: string,
-    files: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"],
-    previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"],
-    omitted: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["omitted"],
-  ): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"];
-  readReplicaCurrentViewText(workspaceId: string, sha: string): string | null;
-  readReplicaStanding(
-    workspaceId: string,
-    shareGrantBindings?: string,
-  ): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
-  listReplicaCurrentViewFiles(
-    input: Parameters<typeof import("../replicaCurrentViewReads").listReplicaCurrentViewFiles>[1],
-    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
-  ): import("../replicaCurrentViewReads").ReplicaCurrentViewList;
-  readReplicaCurrentViewFile(
-    input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & { path: string },
-    source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource,
-  ): import("../replicaCurrentViewReads").ReplicaCurrentViewRead;
   putBlob(input: {
     workspaceId: string;
     sha256: string;
@@ -1793,6 +1738,11 @@ export interface SyncRelayStorage {
     objectId: string;
     epochLogFloor: number;
   }): CurrentFileStateRow | null | "reset";
+  currentFileBlobSha256(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): string | undefined;
   currentFileObjectId(input: {
     workspaceId: string;
     versionId: string;
@@ -1856,6 +1806,13 @@ export interface SyncRelayStorage {
     guard: () => void;
     mintCredential?: () => SyncRelayLinkCredentialMint;
   }): LinkGrantTransitionResult;
+  retuneNamedShareGrant(input: {
+    shareId: string;
+    grantId: string;
+    access: string;
+    changedAtMs: number;
+    guard: () => void;
+  }): ShareGrantTransitionResult;
   revokeShareGrant(input: {
     shareId: string;
     grantId: string;
@@ -2025,6 +1982,13 @@ export interface SyncRelayStorage {
     userId: string,
     shareId?: string,
   ): ReturnType<typeof import("./shareRemoval").listRemovedSharesForRecipient>;
+  listRemovedSharesInRecipientList(
+    userId: string,
+    shareId?: string,
+  ): ReturnType<typeof import("./shareRemoval").listRemovedSharesInRecipientList>;
+  leaveShare(
+    input: Parameters<typeof import("./shareRemoval").leaveShare>[1],
+  ): ReturnType<typeof import("./shareRemoval").leaveShare>;
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
   // Candidate moment rows for the shared-blob allowlist. Both semantics start
@@ -2199,8 +2163,13 @@ export interface SqliteDb {
   close(): void;
 }
 
+export type SyncRelayOpenPart = "lock" | "file" | "continuity" | "schema" | "purge";
+
 export interface OpenSyncRelayStorageOptions {
+  /** Called as each part of the open ends, in order, with the part's name. */
+  opened?: (part: SyncRelayOpenPart) => void;
   pushConfigured?: boolean;
+  apnsConfigured?: boolean;
   liveTickets?: LiveTicketStoragePolicy;
   workspaceQuotaBytes?: number;
   blobGraceMs?: number;

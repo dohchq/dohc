@@ -1398,6 +1398,7 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.conflictsResolve]: Schema.Union([
     mutableStruct({
       conflict: ConflictRecordSchema,
+      placed: Schema.Boolean,
       write: Schema.NullOr(JsonObjectSchema),
       delete: Schema.NullOr(JsonObjectSchema),
     }),
@@ -1429,6 +1430,9 @@ const WorkspaceResultSchemas = {
     // happen, but a file another program changes at that moment can be lost.
     noAtomicPlacement: Schema.Boolean,
     recoveryUnavailable: Schema.Boolean,
+    // False until capture has loaded the secret key, failed to, or finished
+    // a clean pass since the engine opened the workspace.
+    secretKeyChecked: Schema.Boolean,
     // Why protected files such as `.env` can't be captured, such as
     // `volume-shares-new-files` or `key-missing`. Absent while the key is fine.
     secretKeyUnavailable: Schema.optionalKey(Schema.NonEmptyString),
@@ -1786,21 +1790,4 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
     ) as WorkspaceMethodResultMap[M];
   }
   return decoded;
-}
-
-export type ReplicaCurrentViewPage = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.replicaCut];
-export type ReplicaCurrentView = Omit<
-  ReplicaCurrentViewPage,
-  "moved" | "nextCursor" | "refusedFiles" | "delta" | "removed"
-> & { omitted: ReplicaCurrentViewPage["refusedFiles"] };
-export type ReplicaCurrentViewPosition = Pick<
-  ReplicaCurrentView,
-  "revision" | "logCursor" | "journalCursor"
->;
-export type ReplicaCurrentViewCursor = NonNullable<ReplicaCurrentViewPage["nextCursor"]>;
-export type ReplicaCurrentViewSelector =
-  WorkspaceMethodParamsMap[typeof WORKSPACE_METHOD.replicaCut]["selectors"][number];
-
-export function decodeReplicaCurrentView(value: unknown): ReplicaCurrentViewPage {
-  return decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut, value as JsonValue);
 }

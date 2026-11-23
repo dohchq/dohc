@@ -414,9 +414,9 @@ describe("SettingsDialog", () => {
     };
     render(<SettingsDialog {...props} />);
     expect(
-      screen.getByText("Couldn’t open this workspace. Close Settings to try again."),
+      screen.getByText("dohc could not open this workspace. Close Settings to try again."),
     ).toBeTruthy();
-    expect(screen.queryByText("Loading settings...")).toBeNull();
+    expect(screen.queryByText("Loading settings…")).toBeNull();
     await waitFor(() => expect(bridge.getUserSettings).toHaveBeenCalled());
     expect(bridge.getWorkspaceSettings).not.toHaveBeenCalled();
     expect(bridge.getMcpConfig).not.toHaveBeenCalled();
@@ -448,7 +448,7 @@ describe("SettingsDialog", () => {
       expect(bridge.requestAccessRefresh).not.toHaveBeenCalled();
       expect(bridge.listSharingAccess).not.toHaveBeenCalled();
       expect(onError).not.toHaveBeenCalled();
-      expect(screen.getByText("Loading settings...")).toBeTruthy();
+      expect(screen.getByText("Loading settings…")).toBeTruthy();
       view.rerender(<SettingsDialog {...props} workspaceIsReady />);
       await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledOnce());
       if (initialSection === "agents")
@@ -968,7 +968,7 @@ describe("SettingsDialog", () => {
     await act(async () => onNotice.mock.calls[0]![1]!());
     await waitFor(() =>
       expect(onError).toHaveBeenCalledWith(
-        "Undo didn't replace the new Codex, so the one you removed stays removed.",
+        "Undo did not replace the new Codex, so the removed agent stays removed.",
       ),
     );
     expect(file.agents.codex).toEqual(added);
@@ -1152,13 +1152,13 @@ describe("SettingsDialog", () => {
     await waitFor(() =>
       expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function)),
     );
-    const retry = screen.getByRole("button", { name: "Retry" });
+    const retry = screen.getByRole("button", { name: "Try again" });
     expect(retry.hasAttribute("disabled")).toBe(true);
     runActive = false;
     await user.click(retry);
     await act(async () => {});
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
-    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
+    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Try again");
     await act(async () => {
       recovery.resolve({
         activeRun: {
@@ -1176,8 +1176,8 @@ describe("SettingsDialog", () => {
       expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false),
     );
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
-    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Try again");
+    await user.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() =>
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"),
     );
@@ -1195,7 +1195,7 @@ describe("SettingsDialog", () => {
     await screen.findByTestId("mcp-load-error");
     const oldRetryRead = deferred<Awaited<ReturnType<typeof bridge.getAgentRunStatus>>>();
     bridge.getAgentRunStatus.mockImplementationOnce(() => oldRetryRead.promise);
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: "Try again" }));
     view.rerender(<SettingsDialog workspaceIsReady workspaceId="ws-2" {...props} />);
     await waitFor(() =>
       expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false),
@@ -1463,7 +1463,7 @@ describe("SettingsDialog", () => {
 
     const group = await screen.findByRole("radiogroup", { name: "Attachment location" });
     const radio = (name: string) => within(group).getByRole("radio", { name });
-    expect(radio("In a folder beside the document").getAttribute("aria-checked")).toBe("true");
+    expect(radio("In a folder beside the page").getAttribute("aria-checked")).toBe("true");
     expect(examplePath("per-document")).toBe("Trips/Lisbon/assets/photo.png");
     expect(examplePath("global-folder")).toBe("assets/photo.png");
     expect(examplePath("same-folder")).toBe("Trips/Lisbon/photo.png");
@@ -1482,7 +1482,7 @@ describe("SettingsDialog", () => {
     const input = screen.getByTestId("attachment-folder-input") as HTMLInputElement;
     await waitFor(() => expect(input.disabled).toBe(true));
     expect(document.getElementById(input.getAttribute("aria-describedby")!)?.textContent).toBe(
-      "Not used when images go beside the document.",
+      "Not used when images go beside the page.",
     );
   });
 
@@ -1629,7 +1629,7 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     expect(onError).toHaveBeenCalledWith(words, refused, expect.any(Function));
     expect(screen.getAllByTestId("settings-warning").map((node) => node.textContent)).toContain(
-      `Settings error: ${words}`,
+      words,
     );
     expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
     await waitFor(() =>
@@ -1646,6 +1646,42 @@ describe("SettingsDialog", () => {
       workspaceId: "ws-1",
       patch: { files: { attachmentLocation: "global-folder" } },
     });
+  });
+
+  it("normalizes the Default accent swatch back to null so theme switching stays adaptive", async () => {
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog
+        workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const accentRow = await screen.findByTestId("settings-row-accent");
+    await user.click(within(accentRow).getByRole("button", { name: "Blue" }));
+    await waitFor(() =>
+      expect(bridge.setUserSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            appearance: expect.objectContaining({ accentColor: expect.stringMatching(/^#/) }),
+          }),
+        }),
+      ),
+    );
+
+    await user.click(within(accentRow).getByRole("button", { name: "Default" }));
+    await waitFor(() =>
+      expect(bridge.setUserSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            appearance: expect.objectContaining({ accentColor: null }),
+          }),
+        }),
+      ),
+    );
   });
 });
 

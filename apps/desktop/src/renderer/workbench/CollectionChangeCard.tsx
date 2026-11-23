@@ -62,7 +62,10 @@ export const collectionLoadFailure =
   (name: string) =>
   (error: unknown): CollectionChangeLoadFailure =>
     isDatasetOwnerOnly(error)
-      ? { words: `You can't apply changes to ${name}. Ask its owner to apply it.`, ownerOnly: true }
+      ? {
+          words: `You cannot apply changes to ${name}. Ask its owner to apply them.`,
+          ownerOnly: true,
+        }
       : { words: ipcErrorMessage(error, "dohc could not read this change."), ownerOnly: false };
 export type CollectionChangeLoadFailure = { words: string; ownerOnly: boolean };
 /** What Apply says when it holds a change that records made delete more than the card shows. */
@@ -70,7 +73,7 @@ export const collectionDeletesMoreFailure = (
   was: { records: number; values: number },
   now: { records: number; values: number },
 ) => ({
-  words: `Records changed after it was sent, and it would now delete ${collectionDeletesMore(was, now)}. Review the source change to apply it.`,
+  words: `Records changed after this was sent, and applying it would now delete ${collectionDeletesMore(was, now)}. Review the source change to apply it.`,
   retry: false,
 });
 
@@ -226,7 +229,7 @@ export function CollectionChangeCard(props: {
         if (!mounted.current)
           return fail(
             {
-              words: "Its files changed after it was sent. Review the change to apply it.",
+              words: "These files changed after this was sent. Review the change to apply it.",
               retry: false,
             },
             null,
@@ -479,7 +482,7 @@ export function CollectionChangeCardView(props: {
   const tense = state.kind === "applied" ? "past" : "present";
   const noteAt = proposal.note === null ? -1 : collectionChangeNoteRow(rows);
   const note =
-    proposal.note === null ? null : `${message.authorDisplayName}'s note: "${proposal.note}"`;
+    proposal.note === null ? null : `Note from ${message.authorDisplayName}: "${proposal.note}"`;
   const review = (
     <button
       type="button"
@@ -580,7 +583,7 @@ export function CollectionChangeCardView(props: {
       {heading(
         status ? (
           <span className="ml-auto flex items-center gap-2 text-[12px] text-muted">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel-2 px-2 py-px text-[11px] text-ink">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel-2 px-2 py-px text-[12px] text-ink">
               <span className={`size-1.5 rounded-full ${status.dot}`} aria-hidden />
               {status.label}
             </span>
@@ -628,9 +631,9 @@ export function CollectionChangeCardView(props: {
           <CircleAlert size={14} strokeWidth={1.9} aria-hidden className="shrink-0" />
           <span>
             {state.atMs === null
-              ? "Its files changed after it was sent."
+              ? "These files changed after this was sent."
               : state.by
-                ? `${state.by.name} changed these files at ${formatClock(state.atMs)}.`
+                ? `Changed at ${formatClock(state.atMs)} by ${state.by.name}.`
                 : `These files changed at ${formatClock(state.atMs)}.`}{" "}
             Review the change to apply it.
           </span>
@@ -681,14 +684,12 @@ function ChangeRow(props: {
             {words.danger && !props.note ? (
               <CircleAlert size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
             ) : null}
-            <span className={words.file && !props.note ? "font-mono text-[11px]" : undefined}>
-              {effect}
-            </span>
+            <span className={words.file && !props.note ? "text-[12px]" : undefined}>{effect}</span>
           </div>
         ) : null}
       </div>
       {other ? (
-        <span className="mt-0.5 text-[11px] text-subtle">
+        <span className="mt-0.5 text-[12px] text-subtle">
           {by(author.name, props.row.source?.atMs ?? null)}
         </span>
       ) : (

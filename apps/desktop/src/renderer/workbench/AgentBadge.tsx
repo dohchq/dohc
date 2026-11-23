@@ -62,7 +62,7 @@ export function AgentBadge(props: {
   // it takes the plug and its card claims no kind.
   const plug = props.presentation?.connected;
   const connected = plug === true;
-  const label = connected ? "connected agent" : "agent";
+  const label = connected ? "Connected agent" : "Agent";
   const Mark = plug ? Plug : Sparkles;
   const ownAgent =
     !plug && props.presentation?.self && settings && author.authorAgentId
@@ -74,7 +74,7 @@ export function AgentBadge(props: {
   const command = launch ? launchCommand(launch) : undefined;
   // An agent with a thread runs in its tool, wherever that tool runs it.
   const runsWith = ownAgent?.thread
-    ? "A thread in T3 Code"
+    ? "Thread in T3 Code"
     : !launch
       ? undefined
       : "tool" in launch

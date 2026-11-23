@@ -16,6 +16,7 @@ import { DrawingView } from "./DrawingView";
 import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import {
   DocumentControls,
+  EditCopyNotice,
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
   ViewActions,
@@ -253,7 +254,7 @@ function TruncatedNotice(props: {
   return (
     <div
       data-testid="truncated-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-warning"
     >
       <span>Showing the start of a large file.</span>
       <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
@@ -264,7 +265,7 @@ function TruncatedNotice(props: {
             onClick={() => openExternally(props)}
             className="text-subtle hover:text-ink"
           >
-            Open the full file externally
+            Open full file externally
           </button>
         )}
       </OpenExternallyControl>
@@ -278,7 +279,7 @@ type FileInspectorProps = {
   // A record's Button fields report through the shell's toasts and Notices,
   // and the shell opens the record's History.
   onButtonError?: ReportButtonError;
-  onButtonNotice?: (message: string, undo?: () => void) => void;
+  onButtonNotice?: (message: string, undo?: () => void) => (() => void) | void;
   // Opens account settings, for a joined page opened with another account.
   onSwitchAccount?: () => void;
   // Closes every tab showing a file, as an Undo that removes it does first.
@@ -322,6 +323,7 @@ type FileInspectorProps = {
   onOpenLiveDocuments?: (path: string) => void;
   // The file is a received share's: a shared view, or a mount in shared-with-me.
   receivedShare?: boolean;
+  onOpenToEdit?: () => void;
   accessEnded?: boolean;
   // Capture holds this file's outside edit, and Try again asks it to retry.
   captureHeld?: boolean;
@@ -757,14 +759,18 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
     if (noDocument) onEditorReady?.(null);
   }, [noDocument, onEditorReady]);
   const url = assetUrl(props.workspaceId, props.path, props.refreshKey ?? 0);
-  const truncatedNotice =
-    isText && truncated ? (
-      <TruncatedNotice
-        workspaceId={props.workspaceId}
-        path={props.path}
-        onError={props.onButtonError}
-      />
-    ) : null;
+  const truncatedNotice = (
+    <>
+      {props.onOpenToEdit ? <EditCopyNotice onOpenToEdit={props.onOpenToEdit} /> : null}
+      {isText && truncated ? (
+        <TruncatedNotice
+          workspaceId={props.workspaceId}
+          path={props.path}
+          onError={props.onButtonError}
+        />
+      ) : null}
+    </>
+  );
   const onShareCurrentPath = props.onSharePath ? () => props.onSharePath?.(props.path) : undefined;
   const { appFolder, onRunApp } = props;
   const runApp = appFolder && onRunApp ? () => onRunApp(appFolder) : undefined;
@@ -792,7 +798,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
                     : engine.permanentFailureWhileEditing
                       ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
                       : engine.readOnlyWhileEditing
-                        ? "This document became read-only before your edit saved. Copy your edits to keep them."
+                        ? "This file became read-only before your edits saved. Copy your edits to keep them."
                         : undefined
       }
       replacedDraftIds={engine.replacedDraftIds}
@@ -841,7 +847,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
           icon={Layers}
           title={
             <>
-              This version doesn&apos;t have this file.{" "}
+              This version does not have this file.{" "}
               {pendingDraft ? (
                 <span data-testid="file-not-in-version-discarded">
                   dohc discarded your unsaved edit.{" "}
@@ -890,6 +896,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
             contentShown={false}
             noun={kind === "markdown" ? "page" : "document"}
             message={engine.openRefusal ?? engine.sharedWaiting?.message}
+            details={engine.openRefusalDetail}
           />
         ) : null}
         {engine.artifactAssetsInvalid ? (
@@ -1143,7 +1150,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
-          <EmptyState data-testid="view-pdf" title="dohc can't preview PDF files.">
+          <EmptyState data-testid="view-pdf" title="dohc cannot preview PDF files.">
             <OpenExternallyButton
               workspaceId={props.workspaceId}
               path={props.path}
@@ -1185,7 +1192,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
-          <EmptyState data-testid="view-binary" title="dohc can't preview this type of file.">
+          <EmptyState data-testid="view-binary" title="dohc cannot preview this type of file.">
             <OpenExternallyButton
               workspaceId={props.workspaceId}
               path={props.path}

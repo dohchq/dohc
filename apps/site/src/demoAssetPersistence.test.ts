@@ -41,6 +41,7 @@ describe("demo asset persistence fallback", () => {
     configureDemoDesktopBridge({
       documents: [],
       folders: [],
+      fixedPaths: [],
       createFile: () => undefined,
       createFolder: () => undefined,
       movePath: () => undefined,

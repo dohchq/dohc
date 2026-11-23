@@ -201,8 +201,8 @@ it("acknowledges after the shell's toast and Notice state commits", async () => 
   await act(async () => f.queue.report("a", REFUSED));
   expect(f.order).toEqual(["acknowledge"]);
   expect(atAcknowledgment).toEqual([
-    "The sync relay did not accept your change to tasks/automations.yaml. Send it as a proposal.",
-    "The sync relay did not accept your change to tasks/automations.yaml. Send it as a proposal.",
+    "The server did not accept your change to tasks/automations.yaml. Send it as a proposal.",
+    "The server did not accept your change to tasks/automations.yaml. Send it as a proposal.",
   ]);
 });
 
@@ -234,7 +234,7 @@ it.each(["stale", "refused"] as const)(
     expect(notices).toHaveLength(1);
     expect(f.order).toEqual(["shown", "acknowledge"]);
     expect(notices[0]!.send?.label).toBe("Send as proposal");
-    if (result === "stale") expect(notices[0]!.message).toContain("Your text draft is kept");
+    if (result === "stale") expect(notices[0]!.message).toContain("Your draft is saved");
     view.unmount();
     renderHook(() => useShareDirectWrites(input(notices)));
     await act(async () => {

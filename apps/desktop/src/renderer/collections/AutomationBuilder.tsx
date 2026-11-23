@@ -25,6 +25,8 @@ import {
   SectionLabel,
 } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { RUN_TIME, Sentence, StatusLine } from "./AutomationParts";
 import {
   automationTableOf,
@@ -198,7 +200,7 @@ const DIAGNOSTIC_SENTENCES: Partial<Record<AutomationDiagnostic["code"], string>
   "reserved-field-name": "id is the record's own id, so a step cannot set it.",
   "control-characters": "The name has characters dohc cannot show.",
   "too-many-steps": "An automation can have at most 25 steps.",
-  "if-too-deep": "If steps can sit at most three deep.",
+  "if-too-deep": "If steps can be nested at most 3 levels deep.",
   "unexpected-formula-marker": "Only a value can be a formula, so this cannot start with =.",
   "unknown-binding":
     "No step before this one in its list names that result. Move this step after the step that names it.",
@@ -234,7 +236,7 @@ const invalid = (shown: Shown) =>
 function Problem({ shown }: { shown: Shown }) {
   if (shown === null) return null;
   return (
-    <p id={shown.id} data-problem className="m-0 mt-1 text-[11px] leading-snug text-danger">
+    <p id={shown.id} data-problem className="m-0 mt-1 text-[12px] leading-snug text-danger">
       {shown.text}
     </p>
   );
@@ -276,7 +278,7 @@ function FieldSelect(props: {
       </select>
       {known || props.problem !== null ? null : (
         <StatusLine tone="warning" icon={AlertTriangle} label="Not a field">
-          {props.value} is not a field in {props.collection}.
+          The Collection {props.collection} has no field named {props.value}.
         </StatusLine>
       )}
       <Problem shown={props.problem} />
@@ -1422,7 +1424,15 @@ export function AutomationBuilder(props: {
   const [attempted, setAttempted] = useState(false);
   const [checking, setChecking] = useState(false);
   const [saveChosen, setSaveChosen] = useState(false);
-  const [targets, setTargets] = useState<Target[] | null>(null);
+  // The Collections a step can reach, for both kinds of Collection. A new workspace or Collection starts over.
+  const listed = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([workspaceId, collectionPath]),
+    load: async (): Promise<Target[] | null> => {
+      const result = await bridge().listAutomationTargets({ workspaceId, collectionPath });
+      return "collections" in result ? result.collections : null;
+    },
+  });
+  const targets = listed.value ?? null;
   // Each other dataset a step names, as dohc describes it, or "failed" when it could not.
   const [datasetTables, setDatasetTables] = useState(
     () => new Map<string, AutomationTable | "failed">(),
@@ -1909,24 +1919,21 @@ export function AutomationBuilder(props: {
     };
   }, [workspaceId, collectionPath, choosesPeople]);
 
-  // The Collections a step can reach, for both kinds of Collection. A new
-  // workspace or Collection starts over, so nothing it knew stays.
+  // A new workspace or Collection starts over, so nothing it knew stays.
   useEffect(() => {
-    setTargets(null);
     setDatasetTables(new Map());
     setSchemas(new Map([[collectionPath, props.fields.filter(holdsValue)]]));
     requested.current = new Set();
-    const epoch = scope.current();
-    void bridge()
-      .listAutomationTargets({ workspaceId, collectionPath })
-      .then((result) => {
-        if (scope.isCurrent(epoch) && "collections" in result) setTargets(result.collections);
-      })
-      .catch((error: unknown) => {
-        if (scope.isCurrent(epoch))
-          onError("dohc could not list the Collections an automation can change.", error);
-      });
   }, [workspaceId, collectionPath]);
+  const reportTargets = useRef(onError);
+  reportTargets.current = onError;
+  useEffect(() => {
+    if (listed.error !== null)
+      reportTargets.current(
+        "dohc could not list the Collections an automation can change.",
+        listed.error,
+      );
+  }, [listed.error]);
 
   // A Find in another Collection gets its condition once dohc knows that Collection's kind.
   useEffect(() => {
@@ -2046,7 +2053,8 @@ export function AutomationBuilder(props: {
   const fieldChoices = [...missingFields, ...recordFields.map((field) => field.name)];
   const lacks = (fields: readonly FieldDefinition[], name: string) =>
     moved && name !== "" && !fields.some((field) => field.name === name);
-  const notAField = (name: string) => `${name} is not a field in ${watched}. Choose a field.`;
+  const notAField = (name: string) =>
+    `The Collection ${watched} has no field named ${name}. Choose a field.`;
   if (automation.when.kind === "field-changed") {
     if (automation.when.field === "") problems.set("when/field", "Choose a field.");
     else if (lacks(recordFields, automation.when.field))
@@ -2060,7 +2068,7 @@ export function AutomationBuilder(props: {
   if (lost.length > 0) {
     problems.set(
       "when/fields",
-      `${lost.join(", ")} ${lost.length === 1 ? "is not a field" : "are not fields"} in ${watched}. Clear ${lost.length === 1 ? "it" : "them"}.`,
+      `The Collection ${watched} does not have ${lost.length === 1 ? "this field" : "these fields"}: ${lost.join(", ")}. Clear ${lost.length === 1 ? "it" : "them"}.`,
     );
   }
   if (automation.when.kind === "button" && automation.when.field === "")
@@ -2068,7 +2076,7 @@ export function AutomationBuilder(props: {
   else if (automation.when.kind === "button" && lacks(buttonFields, automation.when.field)) {
     problems.set(
       "when/button",
-      `${automation.when.field} is not a button in ${watched}. Choose a button.`,
+      `The Collection ${watched} has no button named ${automation.when.field}. Choose a button.`,
     );
   }
   // A Find's rows name its Collection's fields, which a moved trigger does not change.
@@ -2202,7 +2210,7 @@ export function AutomationBuilder(props: {
       rows.forEach(({ key: row, value: entry, number }) => {
         if (entry.field.trim() === "") problems.set(`row-${row}/field`, "Name this input.");
         else if (seen.has(entry.field))
-          problems.set(`row-${row}/field`, `${entry.field} is in this step twice.`);
+          problems.set(`row-${row}/field`, `This step lists the input ${entry.field} twice.`);
         seen.add(entry.field);
         if (entry.value.kind === "formula")
           formulaProblem(`row-${row}/value`, entry.value.expression);
@@ -2244,7 +2252,7 @@ export function AutomationBuilder(props: {
       )
         problems.set(`row-${row}/field`, notAField(entry.field));
       else if (seen.has(entry.field))
-        problems.set(`row-${row}/field`, `${entry.field} is in this step twice.`);
+        problems.set(`row-${row}/field`, `This step lists the field ${entry.field} twice.`);
       seen.add(entry.field);
       if (entry.value.kind === "formula")
         formulaProblem(`row-${row}/value`, entry.value.expression);
@@ -2439,7 +2447,7 @@ export function AutomationBuilder(props: {
           {value === "" ? (
             <option value="" disabled>
               {groupList === "failed"
-                ? "Groups could not be listed"
+                ? "dohc could not list Groups."
                 : groupList === "unavailable"
                   ? "Groups are unavailable here"
                   : groups === null
@@ -2589,7 +2597,7 @@ export function AutomationBuilder(props: {
                   {value === "" ? (
                     <option value="" disabled>
                       {peopleList === "failed"
-                        ? "People could not be listed"
+                        ? "dohc could not list people."
                         : peopleList === "unavailable"
                           ? "People are unavailable here"
                           : peopleList === null
@@ -2739,7 +2747,7 @@ export function AutomationBuilder(props: {
           : step.kind === "invoke"
             ? target.kind === "dataset"
               ? (target.actionsStopped ?? operationStop(targetPath, step.operation))
-              : "Only a dataset Collection has actions."
+              : "Only a Data Collection has actions."
             : step.kind === "find"
               ? (target.findStopped ??
                 (step.operation === null ? null : operationStop(targetPath, step.operation)))
@@ -3067,10 +3075,12 @@ export function AutomationBuilder(props: {
             </select>
             {chosen === undefined && (tables !== null || targetPath === collectionPath) ? (
               <StatusLine tone="warning" icon={AlertTriangle} label="Not an action">
-                {targetName} has no action named {action.operation}. Choose another.
+                The Collection {targetName} has no action named {action.operation}. Choose another.
               </StatusLine>
             ) : chosen === undefined || chosen.reversible ? null : (
-              <p className="m-0 text-[12px] text-muted">{chosen.label} can't be undone.</p>
+              <p className="m-0 text-[12px] text-muted">
+                The action {chosen.label} cannot be undone.
+              </p>
             )}
             {rows.map(({ key: rowKey, value: row }, rowIndex) => {
               const name = row.field || `input ${rowIndex + 1}`;
@@ -3207,7 +3217,7 @@ export function AutomationBuilder(props: {
                       step: { ...step, file: event.target.value },
                     }))
                   }
-                  className={`${inputClass} font-mono text-[12px]`}
+                  className={inputClass}
                   {...invalid(problem(`step-${key}/source`))}
                 />
                 <SecondaryButton
@@ -3228,7 +3238,8 @@ export function AutomationBuilder(props: {
             {step.kind === "run-file" && missing.has(step.file) ? (
               <StatusLine tone="warning" icon={AlertTriangle} label="No file">
                 <p className="m-0">
-                  {own} has no file {step.file}. Create it to write the code there.
+                  The Collection {own} has no file named {step.file}. Create it to write the code
+                  there.
                 </p>
                 <SecondaryButton
                   size="compact"
@@ -3320,7 +3331,7 @@ export function AutomationBuilder(props: {
                 aria-label={`Step ${number}, ${BRANCH_LABELS[branch]}`}
                 className="flex flex-col gap-2 border-l border-line pl-2"
               >
-                <span className="text-[11px] font-medium text-muted">{BRANCH_LABELS[branch]}</span>
+                <span className="text-[12px] font-medium text-muted">{BRANCH_LABELS[branch]}</span>
                 {stepList(`${key}/${branch}`, entry.branches![branch])}
               </div>
             ))}
@@ -3684,7 +3695,7 @@ export function AutomationBuilder(props: {
             id={`${problemIds}deep-${listId.replace(/\W/gu, "_")}`}
             className="m-0 text-[12px] text-muted"
           >
-            An If here would sit inside three others, and an automation allows three.
+            An If step here would be more than 3 levels deep. Automations allow up to 3 levels.
           </p>
         ) : null}
       </>
@@ -4014,7 +4025,7 @@ export function AutomationBuilder(props: {
                     {MONTH_DAYS.map((day) => (
                       <label
                         key={day}
-                        className="flex items-center gap-1 font-mono text-[12px] text-ink"
+                        className="flex items-center gap-1 tabular-nums text-[12px] text-ink"
                       >
                         <input
                           type="checkbox"
@@ -4048,7 +4059,7 @@ export function AutomationBuilder(props: {
                   aria-label="Minutes past the hour"
                   value={trigger.at}
                   onChange={(event) => setWhen({ ...trigger, at: event.target.value })}
-                  className={`${selectClass} font-mono`}
+                  className={`${selectClass} tabular-nums`}
                   {...invalid(problem("when/at"))}
                 >
                   {MINUTES.includes(trigger.at) ? null : (
@@ -4134,7 +4145,7 @@ export function AutomationBuilder(props: {
               {buttonFields.length === 0 ? (
                 <StatusLine tone="muted" icon={Info} label="No button">
                   <p className="m-0">
-                    {watched} has no Button field. Add one, then choose it here.
+                    The Collection {watched} has no Button field. Add one, then choose it here.
                   </p>
                   {props.onOpenFields && watched === own ? (
                     <SecondaryButton size="compact" className="mt-1" onClick={props.onOpenFields}>
@@ -4202,7 +4213,10 @@ export function AutomationBuilder(props: {
               Save your changes?
             </h3>
             <p className="m-0 mt-2 text-[13px] text-muted">
-              {automation.name.trim() || "This automation"} has changes you have not saved.
+              {automation.name.trim()
+                ? `The automation ${automation.name.trim()}`
+                : "This automation"}{" "}
+              has unsaved changes.
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <SecondaryButton onClick={props.onStay}>Keep editing</SecondaryButton>

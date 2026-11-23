@@ -3,6 +3,8 @@
 // Strings with names or counts are functions, so no app builds a sentence from pieces.
 
 export const workspaceWords = {
+  /** Phone only: the back arrow in an Android header. */
+  back: "Back",
   // ExplorerHome.tsx
   pages: "Pages",
   sketches: "Sketches",

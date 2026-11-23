@@ -406,3 +406,122 @@ it("returns safe app refusal text and hides invalid backend errors", async () =>
     f.close();
   }
 });
+
+it("observes handshake, pre-forward rejections, and post-validation outcomes without breaking delivery", async () => {
+  vi.stubGlobal("MessageChannel", NodeMessageChannel);
+  const frame = new EventTarget();
+  let port!: NodeMessagePort;
+  Object.assign(frame, {
+    contentWindow: {
+      postMessage(_message: unknown, _target: string, ports: NodeMessagePort[]) {
+        port = ports[0]!;
+      },
+    },
+  });
+  const events: unknown[] = [];
+  const replies = [
+    () => Response.json({ result: { ok: 1 }, revision: 1, replayed: false }),
+    () => Response.json({ code: "workshop_full", message: "Full" }, { status: 409 }),
+    () => Response.json({ code: "bad", message: "bad", extra: true }, { status: 409 }),
+  ];
+  const lifetime = new AbortController();
+  attachAppCollectionBroker(
+    frame as HTMLIFrameElement,
+    async () => replies.shift()!(),
+    lifetime.signal,
+    (event) => {
+      events.push(event);
+      if (event.kind === "handshake-delivered") throw new Error("observer failure ignored");
+    },
+  );
+  try {
+    frame.dispatchEvent(new Event("load"));
+    const send = (body: unknown) => {
+      const reply = once(port, "message");
+      port.postMessage(body);
+      return reply.then(([value]) => value);
+    };
+    port.postMessage({ id: "", op: "backend.invoke", operation: "bookSeat" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(await send({ id: "bad-keys", op: "backend.invoke", operation: "bookSeat" })).toEqual({
+      id: "bad-keys",
+      ok: false,
+      status: 400,
+    });
+    expect(
+      await send({
+        id: "ok-1",
+        op: "backend.invoke",
+        operation: "bookSeat",
+        idempotencyKey: "k1",
+        input: {},
+      }),
+    ).toMatchObject({ id: "ok-1", ok: true });
+    expect(
+      await send({
+        id: "refused-1",
+        op: "backend.invoke",
+        operation: "bookSeat",
+        idempotencyKey: "k2",
+        input: {},
+      }),
+    ).toMatchObject({ id: "refused-1", ok: false, status: 409 });
+    expect(
+      await send({
+        id: "bad-409",
+        op: "backend.invoke",
+        operation: "bookSeat",
+        idempotencyKey: "k3",
+        input: {},
+      }),
+    ).toEqual({ id: "bad-409", ok: false, status: 503 });
+    expect(events).toEqual([
+      { kind: "handshake-delivered" },
+      {
+        kind: "rejected",
+        reason: "invalid_id",
+        status: null,
+        op: "backend.invoke",
+        operation: "bookSeat",
+      },
+      {
+        kind: "rejected",
+        reason: "invalid_keys",
+        status: 400,
+        op: "backend.invoke",
+        operation: "bookSeat",
+      },
+      { kind: "started", id: "ok-1", op: "backend.invoke", operation: "bookSeat" },
+      {
+        kind: "completed",
+        id: "ok-1",
+        op: "backend.invoke",
+        operation: "bookSeat",
+        status: 200,
+        ok: true,
+      },
+      { kind: "started", id: "refused-1", op: "backend.invoke", operation: "bookSeat" },
+      {
+        kind: "completed",
+        id: "refused-1",
+        op: "backend.invoke",
+        operation: "bookSeat",
+        status: 409,
+        ok: false,
+        refusalCode: "workshop_full",
+      },
+      { kind: "started", id: "bad-409", op: "backend.invoke", operation: "bookSeat" },
+      {
+        kind: "completed",
+        id: "bad-409",
+        op: "backend.invoke",
+        operation: "bookSeat",
+        status: 503,
+        ok: false,
+      },
+    ]);
+  } finally {
+    lifetime.abort();
+    vi.unstubAllGlobals();
+  }
+});

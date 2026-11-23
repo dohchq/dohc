@@ -26,7 +26,7 @@ export interface TextMenuActions {
 const LOOK_UP_CHARS = 25;
 
 function lookUpLabel(selection: string): string {
-  return `Look up “${cutText(selection.replace(/\s+/g, " "), LOOK_UP_CHARS)}”`;
+  return `Look up "${cutText(selection.replace(/\s+/g, " "), LOOK_UP_CHARS)}"`;
 }
 
 const SUBSTITUTIONS: MenuItemConstructorOptions = {
