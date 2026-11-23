@@ -50,6 +50,16 @@ async function until(predicate) {
   }
 }
 
+function exited(pid) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    if (error.code === "ESRCH") return true;
+    throw error;
+  }
+}
+
 async function delivery(t, { smoke = "passed" } = {}) {
   const root = scratch(t);
   const app = join(root, "app");
@@ -329,15 +339,7 @@ test(
       assert.equal(await (await fetch(`http://127.0.0.1:${app.port}`)).text(), "running");
       assert.match(readFileSync(session.log, "utf8"), /app log after launcher exit/u);
       await fetch(`http://127.0.0.1:${app.port}/quit`);
-      await until(() => {
-        try {
-          process.kill(app.pid, 0);
-          return false;
-        } catch (error) {
-          if (error.code === "ESRCH") return true;
-          throw error;
-        }
-      });
+      await until(() => exited(app.pid));
       app = undefined;
     } finally {
       if (launcher.exitCode === null && launcher.signalCode === null) launcher.kill();
@@ -395,6 +397,7 @@ test(
         } catch (error) {
           if (error.code !== "ESRCH") throw error;
         }
+        await until(() => exited(descendantPid));
       }
     }
   },
