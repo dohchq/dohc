@@ -204,7 +204,7 @@ it("files a row for each unfinished restore, and Decline from the row ends it", 
   });
   expect(f.row("docs/c.md")).toMatchObject({
     title: "Finishing restore",
-    message: "The restore of docs/c.md has not finished. Try again to finish it.",
+    message: "The restore of docs/c.md has not finished.",
   });
   expect(f.row("docs/b.md")?.retry).toBeTypeOf("function");
   act(() => shell.runShellErrorAction(f.row()!.id, 1));
@@ -225,7 +225,7 @@ it("files a row for each unfinished restore, and Decline from the row ends it", 
   act(() => shell.retryShellError(f.row("docs/b.md")!.id));
   expect(
     await screen.findByText(
-      "The restore has not finished. Live editing of this file stays stopped until it does. Retry to continue it.",
+      "The restore has not finished. Live editing of this file stays stopped until it does.",
     ),
   ).toBeTruthy();
   expect(f.ownerRestore).toHaveBeenCalledWith({

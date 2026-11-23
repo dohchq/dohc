@@ -36,7 +36,7 @@ body:
     id: system
     attributes:
       label: Computer
-      description: Your operating system and its version. On Linux, also say whether you installed the .deb or the AppImage.
+      description: Your operating system and its version. On Linux, also say whether you installed the .deb, the .rpm, or the AppImage.
       placeholder: Windows 11 23H2
     validations:
       required: true

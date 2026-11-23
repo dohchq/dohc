@@ -39,3 +39,44 @@ it.each([
     editor.destroy();
   }
 });
+
+it("highlights 0/0 with danger class when query has no matches and re-focuses on Mod+F / Mod+H", () => {
+  vi.stubGlobal("dohcDesktop", { platform: "win32" });
+  Element.prototype.scrollIntoView = vi.fn();
+  const editor = new Editor({
+    extensions: [StarterKit, findReplaceExtension],
+    content: "<p>the cat, the mat</p>",
+  });
+  try {
+    render(<FindReplaceBar editor={editor} />);
+    act(() =>
+      editor.view.dispatch(
+        editor.state.tr.setMeta(findReplaceKey, { type: "open", replace: false, query: "zzz" }),
+      ),
+    );
+    const count = screen.getByText("0/0");
+    expect(count.className).toContain("is-empty");
+    expect(count.className).toContain("text-danger");
+
+    const findInput = screen.getByPlaceholderText("Find") as HTMLInputElement;
+    findInput.blur();
+    expect(document.activeElement).not.toBe(findInput);
+
+    // Re-opening via open meta increments openNonce and re-focuses + selects Find input.
+    act(() =>
+      editor.view.dispatch(
+        editor.state.tr.setMeta(findReplaceKey, { type: "open", replace: false }),
+      ),
+    );
+    expect(document.activeElement).toBe(findInput);
+    expect(findInput.selectionStart).toBe(0);
+    expect(findInput.selectionEnd).toBe(3);
+
+    // Pressing Ctrl+H inside Find input with an active query opens & focuses Replace input.
+    fireEvent.keyDown(findInput, { key: "h", ctrlKey: true });
+    const replaceInput = screen.getByPlaceholderText("Replace") as HTMLInputElement;
+    expect(document.activeElement).toBe(replaceInput);
+  } finally {
+    editor.destroy();
+  }
+});

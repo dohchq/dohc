@@ -390,7 +390,7 @@ describe("the ⚡ panel of a Collection reached through a share", () => {
     render(<Panel />);
     await user.click(await screen.findByRole("switch", { name: "Stamp the finish date" }));
     expect((await screen.findByTestId("automations-reformat")).textContent).toContain(
-      "so you lose its comments and hand formatting.",
+      "so you lose its comments and custom formatting.",
     );
     await user.click(screen.getByTestId("automations-reformat-confirm"));
     await waitFor(() => expect(bridge.switchCollectionAutomation).toHaveBeenCalledTimes(2));

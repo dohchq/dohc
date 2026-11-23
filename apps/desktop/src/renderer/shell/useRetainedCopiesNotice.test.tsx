@@ -111,7 +111,7 @@ describe("useRetainedCopiesNotice", () => {
       tone: "warning",
       title: "1,200 old file copies",
       message:
-        "They take up 300 MB. dohc can't check whether another program still uses these copies on this drive.",
+        "They take up 300 MB. dohc cannot check whether another program still uses these copies on this drive.",
       action: { label: RETAINED_COPIES_ACTION },
       retry: null,
       seen: false,
@@ -150,8 +150,8 @@ describe("useRetainedCopiesNotice", () => {
     h.run(h.row()!.id);
     const dialog = await screen.findByTestId("retained-copies-confirm");
     expect(dialog.textContent).toContain("Delete 2 old file copies from Notes?");
-    expect(dialog.textContent).toContain("Close other programs that use this workspace first.");
-    expect(dialog.textContent).toContain("This can't be undone.");
+    expect(dialog.textContent).toContain("Close other programs using this workspace first.");
+    expect(dialog.textContent).toContain("This cannot be undone.");
     fireEvent.click(screen.getByTestId("retained-copies-cancel"));
     expect(screen.queryByTestId("retained-copies-confirm")).toBeNull();
     expect(h.bridge.deleteRetainedCopies).not.toHaveBeenCalled();
@@ -200,9 +200,25 @@ describe("useRetainedCopiesNotice", () => {
       100, 50,
     ]);
     expect(h.errors().find((error) => error.tone === "success")?.message).toBe(
-      "Deleted 148 old file copies. 2 stay because they changed or dohc still needs them.",
+      "Deleted 148 old file copies. 2 copies stay because they changed or dohc still needs them.",
     );
     expect(h.row()?.title).toBe("1,002 old file copies");
+  });
+
+  it("uses singular grammar when 1 copy stays after deletion", async () => {
+    const h = harness({ workspaceId: "ws-a", summary: above });
+    h.bridge.deleteRetainedCopies.mockResolvedValueOnce({
+      deleted: 1,
+      skipped: 1,
+      failed: 0,
+      remaining: { count: 1, bytes: 200 * MB },
+    });
+    h.run(h.row()!.id);
+    fireEvent.click(await screen.findByTestId("retained-copies-delete"));
+    await waitFor(() => expect(h.errors().some((error) => error.tone === "success")).toBe(true));
+    expect(h.errors().find((error) => error.tone === "success")?.message).toBe(
+      "Deleted 1 old file copy. 1 copy stays because it changed or dohc still needs it.",
+    );
   });
 
   it("reports a failed delete with Try again, which asks again", async () => {

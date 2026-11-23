@@ -222,11 +222,12 @@ export interface Outbox {
     messages: readonly ChatMessage[],
   ): void;
   /**
-   * Stops sending and deletes the last signed-in account's rows, its Notice marks and list included, and every other
-   * account's Notice list, or a damaged kept.db, in one commit. Then it runs a TRUNCATE checkpoint, calls `leave` and
-   * resolves once it has. Rejects as `not-deleted`, without calling `leave`, when the commit or checkpoint fails.
+   * Stops sending and deletes `account`'s rows, or the last signed-in account's, its Notice marks and list included, and
+   * every other account's Notice list, or a damaged kept.db, in one commit. Then it runs a TRUNCATE checkpoint, calls
+   * `leave` and resolves once it has. Rejects as `not-deleted`, without calling `leave`, when the commit or checkpoint
+   * fails.
    */
-  signOut(leave: () => Promise<void>): Promise<void>;
+  signOut(leave: () => Promise<void>, account?: AccountKey | null): Promise<void>;
   /**
    * Whether Sign out holds kept.db: one under way, or one whose delete failed. Meanwhile no Notice store adds a row or
    * saves a list. The list clear that `leave`'s sign-in change runs finds no list left, so it adds no text to the WAL.
@@ -1146,11 +1147,12 @@ export function createOutbox(options: {
       pump();
     },
 
-    signOut(leave) {
+    signOut(leave, account) {
       epoch += 1;
       const at = epoch;
-      // After failed Sign outs, Try again deletes each of their accounts' rows, even if another has signed in since.
-      const accounts = owed.length > 0 ? owed : [lastAccount];
+      // After failed Sign outs, Try again deletes each of their accounts' rows, and those of any account signed in since.
+      const ending = account ?? lastAccount;
+      const accounts = owed.some((left) => sameAccount(left, ending)) ? owed : [...owed, ending];
       const damaged = status === "damaged";
       stopSending();
       held = true;

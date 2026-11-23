@@ -9,7 +9,6 @@ import type { StorageContext } from "./context";
 import { findChannelCreateKind } from "./objectIndex";
 import type { SqliteDb } from "./types";
 import { workspaceRoleOf } from "./workspaceMembers";
-import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 
 // A Group's rule (docs/engineering/plans/workspace-members.md, piece 4): one
 // level for every member, kept by the relay beside the member level and
@@ -173,7 +172,6 @@ export function setWorkspaceGroupRule(
            changed_by_user_id = excluded.changed_by_user_id, changed_at_ms = excluded.changed_at_ms`,
       )
       .run(input.workspaceId, input.channelWireId, text, input.actorUserId, nowMs);
-    forgetReplicaCurrentViewCaches(storage, input.workspaceId);
     return { ok: true };
   });
 }

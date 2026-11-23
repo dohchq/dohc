@@ -759,7 +759,7 @@ describe("WorkspaceFileMutationOwner", () => {
         relativePath: "empty",
       }),
     ).rejects.toThrow(
-      "A shared view can't hold an empty folder. Make a file in the folder you want.",
+      "A shared view cannot hold an empty folder. Make a file in the folder you want.",
     );
     await expect(
       test.owner.writeAsset(trustedEvent, {
@@ -767,7 +767,7 @@ describe("WorkspaceFileMutationOwner", () => {
         relativePath: "asset.bin",
         bytes: new Uint8Array([1]),
       }),
-    ).rejects.toThrow("This is a shared view — ask owner@example.com for changes.");
+    ).rejects.toThrow("This is a shared view. Ask owner@example.com for changes.");
     expect(test.change).not.toHaveBeenCalled();
   });
 
@@ -809,7 +809,7 @@ describe("WorkspaceFileMutationOwner", () => {
         relativePath: "empty",
       }),
     ).rejects.toThrow(
-      "A shared view can't hold an empty folder. Make a file in the folder you want.",
+      "A shared view cannot hold an empty folder. Make a file in the folder you want.",
     );
     await expect(
       test.owner.writeAsset(trustedEvent, {
@@ -817,7 +817,7 @@ describe("WorkspaceFileMutationOwner", () => {
         relativePath: "asset.bin",
         bytes: new Uint8Array([1]),
       }),
-    ).rejects.toThrow("This is a shared view — ask owner@example.com for changes.");
+    ).rejects.toThrow("This is a shared view. Ask owner@example.com for changes.");
 
     expect(test.change.mock.calls.map((call) => call[2].kind)).toEqual(["create", "save"]);
     expect(await readdir(test.rootPath)).toEqual([]);

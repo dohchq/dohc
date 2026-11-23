@@ -30,7 +30,7 @@ This policy covers the desktop app, the services in `services/`, and all publish
 - A shared-content page or workspace app gains access reserved for another app or the desktop app.
 - Someone keeps access after the owner revokes it or replaces the share link, including through an already-open session.
 
-The project's [security requirements](AGENTS.md#product-invariants) describe these boundaries in more detail.
+The project's [security requirements](AGENTS.md#invariants) describe these boundaries in more detail.
 
 ## What this policy does not cover
 

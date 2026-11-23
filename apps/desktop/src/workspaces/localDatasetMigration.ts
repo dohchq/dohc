@@ -25,7 +25,7 @@ export interface LocalDatasetMigrationPreparation {
 export interface PrepareLocalDatasetMigration {
   datasetId: string;
   descriptorPath: string;
-  migrationPath: string;
+  migrationPath: string | null;
   adapter: SourceAdapter;
   signal?: AbortSignal;
 }
@@ -145,7 +145,7 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
         throw new Error("Too many Collection changes await approval. Finish or discard a review.");
       if (
         !allowed(input.descriptorPath) ||
-        !allowed(input.migrationPath) ||
+        (input.migrationPath !== null && !allowed(input.migrationPath)) ||
         !["dataset.json", "revision.json"].includes(input.descriptorPath.split("/").at(-1)!)
       )
         throw new Error("Choose Collection sources in this workspace.");
@@ -181,18 +181,23 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
           return { metadata, files };
         };
         const first = await capture([input.descriptorPath]);
-        const definition = parseDatasetDefinition(JSON.parse(decode(first.files[0]!.bytes)));
+        const definition = parseDatasetDefinition(JSON.parse(decode(first.files[0]!.bytes)), {
+          descriptorPath: input.descriptorPath,
+        });
         if (definition.datasetId !== input.datasetId)
           throw new Error(
             "These sources belong to another Collection. Choose the matching sources.",
           );
-        const paths = [
-          input.descriptorPath,
-          definition.schemaPath,
-          definition.operationsPath,
-          input.migrationPath,
-        ];
-        if (new Set(paths).size !== 4 || paths.some((path) => !allowed(path)))
+        const paths =
+          input.migrationPath === null
+            ? [input.descriptorPath, definition.schemaPath, definition.operationsPath]
+            : [
+                input.descriptorPath,
+                definition.schemaPath,
+                definition.operationsPath,
+                input.migrationPath,
+              ];
+        if (new Set(paths).size !== paths.length || paths.some((path) => !allowed(path)))
           throw new Error("Choose separate Collection source files in this workspace.");
         const captured = await capture(paths);
         if (
@@ -203,16 +208,25 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
         const read = (path: string) =>
           decode(captured.files.find((file) => file.path === path)!.bytes);
         const schemaSql = read(definition.schemaPath),
-          operationSource = read(definition.operationsPath),
-          migrationSql = read(input.migrationPath);
-        if (!migrationSql.trim() || migrationSql.includes("\0"))
-          throw new Error("The migration SQL is empty or invalid. Update it and prepare again.");
+          operationSource = read(definition.operationsPath);
         const revision = describeDatasetRevision({
           definition,
           revision: previous.revision.revision + 1,
           schemaSql,
           operationSource,
         });
+        let migrationSql: string;
+        if (input.migrationPath === null) {
+          if (revision.schemaSha256 !== previous.revision.schemaSha256)
+            throw new Error(
+              "The Collection schema changed. Provide a migrationPath with the SQL migration.",
+            );
+          migrationSql = "SELECT 1;";
+        } else {
+          migrationSql = read(input.migrationPath);
+          if (!migrationSql.trim() || migrationSql.includes("\0"))
+            throw new Error("The migration SQL is empty or invalid. Update it and prepare again.");
+        }
         const candidate = DatasetMigrationCandidate.parse(
           await dependencies.prepareMigrationCandidate({
             workspaceId: dependencies.workspaceId,

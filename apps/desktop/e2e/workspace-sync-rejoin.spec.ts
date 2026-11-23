@@ -51,6 +51,7 @@ import {
 const TOKEN = "test:e2e-user";
 type SyncStatusBridge = Pick<DohcDesktopBridge, "getSyncStatus">;
 type WorkspaceRegistryBridge = Pick<DohcDesktopBridge, "getWorkspaceRegistry">;
+type SetAsideDraftWindow = { dohcDesktop: Pick<DohcDesktopBridge, "listSetAsideDrafts"> };
 async function readSyncStatus(
   page: Page,
   workspaceId: string,
@@ -526,7 +527,7 @@ test("protected join preserves a failed folder, then restores exact secret and b
 
     await expect(page.getByTestId("join-sync-passphrase")).toBeFocused();
     await expect(page.getByTestId("join-used-folder")).toHaveText(
-      `Files stay in ${temp.rootPath}.`,
+      `Files from the last attempt stay in ${temp.rootPath}.`,
     );
     await expect(page.getByTestId("join-error")).toHaveCount(0);
     await expect.poll(async () => (await readdir(temp.rootPath)).sort()).toContain(".dohc");
@@ -884,7 +885,11 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
       timeout: 30_000,
     });
     await expect(page.getByTestId("orphaned-draft-notice")).toHaveCount(0);
-    expect(await page.evaluate(() => localStorage.getItem("dohc-set-aside-drafts"))).toBeNull();
+    expect(
+      await page.evaluate(() =>
+        (window as unknown as SetAsideDraftWindow).dohcDesktop.listSetAsideDrafts({}),
+      ),
+    ).toEqual([]);
     expect(
       desktop.logs
         .filter((entry) =>
@@ -1033,10 +1038,9 @@ test("typing continues after enabling sync claims the open document", async () =
     await page.keyboard.insertText(" pending-marker");
 
     const setAsideDrafts = () =>
-      page.evaluate(() =>
-        Object.keys(localStorage)
-          .filter((key) => key.startsWith("dohc-set-aside-drafts:"))
-          .map((key) => localStorage.getItem(key) ?? "")
+      page.evaluate(async () =>
+        (await (window as unknown as SetAsideDraftWindow).dohcDesktop.listSetAsideDrafts({}))
+          .map((draft) => draft.raw)
           .join("\n"),
       );
     await expect
@@ -1073,10 +1077,9 @@ test("typing continues after enabling sync claims the open document", async () =
       const restarted = desktop.page;
       await openWorkspaceFromFirstRun(restarted, temp);
       expect(
-        await restarted.evaluate(() =>
-          Object.keys(localStorage)
-            .filter((key) => key.startsWith("dohc-set-aside-drafts:"))
-            .map((key) => localStorage.getItem(key) ?? "")
+        await restarted.evaluate(async () =>
+          (await (window as unknown as SetAsideDraftWindow).dohcDesktop.listSetAsideDrafts({}))
+            .map((draft) => draft.raw)
             .join("\n"),
         ),
       ).toContain("pending-marker");

@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { pushMessageAccess, readPushMessage } from "./chatMessageInterest";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
-import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
 import type { SyncRelayHandler } from "./server";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import { recordAccountName } from "./storage/accountNames";
@@ -576,69 +575,6 @@ describe("a member reads the workspace through the link read routes", () => {
     });
     expect(role.status, await role.clone().text()).toBe(200);
     expect((await reads()).named).toMatchObject({ old: true, blobs: [200, 200, 200] });
-  });
-
-  // A pin is an earlier version, so it needs Edit at its file's path.
-  it("reads a History pin only where the member has Edit on its file", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(100_000);
-    const { h, storage } = await seed();
-    const ana = await member(h, storage, "ana");
-    await ownerRule(h, "view", "members: view\n");
-    await ownerWrite(h, "view/a.md", "view old");
-    storage.claimWorkspaceIdentity({
-      workspaceId: WORKSPACE,
-      replicationEpoch: "epoch",
-      streamIdentity: "stream",
-    });
-    const lease = createReplicaReadPrincipal(storage).issue(WORKSPACE, "test");
-    storage.bindReplicaCurrentView(lease);
-    let revision = 0;
-    const store = (texts: Record<"docs/plan.md" | "view/a.md", string>) => {
-      const standing = storage.readReplicaStanding(WORKSPACE)!;
-      storage.storeReplicaCurrentView(lease, {
-        workspaceId: WORKSPACE,
-        revision: ++revision,
-        logCursor: standing.logSeq,
-        journalCursor: standing.journalCursor,
-        files: Object.entries(texts).map(([path, text]) => ({
-          versionId: "main",
-          objectId: `object-${path}`,
-          path,
-          contentKind: "text" as const,
-          sha256: sha256(text),
-          byteLength: Buffer.byteLength(text),
-          lineageClaimId: null,
-          restoreGeneration: null,
-        })),
-        texts: Object.values(texts).map((text) => ({ sha256: sha256(text), text })),
-        omitted: [],
-      });
-    };
-    store({ "docs/plan.md": "baseline", "view/a.md": "view baseline" });
-    store({ "docs/plan.md": "the plan", "view/a.md": "view old" });
-    vi.setSystemTime(131_000);
-    storage.sampleReplicaHistory(lease);
-    store({ "docs/plan.md": "the new plan", "view/a.md": "view current" });
-    const history = () => {
-      // A level change starts a new grant generation.
-      const grant = storage.listActiveShareGrantsForRecipient(ana.shareId, "ana")[0]!;
-      const input = {
-        grantId: grant.grantId,
-        generation: grant.generation,
-        principal: { kind: "user" as const, userId: "ana" },
-      };
-      const list = storage.listReplicaHistoryPins(input);
-      return list.status === "ready"
-        ? list.pins.map((pin) => storage.readReplicaHistoryPin({ ...input, pinId: pin.pinId }))
-        : list;
-    };
-    await setLevel(h, "edit");
-    const pins = history();
-    expect(pins).toMatchObject([{ status: "ready", text: "the plan" }]);
-    expect(JSON.stringify(pins)).not.toContain("view old");
-    await setLevel(h, "view");
-    expect(history()).toEqual({ status: "denied" });
   });
 
   // A workspace label is read with its reader's reach. A folder marker stays

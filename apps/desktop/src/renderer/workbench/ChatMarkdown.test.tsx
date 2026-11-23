@@ -175,9 +175,20 @@ describe("ChatMarkdown", () => {
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     const view = renderBody("Try:\n\n```ts\nconst a = 1;\nconst b = `two`;\n```");
     const copy = view.getByRole("button", { name: "Copy code" });
-    expect(copy.parentElement?.className).toContain("right-px top-px");
+    expect(copy.parentElement?.hasAttribute("data-chat-control")).toBe(true);
+    expect(copy.parentElement?.textContent).toContain("ts");
+    const code = view.container.querySelector("pre code");
+    expect(code?.className).toContain("dohc-code-syntax");
+    expect(code?.querySelector(".hljs-keyword")?.textContent).toBe("const");
     await act(async () => copy.click());
     expect(writeText).toHaveBeenCalledWith("const a = 1;\nconst b = `two`;");
+  });
+
+  it("highlights a token-dense JSON array directly from the tokenizer tree without losing characters", async () => {
+    const denseJson = `[${Array.from({ length: 9998 }, (_, i) => String(i % 10)).join(",")}]`;
+    const view = renderBody(`\`\`\`json\n${denseJson}\n\`\`\``);
+    await waitFor(() => expect(view.container.querySelector("pre code .hljs-number")).toBeTruthy());
+    expect(view.container.querySelector("pre code")?.textContent).toBe(denseJson);
   });
 
   describe("whole-message copy", () => {

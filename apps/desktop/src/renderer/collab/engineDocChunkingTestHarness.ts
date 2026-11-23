@@ -1,6 +1,7 @@
 import { engineSaveState } from "../../workspaces/engineYDocSaveState";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
+import { draftFilesForTests } from "../orphanedDraftFiles.testHarness";
 
 type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 
@@ -13,9 +14,11 @@ export function harnessBridge(initialUpdate?: Uint8Array) {
   doc.getMap("meta").set("contentKind", "plain-text");
   doc.getText("plainText").insert(0, "seed");
   const seedUpdate = initialUpdate ?? Y.encodeStateAsUpdate(doc);
+  const drafts = draftFilesForTests();
 
   const api = {
     platform: "linux" as const,
+    ...drafts.calls,
     async openEngineYDocSession(payload: { sessionId: string }) {
       openedSessionId = payload.sessionId;
       return {
@@ -61,6 +64,7 @@ export function harnessBridge(initialUpdate?: Uint8Array) {
   return {
     api,
     applied,
+    drafts,
     emitNow,
     sessionId: () => openedSessionId,
     rejectUpdates() {

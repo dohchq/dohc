@@ -210,10 +210,15 @@
       "dataset.operation.cancel"
     ],
     "appPublication": [
+      "app.frontend.verify",
       "app.link.create",
       "app.local.list",
       "app.local.check",
       "app.local.prepare",
+      "app.local.stage",
+      "app.local.staged.list",
+      "app.local.staged.approve",
+      "app.local.staged.discard",
       "app.local.launch",
       "app.publication.list",
       "app.publication.prepare",
@@ -302,6 +307,15 @@
     "outsideChanges": [
       "capture.outside.read"
     ],
+    "workspaceSearch": [
+      "workspace.search"
+    ],
+    "planUndoAgentRun": [
+      "history.agent.run.plan"
+    ],
+    "undoAgentRun": [
+      "history.agent.run.undo"
+    ],
     "members": [
       "members.list",
       "members.invite",
@@ -386,6 +400,10 @@
     "app listLocal": "app.local.list",
     "app checkLocal": "app.local.check",
     "app prepareLocal": "app.local.prepare",
+    "app stage": "app.local.stage",
+    "app listStaged": "app.local.staged.list",
+    "app approveStaged": "app.local.staged.approve",
+    "app discardStaged": "app.local.staged.discard",
     "app launchLocal": "app.local.launch",
     "app list": "app.publication.list",
     "app prepare": "app.publication.prepare",
@@ -431,6 +449,10 @@
     "dataset cancelInvoke": "dataset.operation.cancel",
     "document outside-changes": "capture.outside.read",
     "document keep-outside-change": "capture.outside.keep",
+    "workspace search": "workspace.search",
+    "history agent-run-plan": "history.agent.run.plan",
+    "history undo-agent-run": "history.agent.run.undo",
+    "app verifyFrontend": "app.frontend.verify",
     "members list": "members.list",
     "members invite": "members.invite",
     "members remove": "members.remove",

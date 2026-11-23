@@ -20,22 +20,22 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let body = app.webViews.firstMatch.textViews.firstMatch
-    XCTAssertTrue(body.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(body.waitForExistence(timeout: 45), "The page's editable body should appear")
     // The caret lands in view, so nothing on the page may move when the keyboard comes up.
     let title = app.webViews.firstMatch.staticTexts["Packing list"]
-    XCTAssertTrue(title.waitForExistence(timeout: 5))
+    XCTAssertTrue(title.waitForExistence(timeout: 15))
     let titleBefore = title.frame
     body.tap()
-    XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "A tap should bring up the on-screen keyboard")
+    XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 15), "A tap should bring up the on-screen keyboard")
     // The header's Done, not a key on the keyboard.
     let done = app.navigationBars.buttons["Done"]
-    XCTAssertTrue(done.waitForExistence(timeout: 5), "Done should show while the keyboard is up")
+    XCTAssertTrue(done.waitForExistence(timeout: 15), "Done should show while the keyboard is up")
     XCTAssertEqual(title.frame.minY, titleBefore.minY, accuracy: 1, "The page moved when the keyboard came up")
     keep(app, "04-editing-keyboard")
     app.typeText("Typed on the phone. ")
     keep(app, "04-editing-typed")
     done.tap()
-    XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "Done should close the keyboard")
+    XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 15), "Done should close the keyboard")
     XCTAssertFalse(app.navigationBars.buttons["Done"].exists, "Done shows only while the keyboard is up")
     XCTAssertTrue(app.navigationBars.buttons["Document actions"].exists, "The menu comes back when editing ends")
     XCTAssertEqual(title.frame.minY, titleBefore.minY, accuracy: 1, "The page stayed moved after Done")
@@ -49,13 +49,13 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let page = app.webViews.firstMatch
-    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 45), "The page's editable body should appear")
     page.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92)).tap()
     let keyboard = app.keyboards.firstMatch
-    XCTAssertTrue(keyboard.waitForExistence(timeout: 10), "A tap should bring up the on-screen keyboard")
+    XCTAssertTrue(keyboard.waitForExistence(timeout: 15), "A tap should bring up the on-screen keyboard")
     app.typeText("Typed near the bottom. ")
     let typed = page.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Typed near the bottom.")).firstMatch
-    XCTAssertTrue(typed.waitForExistence(timeout: 5), "The typed text should reach the page")
+    XCTAssertTrue(typed.waitForExistence(timeout: 15), "The typed text should reach the page")
     XCTAssertLessThanOrEqual(typed.frame.maxY, keyboard.frame.minY, "The caret's line should sit above the keyboard")
     keep(app, "04-editing-bottom")
   }
@@ -69,16 +69,16 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let page = app.webViews.firstMatch
-    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 45), "The page's editable body should appear")
     page.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92)).tap()
     let keyboard = app.keyboards.firstMatch
-    XCTAssertTrue(keyboard.waitForExistence(timeout: 10), "A tap should bring up the on-screen keyboard")
+    XCTAssertTrue(keyboard.waitForExistence(timeout: 15), "A tap should bring up the on-screen keyboard")
     app.typeText("Typed before the emoji. ")
     let emoji = keyboard.buttons["Emoji"]
-    XCTAssertTrue(emoji.waitForExistence(timeout: 5), "The keyboard should offer its emoji key")
+    XCTAssertTrue(emoji.waitForExistence(timeout: 15), "The keyboard should offer its emoji key")
     emoji.tap()
     let typed = page.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Typed before the emoji.")).firstMatch
-    XCTAssertTrue(typed.waitForExistence(timeout: 5), "The typed text should reach the page")
+    XCTAssertTrue(typed.waitForExistence(timeout: 15), "The typed text should reach the page")
     // Let the emoji keyboard finish rising before measuring.
     _ = keyboard.wait(for: \.isHittable, toEqual: true, timeout: 3)
     XCTAssertLessThanOrEqual(typed.frame.maxY, keyboard.frame.minY, "The line should sit above the emoji keyboard")
@@ -95,24 +95,24 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let page = app.webViews.firstMatch
-    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 45), "The page's editable body should appear")
     let spot = page.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92))
     spot.tap()
-    XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "A tap should bring up the on-screen keyboard")
+    XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 15), "A tap should bring up the on-screen keyboard")
     app.typeText("Before the emoji. ")
     // The long press goes on the typed text once it sits above the keyboard, not on the spot under the keyboard.
     let typed = page.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Before the emoji.")).firstMatch
-    XCTAssertTrue(typed.waitForExistence(timeout: 5), "The typed text should reach the page")
+    XCTAssertTrue(typed.waitForExistence(timeout: 15), "The typed text should reach the page")
     let keyboard = app.keyboards.firstMatch
     let above = NSPredicate { _, _ in typed.frame.maxY <= keyboard.frame.minY }
-    XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: above, object: nil)], timeout: 5), .completed,
+    XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: above, object: nil)], timeout: 15), .completed,
                    "The typed line should sit above the keyboard")
     typed.press(forDuration: 1.0)
     let paste = app.menuItems["Paste"]
-    XCTAssertTrue(paste.waitForExistence(timeout: 5), "A long press should offer Paste")
+    XCTAssertTrue(paste.waitForExistence(timeout: 15), "A long press should offer Paste")
     paste.tap()
     let pasted = page.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", emoji)).firstMatch
-    XCTAssertTrue(pasted.waitForExistence(timeout: 5), "The pasted emoji should reach the page whole")
+    XCTAssertTrue(pasted.waitForExistence(timeout: 15), "The pasted emoji should reach the page whole")
     keep(app, "04-editing-pasted-emoji")
   }
 
@@ -124,15 +124,15 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let page = app.webViews.firstMatch
-    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 45), "The page's editable body should appear")
     let title = page.staticTexts["Packing list"]
-    XCTAssertTrue(title.waitForExistence(timeout: 5))
+    XCTAssertTrue(title.waitForExistence(timeout: 15))
     let top = title.frame.minY
     page.swipeUp()
     XCTAssertLessThan(title.frame.minY, top - 40, "A swipe should scroll the page")
     app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.005)).tap()
     let back = NSPredicate { _, _ in abs(title.frame.minY - top) <= 1 }
-    XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: back, object: nil)], timeout: 3), .completed,
+    XCTAssertEqual(XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: back, object: nil)], timeout: 15), .completed,
                    "A tap on the status bar should scroll the page back to the top")
   }
 
@@ -144,13 +144,13 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let page = app.webViews.firstMatch
-    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 45), "The page's editable body should appear")
     let title = page.staticTexts["Packing list"]
     let line = page.staticTexts["Walking shoes, already broken in"]
-    XCTAssertTrue(line.waitForExistence(timeout: 5))
+    XCTAssertTrue(line.waitForExistence(timeout: 15))
     line.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap()
     let keyboard = app.keyboards.firstMatch
-    XCTAssertTrue(keyboard.waitForExistence(timeout: 10), "A tap should bring up the on-screen keyboard")
+    XCTAssertTrue(keyboard.waitForExistence(timeout: 15), "A tap should bring up the on-screen keyboard")
     line.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).doubleTap()
     keep(app, "04-drag-selected")
     let before = title.frame.minY

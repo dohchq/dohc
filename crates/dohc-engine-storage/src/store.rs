@@ -6,6 +6,7 @@ use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
 use crate::materialize::{
     Displacement, DisplacementResolution, DisplacementSpec, JobStatus, MaterializationJob,
+    StagedDacl,
 };
 use crate::schema::{OPEN_WORK_STEP_OPS, open_engine_db, open_engine_db_read_only};
 use crate::{blob, materialize};
@@ -398,6 +399,27 @@ impl EngineStore {
         .map_err(StorageError::corrupt)
     }
 
+    /// Install or clear a SQLite cancellation progress handler on a read-only
+    /// connection. Writer connections check cancellation between bounded units
+    /// instead so an active savepoint rollback can never be interrupted.
+    pub fn set_read_progress_handler<F>(
+        &mut self,
+        step_ops: std::ffi::c_int,
+        handler: Option<F>,
+    ) -> Result<(), StorageError>
+    where
+        F: FnMut() -> bool + Send + 'static,
+    {
+        if self.pages_checked.is_some() {
+            return Err(StorageError::InvalidInput {
+                reason: "read progress handler requires a read-only store",
+            });
+        }
+        self.conn
+            .progress_handler(step_ops, handler)
+            .map_err(StorageError::corrupt)
+    }
+
     /// Whether this open initialized a fresh database rather than reopening an
     /// existing v2 store.
     pub fn was_freshly_created(&self) -> bool {
@@ -579,6 +601,17 @@ impl EngineStore {
     /// is `sync_all`.
     pub fn flush_before_commits(&self, file: &std::fs::File) -> std::io::Result<()> {
         self.flushes.flush(file)
+    }
+
+    /// A flusher other threads can use for files a later commit of this store
+    /// describes. Record each flush with [`Self::record_flush`] before that
+    /// commit.
+    pub fn file_flusher(&self) -> crate::FileFlusher {
+        self.flushes.flusher()
+    }
+
+    pub fn record_flush(&self, flushed: crate::Flushed) {
+        self.flushes.record(flushed);
     }
 
     /// Make every file flushed with a barrier durable by draining the drive
@@ -1310,6 +1343,91 @@ impl EngineStore {
             .optional()
             .map_err(StorageError::corrupt)
     }
+    /// What dohc saved for the staged file with this identity.
+    pub fn staged_dacl(&self, file_identity: &str) -> Result<Option<StagedDacl>, StorageError> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT dacl, left_reason FROM materialization_staged_dacls WHERE file_identity=?1",
+                [file_identity],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::corrupt)?
+            .map(|row| match row {
+                (Some(dacl), None) => Ok(StagedDacl::Saved(dacl)),
+                (None, Some(reason)) => Ok(StagedDacl::Left(reason)),
+                _ => Err(StorageError::corrupt(std::io::Error::other(
+                    "a staged DACL row is neither saved nor left",
+                ))),
+            })
+            .transpose()
+    }
+
+    /// Save what dohc keeps for a file staged in `directory` in place of
+    /// what was saved, in a FULL commit, which precedes any change to the
+    /// file's DACL.
+    pub fn save_staged_dacl(
+        &self,
+        file_identity: &str,
+        directory: &str,
+        saved: &StagedDacl,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        let (dacl, reason) = match saved {
+            StagedDacl::Saved(dacl) => (Some(dacl.as_str()), None),
+            StagedDacl::Left(reason) => (None, Some(reason.as_str())),
+        };
+        materialize::with_full_commit(&self.conn, |tx| {
+            tx.execute(
+                "INSERT INTO materialization_staged_dacls(file_identity,directory,dacl,left_reason,created_at_ms)                  VALUES(?1,?2,?3,?4,?5) ON CONFLICT(file_identity) DO UPDATE SET                  directory=excluded.directory, dacl=excluded.dacl, left_reason=excluded.left_reason",
+                rusqlite::params![file_identity, directory, dacl, reason, now_ms],
+            )
+            .map_err(StorageError::persist)?;
+            Ok(())
+        })
+    }
+
+    /// Forget staged files that are no longer staged, in a FULL commit, so a
+    /// file staged again later saves the DACL it has then.
+    pub fn forget_staged_dacls(&self, file_identities: &[String]) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        if file_identities.is_empty() {
+            return Ok(());
+        }
+        materialize::with_full_commit(&self.conn, |tx| {
+            for identity in file_identities {
+                tx.execute(
+                    "DELETE FROM materialization_staged_dacls WHERE file_identity=?1",
+                    [identity],
+                )
+                .map_err(StorageError::persist)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The files dohc saved something for while they were staged in
+    /// `directory`.
+    pub fn staged_dacls_in(&self, directory: &str) -> Result<Vec<String>, StorageError> {
+        let mut q = self
+            .conn
+            .prepare(
+                "SELECT file_identity FROM materialization_staged_dacls WHERE directory=?1 ORDER BY file_identity",
+            )
+            .map_err(StorageError::corrupt)?;
+        q.query_map([directory], |r| r.get(0))
+            .map_err(StorageError::corrupt)?
+            .collect::<Result<_, _>>()
+            .map_err(StorageError::corrupt)
+    }
+
     pub fn staging_locations(&self) -> Result<Vec<String>, StorageError> {
         let mut q = self
             .conn
@@ -1670,6 +1788,146 @@ mod pages_checked_tests {
         std::fs::write(&marker, b"").unwrap();
         let store = EngineStore::open_serving_first(&db, 3, None, None, false, never()).unwrap();
         assert!(store.page_check.is_none());
+        assert!(!marker.exists());
+    }
+
+    fn store_one_migration_behind(db: &Path, passive: bool) -> &'static str {
+        use crate::migration::{BASELINE_MIGRATIONS, MigrationContext, run_migrations};
+        let (last, earlier) = BASELINE_MIGRATIONS.split_last().unwrap();
+        let mut conn = Connection::open(db).unwrap();
+        run_migrations(
+            &mut conn,
+            earlier,
+            &MigrationContext::current(1),
+            &crate::faults::NoFaults,
+        )
+        .unwrap();
+        if passive {
+            conn.execute(
+                "UPDATE engine_ownership SET store_role='passive' WHERE rowid_guard=1",
+                [],
+            )
+            .unwrap();
+        }
+        last.id
+    }
+
+    fn integrity_mark(db: &Path, migration: &str) -> Option<Option<i64>> {
+        Connection::open(db)
+            .unwrap()
+            .query_row(
+                "SELECT integrity_ok FROM engine_migrations \
+                 WHERE id = ?1 AND completed_at IS NOT NULL",
+                [migration],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_store_migrates_before_its_pages_are_checked_and_is_refused_once_the_check_finds_damage() {
+        for passive in [false, true] {
+            let root = ScratchDir::new_named("migrate-then-check").unwrap();
+            let db = root.join("engine.db");
+            let pending = store_one_migration_behind(&db, passive);
+            damage_a_page(&db);
+            let marker = crate::page_check::check_first_marker(&db);
+            let (told, damage) = std::sync::mpsc::channel();
+            let mut store = EngineStore::open_serving_first(
+                &db,
+                2,
+                None,
+                None,
+                passive,
+                Box::new(move || told.send(()).unwrap()),
+            )
+            .unwrap();
+            damage
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the check reports the damage");
+            page_check_ended(&mut store);
+            drop(store);
+            assert_eq!(integrity_mark(&db, pending), Some(None));
+            assert!(marker.exists());
+            let never: crate::PagesDamaged = Box::new(|| panic!("no check runs after a refusal"));
+            assert!(matches!(
+                EngineStore::open_serving_first(&db, 3, None, None, passive, never),
+                Err(StorageError::StateCorrupt { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn an_open_that_checks_first_refuses_to_migrate_a_damaged_store() {
+        let root = ScratchDir::new_named("check-then-migrate").unwrap();
+        let db = root.join("engine.db");
+        let pending = store_one_migration_behind(&db, false);
+        damage_a_page(&db);
+        assert!(matches!(
+            EngineStore::open(&db, 2),
+            Err(StorageError::MigrationFailed { .. })
+        ));
+        assert_eq!(integrity_mark(&db, pending), None);
+    }
+
+    #[test]
+    fn a_sound_store_migrated_before_its_check_reads_as_current_and_one_checked_first_records_its_check()
+     {
+        use crate::migration::{BASELINE_MIGRATIONS, LedgerState, classify_ledger};
+        let root = ScratchDir::new_named("migrate-sound").unwrap();
+        let never =
+            || -> crate::PagesDamaged { Box::new(|| panic!("a sound store is not damaged")) };
+        let current = |db: &Path| {
+            classify_ledger(&Connection::open(db).unwrap(), BASELINE_MIGRATIONS).unwrap()
+        };
+
+        for (name, passive) in [("later.db", false), ("later-passive.db", true)] {
+            let later = root.join(name);
+            let pending = store_one_migration_behind(&later, passive);
+            let mut store =
+                EngineStore::open_serving_first(&later, 2, None, None, passive, never()).unwrap();
+            page_check_ended(&mut store);
+            drop(store);
+            assert_eq!(integrity_mark(&later, pending), Some(None));
+            assert_eq!(current(&later), LedgerState::Current);
+            assert!(!crate::page_check::check_first_marker(&later).exists());
+        }
+
+        let first = root.join("first.db");
+        let pending = store_one_migration_behind(&first, false);
+        drop(EngineStore::open(&first, 2).unwrap());
+        assert_eq!(integrity_mark(&first, pending), Some(Some(1)));
+        assert_eq!(current(&first), LedgerState::Current);
+    }
+
+    #[test]
+    fn a_marked_store_is_checked_before_it_migrates() {
+        let root = ScratchDir::new_named("marked-then-migrate").unwrap();
+        let db = root.join("engine.db");
+        let pending = store_one_migration_behind(&db, false);
+        damage_a_page(&db);
+        std::fs::write(crate::page_check::check_first_marker(&db), b"").unwrap();
+        let never: crate::PagesDamaged = Box::new(|| panic!("no check runs after a refusal"));
+        assert!(matches!(
+            EngineStore::open_serving_first(&db, 2, None, None, false, never),
+            Err(StorageError::StateCorrupt { .. })
+        ));
+        assert_eq!(integrity_mark(&db, pending), None);
+    }
+
+    #[test]
+    fn a_marked_sound_store_checks_its_migration_before_it_commits_and_loses_its_marker() {
+        let root = ScratchDir::new_named("marked-sound-migrate").unwrap();
+        let db = root.join("engine.db");
+        let pending = store_one_migration_behind(&db, false);
+        let marker = crate::page_check::check_first_marker(&db);
+        std::fs::write(&marker, b"").unwrap();
+        let never: crate::PagesDamaged = Box::new(|| panic!("a sound store is not damaged"));
+        let store = EngineStore::open_serving_first(&db, 2, None, None, false, never).unwrap();
+        assert!(store.page_check.is_none());
+        drop(store);
+        assert_eq!(integrity_mark(&db, pending), Some(Some(1)));
         assert!(!marker.exists());
     }
 

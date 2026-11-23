@@ -68,6 +68,7 @@ const COMPARED_TABLES: &[&str] = &[
     "live_restore_fences",
     "live_restore_cancellations",
     "ydoc_owner_applied_frames",
+    "ydoc_owner_taken_rows",
     "ydoc_owner_bindings",
     "owner_pending_settlements",
     "owner_pending_settlement_blobs",
@@ -121,6 +122,7 @@ const COMPARED_TABLES: &[&str] = &[
     "materialization_retained",
     "materialization_displacement_reads",
     "materialization_staging_locations",
+    "materialization_staged_dacls",
     "ydoc_docs",
     "markdown_write_obligations",
     "markdown_write_obligation_notice_dismissals",
@@ -371,7 +373,9 @@ pub fn create_verified_backup(
     //    never delete the only valid source to make room.
     let available = probe.available_bytes(recovery_dir)?;
     if available < needed {
-        return Err(StorageError::DiskFull { needed, available });
+        return Err(StorageError::DiskFull {
+            shortfall: Some(crate::SpaceShortfall { needed, available }),
+        });
     }
 
     // 2. Ensure the recovery dir (owner-only where supported).

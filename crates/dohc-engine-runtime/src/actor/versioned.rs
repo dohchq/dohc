@@ -25,27 +25,46 @@ use dohc_engine_domain::{
 };
 use dohc_engine_storage::text;
 use dohc_engine_storage::{
-    EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, NoFaults, Preimage,
-    StorageError, TxnOutcome, hex_sha256,
+    EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, MaterializationOperation,
+    NoFaults, Preimage, StorageError, TxnOutcome, hex_sha256,
 };
 use dohc_engine_sync::{
     ApplyDisposition, ApplyOutcome, ConflictApplyResult, ReplicationEnvelope,
     apply_conflict_envelope, read_replayed_refusal, retain_refusal_for_direct_retry,
 };
 use rusqlite::{OptionalExtension, params};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathClearSince {
+    pub after_moment_order: i64,
+    pub allowed_object_id: String,
+    pub expected_head_moment_id: Option<String>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct WriteConditions {
     pub create_only: bool,
     pub expected_sha256: Option<String>,
+    pub path_clear_since: Option<PathClearSince>,
 }
 
 impl WriteConditions {
     fn fingerprint(&self) -> String {
-        serde_json::json!([self.create_only, self.expected_sha256]).to_string()
+        match &self.path_clear_since {
+            None => serde_json::json!([self.create_only, self.expected_sha256]).to_string(),
+            Some(guard) => serde_json::json!([
+                self.create_only,
+                self.expected_sha256,
+                guard.after_moment_order,
+                guard.allowed_object_id,
+                guard.expected_head_moment_id,
+            ])
+            .to_string(),
+        }
     }
 
     fn check(
@@ -419,6 +438,7 @@ impl ActorHandle {
             input,
             None,
             None,
+            None,
             false,
             root_dir,
             self_writes,
@@ -438,6 +458,7 @@ impl ActorHandle {
         input: DeleteTextFile,
         expected_object_id: Option<String>,
         expected_sha256: Option<String>,
+        path_clear_since: Option<PathClearSince>,
         confirm_absent: bool,
         root_dir: PathBuf,
         self_writes: Arc<dyn SelfWriteRecorder>,
@@ -451,6 +472,7 @@ impl ActorHandle {
                     &input,
                     expected_object_id.as_deref(),
                     expected_sha256.as_deref(),
+                    path_clear_since.as_ref(),
                     confirm_absent,
                     &root_dir,
                     self_writes.as_ref(),
@@ -723,46 +745,53 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
-        self.conflict_resolve_with_root(input, leases, None, faults, token)
-            .await
+        self.run(move |store, cache| {
+            let outcome =
+                conflict_resolve_on_store(store, &input, None, &leases, faults.as_ref(), &token);
+            cache.clear();
+            outcome
+        })
+        .await
     }
 
     /// Resolve and index a text conflict with the workspace root owned by the
-    /// calling session.
+    /// calling session, then place the result in that root. The flag is false
+    /// when a file the resolution queued could not be placed.
     pub async fn conflict_resolve_indexed(
         &self,
         input: ResolveTextConflict,
         leases: LeaseRegistry,
         root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<ResolveTextConflictResult, RuntimeError> {
-        self.conflict_resolve_with_root(input, leases, Some(root_dir), faults, token)
-            .await
-    }
-
-    async fn conflict_resolve_with_root(
-        &self,
-        input: ResolveTextConflict,
-        leases: LeaseRegistry,
-        root_dir: Option<PathBuf>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<ResolveTextConflictResult, RuntimeError> {
+    ) -> Result<(ResolveTextConflictResult, bool), RuntimeError> {
         self.run(move |store, cache| {
+            let waiting: HashSet<String> = store
+                .list_pending_materialization_jobs()?
+                .into_iter()
+                .map(|job| job.job_id)
+                .collect();
             let outcome = conflict_resolve_on_store(
                 store,
                 &input,
-                root_dir.as_deref(),
+                Some(&root_dir),
                 &leases,
                 faults.as_ref(),
                 &token,
             );
-            // Resolution can replace or archive a lineage; the tuple probe
-            // already misses on every such outcome (the claim id changes or
-            // the marker is deleted), but the reset hooks are unconditional.
             cache.clear();
-            outcome
+            let result = outcome?;
+            let placed = place_resolution(
+                store,
+                &root_dir,
+                &input.workspace_id,
+                waiting,
+                self_writes.as_ref(),
+                input.now_ms,
+                faults.as_ref(),
+            );
+            Ok((result, placed))
         })
         .await
     }
@@ -885,6 +914,17 @@ pub(super) fn versioned_text_write_with_publication_on_store(
             .map_err(StorageError::corrupt_public)?;
         if !replayed && restore_before_moment_id.is_some() {
             refuse_owned_restore(tx, &input.workspace_id, &input.version_id, &input.path)?;
+        }
+        if !replayed && let Some(guard) = conditions.and_then(|c| c.path_clear_since.as_ref()) {
+            check_path_clear_since_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &input.path,
+                conditions.is_some_and(|c| c.create_only),
+                guard,
+                input.metadata_correlation_id.as_deref(),
+            )?;
         }
         if !replayed
             && input.metadata_origin == "restore"
@@ -1035,6 +1075,17 @@ fn versioned_binary_write_conditioned_on_store(
             .map_err(StorageError::corrupt_public)?;
         if !replayed && input.metadata_origin == "restore" {
             refuse_owned_restore(tx, &input.workspace_id, &input.version_id, &input.path)?;
+        }
+        if !replayed && let Some(guard) = conditions.and_then(|c| c.path_clear_since.as_ref()) {
+            check_path_clear_since_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &input.path,
+                conditions.is_some_and(|c| c.create_only),
+                guard,
+                input.metadata_correlation_id.as_deref(),
+            )?;
         }
         if !replayed
             && input.metadata_origin == "restore"
@@ -1350,6 +1401,7 @@ fn versioned_text_delete_on_store(
     input: &DeleteTextFile,
     expected_object_id: Option<&str>,
     expected_sha256: Option<&str>,
+    path_clear_since: Option<&PathClearSince>,
     confirm_absent: bool,
     root_dir: &std::path::Path,
     self_writes: &dyn SelfWriteRecorder,
@@ -1366,6 +1418,7 @@ fn versioned_text_delete_on_store(
             input,
             expected_object_id,
             expected,
+            path_clear_since,
             root_dir,
             self_writes,
             faults,
@@ -1483,11 +1536,13 @@ fn refuse_owned_restore(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn checked_delete_on_store(
     store: &mut EngineStore,
     input: &DeleteTextFile,
     expected_object_id: Option<&str>,
     expected: &str,
+    path_clear_since: Option<&PathClearSince>,
     root: &std::path::Path,
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
@@ -1497,8 +1552,19 @@ fn checked_delete_on_store(
         if !replayed {
             ensure_publication_version(tx, &input.workspace_id, &input.version_id)?;
             refuse_owned_page(tx, &input.workspace_id, &input.version_id, &input.path)?;
+            if let Some(guard) = path_clear_since {
+                check_path_clear_since_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &input.path,
+                    false,
+                    guard,
+                    input.metadata_correlation_id.as_deref(),
+                )?;
+            }
             check_restore_content_in_tx(tx, &input.workspace_id, &input.version_id, &input.path, expected)?;
-            WriteConditions {create_only: false, expected_sha256: Some(expected.to_owned())}.check(root, &input.path, true)?;
+            WriteConditions {create_only: false, expected_sha256: Some(expected.to_owned()), path_clear_since: None}.check(root, &input.path, true)?;
             let unresolved: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM share_direct_write_plan p,json_each(p.objects_json) o JOIN snapshots s ON s.workspace_id=p.workspace_id AND s.object_id=json_extract(o.value,'$[0]') WHERE p.workspace_id=?1 AND p.result_json IS NULL AND s.version_id=?2 AND s.path=?3)",params![input.workspace_id,input.version_id,input.path],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
             if unresolved { return Err(DomainError::InvalidInput {reason: "record-delivery-unknown"}.into()); }
         }
@@ -1950,6 +2016,108 @@ pub(super) fn check_restore_content_in_tx(
             current_sha256: Some(sha),
         }
         .into());
+    }
+    Ok(())
+}
+
+fn check_path_clear_since_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    create_only: bool,
+    guard: &PathClearSince,
+    correlation_id: Option<&str>,
+) -> Result<(), RuntimeError> {
+    let target_key = dohc_engine_files::floor::path_collision_key(path);
+    let mut stmt = tx
+        .prepare_cached(&format!(
+            "SELECT path, payload_before_path, metadata_origin, metadata_correlation_id \
+             FROM moments \
+             WHERE workspace_id = ?1 \
+               AND version_id = ?2 \
+               AND moment_order > ?3 \
+               AND object_id != ?4 \
+               AND COALESCE(sync_record_only, 0) = 0 \
+               AND {}",
+            dohc_engine_domain::exclude_capture_recovery_sql!(),
+        ))
+        .map_err(StorageError::corrupt_public)?;
+    let mut rows = stmt
+        .query(params![
+            workspace_id,
+            version_id,
+            guard.after_moment_order,
+            &guard.allowed_object_id
+        ])
+        .map_err(StorageError::corrupt_public)?;
+    while let Some(row) = rows.next().map_err(StorageError::corrupt_public)? {
+        let row_path: String = row.get(0).map_err(StorageError::corrupt_public)?;
+        let before_path: Option<String> = row.get(1).map_err(StorageError::corrupt_public)?;
+        let origin: String = row.get(2).map_err(StorageError::corrupt_public)?;
+        let row_corr: Option<String> = row.get(3).map_err(StorageError::corrupt_public)?;
+        if origin == "restore" && correlation_id.is_some() && row_corr.as_deref() == correlation_id
+        {
+            continue;
+        }
+        if dohc_engine_files::floor::path_collision_key(&row_path) == target_key
+            || before_path
+                .as_deref()
+                .is_some_and(|p| dohc_engine_files::floor::path_collision_key(p) == target_key)
+        {
+            return Err(DomainError::InvalidInput {
+                reason: "restore-path-collision",
+            }
+            .into());
+        }
+    }
+    if let Some(expected_head) = guard.expected_head_moment_id.as_deref() {
+        let latest_head: Option<String> = tx
+            .query_row(
+                "SELECT m.moment_id FROM moments m \
+                 WHERE m.workspace_id = ?1 \
+                   AND m.version_id = ?2 \
+                   AND m.object_id = ?3 \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM materialization_jobs j \
+                     WHERE j.workspace_id = m.workspace_id \
+                       AND j.job_id = 'restore-delete-mat_' || m.moment_id \
+                   ) \
+                 ORDER BY m.moment_order DESC \
+                 LIMIT 1",
+                params![workspace_id, version_id, &guard.allowed_object_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)?;
+        if latest_head.as_deref() != Some(expected_head) {
+            return Err(DomainError::InvalidInput {
+                reason: "restore-head-changed",
+            }
+            .into());
+        }
+        let current_object: Option<String> = tx
+            .query_row(
+                "SELECT object_id FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                params![workspace_id, version_id, path],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)?;
+        if create_only {
+            if current_object.is_some() {
+                return Err(DomainError::InvalidInput {
+                    reason: "restore-head-changed",
+                }
+                .into());
+            }
+        } else if current_object.as_deref() != Some(guard.allowed_object_id.as_str()) {
+            return Err(DomainError::InvalidInput {
+                reason: "restore-head-changed",
+            }
+            .into());
+        }
     }
     Ok(())
 }
@@ -3182,7 +3350,8 @@ fn conflict_resolve_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store)
+    let mut automation_claims = Vec::new();
+    let mut result = VersionedTextStore::new(store)
         .resolve_text_conflict_with(
             input,
             faults,
@@ -3219,12 +3388,60 @@ fn conflict_resolve_on_store(
                     )
                     .map_err(search_domain)?;
                 }
-                dohc_engine_sync::commit_local_conflict_resolve_v1_in_tx(tx, &plan, result)
-                    .map_err(map_fold_error)?;
+                if let Some(facts) =
+                    dohc_engine_sync::commit_local_conflict_resolve_v1_in_tx(tx, &plan, result)
+                        .map_err(map_fold_error)?
+                {
+                    automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
+                        tx,
+                        &input.workspace_id,
+                        &facts,
+                        result.conflict.updated_at_ms,
+                    )?;
+                }
                 Ok(())
             },
         )
-        .map_err(RuntimeError::from)
+        .map_err(RuntimeError::from)?;
+    if let Some(write) = result.write.as_mut() {
+        write.automation_claims = automation_claims;
+    }
+    Ok(result)
+}
+
+fn place_resolution(
+    store: &EngineStore,
+    root: &std::path::Path,
+    workspace_id: &str,
+    waiting: HashSet<String>,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> bool {
+    let Ok(pending) = store.list_pending_materialization_jobs() else {
+        return false;
+    };
+    let mut queued: Vec<_> = pending
+        .into_iter()
+        .filter(|job| !waiting.contains(&job.job_id))
+        .collect();
+    queued.sort_by_key(|job| job.operation != MaterializationOperation::Delete);
+    queued
+        .iter()
+        .filter(|job| {
+            !materialize_expected_job(
+                store,
+                root,
+                workspace_id,
+                &job.job_id,
+                self_writes,
+                now_ms,
+                faults,
+                None,
+            )
+        })
+        .count()
+        == 0
 }
 
 /// Map a resolution-fold failure into the resolving transaction's error
@@ -3326,6 +3543,7 @@ mod doc_cache_reset_tests {
         let result = versioned_text_delete_on_store(
             &mut store,
             &delete,
+            None,
             None,
             None,
             false,
@@ -3713,6 +3931,7 @@ mod doc_cache_reset_tests {
                         &input,
                         Some("document"),
                         &expected,
+                        None,
                         &root,
                         &LateChange(root.join("record.md"), directory),
                         &NoFaults
@@ -3740,6 +3959,7 @@ mod doc_cache_reset_tests {
                 input,
                 Some("document"),
                 expected,
+                None,
                 root,
                 &(),
                 crash.as_ref()
@@ -3793,6 +4013,7 @@ mod doc_cache_reset_tests {
             &input,
             Some("document"),
             &expected,
+            None,
             &root,
             &(),
             &NoFaults,
@@ -3836,6 +4057,7 @@ mod doc_cache_reset_tests {
                 &input,
                 Some("document"),
                 &expected,
+                None,
                 &root,
                 &LateAlias(root.to_path_buf()),
                 &NoFaults,
@@ -3894,6 +4116,7 @@ mod doc_cache_reset_tests {
                             &input,
                             Some("document"),
                             &expected,
+                            None,
                             &root,
                             &(),
                             &Crash(point)
@@ -3978,6 +4201,7 @@ mod doc_cache_reset_tests {
                                 &input,
                                 Some("document"),
                                 &expected,
+                                None,
                                 &root,
                                 &(),
                                 &NoFaults
@@ -4021,6 +4245,7 @@ mod doc_cache_reset_tests {
                     &input,
                     Some("document"),
                     &expected,
+                    None,
                     &root,
                     &(),
                     &NoFaults
@@ -4061,6 +4286,7 @@ mod doc_cache_reset_tests {
                     &input,
                     Some("document"),
                     &expected,
+                    None,
                     &root,
                     &(),
                     &NoFaults
@@ -4201,6 +4427,7 @@ mod owned_page_delete_tests {
             &input,
             None,
             expected_sha256,
+            None,
             confirm_absent,
             root,
             &(),
@@ -4314,6 +4541,7 @@ mod owned_page_delete_tests {
         let checked = WriteConditions {
             create_only: false,
             expected_sha256: Some(hex_sha256(b"Owned\n")),
+            path_clear_since: None,
         };
         for conditions in [None, Some(&checked)] {
             let error =
@@ -4340,5 +4568,370 @@ mod owned_page_delete_tests {
             .unwrap();
         write_binary(&mut store, root, "a.md", "a", "restore", None).unwrap();
         assert_eq!(std::fs::read(root.join("a.md")).unwrap(), b"\0earlier");
+    }
+
+    #[test]
+    fn path_clear_since_refuses_foreign_activity_after_watermark_even_with_clock_skew() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = scratch.path();
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults).unwrap();
+        let initial = versioned_text_write_with_publication_on_store(
+            &mut store,
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "obj-orig".into(),
+                path: "notes/raced.md".into(),
+                text: "Original\n".into(),
+                moment_id: "m-orig-1".into(),
+                request_id: Some("req-orig-1".into()),
+                metadata_origin: "local-file".into(),
+                metadata_summary: Some("Create".into()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_000,
+            },
+            Some(root),
+            None,
+            None,
+            None,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let deleted = versioned_text_delete_on_store(
+            &mut store,
+            &DeleteTextFile {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                path: "notes/raced.md".into(),
+                moment_id: "m-orig-del".into(),
+                request_id: Some("req-orig-del".into()),
+                metadata_origin: "local-file".into(),
+                metadata_summary: Some("Delete".into()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_000,
+            },
+            None,
+            None,
+            None,
+            false,
+            root,
+            &(),
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let watermark = deleted.moment.moment_order - 1;
+        // Another object is created and deleted at the same path with an earlier wall-clock
+        // timestamp and different casing.
+        versioned_text_write_with_publication_on_store(
+            &mut store,
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "obj-other".into(),
+                path: "notes/Raced.md".into(),
+                text: "Interloper\n".into(),
+                moment_id: "m-other-1".into(),
+                request_id: Some("req-other-1".into()),
+                metadata_origin: "local-file".into(),
+                metadata_summary: Some("Create other".into()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 500,
+            },
+            Some(root),
+            None,
+            None,
+            None,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        versioned_text_delete_on_store(
+            &mut store,
+            &DeleteTextFile {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                path: "notes/Raced.md".into(),
+                moment_id: "m-other-del".into(),
+                request_id: Some("req-other-del".into()),
+                metadata_origin: "local-file".into(),
+                metadata_summary: Some("Delete other".into()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 600,
+            },
+            None,
+            None,
+            None,
+            false,
+            root,
+            &(),
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        let err = versioned_text_write_with_publication_on_store(
+            &mut store,
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: initial.object.object_id.clone(),
+                path: "notes/raced.md".into(),
+                text: "Original\n".into(),
+                moment_id: "m-restore-refused".into(),
+                request_id: Some("req-restore-refused".into()),
+                metadata_origin: "restore".into(),
+                metadata_summary: Some("Restored notes/raced.md".into()),
+                metadata_correlation_id: Some("restore-agent-run-test".into()),
+                author_json: None,
+                now_ms: 3_000,
+            },
+            Some(root),
+            Some(&deleted.moment.moment_id),
+            Some(&WriteConditions {
+                create_only: true,
+                expected_sha256: None,
+                path_clear_since: Some(PathClearSince {
+                    after_moment_order: watermark,
+                    allowed_object_id: initial.object.object_id,
+                    expected_head_moment_id: Some(deleted.moment.moment_id.clone()),
+                }),
+            }),
+            None,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RuntimeError::Domain(DomainError::InvalidInput {
+                    reason: "restore-path-collision"
+                })
+            ),
+            "expected restore-path-collision, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn path_clear_since_refuses_edit_and_revert_to_same_bytes_on_same_object() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = scratch.path();
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults).unwrap();
+        let initial = versioned_text_write_with_publication_on_store(
+            &mut store,
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "obj-same".into(),
+                path: "notes/reverted.md".into(),
+                text: "Before\n".into(),
+                moment_id: "m-same-1".into(),
+                request_id: Some("req-same-1".into()),
+                metadata_origin: "local-file".into(),
+                metadata_summary: Some("Create".into()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_000,
+            },
+            Some(root),
+            None,
+            None,
+            None,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let agent = versioned_text_write_with_publication_on_store(
+            &mut store,
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: initial.object.object_id.clone(),
+                path: "notes/reverted.md".into(),
+                text: "Agent\n".into(),
+                moment_id: "m-same-agent".into(),
+                request_id: Some("req-same-agent".into()),
+                metadata_origin: "api".into(),
+                metadata_summary: Some("Agent edit".into()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_000,
+            },
+            Some(root),
+            None,
+            None,
+            None,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        versioned_text_write_with_publication_on_store(
+            &mut store,
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: initial.object.object_id.clone(),
+                path: "notes/reverted.md".into(),
+                text: "Human intermediate\n".into(),
+                moment_id: "m-same-human-1".into(),
+                request_id: Some("req-same-human-1".into()),
+                metadata_origin: "local-file".into(),
+                metadata_summary: Some("Human edit".into()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 3_000,
+            },
+            Some(root),
+            None,
+            None,
+            None,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        versioned_text_write_with_publication_on_store(
+            &mut store,
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: initial.object.object_id.clone(),
+                path: "notes/reverted.md".into(),
+                text: "Agent\n".into(),
+                moment_id: "m-same-human-revert".into(),
+                request_id: Some("req-same-human-revert".into()),
+                metadata_origin: "local-file".into(),
+                metadata_summary: Some("Human reverted to same bytes".into()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4_000,
+            },
+            Some(root),
+            None,
+            None,
+            None,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let expected_sha = hex_sha256(b"Agent\n");
+        let guard = PathClearSince {
+            after_moment_order: agent.moment.moment_order - 1,
+            allowed_object_id: initial.object.object_id.clone(),
+            expected_head_moment_id: Some(agent.moment.moment_id.clone()),
+        };
+        let text_err = versioned_text_write_with_publication_on_store(
+            &mut store,
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: initial.object.object_id.clone(),
+                path: "notes/reverted.md".into(),
+                text: "Before\n".into(),
+                moment_id: "m-same-restore-text".into(),
+                request_id: Some("req-same-restore-text".into()),
+                metadata_origin: "restore".into(),
+                metadata_summary: Some("Restored notes/reverted.md".into()),
+                metadata_correlation_id: Some("restore-agent-run-same".into()),
+                author_json: None,
+                now_ms: 5_000,
+            },
+            Some(root),
+            Some(&agent.moment.moment_id),
+            Some(&WriteConditions {
+                create_only: false,
+                expected_sha256: Some(expected_sha.clone()),
+                path_clear_since: Some(guard.clone()),
+            }),
+            None,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                text_err,
+                RuntimeError::Domain(DomainError::InvalidInput {
+                    reason: "restore-head-changed"
+                })
+            ),
+            "expected restore-head-changed on text write, got {text_err:?}"
+        );
+        let binary_err = versioned_binary_write_conditioned_on_store(
+            &mut store,
+            &WriteBinary {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: initial.object.object_id.clone(),
+                path: "notes/reverted.md".into(),
+                bytes: b"\0before".to_vec(),
+                moment_id: "m-same-restore-bin".into(),
+                request_id: Some("req-same-restore-bin".into()),
+                metadata_origin: "restore".into(),
+                metadata_summary: Some("Restored notes/reverted.md".into()),
+                metadata_correlation_id: Some("restore-agent-run-same".into()),
+                author_json: None,
+                now_ms: 5_100,
+            },
+            root,
+            Some(&WriteConditions {
+                create_only: false,
+                expected_sha256: Some(expected_sha.clone()),
+                path_clear_since: Some(guard.clone()),
+            }),
+            &(),
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                binary_err,
+                RuntimeError::Domain(DomainError::InvalidInput {
+                    reason: "restore-head-changed"
+                })
+            ),
+            "expected restore-head-changed on binary write, got {binary_err:?}"
+        );
+        let delete_err = checked_delete_on_store(
+            &mut store,
+            &DeleteTextFile {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                path: "notes/reverted.md".into(),
+                moment_id: "m-same-restore-del".into(),
+                request_id: Some("req-same-restore-del".into()),
+                metadata_origin: "restore".into(),
+                metadata_summary: Some("Restored notes/reverted.md".into()),
+                metadata_correlation_id: Some("restore-agent-run-same".into()),
+                author_json: None,
+                now_ms: 5_200,
+            },
+            Some(&initial.object.object_id),
+            &expected_sha,
+            Some(&guard),
+            root,
+            &(),
+            &NoFaults,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                delete_err,
+                RuntimeError::Domain(DomainError::InvalidInput {
+                    reason: "restore-head-changed"
+                })
+            ),
+            "expected restore-head-changed on checked delete, got {delete_err:?}"
+        );
     }
 }

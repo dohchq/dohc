@@ -9,7 +9,6 @@ import {
   settlementRecordDigest,
 } from "./hostedSettlement.js";
 import type { StorageContext } from "./context.js";
-import { replicaHistoryReplacement } from "./replicaHistoryPositions.js";
 import nativeAuthoredSettlement from "../testing/fixtures/nativeAuthoredSettlement.json";
 const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
 afterEach(() => logged.mockClear());
@@ -824,34 +823,6 @@ it("accepts an owner engine's own spelling of the proven state and continues fro
         .all()
         .map((row) => row.markdown_sha256),
     ).toEqual([first.markdownSha, next.markdownSha]);
-    // A replica whose file is the engine's file of the last settled cut finds that state unreplaced.
-    const at = f.raw
-      .prepare(
-        "SELECT object_id,current_path,lineage_claim_id,restore_fence_generation FROM sync_relay_live_update_journal WHERE journal_cursor=?",
-      )
-      .get(next.receipt.journalCursor)!;
-    expect(
-      replicaHistoryReplacement(
-        f.storage as StorageContext,
-        "workspace",
-        "main",
-        String(at.object_id),
-        0,
-        0,
-        0,
-        next.receipt.journalCursor,
-        {
-          versionId: "main",
-          objectId: String(at.object_id),
-          path: String(at.current_path),
-          contentKind: "text",
-          sha256: next.markdownSha,
-          byteLength: 1,
-          lineageClaimId: String(at.lineage_claim_id),
-          restoreGeneration: Number(at.restore_fence_generation),
-        },
-      ),
-    ).toEqual([null, null]);
   } finally {
     f.close();
   }
@@ -891,3 +862,68 @@ it("rechecks an unchanged publication anchor at commit", async () => {
     f.close();
   }
 });
+
+it.each([
+  ["the owner's save since the last settlement", "owner-laptop", true, false, true],
+  ["the owner's save the interval does not read as", "owner-laptop", false, false, false],
+  ["the owner's save with a save earlier in its push", "owner-laptop", true, true, false],
+  ["the host's own save", "service-host:host", true, false, false],
+  ["no save", null, true, false, false],
+] as const)(
+  "starts the first settlement after a Stop from %s",
+  async (_case, saver, intervalReadsAsSave, earlierInPush, accepted) => {
+    const f = registered({ deployment: true });
+    try {
+      const first = publication(f, "first");
+      await prepare(f, [first.op]);
+      append(f, [first.op]);
+      const next = publication(f, "after-resume", first.receipt.journalCursor, "", 1);
+      const other = new TextEncoder().encode("# Saved while stopped\n");
+      f.storage.putBlob({
+        workspaceId: "workspace",
+        sha256: hash(other),
+        content: other,
+        createdAtMs: 1,
+      });
+      const savedSha = intervalReadsAsSave ? next.markdownSha : hash(other);
+      next.payload.payloadBeforeBlobSha256 = savedSha;
+      next.op.payloadJson = stableJsonStringify(next.payload);
+      const path = first.record.binding.currentPath;
+      const save = (originSeq: number, before: string, after: string) => ({
+        originSeq,
+        opKind: "moment.append",
+        recordedAtMs: 2,
+        payloadJson: stableJsonStringify({
+          momentId: `save-${originSeq}-${after.slice(0, 6)}`,
+          objectId: first.record.binding.objectId,
+          versionId: "main",
+          path,
+          operation: "write",
+          payloadBeforePath: path,
+          payloadAfterPath: path,
+          payloadBeforeContentKind: "text",
+          payloadBeforeBlobSha256: before,
+          payloadAfterBlobSha256: after,
+          payloadAfterByteLength: 1,
+          payloadAfterContentKind: "text",
+          recordedAtMs: 2,
+        }),
+      });
+      if (saver)
+        f.storage.appendLogBatch({
+          workspaceId: "workspace",
+          originId: saver,
+          ops: [save(0, first.markdownSha, savedSha)],
+        });
+      next.op.originSeq = earlierInPush ? 2 : 1;
+      const ops = earlierInPush ? [save(1, savedSha, hash(other)), next.op] : [next.op];
+      await prepare(f, ops);
+      expect(append(f, ops).settlementRefusals).toEqual(
+        accepted ? undefined : [expect.objectContaining({ momentId: "after-resume" })],
+      );
+      expect(refusedChecks()).toEqual(accepted ? [] : ["prepare predecessor-markdown"]);
+    } finally {
+      f.close();
+    }
+  },
+);

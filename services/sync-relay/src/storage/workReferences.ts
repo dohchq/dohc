@@ -16,6 +16,7 @@ import {
   targetVersionId,
   type ChatShareThreadResolver,
 } from "../shareFilter";
+import { LINK_CHAT_ORIGIN_PREFIX, SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import type { StorageContext } from "./context";
 
 export const WORK_REFERENCE_BATCH = 128;
@@ -145,32 +146,43 @@ function snapshotObject(
     .get(workspaceId, versionId, value);
 }
 
-// A chat's wire id and kind, from the first create of its wire. A later
-// create, such as a share member's for the same wire, never names the chat.
+type ChatCreatePayload = { channelId?: unknown; wireId?: unknown; kind?: unknown };
+const CHAT_CREATES = `SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'`;
+
 function chatCreate(
   storage: StorageContext,
   workspaceId: string,
   channelId: string,
 ): { wireId: string; kind: unknown } | null {
-  const first = (field: "channelId" | "wireId", value: string) => {
-    const row = storage.db
-      .prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
-      AND json_extract(payload_json,'$.${field}')=? ORDER BY relay_seq LIMIT 1`)
-      .get(workspaceId, value);
-    return row
-      ? (JSON.parse(String(row.payload_json)) as {
-          channelId?: unknown;
-          wireId?: unknown;
-          kind?: unknown;
-        })
-      : null;
-  };
-  const named = first("channelId", channelId);
-  if (!named) return null;
-  const wireId = typeof named.wireId === "string" ? named.wireId : channelId;
-  const created = first("wireId", wireId);
-  if (typeof named.wireId === "string" && created?.channelId !== channelId) return null;
-  return { wireId, kind: named.kind };
+  const refused = new Set<string>();
+  const owned = storage.db.prepare(
+    `${CHAT_CREATES} AND json_extract(payload_json,'$.channelId')=?
+    AND substr(origin_id,1,?)<>? AND substr(origin_id,1,?)<>? ORDER BY relay_seq`,
+  );
+  for (const row of owned.iterate(
+    workspaceId,
+    channelId,
+    SHARE_MEMBER_ORIGIN_PREFIX.length,
+    SHARE_MEMBER_ORIGIN_PREFIX,
+    LINK_CHAT_ORIGIN_PREFIX.length,
+    LINK_CHAT_ORIGIN_PREFIX,
+  )) {
+    const named = JSON.parse(String(row.payload_json)) as ChatCreatePayload;
+    if (typeof named.wireId !== "string") return { wireId: channelId, kind: named.kind };
+    if (refused.has(named.wireId)) continue;
+    const created = storage.db
+      .prepare(
+        `${CHAT_CREATES} AND json_extract(payload_json,'$.wireId')=? ORDER BY relay_seq LIMIT 1`,
+      )
+      .get(workspaceId, named.wireId);
+    if (
+      created &&
+      (JSON.parse(String(created.payload_json)) as ChatCreatePayload).channelId === channelId
+    )
+      return { wireId: named.wireId, kind: named.kind };
+    refused.add(named.wireId);
+  }
+  return null;
 }
 
 type Scope = {

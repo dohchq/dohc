@@ -481,7 +481,7 @@ export function registerChatsIpcHandlers<
         const objectId = await chatFileObjectId(scope, input.path);
         if (!objectId) {
           throw new Error(
-            "Chats aren't available for this file yet — only text files dohc tracks can have Chats.",
+            "Chats are not available for this file yet. Only text files dohc tracks can have Chats.",
           );
         }
         return { objectId, pathHint: input.path };
@@ -1289,6 +1289,7 @@ export function registerChatsIpcHandlers<
       authorId: reaction.author.authorId,
       authorKind: reaction.author.kind,
       authorDisplayName: reaction.author.displayName,
+      ...(reaction.author.agentId ? { authorAgentId: reaction.author.agentId } : {}),
     };
   }
 

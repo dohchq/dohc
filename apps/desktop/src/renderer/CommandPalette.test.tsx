@@ -43,7 +43,7 @@ describe("CommandPalette keyboard selection", () => {
     const { ran, onClose } = setup();
     const target =
       focus === "input"
-        ? screen.getByRole("textbox", { name: "Command" })
+        ? screen.getByRole("combobox", { name: "Command" })
         : focus === "result row"
           ? screen.getByRole("button", { name: "alpha" })
           : screen
@@ -75,14 +75,14 @@ describe("CommandPalette keyboard selection", () => {
       bubbles: true,
       cancelable: true,
     });
-    fireEvent(screen.getByRole("textbox", { name: "Command" }), event);
+    fireEvent(screen.getByRole("combobox", { name: "Command" }), event);
     expect(event.defaultPrevented).toBe(false);
     expect(onClose).not.toHaveBeenCalled();
   });
 
   it("leaves an Enter that confirms an IME composition to the input method", () => {
     const { ran, onClose } = setup();
-    const input = screen.getByRole("textbox", { name: "Command" });
+    const input = screen.getByRole("combobox", { name: "Command" });
     fireEvent.keyDown(input, { key: "Enter", isComposing: true });
     fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
     fireEvent.keyDown(input, { key: "ArrowDown", isComposing: true });
@@ -143,9 +143,23 @@ describe("CommandPalette keyboard selection", () => {
 
   it("Escape from the input closes it once, through the overlay", async () => {
     const { ran, onClose } = setup();
-    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Command" }));
+    expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Command" }));
     await userEvent.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledOnce();
     expect(ran).toEqual([]);
+  });
+
+  it("keeps the listbox label distinct from the combobox label", () => {
+    render(
+      <CommandPalette
+        ariaLabel="File"
+        commands={[{ id: "notes.md", label: "notes.md", run: vi.fn() }]}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("File", { exact: false })).toBe(
+      screen.getByRole("combobox", { name: "File" }),
+    );
+    expect(screen.getByRole("listbox", { name: "Results" })).toBeTruthy();
   });
 });

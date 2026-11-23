@@ -27,7 +27,7 @@ export interface NamedFrameAppliedUpdate {
   /** The journal cursor, or for a room row its room position. Both come from one rising count. */
   readonly journalCursor: number;
   readonly updateBytes: Uint8Array;
-  /** On a live room's save: the last room position it holds. */
+  /** On a live room's save: the position through which every room row is saved. */
   readonly rowsThrough?: number;
   /** An edit a live room took and has not saved, for the note's owner. */
   readonly roomRow?: true;

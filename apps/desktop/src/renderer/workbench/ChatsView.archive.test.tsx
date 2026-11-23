@@ -74,7 +74,7 @@ describe("ChatsView archive and row menus", () => {
 
     await user.click(toggle);
     const trip = within(screen.getByTestId("chats-archived-list")).getByTestId("chats-channel");
-    expect(within(trip).getByTestId("chats-channel-name").className).toContain("font-medium");
+    expect(within(trip).getByTestId("chats-channel-name").className).toContain("font-semibold");
     expect(within(trip).getByTestId("chats-channel-unread").textContent).toBe("2");
 
     fireEvent.contextMenu(trip, { clientX: 40, clientY: 200 });
@@ -246,7 +246,7 @@ describe("ChatsView archive and row menus", () => {
     });
 
     const row = await screen.findByTestId("chats-my-agent");
-    expect(within(row).getByTestId("chats-my-agent-state").textContent).toBe("off");
+    expect(within(row).getByTestId("chats-my-agent-state").textContent).toBe("Off");
     fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
     expect(menuLabels()).toContain("Turn on");
     await user.click(screen.getByTestId("chat-row-menu-agent-power"));

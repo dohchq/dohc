@@ -55,7 +55,7 @@ for (const refusal of [
       const { app, page } = desktop;
 
       const stopped = page.getByTestId("workspace-open-failed");
-      await expect(stopped).toContainText("Couldn’t open this workspace");
+      await expect(stopped).toContainText("dohc could not open this workspace");
       await expect(stopped).toContainText(
         "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.",
       );

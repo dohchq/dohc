@@ -128,6 +128,9 @@ export function previewPaths(deliveryDir) {
     profile: join(data, "profile"),
     appData: join(home, "AppData", "Roaming"),
     localAppData: join(home, "AppData", "Local"),
+    // Windows can resolve these under USERPROFILE. A native file dialog that
+    // opens on a missing one shows "Location is not available".
+    knownFolders: ["Desktop", "Documents", "Downloads"].map((name) => join(home, name)),
     logs: join(data, "logs"),
     session: join(data, "session.json"),
   };
@@ -197,7 +200,13 @@ export async function launchPreview(
   log(`Checking the preview package for ${describe(manifest)}...`);
   const { executable, tree } = await verifyDelivery(deliveryDir, manifest);
   const paths = previewPaths(deliveryDir);
-  for (const path of [paths.profile, paths.appData, paths.localAppData, paths.logs])
+  for (const path of [
+    paths.profile,
+    paths.appData,
+    paths.localAppData,
+    ...paths.knownFolders,
+    paths.logs,
+  ])
     mkdirSync(path, { recursive: true });
   if (existsSync(paths.session)) {
     const previous = JSON.parse(readFileSync(paths.session, "utf8"));

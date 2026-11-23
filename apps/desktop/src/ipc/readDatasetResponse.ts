@@ -11,6 +11,7 @@ export function datasetResponseAction(path: string): string | null {
   const dataset =
     /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:\/([0-9a-f-]{36})(?:\/([a-z]+))?)?(?:\?|$)/.exec(path);
   if (dataset) return dataset[2] ?? (dataset[1] ? "describe" : "list");
+  if (/^\/sync\/[^/]+\/local-apps$/.test(path)) return "local-app";
   return (
     /^\/sync\/[^/]+\/app-publications\/[0-9a-f]{64}\/backend\/(invoke|attempt|upload|file)$/.exec(
       path,

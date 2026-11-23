@@ -1168,6 +1168,42 @@ describe("shared channels (MU-C4)", () => {
     expect(bodies).toContain("after re-create");
   });
 
+  it("refuses a member's create under General's or an agent chat's id and accepts the Group's own", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    const share = await createGroupShare(h, MEMBER_A);
+    const push = (channelId: string) =>
+      h(
+        request(
+          MEMBER_A,
+          `/sync/shares/${share}/log`,
+          jsonBody({
+            originId: "origin-member-a",
+            ops: [
+              {
+                ...channelCreate(SHARED_WIRE, "team"),
+                payload: { ...channelCreate(SHARED_WIRE, "team").payload, channelId },
+                originSeq: 0,
+              },
+            ],
+          }),
+        ),
+      );
+    for (const channelId of [
+      "channel-general",
+      "channel-agent-default",
+      `personal-dm:p-${"a".repeat(26)}`,
+    ]) {
+      const refused = await push(channelId);
+      expect(refused.status, channelId).toBe(403);
+      expect((await json(refused)).code).toBe("share_op_rejected");
+    }
+    const accepted = await push(`chan-${SHARED_WIRE}`);
+    expect(accepted.status).toBe(200);
+    expect(await json(accepted)).toMatchObject({ ok: true, accepted: 1, inserted: 1 });
+  });
+
   it("serves chat ops rebuilt from an explicit allowlist — unexpected payload fields never leak", async () => {
     const storage = await testStorage();
     const h = handler(storage);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  constants,
   copyFileSync,
   existsSync,
   linkSync,
@@ -52,8 +53,11 @@ const nodeLibraries = existsSync(nodeLib)
   : [];
 const fixtureNode = join(scratch, windows ? "node.exe" : "node");
 copyFileSync(process.execPath, fixtureNode);
+// macOS can report a hard-linked executable by another of its links, which moves
+// its @rpath and process.execPath there, so each Mac fixture gets its own clone.
 function linkNode(to) {
-  linkSync(fixtureNode, to);
+  if (process.platform === "darwin") copyFileSync(fixtureNode, to, constants.COPYFILE_FICLONE);
+  else linkSync(fixtureNode, to);
   for (const name of nodeLibraries) symlinkSync(join(nodeLib, name), join(dirname(to), name));
 }
 function fixture(platform = "win32", arch = "x64", label = "Ice Test") {

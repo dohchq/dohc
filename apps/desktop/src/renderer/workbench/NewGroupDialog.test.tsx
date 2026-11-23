@@ -9,8 +9,9 @@ afterEach(cleanup);
 const nameField = () => screen.getByTestId("chats-new-channel-name") as HTMLInputElement;
 
 describe("NewGroupDialog", () => {
-  it("starts in Name with Chat picked and Create off until there's a name", () => {
-    render(<NewGroupDialog onCreate={vi.fn()} onClose={vi.fn()} />);
+  it("starts in Name with Chat picked and shows inline error if Create is clicked without a name", () => {
+    const onCreate = vi.fn();
+    render(<NewGroupDialog onCreate={onCreate} onClose={vi.fn()} />);
     expect(screen.getByRole("heading").textContent).toBe("New Group");
     expect(screen.getByTestId("chats-new-channel-submit").textContent).toBe("Create Group");
     expect(document.activeElement).toBe(nameField());
@@ -19,13 +20,15 @@ describe("NewGroupDialog", () => {
     expect(purpose).toBe(screen.getByTestId("chats-new-channel-purpose"));
     expect(purpose.hasAttribute("placeholder")).toBe(false);
     expect(screen.getByRole("radio", { name: "Chat" }).getAttribute("aria-checked")).toBe("true");
-    expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(
-      true,
+    const submit = screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement;
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+    expect(screen.getByTestId("chats-new-channel-name-error").textContent).toBe(
+      "Give the Group a name.",
     );
-    fireEvent.change(nameField(), { target: { value: "launch" } });
-    expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(
-      false,
-    );
+    expect(nameField().getAttribute("aria-invalid")).toBe("true");
+    expect(document.activeElement).toBe(nameField());
+    expect(onCreate).not.toHaveBeenCalled();
   });
 
   it("says a name is missing when Enter is pressed without one, and creates nothing", () => {

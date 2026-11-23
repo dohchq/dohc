@@ -87,6 +87,8 @@ const jsonFields: Readonly<Record<string, unknown>> = {
   approvalId: id,
   candidateDigest: hash,
   expectedAuthorityRevision: 1,
+  stageId: id,
+  reviewDigest: hash,
 };
 
 export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
@@ -166,6 +168,9 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "automation press": ["Tasks", "button", "record"],
   "account deletePreview": [],
   "account delete": ["--server", "https://dohc.example.com", "--preview-token", "token"],
+  "workspace search": ["tokyo"],
+  "history agent-run-plan": ["run-1"],
+  "history undo-agent-run": ["run-1", hash],
   // JSON verb parsers declare their socket dispatch after validating these request fields.
   ...Object.fromEntries(
     Object.entries(CLI_COMMANDS).flatMap(([group, command]) =>
@@ -185,4 +190,5 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
         ]),
     ),
   ),
+  "app verifyFrontend": [JSON.stringify({ workspaceId: "workspace", appRoot: "app" })],
 };

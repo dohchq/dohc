@@ -289,22 +289,6 @@ describe("Overlay", () => {
     expect(onCloseOuter).not.toHaveBeenCalled();
   });
 
-  it("frees the titlebar for a press outside while any overlay is open", () => {
-    const root = document.documentElement;
-    const { rerender, unmount } = render(
-      <Overlay onClose={vi.fn()}>
-        <Overlay onClose={vi.fn()}>Inner</Overlay>
-      </Overlay>,
-    );
-    expect(root.hasAttribute("data-modal-open")).toBe(true);
-
-    rerender(<Overlay onClose={vi.fn()}>Outer</Overlay>);
-    expect(root.hasAttribute("data-modal-open")).toBe(true);
-
-    unmount();
-    expect(root.hasAttribute("data-modal-open")).toBe(false);
-  });
-
   it("closes only the topmost of two nested overlays on Escape", () => {
     const onCloseOuter = vi.fn();
     const onCloseInner = vi.fn();

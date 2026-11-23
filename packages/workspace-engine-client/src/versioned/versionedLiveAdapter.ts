@@ -7,6 +7,7 @@ import {
   LinksResolveInput,
   LinksResolveResult,
 } from "@dohc/workspace-contracts/links";
+import { WorkspaceSearchInput, WorkspaceSearchResult } from "@dohc/workspace-contracts/retrieval";
 import type {
   HistoryOperationsStore,
   HistoryOperation,
@@ -457,6 +458,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     publish?: boolean;
     createOnly?: boolean;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: string;
+    expectedPathClearHeadMomentId?: string;
     requestId?: string;
     restoreBeforeMomentId?: string;
     metadata: AdapterWriteMetadata;
@@ -471,6 +475,15 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       path: input.path,
       ...(input.publish !== undefined ? { publish: input.publish } : {}),
       ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
+      ...(input.expectedPathClearSinceOrder !== undefined
+        ? { expectedPathClearSinceOrder: input.expectedPathClearSinceOrder }
+        : {}),
+      ...(input.expectedPathClearObjectId !== undefined
+        ? { expectedPathClearObjectId: input.expectedPathClearObjectId }
+        : {}),
+      ...(input.expectedPathClearHeadMomentId !== undefined
+        ? { expectedPathClearHeadMomentId: input.expectedPathClearHeadMomentId }
+        : {}),
       ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
       ...(input.restoreBeforeMomentId !== undefined
         ? { restoreBeforeMomentId: input.restoreBeforeMomentId }
@@ -510,6 +523,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     bytes: Uint8Array;
     createOnly?: boolean;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: string;
+    expectedPathClearHeadMomentId?: string;
     requestId?: string;
     metadata: AdapterWriteMetadata;
     author?: WriteAuthor | null;
@@ -517,6 +533,17 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }): Promise<VersionedMethodResultMap["versionedBinary.write"]> {
     this.assertWorkspace(input.workspaceId);
     const requestId = input.requestId ?? randomUUID();
+    const pathClear = {
+      ...(input.expectedPathClearSinceOrder !== undefined
+        ? { expectedPathClearSinceOrder: input.expectedPathClearSinceOrder }
+        : {}),
+      ...(input.expectedPathClearObjectId !== undefined
+        ? { expectedPathClearObjectId: input.expectedPathClearObjectId }
+        : {}),
+      ...(input.expectedPathClearHeadMomentId !== undefined
+        ? { expectedPathClearHeadMomentId: input.expectedPathClearHeadMomentId }
+        : {}),
+    };
     if (input.bytes.byteLength > INBAND_BINARY_COLLECTION_CAP_BYTES) {
       const sha256 = createHash("sha256").update(input.bytes).digest("hex");
       return this.request(
@@ -527,6 +554,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
           path: input.path,
           ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
           ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
+          ...pathClear,
           sha256,
           ...(input.metadata.origin === "restore"
             ? {}
@@ -550,6 +578,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         path: input.path,
         ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
         ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
+        ...pathClear,
         bytes: Array.from(input.bytes),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
@@ -927,6 +956,14 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return result;
   }
 
+  async retrieveWorkspace(input: WorkspaceSearchInput): Promise<WorkspaceSearchResult> {
+    return WorkspaceSearchResult.parse(
+      await this.requester.request("retrieval.query", WorkspaceSearchInput.parse(input), {
+        workspace: this.workspace,
+      }),
+    );
+  }
+
   /** Resolve only the requested file identities without listing or reading bodies. */
   async resolveFiles(input: {
     workspaceId: string;
@@ -1235,6 +1272,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     path: string;
     expectedObjectId?: string;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: string;
+    expectedPathClearHeadMomentId?: string;
     onlyIfAbsentOnDisk?: boolean;
     requestId?: string;
     metadata: AdapterWriteMetadata;
@@ -1258,6 +1298,15 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
           ? { expectedObjectId: input.expectedObjectId }
           : {}),
         ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
+        ...(input.expectedPathClearSinceOrder !== undefined
+          ? { expectedPathClearSinceOrder: input.expectedPathClearSinceOrder }
+          : {}),
+        ...(input.expectedPathClearObjectId !== undefined
+          ? { expectedPathClearObjectId: input.expectedPathClearObjectId }
+          : {}),
+        ...(input.expectedPathClearHeadMomentId !== undefined
+          ? { expectedPathClearHeadMomentId: input.expectedPathClearHeadMomentId }
+          : {}),
         ...(input.onlyIfAbsentOnDisk ? { onlyIfAbsentOnDisk: true } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
@@ -1289,6 +1338,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     objectId?: string;
     limit?: number;
     beforeMomentOrder?: number;
+    metadataOnly?: boolean;
   }): Promise<{
     moments: MomentRecord[];
     nextBeforeMomentOrder: number | null;
@@ -1302,6 +1352,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       ...(input.beforeMomentOrder !== undefined
         ? { beforeMomentOrder: input.beforeMomentOrder }
         : {}),
+      ...(input.metadataOnly !== undefined ? { metadataOnly: input.metadataOnly } : {}),
     });
   }
 

@@ -4,6 +4,7 @@ import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
 import { post } from "./bridge";
+import { opensFormat, refuseFormat } from "./format";
 import { followLive } from "./live";
 
 export interface PageProperty {
@@ -67,8 +68,11 @@ export function mountDocument(page: PageConfig) {
     (document.activeElement as HTMLElement | null)?.blur();
     window.getSelection()?.removeAllRanges();
   };
-  if (page.large) {
+  const doc = page.large ? null : markdownToYDoc(page.markdown);
+  if (doc === null) {
     body.append(element("pre", "source", page.markdown));
+  } else if (!opensFormat(doc)) {
+    refuseFormat();
   } else {
     // Keystroke to paint: from the browser's `beforeinput` to the frame that shows it.
     const samples: number[] = [];
@@ -80,7 +84,6 @@ export function mountDocument(page: PageConfig) {
       },
       { capture: true },
     );
-    const doc = markdownToYDoc(page.markdown);
     // Copy as Markdown copies the page as it is now, with the person's edits.
     (window as Window & { __dohcCopyMarkdown?: () => void }).__dohcCopyMarkdown = () =>
       post("markdown", { markdown: yDocToMarkdown(doc) });

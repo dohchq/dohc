@@ -9,6 +9,7 @@ import { gunzipSync } from "node:zlib";
 
 import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
 import { compileOwner } from "./stage-agent-probe.mjs";
+import { BUILTIN_FILES, buildClosedAppBuiltins } from "../src/workspaces/closedAppBuiltins.ts";
 const maxNodeBytes = 128 * 1024 * 1024;
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -37,6 +38,10 @@ function compilerFiles(platform, arch) {
     "licenses/acorn.txt",
     "licenses/parse5.txt",
     "licenses/entities.txt",
+    "licenses/react.txt",
+    "licenses/react-dom.txt",
+    "licenses/scheduler.txt",
+    ...BUILTIN_FILES.map((name) => `builtins/${name}`),
   ];
 }
 
@@ -265,7 +270,8 @@ export async function stageAppCompiler(options = {}) {
   if (JSON.parse(await readFile(join(esbuildRoot, "package.json"), "utf8")).version !== "0.28.1")
     throw new Error("App compiler requires esbuild 0.28.1.");
   // Loaded here so the Rust gate can read the pinned Node without installed packages.
-  const { build } = await import("esbuild");
+  const esbuild = await import("esbuild");
+  const { build } = esbuild;
   const esbuildRequire = createRequire(join(esbuildRoot, "package.json"));
   const nativePackage = `@esbuild/${platform}-${arch}`;
   let platformRoot;
@@ -299,6 +305,11 @@ export async function stageAppCompiler(options = {}) {
         createRequire(join(parse5Root, "package.json")).resolve,
         "entities",
       );
+      const reactRoot = dirname(require.resolve("react/package.json"));
+      const reactDomRoot = dirname(require.resolve("react-dom/package.json"));
+      const schedulerRoot = dirname(
+        createRequire(join(reactDomRoot, "package.json")).resolve("scheduler/package.json"),
+      );
       await writeFile(join(staging, pinned.file), node, { mode: 0o755 });
       for (const file of ["package.json", "lib/main.js", "LICENSE.md"])
         await cp(join(esbuildRoot, file), join(staging, "node_modules/esbuild", file));
@@ -322,6 +333,17 @@ export async function stageAppCompiler(options = {}) {
       await cp(join(acornRoot, "LICENSE"), join(staging, "licenses/acorn.txt"));
       await cp(join(parse5Root, "LICENSE"), join(staging, "licenses/parse5.txt"));
       await cp(join(entitiesRoot, "LICENSE"), join(staging, "licenses/entities.txt"));
+      await cp(join(reactRoot, "LICENSE"), join(staging, "licenses/react.txt"));
+      await cp(join(reactDomRoot, "LICENSE"), join(staging, "licenses/react-dom.txt"));
+      await cp(join(schedulerRoot, "LICENSE"), join(staging, "licenses/scheduler.txt"));
+      const builtins = await buildClosedAppBuiltins(esbuild, sourceRoot);
+      for (const [name, asset] of builtins.files) {
+        await writeFile(join(staging, "builtins", name), asset.bytes);
+      }
+      const stagedBuiltinsPin = JSON.stringify({
+        digest: builtins.digest,
+        files: Object.fromEntries([...builtins.files].map(([name, asset]) => [name, asset.sha256])),
+      });
       for (const [source, output] of [
         ["closedAppCompilerProcess.ts", "adapter.mjs"],
         ["closedAppCompilerWorker.ts", "worker.mjs"],
@@ -334,6 +356,7 @@ export async function stageAppCompiler(options = {}) {
           target: "node24",
           format: "esm",
           external: ["esbuild"],
+          define: { __DOHC_STAGED_BUILTINS__: stagedBuiltinsPin },
           logLevel: "silent",
         });
       }

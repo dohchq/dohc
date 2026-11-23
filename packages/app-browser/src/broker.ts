@@ -1,3 +1,41 @@
+export type AppBrokerOp =
+  | "collection.list"
+  | "collection.create"
+  | "backend.invoke"
+  | "backend.attempt"
+  | "backend.upload"
+  | "backend.file"
+  | "unknown";
+
+export type AppBrokerLocalRejectionReason =
+  | "invalid_id"
+  | "duplicate_id"
+  | "unserializable"
+  | "payload_too_large"
+  | "invalid_keys"
+  | "rate_limited";
+
+export type AppBrokerObservation =
+  | { kind: "handshake-delivered" }
+  | {
+      kind: "rejected";
+      reason: AppBrokerLocalRejectionReason;
+      status: number | null;
+      op: AppBrokerOp;
+      operation?: string;
+    }
+  | { kind: "started"; id: string; op: AppBrokerOp; operation?: string }
+  | {
+      kind: "completed";
+      id: string;
+      op: AppBrokerOp;
+      operation?: string;
+      status: number;
+      ok: boolean;
+      refusalCode?: string;
+    }
+  | { kind: "aborted"; id: string; op: AppBrokerOp; operation?: string };
+
 /**
  * Runs only in the trusted bootstrap. The app receives this one frame-bound port.
  * `activated` is this window's transient user activation when the request arrived: a real click or key
@@ -8,6 +46,7 @@ export function attachAppCollectionBroker(
   frame: HTMLIFrameElement,
   send: (body: unknown, signal: AbortSignal, request: { activated: boolean }) => Promise<Response>,
   lifetime: AbortSignal,
+  observe?: (event: AppBrokerObservation) => void,
 ): void {
   let closed = false,
     loaded = false,
@@ -18,6 +57,22 @@ export function attachAppCollectionBroker(
   const channel = new MessageChannel(),
     controller = new AbortController(),
     ids = new Set<string>();
+  const emit = (event: AppBrokerObservation) => {
+    try {
+      observe?.(event);
+    } catch {}
+  };
+  const knownOp = (v: unknown): AppBrokerOp =>
+    v === "collection.list" ||
+    v === "collection.create" ||
+    v === "backend.invoke" ||
+    v === "backend.attempt" ||
+    v === "backend.upload" ||
+    v === "backend.file"
+      ? v
+      : "unknown";
+  const knownOperation = (v: unknown): string | undefined =>
+    typeof v === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(v) ? v : undefined;
   const close = () => {
     closed = true;
     controller.abort();
@@ -57,6 +112,7 @@ export function attachAppCollectionBroker(
     frame.contentWindow?.postMessage({ kind: "dohc-app-channel", version: 1 }, "*", [
       channel.port2,
     ]);
+    emit({ kind: "handshake-delivered" });
   });
   const record = (value: unknown): value is Record<string, unknown> =>
     !!value && typeof value === "object" && !Array.isArray(value);
@@ -66,61 +122,89 @@ export function attachAppCollectionBroker(
     if (!inputActive) armed = true;
     const activated = inputActive && armed;
     const body: unknown = event.data;
-    if (!record(body) || typeof body.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.id))
+    const op = record(body) ? knownOp(body.op) : "unknown";
+    const operation = record(body) ? knownOperation(body.operation) : undefined;
+    const opMeta = operation ? { operation } : {};
+    if (!record(body) || typeof body.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.id)) {
+      emit({ kind: "rejected", reason: "invalid_id", status: null, op, ...opMeta });
       return;
+    }
     const id = body.id,
       reject = (status: number) => {
         if (!closed) channel.port1.postMessage({ id, ok: false, status });
+      },
+      rejectLocal = (reason: AppBrokerLocalRejectionReason, status: number) => {
+        reject(status);
+        emit({ kind: "rejected", reason, status, op, ...opMeta });
       };
-    if (ids.has(id)) {
-      reject(429);
-      return;
-    }
+    if (ids.has(id)) return rejectLocal("duplicate_id", 429);
     let encoded: string;
     try {
       encoded = JSON.stringify(body);
     } catch {
-      reject(400);
-      return;
+      return rejectLocal("unserializable", 400);
     }
     const upload = body.op === "backend.upload",
       backend = typeof body.op === "string" && body.op.startsWith("backend.");
     const requestBytes = upload ? 8 * 1024 * 1024 : backend ? 128 * 1024 : 16_384;
-    if (new TextEncoder().encode(encoded).byteLength > requestBytes) {
-      reject(413);
-      return;
-    }
+    if (new TextEncoder().encode(encoded).byteLength > requestBytes)
+      return rejectLocal("payload_too_large", 413);
     const keys = Object.keys(body).sort().join();
+    const validAlias =
+      !Object.hasOwn(body, "dataset") ||
+      (typeof body.dataset === "string" &&
+        /^[a-z][a-z0-9_-]{0,63}$/.test(body.dataset) &&
+        body.dataset !== "prototype" &&
+        body.dataset !== "constructor");
     const valid =
-      body.op === "collection.list"
+      validAlias &&
+      (body.op === "collection.list"
         ? ["id,limit,op", "afterPath,id,limit,op"].includes(keys)
         : body.op === "collection.create"
           ? keys === "fields,id,idempotencyKey,op"
           : body.op === "backend.invoke"
-            ? keys === "id,idempotencyKey,input,op,operation"
+            ? [
+                "id,idempotencyKey,input,op,operation",
+                "dataset,id,idempotencyKey,input,op,operation",
+              ].includes(keys)
             : body.op === "backend.attempt"
-              ? keys === "id,op,operation,request"
+              ? ["id,op,operation,request", "dataset,id,op,operation,request"].includes(keys)
               : body.op === "backend.upload"
-                ? keys === "bytesBase64,contentType,id,idempotencyKey,name,op"
+                ? [
+                    "bytesBase64,contentType,id,idempotencyKey,name,op",
+                    "bytesBase64,contentType,dataset,id,idempotencyKey,name,op",
+                  ].includes(keys)
                 : body.op === "backend.file"
-                  ? keys === "fileId,id,input,op,operation"
-                  : false;
-    if (!valid) {
-      reject(400);
-      return;
-    }
+                  ? [
+                      "fileId,id,input,op,operation",
+                      "dataset,fileId,id,input,op,operation",
+                    ].includes(keys)
+                  : false);
+    if (!valid) return rejectLocal("invalid_keys", 400);
     const now = Date.now();
     backendTokens = Math.min(30, backendTokens + (now - updated) / 2000);
     collectionTokens = Math.min(12, collectionTokens + (now - updated) / 5000);
     updated = now;
-    if (pending >= 4 || (backend ? backendTokens : collectionTokens) < 1) {
-      reject(429);
-      return;
-    }
+    if (pending >= 4 || (backend ? backendTokens : collectionTokens) < 1)
+      return rejectLocal("rate_limited", 429);
     if (backend) backendTokens--;
     else collectionTokens--;
     pending++;
     ids.add(id);
+    emit({ kind: "started", id, op, ...opMeta });
+    let finished = false;
+    const finish = (status: number, ok: boolean, refusalCode?: string) => {
+      finished = true;
+      emit({
+        kind: "completed",
+        id,
+        op,
+        ...opMeta,
+        status,
+        ok,
+        ...(refusalCode ? { refusalCode } : {}),
+      });
+    };
     try {
       const response = await send(body, controller.signal, { activated });
       if (closed || controller.signal.aborted) {
@@ -133,13 +217,14 @@ export function attachAppCollectionBroker(
         response.headers.get("content-type")?.split(";", 1)[0] === "application/json";
       if (!response.ok && !refusal) {
         await response.body?.cancel().catch(() => {});
-        reject([400, 404, 409, 413, 429].includes(response.status) ? response.status : 503);
-        return;
+        const status = [400, 404, 409, 413, 429].includes(response.status) ? response.status : 503;
+        reject(status);
+        return finish(status, false);
       }
       const reader = response.body?.getReader();
       if (!reader) {
         reject(503);
-        return;
+        return finish(503, false);
       }
       const chunks: Uint8Array[] = [];
       let size = 0;
@@ -178,7 +263,7 @@ export function attachAppCollectionBroker(
           new TextEncoder().encode(value.message).byteLength > 1024
         ) {
           reject(503);
-          return;
+          return finish(503, false);
         }
         if (!closed)
           channel.port1.postMessage({
@@ -187,12 +272,15 @@ export function attachAppCollectionBroker(
             status: 409,
             error: { code: value.code, message: value.message },
           });
-        return;
+        return finish(409, false, value.code);
       }
       if (!closed) channel.port1.postMessage({ id, ok: true, value });
+      finish(200, true);
     } catch {
       reject(503);
+      finish(503, false);
     } finally {
+      if (!finished) emit({ kind: "aborted", id, op, ...opMeta });
       pending--;
       ids.delete(id);
     }

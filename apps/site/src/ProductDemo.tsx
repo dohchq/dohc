@@ -1,6 +1,10 @@
 import { Layers } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { SyncStatusResult, WorkspaceSummary } from "../../desktop/src/ipc/bridgeContract";
+import {
+  admitCollectionChanges,
+  openCollectionChangeShell,
+} from "../../desktop/src/renderer/collectionChangeShells";
 import { CommandPalette, type Command } from "../../desktop/src/renderer/CommandPalette";
 import { COMMAND_ROWS } from "../../desktop/src/renderer/commands/commandRows";
 import {
@@ -12,6 +16,8 @@ import { PageIdentity } from "../../desktop/src/renderer/PageIdentity";
 import { PropertiesPanel } from "../../desktop/src/renderer/PropertiesPanel";
 import { QuickOpenPalette } from "../../desktop/src/renderer/QuickOpenPalette";
 import { Titlebar } from "../../desktop/src/renderer/Titlebar";
+import { DeleteCollectionRecordDialog } from "../../desktop/src/renderer/DeleteCollectionRecordDialog";
+import { TransactionalCollectionPage } from "../../desktop/src/renderer/TransactionalCollectionPage";
 import {
   applyFrontmatter,
   parseFrontmatter,
@@ -21,6 +27,10 @@ import { EditorTabs } from "../../desktop/src/renderer/workbench/EditorTabs";
 import { EmptyEditorGroup } from "../../desktop/src/renderer/workbench/EmptyEditorGroup";
 import { NoticeCenter } from "../../desktop/src/renderer/workbench/NoticeCenter";
 import { EditorGroupFrame } from "../../desktop/src/renderer/workbench/tabRowActions";
+import {
+  siteTabPath,
+  transactionalCollectionTabPath,
+} from "../../desktop/src/renderer/workbench/workbenchState";
 import { WorkspaceSyncStatus } from "../../desktop/src/renderer/workbench/WorkspaceSyncStatus";
 import {
   ShellErrorReporter,
@@ -29,6 +39,15 @@ import {
 } from "../../desktop/src/renderer/shell/useShellError";
 import { matchShellShortcut } from "../../desktop/src/shortcuts/shortcutRegistry";
 import { DEMO_EDITOR_GROUP_ID, DemoSidebar, type DemoWorkspaceDocument } from "./DemoSidebar";
+import {
+  DEMO_GUESTS,
+  demoCollectionStore,
+  GUESTS_DATASET,
+  GUESTS_DATASET_PATH,
+  GUESTS_TABLE_ID,
+  isDemoRecordList,
+  type DemoRecord,
+} from "./demoCollection";
 import { DEMO_PANEL_IDS, isDemoPanelId, type DemoPanelId } from "./demoPanels";
 import {
   configureDemoDesktopBridge,
@@ -36,21 +55,33 @@ import {
   demoWorkspaceAssetsPersistAcrossSessions,
   resolveDemoWorkspaceAssetUrl,
 } from "./demoDesktopBridge";
-import { collectWorkspacePaths, isPathAtOrBelow, rewritePathPrefix } from "./demoWorkspacePaths";
-
-type DemoDocument = {
-  path: string;
-  markdown: string;
-};
+import {
+  APP_ENTRY,
+  APP_ROOT,
+  APP_SOURCE,
+  APP_TITLE,
+  appDocument,
+  DEMO_PAGES,
+  DEMO_PINNED_PAGES,
+  DEMO_WORKSPACE_NAME,
+} from "./demoWorkspace";
+import {
+  collectWorkspacePaths,
+  isPathAtOrBelow,
+  resolveDemoWikilink,
+  rewritePathPrefix,
+} from "./demoWorkspacePaths";
 
 type SaveState = "saved" | "saving";
 
-const STORAGE_KEY = "dohc-marketing-demo-documents-v2";
-const FOLDERS_STORAGE_KEY = "dohc-marketing-demo-folders-v1";
+const STORAGE_KEY = "dohc-marketing-demo-pages-v3";
+const FOLDERS_STORAGE_KEY = "dohc-marketing-demo-folders-v2";
+const GUESTS_STORAGE_KEY = "dohc-marketing-demo-guests-v1";
+const WORKSPACE_ID = "marketing-demo";
 
 const DEMO_WORKSPACE: WorkspaceSummary = {
-  workspaceId: "marketing-demo",
-  rootPath: "personal",
+  workspaceId: WORKSPACE_ID,
+  rootPath: DEMO_WORKSPACE_NAME,
   kind: "personal",
   mode: "local-first",
 };
@@ -65,76 +96,21 @@ const DEMO_SYNC_STATUS: SyncStatusResult = {
   liveSessionsGeneration: 0,
 };
 
-const DEMO_DOCUMENTS: DemoDocument[] = [
-  {
-    path: "welcome.md",
-    markdown: `---
-title: Work you can inspect
-icon: 📝
----
-This is the editor from the desktop app. Edit the document directly.
+export const APP_TAB = siteTabPath(APP_ROOT);
+export const COLLECTION_TAB = transactionalCollectionTabPath(GUESTS_DATASET_PATH, GUESTS_TABLE_ID);
+const TAB_LABELS: ReadonlyMap<string, string> = new Map([
+  [APP_TAB, APP_TITLE],
+  [COLLECTION_TAB, GUESTS_DATASET.name],
+]);
 
-## Try it
+type TabKind = "page" | "app" | "collection" | "app-source";
 
-- Select text to format it
-- Type **/** on an empty line for commands
-- Type **[[** to link another document
-- Use Markdown shortcuts to create blocks
-
-> [!note] Your files stay readable
-> People and agents work from the same source.
-
-- [x] A real editor
-- [ ] Your next document
-`,
-  },
-  {
-    path: "projects/launch-plan.md",
-    markdown: `---
-title: Launch plan
-icon: 🚀
----
-## Before launch
-
-- [x] Product direction
-- [x] Desktop editor
-- [ ] First user workspace
-- [ ] Publish the story
-
-## Decisions
-
-| Decision | Why |
-| --- | --- |
-| Local first | The workspace stays on the user's computer |
-| Text based | People and agents inspect the same source |
-| Individual first | The product must be useful to one person |
-
-Plans change. The record remains.
-`,
-  },
-  {
-    path: "research/agent-workflows.md",
-    markdown: `---
-title: Agent workflows
-icon: 🧠
----
-## A repeatable loop
-
-1. Write the task
-2. Let the agent inspect the workspace
-3. Review the proposed changes
-4. Save the process as a skill
-
-### The contract
-
-Agents get tools. Users set access, ownership, and review requirements.
-
-\`\`\`text
-task -> work -> review -> retained context
-\`\`\`
-`,
-  },
-];
+function tabKind(path: string): TabKind {
+  if (path === APP_TAB) return "app";
+  if (path === COLLECTION_TAB) return "collection";
+  if (path === APP_ENTRY) return "app-source";
+  return "page";
+}
 
 function filename(path: string): string {
   return path.split("/").pop() ?? path;
@@ -144,59 +120,48 @@ function filenameStem(path: string): string {
   return filename(path).replace(/\.md$/i, "");
 }
 
-function initialDrafts(): Record<string, string> {
-  const defaults = Object.fromEntries(
-    DEMO_DOCUMENTS.map((document) => [document.path, document.markdown]),
-  );
+function readStored(key: string): unknown {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (!stored) return defaults;
-    const parsed = JSON.parse(stored) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return defaults;
-    }
-    const restored: Record<string, string> = {};
-    for (const [path, markdown] of Object.entries(parsed)) {
-      if (typeof markdown === "string" && path.endsWith(".md") && !path.split("/").includes("..")) {
-        restored[path] = markdown;
-      }
-    }
-    return Object.keys(restored).length > 0 ? restored : defaults;
+    const stored = localStorage.getItem(key);
+    return stored === null ? undefined : (JSON.parse(stored) as unknown);
   } catch {
     // A blocked or malformed localStorage entry should never stop the demo.
+    return undefined;
   }
-  return defaults;
 }
 
-function persistDrafts(drafts: Record<string, string>): boolean {
+function writeStored(key: string, value: unknown): boolean {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(drafts));
+    localStorage.setItem(key, JSON.stringify(value));
     return true;
   } catch {
     return false;
   }
+}
+
+function initialDrafts(): Record<string, string> {
+  const defaults = Object.fromEntries(DEMO_PAGES.map((page) => [page.path, page.markdown]));
+  const parsed = readStored(STORAGE_KEY);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return defaults;
+  const restored: Record<string, string> = {};
+  for (const [path, markdown] of Object.entries(parsed)) {
+    if (typeof markdown === "string" && path.endsWith(".md") && !path.split("/").includes("..")) {
+      restored[path] = markdown;
+    }
+  }
+  return Object.keys(restored).length > 0 ? restored : defaults;
 }
 
 function initialFolders(): string[] {
-  try {
-    const saved = localStorage.getItem(FOLDERS_STORAGE_KEY);
-    if (saved === null) return ["notes"];
-    const parsed = JSON.parse(saved) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((folder): folder is string => typeof folder === "string")
-      : ["notes"];
-  } catch {
-    return ["notes"];
-  }
+  const parsed = readStored(FOLDERS_STORAGE_KEY);
+  return Array.isArray(parsed)
+    ? parsed.filter((folder): folder is string => typeof folder === "string")
+    : [];
 }
 
-function persistFolders(folders: string[]): boolean {
-  try {
-    localStorage.setItem(FOLDERS_STORAGE_KEY, JSON.stringify(folders));
-    return true;
-  } catch {
-    return false;
-  }
+function initialGuests(): readonly DemoRecord[] {
+  const parsed = readStored(GUESTS_STORAGE_KEY);
+  return isDemoRecordList(parsed) ? parsed : DEMO_GUESTS;
 }
 
 function localStorageIsAvailable(): boolean {
@@ -250,22 +215,26 @@ export function ProductDemo() {
     retryShellError,
     runShellErrorAction,
     clearIdentity,
-  } = useShellError("marketing-demo");
+  } = useShellError(WORKSPACE_ID);
   const reportFailureMessage = useCallback(
     (message: string) => reportShellFailure({ message }),
     [reportShellFailure],
   );
   const [theme, setTheme] = useState<"light" | "dark">(currentTheme);
   const [drafts, setDrafts] = useState<Record<string, string>>(initialDrafts);
-  const [activePath, setActivePath] = useState(
-    () => Object.keys(drafts)[0] ?? DEMO_DOCUMENTS[0].path,
-  );
-  const [openTabs, setOpenTabs] = useState(() => Object.keys(drafts).slice(0, 5));
+  const [activePath, setActivePath] = useState(() => Object.keys(drafts)[0] ?? DEMO_PAGES[0].path);
+  const [openTabs, setOpenTabs] = useState(() => [
+    ...Object.keys(drafts).slice(0, 1),
+    APP_TAB,
+    COLLECTION_TAB,
+  ]);
   const [recentPaths, setRecentPaths] = useState<string[]>([]);
   const [palette, setPalette] = useState<"commands" | "quick-open" | null>(null);
   const [activeActivity, setActiveActivity] = useState<DemoPanelId>("explorer");
   const [sidebarVisible, setSidebarVisible] = useState(initialSidebarVisible);
   const [emptyFolders, setEmptyFolders] = useState<string[]>(initialFolders);
+  const [pinnedPages, setPinnedPages] = useState<string[]>(DEMO_PINNED_PAGES);
+  const [pinnedApps, setPinnedApps] = useState<string[]>([APP_ROOT]);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [showSource, setShowSource] = useState(false);
   const [sourceText, setSourceText] = useState("");
@@ -300,7 +269,19 @@ export function ProductDemo() {
     [reportShellFailure],
   );
 
-  const editorOpen = openTabs.includes(activePath);
+  const [guests] = useState(() =>
+    demoCollectionStore(initialGuests(), (records) => {
+      if (!writeStored(GUESTS_STORAGE_KEY, records)) reportSessionOnly("workspace");
+    }),
+  );
+  const [deletion, setDeletion] = useState<{
+    recordId: string | number;
+    answer(confirmed: boolean): void;
+  } | null>(null);
+
+  const activeTab = openTabs.includes(activePath) ? activePath : null;
+  const activeKind = activeTab === null ? null : tabKind(activeTab);
+  const pageOpen = activeKind === "page";
   const activeFullText = drafts[activePath] ?? "";
   const activeBody = parseFrontmatter(activeFullText).body;
   const documents = useMemo<DemoWorkspaceDocument[]>(
@@ -319,26 +300,26 @@ export function ProductDemo() {
     [drafts],
   );
   const knownFiles = useMemo(
-    () =>
-      documents.map((document) => ({
-        path: document.path,
-        title: document.title,
-      })),
+    () => documents.map((document) => ({ path: document.path, title: document.title })),
+    [documents],
+  );
+  const workspaceFiles = useMemo(
+    () => [...documents, { path: APP_ENTRY }, { path: GUESTS_DATASET_PATH }],
     [documents],
   );
   const fileEntries = useMemo(
     () =>
       new Map(
-        documents.map((document) => [
-          document.path,
+        workspaceFiles.map((file) => [
+          file.path,
           {
-            path: document.path,
+            path: file.path,
             kind: "file" as const,
-            ...(document.icon ? { icon: document.icon } : {}),
+            ...("icon" in file && file.icon ? { icon: file.icon } : {}),
           },
         ]),
       ),
-    [documents],
+    [workspaceFiles],
   );
 
   useEffect(() => {
@@ -358,6 +339,27 @@ export function ProductDemo() {
     return () => window.removeEventListener(DEMO_ASSET_PERSISTENCE_EVENT, markSessionOnly);
   }, [reportSessionOnly]);
 
+  useEffect(() => {
+    const close = openCollectionChangeShell(WORKSPACE_ID, {
+      onError: (fallback, error, retry, identity, quiet, onDismiss) =>
+        reportShellFailure({
+          message: fallback,
+          cause: error,
+          retry,
+          ...(identity !== undefined ? { identity } : {}),
+          ...(quiet ? { quiet } : {}),
+          ...(onDismiss ? { onDismiss } : {}),
+        }),
+      onSettled: clearIdentity,
+      onNotice: (message) => reportShellFailure({ tone: "success", message }),
+    });
+    const end = admitCollectionChanges(WORKSPACE_ID);
+    return () => {
+      end();
+      close();
+    };
+  }, [clearIdentity, reportShellFailure]);
+
   useEffect(
     () => () => {
       if (saveFrame.current !== null) cancelAnimationFrame(saveFrame.current);
@@ -367,11 +369,11 @@ export function ProductDemo() {
   );
 
   useEffect(() => {
-    if (!persistDrafts(drafts)) reportSessionOnly("workspace");
+    if (!writeStored(STORAGE_KEY, drafts)) reportSessionOnly("workspace");
   }, [drafts, reportSessionOnly]);
 
   useEffect(() => {
-    if (!persistFolders(emptyFolders)) reportSessionOnly("workspace");
+    if (!writeStored(FOLDERS_STORAGE_KEY, emptyFolders)) reportSessionOnly("workspace");
   }, [emptyFolders, reportSessionOnly]);
 
   const composeCurrentDocument = useCallback(
@@ -400,9 +402,9 @@ export function ProductDemo() {
   // replaces it, so no edit waits on a frame that never comes.
   const flushActiveDraft = useCallback(() => {
     cancelPendingSave();
-    if (editorOpen) storeDraft(activePath, composeCurrentDocument());
+    if (pageOpen) storeDraft(activePath, composeCurrentDocument());
     setSaveState("saved");
-  }, [activePath, cancelPendingSave, composeCurrentDocument, editorOpen, storeDraft]);
+  }, [activePath, cancelPendingSave, composeCurrentDocument, pageOpen, storeDraft]);
 
   const scheduleSave = useCallback(() => {
     setSaveState("saving");
@@ -430,11 +432,12 @@ export function ProductDemo() {
 
   const openDocument = useCallback(
     (path: string) => {
-      if (path === activePath && editorOpen) return;
+      const target = path === GUESTS_DATASET_PATH ? COLLECTION_TAB : path;
+      if (target === activePath && activeTab !== null) return;
       flushActiveDraft();
-      showDocument(path);
+      showDocument(target);
     },
-    [activePath, editorOpen, flushActiveDraft, showDocument],
+    [activePath, activeTab, flushActiveDraft, showDocument],
   );
 
   // Closing the active tab shows its neighbour, as the desktop does; closing
@@ -471,14 +474,17 @@ export function ProductDemo() {
 
   const openWikilink = useCallback(
     (target: string) => {
-      const normalized = target.replace(/\.md$/i, "");
-      const match =
-        knownFiles.find((file) => file.path.replace(/\.md$/i, "") === normalized) ??
-        knownFiles.find((file) => file.path === target);
-      openDocument(match?.path ?? `${normalized}.md`);
+      const match = resolveDemoWikilink(
+        knownFiles.map((file) => file.path),
+        target,
+      );
+      openDocument(match ?? `${target.trim().replace(/\.md$/i, "")}.md`);
     },
     [knownFiles, openDocument],
   );
+
+  const newPageMarkdown = (title: string) =>
+    `---\ntitle: ${title}\nicon: 📝\n---\nStart writing here. Type **/** for commands or **[[** to link another page.\n`;
 
   const createDocument = useCallback(() => {
     flushActiveDraft();
@@ -486,27 +492,18 @@ export function ProductDemo() {
       collectWorkspacePaths([...Object.keys(draftsRef.current), ...emptyFolders]),
     );
     let index = 1;
-    let path = "notes/quick-note.md";
+    let path = "Untitled.md";
     while (workspacePaths.has(path)) {
       index += 1;
-      path = `notes/quick-note-${index}.md`;
+      path = `Untitled ${index}.md`;
     }
-    storeDraft(
-      path,
-      `---\ntitle: Quick note ${index}\nicon: 📝\n---\nStart writing here. Type **/** for commands or **[[** to link another page.\n`,
-    );
+    storeDraft(path, newPageMarkdown(filenameStem(path)));
     showDocument(path);
   }, [emptyFolders, flushActiveDraft, showDocument, storeDraft]);
 
   const createDocumentAtPath = useCallback(
     (path: string) => {
-      const title = filenameStem(path)
-        .replace(/[-_]+/g, " ")
-        .replace(/\b\w/g, (letter) => letter.toUpperCase());
-      storeDraft(
-        path,
-        `---\ntitle: ${title}\nicon: 📝\n---\nStart writing here. Type **/** for commands or **[[** to link another page.\n`,
-      );
+      storeDraft(path, newPageMarkdown(filenameStem(path)));
       // Explorer calls onOpenFile immediately after the bridge resolves, before
       // React has published the new documents prop. Select it here so the new
       // file still opens in that same interaction.
@@ -517,34 +514,30 @@ export function ProductDemo() {
 
   const moveDraftPath = useCallback(
     (fromPath: string, toPath: string) => {
-      updateDrafts((current) => {
-        return Object.fromEntries(
+      updateDrafts((current) =>
+        Object.fromEntries(
           Object.entries(current).map(([path, markdown]) => [
             rewritePathPrefix(path, fromPath, toPath),
             markdown,
           ]),
-        );
-      });
+        ),
+      );
       setActivePath((current) => rewritePathPrefix(current, fromPath, toPath));
       setEmptyFolders((current) =>
         current.map((path) => rewritePathPrefix(path, fromPath, toPath)),
       );
+      setPinnedPages((current) => current.map((path) => rewritePathPrefix(path, fromPath, toPath)));
     },
     [updateDrafts],
   );
 
   const deleteDraftPath = useCallback(
     (path: string) => {
-      const next = updateDrafts((current) => {
-        const filtered = Object.fromEntries(
+      const next = updateDrafts((current) =>
+        Object.fromEntries(
           Object.entries(current).filter(([entry]) => !isPathAtOrBelow(entry, path)),
-        );
-        if (Object.keys(filtered).length === 0) {
-          const fallback = DEMO_DOCUMENTS[0];
-          filtered[fallback.path] = fallback.markdown;
-        }
-        return filtered;
-      });
+        ),
+      );
       const remainingTabs = openTabs.filter((tab) => !isPathAtOrBelow(tab, path));
       setOpenTabs(remainingTabs);
       if (isPathAtOrBelow(activePath, path)) {
@@ -554,7 +547,7 @@ export function ProductDemo() {
         setActivePath(
           remainingTabs[Math.min(index, remainingTabs.length - 1)] ??
             Object.keys(next)[0] ??
-            DEMO_DOCUMENTS[0].path,
+            DEMO_PAGES[0].path,
         );
         setShowSource(false);
         setSourceText("");
@@ -562,6 +555,7 @@ export function ProductDemo() {
       setEmptyFolders((current) =>
         current.filter((entry) => entry !== path && !entry.startsWith(`${path}/`)),
       );
+      setPinnedPages((current) => current.filter((entry) => !isPathAtOrBelow(entry, path)));
     },
     [activePath, openTabs, updateDrafts],
   );
@@ -585,14 +579,14 @@ export function ProductDemo() {
   );
 
   const toggleSource = useCallback(() => {
-    if (!showSource) {
+    if (!showSource && pageOpen) {
       cancelPendingSave();
       const next = composeCurrentDocument();
       storeDraft(activePath, next);
       setSourceText(next);
     }
     setShowSource((current) => !current);
-  }, [activePath, cancelPendingSave, composeCurrentDocument, showSource, storeDraft]);
+  }, [activePath, cancelPendingSave, composeCurrentDocument, pageOpen, showSource, storeDraft]);
 
   const selectActivity = useCallback(
     (next: DemoPanelId) => {
@@ -628,12 +622,8 @@ export function ProductDemo() {
       command("new-file", createDocument),
       command("quick-open", () => setPalette("quick-open")),
       command("toggle-sidebar", toggleSidebar),
-      ...(editorOpen
-        ? [
-            command("close-tab", () => closeTab(activePath)),
-            command("toggle-markdown-source", toggleSource),
-          ]
-        : []),
+      ...(activeTab !== null ? [command("close-tab", () => closeTab(activeTab))] : []),
+      ...(pageOpen ? [command("toggle-markdown-source", toggleSource)] : []),
       ...(openTabs.length > 1
         ? [
             command("next-tab", () => showNeighbourTab(1)),
@@ -648,11 +638,11 @@ export function ProductDemo() {
       ),
     ];
   }, [
-    activePath,
+    activeTab,
     closeTab,
     createDocument,
-    editorOpen,
     openTabs.length,
+    pageOpen,
     showNeighbourTab,
     toggleSidebar,
     toggleSource,
@@ -672,8 +662,8 @@ export function ProductDemo() {
               ? toggleSidebar
               : id === "new-file"
                 ? createDocument
-                : id === "close-tab" && editorOpen
-                  ? () => closeTab(activePath)
+                : id === "close-tab" && activeTab !== null
+                  ? () => closeTab(activeTab)
                   : id === "next-tab"
                     ? () => showNeighbourTab(1)
                     : id === "previous-tab"
@@ -681,25 +671,196 @@ export function ProductDemo() {
                       : null;
       if (!run) return;
       event.preventDefault();
-      run();
+      if (!deletion) run();
     },
-    [activePath, closeTab, createDocument, editorOpen, showNeighbourTab, toggleSidebar],
+    [activeTab, closeTab, createDocument, deletion, showNeighbourTab, toggleSidebar],
   );
 
   const createFolder = useCallback((path: string) => {
     setEmptyFolders((current) => (current.includes(path) ? current : [...current, path]));
   }, []);
 
+  const togglePinnedPage = useCallback((path: string) => {
+    setPinnedPages((current) =>
+      current.includes(path) ? current.filter((entry) => entry !== path) : [...current, path],
+    );
+  }, []);
+
+  const setAppPinned = useCallback((appRoot: string, pinned: boolean) => {
+    setPinnedApps((current) =>
+      pinned
+        ? current.includes(appRoot)
+          ? current
+          : [...current, appRoot]
+        : current.filter((entry) => entry !== appRoot),
+    );
+  }, []);
+
+  const newCollection = useCallback(
+    () =>
+      reportShellFailure({
+        tone: "warning",
+        identity: "demo-new-collection",
+        message: "The demo has one Collection. Download dohc to make your own.",
+      }),
+    [reportShellFailure],
+  );
+
   useLayoutEffect(() => {
     configureDemoDesktopBridge({
       documents,
       folders: emptyFolders,
+      fixedPaths: [APP_ENTRY, GUESTS_DATASET_PATH],
       createFile: createDocumentAtPath,
       createFolder,
       movePath: moveDraftPath,
       deletePath: deleteDraftPath,
     });
   }, [createDocumentAtPath, createFolder, deleteDraftPath, documents, emptyFolders, moveDraftPath]);
+
+  const sourceToggle = (labels: { shown: string; hidden: string }) => ({
+    label: showSource ? labels.shown : labels.hidden,
+    testId: "markdown-edit-toggle",
+    onClick: toggleSource,
+  });
+
+  let view: React.ReactNode;
+  if (activeKind === "page") {
+    view = (
+      <>
+        <ViewActions
+          actions={
+            <ShellErrorReporter.Provider value={reportShellFailure}>
+              <ShellNoticeClear.Provider value={clearIdentity}>
+                <DocumentControls
+                  toggle={sourceToggle({ shown: "WYSIWYG", hidden: "Source" })}
+                  menu={{
+                    workspaceId: WORKSPACE_ID,
+                    path: activePath,
+                    suggestedName: filenameStem(activePath),
+                    getMarkdown: () => composeCurrentDocument(),
+                  }}
+                />
+              </ShellNoticeClear.Provider>
+            </ShellErrorReporter.Provider>
+          }
+        />
+        {showSource ? (
+          <textarea
+            className="demo-source"
+            value={sourceText}
+            readOnly
+            spellCheck={false}
+            aria-label="Read-only Markdown source"
+          />
+        ) : null}
+        <div
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          data-dohc-doc-pane=""
+          hidden={showSource}
+        >
+          <div className="group/topmatter">
+            <PageIdentity
+              body={activeFullText}
+              onChange={updateIdentity}
+              filenameStem={filenameStem(activePath)}
+              onEnterBody={() => editorRef.current?.focus("start")}
+            />
+            <PropertiesPanel
+              body={activeFullText}
+              onChange={updateIdentity}
+              onShowSource={toggleSource}
+            />
+          </div>
+          <MarkdownEditor
+            key={activePath}
+            ref={editorRef}
+            value={activeBody}
+            onDirty={scheduleSave}
+            workspaceId={WORKSPACE_ID}
+            path={activePath}
+            knownFiles={knownFiles}
+            onOpenWikilink={openWikilink}
+            resolveWorkspaceAssetUrl={resolveDemoWorkspaceAssetUrl}
+            collab={null}
+          />
+        </div>
+      </>
+    );
+  } else if (activeKind === "app") {
+    view = (
+      <>
+        <ViewActions
+          actions={
+            <DocumentControls
+              toggle={sourceToggle({ shown: "App", hidden: "Source" })}
+              menu={null}
+            />
+          }
+        />
+        {showSource && (
+          <textarea
+            className="demo-source"
+            value={APP_SOURCE}
+            readOnly
+            spellCheck={false}
+            aria-label={`Read-only source of ${APP_ENTRY}`}
+          />
+        )}
+        <iframe
+          title={APP_TITLE}
+          hidden={showSource}
+          sandbox="allow-scripts allow-forms"
+          srcDoc={appDocument(theme)}
+          className="demo-app min-h-0 flex-1 border-0 bg-bg"
+        />
+      </>
+    );
+  } else if (activeKind === "app-source") {
+    view = (
+      <textarea
+        className="demo-source"
+        value={APP_SOURCE}
+        readOnly
+        spellCheck={false}
+        aria-label={`Read-only source of ${APP_ENTRY}`}
+      />
+    );
+  } else if (activeKind === "collection") {
+    view = (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <TransactionalCollectionPage
+          workspaceId={WORKSPACE_ID}
+          dataset={GUESTS_DATASET}
+          tableId={GUESTS_TABLE_ID}
+          invoke={guests.invoke}
+          onError={(fallback, error, retry, identity) =>
+            reportShellFailure({
+              message: fallback,
+              cause: error,
+              retry,
+              ...(identity !== undefined ? { identity } : {}),
+            })
+          }
+          onSettled={clearIdentity}
+          onNotice={(message) => reportShellFailure({ tone: "success", message })}
+          confirmDelete={(row) =>
+            new Promise((answer) => setDeletion({ recordId: row.id, answer }))
+          }
+        />
+      </div>
+    );
+  } else {
+    view = (
+      <EmptyEditorGroup
+        platform={window.dohcDesktop?.platform}
+        create={{ markdown: createDocument }}
+        recent={recentPaths}
+        files={documents}
+        onOpen={openDocument}
+      />
+    );
+  }
 
   return (
     <div
@@ -735,7 +896,7 @@ export function ProductDemo() {
           }}
           notices={
             <NoticeCenter
-              workspaceId="marketing-demo"
+              workspaceId={WORKSPACE_ID}
               syncStatus={null}
               agentActive={false}
               conflictSummaries={[]}
@@ -763,8 +924,14 @@ export function ProductDemo() {
           visible={sidebarVisible}
           documents={documents}
           folders={emptyFolders}
-          activePath={editorOpen ? activePath : null}
+          activePath={activeTab}
           openTabs={openTabs}
+          tabLabels={TAB_LABELS}
+          pinnedPages={pinnedPages}
+          pinnedApps={pinnedApps}
+          onTogglePinnedPage={togglePinnedPage}
+          onSetAppPinned={setAppPinned}
+          onNewCollection={newCollection}
           onOpenDocument={openDocument}
           onCloseTab={closeTab}
           onCloseAllTabs={closeAllTabs}
@@ -782,9 +949,10 @@ export function ProductDemo() {
                 groupId={DEMO_EDITOR_GROUP_ID}
                 groupNumber={1}
                 tabs={openTabs.map((path) => ({ path }))}
-                activeTab={editorOpen ? activePath : null}
-                activeTabDirty={saveState === "saving"}
+                activeTab={activeTab}
+                activeTabDirty={pageOpen && saveState === "saving"}
                 files={fileEntries}
+                tabLabels={TAB_LABELS}
                 recoveryPaths={NO_PATHS}
                 onActivate={(_groupId, path) => openDocument(path)}
                 onClose={(_groupId, path) => closeTab(path)}
@@ -795,89 +963,33 @@ export function ProductDemo() {
               />
             )}
           >
-            {editorOpen ? (
-              <>
-                <ViewActions
-                  actions={
-                    <ShellErrorReporter.Provider value={reportShellFailure}>
-                      <ShellNoticeClear.Provider value={clearIdentity}>
-                        <DocumentControls
-                          toggle={{
-                            label: showSource ? "WYSIWYG" : "Source",
-                            testId: "markdown-edit-toggle",
-                            onClick: toggleSource,
-                          }}
-                          menu={{
-                            workspaceId: "marketing-demo",
-                            path: activePath,
-                            suggestedName: filenameStem(activePath),
-                            getMarkdown: () => composeCurrentDocument(),
-                          }}
-                        />
-                      </ShellNoticeClear.Provider>
-                    </ShellErrorReporter.Provider>
-                  }
-                />
-                {showSource ? (
-                  <textarea
-                    className="demo-source"
-                    value={sourceText}
-                    readOnly
-                    spellCheck={false}
-                    aria-label="Read-only markdown source"
-                  />
-                ) : null}
-                <div
-                  className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
-                  data-dohc-doc-pane=""
-                  hidden={showSource}
-                >
-                  <div className="group/topmatter">
-                    <PageIdentity
-                      body={activeFullText}
-                      onChange={updateIdentity}
-                      filenameStem={filenameStem(activePath)}
-                      onEnterBody={() => editorRef.current?.focus("start")}
-                    />
-                    <PropertiesPanel
-                      body={activeFullText}
-                      onChange={updateIdentity}
-                      onShowSource={toggleSource}
-                    />
-                  </div>
-                  <MarkdownEditor
-                    key={activePath}
-                    ref={editorRef}
-                    value={activeBody}
-                    onDirty={scheduleSave}
-                    workspaceId="marketing-demo"
-                    path={activePath}
-                    knownFiles={knownFiles}
-                    onOpenWikilink={openWikilink}
-                    resolveWorkspaceAssetUrl={resolveDemoWorkspaceAssetUrl}
-                    collab={null}
-                  />
-                </div>
-              </>
-            ) : (
-              <EmptyEditorGroup
-                platform={window.dohcDesktop?.platform}
-                create={{ markdown: createDocument }}
-                recent={recentPaths}
-                files={documents}
-                onOpen={openDocument}
-              />
-            )}
+            {view}
           </EditorGroupFrame>
         </main>
       </div>
+      {deletion ? (
+        <div className="demo-overlay">
+          <DeleteCollectionRecordDialog
+            collectionName={GUESTS_DATASET.name}
+            recordId={deletion.recordId}
+            onCancel={() => {
+              deletion.answer(false);
+              setDeletion(null);
+            }}
+            onConfirm={() => {
+              deletion.answer(true);
+              setDeletion(null);
+            }}
+          />
+        </div>
+      ) : null}
       {palette ? (
         <div className="demo-overlay">
           {palette === "quick-open" ? (
             <QuickOpenPalette
-              files={documents}
+              files={workspaceFiles}
               recent={recentPaths}
-              pinned={[]}
+              pinned={pinnedPages}
               onOpenPath={openDocument}
               onClose={() => setPalette(null)}
             />

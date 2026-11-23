@@ -15,7 +15,7 @@ function run(events: UpdateEvent[], from: UpdateState = initialUpdateState): Upd
 describe("updateMachine", () => {
   it("starts idle with a user-visible message", () => {
     expect(initialUpdateState.status).toBe("idle");
-    expect(initialUpdateState.message).toMatch(/not been checked/);
+    expect(initialUpdateState.message).toMatch(/has not checked/);
   });
 
   it("walks the full path: check → available → download → downloading → ready", () => {

@@ -15,7 +15,7 @@ import { SettingRow } from "./SettingRow";
 export const PRIVATE_NETWORK_EXPLANATION =
   "Everyone you share with needs access to this private network, from every device they use.";
 export const DISCONNECT_EXPLANATION =
-  "Stops sync for every workspace on this machine. Your files stay where they are.";
+  "Stops sync for every workspace on this computer. Your files stay where they are. Offline copies of your Collections stay readable here until another account connects.";
 
 // Sign-ins this window has heard of, counted by one listener for the life of
 // the window. Main announces a logout with no session, and every sign-in
@@ -111,9 +111,7 @@ export function CloudAccountRow(props: {
       }
       description={
         <span className="flex flex-wrap items-center gap-x-2">
-          <span data-testid="cloud-connected-server" className="font-mono">
-            {server}
-          </span>
+          <span data-testid="cloud-connected-server">{server}</span>
           {props.networkAccess === "private" ? (
             <Explained
               explanation={PRIVATE_NETWORK_EXPLANATION}

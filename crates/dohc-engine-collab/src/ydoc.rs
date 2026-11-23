@@ -29,6 +29,7 @@
 //!    state unchanged, and the caller persists only bytes an apply accepted.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -37,15 +38,17 @@ use yrs::types::text::{TextDiffChunk, YChange};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{
-    Any, Array, Doc, GetString, IdSet, Map, Options, Out, ReadTxn, StateVector, Text, Transact,
-    Update, Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim,
+    Any, Array, Doc, GetString, IdSet, Map, MapRef, Options, Out, ReadTxn, StateVector, Text,
+    Transact, Update, Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim,
 };
 
 use crate::error::CollabError;
 use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
+mod body_sequence;
 mod bounded_encoder;
 mod frontmatter_yaml;
+mod inline_reading;
 #[cfg(test)]
 mod nested_markdown_contract_tests;
 #[cfg(test)]
@@ -95,12 +98,30 @@ pub(crate) fn reader_source_meta_key(key: &str) -> bool {
 pub const ROOT_BODY: &str = "body";
 /// The plaintext-document body: a single `Y.Text`.
 pub const ROOT_PLAINTEXT: &str = "plainText";
+/// A format-2 note's body: one `Y.Text` of letters, block boundaries, and
+/// inline items (`docs/engineering/note-body-sequence.md`).
+pub const ROOT_SEQUENCE: &str = "sequence";
+/// A format-2 note's container records: a `Y.Map` keyed `<id>` and
+/// `<id>.<attribute>`.
+pub const ROOT_CONTAINERS: &str = "containers";
 /// Immutable Excalidraw element snapshots, keyed by revision tuple JSON.
 pub const ROOT_SCENE_REVISIONS: &str = "excalidraw:revisions";
 /// Excalidraw app-state properties, keyed by property name.
 pub const ROOT_SCENE_APP_STATE: &str = "excalidraw:app-state";
 /// Durable Excalidraw asset metadata, keyed by file id.
 pub const ROOT_SCENE_ASSETS: &str = "excalidraw:assets";
+
+/// The engine's setting for format-2 notes. An engine started with this
+/// environment variable set to `1` reads a note whose `meta.schemaVersion`
+/// is 2 from [`ROOT_SEQUENCE`] and [`ROOT_CONTAINERS`], and admits it as a
+/// public baseline. Any other engine refuses such a note as a baseline and
+/// writes what is under [`ROOT_BODY`].
+pub const BODY_SEQUENCE_SETTING: &str = "DOHC_ENGINE_NOTE_BODY_SEQUENCE";
+
+fn body_sequence_setting() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var(BODY_SEQUENCE_SETTING).is_ok_and(|value| value == "1"))
+}
 
 /// Which offset mode a `Doc` is built with. `Utf16` is the only wire-safe mode;
 /// `Bytes` exists solely so the pinned divergence probe can demonstrate the
@@ -424,6 +445,7 @@ pub struct MarkdownSourceReference {
 /// A wire-facing durable Y.Doc.
 pub struct Ydoc {
     doc: Doc,
+    reads_body_sequence: bool,
 }
 
 impl std::fmt::Debug for Ydoc {
@@ -476,7 +498,32 @@ impl Ydoc {
         doc.get_or_insert_map(ROOT_SCENE_REVISIONS);
         doc.get_or_insert_map(ROOT_SCENE_APP_STATE);
         doc.get_or_insert_map(ROOT_SCENE_ASSETS);
-        Ydoc { doc }
+        Ydoc {
+            doc,
+            reads_body_sequence: body_sequence_setting(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reading_body_sequence(mut self) -> Self {
+        self.reads_body_sequence = true;
+        self
+    }
+
+    fn body_sequence_roots(&self) -> Option<(yrs::TextRef, MapRef)> {
+        if !self.reads_body_sequence {
+            return None;
+        }
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let reading = self.doc.transact();
+        let version = body_sequence::stored_under(&meta, "schemaVersion");
+        drop(reading);
+        if !matches!(version, Some(Any::Number(2.0))) {
+            return None;
+        }
+        let sequence = self.doc.get_or_insert_text(ROOT_SEQUENCE);
+        let containers = self.doc.get_or_insert_map(ROOT_CONTAINERS);
+        Some((sequence, containers))
     }
 
     /// Validate an update without mutating any doc: decode the whole v1 update.
@@ -782,14 +829,22 @@ impl Ydoc {
     fn validate_public_baseline_as(&self, bytes: &[u8], reader: bool) -> Result<(), CollabError> {
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let sequence_roots = self.body_sequence_roots();
+        let sequence_note = sequence_roots.is_some();
         let txn = self.doc.transact();
         let invalid = || CollabError::MalformedUpdate {
             reason: "invalid public baseline schema".into(),
         };
+        if let Some((sequence, containers)) = &sequence_roots {
+            if !body_sequence::roots_hold_only_their_own_items(&body, sequence, containers) {
+                return Err(invalid());
+            }
+        }
         for (name, root) in txn.root_refs() {
             match name {
                 ROOT_META | ROOT_FRONTMATTER | ROOT_BODY => {}
+                ROOT_SEQUENCE | ROOT_CONTAINERS if sequence_note => {}
                 ROOT_SCENE_REVISIONS | ROOT_SCENE_APP_STATE | ROOT_SCENE_ASSETS => {
                     if !matches!(root, Out::YMap(ref map) if map.len(&txn) == 0) {
                         return Err(invalid());
@@ -820,7 +875,8 @@ impl Ydoc {
                     (key, &value),
                     (MARKDOWN_SOURCE_READER_META_KEY, Out::Any(Any::Number(1.0)))
                 );
-            if !valid && !item_record && !reader_meta {
+            let sequence_version = sequence_note && key == "schemaVersion";
+            if !valid && !item_record && !reader_meta && !sequence_version {
                 return Err(invalid());
             }
         }
@@ -1243,7 +1299,9 @@ impl Ydoc {
         let frontmatter = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let roots = self.body_sequence_roots();
         let txn = self.doc.transact();
+        let sequence = roots.filter(|roots| body_sequence::holds_the_body(&roots.0, &body));
         let uses_crlf = matches!(
             meta.get(&txn, MARKDOWN_CRLF_META_KEY),
             Some(Out::Any(Any::Bool(true)))
@@ -1279,12 +1337,24 @@ impl Ydoc {
                 frontmatter_yaml.push_str(entry)?;
             }
         }
-        let children: Vec<MarkdownNode> = body
-            .children(&txn)
-            .map(|child| {
-                markdown_node(&txn, child, 0, &mut remaining_nodes, &mut source_text_bytes)
-            })
-            .collect::<ProjectionResult<_>>()?;
+        let mut children = Vec::new();
+        if let Some((sequence, containers)) = &sequence {
+            children = body_sequence::blocks(
+                &txn,
+                sequence,
+                containers,
+                &mut remaining_nodes,
+                &mut source_text_bytes,
+            )?;
+        } else {
+            for child in body.children(&txn) {
+                let child =
+                    markdown_node(&txn, child, 0, &mut remaining_nodes, &mut source_text_bytes)?;
+                if !empty_list_or_item(&child) {
+                    children.push(child);
+                }
+            }
+        }
         let body_markdown = markdown_document(&children)?;
         if let Some(Out::Any(Any::String(source))) = meta.get(&txn, FRONTMATTER_SOURCE_META_KEY) {
             let written = written_frontmatter_keys(&frontmatter, &meta, &txn);
@@ -1678,8 +1748,10 @@ impl Ydoc {
                     // A live note keeps every block it deletes, so an outside
                     // save keeps the blocks it left alone at either end and
                     // adds only what changed.
+                    let inline = reading != MarkdownReading::Successor
+                        && inline_reading_fits::<_, WIRE_SEED>(&*txn, &map, &blocks);
                     let (start, end) = if file_fold {
-                        unchanged_ends::<_, WIRE_SEED>(&*txn, &frag, &blocks)
+                        unchanged_ends::<_, WIRE_SEED>(&*txn, &frag, &blocks, inline)
                     } else {
                         (0, 0)
                     };
@@ -1691,7 +1763,7 @@ impl Ydoc {
                         .iter()
                         .rev()
                     {
-                        insert_md_block::<_, WIRE_SEED>(txn, &frag, start, block);
+                        insert_md_block::<_, WIRE_SEED>(txn, &frag, start, block, inline);
                     }
                 };
                 if WIRE_SEED {
@@ -4846,13 +4918,60 @@ fn parse_list<'src>(
     Some((block, at))
 }
 
+fn inline_reading_fits<T: ReadTxn, const WIRE_DEFAULTS: bool>(
+    txn: &T,
+    frontmatter: &MapRef,
+    blocks: &[MdBlock<'_>],
+) -> bool {
+    let mut remaining = MAX_PROJECTION_NODES;
+    let mut bytes = 0;
+    let frontmatter_fits = frontmatter.iter(txn).all(|(key, value)| {
+        checked_projection_len(bytes, key.len()).is_ok_and(|total| {
+            bytes = total;
+            projection_frontmatter_value(txn, value, 0, &mut remaining, &mut bytes).is_ok()
+        })
+    });
+    if !frontmatter_fits {
+        return false;
+    }
+    let scratch = yrs::Doc::new();
+    let body = scratch.get_or_insert_xml_fragment(ROOT_BODY);
+    let mut scratch_txn = scratch.transact_mut();
+    for block in blocks.iter().rev() {
+        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &body, 0, block, true);
+    }
+    body.children(&scratch_txn)
+        .all(|child| markdown_node(&scratch_txn, child, 0, &mut remaining, &mut bytes).is_ok())
+}
+
 fn insert_md_paragraph<F: XmlFragment>(
     txn: &mut yrs::TransactionMut<'_>,
     parent: &F,
     index: u32,
     text: &str,
+    inline: bool,
 ) {
     let el = parent.insert(txn, index, XmlElementPrelim::empty("paragraph"));
+    if let Some(pieces) = inline
+        .then(|| inline_reading::read_inline(text, true))
+        .flatten()
+    {
+        inline_reading::insert_pieces(txn, &el, &pieces);
+        return;
+    }
+    insert_md_paragraph_text(txn, &el, text);
+}
+
+fn insert_md_cell<F: XmlFragment>(txn: &mut yrs::TransactionMut<'_>, parent: &F, text: &str) {
+    let el = parent.insert(txn, 0, XmlElementPrelim::empty("paragraph"));
+    insert_md_paragraph_text(txn, &el, text);
+}
+
+fn insert_md_paragraph_text(
+    txn: &mut yrs::TransactionMut<'_>,
+    el: &yrs::XmlElementRef,
+    text: &str,
+) {
     let spans = if text.contains("&#") {
         inline_code_spans(text)
     } else {
@@ -4892,11 +5011,12 @@ fn insert_md_list_item<F: XmlFragment, const WIRE_DEFAULTS: bool>(
     txn: &mut yrs::TransactionMut<'_>,
     parent: &F,
     item: &MdListItem<'_>,
+    inline: bool,
 ) {
     for block in item.blocks().iter().rev() {
-        insert_md_block::<_, WIRE_DEFAULTS>(txn, parent, 0, block);
+        insert_md_block::<_, WIRE_DEFAULTS>(txn, parent, 0, block, inline);
     }
-    insert_md_paragraph(txn, parent, 0, &item.paragraph);
+    insert_md_paragraph(txn, parent, 0, &item.paragraph, inline);
 }
 
 fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
@@ -4904,18 +5024,27 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
     parent: &F,
     index: u32,
     block: &MdBlock<'_>,
+    inline: bool,
 ) {
     match block {
-        MdBlock::Paragraph(text) => insert_md_paragraph(txn, parent, index, text),
+        MdBlock::Paragraph(text) => insert_md_paragraph(txn, parent, index, text, inline),
         MdBlock::Heading { level, text } => {
             let el = parent.insert(txn, index, XmlElementPrelim::empty("heading"));
             el.insert_attribute(txn, "level", *level);
-            el.insert(txn, 0, XmlTextPrelim::new(text.as_str()));
+            match inline
+                .then(|| inline_reading::read_inline(text, false))
+                .flatten()
+            {
+                Some(pieces) => inline_reading::insert_pieces(txn, &el, &pieces),
+                None => {
+                    el.insert(txn, 0, XmlTextPrelim::new(text.as_str()));
+                }
+            }
         }
         MdBlock::Quote(children) => {
             let el = parent.insert(txn, index, XmlElementPrelim::empty("blockquote"));
             for child in children.iter().rev() {
-                insert_md_block::<_, WIRE_DEFAULTS>(txn, &el, 0, child);
+                insert_md_block::<_, WIRE_DEFAULTS>(txn, &el, 0, child, inline);
             }
         }
         MdBlock::BulletList(items) => {
@@ -4924,13 +5053,13 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
                 MdBulletItems::Plain(items) => {
                     for text in items.iter().rev() {
                         let li = el.insert(txn, 0, XmlElementPrelim::empty("listItem"));
-                        insert_md_paragraph(txn, &li, 0, text);
+                        insert_md_paragraph(txn, &li, 0, text, inline);
                     }
                 }
                 MdBulletItems::Blocks(items) => {
                     for item in items.iter().rev() {
                         let li = el.insert(txn, 0, XmlElementPrelim::empty("listItem"));
-                        insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item);
+                        insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item, inline);
                     }
                 }
             }
@@ -4940,7 +5069,7 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
             el.insert_attribute(txn, "start", *start);
             for item in items.iter().rev() {
                 let li = el.insert(txn, 0, XmlElementPrelim::empty("listItem"));
-                insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item);
+                insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item, inline);
             }
         }
         MdBlock::TaskList(items) => {
@@ -4948,7 +5077,7 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
             for (checked, item) in items.iter().rev() {
                 let li = el.insert(txn, 0, XmlElementPrelim::empty("taskItem"));
                 li.insert_attribute(txn, "checked", *checked);
-                insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item);
+                insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item, inline);
             }
         }
         MdBlock::CodeBlock { language, content } => {
@@ -4992,7 +5121,7 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
                     // with pipe escaping and the projector's one layer of
                     // entity encoding undone.
                     let text = decode_html_entities_once(&text.replace("\\|", "|"));
-                    insert_md_paragraph(txn, &cell, 0, &text);
+                    insert_md_cell(txn, &cell, &text);
                 }
             }
         }
@@ -5150,6 +5279,7 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     txn: &T,
     body: &yrs::XmlFragmentRef,
     blocks: &[MdBlock<'_>],
+    inline: bool,
 ) -> (u32, u32) {
     let len = body.len(txn);
     if len == 0 || blocks.is_empty() {
@@ -5168,7 +5298,7 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     let mut kept = |old: &XmlOut, block: &MdBlock<'_>| {
         let before = fresh.len(&scratch_txn);
         count_fold_work!(built);
-        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block);
+        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block, inline);
         if fresh.len(&scratch_txn) != before + 1 {
             return false;
         }
@@ -5295,6 +5425,8 @@ fn consume_projection_value_node(
 ) -> ProjectionResult<()> {
     if depth > MAX_PROJECTION_DEPTH || *remaining_nodes == 0 {
         return Err(CollabError::ProjectionTooComplex {
+            depth,
+            nodes_left: *remaining_nodes,
             max_depth: MAX_PROJECTION_DEPTH,
             max_nodes: MAX_PROJECTION_NODES,
         });
@@ -5402,6 +5534,7 @@ thread_local! {
     static INLINE_PARTS_MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static EMPTY_LINK_READER_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LITERAL_LINKS_WRITTEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MARK_VALUES_COMPARED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn append_admitted_projection_text(target: &mut String, text: &str) {
@@ -5964,10 +6097,33 @@ impl Clone for TextRun {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 struct MarkdownMark {
     kind: MarkKind,
-    attrs: Value,
+    attrs: Arc<Value>,
+}
+
+impl MarkdownMark {
+    fn new(kind: MarkKind, attrs: Value) -> Self {
+        Self {
+            kind,
+            attrs: Arc::new(attrs),
+        }
+    }
+}
+
+impl PartialEq for MarkdownMark {
+    fn eq(&self, other: &Self) -> bool {
+        if self.kind != other.kind {
+            return false;
+        }
+        if Arc::ptr_eq(&self.attrs, &other.attrs) {
+            return true;
+        }
+        #[cfg(test)]
+        MARK_VALUES_COMPARED.with(|count| count.set(count.get() + 1));
+        self.attrs == other.attrs
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -6020,6 +6176,18 @@ struct RenderContext<'a> {
     table_cell: bool,
 }
 
+fn empty_list_or_item(node: &MarkdownNode) -> bool {
+    matches!(
+        node,
+        MarkdownNode::Element { tag, children, .. }
+            if children.is_empty()
+                && matches!(
+                    tag.as_str(),
+                    "bulletList" | "orderedList" | "taskList" | "listItem" | "taskItem"
+                )
+    )
+}
+
 fn markdown_node<T: ReadTxn>(
     txn: &T,
     node: XmlOut,
@@ -6027,13 +6195,7 @@ fn markdown_node<T: ReadTxn>(
     remaining_nodes: &mut usize,
     source_text_bytes: &mut usize,
 ) -> ProjectionResult<MarkdownNode> {
-    if depth > MAX_PROJECTION_DEPTH || *remaining_nodes == 0 {
-        return Err(CollabError::ProjectionTooComplex {
-            max_depth: MAX_PROJECTION_DEPTH,
-            max_nodes: MAX_PROJECTION_NODES,
-        });
-    }
-    *remaining_nodes -= 1;
+    consume_projection_value_node(depth, remaining_nodes)?;
     match node {
         XmlOut::Text(text) => {
             let mut runs = Vec::new();
@@ -6092,7 +6254,9 @@ fn markdown_node<T: ReadTxn>(
                 let child =
                     markdown_node(txn, child, depth + 1, remaining_nodes, source_text_bytes)?;
                 // An empty text piece writes nothing; its line is still an empty line.
-                if !matches!(&child, MarkdownNode::Text(runs) if runs.is_empty()) {
+                if !matches!(&child, MarkdownNode::Text(runs) if runs.is_empty())
+                    && !empty_list_or_item(&child)
+                {
                     children.push(child);
                 }
             }
@@ -6206,10 +6370,8 @@ fn push_mark(
     source_text_bytes: &mut usize,
 ) -> ProjectionResult<()> {
     if let Some(attrs) = attrs {
-        marks.push(MarkdownMark {
-            kind,
-            attrs: projection_any_to_json(attrs, depth, remaining_nodes, source_text_bytes)?,
-        });
+        let attrs = projection_any_to_json(attrs, depth, remaining_nodes, source_text_bytes)?;
+        marks.push(MarkdownMark::new(kind, attrs));
     }
     Ok(())
 }
@@ -7870,7 +8032,9 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
                     raw.push_str(GFM_TABLE_CELL_BLOCK_SEPARATOR)?;
                 }
                 let rendered = render_table_cell_block(child, tag, attrs, children, index)?;
-                raw.push_str(&rendered)?;
+                // Per block, as Tiptap renders a cell, so a backtick in one
+                // block doesn't open a code span in the next.
+                raw.push_str(&write_table_cell_breaks(&rendered))?;
             }
             let text = collapse_js_whitespace(&table_cell_line_breaks(
                 &prepare_rendered_table_cell(&raw.into_string())?,
@@ -7994,13 +8158,65 @@ fn render_table_cell_block(
     )
 }
 
+/// Writes a break spelled in a cell's text as `<br>`, as the TypeScript
+/// writer does. A code span keeps its text as written, so a break spelled
+/// there stays. Both writers find code spans by the same rule, which doesn't
+/// skip link addresses, autolinks or raw HTML: a backtick in one of them can
+/// pair with a later code span's.
+fn write_table_cell_breaks(markdown: &str) -> String {
+    let spelled = |text: &str| {
+        text.replace("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
+            .replace("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
+    };
+    let bytes = markdown.as_bytes();
+    let mut output = String::with_capacity(markdown.len());
+    let (mut plain, mut at) = (0, 0);
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'`' => {
+                let opened = at;
+                while bytes.get(at) == Some(&b'`') {
+                    at += 1;
+                }
+                if let Some(close) = closing_backtick_run(bytes, at, at - opened) {
+                    output.push_str(&spelled(&markdown[plain..opened]));
+                    output.push_str(&markdown[opened..close]);
+                    at = close;
+                    plain = close;
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    output.push_str(&spelled(&markdown[plain..]));
+    output
+}
+
+/// The end of the first run of exactly `length` backticks from `from`, which
+/// closes a code span.
+fn closing_backtick_run(bytes: &[u8], from: usize, length: usize) -> Option<usize> {
+    let mut at = from;
+    while at < bytes.len() {
+        if bytes[at] != b'`' {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while bytes.get(at) == Some(&b'`') {
+            at += 1;
+        }
+        if at - start == length {
+            return Some(at);
+        }
+    }
+    None
+}
+
 fn prepare_rendered_table_cell(markdown: &str) -> ProjectionResult<String> {
-    let normalized = markdown
-        .replace("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
-        .replace("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR);
     let mut output = ProjectionBuffer::new();
     let mut preceding_backslashes = 0usize;
-    for character in normalized.chars() {
+    for character in markdown.chars() {
         if character == '|' && preceding_backslashes % 2 == 0 {
             output.push('\\')?;
         }
@@ -8094,6 +8310,21 @@ fn render_inline(
                 MarkdownNode::Fragment(children) => flatten(children, parts),
                 MarkdownNode::Element { .. } => parts.push(SourceInlinePart::Node(node)),
             }
+        }
+    }
+
+    fn share_marks_equal_to_the_run_before(parts: &mut [InlinePart<'_>]) {
+        let mut before: Vec<MarkdownMark> = Vec::new();
+        for part in parts {
+            let InlinePart::Text { run, .. } = part else {
+                continue;
+            };
+            for mark in &mut run.marks {
+                if let Some(same) = before.iter().find(|same| **same == *mark) {
+                    mark.attrs = Arc::clone(&same.attrs);
+                }
+            }
+            before.clone_from(&run.marks);
         }
     }
 
@@ -8635,7 +8866,7 @@ fn render_inline(
         let mut end = source_index;
         while let Some(SourceInlinePart::Text(candidate)) = source_parts.get(end) {
             if active_mark(&candidate.marks, MarkKind::Code)
-                .is_none_or(|candidate_code| candidate_code.attrs != code_mark.attrs)
+                .is_none_or(|candidate_code| candidate_code != code_mark)
             {
                 break;
             }
@@ -8655,6 +8886,7 @@ fn render_inline(
         });
         source_index = end;
     }
+    share_marks_equal_to_the_run_before(&mut parts);
 
     if !code_context {
         let raw_html = raw_html_replacements(&parts, table_cell, definition)?;
@@ -9252,9 +9484,7 @@ fn has_mark(marks: &[MarkdownMark], kind: MarkKind) -> bool {
 }
 
 fn contains_same_mark(marks: &[MarkdownMark], expected: &MarkdownMark) -> bool {
-    marks
-        .iter()
-        .any(|mark| mark.kind == expected.kind && mark.attrs == expected.attrs)
+    marks.contains(expected)
 }
 
 fn active_mark(marks: &[MarkdownMark], kind: MarkKind) -> Option<&MarkdownMark> {
@@ -9691,6 +9921,35 @@ mod projection_tests {
         remote
     }
     #[test]
+    fn splitting_a_run_into_more_pieces_compares_no_more_mark_values() {
+        let values_compared_writing = |lines: usize| {
+            let source = Ydoc::wire();
+            let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            {
+                let mut txn = source.doc.transact_mut();
+                let paragraph = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+                let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+                let link = json_to_any(&json!({ "href": "https://example.com" }));
+                let linked = Attrs::from([("link".into(), link.clone())]);
+                let bold = json_to_any(&json!({}));
+                let linked_and_bold = Attrs::from([("link".into(), link), ("bold".into(), bold)]);
+                text.insert_with_attributes(&mut txn, 0, "x", linked);
+                text.insert_with_attributes(&mut txn, 1, &"\n#".repeat(lines), linked_and_bold);
+            }
+            let remote = Ydoc::wire();
+            let update = source.encode_full_state();
+            remote.apply(&update).expect("the note applies");
+            MARK_VALUES_COMPARED.with(|count| count.set(0));
+            let written = remote.project_richdoc().expect("it writes");
+            assert_eq!(written.matches("&#35;").count(), lines);
+            MARK_VALUES_COMPARED.with(|count| count.get())
+        };
+        let compared = values_compared_writing(10);
+        assert!(compared > 0);
+        assert_eq!(values_compared_writing(1_000), compared);
+    }
+
+    #[test]
     fn hostile_remote_heading_level_is_clamped_before_allocation() {
         let doc = remote_doc_with_body([xml_element(
             "heading",
@@ -9764,11 +10023,14 @@ mod projection_tests {
         }
         let doc = remote_doc_with_body([child]);
 
+        const ONE_TOO_DEEP: usize = MAX_PROJECTION_DEPTH + 1;
         assert!(matches!(
             doc.project(ContentKind::Richdoc),
             Err(CollabError::ProjectionTooComplex {
+                depth: ONE_TOO_DEEP,
                 max_depth: MAX_PROJECTION_DEPTH,
-                max_nodes: MAX_PROJECTION_NODES
+                max_nodes: MAX_PROJECTION_NODES,
+                ..
             })
         ));
     }

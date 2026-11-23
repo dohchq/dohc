@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { Folder, Search } from "lucide-react";
+import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { Folder, Search, X } from "lucide-react";
 import { desktopPins, settingsNavPin } from "../../testPins";
 import { workspaceName } from "../Titlebar";
 import { isSettingsSectionId, SETTINGS_SECTIONS, type SettingsSectionId } from "./settingsRegistry";
@@ -23,11 +23,36 @@ export function SettingsNav(props: {
   // Beside the title, such as whether the last change saved.
   status?: ReactNode;
 }) {
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const group = (name: Section["group"]) =>
     props.sections.filter((section) => section.group === name);
   const yours = group("you");
   const workspace = group("workspace");
   const advanced = group("advanced");
+
+  const onNavKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (
+      event.key !== "ArrowDown" &&
+      event.key !== "ArrowUp" &&
+      event.key !== "Home" &&
+      event.key !== "End"
+    )
+      return;
+    const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button")];
+    if (buttons.length === 0) return;
+    const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    event.preventDefault();
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? buttons.length - 1
+          : event.key === "ArrowDown"
+            ? (current + 1) % buttons.length
+            : (current <= 0 ? buttons.length : current) - 1;
+    buttons[nextIndex]?.focus();
+  };
+
   const item = (section: Section) => (
     <button
       key={section.id}
@@ -64,14 +89,36 @@ export function SettingsNav(props: {
           className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-subtle"
         />
         <input
+          ref={searchInputRef}
           spellCheck={false}
           data-testid={desktopPins.settingsSearch}
           aria-label="Search settings"
           value={props.query}
           onChange={(event) => props.onQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && props.query.length > 0) {
+              event.preventDefault();
+              event.stopPropagation();
+              props.onQuery("");
+            }
+          }}
           placeholder="Search"
-          className="h-8 w-full rounded-md border border-line bg-bg pl-7 pr-2 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+          className="h-8 w-full rounded-md border border-line bg-bg pl-7 pr-7 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
         />
+        {props.query.length > 0 ? (
+          <button
+            type="button"
+            aria-label="Clear search"
+            title="Clear search"
+            onClick={() => {
+              props.onQuery("");
+              searchInputRef.current?.focus();
+            }}
+            className="absolute right-1.5 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink"
+          >
+            <X size={12} aria-hidden />
+          </button>
+        ) : null}
       </div>
       <select
         aria-label="Settings section"
@@ -87,7 +134,10 @@ export function SettingsNav(props: {
           </option>
         ))}
       </select>
-      <nav className="flex min-h-0 flex-1 flex-col overflow-auto max-[720px]:hidden">
+      <nav
+        onKeyDown={onNavKeyDown}
+        className="flex min-h-0 flex-1 flex-col overflow-auto max-[720px]:hidden"
+      >
         {yours.map(item)}
         {workspace.length > 0 ? (
           <div

@@ -92,7 +92,7 @@ it("reports a failed unmount with Try again", async () => {
     await result.current.unmountShare("shared-with-me/alex");
   });
   expect(reportShellError).toHaveBeenCalledWith(
-    "Couldn't remove the share.",
+    "dohc could not remove this share.",
     expect.any(Error),
     expect.any(Function),
   );
@@ -196,7 +196,7 @@ it("lets only the newest announced refresh write its summary", async () => {
     await result.current.refreshShareMounts(true);
   });
   expect(reportShellError).toHaveBeenCalledWith(
-    "Couldn't refresh shares.",
+    "dohc could not refresh shares.",
     expect.any(Error),
     null,
     "share-refresh",
@@ -403,8 +403,8 @@ it("tells the person when dohc set aside a share's collision record", async () =
   const { result, showSuccessNotice, reportShellFailure, clearIdentity, clearKind } = mountRows();
   const setAside = {
     message:
-      "dohc could not read its record of your files with the same path as a file in alex. " +
-      "dohc keeps these files apart.",
+      "dohc could not read its list of files that share a path with alex. " +
+      "Your files stay separate.",
     identity: "share-mount-collision-record-set-aside:share-1",
     tone: "warning",
   };
@@ -422,7 +422,7 @@ it("tells the person when dohc set aside a share's collision record", async () =
   expect(reportShellFailure.mock.calls.map(([row]) => row)).toEqual([
     setAside,
     {
-      message: "Shares refreshed — 2 files updated.",
+      message: "Shares refreshed. 2 files updated.",
       tone: "success",
       kind: "share-refresh",
       quiet: true,
@@ -551,7 +551,7 @@ it.each([false, true])(
       expect(reportShellFailure).toHaveBeenCalledWith({
         title: "dohc skipped 2 shared files from alex",
         message:
-          "dohc could not receive 2 shared files. A file from this machine is in the way. Move or rename your file, then refresh.",
+          "dohc could not receive 2 shared files. A file on this computer is in the way. Move or rename your file, then refresh.",
         identity: "share-mount-kept-paths:share-1",
         tone: "warning",
         retry: expect.any(Function),
@@ -566,7 +566,7 @@ it.each([false, true])(
       expect(clearIdentity).not.toHaveBeenCalledWith("share-mount-kept-paths:share-1");
       if (announce) {
         expect(reportShellFailure).toHaveBeenLastCalledWith({
-          message: "Shares refreshed — 0 files updated.",
+          message: "Shares refreshed. 0 files updated.",
           tone: "success",
           kind: "share-refresh",
           quiet: true,
@@ -595,7 +595,7 @@ it.each([false, true])(
           { path: "docs/blocked/b.md", reason: "local-collision", owner: "docs/blocked" },
         ]),
       ).toBe(
-        "dohc could not receive 3 shared files. Files from this machine are in the way. Move or rename your files, then refresh.",
+        "dohc could not receive 3 shared files. Files on this computer are in the way. Move or rename your files, then refresh.",
       );
     } finally {
       vi.unstubAllGlobals();
@@ -627,7 +627,7 @@ it("includes both spellings in notice details", async () => {
     expect(reportShellFailure).toHaveBeenCalledWith(
       expect.objectContaining({
         message:
-          "dohc could not receive a shared file. This machine treats its name and another shared file's as the same name. Ask the person who shared the files to rename one of them.",
+          "dohc could not receive a shared file. This computer treats its name and another shared file's name as the same. Ask the person who shared the files to rename one of them.",
         paths: ["shared-with-me/alex/docs/Notes.md", "shared-with-me/alex/docs/notes.md"],
       }),
     );
@@ -659,7 +659,7 @@ it("includes every kept mount path in notice details", async () => {
     expect(reportShellFailure).toHaveBeenCalledWith(
       expect.objectContaining({
         message:
-          "dohc could not receive 4 shared files. Files from this machine are in the way. Move or rename your files, then refresh.",
+          "dohc could not receive 4 shared files. Files on this computer are in the way. Move or rename your files, then refresh.",
         paths: paths.map((path) => `shared-with-me/alex/${path}`),
       }),
     );

@@ -12,18 +12,18 @@ const REASONS = {
 
 const MESSAGES: Record<ChatWakeProblem, string> = {
   unreadable:
-    "Agents here do not start for messages from your phone until it can. Restore or repair the file in Details before you try again.",
-  dropped: "The server no longer lists this computer for it, so nothing ran here.",
+    "Agents here do not start for messages from your phone until dohc can read this file. Restore or repair the file in Details before you try again.",
+  dropped: "The server no longer lists this computer for this agent request, so nothing ran here.",
   parked:
-    "Its workspace stopped syncing here with this account. dohc starts it once the workspace syncs here again.",
-  unconfirmed: "Its request is queued on this computer, and the server no longer lists it.",
+    "This workspace stopped syncing here with this account. dohc starts the agent once the workspace syncs here again.",
+  unconfirmed: "This agent request is queued on this computer, and the server no longer lists it.",
 };
 
 // The declarations ledger: which workspaces this computer told the server about its agents. Without it, nothing is
 // declared or withdrawn, and it is never written over. A read can fail for a moment too, so the text says dohc keeps
 // trying, and the person restores or repairs the file only if the row stays.
 const LEDGER_UNREADABLE =
-  "Your phone cannot wake agents here until it can. dohc keeps trying. If this stays, restore or repair the file in Details.";
+  "Your phone cannot wake agents here until dohc can read this file. dohc keeps trying. If this stays, restore or repair the file in Details.";
 
 // Why the server can't take this computer's agents, and the one thing to do.
 const REFUSALS: Record<ChatRunnerRefusal["reason"], string> = {

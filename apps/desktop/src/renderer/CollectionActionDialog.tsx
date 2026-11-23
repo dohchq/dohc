@@ -172,9 +172,7 @@ function ScopedAction(props: CollectionActionDialogProps) {
                 }}
               />
             </label>
-            <p className="m-0 text-[12px] text-muted">
-              Use the input expected by this authored action.
-            </p>
+            <p className="m-0 text-[12px] text-muted">Enter the input for this action.</p>
             {invalid ? (
               <p role="alert" className="m-0 text-[12px] text-danger">
                 {invalid}
@@ -193,8 +191,8 @@ function ScopedAction(props: CollectionActionDialogProps) {
                   {cancelled ? "Action cancelled" : "Action not confirmed"}
                 </p>
                 <p className="m-0">
-                  dohc could not confirm whether it finished. It may have changed records. Check
-                  this Collection's records or History.
+                  dohc could not confirm whether this action finished. Check this Collection's
+                  records or History to see if anything changed.
                 </p>
                 {failure && !cancelled ? <Cause text={failure} /> : null}
               </div>

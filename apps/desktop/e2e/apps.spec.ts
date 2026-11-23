@@ -6,6 +6,7 @@ import path from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   sharedDatasetViewerOrigin,
+  openAppFromFolderLink,
   startSharedDatasetBrowser,
 } from "./helpers/sharedDatasetBrowser";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
@@ -260,11 +261,9 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
       await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
       const share = page.getByTestId("share-dialog");
-      await share
-        .getByRole("radiogroup", { name: "Link access" })
-        .getByRole("radio", { name: "View", exact: true })
-        .click();
+      await expect(share.getByTestId("share-link-create-access")).toHaveText("Can view");
       await share.getByRole("button", { name: "Create link", exact: true }).click();
+      await share.getByRole("button", { name: "Link details", exact: true }).click();
       const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
       await share.getByRole("button", { name: "Close", exact: true }).click();
       await review.click();
@@ -287,7 +286,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       const guest = await shared!.browser.newPage();
       guest.on("pageerror", (error) => shared!.failures.push(error.message));
       await guest.goto(linkUrl);
-      await guest.getByRole("button", { name: "Open app", exact: true }).click();
+      await openAppFromFolderLink(guest);
       const heading = guest
         .frameLocator("iframe")
         .getByRole("heading", { name: "Trip poll", exact: true });
@@ -439,11 +438,9 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     const publication = page.getByTestId("app-publication-dialog");
     await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
     const share = page.getByTestId("share-dialog");
-    await share
-      .getByRole("radiogroup", { name: "Link access" })
-      .getByRole("radio", { name: "View", exact: true })
-      .click();
+    await expect(share.getByTestId("share-link-create-access")).toHaveText("Can view");
     await share.getByRole("button", { name: "Create link", exact: true }).click();
+    await share.getByRole("button", { name: "Link details", exact: true }).click();
     const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
     expect(new URL(linkUrl).origin).toBe(sharedDatasetViewerOrigin);
     await share.getByRole("button", { name: "Close", exact: true }).click();
@@ -477,7 +474,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     const guest = await shared.browser.newPage();
     guest.on("pageerror", (error) => shared!.failures.push(error.message));
     await guest.goto(linkUrl);
-    await guest.getByRole("button", { name: "Open app", exact: true }).click();
+    await openAppFromFolderLink(guest);
     const app = guest.frameLocator("iframe");
     await expect(app.getByRole("heading", { name: "Reading list", exact: true })).toBeVisible();
     await expect(app.getByRole("listitem")).toHaveText([

@@ -93,7 +93,7 @@ describe("useMergeRemovalNotices", () => {
     expect(row).toMatchObject({
       title: "Text removed when two changes met",
       message: '" world"',
-      lastLine: "Ben's change deleted the line it was in.",
+      lastLine: "A change by Ben deleted the line it was in.",
       identity: "merge-removal:moment-merge-removal-a",
       tone: "warning",
       retry: null,
@@ -234,6 +234,6 @@ it("cuts a long quote at six lines", () => {
   const text = ["1", "2", "3", "4", "5", "6", "7", "8"].join("\n");
   expect(mergeRemovalWords({ quote: text, length: text.length }, "Ana")).toEqual({
     message: `"1\n2\n3\n4\n5\n6…"\nAnd 4 more characters. Copy text copies all of it.`,
-    lastLine: "Ana's change deleted the line it was in.",
+    lastLine: "A change by Ana deleted the line it was in.",
   });
 });

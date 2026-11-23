@@ -608,11 +608,16 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     now_ms: 5,
-                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                SecretDiskIntent::Materialize {
+                    check: &|_, _, _, _| Ok(dohc_engine_storage::Preimage::Absent),
                 },
                 &NoFaults,
             )
             .expect("foreign secret write");
+        store
+            .mark_materialization_complete("secret-mat_api-secret-moment", 5)
+            .expect("settle projection");
     }
     // Disk carries different bytes: a claim would show up as a changed tip.
     write_file(scratch.path(), ".env", b"TOKEN=from-disk");
@@ -1427,6 +1432,106 @@ async fn outside_renames_that_only_respell_retire_the_old_spelling() {
         aliases, expected,
         "one alias per file, none for OS metadata"
     );
+}
+
+async fn wait_on_disk(root: &Path, path: &str, text: &str) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while std::fs::read_to_string(root.join(path)).ok().as_deref() != Some(text) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{path} never reached the disk"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_outside_delete_retires_a_file_another_route_wrote() {
+    for (origin, publish, renamed) in [
+        ("api", true, false),
+        ("sync", true, false),
+        ("sync", false, false),
+        ("sync", false, true),
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        write_root_binding(scratch.path(), TOKEN).expect("root binding");
+        write_file(scratch.path(), "witness.md", b"anchor");
+        let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+        let handle = open_workspace(&transport, &scratch, 1).await;
+        wait_for_text(&transport, &handle, "witness.md", Some("anchor")).await;
+        let path = format!("{origin}.md");
+        call_with_busy_retry(
+            &transport,
+            RequestContext::unbounded(),
+            request(
+                2,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": format!("{origin}-object"),
+                    "path": path,
+                    "text": "written by the engine",
+                    "momentId": format!("{origin}-moment"),
+                    "origin": origin,
+                    "publish": publish
+                }),
+            ),
+        )
+        .await
+        .expect("engine write");
+        if publish {
+            wait_on_disk(scratch.path(), &path, "written by the engine").await;
+        } else {
+            write_file(scratch.path(), &path, b"written by the engine");
+        }
+        let mut method = "capture.reconcile";
+        for attempt in 0.. {
+            let response = call_with_busy_retry(
+                &transport,
+                RequestContext::unbounded(),
+                request(3, method, Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect(method);
+            if response.result["settled"] == json!(true) {
+                break;
+            }
+            assert!(attempt < 20, "capture did not settle: {}", response.result);
+            method = "capture.flush";
+        }
+        if renamed {
+            std::fs::rename(scratch.path().join(&path), scratch.path().join("moved.md"))
+                .expect("rename");
+            wait_for_text(
+                &transport,
+                &handle,
+                "moved.md",
+                Some("written by the engine"),
+            )
+            .await;
+        } else {
+            std::fs::remove_file(scratch.path().join(&path)).expect("delete");
+        }
+        wait_for_text(&transport, &handle, &path, None).await;
+        close_workspace(&transport, handle, 9_000).await;
+        let store = EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 100)
+            .expect("reopen store");
+        let operation: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT operation FROM moments WHERE workspace_id = ?1 AND path = ?2 \
+                     ORDER BY moment_order DESC LIMIT 1",
+                    [WORKSPACE_ID, path.as_str()],
+                    |row| row.get(0),
+                )
+            })
+            .expect("latest moment");
+        assert_eq!(
+            operation, "delete",
+            "{origin} publish={publish} renamed={renamed}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

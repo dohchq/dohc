@@ -103,6 +103,7 @@ let blockedMaterialization = false;
 let closeRefusal: unknown = null;
 let beforeRecordUpdate: (() => Promise<void>) | null = null;
 let beforeClose: (() => Promise<void>) | null = null;
+let beforeResync: (() => Promise<void>) | null = null;
 let beforeSettle: (() => Promise<void>) | null = null;
 let enforceRecordOwner = false;
 // Refuses the next journal write once, the way the daemon refuses it on the
@@ -124,6 +125,7 @@ function transportLost(): Error {
   });
 }
 let captureErrors: string[] = [];
+let busyOutsideCapture: { path: string; text: string; flushes: number } | null = null;
 let versioned: VersionedLoopbackEngine;
 let ydoc: YdocLoopbackEngine;
 // The daemon's disk side: ingests the folder on `capture.flush`, rewrites it
@@ -146,9 +148,42 @@ function daemonSessions(): EngineWorkspaceSessions {
     },
     async sendRequest(request: Request): Promise<Response> {
       requests.push(request);
+      if (busyOutsideCapture && request.method === "watcher.status") {
+        const ready = daemonCaptureLifecycleAnswer(request)!;
+        return {
+          ...ready,
+          result: {
+            ...(ready.result as Record<string, JsonValue>),
+            deferredWrites: [busyOutsideCapture.path],
+            phase: busyOutsideCapture.flushes > 0 ? "importing" : "ready",
+          },
+        };
+      }
+      if (busyOutsideCapture && request.method === "capture.flush") {
+        if (busyOutsideCapture.flushes > 0) {
+          busyOutsideCapture.flushes -= 1;
+          return {
+            id: request.id,
+            result: {
+              deferredWrites: [busyOutsideCapture.path],
+              settled: false,
+              running: true,
+              degraded: false,
+              heldFiles: [],
+            },
+          };
+        }
+        seedYdoc("main", busyOutsideCapture.text);
+        busyOutsideCapture = null;
+      }
       if (request.method === YDOC_METHOD.recordUpdate && beforeRecordUpdate) {
         const hook = beforeRecordUpdate;
         beforeRecordUpdate = null;
+        await hook();
+      }
+      if (request.method === YDOC_METHOD.resync && beforeResync) {
+        const hook = beforeResync;
+        beforeResync = null;
         await hook();
       }
       if (request.method === YDOC_METHOD.close && beforeClose) {
@@ -335,6 +370,7 @@ beforeEach(async () => {
   closeRefusal = null;
   beforeRecordUpdate = null;
   beforeClose = null;
+  beforeResync = null;
   beforeSettle = null;
   enforceRecordOwner = false;
   nextRecordRefusal = null;
@@ -346,6 +382,7 @@ beforeEach(async () => {
   resyncCount = 0;
   lostResyncs = new Set();
   captureErrors = [];
+  busyOutsideCapture = null;
   recordUpdateDelayMs = 0;
   versioned = new VersionedLoopbackEngine();
   versioned.seedTextFile({
@@ -904,6 +941,19 @@ it("settles and closes the Rust Y.Doc session before a version switch", async ()
   await capture.switchVersion(draft.activeVersionId);
   expect(await readFile(join(root, PATH), "utf8")).toContain("Unsaved draft edit.");
   await session.close();
+});
+
+it("reopens a note that changed outside dohc once a busy capture records the change", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  const outside = "# Solo\n\nEdited in another app.\n";
+  await writeFile(join(root, PATH), outside, "utf8");
+  busyOutsideCapture = { path: PATH, text: outside, flushes: 3 };
+  capture.noteWriteDeferred(PATH);
+  await session.close();
+  const reopened = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  expect(documentMarkdown(reopened.initialUpdate)).toBe(outside);
+  expect(captureErrors).toEqual([]);
+  await reopened.close();
 });
 
 it("releases a verified synced document and reports changed-on-disk after a terminal close settle refusal", async () => {
@@ -1706,6 +1756,77 @@ it("drops a definitively refused caller-confirmed original so later typing can s
   editor.destroy();
 });
 
+it("tells an agent the busy engine kept nothing of its write, and never sends it again", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  busyRecordAttempts = 2;
+  await expect(keyedWrite(session, "Busy write.")).rejects.toThrow(
+    `The engine did not record this write to ${PATH}, and nothing of it was kept. Retry with the same request.`,
+  );
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Busy write.");
+
+  await keyedWrite(session, "Busy write.", "claim/1/1");
+  await session.settleNow();
+  await session.close({ settle: false });
+  const sent = requests.filter(
+    (request) =>
+      request.method === YDOC_METHOD.recordUpdate && request.idempotencyKey === "claim/1/0",
+  );
+  expect(sent).toHaveLength(2);
+  expect((await readFile(join(root, PATH), "utf8")).split("Busy write.")).toHaveLength(2);
+  expect(journalMarkdown().split("Busy write.")).toHaveLength(2);
+});
+
+it.each([
+  { retirement: "succeeds", answer: "nothing of it was kept" },
+  { retirement: "fails", answer: "may have been recorded" },
+] as const)(
+  "answers an agent's dropped busy write once retiring the checkpoint holding it $retirement",
+  async ({ retirement, answer }) => {
+    await capture.stop();
+    const checkpointKeys: string[][] = [];
+    const retiring = deferred();
+    const retire = vi.fn(async () => {
+      await retiring.promise;
+      if (retirement === "fails") throw new Error("checkpoint retirement refused");
+    });
+    capture = createWorkspaceEngineCapture({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      attachmentId: ATTACHMENT_ID,
+      rustEngineSessions: sessions,
+      openRustYDocProviderSession: async (options) => ({
+        ...(await openEngineYdocProviderSession(options)),
+        objectId: "checkpoint-object",
+        versionId: "main",
+      }),
+      writeTypingCheckpoint: async (checkpoint) => {
+        checkpointKeys.push(checkpoint.updates.map((update) => update.requestId));
+      },
+      retireTypingCheckpoint: retire,
+      onError: (context) => captureErrors.push(context),
+    });
+    const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
+    busyRecordAttempts = 3;
+    loseNextResync = true;
+    let answered = false;
+    const write = keyedWrite(session, "Dropped agent write.").finally(() => {
+      answered = true;
+    });
+    void write.catch(() => undefined);
+    try {
+      await vi.waitFor(() => expect(checkpointKeys.flat()).toContain("claim/1/0"));
+      await vi.waitFor(() => expect(retire).toHaveBeenCalled());
+      expect(answered).toBe(false);
+      retiring.resolve();
+      await expect(write).rejects.toThrow(answer);
+      expect(busyRecordAttempts).toBe(0);
+    } finally {
+      retiring.resolve();
+      await session.close({ settle: false });
+    }
+  },
+);
+
 it("retires a busy refusal's typing checkpoint once the engine records the resent typing", async () => {
   await capture.stop();
   const written: string[] = [];
@@ -2199,6 +2320,138 @@ it("successful eviction stays closed when checkpoint retirement fails", async ()
     failRetirement = false;
     await closing.catch(() => undefined);
     await flushTypingCheckpoints(WORKSPACE_ID);
+    editor.destroy();
+  }
+});
+
+it("pauses an open editor behind the typing it already handed over, then shows the note", async () => {
+  await capture.stop();
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
+    // The engine no longer edits the note live once it leaves.
+    openRustYDocProviderSession: async (options) => ({
+      ...(await openEngineYdocProviderSession(options)),
+      ownerBound: false,
+    }),
+    onError: (context) => captureErrors.push(context),
+  });
+  const replacements = vi.fn();
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate() {},
+    onLineageReplaced: replacements,
+  });
+  const editor = mirrorEditor(session);
+  try {
+    typeIntoBody(editor, "Typed before the pause.");
+    const recordedAtPause: string[] = [];
+    await expect(
+      session.leaveLiveEditing!(async () => {
+        recordedAtPause.push(journalMarkdown());
+        return "paused";
+      }),
+    ).resolves.toBe("paused");
+    expect(recordedAtPause[0]).toContain("Typed before the pause.");
+    await vi.waitFor(() => expect(replacements).toHaveBeenCalledOnce());
+    expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain(
+      "Typed before the pause.",
+    );
+    expect(captureErrors).toEqual([]);
+  } finally {
+    await session.close({ settle: false });
+    editor.destroy();
+  }
+});
+
+it("hands typing that reached it during the pause to late, with what it builds on", async () => {
+  await capture.stop();
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => ({
+      ...(await openEngineYdocProviderSession(options)),
+      ownerBound: false,
+    }),
+    onError: (context) => captureErrors.push(context),
+  });
+  const replacements = vi.fn();
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate() {},
+    onLineageReplaced: replacements,
+  });
+  const editor = mirrorEditor(session);
+  try {
+    typeIntoBody(editor, "Typed before the pause.");
+    const late: Uint8Array[] = [];
+    // The engine's state takes a moment to arrive, and the owner types on until it does.
+    let typedAfterPause = false;
+    beforeResync = async () => {
+      typedAfterPause = true;
+      typeIntoBody(editor, " Typed before the note came back.");
+    };
+    await session.leaveLiveEditing!(
+      async () => {
+        typeIntoBody(editor, " Typed during the pause.");
+      },
+      (edits) => late.push(edits),
+    );
+    expect(typedAfterPause).toBe(true);
+    expect(replacements).toHaveBeenCalledOnce();
+    expect(late).toHaveLength(1);
+    const copy = documentMarkdown(late[0]!);
+    expect(copy).toContain("Typed before the pause.");
+    expect(copy).toContain("Typed during the pause.");
+    expect(copy).toContain("Typed before the note came back.");
+    expect(journalMarkdown()).not.toContain("Typed during the pause.");
+  } finally {
+    await session.close({ settle: false });
+    editor.destroy();
+  }
+});
+
+it("hands typing during the pause to late when live editing ended but the answer failed", async () => {
+  await capture.stop();
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => ({
+      ...(await openEngineYdocProviderSession(options)),
+      ownerBound: false,
+    }),
+    onError: (context) => captureErrors.push(context),
+  });
+  const replacements = vi.fn();
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate() {},
+    onLineageReplaced: replacements,
+  });
+  const editor = mirrorEditor(session);
+  try {
+    const late: Uint8Array[] = [];
+    const lost = new Error("The answer was lost.");
+    await expect(
+      session.leaveLiveEditing!(
+        async () => {
+          typeIntoBody(editor, " Typed during the pause.");
+          throw lost;
+        },
+        (edits) => late.push(edits),
+      ),
+    ).rejects.toBe(lost);
+    expect(replacements).toHaveBeenCalledOnce();
+    expect(late).toHaveLength(1);
+    expect(documentMarkdown(late[0]!)).toContain("Typed during the pause.");
+  } finally {
+    await session.close({ settle: false });
     editor.destroy();
   }
 });

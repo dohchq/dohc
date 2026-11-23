@@ -1,8 +1,18 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderBare,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useState, type ComponentProps } from "react";
+import { useState, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import type {
   CloudStatusResult,
   ListRelayShareLinksResult,
@@ -14,6 +24,13 @@ import type {
 } from "../ipc/ownerAppPublicationContract";
 import { deferred } from "../testing/deferred";
 import { OwnerAppPublication as Control } from "./OwnerAppPublication";
+import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
+
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="ws-trip">{children}</WorkspaceSessionProvider>;
+}
+
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: Session });
 
 const prepared: Extract<OwnerAppPublicationResult, { kind: "prepared" }> = {
   kind: "prepared",
@@ -105,7 +122,7 @@ async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPubl
     return { kind: "withdrawn", publicationId: published.publicationId, authorityRevision: 2 };
   return { kind: "cancelled" };
 }
-const datasetAnswer = async (): Promise<unknown> => ({
+const datasetAnswer = async (_request?: { action?: string }): Promise<unknown> => ({
   kind: "list",
   datasets: [
     {
@@ -254,19 +271,19 @@ describe("owner app publication", () => {
         ).toBeTruthy();
       }
       fireEvent.click(
-        screen.getByRole("button", { name: `Revoke collection access ${published.publicationId}` }),
+        screen.getByRole("button", { name: `Revoke Collection access ${published.publicationId}` }),
       );
       expect(
         api.publishOwnerApp.mock.calls.some(([input]) => input.action === "revokeCollection"),
       ).toBe(false);
       expect(
         screen.getByText(
-          "Saved responses stay in your workspace. Copies already received cannot be removed.",
+          /Saved responses stay in your workspace, and copies already received cannot be removed\./,
         ),
       ).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Revoke access" }));
       await screen.findByText(
-        "App collection access revoked. Prepare the app again to review and restore access.",
+        "App Collection access revoked. Prepare the app again to review and restore access.",
       );
       expect(api.publishOwnerApp).toHaveBeenCalledWith({
         action: "revokeCollection",
@@ -277,10 +294,10 @@ describe("owner app publication", () => {
       expect(
         screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }),
       ).toBeTruthy();
-      await screen.findByText("No collection access");
+      await screen.findByText("No Collection access");
       expect(
         screen.queryByRole("button", {
-          name: `Revoke collection access ${published.publicationId}`,
+          name: `Revoke Collection access ${published.publicationId}`,
         }),
       ).toBeNull();
     },
@@ -318,7 +335,7 @@ describe("owner app publication", () => {
     const view = render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await open();
     fireEvent.click(
-      screen.getByRole("button", { name: `Revoke collection access ${published.publicationId}` }),
+      screen.getByRole("button", { name: `Revoke Collection access ${published.publicationId}` }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Revoke access" }));
     expect((screen.getByRole("button", { name: "Close" }) as HTMLButtonElement).disabled).toBe(
@@ -335,7 +352,7 @@ describe("owner app publication", () => {
     );
     expect(
       screen.queryByText(
-        "App collection access revoked. Prepare the app again to review and restore access.",
+        "App Collection access revoked. Prepare the app again to review and restore access.",
       ),
     ).toBeNull();
   });
@@ -424,6 +441,284 @@ describe("owner app publication", () => {
     });
   });
 
+  it("finds a Collection again from its newest Try again, and not from an older one", async () => {
+    const reportError =
+      vi.fn<(fallback: string, error: unknown, retry: (() => void) | null) => void>();
+    const failed = deferred<unknown>();
+    const found = deferred<unknown>();
+    api.dataset.mockReturnValueOnce(failed.promise).mockReturnValueOnce(found.promise);
+    api.publishOwnerApp.mockImplementation((request) =>
+      request.action === "prepare"
+        ? Promise.resolve({ ...prepared, capabilities: [datasetCapability] })
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
+    await review();
+    const scope = screen.getByTestId("app-publication-capability");
+    expect(scope.textContent).toContain("Finding Collection…");
+    await act(async () => failed.reject(new Error("engine stopped")));
+    expect(scope.textContent).toContain("Collection path unavailable");
+    expect(reportError).toHaveBeenCalledOnce();
+    expect(reportError.mock.calls[0]![0]).toBe("dohc could not find this Collection.");
+    const tryAgain = reportError.mock.calls[0]![2]!;
+    act(tryAgain);
+    expect(scope.textContent).toContain("Finding Collection…");
+    await waitFor(() => expect(api.dataset).toHaveBeenCalledTimes(2));
+    act(tryAgain);
+    await act(async () => found.resolve(await datasetAnswer()));
+    expect(scope.textContent).toContain("data/dataset.json");
+    expect(api.dataset).toHaveBeenCalledTimes(2);
+    expect(reportError).toHaveBeenCalledOnce();
+  });
+
+  it("loads plain-English action descriptions for published dataset details only after expanding, without blocking Unpublish", async () => {
+    const historyPending = deferred<unknown>();
+    const definition = {
+      formatVersion: 1 as const,
+      datasetId: datasetCapability.datasetId,
+      name: "Orders",
+      schemaPath: "data/schema.sql",
+      operationsPath: "data/operations.js",
+      tables: [
+        {
+          tableId: "00000000-0000-4000-8000-000000000020",
+          name: "Orders",
+          sqlName: "orders",
+          primaryKey: "id",
+          fields: [
+            {
+              fieldId: "00000000-0000-4000-8000-000000000021",
+              name: "ID",
+              sqlColumn: "id",
+              type: "text" as const,
+              required: true,
+              unique: true,
+            },
+            {
+              fieldId: "00000000-0000-4000-8000-000000000022",
+              name: "Item",
+              sqlColumn: "item",
+              type: "text" as const,
+              required: true,
+              unique: false,
+            },
+          ],
+        },
+      ],
+      operations: [
+        {
+          operationId: datasetCapability.operations[0]!.operationId,
+          name: "submit",
+          label: "Submit order",
+          tableId: "00000000-0000-4000-8000-000000000020",
+          kind: "create" as const,
+          access: "link" as const,
+          readOnly: false,
+          fieldIds: ["00000000-0000-4000-8000-000000000022"],
+        },
+      ],
+    };
+    api.dataset.mockImplementation(async (request) => {
+      if (request?.action === "historyRevision") return historyPending.promise;
+      return datasetAnswer();
+    });
+    api.publishOwnerApp.mockImplementation(async (request) =>
+      request.action === "list"
+        ? { kind: "listed", publications: [datasetRow], nextCursor: null }
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    expect(
+      screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }),
+    ).toBeTruthy();
+    expect(api.dataset).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Approved Collection access"));
+    await waitFor(() =>
+      expect(api.dataset).toHaveBeenCalledWith({
+        action: "historyRevision",
+        workspaceId: "ws-trip",
+        datasetPath: "data/dataset.json",
+        revisionSha256: datasetCapability.revisionSha256,
+      }),
+    );
+    const card = screen.getByTestId("app-publication-capability");
+    expect(card.textContent).toContain("Link actions: submit (changes data)");
+    await act(async () =>
+      historyPending.resolve({
+        kind: "history-revision",
+        revision: {
+          datasetId: datasetCapability.datasetId,
+          definition,
+          revision: datasetCapability.revision,
+          revisionSha256: datasetCapability.revisionSha256,
+          definitionSha256: "b".repeat(64),
+          schemaSha256: "c".repeat(64),
+          operationsSha256: "d".repeat(64),
+        },
+        schemaSql: "",
+        operationSource: generateDatasetOperations(definition),
+        generatedSources: true,
+      }),
+    );
+    expect(card.textContent).toContain("Link actions: Adds records with Item · submit");
+  });
+
+  it("does not make field-level claims on published cards when schema triggers make sources custom", async () => {
+    const definition: DatasetDefinition = {
+      formatVersion: 1,
+      datasetId: datasetCapability.datasetId,
+      name: "Items",
+      schemaPath: "data/schema.sql",
+      operationsPath: "data/operations.js",
+      tables: [
+        {
+          tableId: "00000000-0000-4000-8000-000000000020",
+          name: "Items",
+          sqlName: "items",
+          primaryKey: "id",
+          fields: [
+            {
+              fieldId: "00000000-0000-4000-8000-000000000021",
+              name: "ID",
+              sqlColumn: "id",
+              type: "text",
+              required: true,
+              unique: true,
+            },
+            {
+              fieldId: "00000000-0000-4000-8000-000000000022",
+              name: "Item",
+              sqlColumn: "item",
+              type: "text",
+              required: true,
+              unique: false,
+            },
+          ],
+        },
+      ],
+      operations: [
+        {
+          operationId: "00000000-0000-4000-8000-000000000002",
+          name: "submit",
+          label: "Submit",
+          tableId: "00000000-0000-4000-8000-000000000020",
+          kind: "create",
+          access: "link",
+          readOnly: false,
+          fieldIds: ["00000000-0000-4000-8000-000000000022"],
+        },
+      ],
+    };
+    api.dataset.mockImplementation(async (request) => {
+      if (request?.action === "historyRevision") {
+        return {
+          kind: "history-revision",
+          revision: {
+            datasetId: datasetCapability.datasetId,
+            definition,
+            revision: datasetCapability.revision,
+            revisionSha256: datasetCapability.revisionSha256,
+            definitionSha256: "b".repeat(64),
+            schemaSha256: "c".repeat(64),
+            operationsSha256: "d".repeat(64),
+          },
+          schemaSql: "CREATE TRIGGER custom_edit AFTER INSERT ON items BEGIN SELECT 1; END;",
+          operationSource: generateDatasetOperations(definition),
+          generatedSources: false,
+        };
+      }
+      return datasetAnswer();
+    });
+    api.publishOwnerApp.mockImplementation(async (request) =>
+      request.action === "list"
+        ? { kind: "listed", publications: [datasetRow], nextCursor: null }
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    fireEvent.click(screen.getByText("Approved Collection access"));
+    await waitFor(() =>
+      expect(screen.getByTestId("app-publication-capability").textContent).toContain(
+        'Runs "Submit"',
+      ),
+    );
+    expect(screen.getByTestId("app-publication-capability").textContent).not.toContain(
+      "Adds records with Item",
+    );
+  });
+
+  it("shows plain-English dataset action summaries and surfaces address warnings in the share-link review card", async () => {
+    const datasetWithDisplay = {
+      ...datasetCapability,
+      operationIds: [
+        "00000000-0000-4000-8000-000000000002",
+        "00000000-0000-4000-8000-000000000003",
+        "00000000-0000-4000-8000-000000000004",
+      ],
+      operations: [
+        {
+          operationId: "00000000-0000-4000-8000-000000000002",
+          name: "submit",
+          access: "link" as const,
+          readOnly: false,
+          display: { kind: "create" as const, label: "Submit", fields: ["Item", "Quantity"] },
+        },
+        {
+          operationId: "00000000-0000-4000-8000-000000000003",
+          name: "list",
+          access: "helper" as const,
+          readOnly: true,
+          display: { kind: "read" as const, label: "View orders", fields: ["Item", "Status"] },
+        },
+        {
+          operationId: "00000000-0000-4000-8000-000000000004",
+          name: "cancel",
+          access: "owner" as const,
+          readOnly: false,
+          display: { kind: "action" as const, label: "Cancel order", fields: [] },
+        },
+      ],
+    };
+    api.dataset.mockResolvedValueOnce({
+      kind: "list",
+      datasets: [
+        {
+          datasetId: datasetCapability.datasetId,
+          datasetPath: null,
+          datasetAddressStatus: "ambiguous",
+        },
+      ],
+      nextCursor: null,
+    });
+    api.publishOwnerApp.mockImplementation((request) =>
+      request.action === "prepare"
+        ? Promise.resolve({ ...prepared, capabilities: [datasetWithDisplay] })
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await review();
+    const card = screen.getByTestId("app-publication-capability");
+    expect(card.textContent).toContain(
+      "Multiple dataset.json files name this Collection. Remove the duplicate file.",
+    );
+    expect(card.textContent).toContain("Link actions: Adds records with Item, Quantity · submit");
+    expect(card.textContent).toContain("Helper actions: Reads Item, Status · list");
+    expect(card.textContent).not.toContain("(reads only)");
+    expect(card.textContent).toContain(
+      'Owner actions: Runs "Cancel order" · cancel (changes data)',
+    );
+    expect(card.textContent).toContain(
+      "This app uses only this Collection's approved actions. Its responses appear in the same Collection, and approving this app does not change the Collection's rules.",
+    );
+    expect(card.querySelector("details")?.open).toBe(false);
+    expect(
+      screen.getByText(
+        "Unpublishing stops new access through this app. It cannot remove copies sent elsewhere.",
+      ),
+    ).toBeTruthy();
+  });
+
   it("shows the fixed collection capability before approving the unchanged digest", async () => {
     const capability = {
       kind: "collection-create" as const,
@@ -441,7 +736,7 @@ describe("owner app publication", () => {
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await review();
     const scope = screen.getByTestId("app-publication-capability");
-    expect(scope.textContent).toContain("Create records only in trip/responses");
+    expect(scope.textContent).toContain("Creates records only in trip/responses");
     expect(scope.textContent).toContain("Fields it can create: name, place");
     expect(scope.textContent).toContain("Required fields: place");
     expect(scope.textContent).toContain("Fields shown in the app: place");
@@ -450,6 +745,11 @@ describe("owner app publication", () => {
     );
     expect(scope.textContent).toContain(capability.schemaSha256);
     expect(scope.textContent).toContain("cannot change or delete existing records");
+    expect(
+      screen.getByText(
+        "Unpublishing stops new access through this app. The share link still opens its response files. Copies sent elsewhere stay.",
+      ),
+    ).toBeTruthy();
     await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
     expect(api.publishOwnerApp).toHaveBeenCalledWith({
       action: "approve",
@@ -585,7 +885,7 @@ describe("owner app publication", () => {
       screen.getByText("1 removed. 0 already absent. 0 conflicts kept. 0 failed."),
     ).toBeTruthy();
     expect(
-      screen.getByText("0 removed. 0 already absent. 1 conflicts kept. 0 failed."),
+      screen.getByText("0 removed. 0 already absent. 1 conflict kept. 0 failed."),
     ).toBeTruthy();
   });
 
@@ -717,7 +1017,7 @@ describe("owner app publication", () => {
         screen.getByRole("heading", { level: 2, name: "Trip planner" }),
       );
       expect(await stateText()).toBe(
-        "Approve it to run this version on this device.Later edits to its source wait for your approval.",
+        "Approve this app to run it on this device.Later source edits wait for your approval.",
       );
       await ready();
       expect(approveButton().textContent).toBe("Approve and open");
@@ -732,6 +1032,9 @@ describe("owner app publication", () => {
       expect(reach("Reads")).toBe("Item, Status");
       expect(reach("Changes")).toBe("Adds records with Item, Quantity");
       expect(within(access).queryByText("New")).toBeNull();
+      expect(screen.getByTestId("app-access-boundary").textContent).toBe(
+        "Uses only this Collection's approved actions. It cannot read other workspace files.",
+      );
       expect(access.textContent).toContain("It can send what it receives to other websites.");
       expect(screen.getByRole("heading", { name: "What it can reach" })).toBeTruthy();
       expect(await screen.findByRole("heading", { name: "Share links" })).toBeTruthy();
@@ -755,6 +1058,81 @@ describe("owner app publication", () => {
       expect(api.openExternalUrl).not.toHaveBeenCalled();
     });
 
+    it.each([
+      [
+        "no workspace data",
+        [] as Capability[],
+        "Cannot read or change workspace files or Collections.",
+      ],
+      [
+        "collection-create",
+        [approvedCollection] as Capability[],
+        "Cannot change or delete existing records, or read other workspace files.",
+      ],
+    ])(
+      "states the accurate boundary line for %s",
+      async (_label, capabilities, expectedBoundary) => {
+        api.publishOwnerApp.mockImplementation(local([], { capabilities }));
+        renderLocal();
+        await openLocal();
+        await ready();
+        expect(screen.getByTestId("app-access-boundary").textContent).toBe(expectedBoundary);
+      },
+    );
+
+    it("marks newly added fields when changed source widens createFields on an existing operation", async () => {
+      const restrictedSubmit = {
+        ...submitOperation,
+        display: { kind: "create" as const, label: "Submit", fields: ["Item"] },
+      };
+      const narrowApproval = {
+        ...approvedAccess,
+        operations: [listOperation, restrictedSubmit],
+        createFields: [
+          {
+            operationId: submitOperation.operationId,
+            fieldIds: ["00000000-0000-4000-8000-000000000010"],
+          },
+        ],
+      };
+      api.publishOwnerApp.mockImplementation(
+        local([{ ...localRow, datasetCapability: narrowApproval }], {
+          revision: "e".repeat(64),
+          capabilities: [approvedAccess],
+        }),
+      );
+      renderLocal();
+      await openLocal();
+      await ready();
+      expect(lines("Changes")).toEqual(["Adds records with Item, QuantityNew"]);
+      expect(within(screen.getByTestId("app-access")).getAllByText("New")).toHaveLength(1);
+    });
+
+    it("marks a widened createFields operation even when display metadata is unavailable", async () => {
+      const bareSubmit = datasetCapability.operations[0]!;
+      const narrowApproval = {
+        ...datasetCapability,
+        operations: [bareSubmit],
+        createFields: [
+          {
+            operationId: bareSubmit.operationId,
+            fieldIds: ["00000000-0000-4000-8000-000000000010"],
+          },
+        ],
+      };
+      api.publishOwnerApp.mockImplementation(
+        local([{ ...localRow, datasetCapability: narrowApproval }], {
+          revision: "e".repeat(64),
+          capabilities: [datasetCapability],
+        }),
+      );
+      renderLocal();
+      await openLocal();
+      await ready();
+      expect(lines("Changes")).toEqual(["RecordsNew"]);
+      expect(within(screen.getByTestId("app-access")).getAllByText("New")).toHaveLength(1);
+    });
+
     it("marks what changed source adds and approves the changes", async () => {
       api.publishOwnerApp.mockImplementation(
         local([localRow], { revision: "e".repeat(64), capabilities: [grownAccess] }),
@@ -762,7 +1140,7 @@ describe("owner app publication", () => {
       renderLocal();
       await openLocal();
       expect(await stateText()).toBe(
-        "Its source changed since you approved it.The app runs the approved version until you approve the changes.",
+        "The app's source changed since you approved it.The app runs the approved version until you approve the changes.",
       );
       await ready();
       expect(approveButton().textContent).toBe("Approve changes");
@@ -882,7 +1260,7 @@ describe("owner app publication", () => {
       expect(alert.nextElementSibling?.tagName).toBe("FOOTER");
       expect(reportError).not.toHaveBeenCalled();
       expect(dialog()).toBeTruthy();
-      expect(await stateText()).toContain("Approve it to run this version on this device.");
+      expect(await stateText()).toContain("Approve this app to run it on this device.");
       await waitFor(() => expect(actions("prepareLocal")).toHaveLength(2));
       await ready();
       expect(actions("cancel")).toEqual([]);
@@ -1023,7 +1401,7 @@ describe("owner app publication", () => {
           ),
         ),
       );
-      expect(screen.queryByText("The server didn't return this app's links.")).toBeNull();
+      expect(screen.queryByText("The server did not return this app's links.")).toBeNull();
       expect(screen.getByRole("button", { name: "Publish on a link" })).toBeTruthy();
       expect(api.getSyncStatus).not.toHaveBeenCalled();
     });
@@ -1162,8 +1540,16 @@ it("reviews a chosen read and its fields, with approval off by default", async (
   const choice = screen.getByRole("checkbox", { name: /records.list/ }) as HTMLInputElement;
   expect(choice.checked).toBe(false);
   expect(screen.getByText("Fields: Record ID, Email, Name")).toBeTruthy();
+  expect(
+    screen.getByText(
+      "Selected reads are added to this app's link access and show current records and later changes. Unpublish to withdraw access.",
+    ),
+  ).toBeTruthy();
   fireEvent.click(choice);
   expect(choice.checked).toBe(true);
+  expect(screen.getByTestId("app-publication-capability").textContent).toContain(
+    "Selected link reads: records.list (Record ID, Email, Name). People with the link can use these once published.",
+  );
   fireEvent.click(choice);
   expect(choice.checked).toBe(false);
   fireEvent.click(choice);
@@ -1224,3 +1610,263 @@ it.each([false, true])(
     }
   },
 );
+
+it("shows every bound Collection and its alias in the local review dialog for a multi-Collection app", async () => {
+  vi.stubGlobal("dohcDesktop", api);
+  const expensesCap = {
+    ...datasetCapability,
+    alias: "expenses",
+    name: "Expenses",
+    datasetId: "00000000-0000-4000-8000-000000000010",
+  };
+  const workoutsCap = {
+    ...datasetCapability,
+    alias: "workouts",
+    name: "Workouts",
+    datasetId: "00000000-0000-4000-8000-000000000020",
+  };
+  api.publishOwnerApp.mockImplementation(async (request) => {
+    if (request.action === "listLocal") {
+      return {
+        kind: "localListed",
+        publications: [
+          {
+            publicationId: published.publicationId,
+            authorityRevision: 1,
+            appRoot: "control-tower",
+            sourceRevision: prepared.sourceRevision,
+            datasetCapabilities: [expensesCap, workoutsCap],
+            approved: true,
+            active: true,
+          },
+        ],
+      };
+    }
+    if (request.action === "checkLocal") {
+      return {
+        kind: "localChecked",
+        appRoot: "control-tower",
+        sourceRevision: prepared.sourceRevision,
+        sourcePaths: ["control-tower/main.tsx"],
+      };
+    }
+    return answer(request);
+  });
+  try {
+    render(
+      <OwnerAppPublication workspaceId="ws-trip" appRoot="control-tower" localApproval="browser" />,
+    );
+    await userEvent.setup().click(screen.getByRole("button", { name: "Review app" }));
+    const accessBox = await screen.findByTestId("app-access");
+    expect(accessBox.textContent).toContain("Expenses");
+    expect(accessBox.textContent).toContain("expenses");
+    expect(accessBox.textContent).toContain("Workouts");
+    expect(accessBox.textContent).toContain("workouts");
+  } finally {
+    cleanup();
+    vi.unstubAllGlobals();
+    api.publishOwnerApp.mockImplementation(answer);
+  }
+});
+
+it("renders a single plain-English staged review card for new/updated Collections and approves or discards it", async () => {
+  vi.stubGlobal("dohcDesktop", api);
+  const stageId = "00000000-0000-4000-8000-000000000099";
+  const reviewDigest = "c".repeat(64);
+  const expensesCap = {
+    kind: "dataset" as const,
+    name: "Expenses",
+    alias: "expenses",
+    datasetId: "00000000-0000-4000-8000-000000000001",
+    revision: 1,
+    revisionSha256: "a".repeat(64),
+    operationIds: ["00000000-0000-4000-8000-000000000002"],
+    operations: [
+      {
+        operationId: "00000000-0000-4000-8000-000000000002",
+        name: "listExpenses",
+        access: "owner" as const,
+        readOnly: true,
+        display: { kind: "read" as const, label: "List", fields: ["Merchant", "Amount"] },
+      },
+    ],
+  };
+  const workoutsCap = {
+    kind: "dataset" as const,
+    name: "Workouts",
+    alias: "workouts",
+    datasetId: "00000000-0000-4000-8000-000000000011",
+    revision: 2,
+    revisionSha256: "b".repeat(64),
+    operationIds: ["00000000-0000-4000-8000-000000000012"],
+    operations: [
+      {
+        operationId: "00000000-0000-4000-8000-000000000012",
+        name: "logWorkout",
+        access: "owner" as const,
+        readOnly: false,
+        display: { kind: "create" as const, label: "Log", fields: ["Activity", "Minutes"] },
+      },
+    ],
+  };
+  let stagedVisible = true;
+  const approvedCalls: OwnerAppPublicationRequest[] = [];
+  const discardedCalls: OwnerAppPublicationRequest[] = [];
+  api.publishOwnerApp.mockImplementation(async (request) => {
+    if (request.action === "listLocal") return { kind: "localListed", publications: [] };
+    if (request.action === "checkLocal")
+      return {
+        kind: "localChecked",
+        appRoot: "control-tower",
+        sourceRevision: prepared.sourceRevision,
+        sourcePaths: ["control-tower/index.tsx"],
+      };
+    if (request.action === "listStaged") {
+      return {
+        kind: "stagedListed",
+        stages: stagedVisible
+          ? [
+              {
+                stageId,
+                appRoot: "control-tower",
+                reviewDigest,
+                createdAtMs: 1_790_000_000_000,
+                sourceRevision: prepared.sourceRevision,
+                sourcePaths: ["control-tower/index.tsx"],
+                collections: [
+                  {
+                    alias: "expenses",
+                    datasetId: expensesCap.datasetId,
+                    name: "Expenses",
+                    datasetPath: "control-tower/expenses/dataset.json",
+                    action: "create",
+                    targetRevision: 1,
+                    targetRevisionSha256: expensesCap.revisionSha256,
+                    applied: false,
+                    tables: [{ name: "Expenses", fields: ["Date", "Merchant", "Amount"] }],
+                  },
+                  {
+                    alias: "workouts",
+                    datasetId: workoutsCap.datasetId,
+                    name: "Workouts",
+                    datasetPath: "control-tower/workouts/dataset.json",
+                    action: "migrate",
+                    previousRevision: 1,
+                    targetRevision: 2,
+                    targetRevisionSha256: workoutsCap.revisionSha256,
+                    migrationPath: null,
+                    applied: false,
+                    changes: [
+                      { kind: "code-changed", summary: "Changes the code for the actions" },
+                    ],
+                  },
+                ],
+                capabilities: [expensesCap, workoutsCap],
+                externalNetwork: true,
+              },
+            ]
+          : [],
+      };
+    }
+    if (request.action === "approveStaged") {
+      approvedCalls.push(request);
+      stagedVisible = false;
+      return {
+        kind: "stagedApproved",
+        stageId,
+        publicationId: "d".repeat(64),
+        authorityRevision: 1,
+        collectionsApplied: [
+          {
+            datasetId: expensesCap.datasetId,
+            action: "create",
+            revision: 1,
+            revisionSha256: expensesCap.revisionSha256,
+          },
+        ],
+      };
+    }
+    if (request.action === "discardStaged") {
+      discardedCalls.push(request);
+      stagedVisible = false;
+      return { kind: "stagedDiscarded", stageId };
+    }
+    return answer(request);
+  });
+  try {
+    const user = userEvent.setup();
+    const collectionsChanged = vi.fn();
+    render(
+      <OwnerAppPublication
+        workspaceId="ws-trip"
+        appRoot="control-tower"
+        localApproval="tab"
+        onCollectionsChange={collectionsChanged}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Review app" }));
+    const card = await screen.findByTestId("staged-app-review-card");
+    expect(card.textContent).toContain("1 new Collection and 1 updated Collection");
+    expect(card.textContent).toContain("Expenses");
+    expect(card.textContent).toContain("Date, Merchant, Amount");
+    expect(card.textContent).toContain("Workouts");
+    expect(card.textContent).toContain("Changes the code for the actions");
+
+    await user.click(screen.getByTestId("staged-app-approve"));
+    await waitFor(() =>
+      expect(approvedCalls).toEqual([
+        { action: "approveStaged", workspaceId: "ws-trip", stageId, reviewDigest },
+      ]),
+    );
+    expect(collectionsChanged).toHaveBeenCalledTimes(1);
+
+    stagedVisible = true;
+    await user.click(screen.getByRole("button", { name: "Review app" }));
+    await screen.findByTestId("staged-app-review-card");
+    await user.click(screen.getByTestId("staged-app-discard"));
+    await waitFor(() =>
+      expect(discardedCalls).toEqual([
+        { action: "discardStaged", workspaceId: "ws-trip", stageId },
+      ]),
+    );
+  } finally {
+    cleanup();
+    vi.unstubAllGlobals();
+    api.publishOwnerApp.mockImplementation(answer);
+  }
+});
+
+it("shows the failed review state instead of falling back when loading staged proposals fails", async () => {
+  const user = userEvent.setup();
+  const prepareLocalCalls: OwnerAppPublicationRequest[] = [];
+  api.publishOwnerApp.mockImplementation(async (request) => {
+    if (request.action === "listLocal") return { kind: "localListed", publications: [] };
+    if (request.action === "checkLocal")
+      return {
+        kind: "localChecked",
+        appRoot: "control-tower",
+        sourceRevision: prepared.sourceRevision,
+        sourcePaths: ["control-tower/index.tsx"],
+      };
+    if (request.action === "listStaged") throw new Error("staged store unavailable");
+    if (request.action === "prepareLocal") {
+      prepareLocalCalls.push(request);
+      return { ...prepared, local: true };
+    }
+    return answer(request);
+  });
+  vi.stubGlobal("dohcDesktop", api);
+  try {
+    render(
+      <OwnerAppPublication workspaceId="ws-trip" appRoot="control-tower" localApproval="tab" />,
+    );
+    await user.click(screen.getByRole("button", { name: "Review app" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("staged store unavailable");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeDefined();
+    expect(prepareLocalCalls).toEqual([]);
+  } finally {
+    cleanup();
+    vi.unstubAllGlobals();
+    api.publishOwnerApp.mockImplementation(answer);
+  }
+});

@@ -292,7 +292,7 @@ describe("agent threads", () => {
     await expect(
       agentThreads.connect(WORKSPACE, { id: "chief", name: "Chief", thread }),
     ).rejects.toThrow(
-      `dohc can't connect a thread from where it is installed. The path of its folder has "&", which a command can't carry safely. Install dohc in a folder whose path has none.`,
+      `dohc cannot connect a thread from where it is installed. The path of its folder has "&", which a command cannot carry safely. Install dohc in a folder whose path has none.`,
     );
 
     expect(forward).not.toHaveBeenCalled();

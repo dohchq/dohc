@@ -10,6 +10,7 @@
     "./documents": "./src/documents.ts",
     "./account": "./src/account.ts",
     "./apps": "./src/apps.ts",
+    "./collections": "./src/collections.ts",
     "./workspace": "./src/workspace.ts"
   },
   "scripts": {

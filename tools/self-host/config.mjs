@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isDeepStrictEqual, parseEnv } from "node:util";
 import { posix, resolve } from "node:path";
 
@@ -211,6 +211,44 @@ export function validateSettings(settings) {
     Number(settings.DOHC_SMTP_PORT) > 65535
   )
     errors.push("Set DOHC_SMTP_PORT to a valid port.");
+  if (apnsAlerts(settings)) {
+    for (const name of apnsSettings)
+      if (!settings[name])
+        errors.push(
+          `Set ${name}, or clear every DOHC_RELAY_APNS_ value to turn off iPhone alerts.`,
+        );
+    const topic = settings.DOHC_RELAY_APNS_TOPIC;
+    if (topic && (topic.length > 255 || !/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(topic)))
+      errors.push("Set DOHC_RELAY_APNS_TOPIC to the phone app's bundle ID, app.dohc.mobile.");
+    const environments = settings.DOHC_RELAY_APNS_ENVIRONMENTS?.split(",").map((name) =>
+      name.trim(),
+    );
+    if (
+      environments &&
+      settings.DOHC_RELAY_APNS_ENVIRONMENTS &&
+      (!environments.every((name) => ["production", "sandbox"].includes(name)) ||
+        new Set(environments).size !== environments.length)
+    )
+      errors.push(
+        "Set DOHC_RELAY_APNS_ENVIRONMENTS to production, or to production,sandbox to also alert development builds.",
+      );
+    for (const name of ["DOHC_RELAY_APNS_KEY_ID", "DOHC_RELAY_APNS_TEAM_ID"])
+      if (settings[name] && !/^[A-Z0-9]{10}$/.test(settings[name]))
+        errors.push(`Set ${name} to the 10-character ID from your Apple Developer account.`);
+    const key = settings.DOHC_RELAY_APNS_KEY_FILE;
+    if (key && (!/^(\/(?!\.\.?(\/|$))[a-zA-Z0-9._-]+)+$/.test(key) || !isFile(key)))
+      errors.push(
+        "Set DOHC_RELAY_APNS_KEY_FILE to the absolute path of the APNs auth key (.p8) on this server.",
+      );
+    if (
+      key &&
+      settings.DOHC_DATA_DIRECTORY &&
+      inside(realPath(key), realPath(settings.DOHC_DATA_DIRECTORY))
+    )
+      errors.push(
+        "Keep DOHC_RELAY_APNS_KEY_FILE outside DOHC_DATA_DIRECTORY. A deployment archive copies the deployment's folders.",
+      );
+  }
   if (
     settings.DOHC_DATA_DIRECTORY &&
     !/^(\/(?!\.\.?(\/|$))[a-zA-Z0-9._-]+)+$/.test(settings.DOHC_DATA_DIRECTORY)
@@ -222,10 +260,37 @@ export function validateSettings(settings) {
   return errors;
 }
 
+export const realPath = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
+
+const isFile = (path) => {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+};
+
+const apnsSettings = [
+  "DOHC_RELAY_APNS_TOPIC",
+  "DOHC_RELAY_APNS_ENVIRONMENTS",
+  "DOHC_RELAY_APNS_KEY_FILE",
+  "DOHC_RELAY_APNS_KEY_ID",
+  "DOHC_RELAY_APNS_TEAM_ID",
+];
+/** iPhone alerts need every APNs setting. With none of them set, the server sends no alerts. */
+const apnsAlerts = (settings) => apnsSettings.some((name) => settings[name]);
+/** Where the relay reads the APNs auth key. A deployment archive leaves the file bound here out. */
+export const apnsKeyTarget = "/etc/dohc/apns-key.p8";
+
 /** Refuses invalid settings, so a command stops before any Docker or database operation uses them. */
-export function readValidSettings(path) {
-  const settings = readSettings(path),
-    errors = validateSettings(settings);
+export function readValidSettings(path, settings = readSettings(path)) {
+  const errors = validateSettings(settings);
   if (errors.length) throw new Error(errors.join("\n"));
   return settings;
 }
@@ -246,6 +311,7 @@ export function composeArgs(envFile, settings, ...args) {
       : []),
     ...(settings.DOHC_DATA_DIRECTORY ? ["-f", "tools/self-host/compose.data-disk.yml"] : []),
     ...(settings.DOHC_POSTGRES_HOST ? ["-f", "tools/self-host/compose.external-postgres.yml"] : []),
+    ...(apnsAlerts(settings) ? ["-f", "tools/self-host/compose.apns.yml"] : []),
     ...(settings.DOHC_BEHIND_CLOUDFLARE === "1"
       ? ["-f", "tools/self-host/compose.cloudflare.yml"]
       : []),
@@ -472,6 +538,28 @@ const inside = (path, folder) =>
   path === folder || path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
 const overlapping = (a, b) => inside(a, b) || inside(b, a);
 
+// A bound volume that Docker has not created yet still names its folder.
+const storageFolders = (config, volumes) =>
+  [
+    ...volumes.flatMap((volume) => [
+      bindDirectory(volume.Options),
+      normalizeDirectory(volume.Mountpoint),
+    ]),
+    ...Object.values(config.volumes ?? {}).map((volume) => bindDirectory(volume.driver_opts)),
+  ].filter(Boolean);
+
+/** Returns each APNs auth key file inside the deployment's storage, where an archive would copy it. */
+export function apnsKeysInStorage(config, volumes) {
+  const storage = storageFolders(config, volumes).map(realPath);
+  return Object.values(config.services ?? {})
+    .flatMap((service) => service.volumes ?? [])
+    .filter((volume) => volume.type === "bind" && volume.target === apnsKeyTarget)
+    .map((volume) => volume.source)
+    .filter((source) =>
+      storage.some((folder) => inside(realPath(normalizeDirectory(source)), folder)),
+    );
+}
+
 /**
  * Returns a function that lists each running container's writable mount that reaches the deployment's storage.
  * `volumes` are the deployment's existing volumes as Docker inspects them. `run(args)` returns Docker's output and throws when Docker fails.
@@ -479,14 +567,7 @@ const overlapping = (a, b) => inside(a, b) || inside(b, a);
 export function storageWriters(config, volumes, run) {
   const volumeNames = new Set(Object.values(config.volumes ?? {}).map((volume) => volume.name));
   // A writable mount of a deployment folder, or of a folder inside or above it, can change deployment data.
-  // A bound volume that Docker has not created yet still names its folder.
-  const storage = [
-    ...volumes.flatMap((volume) => [
-      bindDirectory(volume.Options),
-      normalizeDirectory(volume.Mountpoint),
-    ]),
-    ...Object.values(config.volumes ?? {}).map((volume) => bindDirectory(volume.driver_opts)),
-  ].filter(Boolean);
+  const storage = storageFolders(config, volumes);
   return () => {
     const ids = run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean);
     if (!ids.length) return [];

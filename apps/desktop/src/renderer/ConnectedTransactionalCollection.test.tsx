@@ -535,7 +535,7 @@ it("reports an unknown action result in the open dialog without a toast or Notic
   fireEvent.click(await screen.findByRole("button", { name: "Draw winner" }));
   fireEvent.click(screen.getByRole("button", { name: "Run action" }));
   await screen.findByText("Action not confirmed");
-  expect(screen.getByText(/may have changed records/)).toBeTruthy();
+  expect(screen.getByText(/see if anything changed/)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   expect(onError).not.toHaveBeenCalled();
 });
@@ -827,7 +827,7 @@ it("opens wrapped history through the real dialog and reverses the saved edit", 
   fireEvent.click(await history.findByText("edit", { exact: true }));
   expect(history.getByText('"Original name"')).toBeTruthy();
   fireEvent.click(history.getByRole("button", { name: "Undo edit" }));
-  await history.findByText("No saved operations on this page. Refresh to check for changes.");
+  await history.findByText("No saved actions on this page. Refresh to check for changes.");
   expect(backend.dataset).toHaveBeenCalledWith({
     action: "invoke",
     workspaceId: "workspace-a",
@@ -1020,6 +1020,106 @@ it("shows its kept copy brought up to date in place, and leaves read-only by its
   expect(input.getAttribute("data-records-version")).toBe("1");
 });
 
+it("drops a signed-out copy when an account signs in, reads nothing meanwhile, and shows nothing of it if the next read fails", async () => {
+  const session: Array<
+    (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void
+  > = [];
+  backend.onCloudSessionChanged.mockImplementation(((listener: (typeof session)[number]) => {
+    session.push(listener);
+    return () => session.splice(session.indexOf(listener), 1);
+  }) as never);
+  const copyChanged: Array<(event: { workspaceId: string; datasetId?: string }) => void> = [];
+  backend.onCollectionCopyChanged.mockImplementation((listener) => {
+    copyChanged.push(listener);
+    return () => undefined;
+  });
+  backend.dataset.mockResolvedValue({
+    kind: "description",
+    dataset,
+    copy: { offline: true, signedOut: true, host: "sync.example.test" },
+  });
+  const onError = vi.fn();
+  render(
+    <ConnectedTransactionalCollection
+      workspaceId="workspace-a"
+      datasetPath="data/dataset.json"
+      tableId={id(2)}
+      onError={onError}
+      onFormCreated={vi.fn()}
+      onOpenFile={vi.fn()}
+      onOpenScheduleSettings={vi.fn()}
+    />,
+  );
+  await screen.findByLabelText("Collection view state");
+  act(() => {
+    for (const listener of [...session]) listener({ sessionKey: "b", phase: "changing" });
+  });
+  expect(screen.queryByLabelText("Collection view state")).toBeNull();
+  // While the session changes, the page reads nothing: not on a copy change, nor on Try again.
+  const reads = backend.dataset.mock.calls.length;
+  act(() => {
+    for (const listener of copyChanged)
+      listener({ workspaceId: "workspace-a", datasetId: dataset.datasetId });
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(backend.dataset.mock.calls.length).toBe(reads);
+  expect(screen.queryByLabelText("Collection view state")).toBeNull();
+  backend.dataset.mockRejectedValue(new Error("The other account can't read this."));
+  act(() => {
+    for (const listener of [...session]) listener({ sessionKey: "b", phase: "ready" });
+  });
+  await waitFor(() => expect(onError).toHaveBeenCalled());
+  expect(screen.queryByLabelText("Collection view state")).toBeNull();
+});
+it("shows no signed-out copy from a first read that answers after a session starts", async () => {
+  const session: Array<
+    (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void
+  > = [];
+  backend.onCloudSessionChanged.mockImplementation(((listener: (typeof session)[number]) => {
+    session.push(listener);
+    return () => session.splice(session.indexOf(listener), 1);
+  }) as never);
+  let answer!: (value: unknown) => void;
+  backend.dataset.mockImplementationOnce(
+    () => new Promise((resolve) => (answer = resolve)) as never,
+  );
+  const onError = vi.fn();
+  render(
+    <ConnectedTransactionalCollection
+      workspaceId="workspace-a"
+      datasetPath="data/dataset.json"
+      tableId={id(2)}
+      onError={onError}
+      onFormCreated={vi.fn()}
+      onOpenFile={vi.fn()}
+      onOpenScheduleSettings={vi.fn()}
+    />,
+  );
+  await waitFor(() => expect(backend.dataset).toHaveBeenCalledTimes(1));
+  act(() => {
+    for (const listener of [...session]) listener({ sessionKey: "b", phase: "changing" });
+  });
+  // The first read, which main answered from the account signed in last, arrives now.
+  await act(async () => {
+    answer({
+      kind: "description",
+      dataset,
+      copy: { offline: true, signedOut: true, host: "sync.example.test" },
+    });
+    await Promise.resolve();
+  });
+  expect(screen.queryByLabelText("Collection view state")).toBeNull();
+  backend.dataset.mockRejectedValue(new Error("The other account can't read this."));
+  act(() => {
+    for (const listener of [...session]) listener({ sessionKey: "b", phase: "ready" });
+  });
+  await waitFor(() => expect(onError).toHaveBeenCalled());
+  expect(backend.dataset).toHaveBeenCalledTimes(2);
+  expect(screen.queryByLabelText("Collection view state")).toBeNull();
+});
 it("shows a slow quiet read's answer when another change arrives during it", async () => {
   const copyChanged: Array<(event: { workspaceId: string; datasetId?: string }) => void> = [];
   backend.onCollectionCopyChanged.mockImplementation((listener) => {
@@ -1170,7 +1270,7 @@ describe("a quiet read beside one the page started", () => {
     const row = "collection-open:data/dataset.json";
     await waitFor(() =>
       expect(onError).toHaveBeenCalledWith(
-        "Could not open this Collection.",
+        "dohc could not open this Collection.",
         expect.anything(),
         expect.any(Function),
         row,
@@ -1392,7 +1492,7 @@ it("loads owner pending responses and requires confirmation before clearing a sa
   fireEvent.click(
     within(screen.getByRole("alertdialog")).getByRole("button", { name: "Clear retry" }),
   );
-  await screen.findByText("No pending responses. Refresh to check for changes.");
+  await screen.findByText("No pending responses.");
   expect(backend.dataset).toHaveBeenCalledWith({
     action: "pendingAttempts",
     workspaceId: "workspace-a",
@@ -1431,7 +1531,8 @@ it.each([
         onOpenScheduleSettings={vi.fn()}
       />,
     );
-    await waitFor(() => expect(screen.queryByText("Opening collection…")).toBeNull());
+    await screen.findByLabelText("Collection view state");
+    expect(screen.queryByText("Opening Collection…")).toBeNull();
     expect(screen.queryByRole("button", { name: "Pending responses" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Export recovery" })).toBeNull();
   },
@@ -1545,7 +1646,7 @@ it("cancels an unconfirmed response only after owner acknowledgement and reports
   fireEvent.click(
     within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel response" }),
   );
-  await screen.findByText("No pending responses. Refresh to check for changes.");
+  await screen.findByText("No pending responses.");
   expect(backend.dataset).toHaveBeenCalledWith({
     action: "cancelAttempt",
     workspaceId: "workspace-a",
@@ -1639,7 +1740,7 @@ it.each([
       onOpenScheduleSettings={vi.fn()}
     />,
   );
-  await screen.findByText("Fundraiser is archived");
+  await screen.findByText("The Collection Fundraiser is archived");
   expect(screen.queryByRole("button", { name: "Delete permanently…" })).toBeNull();
 });
 it("does not report permanent deletion in a different workspace", async () => {
@@ -1852,7 +1953,7 @@ describe("a dataset table's ⚡ panel", () => {
     fireEvent.click(customize);
     const dialog = await screen.findByRole("dialog", { name: "Customize Registrations" });
     expect(within(dialog).getByText("Fundraiser/automations.yaml")).toBeTruthy();
-    expect(within(dialog).getByText("Made with the first automation.")).toBeTruthy();
+    expect(within(dialog).getByText("Created with your first automation")).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Open automations.yaml" })).toBeNull();
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -1954,7 +2055,7 @@ describe("a dataset table's ⚡ panel", () => {
     });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose action: Confirm" }));
     const panel = await screen.findByTestId("collection-automations-panel");
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
       "Confirm",
@@ -2005,7 +2106,7 @@ describe("a dataset table's ⚡ panel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open a record" }));
     expect(handoff.opened).toBe(1);
     fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose action: Confirm" }));
     const panel = await screen.findByTestId("collection-automations-panel");
     fireEvent.change(within(panel).getByRole("textbox", { name: "Name" }), {
       target: { value: "Confirm twice" },
@@ -2324,7 +2425,7 @@ describe("a dataset table's ⚡ panel", () => {
     });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose action: Confirm" }));
     const panel = await screen.findByTestId("collection-automations-panel");
     const name = within(panel).getByRole("textbox", { name: "Name" });
     await waitFor(() => expect(document.activeElement).toBe(name));
@@ -2382,7 +2483,7 @@ describe("a dataset table's ⚡ panel", () => {
     });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose action: Confirm" }));
     const panel = await screen.findByTestId("collection-automations-panel");
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
       "Confirm",
@@ -2663,7 +2764,7 @@ describe("a read that waited for this Collection's move", () => {
     const row = "collection-open:data/dataset.json";
     await waitFor(() =>
       expect(onError).toHaveBeenCalledWith(
-        "Could not open this Collection.",
+        "dohc could not open this Collection.",
         named,
         expect.any(Function),
         row,

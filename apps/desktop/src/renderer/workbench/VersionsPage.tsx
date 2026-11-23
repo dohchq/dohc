@@ -342,14 +342,14 @@ export function VersionsPage(props: {
     body = versions.loadFailed ? (
       <RetryRow testId="versions-page-retry" onRetry={versions.reload} />
     ) : (
-      <SkeletonRows layout="list" label="Loading versions..." />
+      <SkeletonRows layout="list" label="Loading versions…" />
     );
   } else if (onlyMain) {
     body = (
       <EmptyState
         picture={EMPTY_ART.versions}
         data-testid="versions-page-empty"
-        title="Make a version to try changes without touching Main."
+        title="Create a version to try changes without touching Main."
       >
         {newVersion}
       </EmptyState>
@@ -402,7 +402,13 @@ export function VersionsPage(props: {
       {/* The document column, so the page lines up with the editor's text. */}
       <div className="mx-auto flex w-full max-w-[calc(720px+2*var(--dohc-editor-gutter))] flex-1 flex-col px-[var(--dohc-editor-gutter)] pb-6">
         <header className="flex shrink-0 items-start justify-between gap-4 pb-4 pt-10">
-          <h2 className="m-0 flex h-8 items-center text-base font-semibold text-ink">Versions</h2>
+          <div className="min-w-0">
+            <h2 className="m-0 flex h-8 items-center text-base font-semibold text-ink">Versions</h2>
+            <p data-testid="versions-page-note" className="m-0 mt-1 text-[12px] text-muted">
+              Versions separate tracked files. Chats are the same in every version, and agents
+              connected through an Agent link read files from Main.
+            </p>
+          </div>
           {ready && !onlyMain ? newVersion : null}
         </header>
         {body}
@@ -586,7 +592,7 @@ function VersionRow(props: {
             on the version you're in. A click on the row's text focuses the row,
             which doesn't hold them open. */}
         <div
-          className={`flex items-center gap-2 ${props.active ? "" : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"}`}
+          className={`flex items-center gap-2 transition-opacity ${props.active ? "" : "opacity-70 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"}`}
         >
           {props.active ? null : (
             <SecondaryButton

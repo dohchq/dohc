@@ -97,7 +97,7 @@ export const LazyMarkdownEditor = forwardRef<
 
   // The editor's own top padding, so its first line lands on the first bar.
   if (load.status === "loading") {
-    return <SkeletonRows layout="document" label="Loading editor..." className="h-full pt-1.5" />;
+    return <SkeletonRows layout="document" label="Loading editor…" className="h-full pt-1.5" />;
   }
 
   return (

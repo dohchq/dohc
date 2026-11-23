@@ -55,7 +55,12 @@ vi.mock("@dohc/collection-views", () => ({
     </div>
   ),
   CalendarView: (props: CalendarViewProps) => (
-    <div data-testid="calendar" data-open-record={props.openRecordId ?? ""}>
+    <div
+      data-testid="calendar"
+      data-open-record={props.openRecordId ?? ""}
+      data-view-mode={props.viewMode ?? ""}
+    >
+      <button onClick={() => props.onViewModeChange?.("week")}>Week</button>
       <button onClick={() => props.onNavigate?.(new Date(2027, 0, 1))}>January</button>
       {props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}
       {props.records.map((record) => (
@@ -701,6 +706,8 @@ it("loads the visible calendar range and changes range on navigation", async () 
   );
   setup(invoke, calendar);
   await viewIdle("calendar");
+  fireEvent.click(screen.getByRole("button", { name: "Week" }));
+  expect(screen.getByTestId("calendar").getAttribute("data-view-mode")).toBe("week");
   fireEvent.click(screen.getByRole("button", { name: "January" }));
   await waitFor(() =>
     expect(
@@ -714,6 +721,8 @@ it("loads the visible calendar range and changes range on navigation", async () 
       ),
     ).toBe(true),
   );
+  await viewIdle("calendar");
+  expect(screen.getByTestId("calendar").getAttribute("data-view-mode")).toBe("week");
 });
 it("reads the nearest record on each side of an empty month for the calendar to offer", async () => {
   const invoke = vi.fn(

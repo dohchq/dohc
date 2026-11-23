@@ -1474,3 +1474,104 @@ fn merge_removal_text_stays_on_the_engine_that_kept_it() {
         "a dismissed removal stays local"
     );
 }
+
+#[test]
+fn an_owner_save_names_the_last_file_sent_and_skips_an_unchanged_save() {
+    let (_scratch, _, mut store) = owner();
+    let key = DocKey::new("ws", "main", "doc").unwrap();
+    let journal = |store: &mut EngineStore, id: &str| {
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::enrolment::journal_owner_save_in_tx(tx, &key, id)
+            })
+            .unwrap();
+    };
+    write(&mut store, "doc", "v1", "doc.md", "one", "ydoc", 10);
+    journal(&mut store, "v1");
+    write(&mut store, "doc", "v2", "doc.md", "one\ntwo", "ydoc", 20);
+    journal(&mut store, "v2");
+    journal(&mut store, "v2");
+    let sent = exports(&store);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].payload["momentId"], "v1");
+    assert_eq!(sent[1].payload["momentId"], "v2");
+    assert_eq!(sent[1].payload["beforeLatestMomentId"], "v1");
+}
+
+#[test]
+fn an_owner_save_after_another_computer_saved_names_that_computer_file() {
+    let key = DocKey::new("ws", "main", "doc").unwrap();
+    let journal = |store: &mut EngineStore, id: &str| {
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::enrolment::journal_owner_save_in_tx(tx, &key, id)
+            })
+            .unwrap();
+    };
+    let saved = |n: char| format!("moment-ydoc-{}", n.to_string().repeat(64));
+    let (_owner_scratch, _, mut first) = owner();
+    write(&mut first, "doc", &saved('1'), "doc.md", "one", "ydoc", 10);
+    journal(&mut first, &saved('1'));
+    write(
+        &mut first,
+        "doc",
+        &saved('2'),
+        "doc.md",
+        "one\ntwo",
+        "ydoc",
+        20,
+    );
+    journal(&mut first, &saved('2'));
+    let (_peer_scratch, _, mut second) = open_store();
+    seed_replication_version(&mut second, "main", "main");
+    adopt_join_identity(
+        &mut second,
+        "ws",
+        "second",
+        "epoch-1",
+        "stream-1",
+        1,
+        &NoFaults,
+    )
+    .unwrap();
+    second
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_push_state VALUES ('ws','second',-1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    hydrate(&first, &mut second);
+    let sent = exports(&first);
+    for op in &sent {
+        apply(&mut second, op);
+    }
+    second
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE moments SET sync_record_only=1 WHERE moment_id=?1",
+                [saved('2')],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    write(
+        &mut second,
+        "doc",
+        &saved('3'),
+        "doc.md",
+        "one\ntwo\nthree",
+        "ydoc",
+        30,
+    );
+    journal(&mut second, &saved('3'));
+    let next = exports(&second);
+    assert_eq!(next.len(), 1);
+    assert_eq!(
+        next[0].payload["payloadBeforeBlobSha256"], sent[1].payload["payloadAfterBlobSha256"],
+        "the save names the file the other computer sent last"
+    );
+}

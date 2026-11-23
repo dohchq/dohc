@@ -45,6 +45,7 @@ function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root
   const rollbackComplete = vi.fn(() => {
     events.push("notify");
   });
+  const lostDrawings = vi.fn((_workspaceId: string): string[] => []);
   const run = createJoinedWorkspaceRunner({
     canonicalizeRoot,
     reserve: (input) => authorities.reserveBinding(input),
@@ -71,6 +72,7 @@ function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root
     release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
     closeRelay: cleanup,
     rollbackComplete,
+    lostDrawings,
     logError: vi.fn(),
   });
   const input = {
@@ -91,11 +93,33 @@ function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root
     createFolder,
     cleanup,
     rollbackComplete,
+    lostDrawings,
     authorities,
   };
 }
 
 describe("joined workspace creation", () => {
+  it("says which drawings lose their changes when a failed join removes the workspace", async () => {
+    const h = harness();
+    h.lostDrawings.mockImplementation(() => {
+      h.events.push("lost-drawings");
+      return ["plans/site.excalidraw", "board.excalidraw"];
+    });
+    h.input.populate.mockRejectedValue(new Error("download interrupted"));
+
+    await expect(h.run(h.input)).rejects.toThrow(
+      "download failed dohc could not keep drawing changes made while it reconnected, so changes to plans/site.excalidraw and board.excalidraw since their last saved copy are lost.",
+    );
+    expect(h.lostDrawings).toHaveBeenCalledWith("joined");
+    expect(h.events.indexOf("lost-drawings")).toBeLessThan(h.events.indexOf("remove"));
+  });
+
+  it("adds nothing to a failed join's words when no drawing lost changes", async () => {
+    const h = harness();
+    h.input.populate.mockRejectedValue(new Error("download interrupted"));
+    await expect(h.run(h.input)).rejects.toThrow(/^download failed$/u);
+  });
+
   it("preserves existing files when folder creation fails before the join owns anything", async () => {
     const root = await createTestScratch("dohc-join-preserve-");
     const h = harness(root);

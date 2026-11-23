@@ -197,8 +197,8 @@ it.each(["pending", "not-accepted"] as const)(
     expect(
       await screen.findByText(
         state === "pending"
-          ? "Reversals saved on this computer. The shared host has not accepted them yet."
-          : "Reversals saved on this computer. The shared host did not accept them. Try Undo again in Run History.",
+          ? "Reversals saved on this computer. The server has not accepted them yet."
+          : "Reversals saved on this computer. The server did not accept them. Try Undo again in run history.",
       ),
     ).toBeTruthy();
     expect(screen.queryByText(/^Undid 1 run/) !== null).toBe(state === "pending");
@@ -765,7 +765,7 @@ it("stops the chosen person after one confirm, lists files to check with why, an
   ]);
   expect(
     screen.getByText(
-      "ana@example.com loses Edit access to this workspace. Share again to give it back.",
+      "This removes Edit access for ana@example.com on this workspace. Share again to give it back.",
     ),
   ).toBeTruthy();
 
@@ -784,7 +784,7 @@ it("stops the chosen person after one confirm, lists files to check with why, an
   expect(screen.getByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
   fireEvent.click(screen.getByText("trip/packing/automations.yaml"));
   expect(f.props.onOpenFile).toHaveBeenCalledWith("trip/packing/automations.yaml");
-  expect(screen.getByText("Another author changed it after ana@example.com.")).toBeTruthy();
+  expect(screen.getByText("Changed after ana@example.com by another author.")).toBeTruthy();
   expect(screen.getByText("This Collection holds files someone else added.")).toBeTruthy();
   expect(screen.getByText("This action is unavailable for shared live files.")).toBeTruthy();
 
@@ -901,13 +901,13 @@ it("names the rules file it can't read on the file's row, from a restore and fro
   fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
   expect(
     await screen.findByText(
-      "dohc could not restore this file because it can't read .dohc/visibility.toml. Fix the file, then try again.",
+      "dohc could not restore this file because it cannot read .dohc/visibility.toml. Fix the file.",
     ),
   ).toBeTruthy();
   fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
   expect(
     await screen.findByText(
-      "dohc could not restore this file because it can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
+      "dohc could not restore this file because it cannot read .dohc/files.toml and .dohc/visibility.toml. Fix the files.",
     ),
   ).toBeTruthy();
   expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([
@@ -1014,7 +1014,7 @@ it("says access stopped while changes are still arriving, and tries again", asyn
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
   expect(
     await screen.findByText(
-      "Access stopped. dohc has not received all of bob@example.com's changes yet. Try again in a moment.",
+      "Access stopped. dohc has not received all of bob@example.com's changes yet.",
     ),
   ).toBeTruthy();
   expect(f.props.onRestored).not.toHaveBeenCalled();
@@ -1127,7 +1127,7 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
   expect((who as HTMLSelectElement).value).toBe("link:grant-link");
   expect(
     screen.getByText(
-      "Edit link to trip stops working for everyone who has it, including people who opened it in dohc. Share again to give access back.",
+      "This stops Edit link to trip from working for everyone who has it, including people who opened it in dohc. Share again to give access back.",
     ),
   ).toBeTruthy();
 
@@ -1152,7 +1152,7 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
   ).toBeTruthy();
   expect(
     screen.getByText(
-      "Messages and notices from automations changed through Edit link to trip stay sent.",
+      "Messages and Notices from automations changed through Edit link to trip stay sent.",
     ),
   ).toBeTruthy();
   expect(
@@ -1160,7 +1160,7 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
       "Runs on your other computers are not undone here. Undo them from the run history on each computer.",
     ),
   ).toBeTruthy();
-  expect(screen.getByText("Another author changed it after the link.")).toBeTruthy();
+  expect(screen.getByText("Changed after the link by another author.")).toBeTruthy();
 
   fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
   expect(
@@ -1530,7 +1530,7 @@ it("keeps what an earlier try showed when a retry stops before it reads their ch
   expect(screen.queryByText("dohc has not finished undoing runs.")).toBeNull();
   expect(screen.getByText("1 field kept a later value.")).toBeTruthy();
   expect(
-    screen.getByText("Messages and notices from automations ana@example.com changed stay sent."),
+    screen.getByText("Messages and Notices from automations ana@example.com changed stay sent."),
   ).toBeTruthy();
   expect(screen.getByText("trip/packing/collection.yaml")).toBeTruthy();
   expect(f.props.onError.mock.calls[1]![0]).toBe(

@@ -65,21 +65,22 @@ interface Layout {
 
 /** The document in `state` as the Markdown an edit matches against. */
 export function documentMarkdown(state: Uint8Array): string {
-  return withDoc(state, (doc) => savedForm(markdownOfLayout(layoutOf(doc))));
+  return withDoc(state, (doc) => savedForm(layoutOf(doc)));
 }
 
 /** A settled Markdown file as the Markdown an edit to it would match against. */
 export function settledDocumentMarkdown(markdown: string): string {
   const doc = markdownToYDoc(markdown);
   try {
-    return savedForm(markdownOfLayout(layoutOf(doc)));
+    return savedForm(layoutOf(doc));
   } finally {
     doc.destroy();
   }
 }
 
 // As the saved file ends: a note that isn't empty ends with one line break.
-function savedForm(markdown: string): string {
+function savedForm(layout: Layout): string {
+  const markdown = layout.frontmatter + layout.body.trimEnd();
   return markdown === "" || markdown.endsWith("\n") ? markdown : `${markdown}\n`;
 }
 
@@ -194,10 +195,6 @@ function layoutOf(doc: Y.Doc): Layout {
   return { frontmatter, fragment, elements: elements as Y.XmlElement[], blocks, chunks, body };
 }
 
-function markdownOfLayout(layout: Layout): string {
-  return layout.frontmatter + layout.body;
-}
-
 function blockMarkdown(block: ProseMirrorNode, first: boolean): string {
   if (block.type.name === "horizontalRule") return first ? "***" : "---";
   const root = escapeHighlightMarkdown({ type: "doc", content: [block.toJSON()] });
@@ -215,7 +212,7 @@ function planEdit(layout: Layout, edit: DocumentEdit): ((doc: Y.Doc) => void) | 
     return blockChange(layout, lastWithText + 1, lastWithText, replacement);
   }
   const find = edit.find.replaceAll("\r\n", "\n");
-  const at = uniqueMatch(savedForm(markdownOfLayout(layout)), find) - layout.frontmatter.length;
+  const at = uniqueMatch(savedForm(layout), find) - layout.frontmatter.length;
   if (at < 0) {
     throw new Error(
       "The text is in the document's frontmatter. Document edits change the body only.",
@@ -275,9 +272,14 @@ function blockChange(
   markdown: string,
 ): (doc: Y.Doc) => void {
   const schema = getDohcProseMirrorSchema();
+  const note = [
+    ...layout.chunks.slice(0, first).map((chunk) => chunk.markdown),
+    markdown,
+    ...layout.chunks.slice(last + 1).map((chunk) => chunk.markdown),
+  ].join(BLOCK_SEPARATOR);
   const replacement: ProseMirrorNode[] = [];
   if (markdown.trim() !== "") {
-    schema.nodeFromJSON(parseRichdocMarkdown(markdown)).forEach((block) => {
+    schema.nodeFromJSON(parseRichdocMarkdown(markdown, "source", note)).forEach((block) => {
       replacement.push(block);
     });
   }

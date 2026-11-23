@@ -1,4 +1,5 @@
 import { readdir, readFile, writeFile } from "node:fs/promises";
+import { PNG } from "pngjs";
 import { DOCUMENT_END } from "./helpers/keys";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -334,6 +335,69 @@ test("opening an image file directly in the media viewer does not crash", async 
 
     expect(desktop.app.windows().length).toBeGreaterThan(0);
     expect(await page.evaluate(() => 1 + 1)).toBe(2);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("media viewer fits tall images without clipping and keeps keyboard zoom working at limits", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    const tallPng = PNG.sync.write(new PNG({ width: 400, height: 4000 }));
+    await writeWorkspaceFiles(temp, [{ path: "assets/tall.png", contents: tallPng }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "assets/tall.png");
+    await revealExplorerPath(page, "assets/tall.png");
+    await explorerRow(page, "assets/tall.png").click();
+
+    const view = page.getByTestId("view-image");
+    const viewport = view.getByRole("region", { name: "Image preview: tall.png" });
+    const img = view.locator("img");
+    await expect(view).toBeVisible({ timeout: 15_000 });
+    await expect
+      .poll(async () => await img.evaluate((el) => (el as HTMLImageElement).naturalHeight), {
+        timeout: 15_000,
+      })
+      .toBe(4000);
+
+    // Tall image must fit inside the viewport with aspect ratio intact and no overflow.
+    const geometry = await view.evaluate(() => {
+      const vp = document.querySelector<HTMLElement>('[role="region"][aria-label*="tall.png"]')!;
+      const im = vp.querySelector<HTMLImageElement>("img")!;
+      const vpr = vp.getBoundingClientRect();
+      const imr = im.getBoundingClientRect();
+      return {
+        vpH: vpr.height,
+        scrollH: vp.scrollHeight,
+        clientH: vp.clientHeight,
+        imW: imr.width,
+        imH: imr.height,
+        imTop: imr.top,
+        vpTop: vpr.top,
+      };
+    });
+    expect(geometry.imH).toBeLessThanOrEqual(geometry.vpH);
+    expect(geometry.scrollH).toBeLessThanOrEqual(geometry.clientH + 2);
+    expect(geometry.imTop).toBeGreaterThanOrEqual(geometry.vpTop);
+    expect(geometry.imW / geometry.imH).toBeCloseTo(0.1, 1);
+
+    // Zoom Out must be disabled at ~10% fit scale rather than magnifying to 75%.
+    await expect(page.getByTestId("image-zoom-out")).toBeDisabled();
+    await page.getByTestId("image-zoom-in").click();
+    await expect(page.getByTestId("image-zoom-toggle")).toHaveText("25%");
+    await page.getByTestId("image-zoom-in").click();
+    await expect(page.getByTestId("image-zoom-toggle")).toHaveText("50%");
+
+    // Stepping back down to the 25% lower limit disables Zoom Out but keeps focus in the viewer so `0` resets to Fit.
+    await page.getByTestId("image-zoom-out").click();
+    await expect(page.getByTestId("image-zoom-toggle")).toHaveText("25%");
+    await expect(page.getByTestId("image-zoom-out")).toBeDisabled();
+    await expect(viewport).toBeFocused();
+    await page.keyboard.press("0");
+    await expect(page.getByTestId("image-zoom-toggle")).toHaveText("Fit");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

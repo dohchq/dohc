@@ -2182,6 +2182,8 @@ fn release_snapshot(f: &Fixture) -> Vec<Vec<String>> {
         .unwrap()
 }
 
+const OWNER_PERSON: &str = "owner-account";
+
 async fn stop_action(
     actor: &ActorHandle,
     f: &Fixture,
@@ -2218,6 +2220,7 @@ async fn stop_action_at_cursor(
             None,
             Some(accepted_cursor),
             None,
+            Some(OWNER_PERSON.into()),
             action.into(),
             40,
             Arc::new(NoFaults),
@@ -2340,8 +2343,10 @@ async fn stop_releases_current_owner_edits_with_credit_and_preserves_remote_edit
         );
         f.store.read_with(|conn| {
             let (updates,authors):(i64,String)=conn.query_row("SELECT (SELECT COUNT(*) FROM replication_log WHERE op_kind='ydoc.update'),(SELECT author_json FROM moments ORDER BY moment_order DESC LIMIT 1)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
-            assert!(updates>=2);assert!(authors.contains("local-person"));
+            assert!(updates>=2);assert!(authors.contains(OWNER_PERSON));
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM owner_ydoc_outboxes",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            let published:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM replication_log r JOIN moments m ON m.moment_id=json_extract(r.payload_json,'$.momentId') WHERE r.op_kind='moment.append' AND r.imported=0 AND m.moment_order=(SELECT MAX(moment_order) FROM moments) AND json_extract(r.payload_json,'$.payloadAfterBlobSha256')=(SELECT last_settled_sha FROM ydoc_docs WHERE object_id='object'))",[],|r|r.get(0)).unwrap();
+            assert!(published);
             Ok::<_,rusqlite::Error>(())
         }).unwrap();
         supervisor.close_all().unwrap();
@@ -2485,6 +2490,7 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
                         None,
                         Some(0),
                         None,
+                        Some(OWNER_PERSON.into()),
                         "release".into(),
                         30,
                         Arc::new(CrashAt(point)),
@@ -2653,6 +2659,25 @@ async fn a_release_ends_a_stop_the_relay_retired_on_its_own_and_keeps_an_asked_o
     let (f, supervisor, actor) = pending_release_fixture(2).await;
     stop_action(&actor, &f, "release").await.unwrap();
     assert_eq!(f.store.table_row_count("owner_live_stops").unwrap(), 1);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn an_unchanged_save_after_a_stop_sends_the_owners_file() {
+    let f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    assert_eq!(
+        stop_action(&actor, &f, "request").await.unwrap()[0].state,
+        "released"
+    );
+    f.ordinary_settle(&actor).await.unwrap().settled().unwrap();
+    let head_sent: i64 = f.store.read_with(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM replication_log r JOIN snapshots s ON s.latest_moment_id=json_extract(r.payload_json,'$.momentId') \
+         WHERE r.op_kind='moment.append' AND r.imported=0 AND s.object_id='object'",
+        [], |r| r.get(0),
+    )).unwrap();
+    assert_eq!(head_sent, 1);
     supervisor.close_all().unwrap();
 }
 
@@ -3218,7 +3243,7 @@ async fn measure_stop_release_pending_entries() {
                 assert_eq!(
                     credit,
                     if index % 2 == 0 {
-                        "local-person"
+                        OWNER_PERSON
                     } else {
                         "agent-A"
                     }
@@ -3351,6 +3376,7 @@ async fn release_contention_sample() -> (f64, f64, f64) {
                 None,
                 Some(0),
                 None,
+                Some(OWNER_PERSON.into()),
                 "release".into(),
                 40,
                 Arc::new(ObserveCommit(submitted.clone())),
@@ -3498,7 +3524,7 @@ async fn stop_records_each_authors_run_as_one_row_with_its_declared_credit() {
         credits,
         vec![
             (
-                Some("local-person".into()),
+                Some(OWNER_PERSON.into()),
                 Some("human".into()),
                 None,
                 Some(0)
@@ -3529,7 +3555,7 @@ async fn stop_records_each_authors_run_as_one_row_with_its_declared_credit() {
                 Some(3)
             ),
             (
-                Some("local-person".into()),
+                Some(OWNER_PERSON.into()),
                 Some("human".into()),
                 None,
                 Some(0)
@@ -3571,6 +3597,13 @@ async fn stop_records_each_authors_run_as_one_row_with_its_declared_credit() {
     {
         assert_eq!(payload["updateBlobSha256"], hex_sha256(update));
         assert_eq!(payload["actorOriginId"], serde_json::json!(actor));
+        assert_eq!(payload["isBaseState"], false);
+        assert_eq!(
+            payload.get("authorContext"),
+            (kind.as_deref() == Some("human"))
+                .then(|| serde_json::json!({"kind":"account","accountId":OWNER_PERSON}))
+                .as_ref()
+        );
         if kind.is_some() {
             assert_eq!(payload["attribution"]["actorKind"], serde_json::json!(kind));
             assert_eq!(
@@ -3602,7 +3635,7 @@ async fn stop_records_each_authors_run_as_one_row_with_its_declared_credit() {
         .unwrap();
     let authors: Vec<serde_json::Value> = serde_json::from_str(&authors).unwrap();
     let expected = serde_json::json!([
-        {"kind":"human","humanId":"local-person"},
+        {"kind":"human","humanId":OWNER_PERSON},
         {"kind":"agent","agentId":"agent-A","onBehalfOf":"person-A","depth":2,"agentRunId":"run-a"},
         {"kind":"agent","agentId":"agent-A","onBehalfOf":"person-C","depth":3},
         {"kind":"automation","automationId":"automation-A","onBehalfOf":"person-B","depth":1},

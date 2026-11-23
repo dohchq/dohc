@@ -154,6 +154,7 @@ describe("a Collection on the server, as the panel reads it", () => {
         operationSource: "RULES",
         active: true,
         cursor,
+        checkpointSha256: "2".repeat(64),
       })),
       permissions,
     };
@@ -194,6 +195,7 @@ describe("a Collection on the server, as the panel reads it", () => {
       operationSource: "RULES",
       active: false,
       cursor,
+      checkpointSha256: "2".repeat(64),
     });
     expect(
       await readServerDataset("workspace", id(1), data, async () =>

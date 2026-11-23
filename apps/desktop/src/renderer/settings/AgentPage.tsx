@@ -227,7 +227,7 @@ export function checkStatus(props: {
   return props.checking ? (
     <span className="inline-flex items-center gap-1 text-muted">
       <LoaderCircle size={12} aria-hidden className="animate-spin" />
-      Checking
+      Checking…
     </span>
   ) : props.check?.status === "replied" ? (
     <span className="inline-flex items-center gap-1 text-success">
@@ -237,7 +237,7 @@ export function checkStatus(props: {
   ) : props.check?.status === "failed" ? (
     <span className="inline-flex items-center gap-1 text-danger">
       <CircleAlert size={12} aria-hidden />
-      Didn't reply.
+      Did not reply
     </span>
   ) : (
     <span className="text-muted">Not checked</span>
@@ -641,8 +641,8 @@ function ThreadAgentBoxes(props: {
                   title={`${
                     mode === null
                       ? ""
-                      : `dohc can read and message your threads that run with ${mode}, or less. `
-                  }The sign-in lasts 30 days. After that, allow dohc again here.`}
+                      : `dohc can read and message threads running with ${mode} or lower access. `
+                  }This sign-in lasts 30 days. Allow dohc again here when it expires.`}
                 >
                   {`Allowed ${mode === null ? "" : `with ${mode} `}until ${t3CodeAllowedUntil(state.signedInUntilMs!)}`}
                 </span>
@@ -1016,6 +1016,12 @@ export function AgentPage(props: {
               </p>
             ) : null}
           </div>
+          {props.mcpConfig !== null ? (
+            <p data-testid="agent-mcp-note" className="m-0 mt-2 text-[12px] text-muted">
+              For local apps on this computer such as Claude Desktop or Cursor. Save the app's MCP
+              config file, then restart the app.
+            </p>
+          ) : null}
           {props.run ? (
             <>
               <h4 className={SECTION}>History</h4>
@@ -1049,7 +1055,7 @@ export function AgentPage(props: {
                 </PageRow>
               </div>
               <p className="m-0 mt-2 text-[12px] text-muted">
-                {`While a run is on, History shows changes in this workspace as ${agent.name}'s.`}
+                {`MCP edits (and CLI commands with --agent-id) already show as ${agent.name}'s. Start a run to also mark direct file edits in this workspace.`}
               </p>
             </>
           ) : null}
@@ -1115,7 +1121,7 @@ export function AgentPage(props: {
           </PageRow>
         ) : forwarded ? null : (
           <PageRow label="Reaches">
-            <span className={VALUE}>Every workspace dohc opens on this computer</span>
+            <span className={VALUE}>This workspace (copy the config in each workspace)</span>
           </PageRow>
         )}
       </div>

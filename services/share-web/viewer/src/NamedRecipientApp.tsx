@@ -19,23 +19,43 @@ import {
   type NamedDocumentSession,
 } from "./NamedDocumentEditor";
 import { DiscardDraft } from "./DiscardDraft";
+import { DohcMark, Icon, fileIcon } from "./icons";
 import { NamedSignIn, signInErrorMessage } from "./NamedSignIn";
 
 type Account = { id: string; name: string };
 type Selection = { session: NamedDocumentSession; path: string; objectId: string };
+const NARROW_MEDIA = "(max-width: 720px), (pointer: coarse) and (max-height: 500px)";
+
+function useNarrow(): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia?.(NARROW_MEDIA).matches ?? false);
+  useEffect(() => {
+    const query = window.matchMedia?.(NARROW_MEDIA);
+    if (!query) return;
+    const update = () => setNarrow(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  return narrow;
+}
+
 export default function NamedRecipientApp({ grantId }: { grantId: string | null }) {
+  const narrow = useNarrow();
   const [account, setAccount] = useState<Account | null>(null),
     [files, setFiles] = useState<NamedRecipientFiles | null>(null);
   const [busy, setBusy] = useState(true),
     [error, setError] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null),
     [sessionState, setSessionState] = useState<NamedLiveBrowserState | null>(null);
+  const [filesOpen, setFilesOpen] = useState(true);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
   const request = useRef<AbortController | null>(null),
     transport = useRef<ReturnType<
       typeof createNamedLiveBrowserTransport<NamedLiveSelection>
     > | null>(null);
   const currentSelection = useRef<Selection | null>(null);
+  const hadAccount = useRef(false);
+  const filesToggleRef = useRef<HTMLButtonElement | null>(null);
+  const focusFilesToggle = useRef(false);
   const receiveState = useCallback((state: NamedLiveBrowserState) => setSessionState(state), []);
   const clearSelection = () => {
     transport.current?.close();
@@ -43,6 +63,7 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
     currentSelection.current = null;
     setSelection(null);
     setSessionState(null);
+    setFilesOpen(true);
   };
   const start = () => {
     request.current?.abort();
@@ -56,6 +77,12 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
     if (!grantId) throw Error("Invalid invitation");
     const user = accountUser(await namedRequest("/api/account/session", controller.signal));
     if (controller.signal.aborted || request.current !== controller) return;
+    if (!user && hadAccount.current) {
+      hadAccount.current = false;
+      setError("Your session ended. Sign in again.");
+    } else if (user) {
+      hadAccount.current = true;
+    }
     setAccount(user);
     setFiles(null);
     if (!user) return;
@@ -94,6 +121,20 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
     };
   }, [grantId]);
   useEffect(() => {
+    if (selection) {
+      const name =
+        selection.path
+          .split("/")
+          .at(-1)
+          ?.replace(/\.(md|markdown)$/i, "") || selection.path;
+      document.title = `${name} · dohc`;
+    } else if (files?.subjectName) {
+      document.title = `${files.subjectName} · dohc`;
+    } else {
+      document.title = "Shared with dohc";
+    }
+  }, [selection, files?.subjectName]);
+  useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       const state = currentSelection.current?.session.state();
       if (state && (state.pendingUpdates > 0 || state.status === "quarantined")) {
@@ -129,9 +170,16 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
       currentSelection.current = value;
       setSelection(value);
       setSessionState(session.state());
+      if (narrow) focusFilesToggle.current = true;
+      setFilesOpen(false);
       void session.reconnect();
     });
   };
+  useEffect(() => {
+    if (!focusFilesToggle.current || !narrow || !selection || filesOpen) return;
+    focusFilesToggle.current = false;
+    filesToggleRef.current?.focus();
+  }, [narrow, selection, filesOpen]);
   const signIn = (credentials: { email: string; password: string }) => {
     const controller = start();
     void namedRequest("/api/account/sign-in", controller.signal, credentials)
@@ -160,6 +208,7 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
       void namedRequest("/api/account/sign-out", controller.signal, {})
         .then(() => {
           if (!controller.signal.aborted) {
+            hadAccount.current = false;
             setAccount(null);
             setFiles(null);
           }
@@ -175,7 +224,10 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
     <div className="viewer named-recipient">
       <header>
         <div>
-          <p className="eyebrow">dohc</p>
+          <div className="named-brand">
+            <DohcMark size={18} />
+            <p className="eyebrow">dohc</p>
+          </div>
           <h1>{files?.subjectName ?? "Shared files"}</h1>
           {files && (
             <p>
@@ -200,29 +252,51 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
         <NamedSignIn title="Sign in to edit" busy={busy} error={error} onSignIn={signIn} />
       ) : (
         <main className="layout named-recipient-layout">
-          <nav className="named-file-list" aria-label="Shared Markdown files">
-            <p className="section-label">Files</p>
-            {files?.files.map((file) => (
+          <nav
+            className={
+              narrow && selection && !filesOpen ? "named-file-list collapsed" : "named-file-list"
+            }
+            aria-label="Shared Markdown files"
+          >
+            {narrow && selection ? (
               <button
-                className="handoff-button secondary named-file"
-                key={file.objectId}
-                disabled={busy}
-                aria-current={selection?.objectId === file.objectId ? "page" : undefined}
-                onClick={() => open(file.objectId, file.path)}
+                ref={filesToggleRef}
+                type="button"
+                className="handoff-button secondary named-files-toggle"
+                aria-expanded={filesOpen}
+                aria-controls="named-files-panel"
+                onClick={() => setFilesOpen((open) => !open)}
               >
-                {file.path}
+                <span>Files ({files?.files.length ?? 0})</span>
+                <Icon name={filesOpen ? "chevron-down" : "chevron-right"} size={15} />
               </button>
-            ))}
-            {files && !files.files.length && (
-              <p>No Markdown files are available. Refresh after the owner adds a file.</p>
+            ) : (
+              <p className="section-label">Files</p>
             )}
-            <button
-              className="handoff-button secondary named-refresh"
-              disabled={busy}
-              onClick={() => leave(refresh)}
-            >
-              Refresh files
-            </button>
+            <div id="named-files-panel" hidden={narrow && selection !== null && !filesOpen}>
+              {files?.files.map((file) => (
+                <button
+                  className="handoff-button secondary named-file"
+                  key={file.objectId}
+                  disabled={busy}
+                  aria-current={selection?.objectId === file.objectId ? "page" : undefined}
+                  onClick={() => open(file.objectId, file.path)}
+                >
+                  <Icon name={fileIcon(file.path)} size={15} />
+                  <span>{file.path}</span>
+                </button>
+              ))}
+              {files && !files.files.length && (
+                <p>No Markdown files are available. Refresh after the owner adds a file.</p>
+              )}
+              <button
+                className="handoff-button secondary named-refresh"
+                disabled={busy}
+                onClick={() => leave(refresh)}
+              >
+                Refresh files
+              </button>
+            </div>
             {busy && <p role="status">Opening shared files…</p>}
             {error && <p role="alert">{error}</p>}
           </nav>

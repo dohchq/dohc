@@ -97,6 +97,9 @@ type VersionedTextWriteParams = MutationMetadata & {
   text: string;
   createOnly?: boolean;
   expectedSha256?: string;
+  expectedPathClearSinceOrder?: number;
+  expectedPathClearObjectId?: string;
+  expectedPathClearHeadMomentId?: string;
   restoreBeforeMomentId?: string;
   momentId?: string;
 };
@@ -119,6 +122,9 @@ type VersionedTextReadBlobParams = JsonObject & {
 type VersionedBinaryWriteParams = MutationMetadata & {
   createOnly?: boolean;
   expectedSha256?: string;
+  expectedPathClearSinceOrder?: number;
+  expectedPathClearObjectId?: string;
+  expectedPathClearHeadMomentId?: string;
   versionId: string;
   objectId?: string;
   path: string;
@@ -130,6 +136,9 @@ type VersionedBinaryWriteParams = MutationMetadata & {
 type VersionedBinaryWriteBlobParams = MutationMetadata & {
   createOnly?: boolean;
   expectedSha256?: string;
+  expectedPathClearSinceOrder?: number;
+  expectedPathClearObjectId?: string;
+  expectedPathClearHeadMomentId?: string;
   versionId: string;
   objectId?: string;
   path: string;
@@ -153,6 +162,9 @@ type VersionedTextDeleteParams = MutationMetadata & {
   expectedObjectId?: string;
   onlyIfAbsentOnDisk?: boolean;
   expectedSha256?: string;
+  expectedPathClearSinceOrder?: number;
+  expectedPathClearObjectId?: string;
+  expectedPathClearHeadMomentId?: string;
   captureHoldId?: string;
 };
 
@@ -307,6 +319,7 @@ type MomentsListParams = JsonObject & {
   objectId?: string;
   limit?: number;
   beforeMomentOrder?: number;
+  metadataOnly?: boolean;
 };
 
 type MomentsGetParams = JsonObject & { momentId: string };

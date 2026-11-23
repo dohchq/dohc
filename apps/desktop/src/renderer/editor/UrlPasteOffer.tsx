@@ -151,7 +151,9 @@ export function UrlPasteOffer(props: {
       style={{
         position: "fixed",
         left: position.x,
-        top: position.y,
+        ...(position.placement === "above" && position.bottom !== undefined
+          ? { bottom: position.bottom }
+          : { top: position.y }),
         zIndex: 60,
         ...menuEnterFrom(position.placement),
       }}

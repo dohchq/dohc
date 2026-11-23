@@ -10,14 +10,16 @@ import {
 } from "./liveTickets.test-helper";
 import { authorizeServiceHostReplication, deriveServiceHostBearer } from "./serviceHostCredential";
 import { createServiceHostReplication } from "./serviceHostReplication";
-import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
 import { hostedRowDecision, hostedWriteAllowed } from "./serviceHostFeed";
 import { parseLogOp, SERVICE_HOST_ORIGIN_PREFIX, type LogAuthorNameLookup } from "./relayLogInputs";
 import { referencedBlobShas } from "./storage/blobReferences";
 import { stableJsonStringify } from "./canonicalJson";
 import { openSyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
+import { workspaceUsageBytes } from "./storage/workspaces";
 import { retireUncoveredServiceActivations } from "./storage/serviceHostEnrollment";
+import { appendLiveRoomEdit } from "./storage/liveRoomEdits";
+import * as Yjs from "yjs";
 import nativeAuthoredSettlement from "./testing/fixtures/nativeAuthoredSettlement.json";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -715,10 +717,10 @@ it("keeps a retiring document out of hosted reads and writes while its sibling s
   ]);
 });
 
-// Proves: the last save a retiring note publishes reaches the stored note when the note stays, as
-// when its Edit access ended, and moves nothing after a Stop.
-it.each(["access ended", "stopped"] as const)(
-  "publishes a retiring note's last save to the stored note only while the note stays: %s",
+// Proves: the last save a retiring note publishes reaches the stored note while the note stays at its
+// path, after a Stop, a Pause or the end of its Edit access, so a share link shows that save.
+it.each(["access ended", "stopped", "paused"] as const)(
+  "publishes a retiring note's last save to the stored note while the note stays: %s",
   async (ending) => {
     const f = await fixture();
     retainServiceActivation(f.raw, namespace, true);
@@ -731,13 +733,13 @@ it.each(["access ended", "stopped"] as const)(
       .run(last.sha256, last.content.byteLength);
     // The save names the file it replaces, as the host's settlement does.
     for (const content of [A, last]) await f.upload(content);
-    if (ending === "stopped") {
+    if (ending !== "access ended") {
       preparedStop(f.storage, {
         workspaceId: ws,
         path: "docs/a.md",
         ownerUserId: "owner-1",
         enabled: false,
-        retire: true,
+        retire: ending === "stopped",
         nowMs: 20,
         guard() {},
       });
@@ -771,27 +773,320 @@ it.each(["access ended", "stopped"] as const)(
     ).json()) as PushAnswer;
     expect(body).toMatchObject({ inserted: 1 });
     expect(body.refusals).toBeUndefined();
-    const stays = ending === "access ended";
     // A note that stays keeps the save as ordinary history, which every history reader counts.
     expect(
       f.raw
         .prepare("SELECT relay_admission FROM sync_relay_log WHERE origin_id=?")
         .get(HOST_ORIGIN)!.relay_admission,
-    ).toBe(stays ? null : "departed");
+    ).toBeNull();
     expect(
       f.raw
         .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
         .get(ws, "docs/a.md")!.blob_sha256,
-    ).toBe(stays ? last.sha256 : A.sha256);
+    ).toBe(last.sha256);
     expect(
       f.raw
         .prepare(
           "SELECT count(*) AS count FROM sync_relay_object_moments m JOIN sync_relay_log l ON l.relay_seq=m.relay_seq WHERE m.workspace_id=? AND l.origin_id=?",
         )
         .get(ws, HOST_ORIGIN)!.count,
-    ).toBe(stays ? 1 : 0);
+    ).toBe(1);
   },
 );
+
+const last = blob("last save"),
+  owner = blob("owner save"),
+  second = blob("second computer save");
+it.each([
+  {
+    name: "the owner after a Stop",
+    retire: true,
+    userId: "owner-1",
+    saves: [[A, owner]],
+    stored: owner,
+  },
+  {
+    name: "the owner after a Pause",
+    retire: false,
+    userId: "owner-1",
+    saves: [[A, owner]],
+    stored: last,
+  },
+  {
+    name: "a push without the owner's account",
+    retire: true,
+    userId: undefined,
+    saves: [[A, owner]],
+    stored: last,
+  },
+  {
+    name: "the owner's save from another file",
+    retire: true,
+    userId: "owner-1",
+    saves: [[C, owner]],
+    stored: owner,
+  },
+  {
+    name: "a second save from the same old file",
+    retire: true,
+    userId: "owner-1",
+    saves: [
+      [A, owner],
+      [A, second],
+    ],
+    stored: second,
+  },
+] as const)("lets the owner's save after a Stop replace the stored file: $name", async (input) => {
+  const f = await fixture();
+  retainServiceActivation(f.raw, namespace, true);
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceDigest',?,'$.sourceByteLength',?)",
+    )
+    .run(last.sha256, last.content.byteLength);
+  for (const content of [A, last]) await f.upload(content);
+  for (const content of [owner, second])
+    f.storage.putBlob({ workspaceId: ws, ...content, createdAtMs: 1 });
+  preparedStop(f.storage, {
+    workspaceId: ws,
+    path: "docs/a.md",
+    ownerUserId: "owner-1",
+    enabled: false,
+    retire: input.retire,
+    nowMs: 20,
+    guard() {},
+  });
+  const from = (before: Blob) => ({
+    beforePresent: true,
+    payloadBeforePath: "docs/a.md",
+    payloadBeforeBlobSha256: before.sha256,
+  });
+  await f.push([
+    [
+      "moment.append",
+      write(binding.objectId, "docs/a.md", last, {
+        momentId: "moment-1",
+        metadata: {},
+        ...from(A),
+      }),
+    ],
+  ]);
+  f.storage.appendLogBatch({
+    workspaceId: ws,
+    originId: "owner-laptop",
+    ops: input.saves.map(([before, after], originSeq) =>
+      parseLogOp({
+        originSeq,
+        opKind: "moment.append",
+        recordedAtMs: 4,
+        payload: write(binding.objectId, "docs/a.md", after, {
+          momentId: `moment-owner-${originSeq}`,
+          ...from(before),
+        }),
+      }),
+    ),
+    ...(input.userId === undefined
+      ? {}
+      : { workReferences: { userId: input.userId, references: [] } }),
+  });
+  expect(
+    f.raw
+      .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
+      .get(ws, "docs/a.md")!.blob_sha256,
+  ).toBe(input.stored.sha256);
+});
+
+const resumed = blob("save after resume");
+it.each([
+  { name: "the host that resumed from it", source: owner, host: true, stored: resumed },
+  { name: "a host that resumed from another file", source: last, host: true, stored: owner },
+  { name: "a push that is not the host's", source: owner, host: false, stored: owner },
+] as const)(
+  "lets a save from its host's last one replace the owner's save: $name",
+  async (input) => {
+    const f = await fixture();
+    retainServiceActivation(f.raw, namespace, true);
+    f.raw
+      .prepare(
+        "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceDigest',?)",
+      )
+      .run(input.source.sha256);
+    for (const content of [last, owner, resumed])
+      f.storage.putBlob({ workspaceId: ws, ...content, createdAtMs: 1 });
+    const save = (originId: string, originSeq: number, before: Blob, after: Blob) =>
+      f.storage.appendLogBatch({
+        workspaceId: ws,
+        originId,
+        ops: [
+          parseLogOp({
+            originSeq,
+            opKind: "moment.append",
+            recordedAtMs: 4,
+            payload: write(binding.objectId, "docs/a.md", after, {
+              momentId: `moment-${originId}-${originSeq}`,
+              beforePresent: true,
+              payloadBeforePath: "docs/a.md",
+              payloadBeforeBlobSha256: before.sha256,
+            }),
+          }),
+        ],
+      });
+    save(HOST_ORIGIN, 0, A, last);
+    save("owner-laptop", 0, last, owner);
+    save(HOST_ORIGIN, 1, owner, owner);
+    save(HOST_ORIGIN, 2, owner, owner);
+    if (input.host) save(HOST_ORIGIN, 3, last, resumed);
+    else save("other-laptop", 0, last, resumed);
+    expect(
+      f.raw
+        .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
+        .get(ws, "docs/a.md")!.blob_sha256,
+    ).toBe(input.stored.sha256);
+  },
+);
+
+const ownerAuthor = [{ kind: "human", humanId: "owner-1", humanName: "Owner" }] as const;
+const agentAuthor = { kind: "agent", agentId: "agent-1", agentName: "Agent" } as const;
+const ownerEdit = {
+  retire: true,
+  ydocStart: false,
+  account: true,
+  clients: [42],
+  base: false,
+  agent: false,
+  full: false,
+};
+it.each([
+  { name: "the owner after a Stop", ...ownerEdit, takes: true },
+  { name: "the owner after a Pause", ...ownerEdit, retire: false, takes: false },
+  { name: "a push without the owner's name", ...ownerEdit, account: false, takes: false },
+  { name: "two new editor ids", ...ownerEdit, clients: [42, 43], takes: false },
+  { name: "the owner's whole note rather than an edit", ...ownerEdit, base: true, takes: false },
+  { name: "an agent working for the owner", ...ownerEdit, agent: true, takes: false },
+  { name: "a push that fills the workspace", ...ownerEdit, full: true, takes: false },
+  {
+    name: "a note whose history starts at a Y.Doc row",
+    ...ownerEdit,
+    ydocStart: true,
+    takes: true,
+  },
+] as const)(
+  "lets the owner's room edit build on the owner's own edit from a Stop: $name",
+  async (input) => {
+    const f = await fixture();
+    retainServiceActivation(f.raw, namespace, true);
+    preparedStop(f.storage, {
+      workspaceId: ws,
+      path: "docs/a.md",
+      ownerUserId: "owner-1",
+      enabled: false,
+      retire: input.retire,
+      nowMs: 20,
+      guard() {},
+    });
+    if (input.ydocStart)
+      f.raw.prepare("UPDATE sync_relay_live_documents SET baseline_moment_relay_seq=999999").run();
+    const doc = new Yjs.Doc();
+    const authors = [...ownerAuthor, ...(input.agent ? [agentAuthor] : [])];
+    const edit = (originSeq: number, change: () => void) => {
+      const sent = Yjs.encodeStateVector(doc);
+      change();
+      const update = { content: Yjs.encodeStateAsUpdate(doc, sent), sha256: "" };
+      update.sha256 = sha256Hex(update.content);
+      f.storage.putBlob({ workspaceId: ws, ...update, createdAtMs: 1 });
+      const op = parseLogOp({
+        originSeq,
+        opKind: "ydoc.update",
+        recordedAtMs: 4,
+        payload: {
+          ...ydoc(binding.objectId, "docs/a.md", update),
+          isBaseState: input.base,
+          attribution: { actorKind: "human" },
+          actorOriginId: "owner-1",
+        },
+      });
+      if (input.account) op.admittedAuthorSnapshot = authors;
+      return op;
+    };
+    const ops = [
+      edit(0, () => {
+        for (const clientId of input.clients) {
+          doc.clientID = clientId;
+          doc.getMap("frontmatter").set(`title-${clientId}`, "Owner");
+        }
+      }),
+    ];
+    if (input.full) {
+      ops.push(edit(1, () => doc.getMap("frontmatter").set("title-42", "Owner later")));
+      const storage = f.storage as unknown as StorageContext;
+      storage.options.workspaceQuotaBytes =
+        workspaceUsageBytes(storage, ws) +
+        ops.reduce(
+          (bytes, op) =>
+            bytes + Buffer.byteLength(op.payloadJson) + Buffer.byteLength(JSON.stringify(authors)),
+          0,
+        );
+    }
+    f.storage.appendLogBatch({
+      workspaceId: ws,
+      originId: "owner-laptop",
+      ops,
+      workReferences: { userId: "owner-1", references: [] },
+    });
+    doc.clientID = 42;
+    const before = Yjs.encodeStateVector(doc);
+    doc.getMap("frontmatter").set("title-42", "Owner again");
+    expect(
+      appendLiveRoomEdit(f.storage as unknown as StorageContext, {
+        document: {
+          workspaceId: ws,
+          mainVersionId: "main",
+          objectId: binding.objectId,
+          lineageClaimId: binding.lineageClaimId,
+        },
+        sender: authors,
+        authority: {
+          principalKind: "owner",
+          principalId: "owner-1",
+          grantId: null,
+          grantGeneration: null,
+        },
+        clients: [{ clientId: 42, inNote: true }],
+        updateBytes: Yjs.encodeStateAsUpdate(doc, before),
+        receivedAtMs: 30,
+      }).kind,
+    ).toBe(input.takes ? "written" : "refused");
+  },
+);
+
+it("keeps a hosted note's stored file against the owner's later save from another file", async () => {
+  const f = await fixture();
+  f.storage.putBlob({ workspaceId: ws, ...owner, createdAtMs: 1 });
+  f.storage.appendLogBatch({
+    workspaceId: ws,
+    originId: "owner-laptop",
+    ops: [
+      parseLogOp({
+        originSeq: 0,
+        opKind: "moment.append",
+        recordedAtMs: 4,
+        payload: write(binding.objectId, "docs/a.md", owner, {
+          momentId: "moment-owner-hosted",
+          recordedAtMs: 4,
+          beforePresent: true,
+          payloadBeforePath: "docs/a.md",
+          payloadBeforeBlobSha256: C.sha256,
+        }),
+      }),
+    ],
+    workReferences: { userId: "owner-1", references: [] },
+  });
+  expect(
+    f.raw
+      .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
+      .get(ws, "docs/a.md")!.blob_sha256,
+  ).toBe(A.sha256);
+});
 
 it("fails a write naming a blob the host never fetched or uploaded as missing, and keeps it unreadable", async () => {
   const f = await fixture();
@@ -1207,43 +1502,6 @@ it("keeps the hosted credential alive for an undrained Stop and then drops it, n
   expect(hosted()).toBeNull();
 });
 
-it("keeps the read replica's routes and guards apart from the session host's", async () => {
-  const f = await fixture();
-  const principal = createReplicaReadPrincipal(f.storage);
-  const get = (handle: (request: Request) => Promise<Response>, bearer: string, suffix: string) =>
-    handle(
-      new Request(`https://relay.test/sync/${ws}/${suffix}`, {
-        headers: { authorization: `Bearer ${bearer}` },
-      }),
-    );
-  const first = principal.issue(ws, "first");
-  expect((await get(principal.handle, first.bearer, `log?${identity}`)).status).toBe(200);
-  expect((await get(principal.handle, first.bearer, "live-journal")).status).toBe(200);
-  expect((await get(principal.handle, first.bearer, `hosted/log?${identity}`)).status).toBe(404);
-  expect((await get(f.handle, first.bearer, `hosted/log?${identity}`)).status).toBe(404);
-  expect((await get(f.handle, f.bearer, "live-journal")).status).toBe(404);
-  expect((await get(principal.handle, f.bearer, `log?${identity}`)).status).toBe(404);
-  principal.revoke(first);
-  expect((await get(principal.handle, first.bearer, "live-journal")).status).toBe(404);
-  expect((await get(f.handle, f.bearer, `hosted/log?${identity}`)).status).toBe(200);
-  const second = principal.issue(ws, "second");
-  f.storage.setServiceHostEnrollmentEnabled({
-    workspaceId: ws,
-    path: "docs/a.md",
-    ownerUserId: "owner-1",
-    enabled: false,
-    nowMs: 30,
-    guard() {},
-  });
-  f.storage.releaseServiceHostEnrollment({
-    workspaceId: ws,
-    objectId: binding.objectId,
-    nowMs: 31,
-  });
-  expect((await get(f.handle, f.bearer, `hosted/log?${identity}`)).status).toBe(404);
-  expect((await get(principal.handle, second.bearer, "live-journal")).status).toBe(200);
-});
-
 it("admits the engine's own settlement batch for its hosted document, both ways", () => {
   const settlement = nativeAuthoredSettlement.find((op) => op.opKind === "live.audit.settlement")!;
   const document = (
@@ -1287,4 +1545,39 @@ it("admits the engine's own settlement batch for its hosted document, both ways"
   };
   for (const op of nativeAuthoredSettlement)
     expect(hostedWriteAllowed(unhosted, op.opKind, op.payload), op.opKind).toBe(false);
+});
+
+it("answers a push with no rows before a long history is read, and holds a blob check until it is", async () => {
+  const f = await fixture();
+  const read = f.storage.listServiceHostDocumentRows.bind(f.storage);
+  let ended = false,
+    pages = 0;
+  // A history that does not end until the test says so: every page comes back full.
+  vi.spyOn(f.storage, "listServiceHostDocumentRows").mockImplementation((input) => {
+    if (ended) return read(input);
+    pages += 1;
+    const [row] = read({ ...input, afterRelaySeq: 0, limit: 1 });
+    return Array.from({ length: input.limit }, (_, index) => ({
+      ...row!,
+      relaySeq: input.afterRelaySeq + index + 1,
+    }));
+  });
+  try {
+    // The push a host sends at each start, to confirm its origin.
+    expect((await f.push([])).status).toBe(200);
+    expect(pages).toBeGreaterThan(0);
+
+    let answered = false;
+    const have = f
+      .request("POST", "blobs/have", JSON.stringify({ sha256s: [A.sha256] }))
+      .finally(() => (answered = true));
+    // The read takes one turn of the loop for each page. A check that did not wait would answer within a few.
+    const sent = pages;
+    await vi.waitFor(() => expect(pages).toBeGreaterThan(sent + 100));
+    expect(answered).toBe(false);
+    ended = true;
+    expect(await (await have).json()).toEqual({ ok: true, missing: [] });
+  } finally {
+    ended = true;
+  }
 });

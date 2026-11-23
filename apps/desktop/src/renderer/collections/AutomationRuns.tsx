@@ -6,7 +6,7 @@ import {
   Server,
   Undo2,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   ListCollectionAutomationRunsResult,
   UndoCollectionAutomationRunResult,
@@ -79,7 +79,7 @@ export function undoSentence(undone: Undone, onServer = false): string {
     );
   }
   if (undone.actions > 0)
-    parts.push(`${count(undone.actions, "action", "actions")} can't be undone.`);
+    parts.push(`${count(undone.actions, "action", "actions")} cannot be undone.`);
   return parts.join(" ");
 }
 
@@ -117,9 +117,9 @@ export function undoPreviewSentences(preview: Preview): string[] {
       `The Collection's rules do not let dohc undo ${count(preview.irreversible, "change", "changes")}.`,
     );
   if (preview.actions > 0)
-    lines.push(`${count(preview.actions, "action", "actions")} can't be undone.`);
+    lines.push(`${count(preview.actions, "action", "actions")} cannot be undone.`);
   if (tried > 0)
-    lines.push(`You cannot undo ${tried === 1 ? "this deletion" : "these deletions"} in dohc.`);
+    lines.push(`dohc cannot undo ${tried === 1 ? "this deletion" : "these deletions"}.`);
   return lines;
 }
 
@@ -133,30 +133,51 @@ function valueText(value: unknown): string {
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
-function writeText(write: RunWrite): string {
+function writeText(write: RunWrite): ReactNode {
   if (write.kind === "notice") return `Notified ${write.name}`;
   if (write.kind === "message") return `Sent a message to ${write.name}`;
   if (write.kind === "dataset-action") return `Ran ${write.name}`;
-  const record = "path" in write ? recordName(write.path) : String(write.recordId);
+  const record =
+    "path" in write ? (
+      recordName(write.path)
+    ) : (
+      <span className="font-mono">{String(write.recordId)}</span>
+    );
   switch (write.kind) {
     case "field":
-      return `${record} · ${write.field}: ${valueText(write.before)} → ${valueText(write.after)}`;
+      return (
+        <>
+          {record}
+          {` · ${write.field}: ${valueText(write.before)} → ${valueText(write.after)}`}
+        </>
+      );
     case "dataset-edit":
-      return write.fields
-        .map(
-          (field) =>
-            `${record} · ${field.field}: ${valueText(field.before)} → ${valueText(field.after)}`,
-        )
-        .join("; ");
+      return write.fields.map((field, index) => (
+        <Fragment key={index}>
+          {index > 0 ? "; " : null}
+          {record}
+          {` · ${field.field}: ${valueText(field.before)} → ${valueText(field.after)}`}
+        </Fragment>
+      ));
     case "dataset-created":
     case "created":
-      return `Added ${record}`;
+      return <>Added {record}</>;
     case "dataset-kept":
     case "kept":
-      return `${record} · ${write.field}: kept ${valueText(write.current)}, which someone set after the run began`;
+      return (
+        <>
+          {record}
+          {` · ${write.field}: kept ${valueText(write.current)}, which someone set after the run began`}
+        </>
+      );
     case "dataset-skipped":
     case "skipped":
-      return `${record} · ${sentence(write.reason)}`;
+      return (
+        <>
+          {record}
+          {` · ${sentence(write.reason)}`}
+        </>
+      );
   }
 }
 
@@ -207,7 +228,10 @@ function runSummary(run: Run): string {
     ...(fields > 0 ? [`changed ${count(fields, "field", "fields")}`] : []),
     ...(added > 0 ? [`added ${count(added, "record", "records")}`] : []),
   ];
-  const text = parts.length === 0 ? "Nothing changed" : parts.join(" and ");
+  const text =
+    parts.length === 0
+      ? "Nothing changed"
+      : new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(parts);
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
@@ -328,7 +352,7 @@ function RunRow(props: {
           <p className="m-0 break-words text-[12px] leading-snug text-ink">{runSummary(run)}</p>
           <time
             dateTime={new Date(run.updatedAtMs).toISOString()}
-            className="font-mono text-[11px] text-subtle"
+            className="tabular-nums text-[12px] text-subtle"
           >
             {relativeTime(run.updatedAtMs)}
           </time>
@@ -383,7 +407,7 @@ function RunRow(props: {
               type="button"
               aria-expanded={open}
               onClick={() => setOpen((value) => !value)}
-              className="ml-auto rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+              className="ml-auto rounded-md px-1.5 py-0.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink"
             >
               {open ? "Hide changes" : `Show ${count(run.writes.length, "change", "changes")}`}
             </button>
@@ -393,7 +417,7 @@ function RunRow(props: {
       {open ? (
         <ul className="m-0 mt-1.5 list-none space-y-0.5 pl-5">
           {run.writes.map((write, index) => (
-            <li key={index} className="break-words font-mono text-[11px] leading-snug text-muted">
+            <li key={index} className="break-words text-[12px] leading-snug text-muted">
               {writeText(write)}
               {write.unconfirmed && run.state !== "running" && run.state !== "pending"
                 ? " · May not be saved"
@@ -406,7 +430,7 @@ function RunRow(props: {
           {run.reversals?.map((write) => (
             <li
               key={JSON.stringify([write.recordId, write.field])}
-              className="break-words font-mono text-[11px] leading-snug text-muted"
+              className="break-words text-[12px] leading-snug text-muted"
             >
               Undo · {recordName(write.path)} · {write.field}
               {settlementText(write.state) ? ` · ${settlementText(write.state)}` : null}

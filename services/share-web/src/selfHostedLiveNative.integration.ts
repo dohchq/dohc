@@ -121,6 +121,18 @@ function stateWhen(
     });
   });
 }
+// A remote edit changes the doc without changing the provider's state.
+function docWhen(doc: Y.Doc, condition: () => boolean): Promise<void> {
+  if (condition()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (!condition()) return;
+      doc.off("update", check);
+      resolve();
+    };
+    doc.on("update", check);
+  });
+}
 // Preserve the logical HTTPS origin and real cookie while using owned loopback I/O.
 // This executes the production adapter but does not exercise browser UI or TLS.
 async function browserRequest(
@@ -958,8 +970,9 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     ).lastApplied!;
     results.namedAck = ack;
     expect(await runOwnerPass()).toBe("acknowledged");
-    await stateWhen(
-      provider,
+    // The pass ends at the room's receipt, before the room sends the edit on.
+    await docWhen(
+      provider.doc,
       () => provider.doc.getMap("frontmatter").get("ownerConcurrent") === "survives-restart",
     );
     const beforeIdleCursor = provider.state().lastApplied?.journalCursor ?? 0;

@@ -627,11 +627,11 @@ describe("agent moves and deletes", () => {
 
 describe("a folder with a live page", () => {
   const refusal = [
-    `dohc can't move "notes" while a page in it has live editing on`,
+    `dohc cannot move "notes" while a page in it has live editing on`,
     "In Live documents, stop live editing for every page in this folder, then move the folder again.",
   ].join(String.fromCharCode(10));
   const deleteRefusal = [
-    `dohc can't delete "notes" while a page in it has live editing on`,
+    `dohc cannot delete "notes" while a page in it has live editing on`,
     "In Live documents, stop live editing for every page in this folder, then delete the folder again.",
   ].join(String.fromCharCode(10));
   async function ownedFixture() {
@@ -720,11 +720,11 @@ describe("a folder with a live page", () => {
 
 describe("a page this computer owns live", () => {
   const refusal = [
-    `dohc can't move "notes/page.md" while it has live editing on`,
+    `dohc cannot move "notes/page.md" while it has live editing on`,
     "In Live documents, stop live editing for this page, then move it again.",
   ].join(String.fromCharCode(10));
   const deleteRefusal = [
-    `dohc can't delete "notes/page.md" while it has live editing on`,
+    `dohc cannot delete "notes/page.md" while it has live editing on`,
     "In Live documents, stop live editing for this page, then delete it again.",
   ].join(String.fromCharCode(10));
   async function ownedFixture() {
@@ -1207,7 +1207,7 @@ describe("a restore of a page this computer owns live", () => {
       await expect(f.engine().restoreFileToBeforeMoment(created.id, person)).rejects.toMatchObject({
         name: "LivePageOwnedError",
         message: [
-          `dohc can't restore "notes/page.md" while it has live editing on`,
+          `dohc cannot restore "notes/page.md" while it has live editing on`,
           "In Live documents, stop live editing for this page, then restore it again.",
         ].join(String.fromCharCode(10)),
       });

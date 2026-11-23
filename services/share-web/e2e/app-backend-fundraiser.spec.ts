@@ -250,7 +250,7 @@ test("actual fundraiser registers guests and organizers manage the same private 
     await guest.emulateMedia({ colorScheme: "dark" });
     await guest.screenshot({ path: info.outputPath("fundraiser-collection-deleted-dark.png") });
     expect((await f.ownerRead("listRegistrations")).result.records).toHaveLength(2);
-    expect(f.compiler.recipe).toBe("dohc-closed-app-v3");
+    expect(f.compiler.recipe).toBe("dohc-closed-app-v4");
     expect(failures).toEqual([]);
     await info.attach("real-backend-operations", {
       body: JSON.stringify(f.calls, null, 2),

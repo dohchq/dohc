@@ -544,8 +544,7 @@ it("rejects an unkeyed field write when the session declines the decided update"
 
 it("refuses to set fields on a lossy note before any session opens", async () => {
   const root = await createTestScratch("dohc-record-lossy-");
-  const text =
-    "---\nstatus: open\n---\n\n<details>\n<summary>Notes</summary>\n\nHidden.\n</details>\n";
+  const text = "---\nstatus: open\n---\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n";
   await mkdir(join(root, "tasks"));
   await writeFile(join(root, "tasks", "a.md"), text);
   const { session, log } = fakeSession();
@@ -557,7 +556,7 @@ it("refuses to set fields on a lossy note before any session opens", async () =>
       author: AUTOMATION,
     }),
   ).rejects.toThrow(
-    "dohc can't change tasks/a.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+    "dohc can't change tasks/a.md without also changing parts it can't show. Edit the file directly instead.",
   );
   expect(context.openedPaths).toEqual([]);
   expect(log.order).toEqual([]);
@@ -587,8 +586,7 @@ it("refuses a field write when the session holds a lossy note the read did not s
   const root = await createTestScratch("dohc-record-replaced-");
   await mkdir(join(root, "tasks"));
   // The file is absent, but the live session still carries the source witness.
-  const replacement =
-    "---\nstatus: open\n---\n\n<details>\n<summary>Notes</summary>\n\nHidden.\n</details>\n";
+  const replacement = "---\nstatus: open\n---\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n";
   const lossy = markdownToYDoc(replacement);
   const sha = (text: string) => createHash("sha256").update(text).digest("hex");
   lossy.getMap("meta").set("dohcMarkdownSource", replacement);
@@ -605,7 +603,7 @@ it("refuses a field write when the session holds a lossy note the read did not s
       author: AUTOMATION,
     }),
   ).rejects.toThrow(
-    "dohc can't change tasks/a.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+    "dohc can't change tasks/a.md without also changing parts it can't show. Edit the file directly instead.",
   );
   expect(context.openedPaths).toEqual(["tasks/a.md"]);
   expect(log.journaled).toEqual([]);
@@ -618,7 +616,8 @@ it.each(["absent", "matching", "converted"] as const)(
   "checks an edited witness against the %s head before an automation changes fields",
   async (head) => {
     const root = await createTestScratch("dohc-record-witness-head-");
-    const source = "---\nstatus: open\n---\n\n<details>Hidden.</details>\n\nEditable.\n";
+    const source =
+      "---\nstatus: open\n---\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n\nEditable.\n";
     const sha = (text: string) => createHash("sha256").update(text).digest("hex");
     const witness = markdownToYDoc(source);
     const meta = witness.getMap("meta");

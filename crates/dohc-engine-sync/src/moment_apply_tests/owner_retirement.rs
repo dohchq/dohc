@@ -1,7 +1,8 @@
 //! A page retired while this computer owned it closes its owner generation.
 use super::*;
 use dohc_engine_collab::owner_outbox::{
-    OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput, OwnerOutboxRefuseInput,
+    OwnerDeliveryReceipt, OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput,
+    OwnerOutboxRefuseInput, acknowledge_taken,
     draft::append_draft_in_tx,
     enrollment::{OwnerEnrollmentPreparation, prepare_in},
     list_restore_fenced_in,
@@ -304,6 +305,45 @@ fn retiring_an_owner_bound_page_closes_its_generation_and_keeps_every_edit() {
     );
 }
 
+/// The relay took the owner's edit and no save holds it, so no queue entry
+/// keeps its bytes. Retirement keeps them for the recovery copy.
+#[test]
+fn retiring_a_page_keeps_an_edit_the_relay_took_but_has_not_saved() {
+    let mut owner = restore_owner();
+    let taken_edit = edit(&owner, "taken edit");
+    let taken = append_update(&mut owner, "taken", taken_edit.clone());
+    acknowledge_taken(
+        &mut owner.store,
+        &mut dohc_engine_collab::WriterDocCache::default(),
+        "ws",
+        &taken.outbox_id,
+        &OwnerDeliveryReceipt {
+            delivery_id: taken.delivery_id.clone(),
+            update_digest: taken.update_digest.clone(),
+            journal_cursor: owner.observed.accepted_cursor + 1,
+            accepting_host_epoch: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(count(&owner.store, "ydoc_owner_taken_rows"), 1);
+    assert!(pending_digests(&owner.store).is_empty());
+    retire(&mut owner.store).unwrap();
+    assert_eq!(count(&owner.store, "ydoc_owner_taken_rows"), 0);
+    assert_eq!(
+        pending_digests(&owner.store),
+        vec![taken.update_digest.clone()]
+    );
+    assert_retired(
+        &owner,
+        &taken.outbox_id,
+        &owner.observed.checkpoint_digest,
+        1,
+    );
+    let (updates, markdown) = recovery_copy(&owner.store, &taken.outbox_id);
+    assert_eq!(updates, vec![taken_edit]);
+    assert!(markdown.contains("taken edit"));
+}
+
 #[test]
 fn a_restore_successor_another_lineage_or_a_revived_page_is_evaluated_again() {
     let mut owner = restore_owner();
@@ -355,9 +395,15 @@ fn retiring_a_page_whose_stop_was_deferred_closes_its_generation() {
         .store
         .write_with(&NoFaults, |tx| {
             request_in_tx(tx, &key(), true, 21)?;
-            release_in_tx(tx, &binding, Some(cursor + 1), None, 22, |_, _, _, _, _| {
-                Ok(())
-            })
+            release_in_tx(
+                tx,
+                &binding,
+                Some(cursor + 1),
+                None,
+                "person",
+                22,
+                |_, _, _, _, _| Ok(()),
+            )
         })
         .unwrap()
     else {

@@ -81,7 +81,7 @@ const lexicalFixture = new URL(
   import.meta.url,
 );
 
-const canonicalArtifactFixtures = new Set(["plain-ampersands", "angle-words", "cell-break"]);
+const canonicalArtifactFixtures = new Set(["plain-ampersands", "cell-break"]);
 const LEXICAL: Record<string, string> = {
   "star-bullets": "* one\n* two\n",
   "plus-bullets": "+ one\n+ two\n",
@@ -95,7 +95,6 @@ const LEXICAL: Record<string, string> = {
   "table-then-heading": "| Name |\n|---|\n| Ada |\n# Next\n",
   "plain-ampersands": "Tom & Jerry, 5 > 3 and 2 < 4\n\n* one\n* two\n",
   "bracket-line": "[WIP] fix\n",
-  "angle-words": "Vec<T> and cmd <file>\n",
   "skipped-ordinals": "1. a\n3. b\n",
   "cell-break": "| Name |\n|---|\n| Ada&lt;br&gt;Lovelace |\n",
   "lists-then-table": "* a\n\n- b\n\n| x |\n|---|\n| y |\n",

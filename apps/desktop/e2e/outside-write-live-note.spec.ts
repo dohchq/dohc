@@ -397,7 +397,7 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
           .filter({ hasText: "dohc could not list every kept copy" });
         await expect(listFailureRow).toBeVisible();
         await expect(listFailureRow).toContainText(
-          "To find a copy that isn't listed, look beside its file for (kept copy) in the name.",
+          "To find a copy that is not listed, look beside its file for (kept copy) in the name.",
         );
         for (const theme of ["light", "dark"] as const) {
           await page.evaluate(

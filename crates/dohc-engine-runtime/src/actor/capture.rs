@@ -20,8 +20,8 @@ use dohc_engine_domain::{
     CaptureSecretRetire, DomainError, SecretFileStore, SecretMomentRecord, SecretWriteResult,
     VersionedTextStore, WriteResult, capture_ingest_binary_with_admission_in_tx,
     capture_ingest_in_batch_with_admission_in_tx, capture_ingest_with_admission_in_tx,
-    capture_manifest_seed, capture_retire_in_tx, capture_retire_respelled_in_tx,
-    capture_secret_retire_with, ensure_main_version_in_tx,
+    capture_manifest_seed, capture_retire_absent_in_tx, capture_retire_in_tx,
+    capture_retire_respelled_in_tx, capture_secret_retire_with, ensure_main_version_in_tx,
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
@@ -213,6 +213,7 @@ mod capture_file_hold_tests {
             scratch.path(),
             &Root,
             true,
+            None,
             &(),
             &LeaseRegistry::new(),
             &NoFaults,
@@ -856,6 +857,7 @@ mod capture_file_hold_tests {
                 scratch.path(),
                 &Root,
                 true,
+                None,
                 &(),
                 &LeaseRegistry::new(),
                 &NoFaults
@@ -954,6 +956,7 @@ mod capture_file_hold_tests {
                 scratch.path(),
                 &Root,
                 true,
+                None,
                 &(),
                 &LeaseRegistry::new(),
                 &NoFaults,
@@ -1189,7 +1192,7 @@ mod capture_file_hold_tests {
 
 /// Maximum work accepted by one capture batch actor command. Keeping both
 /// bounds here lets the actor serve queued interactive work between chunks.
-pub const MAX_CAPTURE_INGEST_BATCH_OPS: usize = 256;
+pub const MAX_CAPTURE_INGEST_BATCH_OPS: usize = 32;
 pub const MAX_CAPTURE_INGEST_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 /// Capture-owned proof that a filesystem pathname still names the workspace
@@ -1757,6 +1760,7 @@ impl ActorHandle {
         input: CaptureRetire,
         root_dir: PathBuf,
         confirm_absent: bool,
+        seen_sha256: Option<String>,
         self_writes: Arc<dyn SelfWriteRecorder>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
@@ -1771,6 +1775,7 @@ impl ActorHandle {
                     &root_dir,
                     root_guard.as_ref(),
                     confirm_absent,
+                    seen_sha256.as_deref(),
                     self_writes.as_ref(),
                     &leases,
                     faults.as_ref(),
@@ -1803,6 +1808,7 @@ impl ActorHandle {
                     &root_dir,
                     root_guard.as_ref(),
                     false,
+                    None,
                     self_writes.as_ref(),
                     &leases,
                     faults.as_ref(),
@@ -3516,6 +3522,7 @@ fn capture_retire_on_store(
     root_dir: &std::path::Path,
     root_guard: &dyn WorkspaceRootGuard,
     confirm_absent: bool,
+    seen_sha256: Option<&str>,
     self_writes: &dyn SelfWriteRecorder,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
@@ -3584,7 +3591,10 @@ fn capture_retire_on_store(
         }
         let mut result = match respelled_to {
             Some((to, to_sha256)) => capture_retire_respelled_in_tx(tx, input, to, to_sha256),
-            None => capture_retire_in_tx(tx, input),
+            None => match seen_sha256 {
+                Some(seen) if confirm_absent => capture_retire_absent_in_tx(tx, input, seen),
+                _ => capture_retire_in_tx(tx, input),
+            },
         }
         .map_err(RuntimeError::from)?;
         if result.retired.is_some() {
@@ -3843,6 +3853,7 @@ mod capture_secret_root_guard_tests {
                         blocker_input,
                         root,
                         false,
+                        None,
                         Arc::new(()),
                         LeaseRegistry::new(),
                         Arc::new(NoFaults),
@@ -4089,6 +4100,7 @@ mod capture_secret_root_guard_tests {
                 input,
                 blocker_root,
                 false,
+                None,
                 Arc::new(()),
                 LeaseRegistry::new(),
                 Arc::new(NoFaults),
@@ -4238,6 +4250,7 @@ mod capture_secret_root_guard_tests {
                 input,
                 blocker_root,
                 false,
+                None,
                 Arc::new(()),
                 LeaseRegistry::new(),
                 Arc::new(NoFaults),

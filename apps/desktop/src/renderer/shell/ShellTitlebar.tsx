@@ -26,6 +26,11 @@ export function ShellTitlebar(props: {
   otherAccount?: boolean;
   // A membership or share that ended.
   ended?: boolean;
+  onOpenConflicts?: () => void;
+  onOpenSyncSettings?: () => void;
+  onConnectServer?: () => void;
+  onSignInAgain?: () => void;
+  onOpenNotices?: () => void;
   showWorkbenchMenu: (context: "status") => Promise<void>;
   agentActive: boolean;
   restrictedMode?: { asking: boolean; onTrust: () => void };
@@ -62,6 +67,11 @@ export function ShellTitlebar(props: {
             failedSaves={failedSaves}
             otherAccount={props.otherAccount}
             ended={props.ended}
+            onOpenConflicts={props.onOpenConflicts}
+            onOpenSyncSettings={props.onOpenSyncSettings}
+            onConnectServer={props.onConnectServer}
+            onSignInAgain={props.onSignInAgain}
+            onOpenNotices={props.onOpenNotices}
           />
           {props.restrictedMode ? <RestrictedModeIndicator {...props.restrictedMode} /> : null}
         </>

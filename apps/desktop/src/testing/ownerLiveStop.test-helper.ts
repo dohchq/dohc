@@ -13,7 +13,7 @@ export function pendingStopHarness(
   options: Partial<
     Pick<
       OwnerLiveDocumentActionDependencies<{ workspaceId: string }>,
-      "withoutEditors" | "ownerLiveQuarantines" | "liveChanges" | "person"
+      "withoutEditors" | "ownerLiveQuarantines" | "liveChanges" | "person" | "resumeOwnerLivePause"
     >
   > = {},
 ) {
@@ -70,6 +70,7 @@ export function pendingStopHarness(
     unwrittenOwnerLiveReleases: async () => [],
     retryOwnerLiveRelease: async () => undefined,
     listOwnerLiveStops: async () => (recorded ? [recorded] : []),
+    noteBytes: async () => null,
     ...options,
   });
   return { actions, document, ownerLiveStop, relay, recorded: () => recorded };

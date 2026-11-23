@@ -25,7 +25,7 @@ export function mergeRemovalWords(
       : `"${quoted}"`;
   return author === undefined
     ? { message }
-    : { message, lastLine: `${author}'s change deleted the line it was in.` };
+    : { message, lastLine: `A change by ${author} deleted the line it was in.` };
 }
 
 /**
@@ -143,7 +143,7 @@ export function useMergeRemovalNotices(input: {
           // The engine still lists it, so its row comes back.
           publish(removal.momentId);
           latest.current.reportShellError(
-            `dohc could not remove the notice about "${removal.path}".`,
+            `dohc could not dismiss the Notice for "${removal.path}".`,
             error,
             () => clear(removal),
           );

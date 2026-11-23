@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -106,7 +106,7 @@ describe("engine-mode export with no mounted serializer", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     expect(
       await screen.findByText(
-        "dohc cannot open \"a.md\" for live editing. dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
+        "dohc cannot open \"a.md\" for live editing. dohc cannot read this file's Markdown. Common causes are nested lists in a synced workspace or deeply nested quotes. Your outside edit is still in the file on disk. Copy it first, then restore the file's earlier contents. If dohc still cannot read the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
       ),
     ).toBeTruthy();
     expect(screen.queryByTestId("markdown-source-toggle")).toBeNull();
@@ -176,8 +176,8 @@ describe("engine-mode export with no mounted serializer", () => {
     vi.stubGlobal("dohcDesktop", { ...bridge, openEngineYDocSession });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await screen.findByTestId("engine-may-hold-document-notice");
-    await user.click(screen.getByText("Try again"));
+    const notice = await screen.findByTestId("engine-may-hold-document-notice");
+    await user.click(within(notice).getByRole("button", { name: "Try again" }));
     await vi.waitFor(() =>
       expect(screen.queryByTestId("engine-may-hold-document-notice")).toBeNull(),
     );

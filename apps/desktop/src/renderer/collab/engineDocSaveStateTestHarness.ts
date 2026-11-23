@@ -5,6 +5,7 @@ import { declareSceneRoots, insertElementRevision, putSceneAsset } from "@dohc/e
 import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import { EngineYDocUpdateTooLargeError } from "./engineYDocProvider";
+import { draftFilesForTests } from "../orphanedDraftFiles.testHarness";
 
 export const IMAGE_DESCRIPTOR = {
   id: "recovery-image",
@@ -27,6 +28,7 @@ type LineageReplacementListener = (event: {
 
 export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   const saveStateListeners = new Set<SaveStateListener>();
+  const drafts = draftFilesForTests();
   const remoteUpdateListeners = new Set<
     (event: {
       sessionId: string;
@@ -81,6 +83,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
 
   const api = {
     platform: "linux" as const,
+    ...drafts.calls,
     async openEngineYDocSession(payload: { sessionId: string }) {
       openCount += 1;
       openedSessionId = payload.sessionId;
@@ -339,6 +342,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
 
   return {
     api,
+    drafts,
     emit,
     emitNow,
     emitEditRefusal,

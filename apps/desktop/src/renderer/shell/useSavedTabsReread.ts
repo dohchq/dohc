@@ -5,11 +5,11 @@ import { bridge } from "../bridge";
 import { allTabs, parseUiState } from "../workbench/workbenchState";
 
 export const SAVED_TABS_TITLE = "dohc opened this workspace without your saved tabs";
-const TOOK_LONG = "Your saved tabs didn't load within 4 minutes.";
+const TOOK_LONG = "Your saved tabs did not load within 4 minutes.";
 const COME_BACK =
-  "They come back the next time the workspace opens. Until then, tab changes aren't saved.";
+  "They will return the next time this workspace opens. Until then, tab changes are not saved.";
 export const SAVED_TABS_RESTORE =
-  "Restore tabs brings them back. Until you pick it, tab changes aren't saved.";
+  "Choose Restore tabs to bring them back. Until then, tab changes are not saved.";
 export const SAVED_TABS_WAITED = `${TOOK_LONG} ${COME_BACK}`;
 export const SAVED_TABS_RESTORE_AFTER_WAIT = `${SAVED_TABS_RESTORE} ${TOOK_LONG}`;
 

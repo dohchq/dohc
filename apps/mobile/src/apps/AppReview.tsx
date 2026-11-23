@@ -176,6 +176,9 @@ function Review({ apps, publicationId }: { apps: WorkspaceApps; publicationId: s
       <Text style={[styles.heading, { color: theme.ink }]} accessibilityRole="header">
         {appWords.reach}
       </Text>
+      {review.reach.length === 0 ? (
+        <Text style={[styles.body, { color: theme.ink }]}>{appWords.reachesNothing}</Text>
+      ) : null}
       {review.reach.map((collection) => (
         <View key={collection.name} style={styles.group}>
           <Text style={[styles.body, styles.strong, { color: theme.ink }]}>{collection.name}</Text>
