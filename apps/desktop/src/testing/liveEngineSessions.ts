@@ -31,7 +31,6 @@ const READY_WATCHER_STATUS = {
   mergeRemovals: [],
   heldFiles: [],
   outsideChanges: [],
-  heldAccessRules: [],
   retainedCopies: { count: 0, bytes: 0 },
   phase: "ready",
 } satisfies WatcherStatusResult;

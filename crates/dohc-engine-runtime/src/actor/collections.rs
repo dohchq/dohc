@@ -1756,13 +1756,6 @@ fn adopt_collection_record_on_store(
     root_guard: Option<&dyn WorkspaceRootGuard>,
     session_key: Option<&DocKey>,
 ) -> Result<Option<CollectionAdoptionExecution>, RuntimeError> {
-    // Admitted before the id reaches the document, so a refusal changes nothing.
-    super::access_order::order_writer(
-        store,
-        workspace_id,
-        version_id,
-        &[super::access_order::Touch::write(&candidate.file_path)],
-    )?;
     let probe = ydoc_open_state_on_store(
         store,
         doc_cache,
@@ -1963,15 +1956,6 @@ fn cleanup_collection_relation_on_store(
     token: &CancellationToken,
     root_guard: Option<&dyn WorkspaceRootGuard>,
 ) -> Result<CollectionRelationCleanupExecution, RuntimeError> {
-    // Admitted before the document changes, so a refusal changes nothing.
-    super::access_order::order_writer(
-        store,
-        workspace_id,
-        version_id,
-        &[super::access_order::Touch::write(
-            &candidate.source_file_path,
-        )],
-    )?;
     match dohc_engine_files::materialize::write_precondition_sha256(
         root_dir,
         &candidate.source_file_path,
@@ -2328,7 +2312,7 @@ fn reconcile_collections_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    super::access_order::check_root()?;
+    super::store_root::check_root()?;
     validate_workspace_root(root_dir, root_guard)?;
     let (reconciliation, automation_claims) = match store.write_with(faults, |tx| {
         // Half a pull can lack a relation's target that a later page brings.
@@ -2494,8 +2478,6 @@ fn reconcile_collections_on_store(
                     faults,
                 )?;
             }
-            // The record stays pending until its folder clears.
-            Err(error) if super::access_order::refused(&error) => {}
             Err(error) => return Err(error),
         }
     }
@@ -2559,7 +2541,7 @@ fn reconcile_collections_on_store(
             Ok(CollectionRelationCleanupExecution::LeaseHeld) => {
                 lease_held = true;
             }
-            Err(error) if file_conflict(&error) || super::access_order::refused(&error) => {}
+            Err(error) if file_conflict(&error) => {}
             Err(error) => return Err(error),
         }
     }

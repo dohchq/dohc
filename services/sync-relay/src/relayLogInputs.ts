@@ -59,6 +59,9 @@ const RELAY_ONLY_OP_KINDS: ReadonlySet<string> = new Set([
   MESSAGE_DELETE_OP_KIND,
 ]);
 
+// Folder markers (ADR 0017). Only the relay writes them, inside a folder rule's change.
+export const FOLDER_ACCESS_ORIGIN = "relay:folder-access";
+
 // A desktop stores a received share's op under `shared:<shareId>:<source>` and
 // checks a link post against its source, so no client may write from it.
 export const SHARED_REPLAY_ORIGIN_PREFIX = "shared:";
@@ -151,6 +154,9 @@ function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void
   }
   if (originId.startsWith(MESSAGE_DELETE_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for message deletes");
+  }
+  if (originId.startsWith(FOLDER_ACCESS_ORIGIN)) {
+    throw badRequest("originId is reserved for folder markers");
   }
   if (originId.startsWith(SHARED_REPLAY_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for replayed share ops");

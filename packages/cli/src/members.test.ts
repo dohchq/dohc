@@ -10,6 +10,7 @@ const view = {
   memberLevel: "comment",
   inviteLink: { enabled: true, url: "https://share.test/join#token" },
   groupRules: [{ channelWireId: "wire-news", level: "view" }],
+  folderRules: [],
   people: [
     {
       memberId: "owner",
@@ -302,6 +303,7 @@ describe("dohc members", () => {
     memberLevel: "comment",
     inviteLink: null,
     groupRules: null,
+    folderRules: null,
   };
   const ready = (value: unknown) => () =>
     parseCliResult("members", { status: "ready", view: value });
@@ -324,6 +326,8 @@ describe("dohc members", () => {
     expect(ready({ ...view, inviteLink: null })).toThrow();
     expect(ready({ ...view, groupRules: null })).toThrow();
     expect(ready({ ...memberView, groupRules: [], people: [sam] })).toThrow();
+    expect(ready({ ...view, folderRules: null })).toThrow();
+    expect(ready({ ...memberView, people: [], folderRules: [] })).toThrow();
   });
 
   it("refuses an owner entry that is not the owner, an inactive owner, a link that disagrees with itself, an unreadable level, and a colour slot outside the hues", () => {

@@ -2119,8 +2119,12 @@ describe("a personal agent's reads", () => {
 // The agent's person is a member of OTHER's workspace, which members know as "Community".
 const COMMUNITY = OTHER_WS;
 const MEMBER_ID = "member-ada";
-// Hides the folder it is in from every member but ben, whom the relay can't match to the person.
-const HIDING_RULE = "people:\n  ben@dohc.test: edit\n";
+type FolderRule = { members: Level | null; people: Array<{ email: string; level: Level }> };
+// Hides its folder from every member but ben, whom the relay can't match to the person.
+const HIDING_RULE: FolderRule = {
+  members: null,
+  people: [{ email: "ben@dohc.test", level: "edit" }],
+};
 
 function joinCommunity(f: Fixture, input: { level?: Level; role?: "admin" } = {}): void {
   expect(
@@ -2192,6 +2196,14 @@ async function groupRule(f: Fixture, channelWireId: string, level: "none" | "vie
       ...jsonBody({ level }),
       method: "PUT",
     }),
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
+/** OTHER sets a folder's rule, as Members settings does. */
+async function folderRule(f: Fixture, folder: string, rule: FolderRule): Promise<void> {
+  const response = await f.h(
+    request(OTHER, `/sync/${COMMUNITY}/members/folder-rules`, jsonBody({ folder, ...rule })),
   );
   expect(response.status, await response.clone().text()).toBe(200);
 }
@@ -2357,7 +2369,7 @@ describe("a personal agent in a workspace its person joined", () => {
     const answered = read();
     await entered;
     held = null;
-    await communityWrite(f, "later/access.yaml", HIDING_RULE);
+    await folderRule(f, "later", HIDING_RULE);
     release();
     const answer = await ok(await answered);
     expect(answer.messages).toEqual([
@@ -2495,7 +2507,7 @@ describe("a personal agent in a workspace its person joined", () => {
     await groupRule(f, "wire-secret", "none");
     await groupRule(f, "wire-news", "view");
     const open = await communityWrite(f, "plans/a.md", "open plan");
-    await communityWrite(f, "hidden/access.yaml", HIDING_RULE);
+    await folderRule(f, "hidden", HIDING_RULE);
     const hidden = await communityWrite(f, "hidden/b.md", "hidden plan");
     fromComputer(f, COMMUNITY, [
       fileThread("thread-open", { linkedObjectId: "object-plans/a.md" }),
@@ -2554,7 +2566,10 @@ describe("a personal agent in a workspace its person joined", () => {
         userId === OWNER ? email : `${userId}@dohc.test`,
     });
     joinCommunity(f);
-    await communityWrite(f, "named/access.yaml", "people:\n  ada@dohc.test: view\n");
+    await folderRule(f, "named", {
+      members: null,
+      people: [{ email: "ada@dohc.test", level: "view" }],
+    });
     await communityWrite(f, "named/a.md", "for ada");
     // The person's own read stored the address the rule names.
     f.storage.refreshAccountEmail(OWNER, { verifiedEmail: email }, f.now.value);
@@ -2576,7 +2591,7 @@ describe("a personal agent in a workspace its person joined", () => {
   it("downloads a file whose bytes many hidden files that sort before it also hold", async () => {
     const f = await fixture();
     joinCommunity(f);
-    await communityWrite(f, "hidden/access.yaml", HIDING_RULE);
+    await folderRule(f, "hidden", HIDING_RULE);
     for (let index = 0; index < 17; index += 1)
       await communityWrite(f, `hidden/${String(index).padStart(2, "0")}.md`, "template");
     const sha = await communityWrite(f, "plans/a.md", "template");
@@ -2596,7 +2611,7 @@ describe("a personal agent in a workspace its person joined", () => {
     joinCommunity(f);
     communityGroups(f);
     await communityWrite(f, "plans/a.md", "open plan");
-    await communityWrite(f, "hidden/access.yaml", HIDING_RULE);
+    await folderRule(f, "hidden", HIDING_RULE);
     await communityWrite(f, "hidden/b.md", "hidden plan");
     await communityWrite(f, "later/c.md", "for now");
     const agent = await signIn(f, { reach: BOTH_COMMENT });
@@ -2648,7 +2663,7 @@ describe("a personal agent in a workspace its person joined", () => {
     });
     const answered = tool(f, agent, "wait", { cursor: answer.cursor, timeoutMs: 0 });
     await holding;
-    await communityWrite(f, "later/access.yaml", HIDING_RULE);
+    await folderRule(f, "later", HIDING_RULE);
     release();
     expect(((await ok(await answered)) as WaitAnswer).messages).toEqual([
       expect.objectContaining({
@@ -2739,7 +2754,7 @@ describe("a personal agent in a workspace its person joined", () => {
   it("lists a member's agent the files it reads up to the limit, past hidden files that sort first", async () => {
     const f = await fixture({ linkCurrentFileLimit: 2 });
     joinCommunity(f);
-    await communityWrite(f, "hidden/access.yaml", HIDING_RULE);
+    await folderRule(f, "hidden", HIDING_RULE);
     await communityWrite(f, "hidden/b.md", "hidden plan");
     await communityWrite(f, "open/c.md", "plan");
     const agent = await signIn(f, { reach: BOTH_COMMENT });
@@ -2757,22 +2772,17 @@ describe("a personal agent in a workspace its person joined", () => {
     expect(listed.truncated).toBe(true);
   });
 
-  it("shows an admin's agent a folder hidden from members and its access.yaml, as it shows an owner's agent its rules", async () => {
+  it("shows an admin's agent a folder hidden from members, and never its folder marker", async () => {
     const f = await fixture();
     joinCommunity(f, { role: "admin" });
-    await communityWrite(f, "hidden/access.yaml", HIDING_RULE);
+    await folderRule(f, "hidden", HIDING_RULE);
     await communityWrite(f, "hidden/b.md", "hidden plan");
-    await putBlob(f.h, OWNER, WS_A, "members: view\n");
-    await appendLog(f.h, OWNER, WS_A, [
-      moment("shared/access.yaml", "members: view\n", { originSeq: 0 }),
-    ]);
     const agent = await signIn(f, { reach: BOTH_COMMENT });
     const paths = async (workspaceId: string) =>
       ((await ok(await tool(f, agent, "files", { workspaceId }))).files as { path: string }[]).map(
         (file) => file.path,
       );
-    expect(await paths(COMMUNITY)).toEqual(["hidden/access.yaml", "hidden/b.md"]);
-    expect(await paths(WS_A)).toEqual(["shared/access.yaml"]);
+    expect(await paths(COMMUNITY)).toEqual(["hidden/b.md"]);
     expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toContainEqual(
       expect.objectContaining({ workspaceId: COMMUNITY, role: "admin", level: "comment" }),
     );
@@ -2788,7 +2798,7 @@ describe("a personal agent in a workspace its person joined", () => {
     expect(response.status).toBe(200);
     const reader = response.body!.getReader();
     expect((await reader.read()).value?.byteLength).toBe(64 * 1024);
-    await communityWrite(f, "plans/access.yaml", HIDING_RULE);
+    await folderRule(f, "plans", HIDING_RULE);
     await expect(reader.read()).rejects.toMatchObject({ code: "not_found" });
   });
 
@@ -2818,7 +2828,7 @@ describe("a personal agent in a workspace its person joined", () => {
     const answered = tool(f, agent, "wait", { timeoutMs: 0 });
     await holding;
     await groupRule(f, "wire-team", "none");
-    await communityWrite(f, "plans/access.yaml", HIDING_RULE);
+    await folderRule(f, "plans", HIDING_RULE);
     release();
     expect(ids((await ok(await answered)) as WaitAnswer)).toEqual(["in-news"]);
   });
@@ -2856,7 +2866,7 @@ describe("a personal agent in a workspace its person joined", () => {
         beforeContent: "plan",
       }),
     ]);
-    await communityWrite(f, "plans/access.yaml", HIDING_RULE);
+    await folderRule(f, "plans", HIDING_RULE);
     release();
     const { messages } = (await ok(await answered)) as WaitAnswer;
     expect(messages.map((message) => [message.messageId, message.filePath])).toEqual([

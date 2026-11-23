@@ -13,6 +13,7 @@ export function assertSafeWorkspacePath(path: string): string {
 // sync metadata needs a concrete type, so unknown extensions become
 // octet-stream here.
 export function mediaTypeForPath(path: string): string {
+  if (path.split(/[\\/]/u).at(-1)?.toLowerCase() === ".dohc-access") return "text/plain";
   return (
     coreMediaTypeForPath(path) ??
     (isSiteSourcePath(path) ? "text/plain" : "application/octet-stream")

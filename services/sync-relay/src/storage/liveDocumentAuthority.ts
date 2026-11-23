@@ -67,7 +67,6 @@ import {
   type ShareSelector,
   type WorkspaceShareSelector,
   fileSideOf,
-  fileWriteSideOf,
   isLiveEditShareSelector,
   pathVisibleThroughShare,
   pathLevel,
@@ -1912,8 +1911,7 @@ function bindLiveDocument(
       ? pathVisibleThroughShare(fileSideOf(selector)!, path)
       : canonicalLiveSelector(share, selector) && visibleSharePath(selector, path) === path;
   if (!reached) return { kind: "refused", reason: "stale-selector" };
-  // An admin reads rule files but writes none, so an edit is judged by write reach.
-  const files = access === "edit" ? fileWriteSideOf(selector) : fileSideOf(selector);
+  const files = fileSideOf(selector);
   if (
     !files ||
     (access === "edit" ? pathLevel(files, path) !== "edit" : pathLevel(files, path) === null)

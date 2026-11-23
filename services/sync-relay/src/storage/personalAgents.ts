@@ -70,7 +70,7 @@ export interface PersonalReach {
   /** The account owns the workspace. Writes need it; in a joined workspace the agent only reads and posts. */
   owned: boolean;
   role: PersonalWorkspaceRole;
-  /** An owned workspace's is an admin's reach, rule files included. */
+  /** An owned workspace's is an admin's reach. */
   selector: WorkspaceShareSelector;
   /** The level the agent holds where no rule narrows it, which its workspace list shows. */
   listedLevel: PersonalReachLevel;

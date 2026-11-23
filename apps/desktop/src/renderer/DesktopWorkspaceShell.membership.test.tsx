@@ -472,6 +472,7 @@ describe("a joined workspace", () => {
         memberLevel: "comment",
         inviteLink: null,
         groupRules: null,
+        folderRules: null,
         people: [],
       },
     });

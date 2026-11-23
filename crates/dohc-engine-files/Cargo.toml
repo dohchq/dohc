@@ -14,9 +14,6 @@ description = "Workspace filesystem capture for the engine: bounded scan, conten
 # `dohc-engine-testkit` (feature unification arms it for `cargo test
 # --workspace`). Delegates to the storage seam so there is one fault registry.
 fault-injection = ["dohc-engine-storage/fault-injection"]
-# The relay's folder reach, written out again for tests that judge the
-# engine's merge order with something other than the planner.
-test-support = []
 
 [dependencies]
 # The durable job ledger + blob store the materialization pipeline consumes.

@@ -139,7 +139,6 @@ async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
         scan: ScanGauge::default(),
         import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
-        access_rules: AccessRuleFollow::default(),
         first_import: None,
         carried: None,
         rules: None,
@@ -285,7 +284,6 @@ async fn failed_first_layer_start_releases_link_drain_in_the_open_workspace() {
         scan: ScanGauge::default(),
         import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
-        access_rules: AccessRuleFollow::default(),
         first_import: None,
         carried: None,
         rules: None,
@@ -363,171 +361,4 @@ fn a_rescan_that_converges_around_a_quarantined_file_carries_it() {
         .expect("the quarantined file stays carried");
     assert_eq!(pass.paths, paths(&["note-0.md"]));
     assert_eq!(pass.summary.as_deref(), Some(RESCAN_SUMMARY));
-}
-
-/// A hold the driver could not read is announced once it can, and only once.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_hold_read_that_failed_is_announced_once_it_succeeds() {
-    use dohc_engine_storage::EngineStore;
-    use dohc_engine_testkit::ScratchDir;
-    use std::sync::atomic::AtomicU64;
-    use std::time::Duration;
-
-    let scratch = ScratchDir::new().unwrap();
-    let root = scratch.path().to_owned();
-    let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
-    {
-        let mut store = EngineStore::open(&db, 1).unwrap();
-        dohc_engine_domain::VersionedTextStore::new(&mut store)
-            .ensure_main_version("ws", "main", 1, &NoFaults)
-            .unwrap();
-    }
-    // Rules order only once the workspace replicates.
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch(
-            "INSERT INTO sync_identity \
-             (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
-             VALUES ('ws', 'origin', 'epoch', 'stream', 1); \
-             INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
-             VALUES ('ws', 'origin', 0);",
-        )
-        .unwrap();
-    let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let capture = |paths: &'static [&'static str]| {
-        let (actor, root) = (actor.clone(), root.clone());
-        // The batch API refuses a caller inside a runtime.
-        std::thread::spawn(move || {
-            // Older than the settle period, so rules are judged at once.
-            let settled =
-                filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(60));
-            for path in ["team", "team/access.yaml", "team/a.md"] {
-                filetime::set_file_mtime(root.join(path), settled).unwrap();
-            }
-            let inputs: Vec<_> = paths
-                .iter()
-                .map(|path| dohc_engine_domain::CaptureIngest {
-                    workspace_id: "ws".into(),
-                    version_id: "main".into(),
-                    path: (*path).into(),
-                    text: std::fs::read_to_string(root.join(path)).unwrap(),
-                    metadata_origin: "capture".into(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: 10,
-                    request_id: None,
-                    claim_foreign_head: true,
-                })
-                .collect();
-            actor
-                .capture_ingest_batch_blocking(
-                    inputs,
-                    Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
-                        &root,
-                    )),
-                    LeaseRegistry::new(),
-                    Arc::new(NoFaults),
-                    root.clone(),
-                    Arc::new(dohc_engine_testkit::capture::ExistingRootGuard),
-                )
-                .unwrap()
-                .into_iter()
-                .map(|result| result.err().map(|error| error.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .join()
-        .unwrap()
-    };
-    std::fs::create_dir_all(root.join("team")).unwrap();
-    std::fs::write(root.join("team/access.yaml"), "members: view\n").unwrap();
-    std::fs::write(root.join("team/a.md"), "alpha").unwrap();
-    assert_eq!(capture(&["team/access.yaml", "team/a.md"]), [None, None]);
-    std::fs::write(root.join("team/access.yaml"), "members: edit\n").unwrap();
-    let held = capture(&["team/a.md"]);
-    assert!(
-        held[0]
-            .as_deref()
-            .is_some_and(|e| e.starts_with("access-rule-held")),
-        "{held:?}"
-    );
-
-    let events = EngineEvents::default();
-    let mut notices = events.subscribe();
-    let (open_ready_tx, _) = tokio::sync::watch::channel(true);
-    let status = Arc::new(DriverStatus::default());
-    status.mark_initial_ready();
-    let mut env = RealEnv {
-        observation: crate::file_observation::FileObservation::new(events.clone(), "ws".into()),
-        root: root.clone(),
-        initial_links_hold: None,
-        actor: actor.clone(),
-        lease_releases_seen: 0,
-        workspace_id: "ws".into(),
-        leases: LeaseRegistry::new(),
-        status,
-        author_json: Arc::new(Mutex::new(None)),
-        self_writes: SelfWriteSuppression::default(),
-        apply_gate: Arc::new(tokio::sync::Mutex::new(())),
-        store_freshly_created: false,
-        open_ready_tx,
-        refresh_epoch: Arc::new(AtomicU64::new(0)),
-        events,
-        apply_probe: None,
-        scan: ScanGauge::default(),
-        import_priority: Arc::new(ImportPriority::new(|| {})),
-        no_atomic_placement_announced: false,
-        access_rules: AccessRuleFollow::default(),
-        first_import: None,
-        carried: None,
-        rules: None,
-        quarantine_retry_at: None,
-    };
-    let cancel = CancellationToken::new();
-    env.observation.start(env.root.clone()).unwrap();
-    let (layer, _) = FilesLayer::start_with_fingerprint(
-        &env.root,
-        &cancel,
-        None,
-        policy_fingerprint(&env.root),
-        0,
-        &env.scan,
-        &env.observation,
-    )
-    .await
-    .unwrap();
-    let mut announced = || {
-        let mut count = 0;
-        while let Ok(notice) = notices.try_recv() {
-            count += usize::from(notice.name == CAPTURE_ACCESS_RULE_HELD_EVENT);
-        }
-        count
-    };
-    let holds_table = |from: &str, to: &str| {
-        rusqlite::Connection::open(&db)
-            .unwrap()
-            .execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
-            .unwrap();
-    };
-
-    holds_table("access_rule_holds", "access_rule_holds_away");
-    env.follow_access_rules(&layer.files.handle()).await;
-    assert_eq!(announced(), 0, "nothing to announce while the read fails");
-    holds_table("access_rule_holds_away", "access_rule_holds");
-    env.follow_access_rules(&layer.files.handle()).await;
-    assert_eq!(
-        announced(),
-        1,
-        "the hold is announced once the read succeeds"
-    );
-    env.follow_access_rules(&layer.files.handle()).await;
-    assert_eq!(announced(), 0, "the hold is announced once");
-
-    layer.stop().await;
-    drop(env);
-    tokio::task::spawn_blocking(move || supervisor.close(&db))
-        .await
-        .unwrap()
-        .unwrap();
 }

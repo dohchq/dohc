@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { folderMarkerText } from "@dohc/security-contract/access-rules";
 import { expect, it } from "vitest";
 import { createTestScratch } from "./testTemp";
 import { AccessChangeError, moveAccessWarning } from "./moveAccessWarning";
@@ -8,6 +9,7 @@ import { moveWorkspacePathByHand } from "./workspaceFileMoves";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 const person = { kind: "human" as const, humanId: "local:installation" };
+const MARKER = folderMarkerText(`fr_${"1".repeat(32)}`, 1);
 
 const INTO_TEAM =
   "Moving Plan.md into Team may change who can see it. People who could read it may keep a copy.";
@@ -16,14 +18,14 @@ async function workspace() {
   const rootPath = await createTestScratch("move-access");
   for (const file of [
     "Plan.md",
-    "Team/access.yaml",
+    "Team/.dohc-access",
     "Team/Notes/Old.md",
     "Team/Plan2.md",
-    "Projects/Team2/access.yaml",
+    "Projects/Team2/.dohc-access",
     "Projects/Team2/Brief.md",
   ]) {
     await mkdir(dirname(join(rootPath, file)), { recursive: true });
-    await writeFile(join(rootPath, file), file.endsWith("access.yaml") ? "members: view\n" : file);
+    await writeFile(join(rootPath, file), file.endsWith(".dohc-access") ? MARKER : file);
   }
   // The capture runs each change without History, as the move does with no capture.
   let captured = 0;
@@ -120,7 +122,7 @@ it("asks about a rule written while the move waits for the workspace", async () 
     {
       ...f.options,
       // admit runs under the workspace lock, after the change queued before this move.
-      admit: () => writeFile(join(f.rootPath, "Later/access.yaml"), "members: view\n"),
+      admit: () => writeFile(join(f.rootPath, "Later/.dohc-access"), MARKER),
     },
   );
   await expect(moving).rejects.toThrow(

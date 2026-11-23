@@ -274,80 +274,6 @@ pub fn comparison_status(
     }
 }
 
-/// What merging one file from a version does to the target, decided from
-/// the file's three sides. The merge acts on it, and the engine plans a
-/// merge's order of access rule writes from it, so the two can't disagree
-/// about what a rule becomes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileMergePlan {
-    Unchanged(MergeUnchangedReason),
-    /// The target takes this text: the incoming side's, or a clean line merge.
-    WriteText(String),
-    /// The target takes the incoming side's bytes.
-    WriteBinary,
-    Delete,
-    /// The target keeps its side, and the merge records a conflict.
-    Conflict,
-}
-
-pub fn plan_file_merge(comparison: &VersionedTextComparison) -> FileMergePlan {
-    let (base, current, incoming) = (&comparison.base, &comparison.current, &comparison.incoming);
-    if comparison_sides_equal(current, incoming) {
-        return FileMergePlan::Unchanged(MergeUnchangedReason::AlreadySame);
-    }
-    if comparison_sides_equal(incoming, base) {
-        return FileMergePlan::Unchanged(MergeUnchangedReason::SourceUnchanged);
-    }
-    // WS-G1. Equal bytes are already uncontested above. What remains is
-    // decided by which side each branch READS.
-    //
-    // The fast-forward writes the incoming side through the TEXT write and
-    // delete seams, so it needs both live sides to be text. The base does not
-    // gate it: a binary base can never compare equal to a text current
-    // anyway, because the kinds differ.
-    let live_sides_binary = [current, incoming]
-        .into_iter()
-        .flatten()
-        .any(|side| side.binary);
-    if !live_sides_binary && comparison_sides_equal(current, base) {
-        return match incoming {
-            Some(incoming) => FileMergePlan::WriteText(incoming.snapshot.text.clone()),
-            None => FileMergePlan::Delete,
-        };
-    }
-    // The same fast-forward for bytes, through the binary write seam.
-    // `comparison_sides_equal` proves current and base equal by content
-    // ADDRESS, and a side that holds bytes never compares equal to one that
-    // holds text — so an emptied text current over a binary base stays a
-    // conflict here, as it must.
-    //
-    // A removed binary asset keeps its conflict: that seam is the text
-    // delete, whose merged record reports its preimage as text. So does TEXT
-    // replacing an untouched binary head — this seam writes bytes, and the
-    // text fast-forward above refuses a binary current.
-    if incoming.as_ref().is_some_and(|side| side.binary) && comparison_sides_equal(current, base) {
-        return FileMergePlan::WriteBinary;
-    }
-    // The line merge is the one branch that reads the base, so all three
-    // sides must be text. A binary head's text view is empty, and an
-    // ancestor that reads as "" would let an emptied text head compare equal
-    // to it and fast-forward the incoming text over content it never shared
-    // a line with.
-    if let (Some(base), Some(current), Some(incoming)) = (base, current, incoming)
-        && !base.binary
-        && !current.binary
-        && !incoming.binary
-        && let MarkdownMergeResult::Merged(text) = merge_markdown(
-            &base.snapshot.text,
-            &current.snapshot.text,
-            &incoming.snapshot.text,
-        )
-    {
-        return FileMergePlan::WriteText(text);
-    }
-    FileMergePlan::Conflict
-}
-
 impl VersionedTextStore<'_> {
     pub fn compare_text_file_versions(
         &self,
@@ -408,14 +334,37 @@ impl VersionedTextStore<'_> {
                 path: input.path.clone(),
             };
             let comparison = compare_text_file_versions_in_db(tx, &compare_input)?;
-            let result = match plan_file_merge(&comparison) {
-                FileMergePlan::Unchanged(reason) => MergeTextFileResult::Unchanged {
-                    reason,
+            if comparison_sides_equal(&comparison.current, &comparison.incoming) {
+                let result = MergeTextFileResult::Unchanged {
+                    reason: MergeUnchangedReason::AlreadySame,
                     comparison,
                     deduped: false,
-                },
-                FileMergePlan::WriteText(text) => {
-                    let write_input = merge_write_input(input, &text);
+                };
+                return finish_merge(tx, input, &payload_hash, result, &after);
+            }
+            if comparison_sides_equal(&comparison.incoming, &comparison.base) {
+                let result = MergeTextFileResult::Unchanged {
+                    reason: MergeUnchangedReason::SourceUnchanged,
+                    comparison,
+                    deduped: false,
+                };
+                return finish_merge(tx, input, &payload_hash, result, &after);
+            }
+            // WS-G1. Equal bytes are already uncontested above. What remains is
+            // decided by which side each branch READS.
+            //
+            // The fast-forward writes the incoming side through the TEXT write
+            // and delete seams, so it needs both live sides to be text. The base
+            // does not gate it: a binary base can never compare equal to a text
+            // current anyway, because the kinds differ.
+            let live_sides_binary = [&comparison.current, &comparison.incoming]
+                .into_iter()
+                .flatten()
+                .any(|side| side.binary);
+
+            if !live_sides_binary && comparison_sides_equal(&comparison.current, &comparison.base) {
+                if let Some(incoming) = &comparison.incoming {
+                    let write_input = merge_write_input(input, &incoming.snapshot.text);
                     validate_write_input(&write_input)?;
                     let write = write_text_in_tx(tx, &write_input)?;
                     let preimage = comparison
@@ -425,73 +374,110 @@ impl VersionedTextStore<'_> {
                             Preimage::Present(side.snapshot.blob_sha256.clone())
                         });
                     enqueue_write(tx, &write, preimage, "merge")?;
-                    MergeTextFileResult::Write { comparison, write }
+                    let result = MergeTextFileResult::Write { comparison, write };
+                    return finish_merge(tx, input, &payload_hash, result, &after);
                 }
-                FileMergePlan::Delete => {
-                    let delete_input = merge_delete_input(input);
-                    validate_delete_input(&delete_input)?;
-                    let delete = delete_text_in_tx(tx, &delete_input)?;
-                    enqueue_delete(tx, &delete, "merge")?;
-                    MergeTextFileResult::Delete { comparison, delete }
-                }
-                FileMergePlan::WriteBinary => {
-                    let Some(incoming) = comparison.incoming.as_ref() else {
-                        return Err(DomainError::StateCorrupt {
-                            reason: "binary merge planned with no incoming side",
-                        });
-                    };
-                    let preimage = comparison
-                        .current
-                        .as_ref()
-                        .map_or(Preimage::Absent, |side| {
-                            Preimage::Present(side.snapshot.blob_sha256.clone())
-                        });
-                    write_binary_file_in_tx(
-                        tx,
-                        &WriteBinaryFile {
-                            workspace_id: input.workspace_id.clone(),
-                            version_id: input.target_version_id.clone(),
-                            // A path the target already holds keeps its object
-                            // identity; this id binds only a new target path.
-                            object_id: input.object_id.clone(),
-                            path: input.path.clone(),
-                            binary_sha256: incoming.snapshot.blob_sha256.clone(),
-                            moment_id: input.moment_id.clone(),
-                            metadata_origin: input.metadata_origin.clone(),
-                            metadata_summary: input.metadata_summary.clone(),
-                            metadata_correlation_id: input.metadata_correlation_id.clone(),
-                            author_json: input.author_json.clone(),
-                            materialize: Some(preimage),
-                            now_ms: input.now_ms,
-                        },
-                    )?;
-                    let moment = get_moment(tx, &input.workspace_id, &input.moment_id)?.ok_or(
-                        DomainError::StateCorrupt {
-                            reason: "binary merge moment vanished within its transaction",
-                        },
-                    )?;
-                    let write =
-                        binary_merge_write_from_moment(tx, &input.workspace_id, moment, false)?;
-                    MergeTextFileResult::BinaryWrite { comparison, write }
-                }
-                FileMergePlan::Conflict => {
-                    if input.conflict_id.is_empty() {
-                        return Err(DomainError::InvalidInput {
-                            reason: "conflict_id must not be empty",
-                        });
-                    }
-                    let conflict = conflict_from_comparison(input, &comparison);
-                    if !insert_text_conflict_if_absent(tx, &conflict)? {
-                        return Err(DomainError::InvalidInput {
-                            reason: "conflict_id already exists",
-                        });
-                    }
-                    MergeTextFileResult::Conflict {
-                        comparison,
-                        conflict: Box::new(conflict),
-                        deduped: false,
-                    }
-                }
+                let delete_input = merge_delete_input(input);
+                validate_delete_input(&delete_input)?;
+                let delete = delete_text_in_tx(tx, &delete_input)?;
+                enqueue_delete(tx, &delete, "merge")?;
+                let result = MergeTextFileResult::Delete { comparison, delete };
+                return finish_merge(tx, input, &payload_hash, result, &after);
+            }
+
+            // The same fast-forward for bytes, through the binary write seam.
+            // `comparison_sides_equal` proves current and base equal by content
+            // ADDRESS, and a side that holds bytes never compares equal to one
+            // that holds text — so an emptied text current over a binary base
+            // stays a conflict here, as it must.
+            //
+            // A removed binary asset keeps its conflict: that seam is the text
+            // delete, whose merged record reports its preimage as text. So does
+            // TEXT replacing an untouched binary head — this seam writes bytes,
+            // and the text fast-forward above refuses a binary current.
+            if let Some(incoming) = &comparison.incoming
+                && incoming.binary
+                && comparison_sides_equal(&comparison.current, &comparison.base)
+            {
+                let preimage = comparison
+                    .current
+                    .as_ref()
+                    .map_or(Preimage::Absent, |side| {
+                        Preimage::Present(side.snapshot.blob_sha256.clone())
+                    });
+                write_binary_file_in_tx(
+                    tx,
+                    &WriteBinaryFile {
+                        workspace_id: input.workspace_id.clone(),
+                        version_id: input.target_version_id.clone(),
+                        // A path the target already holds keeps its object
+                        // identity; this id binds only a new target path.
+                        object_id: input.object_id.clone(),
+                        path: input.path.clone(),
+                        binary_sha256: incoming.snapshot.blob_sha256.clone(),
+                        moment_id: input.moment_id.clone(),
+                        metadata_origin: input.metadata_origin.clone(),
+                        metadata_summary: input.metadata_summary.clone(),
+                        metadata_correlation_id: input.metadata_correlation_id.clone(),
+                        author_json: input.author_json.clone(),
+                        materialize: Some(preimage),
+                        now_ms: input.now_ms,
+                    },
+                )?;
+                let moment = get_moment(tx, &input.workspace_id, &input.moment_id)?.ok_or(
+                    DomainError::StateCorrupt {
+                        reason: "binary merge moment vanished within its transaction",
+                    },
+                )?;
+                let write = binary_merge_write_from_moment(tx, &input.workspace_id, moment, false)?;
+                let result = MergeTextFileResult::BinaryWrite { comparison, write };
+                return finish_merge(tx, input, &payload_hash, result, &after);
+            }
+
+            // The line merge is the one branch that reads the base, so all three
+            // sides must be text. A binary head's text view is empty, and an
+            // ancestor that reads as "" would let an emptied text head compare
+            // equal to it and fast-forward the incoming text over content it
+            // never shared a line with.
+            if let (Some(base), Some(current), Some(incoming)) =
+                (&comparison.base, &comparison.current, &comparison.incoming)
+                && !base.binary
+                && !current.binary
+                && !incoming.binary
+                && let MarkdownMergeResult::Merged(text) = merge_markdown(
+                    &base.snapshot.text,
+                    &current.snapshot.text,
+                    &incoming.snapshot.text,
+                )
+            {
+                let write_input = merge_write_input(input, &text);
+                validate_write_input(&write_input)?;
+                let write = write_text_in_tx(tx, &write_input)?;
+                enqueue_write(
+                    tx,
+                    &write,
+                    Preimage::Present(current.snapshot.blob_sha256.clone()),
+                    "merge",
+                )?;
+                let result = MergeTextFileResult::Write { comparison, write };
+                return finish_merge(tx, input, &payload_hash, result, &after);
+            }
+
+            if input.conflict_id.is_empty() {
+                return Err(DomainError::InvalidInput {
+                    reason: "conflict_id must not be empty",
+                });
+            }
+            let conflict = conflict_from_comparison(input, &comparison);
+            if !insert_text_conflict_if_absent(tx, &conflict)? {
+                return Err(DomainError::InvalidInput {
+                    reason: "conflict_id already exists",
+                });
+            }
+            let result = MergeTextFileResult::Conflict {
+                comparison,
+                conflict: Box::new(conflict),
+                deduped: false,
             };
             finish_merge(tx, input, &payload_hash, result, &after)
         })?;
@@ -908,8 +894,7 @@ fn decode_merge_ledger(raw: &str) -> Result<MergeLedgerRecord, DomainError> {
     })
 }
 
-/// The three sides of one path a merge compares, read on `conn`.
-pub fn compare_text_file_versions_in_db(
+fn compare_text_file_versions_in_db(
     conn: &Connection,
     input: &CompareTextFileVersions,
 ) -> Result<VersionedTextComparison, DomainError> {

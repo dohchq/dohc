@@ -1107,7 +1107,6 @@ it("decodes whether a recovery keeps typing for a deleted file", () => {
       mergeRemovals: [],
       heldFiles: [],
       outsideChanges: [],
-      heldAccessRules: [],
       retainedCopies: { count: 0, bytes: 0 },
     }),
   ).toMatchObject({
@@ -1117,74 +1116,6 @@ it("decodes whether a recovery keeps typing for a deleted file", () => {
     outsideChanges: [],
     retainedCopies: { count: 0, bytes: 0 },
   });
-});
-
-it("decodes folders whose access rule waits for the owner", () => {
-  const status = {
-    running: true,
-    degraded: false,
-    terminal: false,
-    phase: "ready",
-    noAtomicPlacement: false,
-    recoveryUnavailable: false,
-    keptFiles: [],
-    captureRecoveries: [],
-    mergeRemovals: [],
-    heldFiles: [],
-    outsideChanges: [],
-    retainedCopies: { count: 0, bytes: 0 },
-    deferredWrites: [],
-    heldAccessRules: [
-      {
-        versionId: "main",
-        folder: "team",
-        reason: "widened",
-        observedSha256: "a".repeat(64),
-        recordedAtMs: 5,
-        recordedRule: "members: view\n",
-        rulePath: "team/access.yaml",
-        changes: [{ who: "members", before: "view", after: "edit" }],
-        canAccept: true,
-        unreadable: null,
-        fallsBackTo: null,
-      },
-      {
-        versionId: "main",
-        folder: "",
-        reason: "removed",
-        observedSha256: null,
-        recordedAtMs: 6,
-        recordedRule: null,
-        rulePath: null,
-        changes: [],
-        canAccept: true,
-        unreadable: "recorded",
-        fallsBackTo: null,
-      },
-    ],
-  };
-  expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, status)).toEqual(status);
-  for (const change of [
-    { reason: "narrowed" },
-    { reason: null },
-    { changes: [{ who: "members", before: "admin", after: "edit" }] },
-    { unreadable: "both" },
-  ]) {
-    const heldAccessRules = [{ ...status.heldAccessRules[0], ...change }];
-    expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, heldAccessRules }),
-    ).toThrow(ProtocolShapeError);
-  }
-  for (const method of [
-    WORKSPACE_METHOD.captureAcceptAccessRule,
-    WORKSPACE_METHOD.captureRestoreAccessRule,
-  ]) {
-    const decided = { folder: "team", decided: true, kept: ["team/access.yaml"] };
-    expect(decodeWorkspaceResult(method, decided)).toEqual(decided);
-    expect(() => decodeWorkspaceResult(method, { folder: "team", decided: true })).toThrow(
-      ProtocolShapeError,
-    );
-  }
 });
 
 it("decodes outside writes waiting for an open document", () => {
@@ -1200,7 +1131,6 @@ it("decodes outside writes waiting for an open document", () => {
     mergeRemovals: [],
     heldFiles: [],
     outsideChanges: [],
-    heldAccessRules: [],
     retainedCopies: { count: 0, bytes: 0 },
     deferredWrites: ["notes/open.md"],
   };
@@ -1225,7 +1155,6 @@ it("decodes why protected files wait on the secret key", () => {
     mergeRemovals: [],
     heldFiles: [],
     outsideChanges: [],
-    heldAccessRules: [],
     retainedCopies: { count: 0, bytes: 0 },
     deferredWrites: [],
     secretKeyUnavailable: "volume-shares-new-files",
@@ -1281,7 +1210,6 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
       captureRecoveries: [],
       mergeRemovals: [],
       outsideChanges: [],
-      heldAccessRules: [],
       retainedCopies: { count: 0, bytes: 0 },
     },
   ],

@@ -142,8 +142,6 @@ export function SettingsDialog(props: {
   onClearError?: (identity: string) => void;
   /** Opens New message in Chats with this workspace member chosen. */
   onMessageMember?: (memberId: string) => void;
-  /** Members settings saved a new level for members. */
-  onMemberLevelSaved?: () => void;
   /** The title bar says the server is unreachable. */
   serverNamed?: boolean;
   /** A change that went through, with its Undo. */
@@ -926,7 +924,6 @@ export function SettingsDialog(props: {
                 {...(props.onError ? { onError: props.onError } : {})}
                 {...(props.onClearError ? { onClearError: props.onClearError } : {})}
                 {...(props.onMessageMember ? { onMessage: props.onMessageMember } : {})}
-                {...(props.onMemberLevelSaved ? { onLevelSaved: props.onMemberLevelSaved } : {})}
                 {...(props.serverNamed ? { serverNamed: true } : {})}
               />
             ) : null}

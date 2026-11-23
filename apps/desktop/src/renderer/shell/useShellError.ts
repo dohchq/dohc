@@ -40,8 +40,6 @@ import { SAVED_TABS_TITLE, type SavedTabsNotice } from "./useSavedTabsReread";
 export interface KeptCopyNotice {
   id: number;
   message: string;
-  /** Kept by the owner's Restore rule, whose outcome already names it. */
-  accessRule: boolean;
   save: () => void;
 }
 
@@ -1309,24 +1307,20 @@ export function useShellError(
     };
     const arrived = copies.filter((copy) => !shownKeptCopies.current.has(copy.id));
     for (const copy of arrived) shownKeptCopies.current.add(copy.id);
-    // A copy the owner's Restore rule kept is the result they chose: no toast
-    // and not a failure. Its row stays unread, since only it offers Save copy.
-    const collided = arrived.filter((copy) => !copy.accessRule);
-    const summarized = collided.length > 1;
+    const summarized = arrived.length > 1;
     const fresh: ShellError[] = arrived.map((copy) =>
       row({
         message: copy.message,
         retry: null,
         action: { label: "Save copy", run: copy.save },
         keptCopyId: copy.id,
-        seen: copy.accessRule || summarized,
-        ...(copy.accessRule ? { tone: "success" as const } : {}),
+        seen: summarized,
       }),
     );
     if (summarized) {
       fresh.push(
         row({
-          message: `dohc kept ${collided.length} copies of files other programs changed.`,
+          message: `dohc kept ${arrived.length} copies of files other programs changed.`,
           retry: null,
           kind: "kept-copies-summary",
           seen: false,
@@ -1347,8 +1341,7 @@ export function useShellError(
         (error) =>
           (error.keptCopyId === undefined || listed.has(error.keptCopyId)) &&
           (error.kind !== "kept-copies-more" || more) &&
-          (error.kind !== "kept-copies-summary" ||
-            (copies.some((copy) => !copy.accessRule) && !summarized)),
+          (error.kind !== "kept-copies-summary" || (copies.length > 0 && !summarized)),
       );
       return added.length === 0 && stays.length === current.length ? current : [...stays, ...added];
     });

@@ -42,12 +42,6 @@ pub const CAPTURE_IMPORT_PROGRESS_EVENT: &str = "capture.importProgress";
 /// dropped; `watcher.status` reports the same fact as `noAtomicPlacement`.
 pub const CAPTURE_NO_ATOMIC_PLACEMENT_EVENT: &str = "capture.noAtomicPlacement";
 
-/// A folder's access rule changed outside dohc in a way that waits for its
-/// owner: it was widened, or removed while the folder still holds files.
-/// Nothing under the folder syncs until the owner accepts or restores it.
-/// Delivery is at most once; `watcher.status` lists the same folders as
-/// `heldAccessRules`.
-pub const CAPTURE_ACCESS_RULE_HELD_EVENT: &str = "capture.accessRuleHeld";
 /// A path gained an outside write while a live session held it. Delivery is
 /// at most once; `watcher.status` supplies the deferred paths if a wake is lost.
 pub const CAPTURE_WRITE_DEFERRED_EVENT: &str = "capture.writeDeferred";

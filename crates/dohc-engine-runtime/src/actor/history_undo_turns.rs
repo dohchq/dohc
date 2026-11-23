@@ -330,10 +330,7 @@ impl ActorHandle {
             let probe = tests::TurnProbe::new(&request, phase, member);
             #[cfg(not(test))]
             let _ = (request, phase, member);
-            // Every turn reads or writes the store, so none runs once the
-            // workspace folder no longer holds it.
-            let outcome =
-                crate::actor::access_order::check_root().and_then(|()| work(store, cache));
+            let outcome = crate::actor::store_root::check_root().and_then(|()| work(store, cache));
             #[cfg(test)]
             probe.finish();
             outcome
@@ -528,25 +525,12 @@ impl ActorHandle {
                         check_undo_ownership(conn, &w, &version, &o, &effect)?;
                     }
                     let mut originals = preflight_undo_operation_in(conn, &w, &version, &o)?;
-                    // Restored access rules go before the files they cover, and
-                    // removed ones after; undoing a creation deletes.
-                    let mut deletes = std::collections::HashSet::new();
-                    for m in &originals {
-                        if m.operation == "write"
-                            && !conn
-                                .query_row(
-                                    "SELECT before_present FROM moments WHERE workspace_id=?1 AND moment_id=?2",
-                                    params![w, m.moment_id],
-                                    |r| r.get::<_, bool>(0),
-                                )
-                                .map_err(StorageError::corrupt_public)?
-                        {
-                            deletes.insert(m.moment_id.clone());
-                        }
-                    }
                     originals.sort_by_key(|m| m.operation != "rename");
-                    dohc_engine_files::access_rules::sort_rule_changes(&mut originals, |m| {
-                        (m.path.as_str(), deletes.contains(&m.moment_id))
+                    originals.sort_by_key(|moment| {
+                        let target = moment.before_path.as_deref().unwrap_or(&moment.path);
+                        let deletes = (moment.operation == "write" && moment.before_path.is_none())
+                            || (moment.operation == "rename" && !dohc_engine_files::is_access_marker(target));
+                        dohc_engine_files::marker_step_order(if deletes { &moment.path } else { target }, deletes)
                     });
                     originals
                         .into_iter()
@@ -903,26 +887,6 @@ impl ActorHandle {
                     debug_assert_eq!(index, prepared_cursor);
                     let active = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
                     if active != p.version { return Err(DomainError::InvalidInput {reason:"An Undo is still running. Switch versions when it finishes."}.into()); }
-                    // A settled rule over the members commits before them. A
-                    // rule Undo would remove over files it leaves is refused.
-                    let mut touches = Vec::new();
-                    for (offset, prepared) in batch.iter().enumerate() {
-                        let effect = &p.members[index + offset].effect;
-                        match (effect.operation.as_str(), effect.before_path.as_deref()) {
-                            ("write", _) if matches!(prepared.inverse, Ok(None)) => touches.push((offset, crate::actor::access_order::Touch::delete(&effect.path))),
-                            ("rename", Some(before)) => {
-                                touches.push((offset, crate::actor::access_order::Touch::delete(&effect.path)));
-                                touches.push((offset, crate::actor::access_order::Touch::write(before)));
-                            }
-                            _ => touches.push((offset, crate::actor::access_order::Touch::write(&effect.path))),
-                        }
-                    }
-                    let answers = crate::actor::access_order::order_undo(store, &p.workspace, &p.version, &touches.iter().map(|(_, touch)| *touch).collect::<Vec<_>>())?;
-                    let mut ordered: Vec<Result<(),RuntimeError>> = batch.iter().map(|_| Ok(())).collect();
-                    for ((offset, _), answer) in touches.iter().zip(answers) {
-                        if ordered[*offset].is_ok() { ordered[*offset] = answer; }
-                    }
-                    let mut ordered = ordered.into_iter();
                     let started = std::time::Instant::now();
                     let mut retry_error = None;
                     let mut committed = false;
@@ -931,7 +895,7 @@ impl ActorHandle {
                         while let Some(Prepared { inverse, disk }) = batch.pop_front() {
                             let member = &p.members[index];
                             let cursor = index as i64;
-                            let checks = ordered.next().unwrap_or(Ok(())).and_then(|()| (|| -> Result<(),RuntimeError> {
+                            let checks = (|| -> Result<(),RuntimeError> {
                                 let unchanged = signature(tx,&p.workspace,&p.version,&member.effect.object_id)? == member.head;
                                 let target = member.effect.before_path.as_deref().unwrap_or(&member.effect.path);
                                 let vacant: bool = member.effect.operation == "write" || tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",params![p.workspace,p.version,target],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
@@ -940,7 +904,7 @@ impl ActorHandle {
                                 let disk_changed = (member.effect.operation != "write" && probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent) || source.as_ref().is_some_and(|stamp| probe.stamp(&member.effect.path) != *stamp);
                                 if !unchanged || !vacant || disk_changed { return Err(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"source changed"}.into()); }
                                 Ok(())
-                            })());
+                            })();
                             tx.execute_batch("SAVEPOINT undo_member").map_err(StorageError::persist_public)?;
                             let settle_error = member.settle_error.as_ref().filter(|_| turn_open.as_ref().is_some_and(|(is_open,_)| DocKey::new(&p.workspace,&p.version,&member.effect.object_id).is_ok_and(|key| is_open(&key))));
                             let outcome = checks.and_then(|()| {
@@ -983,7 +947,7 @@ impl ActorHandle {
                                 Err(error) => {
                                     tx.execute_batch("ROLLBACK TO undo_member; RELEASE undo_member").map_err(StorageError::persist_public)?;
                                     if matches!(&error,RuntimeError::Storage(StorageError::FileLocked)) { return Err(error); }
-                                    let refusal = matches!(&error,RuntimeError::Domain(DomainError::UndoRefused {..} | DomainError::SyncedDeletionRevivalRefused | DomainError::LivePageOwned) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive) | RuntimeError::AccessRuleHeld {..});
+                                    let refusal = matches!(&error,RuntimeError::Domain(DomainError::UndoRefused {..} | DomainError::SyncedDeletionRevivalRefused | DomainError::LivePageOwned) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive));
                                     if refusal {
                                         tx.execute("UPDATE history_undo_plans SET errors_json=json_set(errors_json,?2,?3) WHERE request_id=?1",params![p.request,format!("$.\"{cursor}\""),settle_error.cloned().unwrap_or_else(|| error.to_string())]).map_err(StorageError::persist_public)?;
                                     }

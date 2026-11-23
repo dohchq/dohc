@@ -615,7 +615,7 @@ describe("workspace members on the roster", () => {
     const roster = await rosterOf([
       membership("edit", {
         automationsGeneration: 2,
-        memberReach: { role: "member", level: "edit", rules: [["Budget", "view"]] },
+        memberReach: { role: "member", level: "edit", rules: [["Budget", "view"]], groups: [] },
       }),
     ]);
     expect(

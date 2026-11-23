@@ -11,8 +11,12 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 import type { StorageContext } from "./context";
 import { pathCollisionKey } from "../pathCollisionKey";
 import { parseCollectionRecordIdentity } from "@dohc/workspace-contracts/collection-values";
-import { accessRuleFolder, isAccessRulePath } from "@dohc/security-contract/access-rules";
-import { accessRuleStatements, refreshAccessRule, type AccessRuleStatements } from "./accessRules";
+import { accessRuleFolder, isFolderMarkerPath } from "@dohc/security-contract/access-rules";
+import {
+  accessRuleStatements,
+  refreshFolderAccess,
+  type AccessRuleStatements,
+} from "./accessRules";
 
 const RECORD_IDENTITIES_MIGRATION_ID = "current-record-identities-v1";
 const RECORD_IDENTITY_INSERT_SQL = `INSERT INTO sync_relay_current_record_ids (workspace_id, version_id, path, record_id)
@@ -237,7 +241,7 @@ interface CurrentFileStatements {
 }
 
 // A current file and its collision key. Removing the file removes the key.
-// A rule file also moves its folder's rule row.
+// A folder marker in main also moves its folder's rule span.
 function putCurrentFile(
   statements: CurrentFileStatements,
   row: {
@@ -267,15 +271,13 @@ function putCurrentFile(
       : null;
   if (id) statements.recordId.run(row.workspaceId, row.versionId, row.path, id);
   else statements.removeRecordId.run(row.workspaceId, row.versionId, row.path);
-  if (isAccessRulePath(row.path)) {
-    refreshAccessRule(
+  if (row.versionId === "main" && isFolderMarkerPath(row.path))
+    refreshFolderAccess(
       statements.rules,
       row.workspaceId,
-      row.versionId,
       accessRuleFolder(row.path),
       row.relaySeq,
     );
-  }
   if (row.path.endsWith("/collection.yaml")) {
     const folder = row.path.slice(0, -"collection.yaml".length);
     // A manifest may arrive after its records. Read their bounded prefixes
@@ -302,8 +304,8 @@ function removeCurrentFile(
   relaySeq: number,
 ): void {
   statements.remove.run(workspaceId, versionId, path);
-  if (isAccessRulePath(path))
-    refreshAccessRule(statements.rules, workspaceId, versionId, accessRuleFolder(path), relaySeq);
+  if (versionId === "main" && isFolderMarkerPath(path))
+    refreshFolderAccess(statements.rules, workspaceId, accessRuleFolder(path), relaySeq);
 }
 
 export function currentFileStatements(db: SqliteDb): CurrentFileStatements {
@@ -530,7 +532,7 @@ export function currentFileBlobByteLengthQuery(
          AND sync_relay_current_files.blob_sha256 = ?
          AND sync_relay_current_files.state_relay_seq > ?${selector.sql}${after}
        -- A share link reads one page, so its cost and timing stay the same however
-       -- many hidden rule files share these bytes. A member's agent pages on.
+       -- many hidden folder markers share these bytes. A member's agent pages on.
        ORDER BY sync_relay_current_files.path
        LIMIT ${BLOB_BYTE_LENGTH_PAGE}`,
     selectorParams: selector.params,

@@ -24,7 +24,6 @@ const hooks: WorkspaceCaptureHooks = {
   onKeptFiles: () => undefined,
   onRetainedCopies: () => undefined,
   onHeldFiles: () => undefined,
-  onHeldAccessRules: () => undefined,
 };
 const ATTACHMENT_ID = Symbol("engine-capture-gate-test");
 

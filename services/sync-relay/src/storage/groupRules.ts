@@ -13,7 +13,7 @@ import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 
 // A Group's rule (docs/engineering/plans/workspace-members.md, piece 4): one
 // level for every member, kept by the relay beside the member level and
-// roles. The text is an `access.yaml` rule, so person entries can come later
+// roles. The text is a folder rule's text, so person entries can come later
 // with no migration; today the action writes only `members`.
 //
 // `rule_text` is the active rule, or null once it is cleared. A row is never
@@ -93,7 +93,7 @@ export function readGroupRules(db: SqliteDb, workspaceId: string): Map<string, G
   );
 }
 
-/** The stored text for a level: the rule `access.yaml` would hold. */
+/** The stored text for a level, as a folder rule stores it. */
 export function groupRuleText(level: GroupMembersLevel): string {
   return formatAccessRule({ members: level, people: new Map() })!;
 }

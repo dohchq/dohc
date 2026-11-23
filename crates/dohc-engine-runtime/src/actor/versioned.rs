@@ -1,5 +1,4 @@
 use super::ActorHandle;
-use super::access_order;
 use super::capture::{WorkspaceRootGuard, validate_workspace_root};
 use super::journal::journal_moment_outbound_in_tx;
 use super::materialization::{
@@ -472,17 +471,15 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<RollbackExecutionResult, RuntimeError> {
         self.run(move |store, cache| {
-            access_order::ordered(store, |store| {
-                with_local_file_mutation_cache_reset(cache, || {
-                    versioned_text_rollback_on_store(
-                        store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                })
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_rollback_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
         })
         .await
@@ -508,42 +505,16 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<MergeExecutionResult, RuntimeError> {
-        self.versioned_text_merge_in_rule_order(input, None, root_dir, self_writes, faults, token)
-            .await
-    }
-
-    /// Merges one file. For a rule, `rule_order` names the rule changes still
-    /// to merge, this one first, in the order planned for them: the merge
-    /// writes nothing and fails with [`RuntimeError::RuleMergeOrderChanged`]
-    /// unless that order, judged from the store as it is now, still keeps
-    /// everyone within what the target gives them before and after.
-    pub async fn versioned_text_merge_in_rule_order(
-        &self,
-        input: MergeTextFileFromVersion,
-        rule_order: Option<Vec<String>>,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<MergeExecutionResult, RuntimeError> {
         self.run(move |store, cache| {
-            access_order::ordered(store, |store| {
-                store.read_with(|conn| access_order::check_merge_rule_conflicts(conn, &input))?;
-                if let Some(order) = &rule_order {
-                    store.read_with(|conn| {
-                        access_order::check_rule_merge_order(conn, &input, order)
-                    })?;
-                }
-                with_local_file_mutation_cache_reset(cache, || {
-                    versioned_text_merge_on_store(
-                        store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                })
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_merge_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
         })
         .await
@@ -779,16 +750,14 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
         self.run(move |store, cache| {
-            let outcome = access_order::ordered(store, |store| {
-                conflict_resolve_on_store(
-                    store,
-                    &input,
-                    root_dir.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                )
-            });
+            let outcome = conflict_resolve_on_store(
+                store,
+                &input,
+                root_dir.as_deref(),
+                &leases,
+                faults.as_ref(),
+                &token,
+            );
             // Resolution can replace or archive a lineage; the tuple probe
             // already misses on every such outcome (the claim id changes or
             // the marker is deleted), but the reset hooks are unconditional.
@@ -886,6 +855,7 @@ pub(super) fn versioned_text_write_with_publication_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
+    super::store_root::check_root()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -900,15 +870,6 @@ pub(super) fn versioned_text_write_with_publication_on_store(
         return Err(RuntimeError::Cancelled);
     }
     dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
-    // Link rewrites and Collections call this partway through a command, so
-    // it orders first rather than through `ordered`, whose retry starts the
-    // command's clearances again.
-    access_order::order_writer(
-        store,
-        &input.workspace_id,
-        &input.version_id,
-        &[access_order::Touch::write(&input.path)],
-    )?;
     // The write's author names who changed the record's fields: an agent, an
     // automation at its chain depth, or a person.
     let (actor, attribution) =
@@ -1052,6 +1013,7 @@ fn versioned_binary_write_conditioned_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<BinaryWriteExecutionResult, RuntimeError> {
+    super::store_root::check_root()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1062,21 +1024,6 @@ fn versioned_binary_write_conditioned_on_store(
         input.now_ms,
         faults,
     )?;
-    access_order::ordered(store, |store| {
-        binary_write_in_one_transaction(store, input, root_dir, conditions, self_writes, faults)
-    })
-}
-
-/// The binary write after its Version exists. It changes nothing outside its
-/// transaction, so [`access_order::ordered`] may run it again.
-fn binary_write_in_one_transaction(
-    store: &mut EngineStore,
-    input: &WriteBinary,
-    root_dir: &std::path::Path,
-    conditions: Option<&WriteConditions>,
-    self_writes: &dyn SelfWriteRecorder,
-    faults: &dyn FaultInjector,
-) -> Result<BinaryWriteExecutionResult, RuntimeError> {
     let outcome = store.write_with(faults, |tx| {
         let fingerprint = conditions.map(WriteConditions::fingerprint);
         let replayed: bool = tx
@@ -1314,26 +1261,10 @@ fn versioned_text_rename_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<RenameResult, RuntimeError> {
+    super::store_root::check_root()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    if dohc_engine_files::access_rules::is_access_rule_path(&input.from_path)
-        || dohc_engine_files::access_rules::is_access_rule_path(&input.to_path)
-    {
-        return rename_access_rule_on_store(store, input, root_dir, self_writes, faults, token);
-    }
-    access_order::ordered(store, |store| {
-        rename_file_on_store(store, input, root_dir, self_writes, faults)
-    })
-}
-
-fn rename_file_on_store(
-    store: &mut EngineStore,
-    input: &RenameTextFile,
-    root_dir: &std::path::Path,
-    self_writes: &dyn SelfWriteRecorder,
-    faults: &dyn FaultInjector,
-) -> Result<RenameResult, RuntimeError> {
     let result = VersionedTextStore::new(store)
         .rename_text_file_with(input, faults, |tx, result| {
             if !result.deduped {
@@ -1413,145 +1344,6 @@ fn rename_file_on_store(
     Ok(result)
 }
 
-/// A rule never moves as a rename: members reach a folder through its rule,
-/// so the rule is written at its destination before anything moves under it,
-/// and deleted at its source once its files have left.
-fn rename_access_rule_on_store(
-    store: &mut EngineStore,
-    input: &RenameTextFile,
-    root_dir: &std::path::Path,
-    self_writes: &dyn SelfWriteRecorder,
-    faults: &dyn FaultInjector,
-    token: &CancellationToken,
-) -> Result<RenameResult, RuntimeError> {
-    let suffixed = |id: &str, side: &str| format!("{id}-{side}");
-    // The first half's request id names the source too, so a retry from
-    // another source is a new rename, refused like any rename onto a file.
-    let to_request = input.request_id.as_deref().map(|id| {
-        let source = hex_sha256(input.from_path.as_bytes());
-        format!("{id}-to-{}", &source[..16])
-    });
-    let to_moment = suffixed(&input.moment_id, "to");
-    let text = store.read_with(|conn| -> Result<String, RuntimeError> {
-        let retried = match &to_request {
-            Some(id) => conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
-                    [id],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(StorageError::corrupt_public)?,
-            None => false,
-        };
-        let snapshot_at = |path: &str| {
-            dohc_engine_domain::select_snapshot_by_path_in_tx(
-                conn,
-                &input.workspace_id,
-                &input.version_id,
-                path,
-            )
-        };
-        // A retry replays the text its first try wrote. Until the delete
-        // finishes, a changed source refuses the retry. Each half also
-        // checks that its request id still names the same payload.
-        if retried {
-            let text = conn
-                .query_row(
-                    "SELECT b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 \
-                     WHERE m.workspace_id=?1 AND m.moment_id=?2",
-                    [&input.workspace_id, &to_moment],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()
-                .map_err(StorageError::corrupt_public)?
-                .flatten()
-                .ok_or(DomainError::IdempotencyKeyReuseMismatch)?;
-            // A delete still to run removes only the text this rename moved:
-            // a source changed since is someone's later edit.
-            let from_request = input.request_id.as_deref().map(|id| suffixed(id, "from"));
-            let deleted = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
-                    [&from_request],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(StorageError::corrupt_public)?;
-            if !deleted {
-                let source = snapshot_at(&input.from_path)?;
-                if source.binary_sha256.is_some()
-                    || source.snapshot.is_some_and(|source| source.text != text)
-                {
-                    return Err(DomainError::IdempotencyKeyReuseMismatch.into());
-                }
-            }
-            return Ok(text);
-        }
-        // Like any rename, never onto another file.
-        let target = snapshot_at(&input.to_path)?;
-        if target.snapshot.is_some() || target.binary_sha256.is_some() {
-            return Err(DomainError::TargetPathExists.into());
-        }
-        snapshot_at(&input.from_path)?
-            .snapshot
-            .map(|source| source.text)
-            .ok_or(DomainError::FileNotFound.into())
-    })?;
-    let written = versioned_text_write_on_store(
-        store,
-        &WriteText {
-            workspace_id: input.workspace_id.clone(),
-            version_id: input.version_id.clone(),
-            object_id: dohc_engine_domain::derive_capture_object_id(
-                &input.workspace_id,
-                &input.version_id,
-                &input.to_path,
-            ),
-            path: input.to_path.clone(),
-            text,
-            moment_id: to_moment,
-            metadata_origin: input.metadata_origin.clone(),
-            metadata_summary: input.metadata_summary.clone(),
-            metadata_correlation_id: input.metadata_correlation_id.clone(),
-            author_json: input.author_json.clone(),
-            now_ms: input.now_ms,
-            request_id: to_request,
-        },
-        Some(root_dir),
-        None,
-        faults,
-        token,
-    )?;
-    let deleted = versioned_text_delete_on_store(
-        store,
-        &DeleteTextFile {
-            workspace_id: input.workspace_id.clone(),
-            version_id: input.version_id.clone(),
-            path: input.from_path.clone(),
-            moment_id: suffixed(&input.moment_id, "from"),
-            request_id: input.request_id.as_deref().map(|id| suffixed(id, "from")),
-            metadata_origin: input.metadata_origin.clone(),
-            metadata_summary: input.metadata_summary.clone(),
-            metadata_correlation_id: input.metadata_correlation_id.clone(),
-            author_json: input.author_json.clone(),
-            now_ms: input.now_ms,
-        },
-        None,
-        None,
-        false,
-        root_dir,
-        self_writes,
-        faults,
-        token,
-    )?;
-    Ok(RenameResult {
-        deduped: written.deduped && deleted.deduped,
-        object: written.object,
-        before: deleted.before,
-        after: written.snapshot,
-        moment: written.moment,
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
 fn versioned_text_delete_on_store(
     store: &mut EngineStore,
@@ -1564,17 +1356,10 @@ fn versioned_text_delete_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<DeleteResult, RuntimeError> {
+    super::store_root::check_root()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let assets = scene_asset_paths(store, &input.workspace_id, &input.version_id, &input.path)?;
-    let touches: Vec<_> = std::iter::once(input.path.as_str())
-        .chain(assets.iter().map(String::as_str))
-        .map(access_order::Touch::delete)
-        .collect();
-    // A checked delete removes the file from disk before the transaction
-    // that journals it, so a refusal must come before that.
-    access_order::order_writer(store, &input.workspace_id, &input.version_id, &touches)?;
     if let Some(expected) = expected_sha256 {
         return checked_delete_on_store(
             store,
@@ -2203,8 +1988,6 @@ pub(super) fn delete_owned_scene_assets_in_tx(
         &drawing_delete.before.version_id,
         &drawing_delete.object.object_id,
     )?;
-    // Each asset is named `<sha256>.<extension>` (`scene_asset_ref_is_owned`),
-    // so no access rule is among them and their order needs no sorting.
     let candidates = dohc_engine_collab::freeze_scene_asset_delete_authority_in_tx(
         tx,
         &key,
@@ -2944,8 +2727,6 @@ fn restore_deleted_scene_assets_in_tx(
     if !has_authority {
         return Ok(Vec::new());
     }
-    // Asset names are content hashes, so, as in the delete cascade, no access
-    // rule is among them.
     let deleted_assets = scene_asset_delete_moments(
         tx,
         workspace_id,
@@ -3185,6 +2966,7 @@ fn versioned_text_merge_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<MergeExecutionResult, RuntimeError> {
+    super::store_root::check_root()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -3337,23 +3119,7 @@ fn versioned_text_merge_on_store(
             materialize_outcome: PostCommitMaterializeOutcome::Skipped,
         });
     }
-    if let MergeTextFileResult::Write { write, .. } = &result
-        && job.preimage == Preimage::Absent
-        && access_order::respelled_rule_waits(
-            store,
-            &input.workspace_id,
-            &input.target_version_id,
-            &write.snapshot.path,
-        )?
-    {
-        return Ok(MergeExecutionResult {
-            merge: result,
-            materialize_enqueued: !deduped,
-            materialized: false,
-            materialize_outcome: PostCommitMaterializeOutcome::Parked,
-        });
-    }
-    let (mut materialized, mut materialize_outcome) = materialize_pending_job(
+    let (materialized, materialize_outcome) = materialize_pending_job(
         store,
         root_dir,
         &input.workspace_id,
@@ -3363,26 +3129,6 @@ fn versioned_text_merge_on_store(
         faults,
         None,
     );
-    if let MergeTextFileResult::Delete { delete, .. } = &result
-        && materialized
-    {
-        for waiting in
-            access_order::respelled_rule_writes(store, &input.workspace_id, &delete.before.path)?
-        {
-            let (placed, outcome) = materialize_pending_job(
-                store,
-                root_dir,
-                &input.workspace_id,
-                &waiting,
-                self_writes,
-                input.now_ms,
-                faults,
-                None,
-            );
-            materialized &= placed;
-            materialize_outcome = worse_materialize_outcome(materialize_outcome, outcome);
-        }
-    }
     Ok(MergeExecutionResult {
         merge: result,
         materialize_enqueued: !deduped,
@@ -3423,38 +3169,6 @@ fn conflict_open_on_store(
         TxnOutcome::Committed(inserted) => Ok(inserted),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
-}
-
-/// The assets a delete of the drawing at `path` deletes with it, chosen as
-/// [`delete_owned_scene_assets_in_tx`] chooses them. A file that is not a
-/// drawing, by the test it applies, has none.
-pub(super) fn scene_asset_paths(
-    store: &EngineStore,
-    workspace_id: &str,
-    version_id: &str,
-    path: &str,
-) -> Result<Vec<String>, RuntimeError> {
-    store.read_with(|conn| {
-        let object: Option<String> = conn
-            .query_row(
-                "SELECT s.object_id FROM snapshots s WHERE s.workspace_id=?1 \
-                 AND s.version_id=?2 AND s.path=?3 AND s.content_kind='text' \
-                 AND (lower(s.path) GLOB '*.excalidraw' OR EXISTS (SELECT 1 FROM ydoc_docs d \
-                   WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=s.object_id \
-                   AND d.content_kind='scene'))",
-                params![workspace_id, version_id, path],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StorageError::corrupt_public)?;
-        let Some(object) = object else {
-            return Ok(Vec::new());
-        };
-        let key = DocKey::new(workspace_id, version_id, &object)?;
-        Ok(dohc_engine_collab::scene_asset_delete_candidates(
-            conn, &key,
-        )?)
-    })
 }
 
 fn conflict_resolve_on_store(
