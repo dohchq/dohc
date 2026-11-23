@@ -1810,7 +1810,6 @@ export function filterProposedChangeForShare(
   if (isWorkspaceSelector(selector)) {
     const record = asRecord(raw);
     if (
-      selector.role === "member" &&
       selector.reach &&
       typeof record?.basedOnPath === "string" &&
       typeof record.afterPath === "string" &&

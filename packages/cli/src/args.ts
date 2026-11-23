@@ -2369,6 +2369,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         ],
         notes: [
           "Use a workspace-relative path, or / for the workspace root.",
+          "Each run sets the whole rule. Repeat --person for everyone the rule keeps.",
           "Copies already on people's computers stay when access narrows.",
         ],
         parse: (input) => {

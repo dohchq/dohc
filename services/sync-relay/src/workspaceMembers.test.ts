@@ -1090,7 +1090,7 @@ describe("what a member reaches", () => {
       ["private", ""],
       ["private/open", "members: edit\n"],
       ["Team", "members: edit\n"],
-      ["Docs", "members: edit\n"],
+      ["Papers", "members: edit\n"],
       // A ruled folder lists with no other file in it.
       ["empty", "members: view\n"],
     ])
@@ -1099,7 +1099,7 @@ describe("what a member reaches", () => {
     // two are listed apart.
     await ownerWrite(h, "TEAM/.dohc-access", folderMarkerText(ruleIds.get("Team")!, 1));
     // A twin whose marker names no rule hides, and hides its twin too.
-    await ownerWrite(h, "DOCS/.dohc-access", folderMarkerText(`fr_${"0".repeat(32)}`, 1));
+    await ownerWrite(h, "PAPERS/.dohc-access", folderMarkerText(`fr_${"0".repeat(32)}`, 1));
     await ownerWrite(h, "team/unruled.md", "a twin with no rule takes its parent's level");
     const inventory = async () => {
       const response = await pull(h, "ana", shareId);
@@ -1116,13 +1116,46 @@ describe("what a member reaches", () => {
       { path: "view/edit", level: "edit" },
     ]);
     expect(JSON.stringify(listed)).not.toContain("private");
-    expect(JSON.stringify(listed)).not.toContain("Docs");
+    expect(JSON.stringify(listed)).not.toContain("Papers");
     expect(
       (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
     ).toBe(200);
     const admin = await inventory();
     expect(admin.rootLevel).toBe("edit");
     expect(admin.folders).toEqual([]);
+  });
+
+  it("refuses an admin's move across a folder rule, which would leave the rule behind", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    await ownerRule(h, "finance", "");
+    await ownerWrite(h, "finance/budget.md", "numbers");
+    const move = (to: string, id: string) =>
+      post(h, "ana", `/sync/shares/${shareId}/proposals`, {
+        submitId: id,
+        ops: [
+          {
+            basedOnPath: "finance/budget.md",
+            basedOnBlobSha256: sha256("numbers"),
+            operation: "write",
+            afterPath: to,
+            afterBlobSha256: sha256("numbers"),
+            afterContentKind: "text",
+            afterByteLength: "numbers".length,
+            recordedAtMs: 20,
+          },
+        ],
+      });
+    expect(await (await move("finance 2026/budget.md", "out")).json()).toMatchObject({
+      code: "share_op_rejected",
+      error: "Ask the owner to move this.",
+    });
+    const inside = await move("finance/2026 budget.md", "inside");
+    expect(inside.status, await inside.clone().text()).toBe(200);
   });
 
   it("checks proposals, pages and Comments at the folder target, including hidden and folded ancestors", async () => {
@@ -2898,6 +2931,13 @@ describe("folder rules", () => {
     expect((await membersView(h, OWNER)).folderRules).toMatchObject([
       { revision: 2, folders: [{ path: "docs", state: "covered" }] },
     ]);
+  });
+
+  it("binds a rule typed in another case to the folder the owner has", async () => {
+    const { h } = await seed();
+    await ownerWrite(h, "Team/plan.md", "plan");
+    const rule = await created(h, "team", null);
+    expect(rule.folders).toMatchObject([{ path: "Team", state: "covered" }]);
   });
 
   it("keeps rules and their spans when the workspace's sync identity rotates", async () => {
