@@ -118,6 +118,7 @@ Manage explicit data grants through **Access** or `dataset setGrant` and `datase
 Source-folder access alone does not grant Collection access. An app binding and a data grant are separate permissions.
 Run `dohc dataset --help` to list the verbs. Run `dohc dataset <verb> --help` for that verb's fields.
 The [CLI, MCP, and SDK reference](../reference/cli-mcp-sdk.md) also lists each verb's result, and shows how an app page calls an approved operation.
+For React, backend hooks, UI components, and charts without vendoring `node_modules`, see the [built-in app kit reference](../reference/app-kit.md).
 
 ## Read shared records offline
 

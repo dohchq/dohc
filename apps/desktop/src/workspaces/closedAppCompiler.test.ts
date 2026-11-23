@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
 import { createAppDocument, type AppPage } from "@dohc/app-browser/document";
 import { compileClosedApp } from "./closedAppCompiler";
 
@@ -38,47 +39,32 @@ describe("closed app compiler", () => {
       compileClosedApp({ entryPath: schema.path, bounds, inputs: [schema] }),
     ).rejects.toThrow(/entry must be a script/);
   });
-  it("bundles ordinary React TSX, createRoot, hooks, CSS and an asset from captured dependencies", async () => {
+  it("bundles ordinary React TSX, dohc/app, dohc/ui, dohc/charts, CSS and an asset using the pinned built-in kit", async () => {
     const require = createRequire(import.meta.url);
-    const reactRoot = dirname(require.resolve("react/package.json"));
-    const domRoot = dirname(require.resolve("react-dom/package.json"));
-    const schedulerRoot = dirname(
-      createRequire(join(domRoot, "package.json")).resolve("scheduler/package.json"),
-    );
-    const captured = await Promise.all(
-      [
-        [reactRoot, "react", "index.js"],
-        [reactRoot, "react", "cjs/react.production.js"],
-        [reactRoot, "react", "jsx-runtime.js"],
-        [reactRoot, "react", "cjs/react-jsx-runtime.production.js"],
-        [domRoot, "react-dom", "index.js"],
-        [domRoot, "react-dom", "cjs/react-dom.production.js"],
-        [domRoot, "react-dom", "client.js"],
-        [domRoot, "react-dom", "cjs/react-dom-client.production.js"],
-        [schedulerRoot, "scheduler", "index.js"],
-        [schedulerRoot, "scheduler", "cjs/scheduler.production.js"],
-      ].map(async ([root, name, path]) => {
-        const bytes = new Uint8Array(await readFile(join(root!, path!)));
-        return { path: `deps/${name}/${path}`, bytes, sha256: hash(bytes) };
-      }),
-    );
     const result = await compileClosedApp({
       entryPath: "main.tsx",
       bounds: { maxInputFiles: 32, maxInputBytes: 5_000_000, maxOutputBytes: 5_000_000 },
-      packageMap: {
-        react: "deps/react/index.js",
-        "react/jsx-runtime": "deps/react/jsx-runtime.js",
-        "react-dom": "deps/react-dom/index.js",
-        "react-dom/client": "deps/react-dom/client.js",
-        scheduler: "deps/scheduler/index.js",
-      },
       inputs: [
-        ...captured,
         file(
           "main.tsx",
           `import { useState } from 'react';
-        import { createRoot } from 'react-dom/client'; import './style.css'; import picture from './trip.png';
-        function Poll() { const [count, setCount] = useState(0); return <button onClick={() => setCount(count + 1)}><img src={picture}/>Votes: {count}</button>; }
+        import { createRoot } from 'react-dom/client';
+        import { AppProvider } from 'dohc/app';
+        import { AppShell, Button, StatCard } from 'dohc/ui';
+        import { Sparkline } from 'dohc/charts';
+        import './style.css';
+        import picture from './trip.png';
+        function Poll() {
+          const [count, setCount] = useState(0);
+          return (
+            <AppProvider>
+              <AppShell>
+                <StatCard label="Votes" value={count} footer={<Sparkline values={[1, 3, 2, count + 2]} />} />
+                <Button onClick={() => setCount(count + 1)}><img src={picture}/>Votes: {count}</Button>
+              </AppShell>
+            </AppProvider>
+          );
+        }
         const root = createRoot(document.getElementById('root')!); root.render(<Poll/>);
         globalThis.unmountPoll = () => root.unmount();`,
         ),
@@ -90,10 +76,21 @@ describe("closed app compiler", () => {
         },
       ],
     });
-    expect(result.dependencyLock.map((input) => input.path)).toEqual(
-      expect.arrayContaining(captured.map((input) => input.path)),
-    );
+    expect(result.compiler.recipe).toBe("dohc-closed-app-v4");
+    expect(result.compiler.version).toMatch(/^0\.28\.1\+kit-[0-9a-f]{64}$/);
+    expect(result.dependencyLock.map((input) => input.path)).toEqual([
+      "main.tsx",
+      "style.css",
+      "trip.png",
+    ]);
     expect(result.files.map((output) => output.path)).toEqual(["bundle.css", "bundle.js"]);
+    const bundleCss = new TextDecoder().decode(result.files[0]!.bytes);
+    expect(bundleCss).toContain("--kit-bg");
+    const calloutAt = bundleCss.indexOf(".kit-callout");
+    expect(calloutAt).toBeGreaterThanOrEqual(0);
+    for (const tone of [".kit-tone-success", ".kit-tone-warning", ".kit-tone-danger"]) {
+      expect(bundleCss.indexOf(tone)).toBeGreaterThan(calloutAt);
+    }
     const { JSDOM } = require("jsdom") as {
       JSDOM: new (
         html: string,
@@ -112,12 +109,139 @@ describe("closed app compiler", () => {
         expect(dom.window.document.querySelector("button")?.textContent).toBe("Votes: 0"),
       );
       expect(dom.window.document.querySelector("img")?.src).toMatch(/^data:image\/png/);
+      expect(dom.window.document.querySelector("svg[aria-label='Sparkline']")).not.toBeNull();
       dom.window.document.querySelector("button")!.click();
       await vi.waitFor(() =>
         expect(dom.window.document.querySelector("button")?.textContent).toBe("Votes: 1"),
       );
     } finally {
       dom.window.unmountPoll?.();
+      dom.window.close();
+    }
+  });
+
+  it("emits no bundle.css for dohc/app alone, keeps dohc/charts free of page resets, and refuses reserved overrides", async () => {
+    const plain = await compileClosedApp({
+      entryPath: "main.tsx",
+      bounds: { maxInputFiles: 8, maxInputBytes: 1_000_000, maxOutputBytes: 2_000_000 },
+      inputs: [
+        file(
+          "main.tsx",
+          "import { createAppClient } from 'dohc/app'; globalThis.hasClient = typeof createAppClient === 'function';",
+        ),
+      ],
+    });
+    expect(plain.files.map((output) => output.path)).toEqual(["bundle.js"]);
+
+    const chartsOnly = await compileClosedApp({
+      entryPath: "main.tsx",
+      bounds: { maxInputFiles: 8, maxInputBytes: 1_000_000, maxOutputBytes: 2_000_000 },
+      inputs: [
+        file("main.tsx", "import { Sparkline } from 'dohc/charts'; globalThis.spark = Sparkline;"),
+      ],
+    });
+    expect(chartsOnly.files.map((output) => output.path)).toEqual(["bundle.css", "bundle.js"]);
+    const chartsCss = new TextDecoder().decode(chartsOnly.files[0]!.bytes);
+    expect(chartsCss).toContain("--kit-chart-1");
+    expect(chartsCss).not.toContain("html,body{margin:0");
+
+    await expect(
+      compileClosedApp({
+        entryPath: "main.ts",
+        inputs: [file("main.ts", "import 'react-dom/server';")],
+        bounds,
+      }),
+    ).rejects.toThrow(/reserved by dohc's built-in kit/);
+
+    for (const reserved of ["react", "react-dom/client", "scheduler", "dohc/ui", "dohc/app"]) {
+      await expect(
+        compileClosedApp({
+          entryPath: "main.ts",
+          inputs: [file("main.ts", "console.log(1)"), file("fake.js", "export default {}")],
+          packageMap: { [reserved]: "fake.js" },
+          bounds,
+        }),
+      ).rejects.toThrow(/cannot override built-in package/);
+    }
+  });
+
+  it("connects a compiled dohc/app bundle through the real attachAppCollectionBroker", async () => {
+    const built = await compileClosedApp({
+      entryPath: "main.tsx",
+      bounds: { maxInputFiles: 8, maxInputBytes: 1_000_000, maxOutputBytes: 4_000_000 },
+      inputs: [
+        file(
+          "main.tsx",
+          `import { createRoot } from "react-dom/client";
+import { AppProvider, useDatasetQuery } from "dohc/app";
+function View() {
+  const q = useDatasetQuery<{ total: number }>("monthlyTotal", { month: "2026-11" });
+  return <p id="out">{q.loading ? "loading" : q.error ? "err:" + q.error.status : "total:" + q.data?.total}</p>;
+}
+const root = createRoot(document.getElementById("root")!);
+root.render(<AppProvider><View /></AppProvider>);
+globalThis.unmountBrokerTest = () => root.unmount();`,
+        ),
+      ],
+    });
+
+    const received: unknown[] = [];
+    const { JSDOM } = createRequire(import.meta.url)("jsdom") as {
+      JSDOM: new (
+        html: string,
+        options: { runScripts: "outside-only" },
+      ) => {
+        window: Window & typeof globalThis & { unmountBrokerTest?: () => void };
+      };
+    };
+    const dom = new JSDOM('<div id="root"></div>', { runScripts: "outside-only" });
+    const controller = new AbortController();
+    const fakeParent = {} as Window;
+    const listeners = new Map<string, Set<() => void>>();
+    const fakeFrame = {
+      addEventListener(type: string, cb: () => void) {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type)!.add(cb);
+      },
+      contentWindow: {
+        postMessage(data: unknown, _origin: string, transfer?: MessagePort[]) {
+          const event = new dom.window.MessageEvent("message", {
+            data,
+            ports: transfer ?? [],
+          });
+          Object.defineProperty(event, "source", { value: fakeParent });
+          dom.window.dispatchEvent(event);
+        },
+      },
+    } as unknown as HTMLIFrameElement;
+
+    Object.defineProperty(dom.window, "parent", { configurable: true, value: fakeParent });
+    attachAppCollectionBroker(
+      fakeFrame,
+      async (body) => {
+        received.push(body);
+        return new Response(
+          JSON.stringify({ result: { total: 420 }, revision: 2, replayed: false }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+      controller.signal,
+    );
+
+    try {
+      dom.window.eval(
+        new TextDecoder().decode(built.files.find((output) => output.path === "bundle.js")!.bytes),
+      );
+      for (const cb of listeners.get("load") ?? []) cb();
+      await vi.waitFor(() =>
+        expect(dom.window.document.getElementById("out")?.textContent).toBe("total:420"),
+      );
+      expect(received).toHaveLength(1);
+      expect((received[0] as Record<string, unknown>).op).toBe("backend.invoke");
+      expect((received[0] as Record<string, unknown>).operation).toBe("monthlyTotal");
+    } finally {
+      dom.window.unmountBrokerTest?.();
+      controller.abort();
       dom.window.close();
     }
   });
@@ -137,7 +261,7 @@ describe("closed app compiler", () => {
     await expect(
       compileClosedApp({
         entryPath: "main.ts",
-        inputs: [main, file("deps/trip.js", "import 'react';")],
+        inputs: [main, file("deps/trip.js", "import 'unmapped-pkg';")],
         packageMap: { trip: "deps/trip.js" },
         bounds,
       }),
@@ -287,7 +411,7 @@ describe("closed app compiler", () => {
         image("site/map.png"),
         file("site/unused.js", "throw new Error('unused')"),
       );
-      expect(result.compiler.recipe).toBe("dohc-closed-app-v3");
+      expect(result.compiler.recipe).toBe("dohc-closed-app-v4");
       expect(result.files.map((output) => output.path)).toEqual(["bundle.js", "page.json"]);
       expect(result.dependencyLock.map((input) => input.path)).toEqual([
         "site/data.js",
