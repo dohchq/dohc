@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { prosemirrorJSONToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
@@ -10,7 +10,7 @@ import {
   BODY_SEQUENCE_FIELD,
   recordsOfContainer,
 } from "./bodySequenceGrammar.js";
-import { readBodySequence } from "./bodySequenceYjs.js";
+import { readBodySequence, storedValue } from "./bodySequenceYjs.js";
 import { getDohcProseMirrorSchema, yDocToMarkdown } from "./import-export.js";
 
 const schema = getDohcProseMirrorSchema();
@@ -18,6 +18,7 @@ const FILE = fileURLToPath(new URL("./fixtures/body-sequence.json", import.meta.
 const UPDATES_FILE = fileURLToPath(
   new URL("./fixtures/body-sequence-updates.json", import.meta.url),
 );
+const EDITED_FILE = fileURLToPath(new URL("./fixtures/body-sequence-edited.json", import.meta.url));
 const WRITE_FIXTURES = process.env.BODY_SEQUENCE_WRITE_FIXTURES === "1";
 
 type Fixture = { name: string; update: string; document: unknown } & (
@@ -52,14 +53,33 @@ function note(clientID: number, from?: Uint8Array) {
     sequence,
     records,
     line(attrs: Record<string, unknown>, text = "", marks: Record<string, unknown> = {}) {
-      sequence.insertEmbed(sequence.length, element(BLOCK_ELEMENT, attrs), {});
+      const boundary = element(BLOCK_ELEMENT, attrs);
+      sequence.insertEmbed(sequence.length, boundary, {});
       if (text) sequence.insert(sequence.length, text, marks);
+      return boundary;
     },
     text(text: string, marks: Record<string, unknown> = {}) {
       sequence.insert(sequence.length, text, marks);
     },
     item(name: string, attrs: Record<string, unknown>, marks: Record<string, unknown> = {}) {
-      sequence.insertEmbed(sequence.length, element(name, attrs), marks);
+      const made = element(name, attrs);
+      sequence.insertEmbed(sequence.length, made, marks);
+      return made;
+    },
+    keyed(holder: Y.XmlElement | Y.Map<unknown>, key: string, content: Y.Item["content"]) {
+      doc.transact((transaction) => {
+        const newest = holder._map.get(key) ?? null;
+        new Y.Item(
+          Y.createID(doc.clientID, Y.getState(doc.store, doc.clientID)),
+          newest,
+          newest && newest.lastId,
+          null,
+          null,
+          holder,
+          key,
+          content,
+        ).integrate(transaction, 0);
+      });
     },
     stored(content: Y.ContentEmbed | Y.ContentFormat) {
       doc.transact((transaction) => {
@@ -425,6 +445,7 @@ function built(): Record<string, Y.Doc> {
       ["warning", "", "-"],
       ["tip\nwith a line break", "A title", ""],
       ["tip", "A title\rwith a line break", "+"],
+      ["tip\u2028with a line separator", "A title\u2029with a paragraph separator", "-"],
       [3, 7, "x"],
       [null, null, null],
       ["", "kept", ""],
@@ -516,7 +537,12 @@ function built(): Record<string, Y.Doc> {
   values.label("text a reader repairs:");
   values.line({ type: "codeBlock", language: 3, path: [] }, "a language stored as 3");
   values.line({ type: "codeBlock", language: "", path: [] }, "a language stored as nothing");
-  for (const language of ["ts\nwith a line break", "ts\rwith a line break"])
+  for (const language of [
+    "ts\nwith a line break",
+    "ts\rwith a line break",
+    "ts\u2028with a line separator",
+    "ts\u2029with a paragraph separator",
+  ])
     values.line(
       { type: "codeBlock", language, path: [] },
       `a language stored as ${stored(language)}`,
@@ -602,6 +628,7 @@ function built(): Record<string, Y.Doc> {
     ["an id that ends with a line break", ["q", "line\n", "q2"]],
     ["an id that is a number", ["q", 3, "q2"]],
     ["an id that is null", ["q", null, "q2"]],
+    ["an id that is undefined", ["q", undefined, "q2"]],
     ["an id that is an array", ["q", ["q2"], "q2"]],
     ["an id used twice", ["q", "q2", "q", "c"]],
     ["an id with no record", ["q", "missing", "q2"]],
@@ -730,6 +757,30 @@ function built(): Record<string, Y.Doc> {
   ] as const)
     onlyFormatting.stored(new Y.ContentFormat(key, value));
 
+  const notPlain = note(27);
+  notPlain.container("k", "callout", { calloutType: "tip", title: "A title" });
+  notPlain.keyed(notPlain.records, "q", new Y.ContentEmbed("blockquote"));
+  notPlain.keyed(notPlain.records, "c", new Y.ContentString("callout"));
+  notPlain.keyed(notPlain.records, "b", new Y.ContentBinary(new Uint8Array([1, 2])));
+  notPlain.keyed(notPlain.records, "k.title", new Y.ContentString("A title"));
+  notPlain.keyed(notPlain.records, "k.calloutType", new Y.ContentEmbed("warning"));
+  const lettersAsType = notPlain.line({ path: ["q"] }, "a type stored as letters, ");
+  notPlain.keyed(lettersAsType, "type", new Y.ContentString("heading"));
+  notPlain.text("in a quote recorded as an embedded value");
+  notPlain.line({ type: "paragraph", path: ["c"] }, "in a callout recorded as letters");
+  notPlain.line({ type: "paragraph", path: ["b"] }, "in a quote recorded as a binary value");
+  notPlain.line({ type: "paragraph", path: ["k"] }, "a kind and a title that hold no plain value");
+  const lastOfSeveral = notPlain.line({ path: [] }, "the last of several values under one key");
+  notPlain.keyed(lastOfSeveral, "type", new Y.ContentAny(["codeBlock", "heading"]));
+  notPlain.keyed(lastOfSeveral, "level", new Y.ContentAny([5, 2]));
+  notPlain.line({ type: "paragraph", path: [] }, "items: ");
+  const link = notPlain.item("wikilink", {});
+  notPlain.keyed(link, "target", new Y.ContentString("Page"));
+  const image = notPlain.item("image", { alt: "kept" });
+  notPlain.keyed(image, "src", new Y.ContentBinary(new Uint8Array([3])));
+  const embeddedLevel = notPlain.line({ type: "heading", path: [] }, "a level stored as an embed");
+  notPlain.keyed(embeddedLevel, "level", new Y.ContentEmbed(4));
+
   const base = note(4);
   base.line({ type: "paragraph", path: [] }, "One one");
   base.line({ type: "paragraph", path: [] }, "Two two two");
@@ -765,6 +816,7 @@ function built(): Record<string, Y.Doc> {
     "a note with nothing in its sequence": nothing.doc,
     "a note with only items a reader skips": onlySkipped.doc,
     "a note with only formatting items": onlyFormatting.doc,
+    "attributes and records stored as items that hold no plain value": notPlain.doc,
     "both joined one line, one typed, one undid": second.doc,
   };
 }
@@ -814,6 +866,247 @@ it("reads each stored note as the document, and writes it as the Markdown, recor
   }
   expect(stored).toEqual(made);
 });
+
+const EDITED = "a note two people edited at length";
+
+/**
+ * A note two people edit in turns with their changes meeting: typing and deleting inside lines,
+ * marks, splits, joins, kind changes and inline items.
+ */
+function editedAtLength(lines: number, edits: number) {
+  let state = 20261123;
+  const below = (limit: number) => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return Math.floor((state / 0x100000000) * limit);
+  };
+  const WORDS = [
+    "note",
+    "plan",
+    "trip",
+    "day",
+    "list",
+    "the",
+    "of",
+    "and",
+    "pack",
+    "book",
+    "train",
+  ];
+  const words = (count: number) =>
+    Array.from({ length: count }, () => WORDS[below(WORDS.length)]!).join(" ");
+
+  const first = note(30);
+  for (let line = 0; line < lines; line++) {
+    const text = words(8 + below(9));
+    if (line % 10 === 0) first.line({ type: "heading", level: 2, path: [] }, text);
+    else if (line % 25 >= 5 && line % 25 <= 7) {
+      const list = `L${String(Math.floor(line / 25))}`;
+      const item = `I${String(line)}`;
+      if (line % 25 === 5) first.container(list, "bulletList");
+      first.container(item, "listItem");
+      first.line({ type: "paragraph", path: [list, item] }, text);
+    } else first.line({ type: "paragraph", path: [] }, text);
+  }
+  const second = note(31, Y.encodeStateAsUpdate(first.doc));
+  const FROM_THE_OTHER = "from the other person";
+  const people = [first, second].map((person) => {
+    const unsent: Uint8Array[] = [];
+    person.doc.on("update", (update: Uint8Array, origin: unknown) => {
+      if (origin !== FROM_THE_OTHER) unsent.push(update);
+    });
+    return { ...person, unsent };
+  });
+  const meet = () => {
+    for (const [at, person] of people.entries())
+      for (const update of person.unsent.splice(0))
+        Y.applyUpdate(people[1 - at]!.doc, update, FROM_THE_OTHER);
+  };
+  const standingAt = (sequence: Y.Text, index: number) => {
+    const formatting = new Map<string, unknown>();
+    let boundary: Y.XmlElement | null = null;
+    let left = index;
+    for (let item = sequence._start; item !== null && left > 0; item = item.right) {
+      if (item.deleted) continue;
+      const content = item.content;
+      if (content instanceof Y.ContentFormat) formatting.set(content.key, content.value);
+      else {
+        if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement)
+          if (content.type.nodeName === BLOCK_ELEMENT) boundary = content.type;
+        left -= item.length;
+      }
+    }
+    return { boundary, formatting: Object.fromEntries(formatting) };
+  };
+  const element = (name: string, attrs: Record<string, unknown>) => {
+    const made = new Y.XmlElement(name);
+    for (const [key, value] of Object.entries(attrs)) made.setAttribute(key, value as string);
+    return made;
+  };
+  const MARKS = [
+    () => ({ bold: {} }),
+    () => ({ italic: {} }),
+    () => ({ bold: null }),
+    () => ({ italic: null }),
+    () => ({ link: { href: `https://example.com/${String(below(50))}` } }),
+    () => ({ link: null }),
+  ];
+
+  for (let edit = 0; edit < edits; edit++) {
+    const { sequence } = people[edit % 2]!;
+    const length = sequence.length;
+    if (length < 64) break;
+    const kind = below(100);
+    const index = 1 + below(length - 40);
+    if (kind < 55) sequence.insert(index, `${words(1 + below(3))} `);
+    else if (kind < 70) sequence.delete(index, 1 + below(8));
+    else if (kind < 82) sequence.format(index, 3 + below(28), MARKS[below(MARKS.length)]!());
+    else if (kind < 92) {
+      const { boundary, formatting } = standingAt(sequence, index);
+      const path = boundary ? storedValue(boundary, "path") : [];
+      sequence.insertEmbed(index, element(BLOCK_ELEMENT, { type: "paragraph", path }), formatting);
+    } else if (kind < 96) {
+      const { boundary } = standingAt(sequence, index);
+      if (boundary && below(2) === 0) {
+        boundary.setAttribute("type", "heading");
+        boundary.setAttribute("level", (1 + below(3)) as unknown as string);
+      } else boundary?.setAttribute("type", "paragraph");
+    } else {
+      const { formatting } = standingAt(sequence, index);
+      const made =
+        below(2) === 0
+          ? element("hardBreak", {})
+          : element("wikilink", { target: words(1), label: null });
+      sequence.insertEmbed(index, made, formatting);
+    }
+    if (edit % 8 === 7) meet();
+  }
+  meet();
+  return { first: first.doc, second: second.doc };
+}
+
+const LINK_ATTRIBUTES = ["href", "target", "rel", "class", "title"];
+const OWN_ATTRIBUTES = ["level", "language", "tex", "source"];
+const RECORD_ATTRIBUTES = [
+  "checked",
+  "loose",
+  "start",
+  "type",
+  "calloutType",
+  "title",
+  "fold",
+  "height",
+  "colspan",
+  "rowspan",
+  "colwidth",
+  "align",
+];
+
+/**
+ * What a note's sequence holds, and the most nodes the engine spends to read it: one for each live
+ * item, and for a boundary its path entries, the containers it opens with their records and first
+ * paragraphs, and its own attributes; for an inline item its attributes; for a run of letters its
+ * marks, read once and copied once.
+ */
+function storedItems(doc: Y.Doc) {
+  const counts = { letters: 0, formatting: 0, boundaries: 0, inlineItems: 0, other: 0, deleted: 0 };
+  const marks = new Map<string, number>();
+  let nodesAtMost = 1;
+  const sequence = doc.getText(BODY_SEQUENCE_FIELD);
+  const records = doc.getMap(BODY_CONTAINERS_FIELD);
+  const container = (id: unknown) => {
+    let nodes = 2;
+    for (const attribute of RECORD_ATTRIBUTES) {
+      const record = storedValue(records, `${String(id)}.${attribute}`);
+      if (record !== undefined) nodes += 1 + (Array.isArray(record) ? record.length : 0);
+    }
+    return nodes;
+  };
+  for (let item = sequence._start; item !== null; item = item.right) {
+    if (item.deleted) {
+      counts.deleted++;
+      continue;
+    }
+    nodesAtMost++;
+    const content = item.content;
+    if (content instanceof Y.ContentString) {
+      counts.letters++;
+      for (const cost of marks.values()) nodesAtMost += 2 * cost;
+    } else if (content instanceof Y.ContentFormat) {
+      counts.formatting++;
+      const value = content.value as unknown;
+      const on = typeof value === "object" && value !== null && !Array.isArray(value);
+      const attributes =
+        on && content.key === "link"
+          ? LINK_ATTRIBUTES.filter((key) => Object.hasOwn(value, key)).length
+          : 0;
+      if (on) marks.set(content.key, 1 + attributes);
+      else marks.delete(content.key);
+    } else if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement) {
+      const stored = [...content.type._map.keys()].filter(
+        (key) => storedValue(content.type as Y.XmlElement, key) !== undefined,
+      );
+      if (content.type.nodeName === BLOCK_ELEMENT) {
+        counts.boundaries++;
+        const stood = storedValue(content.type, "path");
+        const path = Array.isArray(stood) ? (stood as unknown[]).slice(0, 64) : [];
+        nodesAtMost +=
+          1 + path.length + stored.filter((key) => OWN_ATTRIBUTES.includes(key)).length;
+        for (const id of path) nodesAtMost += container(id);
+      } else {
+        counts.inlineItems++;
+        nodesAtMost += 1 + stored.length;
+      }
+    } else counts.other++;
+  }
+  const live =
+    counts.letters + counts.formatting + counts.boundaries + counts.inlineItems + counts.other;
+  return { ...counts, live, nodesAtMost };
+}
+
+it("counts what a note two people edited at length stores, and reads it the same reopened", () => {
+  const { first, second } = editedAtLength(120, 1500);
+  expect(shown(second)).toEqual(shown(first));
+  const made = {
+    name: EDITED,
+    update: base64(Y.encodeStateAsUpdate(first)),
+    document: shown(first),
+    stored: storedItems(first),
+  };
+  if (WRITE_FIXTURES) writeFileSync(EDITED_FILE, `${JSON.stringify(made)}\n`);
+  const kept = JSON.parse(readFileSync(EDITED_FILE, "utf8")) as typeof made;
+  const reopened = new Y.Doc({ gc: false });
+  reopened.getText(BODY_SEQUENCE_FIELD);
+  reopened.getMap(BODY_CONTAINERS_FIELD);
+  Y.applyUpdate(reopened, Buffer.from(kept.update, "base64"));
+  expect(shown(reopened)).toEqual(kept.document);
+  expect(storedItems(reopened)).toEqual(kept.stored);
+  expect(kept).toEqual(made);
+  reopened.destroy();
+});
+
+const MEASURED = process.env.BODY_SEQUENCE_MEASURE_OUT;
+
+it.runIf(MEASURED !== undefined)(
+  "measures what longer notes two people edited store",
+  { timeout: 30 * 60_000 },
+  () => {
+    for (const [lines, edits] of [
+      [1_000, 10_000],
+      [10_000, 30_000],
+      [10_000, 100_000],
+    ] as const) {
+      const started = Date.now();
+      const note = editedAtLength(lines, edits).first;
+      const bytes = Y.encodeStateAsUpdate(note).length;
+      const measured = { lines, edits, ...storedItems(note), bytes, ms: Date.now() - started };
+      appendFileSync(
+        MEASURED!,
+        `${JSON.stringify(measured)}
+`,
+      );
+    }
+  },
+);
 
 function updatesBuilt(): Record<string, string> {
   const person = (clientID: number, from?: Uint8Array) => {

@@ -231,7 +231,7 @@ fn container_id(id: &str) -> bool {
 }
 
 fn is_one_line(text: &str) -> bool {
-    !text.contains(['\n', '\r'])
+    !text.contains(['\n', '\r', '\u{2028}', '\u{2029}'])
 }
 
 fn is_fold(text: &str) -> bool {
@@ -242,11 +242,8 @@ fn is_side(text: &str) -> bool {
     matches!(text, "left" | "right" | "center")
 }
 
-fn plain(stored: Option<Out>) -> Option<Any> {
-    match stored {
-        Some(Out::Any(value)) => Some(value),
-        _ => None,
-    }
+pub(super) fn stored_under(holder: &impl AsRef<Branch>, key: &str) -> Option<Any> {
+    holder.as_ref().stored_value(key)
 }
 
 fn number(stored: &Any) -> Option<f64> {
@@ -288,27 +285,17 @@ fn starts_with_paragraph(content: &[MarkdownNode]) -> bool {
     content.first().and_then(element_tag) == Some(PARAGRAPH)
 }
 
-fn push_letters(place: &mut Vec<MarkdownNode>, text: &str, marks: &[MarkdownMark]) {
-    if !matches!(place.last(), Some(MarkdownNode::Text(_))) {
-        place.push(MarkdownNode::Text(Vec::new()));
-    }
-    let Some(MarkdownNode::Text(runs)) = place.last_mut() else {
-        return;
-    };
-    match runs.last_mut() {
-        Some(run) if run.marks.as_slice() == marks => run.text.push_str(text),
-        _ => runs.push(TextRun {
-            text: text.to_owned(),
-            marks: marks.to_vec(),
-        }),
-    }
+struct ReadMarks {
+    marks: Marks,
+    nodes: usize,
+    bytes: usize,
 }
 
 #[derive(Default)]
 struct Formatting {
     code: Option<MarkAttributes>,
     others: [Option<MarkAttributes>; MARKS.len()],
-    read: Option<Marks>,
+    read: Option<ReadMarks>,
 }
 
 impl Formatting {
@@ -428,6 +415,58 @@ impl Budget<'_> {
         }
         Ok(marks)
     }
+
+    fn read_marks(&mut self, stored: &Formatting, depth: usize) -> ProjectionResult<ReadMarks> {
+        let (nodes, bytes) = (*self.nodes, *self.bytes);
+        let marks = self.marks(stored, depth)?;
+        Ok(ReadMarks {
+            marks,
+            nodes: nodes - *self.nodes,
+            bytes: *self.bytes - bytes,
+        })
+    }
+
+    fn copy_of(&mut self, read: &ReadMarks, depth: usize) -> ProjectionResult<Marks> {
+        for _ in 0..read.nodes {
+            self.node(depth)?;
+        }
+        self.bytes(read.bytes)?;
+        Ok(read.marks.clone())
+    }
+
+    fn letters(
+        &mut self,
+        place: &mut Vec<MarkdownNode>,
+        text: &str,
+        read: Option<&ReadMarks>,
+        depth: usize,
+    ) -> ProjectionResult<()> {
+        if !matches!(place.last(), Some(MarkdownNode::Text(_))) {
+            place.push(MarkdownNode::Text(Vec::new()));
+        }
+        let Some(MarkdownNode::Text(runs)) = place.last_mut() else {
+            return Ok(());
+        };
+        let marks: &[MarkdownMark] = match read {
+            Some(read) => &read.marks,
+            None => &[],
+        };
+        if let Some(run) = runs.last_mut() {
+            if run.marks.as_slice() == marks {
+                run.text.push_str(text);
+                return Ok(());
+            }
+        }
+        let marks = match read {
+            Some(read) => self.copy_of(read, depth)?,
+            None => Marks::new(),
+        };
+        runs.push(TextRun {
+            text: text.to_owned(),
+            marks,
+        });
+        Ok(())
+    }
 }
 
 struct Open {
@@ -486,8 +525,7 @@ fn inline_place<'leaf>(
     Ok(&mut leaf.after)
 }
 
-struct Reader<'a, T> {
-    txn: &'a T,
+struct Reader<'a> {
     containers: &'a MapRef,
     budget: Budget<'a>,
     formatting: Formatting,
@@ -496,7 +534,7 @@ struct Reader<'a, T> {
     leaf: Option<Leaf>,
 }
 
-impl<T: ReadTxn> Reader<'_, T> {
+impl Reader<'_> {
     fn item(&mut self, stored: TextItem<'_>) -> ProjectionResult<()> {
         self.budget.node(self.open.len())?;
         match stored {
@@ -521,17 +559,16 @@ impl<T: ReadTxn> Reader<'_, T> {
             None => false,
         };
         if !unmarked && self.formatting.read.is_none() {
-            let read = self.budget.marks(&self.formatting, depth)?;
+            let read = self.budget.read_marks(&self.formatting, depth)?;
             self.formatting.read = Some(read);
         }
-        let marks: &[MarkdownMark] = match &self.formatting.read {
-            Some(marks) if !unmarked => marks,
-            _ => &[],
+        let read = match &self.formatting.read {
+            Some(read) if !unmarked => Some(read),
+            _ => None,
         };
         let holds = Leaf::holds_letters;
         let place = inline_place(&mut self.leaf, &mut self.budget, holds, depth)?;
-        push_letters(place, text, marks);
-        Ok(())
+        self.budget.letters(place, text, read, depth)
     }
 
     fn element(&mut self, stored: &yrs::XmlElementRef) -> ProjectionResult<()> {
@@ -541,10 +578,9 @@ impl<T: ReadTxn> Reader<'_, T> {
         let Some(tag) = known(&INLINE_ITEMS, stored.tag()) else {
             return Ok(());
         };
-        let txn = self.txn;
         let depth = self.open.len() + 1;
         self.budget.bytes(tag.len())?;
-        let held = |name: &str| plain(stored.get_attribute(txn, name));
+        let held = |name: &str| stored_under(stored, name);
         let attrs = self.budget.attributes(tag, depth, held)?;
         let holds = Leaf::holds_inline_items;
         let place = inline_place(&mut self.leaf, &mut self.budget, holds, depth)?;
@@ -554,9 +590,8 @@ impl<T: ReadTxn> Reader<'_, T> {
 
     fn boundary(&mut self, stored: &yrs::XmlElementRef) -> ProjectionResult<()> {
         self.close_leaf();
-        let txn = self.txn;
         let containers = self.containers;
-        let held = |name: &str| plain(stored.get_attribute(txn, name));
+        let held = |name: &str| stored_under(stored, name);
         let tag = match held("type") {
             Some(Any::String(name)) => known(&LEAVES, &name).unwrap_or(PARAGRAPH),
             _ => PARAGRAPH,
@@ -576,7 +611,7 @@ impl<T: ReadTxn> Reader<'_, T> {
             let depth = self.open.len();
             self.budget.node(depth)?;
             self.budget.bytes(kind.len())?;
-            let record = |name: &str| plain(containers.get(txn, &format!("{id}.{name}")));
+            let record = |name: &str| stored_under(containers, &format!("{id}.{name}"));
             let attrs = self.budget.attributes(kind, depth, record)?;
             self.open.push(Open {
                 id,
@@ -604,7 +639,7 @@ impl<T: ReadTxn> Reader<'_, T> {
             if !container_id(id) || path.iter().any(|(used, _)| **used == **id) {
                 break;
             }
-            let Some(Any::String(recorded)) = plain(self.containers.get(self.txn, id)) else {
+            let Some(Any::String(recorded)) = stored_under(self.containers, id) else {
                 break;
             };
             let kind = match only_child(parent) {
@@ -687,7 +722,6 @@ pub(super) fn blocks<T: ReadTxn>(
     source_text_bytes: &mut usize,
 ) -> ProjectionResult<Vec<MarkdownNode>> {
     let mut reader = Reader {
-        txn,
         containers,
         budget: Budget {
             nodes: remaining_nodes,
@@ -709,6 +743,8 @@ mod tests {
 
     const NOTES: &str =
         include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence.json");
+    const EDITED_NOTE: &str =
+        include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence-edited.json");
     const DELETES_FIRST_UNIT: [u8; 6] = [0, 1, 5, 1, 0, 1];
     const TYPES_BETWEEN_UNITS: [u8; 12] = [1, 1, 6, 0, 0xc4, 5, 0, 5, 1, 1, b'y', 0];
     const TWO_TO_THE_53: f64 = 9_007_199_254_740_992.0;
@@ -723,6 +759,20 @@ mod tests {
         markdown_not_compared: Option<String>,
     }
 
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StoredItems {
+        live: usize,
+        nodes_at_most: usize,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct EditedNote {
+        update: String,
+        document: Value,
+        stored: StoredItems,
+    }
+
     fn notes() -> Vec<Note> {
         use serde::Deserialize as _;
         let mut json = serde_json::Deserializer::from_str(NOTES);
@@ -731,9 +781,13 @@ mod tests {
     }
 
     fn stored(note: &Note) -> Ydoc {
+        opened(&note.update)
+    }
+
+    fn opened(update: &str) -> Ydoc {
         let doc = Ydoc::wire().reading_body_sequence();
         let update = base64::engine::general_purpose::STANDARD
-            .decode(&note.update)
+            .decode(update)
             .expect("the note's update is base64");
         doc.apply(&update).expect("the note's update applies");
         doc
@@ -787,50 +841,128 @@ mod tests {
         bytes.extend_from_slice(text.as_bytes());
     }
 
-    fn formatting_items_under_keys_that_are_no_marks(count: usize) -> Vec<u8> {
+    enum Stored {
+        Format(String, String),
+        Letters(&'static str),
+        Element(&'static str),
+    }
+
+    fn sequence_of(items: &[Stored]) -> Vec<u8> {
         const CLIENT: usize = 9;
-        const FORMAT: u8 = 6;
         const HAS_ORIGIN: u8 = 0x80;
+        const XML_ELEMENT: u8 = 3;
         let mut update = Vec::new();
         var_uint(&mut update, 1);
-        var_uint(&mut update, count);
+        var_uint(&mut update, items.len());
         var_uint(&mut update, CLIENT);
         var_uint(&mut update, 0);
-        for clock in 0..count {
+        let mut clock = 0;
+        for item in items {
+            let content: u8 = match item {
+                Stored::Letters(_) => 4,
+                Stored::Format(..) => 6,
+                Stored::Element(_) => 7,
+            };
             if clock == 0 {
-                update.push(FORMAT);
+                update.push(content);
                 var_uint(&mut update, 1);
                 var_string(&mut update, ROOT_SEQUENCE);
             } else {
-                update.push(HAS_ORIGIN | FORMAT);
+                update.push(HAS_ORIGIN | content);
                 var_uint(&mut update, CLIENT);
                 var_uint(&mut update, clock - 1);
             }
-            var_string(&mut update, &format!("key{clock}"));
-            var_string(&mut update, "true");
+            match item {
+                Stored::Letters(text) => {
+                    var_string(&mut update, text);
+                    clock += text.encode_utf16().count();
+                }
+                Stored::Format(key, value) => {
+                    var_string(&mut update, key);
+                    var_string(&mut update, value);
+                    clock += 1;
+                }
+                Stored::Element(name) => {
+                    update.push(XML_ELEMENT);
+                    var_string(&mut update, name);
+                    clock += 1;
+                }
+            }
         }
         var_uint(&mut update, 0);
         update
     }
 
-    fn read(doc: &Ydoc, nodes: &mut usize) -> ProjectionResult<Vec<MarkdownNode>> {
+    fn formatting_items_under_keys_that_are_no_marks(count: usize) -> Vec<u8> {
+        let mut items = Vec::new();
+        for at in 0..count {
+            items.push(Stored::Format(format!("key{at}"), "true".to_owned()));
+        }
+        sequence_of(&items)
+    }
+
+    fn read(
+        doc: &Ydoc,
+        nodes: &mut usize,
+        bytes: &mut usize,
+    ) -> ProjectionResult<Vec<MarkdownNode>> {
         let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
         let containers = doc.doc.get_or_insert_map(ROOT_CONTAINERS);
         let txn = doc.doc.transact();
-        let mut bytes = 0;
-        blocks(&txn, &sequence, &containers, nodes, &mut bytes)
+        blocks(&txn, &sequence, &containers, nodes, bytes)
     }
 
     fn document(doc: &Ydoc) -> ProjectionResult<Value> {
-        let mut nodes = MAX_PROJECTION_NODES;
-        let blocks = read(doc, &mut nodes)?;
+        let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
+        let blocks = read(doc, &mut nodes, &mut bytes)?;
         Ok(json!({ "type": TOP, "content": shown(&blocks) }))
     }
 
+    fn spent(doc: &Ydoc) -> (usize, usize) {
+        let (mut nodes, mut bytes) = (MAX_PROJECTION_NODES, 0);
+        read(doc, &mut nodes, &mut bytes).expect("the note reads");
+        (MAX_PROJECTION_NODES - nodes, bytes)
+    }
+
     fn nodes_spent(doc: &Ydoc) -> usize {
-        let mut nodes = MAX_PROJECTION_NODES;
-        read(doc, &mut nodes).expect("the note reads");
-        MAX_PROJECTION_NODES - nodes
+        spent(doc).0
+    }
+
+    fn live_items(doc: &Ydoc) -> usize {
+        let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+        let txn = doc.doc.transact();
+        let mut live = 0;
+        let counted = sequence.try_visit_items(&txn, |_| -> ProjectionResult<()> {
+            live += 1;
+            Ok(())
+        });
+        counted.expect("counting never fails");
+        live
+    }
+
+    fn items_in_texts<T: ReadTxn>(txn: &T, node: XmlOut, held: &mut usize, other: &mut usize) {
+        match node {
+            XmlOut::Text(text) => {
+                let counted = text.try_visit_items(txn, |stored| -> ProjectionResult<()> {
+                    match stored {
+                        TextItem::Letters(_) | TextItem::Format(..) => *held += 1,
+                        TextItem::Embed(_) | TextItem::Other => *other += 1,
+                    }
+                    Ok(())
+                });
+                counted.expect("counting never fails");
+            }
+            XmlOut::Element(element) => {
+                for child in element.children(txn) {
+                    items_in_texts(txn, child, held, other);
+                }
+            }
+            XmlOut::Fragment(fragment) => {
+                for child in fragment.children(txn) {
+                    items_in_texts(txn, child, held, other);
+                }
+            }
+        }
     }
 
     fn admitted(doc: &Ydoc) -> Result<(), CollabError> {
@@ -839,6 +971,10 @@ mod tests {
 
     fn too_complex<T>(read: Result<T, CollabError>) -> bool {
         matches!(read, Err(CollabError::ProjectionTooComplex { .. }))
+    }
+
+    fn too_large<T>(read: Result<T, CollabError>) -> bool {
+        matches!(read, Err(CollabError::ProjectionTooLarge { .. }))
     }
 
     fn shown(nodes: &[MarkdownNode]) -> Vec<Value> {
@@ -1147,6 +1283,97 @@ mod tests {
         let items = formatting_items_under_keys_that_are_no_marks(MAX_PROJECTION_NODES + 1);
         note.apply(&items).expect("the items apply");
         assert!(too_complex(note.project(ContentKind::Richdoc)));
+    }
+
+    #[test]
+    fn charges_a_mark_again_for_every_text_run_that_holds_a_copy_of_it() {
+        let href = "h".repeat(1_000);
+        let cut_into = |runs: usize| {
+            let link = format!("{{\"href\":\"{href}\"}}");
+            let mut items = vec![Stored::Format("link".to_owned(), link)];
+            for run in 0..runs {
+                if run > 0 {
+                    items.push(Stored::Element("hardBreak"));
+                }
+                items.push(Stored::Letters("x"));
+            }
+            let note = empty_note();
+            note.apply(&sequence_of(&items)).expect("the items apply");
+            note
+        };
+        let (one_run, many_runs) = (cut_into(1), cut_into(21));
+        let (_, bytes) = spent(&many_runs);
+        assert!(bytes - spent(&one_run).1 >= 20 * href.len());
+
+        let with_bytes_left = |left: usize| {
+            let mut nodes = MAX_PROJECTION_NODES;
+            let mut bytes = MAX_PROJECTION_BYTES - left;
+            read(&many_runs, &mut nodes, &mut bytes)
+        };
+        assert!(too_large(with_bytes_left(bytes - 1)));
+        assert!(with_bytes_left(bytes).is_ok());
+    }
+
+    #[test]
+    fn is_no_sequence_note_when_its_version_is_not_stored_as_a_plain_value() {
+        const KEYED_EMBED: u8 = 0x20 | 5;
+        let mut version = vec![1, 1, 9, 0, KEYED_EMBED, 1];
+        var_string(&mut version, ROOT_META);
+        var_string(&mut version, "schemaVersion");
+        var_string(&mut version, "2.0");
+        version.push(0);
+
+        let doc = Ydoc::wire().reading_body_sequence();
+        doc.apply(&version).expect("the version applies");
+        let sequence = doc.doc.get_or_insert_text(ROOT_SEQUENCE);
+        sequence.insert(&mut doc.doc.transact_mut(), 0, "letters");
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        let shown = meta.get(&doc.doc.transact(), "schemaVersion");
+        assert_eq!(shown, Some(Out::Any(Any::Number(2.0))));
+        let written = doc.project(ContentKind::Richdoc).expect("it writes");
+        assert_eq!(written.content, "");
+        assert!(admitted(&doc).is_err());
+    }
+
+    #[test]
+    fn the_engines_own_writer_embeds_nothing_in_a_paragraphs_text() {
+        let mut letters_and_formatting = 0;
+        for note in notes() {
+            let Some(markdown) = note.markdown else {
+                continue;
+            };
+            for reading in [MarkdownReading::Projection, MarkdownReading::Source] {
+                let doc = Ydoc::wire();
+                let kind = ContentKind::Richdoc;
+                let written = doc.rewrite_content_to_markdown_as(kind, &markdown, reading);
+                if written.is_err() {
+                    continue;
+                }
+                let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+                let txn = doc.doc.transact();
+                let (mut held, mut other) = (0, 0);
+                for block in body.children(&txn) {
+                    items_in_texts(&txn, block, &mut held, &mut other);
+                }
+                assert_eq!(other, 0, "{}", note.name);
+                letters_and_formatting += held;
+            }
+        }
+        assert!(letters_and_formatting >= 20, "{letters_and_formatting}");
+    }
+
+    #[test]
+    fn reads_a_note_two_people_edited_at_length_within_the_nodes_counted_for_it() {
+        let edited: EditedNote = serde_json::from_str(EDITED_NOTE).expect("the note parses");
+        let doc = opened(&edited.update);
+        let read = document(&doc).expect("the note reads");
+        let (recorded, here) = (top_blocks(&edited.document), top_blocks(&read));
+        let blocks = differing(&recorded, &here, same_document);
+        assert!(same_document(&edited.document, &read), "{blocks}");
+
+        let (live, nodes) = (live_items(&doc), nodes_spent(&doc));
+        assert!(1_000 <= live && live <= edited.stored.live, "{live} live items");
+        assert!(live <= nodes && nodes <= edited.stored.nodes_at_most, "{nodes} for {live}");
     }
 
     #[test]

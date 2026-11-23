@@ -514,8 +514,10 @@ impl Ydoc {
             return None;
         }
         let meta = self.doc.get_or_insert_map(ROOT_META);
-        let version = meta.get(&self.doc.transact(), "schemaVersion");
-        if !matches!(version, Some(Out::Any(Any::Number(2.0)))) {
+        let reading = self.doc.transact();
+        let version = body_sequence::stored_under(&meta, "schemaVersion");
+        drop(reading);
+        if !matches!(version, Some(Any::Number(2.0))) {
             return None;
         }
         let sequence = self.doc.get_or_insert_text(ROOT_SEQUENCE);
