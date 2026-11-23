@@ -619,33 +619,13 @@ describe("deleting where a rule limits members", () => {
     ).toBe(200);
     // The control: while the folder is visible, she deletes her own Comment.
     expect((await deleteMessage(h, "ana", "m-ana-a", "t-budget")).status).toBe(200);
-    // An empty rule hides the folder from members.
-    const emptyRule = await putBlob(h, OWNER, WORKSPACE, "");
-    await ownerAppend(
-      h,
-      [
-        {
-          originSeq: 0,
-          recordedAtMs: 904,
-          opKind: "moment.append",
-          payload: {
-            momentId: "m-plans-rule",
-            versionId: "main",
-            objectId: "object-plans-rule",
-            path: "plans/access.yaml",
-            recordedAtMs: 904,
-            operation: "write",
-            payloadBeforeBlobSha256: null,
-            payloadBeforePath: null,
-            payloadAfterBlobSha256: emptyRule,
-            payloadAfterPath: "plans/access.yaml",
-            metadata: { origin: "user" },
-            beforePresent: "null",
-          },
-        },
-      ],
-      "origin-owner-rule",
-    );
+    // A rule with no level hides the folder from members.
+    const ruled = await post(h, OWNER, `/sync/${WORKSPACE}/members/folder-rules`, {
+      folder: "plans",
+      members: null,
+      people: [],
+    });
+    expect(ruled.status, await ruled.clone().text()).toBe(200);
 
     expect((await deleteMessage(h, "ana", "m-ana-b", "t-budget")).status).toBe(404);
     expect(rowsOf(storage, "m-ana-b").map((row) => row.op_kind)).toEqual(["chat.message.append"]);

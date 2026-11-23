@@ -9,6 +9,7 @@ import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
 import * as workspaceMembersStorage from "./storage/workspaceMembers";
 import * as messageDeletesStorage from "./storage/messageDeletes";
+import * as folderRulesStorage from "./storage/folderRules";
 import * as directMessagesStorage from "./storage/directMessages";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
@@ -1981,6 +1982,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   deletedMessageTimes(...args: Parameters<SyncRelayStorage["deletedMessageTimes"]>) {
     return messageDeletesStorage.deletedMessageTimes(this, ...args);
+  }
+  changeFolderRule(...args: Parameters<SyncRelayStorage["changeFolderRule"]>) {
+    return folderRulesStorage.changeFolderRule(this, ...args);
+  }
+  removeFolderMarkers(...args: Parameters<SyncRelayStorage["removeFolderMarkers"]>) {
+    return folderRulesStorage.removeFolderMarkers(this, ...args);
+  }
+  readFolderRules(...args: Parameters<SyncRelayStorage["readFolderRules"]>) {
+    return folderRulesStorage.readFolderRules(this, ...args);
   }
   resolveDirectPick(...args: Parameters<SyncRelayStorage["resolveDirectPick"]>) {
     return directMessagesStorage.resolveDirectPick(this, ...args);

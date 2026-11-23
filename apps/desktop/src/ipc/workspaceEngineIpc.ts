@@ -142,7 +142,6 @@ export function createWorkspaceEngineIpc<
         | "getCollectionRecord"
         | "clearCaptureRecovery"
         | "retryHeldCapture"
-        | "decideAccessRule"
       >,
     ) => Promise<Result>,
   ): Promise<Result | null>;
@@ -205,10 +204,6 @@ export function createWorkspaceEngineIpc<
   recordHeldFiles(
     workspace: EngineWorkspace,
     files: NonNullable<SyncStatusResult["heldFiles"]>,
-  ): void;
-  recordHeldAccessRules(
-    workspace: EngineWorkspace,
-    holds: NonNullable<SyncStatusResult["heldAccessRules"]>,
   ): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
   retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
@@ -904,30 +899,6 @@ export function createWorkspaceEngineIpc<
               );
               if (result === null) throw new Error("The workspace engine is not running.");
               dependencies.recordHeldFiles(operation.workspace, result.heldFiles);
-              return result;
-            },
-          );
-        },
-        decideAccessRule: async (input, { event }) => {
-          return withRendererWorkspaceOperation(
-            event.sender,
-            input.workspaceId,
-            "This workspace is no longer active.",
-            async (operation) => {
-              const result = await withEngineAdapter(operation.workspace, async (adapter) => {
-                // A refusal, such as a rule that changed since the owner saw it,
-                // still records the holds the engine now lists, so the Notice
-                // shows the rule as it is.
-                const decided = await adapter.decideAccessRule(input).then(
-                  (result) => ({ result }),
-                  (error: unknown) => ({ error }),
-                );
-                const { heldAccessRules } = await adapter.watcherStatus();
-                dependencies.recordHeldAccessRules(operation.workspace, heldAccessRules);
-                if ("error" in decided) throw decided.error;
-                return { heldAccessRules, kept: decided.result.kept };
-              });
-              if (result === null) throw new Error("The workspace engine is not running.");
               return result;
             },
           );

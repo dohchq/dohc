@@ -257,65 +257,6 @@ it("shows a row's lead above its rows and reads it out while Notices is open", a
   expect(said().textContent).toBe(lead);
 });
 
-it("opens Notices at the row a request names and moves focus into it", async () => {
-  const errors: WorkspaceErrorNotice[] = ["outer", "inner"].map((id) => ({
-    id,
-    tone: "warning",
-    title: `${id} rule changed`,
-    message: "Until you choose…",
-    atMs: 0,
-    canRetry: false,
-    seen: true,
-    target: { to: "folder", path: id },
-  }));
-  const view = renderNotices({ workspaceErrors: errors, onOpenTarget: async () => null });
-  expect(screen.queryByTestId("notice-outer")).toBeNull();
-  view.rerender(
-    noticeElement({
-      workspaceErrors: errors,
-      onOpenTarget: async () => null,
-      showRequest: { id: "outer", seq: 1 },
-    }),
-  );
-  await waitFor(() =>
-    expect(screen.getByTestId("notice-outer").contains(document.activeElement)).toBe(true),
-  );
-});
-
-it("washes the row a request pressed with Enter lands on, and keeps the keyboard mark", async () => {
-  const stop = initKeyboardNavigation();
-  try {
-    const errors: WorkspaceErrorNotice[] = ["outer", "inner"].map((id) => ({
-      id,
-      tone: "warning",
-      title: `${id} rule changed`,
-      message: "Until you choose…",
-      atMs: 0,
-      canRetry: false,
-      seen: true,
-      target: { to: "folder", path: id },
-    }));
-    const view = renderNotices({ workspaceErrors: errors, onOpenTarget: async () => null });
-    fireEvent.keyDown(document.body, { key: "Tab" });
-    fireEvent.keyDown(document.body, { key: "Enter" });
-    view.rerender(
-      noticeElement({
-        workspaceErrors: errors,
-        onOpenTarget: async () => null,
-        showRequest: { id: "outer", seq: 1 },
-      }),
-    );
-    await waitFor(() =>
-      expect(screen.getByTestId("notice-outer").contains(document.activeElement)).toBe(true),
-    );
-    expect(screen.getByTestId("notice-outer").classList.contains("dohc-target-flash")).toBe(true);
-    expect(document.documentElement.hasAttribute(KEYBOARD_NAV_ATTRIBUTE)).toBe(true);
-  } finally {
-    stop();
-    document.documentElement.removeAttribute(KEYBOARD_NAV_ATTRIBUTE);
-  }
-});
-
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", {});
 });
@@ -399,7 +340,6 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
       {...(props.keptTyping ? { keptTyping: props.keptTyping } : {})}
       {...(props.onDismissKeptTyping ? { onDismissKeptTyping: props.onDismissKeptTyping } : {})}
-      {...(props.showRequest ? { showRequest: props.showRequest } : {})}
     />
   );
 }

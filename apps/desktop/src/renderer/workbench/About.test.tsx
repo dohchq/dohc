@@ -265,6 +265,7 @@ describe("About Access", () => {
         memberLevel: "comment",
         inviteLink: { enabled: false, url: null },
         groupRules: [],
+        folderRules: [],
         people: [
           person("owner", "owner", "Ana Ruiz", "ana@example.com"),
           person("m-kai", "admin", "Kai", "kai@example.com"),
@@ -1156,6 +1157,7 @@ it("lists everyone in a joined workspace by name and role, from the Members page
       memberLevel: "comment",
       inviteLink: null,
       groupRules: null,
+      folderRules: null,
       people: [
         person("owner", "owner", "Ana Ruiz"),
         person("m-lee", "admin", "Lee Park"),

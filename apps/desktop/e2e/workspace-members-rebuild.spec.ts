@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -16,8 +16,8 @@ import {
 } from "./helpers/workspace";
 
 // A rule that hides a folder from members rebuilds a member's joined copy:
-// the owner's desktop sends the folder's access.yaml, the relay changes the
-// member's reach, and the member's desktop closes its copy, asks the engine to
+// the owner sets it in the relay, which writes the folder's marker to the
+// owner's disk and changes the member's reach, and the member's desktop closes its copy, asks the engine to
 // rebuild it from the relay, and reopens it without the hidden folder.
 
 const OWNER = {
@@ -194,7 +194,20 @@ test("@two-client a rule that hides a folder rebuilds a member's copy without it
     expect(joined!.shareView?.reach?.visibilitySignature).toBe(before);
 
     // The owner hides team/ from members. The relay changes Sam's reach.
-    await writeFile(join(ownerTemp.rootPath, "team/access.yaml"), "# Team only\n");
+    const ruled = await relayJson(
+      relay.baseUrl,
+      OWNER.token,
+      `/sync/${workspaceId}/members/folder-rules`,
+      {
+        method: "POST",
+        body: JSON.stringify({ folder: "team", members: null, people: [] }),
+      },
+    );
+    expect(ruled.status, ruled.body).toBe(200);
+    // The owner's desktop pulls the marker, so the rule moves with the folder.
+    await expect
+      .poll(() => exists(join(ownerTemp.rootPath, "team/.dohc-access")), { timeout: 60_000 })
+      .toBe(true);
     await expect
       .poll(async () => (await memberLog(relay!, shareId)).visibility, {
         timeout: 60_000,

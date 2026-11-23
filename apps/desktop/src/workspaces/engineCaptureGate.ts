@@ -56,7 +56,6 @@ export function captureForWorkspace(
       onRetainedCopies: hooks.onRetainedCopies,
       onHeldFiles: hooks.onHeldFiles,
       onOutsideChanges: hooks.onOutsideChanges,
-      onHeldAccessRules: hooks.onHeldAccessRules,
       onRecoveryUnavailable: hooks.onRecoveryUnavailable,
       onSecretKeyUnavailable: hooks.onSecretKeyUnavailable,
       rustEngineSessions,

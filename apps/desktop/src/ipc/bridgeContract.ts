@@ -1650,30 +1650,6 @@ export type CaptureFileHold = z.infer<typeof CaptureFileHold>;
 export const CaptureHoldsEvent = z
   .object({ workspaceId: WORKSPACE_ID, heldFiles: z.array(CaptureFileHold) })
   .strict();
-// A folder whose access rule changed outside dohc. The rule dohc last
-// recorded still applies until the owner decides. `folder` is empty for the
-// workspace's own rule, and `observedSha256` is null when the rule is gone.
-// `changes` lists who reaches the folder differently, from the rule dohc
-// recorded to the rule on disk now; for a removal, to what the folder falls
-// back to: the rule of `fallsBackTo`, or the workspace level when it is null.
-const AccessRuleReach = z.enum(["view", "comment", "edit", "none", "workspace"]);
-export const AccessRuleHold = z.object({
-  versionId: z.string().min(1),
-  folder: z.string(),
-  reason: z.enum(["widened", "removed"]),
-  observedSha256: z.string().min(1).nullable(),
-  recordedAtMs: z.number().int(),
-  recordedRule: z.string().nullable(),
-  rulePath: z.string().min(1).nullable(),
-  changes: z.array(
-    z.object({ who: z.string().min(1), before: AccessRuleReach, after: AccessRuleReach }),
-  ),
-  canAccept: z.boolean(),
-  unreadable: z.enum(["recorded", "locked", "several-files", "on-disk"]).nullable(),
-  fallsBackTo: z.string().nullable(),
-});
-export type AccessRuleReach = z.infer<typeof AccessRuleReach>;
-export type AccessRuleHold = z.infer<typeof AccessRuleHold>;
 export type CaptureHoldsEvent = z.infer<typeof CaptureHoldsEvent>;
 
 const SYNC_STATUS_BASE_FIELDS = {
@@ -1747,7 +1723,6 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
   outsideChanges: z.array(OutsideChange).optional(),
-  heldAccessRules: z.array(AccessRuleHold).optional(),
   // Collection updates wait for a pull that has not finished, as the engine
   // answers. "sync" while ordinary sync is on, signed in or not, so a pass
   // that finishes the pull ends it. "reopen" after sync paused but the
@@ -1939,28 +1914,6 @@ export const captureRecoveryOperations = {
     handlerCheck: {
       check: "withRendererWorkspaceOperation",
       reason: "Only the sending window's active workspace can retry a held file.",
-    },
-  },
-  // Keeps a held access rule as it is on disk, or puts back the rule dohc
-  // last recorded. Refused when the hold is not the active Version's, or when
-  // the rule changed since the hold the owner saw.
-  decideAccessRule: {
-    capabilityId: "capture.access.decide",
-    channel: "desktop:decide-access-rule",
-    payload: WorkspaceIdPayload.extend({
-      versionId: z.string().min(1),
-      folder: z.string(),
-      decision: z.enum(["accept", "restore"]),
-      expectedSha256: z.string().min(1).nullable(),
-      expectedReason: z.enum(["widened", "removed"]),
-    }),
-    // `kept` names the rule files from outside dohc that Restore kept as kept copies.
-    result: z.object({ heldAccessRules: z.array(AccessRuleHold), kept: z.array(z.string()) }),
-    guard: "trusted-sender",
-    scope: "workspace",
-    handlerCheck: {
-      check: "withRendererWorkspaceOperation",
-      reason: "Only the sending window's active workspace can decide a held access rule.",
     },
   },
   getCaptureRecoveryStatus: {

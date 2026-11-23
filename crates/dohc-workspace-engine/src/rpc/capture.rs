@@ -35,40 +35,6 @@ struct RetryHeldParams {
     path: String,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AccessRuleDecisionParams {
-    /// The Version whose hold the owner decided on. Only the active
-    /// Version's rules are on disk to decide.
-    version_id: String,
-    folder: String,
-    /// The hold's `observedSha256` the owner decided on: required, and null
-    /// when the rule is gone.
-    expected_sha256: Value,
-    /// The hold's reason the owner decided on.
-    expected_reason: String,
-}
-
-fn access_rule_holds_json(views: &[dohc_engine_runtime::AccessRuleHoldView]) -> Value {
-    json!(
-        views
-            .iter()
-            .map(|view| {
-                let hold = &view.hold;
-                json!({
-                    "versionId": hold.version_id, "folder": hold.folder, "reason": hold.reason,
-                    "observedSha256": hold.observed_sha256, "recordedAtMs": hold.recorded_at_ms,
-                    "recordedRule": view.recorded, "rulePath": view.rule_path, "canAccept": view.can_accept,
-                    "changes": view.changes.iter().map(|change| json!({
-                        "who": change.who, "before": change.before, "after": change.after,
-                    })).collect::<Vec<_>>(),
-                    "unreadable": view.unreadable, "fallsBackTo": view.falls_back_to,
-                })
-            })
-            .collect::<Vec<_>>()
-    )
-}
-
 fn held_files_json(holds: &[dohc_engine_storage::capture_file_holds::CaptureFileHold]) -> Value {
     json!(holds.iter().map(|hold| json!({
         "workspaceId": hold.workspace_id, "sourceVersionId": hold.source_version_id,
@@ -536,7 +502,6 @@ impl EngineService {
         response["retried"] = json!(retried);
         Ok(response)
     }
-
     /// Files that changed outside dohc while their note was live.
     pub(super) async fn capture_outside_changes(
         &self,
@@ -550,65 +515,6 @@ impl EngineService {
             .map_err(map_runtime)?;
         Ok(json!({ "outsideChanges": outside_changes_json(&changes) }))
     }
-
-    /// Settle a folder whose access rule waits for its owner: accept the
-    /// rule on disk, or restore the one last committed.
-    pub(super) async fn capture_decide_access_rule(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-        decision: dohc_engine_runtime::AccessRuleDecision,
-    ) -> Result<Value, WireError> {
-        let input: AccessRuleDecisionParams = parse(params)?;
-        let expected_sha256 = match input.expected_sha256 {
-            Value::Null => None,
-            Value::String(sha256) if !sha256.is_empty() => Some(sha256),
-            _ => {
-                return Err(WireError::new(
-                    ErrorCode::InvalidParams,
-                    "expectedSha256 must be a sha256 or null",
-                ));
-            }
-        };
-        let open = self.open(handle.as_ref())?;
-        if !open.is_local_owner() {
-            return Err(WireError::new(
-                ErrorCode::Forbidden,
-                "access rule decisions need the workspace's owning handle",
-            ));
-        }
-        let cancellation = OperationCancellation::new(ctx);
-        // The engine checks the hold is the active Version's under the gate,
-        // which a Version switch takes too.
-        let gate = tokio::select! {
-            () = cancellation.token.cancelled() => return Err(cancellation.interruption("access rule decision (queued)")),
-            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
-        };
-        let decided = open
-            .actor
-            .decide_access_rule(
-                open.workspace_id.clone(),
-                input.version_id,
-                input.folder.clone(),
-                decision,
-                expected_sha256,
-                input.expected_reason,
-                open.root.clone(),
-                Arc::new(self.self_writes.scoped(&open.root)),
-                now_ms()?,
-                Arc::new(dohc_engine_storage::NoFaults),
-            )
-            .await
-            .map_err(map_runtime)?;
-        // The files under the folder follow on the next capture pass.
-        if let Some(driver) = lock(&open.capture).as_ref() {
-            driver.request_manifest_refresh();
-        }
-        drop(gate);
-        Ok(json!({ "folder": input.folder, "decided": true, "kept": decided.kept }))
-    }
-
     pub(super) async fn capture_clear_recovery(
         &self,
         handle: Option<WorkspaceHandle>,
@@ -635,30 +541,13 @@ impl EngineService {
             .kept_materialization_files(open.workspace_id.clone(), open.root.clone())
             .await
             .unwrap_or_default();
-        let (capture_recoveries, holds, outside_changes, merge_removals, mut access_holds) = open
+        let (capture_recoveries, holds, outside_changes, merge_removals) = open
             .actor
             .capture_notices(open.workspace_id.clone())
             .await
             .map_err(map_runtime)?;
-        // Only the active Version's rules are on disk to decide. Another
-        // Version's hold waits, unlisted, until that Version is active. A
-        // workspace with no Version yet has no holds to ask about.
-        if !access_holds.is_empty() {
-            let active = open
-                .actor
-                .active_version_id(open.workspace_id.clone())
-                .await
-                .map_err(map_runtime)?;
-            access_holds.retain(|hold| hold.version_id == active);
-        }
-        let access_views = open
-            .actor
-            .access_rule_hold_views(open.root.clone(), access_holds)
-            .await
-            .map_err(map_runtime)?;
         let held_files = held_files_json(&holds);
         let outside_changes = outside_changes_json(&outside_changes);
-        let held_access_rules = access_rule_holds_json(&access_views);
         let retained_copies = crate::rpc::retained_copies::summary_json(
             crate::rpc::retained_copies::retained_summary(&open)
                 .await
@@ -681,7 +570,6 @@ impl EngineService {
                     "mergeRemovals": merge_removals,
                     "heldFiles": held_files,
                     "outsideChanges": outside_changes,
-                    "heldAccessRules": held_access_rules,
                     "deferredWrites": driver.status().deferred_writes(),
                     "recoveryUnavailable": recovery_unavailable,
                     "retainedCopies": retained_copies,
@@ -705,7 +593,6 @@ impl EngineService {
                 "mergeRemovals": merge_removals,
                 "heldFiles": held_files,
                 "outsideChanges": outside_changes,
-                "heldAccessRules": held_access_rules,
                 "deferredWrites": [],
                 "recoveryUnavailable": recovery_unavailable,
                 "retainedCopies": retained_copies,
@@ -1066,71 +953,6 @@ mod tests {
             )
             .await;
         assert!(result.is_err(), "an arbitrary id never admits a Duplicate");
-        service.workspace_close(Some(handle)).await.unwrap();
-    }
-
-    /// The owner decides on one Version's hold. Only the active Version's
-    /// rules are on disk, so a hold on another Version is not theirs to decide
-    /// until it is active.
-    #[tokio::test]
-    async fn a_decision_on_an_inactive_versions_hold_is_refused() {
-        use std::sync::Arc;
-        const WS: &str = "decide-version";
-        let scratch = ScratchDir::new().unwrap();
-        let supervisor = Box::leak(Box::new(WorkspaceSupervisor::new()));
-        let service = EngineService::with_supervisor(supervisor);
-        let ctx = RequestContext::unbounded();
-        let opened = service
-            .workspace_open(
-                &ctx,
-                json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":WS,"captureMode":"none"}),
-            )
-            .await
-            .unwrap();
-        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
-        let open = service.open(Some(&handle)).unwrap();
-        let faults = || Arc::new(dohc_engine_storage::NoFaults);
-        open.actor
-            .ensure_main_version(WS.into(), 1, faults(), Default::default())
-            .await
-            .unwrap();
-        open.actor
-            .create_named_version(
-                dohc_engine_domain::CreateNamedVersion {
-                    workspace_id: WS.into(),
-                    new_version_id: "feature".into(),
-                    name: "feature".into(),
-                    from_version_id: "main".into(),
-                    now_ms: 2,
-                    request_id: None,
-                },
-                faults(),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        let sha = dohc_engine_storage::hex_sha256(b"members: edit\n");
-        rusqlite::Connection::open(dohc_engine_testkit::engine_db_path(scratch.path()).unwrap())
-            .unwrap()
-            .execute(
-                "INSERT INTO access_rule_holds (workspace_id, version_id, folder, reason, \
-                 observed_sha256, recorded_at_ms) VALUES (?1, 'feature', 'team', 'widened', ?2, 3)",
-                [WS, sha.as_str()],
-            )
-            .unwrap();
-        let decided = service
-            .capture_decide_access_rule(
-                &ctx,
-                Some(handle.clone()),
-                json!({"versionId":"feature","folder":"team","expectedSha256":sha,
-                    "expectedReason":"widened"}),
-                dohc_engine_runtime::AccessRuleDecision::Accept,
-            )
-            .await;
-        let error = decided.expect_err("feature is not the active Version");
-        assert_eq!(error.message, "access-rule-not-held", "{error:?}");
-        let status = service.watcher_status(Some(handle.clone())).await.unwrap();
-        assert_eq!(status["heldAccessRules"], json!([]), "{status}");
         service.workspace_close(Some(handle)).await.unwrap();
     }
     use crate::EngineService;

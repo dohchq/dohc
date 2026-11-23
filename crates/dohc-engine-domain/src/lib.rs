@@ -153,11 +153,10 @@ pub use conflicts::{
 };
 pub use error::{DomainError, HOSTED_REPLICA_WRITE_REFUSED};
 pub use merge::{
-    BinaryMergeWrite, CompareTextFileVersions, ComparisonSide, ComparisonStatus, FileMergePlan,
-    MAX_MERGE_LINES, MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult,
-    MergeUnchangedReason, VersionFileChangeEntry, VersionFileChangePage, VersionFileChangeStatus,
-    VersionedTextComparison, compare_text_file_versions_in_db, comparison_sides_equal,
-    comparison_status, merge_markdown, plan_file_merge,
+    BinaryMergeWrite, CompareTextFileVersions, ComparisonSide, ComparisonStatus, MAX_MERGE_LINES,
+    MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason,
+    VersionFileChangeEntry, VersionFileChangePage, VersionFileChangeStatus,
+    VersionedTextComparison, comparison_sides_equal, comparison_status, merge_markdown,
 };
 pub use normalize::NormalizedState;
 pub use records::{

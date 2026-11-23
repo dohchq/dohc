@@ -1,10 +1,9 @@
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { accessRuleFolder } from "@dohc/security-contract/access-rules";
-import { hidesRuleFile } from "@dohc/security-contract/share-selector";
+import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import { asRecord } from "@dohc/workspace-core";
 import { isWorkspaceSelector, type AnyShareSelector } from "./shareFilter";
 import { relayError } from "./errors";
-import { workspaceFileWriteReach } from "./workspaceReach";
 
 const createLimits = new WeakMap<object, TokenBucketLimiter>();
 
@@ -18,13 +17,12 @@ export function assertMemberChanges(
   charge = false,
 ): void {
   if (!isWorkspaceSelector(selector) || !Array.isArray(raw)) return;
-  const writes = workspaceFileWriteReach(selector);
   for (const entry of raw) {
     const change = asRecord(entry);
     if (!change) continue;
     const before = change.basedOnPath,
       after = change.afterPath;
-    if ([before, after].some((path) => typeof path === "string" && hidesRuleFile(writes, path)))
+    if ([before, after].some((path) => typeof path === "string" && isFolderMarkerPath(path)))
       throw relayError("share_op_rejected");
     if (selector.role !== "member") continue;
     const reach = selector.reach;

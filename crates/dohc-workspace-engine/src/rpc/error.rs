@@ -241,18 +241,6 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = error {
         return WireError::new(ErrorCode::Conflict, error.to_string());
     }
-    if let RuntimeError::AccessRuleHeld { .. } | RuntimeError::AccessRuleChanged { .. } = error {
-        return WireError::new(ErrorCode::Conflict, error.to_string());
-    }
-    if let RuntimeError::AccessRuleNotHeld = error {
-        return WireError::new(ErrorCode::InvalidParams, "access-rule-not-held");
-    }
-    if let RuntimeError::RuleMergeOrderChanged = error {
-        return WireError::new(ErrorCode::Conflict, "rule-merge-order-changed");
-    }
-    if let RuntimeError::RuleMergeConflict { .. } = error {
-        return WireError::new(ErrorCode::Conflict, error.to_string());
-    }
     if let RuntimeError::CaptureFileHeld { path } = error {
         return WireError::new(ErrorCode::Conflict, format!("capture-file-held: {path}"));
     }

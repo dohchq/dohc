@@ -18,6 +18,7 @@ const view = (overrides: Partial<WorkspaceMembersView> = {}): WorkspaceMembersVi
   memberLevel: "comment",
   inviteLink: { enabled: true, url: "https://share.test/join#token" },
   groupRules: [],
+  folderRules: [],
   people: [
     {
       memberId: "owner",
@@ -196,6 +197,7 @@ describe("workspace members actions", () => {
       viewer: { memberId: "m-ana", role: "member" },
       inviteLink: null,
       groupRules: null,
+      folderRules: null,
       people: view().people.map((person) => ({ ...person, email: null })),
     });
 
@@ -276,7 +278,13 @@ describe("workspace members actions", () => {
     ).rejects.toThrow("could not read Members");
     // A member's view must carry no emails.
     h.relay.mockResolvedValueOnce(
-      json(view({ viewer: { memberId: "m-ana", role: "member" }, inviteLink: null })),
+      json(
+        view({
+          viewer: { memberId: "m-ana", role: "member" },
+          inviteLink: null,
+          folderRules: null,
+        }),
+      ),
     );
     await expect(
       h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),

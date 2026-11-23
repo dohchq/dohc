@@ -1,5 +1,6 @@
 import { authorizeShareAction } from "./shareAuthorization";
 import { filterProposedChangeForShare } from "./shareFilter";
+import { folderMarkerText, parseAccessRule } from "@dohc/security-contract/access-rules";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
 import { parseListedReach } from "@dohc/security-contract/listed-reach";
@@ -38,6 +39,8 @@ afterEach(closeTestStorages);
 
 const OWNER = "owner";
 const WORKSPACE = "workspace-members";
+const FOLDER_RULES = `/sync/${WORKSPACE}/members/folder-rules`;
+const FOLDER_MARKERS = `/sync/${WORKSPACE}/members/folder-markers`;
 const GROUP = "wire-team";
 const LATER_GROUP = "wire-later";
 const DM = "wire-dm";
@@ -143,6 +146,37 @@ async function ownerDelete(h: SyncRelayHandler, path: string): Promise<void> {
     }),
   ]);
   ownerHeads.delete(path);
+}
+
+// The owner sets, changes or clears a folder's rule as Members settings does,
+// and keeps the relay's marker in `ownerHeads` for later moves and deletes.
+async function ownerRule(
+  h: SyncRelayHandler,
+  folder: string,
+  text: string | null,
+): Promise<string> {
+  const covers = (rule: { folders: Array<{ path: string }> }) =>
+    rule.folders.some((entry) => entry.path === folder);
+  const held = (await membersView(h, OWNER)).folderRules!.find(covers);
+  const rule = text === null ? null : parseAccessRule(text)!;
+  const response = await post(h, OWNER, FOLDER_RULES, {
+    ...(held ? { ruleId: held.ruleId, revision: held.revision } : { folder }),
+    ...(rule === null
+      ? { clear: true }
+      : {
+          members: rule.members,
+          people: [...rule.people].map(([email, level]) => ({ email, level })),
+        }),
+  });
+  expect(response.status, await response.clone().text()).toBe(200);
+  const rules = ((await response.json()) as WorkspaceMembersView).folderRules!;
+  const ruleId = held?.ruleId ?? rules.find(covers)!.ruleId;
+  const now = rules.find((entry) => entry.ruleId === ruleId);
+  const marker = `${folder}/.dohc-access`;
+  if (now?.folders.some((entry) => entry.path === folder && entry.state === "covered"))
+    ownerHeads.set(marker, sha256(folderMarkerText(ruleId, now.revision)));
+  else ownerHeads.delete(marker);
+  return ruleId;
 }
 
 // The owner's workspace: a Group, General, a direct message, an agent chat,
@@ -364,6 +398,8 @@ describe("workspace member routes", () => {
       ["invite-link", "members-invite-link"],
       ["leave", "members-leave"],
       ["end", "members-end"],
+      ["folder-rules", "members-folder-rules"],
+      ["folder-markers", "members-folder-markers"],
     ]) {
       expect(parse(`/sync/${WORKSPACE}/members/${tail}`)).toEqual({
         route,
@@ -449,7 +485,7 @@ describe("what a member reaches", () => {
     });
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
-    await ownerWrite(h, "docs/access.yaml", "people:\n  ana@dohc.test: edit\n");
+    await ownerRule(h, "docs", "people:\n  ana@dohc.test: edit\n");
     expect(await pulledText(h, "ana", shareId)).toContain("docs/plan.md");
     const signature = storage.memberReach(WORKSPACE, "ana", "member", "comment").signature();
     const counted = lookups;
@@ -477,7 +513,7 @@ describe("what a member reaches", () => {
   it("reads a rule written earlier in the same transaction", async () => {
     const { h, storage } = await seed();
     await invited(h, "ana");
-    await ownerWrite(h, "docs/access.yaml", "members: view\n");
+    await ownerRule(h, "docs", "members: view\n");
     const context = storage as StorageContext;
     const level = () =>
       storage.memberReach(WORKSPACE, "ana", "member", "edit").levelAt("docs/plan.md");
@@ -498,33 +534,37 @@ describe("what a member reaches", () => {
     const { h, storage } = await seed();
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
-    const hiding = await putBlob(h, OWNER, WORKSPACE, "");
+    // The rule gives members the level they already have, so it hides nothing yet.
+    const ruleId = await ownerRule(h, "docs", "members: comment\n");
     const secret = await putBlob(h, OWNER, WORKSPACE, "SENTINEL written after hiding");
-    const hideDocsThenWrite = () =>
+    const op = logOp("moment.append", {
+      momentId: "hide-docs/plan.md",
+      versionId: "main",
+      objectId: "object-docs/plan.md",
+      path: "docs/plan.md",
+      recordedAtMs: 5_000,
+      operation: "write",
+      payloadBeforeBlobSha256: ownerHeads.get("docs/plan.md")!,
+      payloadBeforePath: "docs/plan.md",
+      payloadAfterBlobSha256: secret,
+      payloadAfterPath: "docs/plan.md",
+      metadata: { origin: "user" },
+      beforePresent: "null",
+    });
+    const hideDocsThenWrite = () => {
+      const hidden = storage.changeFolderRule({
+        workspaceId: WORKSPACE,
+        actorUserId: OWNER,
+        change: { kind: "change", ruleId, revision: 1, rule: { members: null, people: new Map() } },
+        nowMs: 5_000,
+      });
+      expect(hidden.ok).toBe(true);
       storage.appendLogBatch({
         workspaceId: WORKSPACE,
         originId: "origin-hide",
-        ops: [
-          ["docs/access.yaml", null, hiding],
-          ["docs/plan.md", ownerHeads.get("docs/plan.md")!, secret],
-        ].map(([path, before, after], originSeq) => {
-          const op = logOp("moment.append", {
-            momentId: `hide-${path}`,
-            versionId: "main",
-            objectId: `object-${path}`,
-            path,
-            recordedAtMs: 5_000,
-            operation: "write",
-            payloadBeforeBlobSha256: before,
-            payloadBeforePath: before ? path : null,
-            payloadAfterBlobSha256: after,
-            payloadAfterPath: path,
-            metadata: { origin: "user" },
-            beforePresent: "null",
-          });
-          return { ...op, originSeq, payloadJson: JSON.stringify(op.payload) };
-        }),
+        ops: [{ ...op, originSeq: 0, payloadJson: JSON.stringify(op.payload) }],
       });
+    };
     const page = createShareReadQueries(storage, 500).filteredLogPage(
       WORKSPACE,
       shareId,
@@ -550,30 +590,35 @@ describe("what a member reaches", () => {
     expect(after).not.toContain(secret);
   });
 
-  it("never serves a member a folder's access rule or a copy of one, and serves both to an admin", async () => {
+  it("serves a folder marker to neither a member nor an admin", async () => {
     const { h } = await seed();
     const ana = await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
-    await ownerWrite(h, "docs/access.yaml", "people:\n  ben@dohc.test: edit\n");
-    await ownerWrite(h, "docs/.access.yaml.swp", "people:\n  ben@dohc.test: edit\n");
+    const ruled = await post(h, OWNER, FOLDER_RULES, {
+      folder: "secret",
+      members: "edit",
+      people: [],
+    });
+    expect(ruled.status, await ruled.clone().text()).toBe(200);
+    await ownerWrite(h, "secret/notes.md", "hidden");
 
     const asMember = await pulledText(h, "ana", shareId);
-    expect(asMember).not.toContain("docs/plan.md");
-    expect(asMember).not.toContain("access.yaml");
+    expect(asMember).toContain("secret/notes.md");
+    expect(asMember).not.toContain(".dohc-access");
 
     expect(
       (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
     ).toBe(200);
     const asAdmin = await pulledText(h, "ana", shareId);
-    expect(asAdmin).toContain("docs/access.yaml");
-    expect(asAdmin).toContain("docs/.access.yaml.swp");
+    expect(asAdmin).toContain("secret/notes.md");
+    expect(asAdmin).not.toContain(".dohc-access");
   });
 
   it("filters member ops and blobs, and has no separate reach read", async () => {
     const { h } = await seed();
     const ana = await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
-    await ownerWrite(h, "private/access.yaml", "");
+    await ownerRule(h, "private", "");
     await ownerWrite(h, "private/deep/secret.md", "PRIVATE CONTENT");
     await ownerWrite(h, "public/deep/hello.md", "PUBLIC CONTENT");
     // A member learns of a reach change from their pages (decision 18A).
@@ -605,12 +650,12 @@ describe("what a member reaches", () => {
     expect((await blob("ana", "PUBLIC CONTENT")).status).toBe(200);
     await ownerWrite(h, "public/deep/hello.md", "changed");
     expect(await signature()).toBe(first);
-    await ownerWrite(h, "private/access.yaml", "members: view\n");
+    await ownerRule(h, "private", "members: view\n");
     const opened = await signature();
     expect(opened).not.toBe(first);
     expect(await pulledText(h, "ana", shareId)).toContain("private/deep/secret.md");
     expect((await listed()).folders).toEqual([{ path: "private", level: "view" }]);
-    await ownerWrite(h, "private/access.yaml", "");
+    await ownerRule(h, "private", "");
     // The signature is a function of reach, so the same reach signs the same.
     expect(await signature()).toBe(first);
     expect(
@@ -625,29 +670,14 @@ describe("what a member reaches", () => {
     const { h } = await seed();
     const ana = await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
-    await ownerWrite(h, "HR/access.yaml", "");
+    const marker = folderMarkerText(await ownerRule(h, "HR", ""), 1);
     await ownerWrite(h, "HR/salaries-2026.md", "PRIVATE CONTENT");
     expect(await pulledText(h, "ana", shareId)).not.toContain("HR/");
 
-    // The engine writes the destination rule before moving files, then removes the old rule.
-    await ownerWrite(h, "People/access.yaml", "");
+    // The engine writes the destination marker before moving files, then removes the old marker.
+    await ownerWrite(h, "People/.dohc-access", marker);
     await ownerRename(h, "HR/salaries-2026.md", "People/salaries-2026.md");
-    await ownerAppend(h, [
-      logOp("moment.append", {
-        momentId: `m-${ownerSeq++}`,
-        versionId: "main",
-        objectId: "object-HR/access.yaml",
-        path: "HR/access.yaml",
-        recordedAtMs: 5000,
-        operation: "delete",
-        payloadBeforeBlobSha256: ownerHeads.get("HR/access.yaml"),
-        payloadBeforePath: "HR/access.yaml",
-        payloadAfterBlobSha256: null,
-        payloadAfterPath: null,
-        metadata: { origin: "user" },
-        beforePresent: "null",
-      }),
-    ]);
+    await ownerDelete(h, "HR/.dohc-access");
 
     const asMember = await pulledText(h, "ana", shareId);
     expect(asMember).not.toContain("HR/");
@@ -667,15 +697,22 @@ describe("what a member reaches", () => {
       const { h } = await seed();
       const ana = await invited(h, "ana");
       const shareId = await shareIdOf(h, "ana");
-      await ownerWrite(h, "HR/access.yaml", "");
+      const marker = folderMarkerText(await ownerRule(h, "HR", ""), 1);
       await ownerWrite(h, "HR/layoff-plan.md", "published plan");
       await ownerRename(h, "HR/layoff-plan.md", "Public/plan.md");
       const before = await pulledText(h, "ana", shareId);
       expect(before).not.toContain("HR/");
       expect(before).toContain('"reachMove":"arrival"');
 
-      if (operation === "rename") await ownerWrite(h, "People/access.yaml", "");
-      await ownerDelete(h, "HR/access.yaml");
+      // The folder holds only its marker now; a rename takes it along.
+      if (operation === "rename") await ownerWrite(h, "People/.dohc-access", marker);
+      await ownerDelete(h, "HR/.dohc-access");
+      // A deleted folder keeps its rule; a renamed one takes it along.
+      expect((await membersView(h, OWNER)).folderRules![0]!.folders).toEqual([
+        operation === "rename"
+          ? { path: "People", state: "covered" }
+          : { path: "HR", state: "folder-missing" },
+      ]);
 
       const after = await pulledText(h, "ana", shareId);
       expect(after).not.toContain("HR/");
@@ -704,12 +741,13 @@ describe("what a member reaches", () => {
       await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" });
       await ownerWrite(h, "Public/notes.md", "notes v1");
       await ownerWrite(h, "Public/notes.md", "notes v2");
-      await ownerWrite(h, "HR/access.yaml", "");
+      const marker = folderMarkerText(await ownerRule(h, "HR", ""), 1);
       await ownerWrite(h, "HR/layoff-plan.md", "SECRET DRAFT v1");
       await ownerWrite(h, "HR/layoff-plan.md", "published plan");
       await ownerRename(h, "HR/layoff-plan.md", "Public/plan.md");
-      if (operation === "rename") await ownerWrite(h, "People/access.yaml", "");
-      await ownerDelete(h, "HR/access.yaml");
+      // The folder holds only its marker now; a rename takes it along.
+      if (operation === "rename") await ownerWrite(h, "People/.dohc-access", marker);
+      await ownerDelete(h, "HR/.dohc-access");
 
       const pulled = await pulledText(h, "ana", shareId);
       expect(pulled).not.toContain("HR/");
@@ -730,10 +768,10 @@ describe("what a member reaches", () => {
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
     await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" });
-    await ownerWrite(h, "HR/access.yaml", "");
+    await ownerRule(h, "HR", "");
     await ownerWrite(h, "HR/a.md", "kept");
     await ownerRename(h, "HR/a.md", "HR/b.md");
-    await ownerDelete(h, "HR/access.yaml");
+    await ownerRule(h, "HR", null);
 
     const ops = (await json(await pull(h, "ana", shareId))).ops as Array<{
       opKind: string;
@@ -759,7 +797,7 @@ describe("what a member reaches", () => {
   it("serves a readable Group without naming its hidden folder", async () => {
     const { h } = await seed();
     await ownerWrite(h, "team/welcome.md", "welcome");
-    await ownerWrite(h, "private/restricted/access.yaml", "");
+    await ownerRule(h, "private/restricted", "");
     await ownerAppend(h, [
       logOp(
         "chat.channel.create",
@@ -788,7 +826,7 @@ describe("what a member reaches", () => {
 
   it("withholds a Group's obsolete folder path after its hidden folder is renamed", async () => {
     const { h } = await seed();
-    await ownerWrite(h, "private/access.yaml", "");
+    const marker = folderMarkerText(await ownerRule(h, "private", ""), 1);
     await ownerWrite(h, "private/secret.md", "PRIVATE CONTENT");
     await ownerAppend(h, [
       logOp(
@@ -808,8 +846,9 @@ describe("what a member reaches", () => {
     const shareId = await shareIdOf(h, "ana");
     expect(await pulledText(h, "ana", shareId)).not.toContain("private");
 
+    await ownerWrite(h, "team-only/.dohc-access", marker);
     await ownerRename(h, "private/secret.md", "team-only/secret.md");
-    await ownerRename(h, "private/access.yaml", "team-only/access.yaml");
+    await ownerDelete(h, "private/.dohc-access");
 
     const asMember = await pulledText(h, "ana", shareId);
     expect(asMember).toContain("Discussion");
@@ -829,16 +868,16 @@ describe("what a member reaches", () => {
     const { h, storage } = await seed();
     const ana = await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
-    await ownerWrite(h, "view/access.yaml", "members: view\n");
-    await ownerWrite(h, "same/access.yaml", "members: comment\n");
+    await ownerRule(h, "view", "members: view\n");
+    await ownerRule(h, "same", "members: comment\n");
     await ownerWrite(h, "docs/a.md", "a");
     await ownerWrite(h, "docs/b.md", "b");
     await ownerWrite(h, "docs/c.md", "c");
     // A rule on a case twin hides `hide/` too.
-    await ownerWrite(h, "Hide/access.yaml", "");
+    await ownerRule(h, "Hide", "");
     await ownerWrite(h, "hide/d.md", "d");
     // Only `Edit/`'s own rule raises its level; its twin `edit/` keeps the default.
-    await ownerWrite(h, "Edit/access.yaml", "members: edit\n");
+    await ownerRule(h, "Edit", "members: edit\n");
     await ownerWrite(h, "Edit/e.md", "e");
     // Each page, a Group pull's included, carries the same signature.
     const read = async () => {
@@ -879,9 +918,9 @@ describe("what a member reaches", () => {
     await expectStep(false, "move from a ruled folder to its case twin");
     await ownerRename(h, "docs/moved/a.md", "Hide/a.md");
     await expectStep(false, "move into a hidden folder", ["departure", "docs/moved/a.md"]);
-    await ownerWrite(h, "plain/access.yaml", "members: comment\n");
+    await ownerRule(h, "plain", "members: comment\n");
     await expectStep(false, "a rule that gives the level its folder already has");
-    await ownerWrite(h, "Hide/inner/access.yaml", "members: edit\n");
+    await ownerRule(h, "Hide/inner", "members: edit\n");
     await expectStep(false, "a rule inside a hidden folder");
     // A rename in another Version leaves main's reach alone.
     const context = storage as StorageContext;
@@ -908,7 +947,7 @@ describe("what a member reaches", () => {
         ),
     );
     await expectStep(false, "rename in a fork");
-    await ownerWrite(h, "view/access.yaml", "members: edit\n");
+    await ownerRule(h, "view", "members: edit\n");
     await expectStep(true, "a rule that changes a level");
     expect(
       (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
@@ -927,12 +966,12 @@ describe("what a member reaches", () => {
     const { h } = await seed();
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
-    await ownerWrite(h, "team/access.yaml", "members: comment\n");
+    const teamRuleId = await ownerRule(h, "team", "members: comment\n");
     await ownerWrite(h, "team/a.md", "a");
-    await ownerWrite(h, "view/access.yaml", "members: view\n");
+    await ownerRule(h, "view", "members: view\n");
     await ownerWrite(h, "view/b.md", "b");
-    await ownerWrite(h, "closed/access.yaml", "");
-    await ownerWrite(h, "shut/access.yaml", "");
+    await ownerRule(h, "closed", "");
+    await ownerRule(h, "shut", "");
     const signatures = async () => {
       // Each page reads the reach in its own transaction, a Group pull's too.
       const [files, group] = await Promise.all(
@@ -957,21 +996,22 @@ describe("what a member reaches", () => {
     };
     await ownerWrite(h, "team/a.md", "edited");
     await expectChanged("content edit", false, false);
-    await ownerWrite(h, "team/access.yaml", "members: view\n");
+    await ownerRule(h, "team", "members: view\n");
     await expectChanged("level-only rule change", true, false);
     // History needs Edit, so the copy rebuilds when Edit starts or stops.
-    await ownerWrite(h, "team/access.yaml", "members: edit\n");
+    await ownerRule(h, "team", "members: edit\n");
     await expectChanged("promotion to Edit", true, true);
-    await ownerWrite(h, "team/access.yaml", "members: view\n");
+    await ownerRule(h, "team", "members: view\n");
     await expectChanged("demotion below Edit", true, true);
-    await ownerWrite(h, "team/access.yaml", "");
+    await ownerRule(h, "team", "");
     await expectChanged("hiding a folder", true, true);
-    await ownerWrite(h, "team/access.yaml", "members: edit\n");
+    await ownerRule(h, "team", "members: edit\n");
     await expectChanged("revealing a folder", true, true);
-    await ownerWrite(h, "empty/access.yaml", "");
+    await ownerRule(h, "empty", "");
     await expectChanged("hiding a folder with no other files", true, true);
-    // A rule on a hidden folder's case twin changes no reach: the twin hides it.
-    await ownerWrite(h, "EMPTY/access.yaml", "members: edit\n");
+    // A copy of an Edit rule's marker in a hidden folder's case twin changes no
+    // reach: the twin hides it.
+    await ownerWrite(h, "EMPTY/.dohc-access", folderMarkerText(teamRuleId, 1));
     const twin = await signatures();
     expect(twin.visibilitySignature, "a hidden folder's twin with a rule").toBe(
       last.visibilitySignature,
@@ -1004,8 +1044,8 @@ describe("what a member reaches", () => {
     const shareId = await shareIdOf(h, "ana");
     await ownerWrite(h, "docs/a.md", "a");
     await ownerWrite(h, "docs/b.md", "b");
-    // The member never sees this write, but the head counts it.
-    await ownerWrite(h, "closed/access.yaml", "");
+    // The member never sees the rule's marker, but the head counts it.
+    await ownerRule(h, "closed", "");
     await ownerWrite(h, "closed/c.md", "c");
     const context = storage as StorageContext;
     const head = () =>
@@ -1041,6 +1081,7 @@ describe("what a member reaches", () => {
     const { h } = await seed();
     const ana = await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
+    const ruleIds = new Map<string, string>();
     for (const [folder, rule] of [
       ["same", "members: comment\n"],
       ["view", "members: view\n"],
@@ -1048,16 +1089,17 @@ describe("what a member reaches", () => {
       ["view/same", "members: view\n"],
       ["private", ""],
       ["private/open", "members: edit\n"],
-      // Two case twins with their own rules are listed apart.
       ["Team", "members: edit\n"],
-      ["TEAM", "members: edit\n"],
-      // A twin that hides hides its twin too.
       ["Docs", "members: edit\n"],
-      ["DOCS", ""],
       // A ruled folder lists with no other file in it.
       ["empty", "members: view\n"],
     ])
-      await ownerWrite(h, `${folder}/access.yaml`, rule!);
+      ruleIds.set(folder!, await ownerRule(h, folder!, rule!));
+    // A case twin holding a copy of a rule's marker shares that rule, and the
+    // two are listed apart.
+    await ownerWrite(h, "TEAM/.dohc-access", folderMarkerText(ruleIds.get("Team")!, 1));
+    // A twin whose marker names no rule hides, and hides its twin too.
+    await ownerWrite(h, "DOCS/.dohc-access", folderMarkerText(`fr_${"0".repeat(32)}`, 1));
     await ownerWrite(h, "team/unruled.md", "a twin with no rule takes its parent's level");
     const inventory = async () => {
       const response = await pull(h, "ana", shareId);
@@ -1088,11 +1130,11 @@ describe("what a member reaches", () => {
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
     await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" });
-    await ownerWrite(h, "private/access.yaml", "");
+    await ownerRule(h, "private", "");
     await ownerWrite(h, "private/deep/secret.md", "hidden");
-    await ownerWrite(h, "view/access.yaml", "members: view\n");
+    await ownerRule(h, "view", "members: view\n");
     await ownerWrite(h, "view/file.md", "readable");
-    await ownerWrite(h, "other/access.yaml", "members: edit\n");
+    await ownerRule(h, "other", "members: edit\n");
     await ownerWrite(h, "other/file.md", "editable");
     const text = "my change",
       hash = sha256(text);
@@ -1136,8 +1178,7 @@ describe("what a member reaches", () => {
       code: "share_op_rejected",
       error: "Ask the owner to move this.",
     });
-    // Case twins with their own rules are two boundaries.
-    await ownerWrite(h, "Other/access.yaml", "members: edit\n");
+    // A ruled folder's case twin is its own boundary.
     const twin = await proposal(
       change("other/file.md", "Other/file.md", sha256("editable")),
       "twin",
@@ -1147,7 +1188,7 @@ describe("what a member reaches", () => {
       error: "Ask the owner to move this.",
     });
     // A move with a hidden end gets the plain refusal, so it can't find where hidden rules are.
-    await ownerWrite(h, "private/deep/access.yaml", "members: edit\n");
+    await ownerRule(h, "private/deep", "members: edit\n");
     for (const [from, to] of [
       ["private/x.md", "x.md"],
       ["private/deep/x.md", "private/x.md"],
@@ -1189,7 +1230,7 @@ describe("what a member reaches", () => {
       expect(response.status).toBe(403);
       expect(await response.json()).toMatchObject({ code: "share_op_rejected" });
     }
-    for (const path of ["docs/access.yaml", "docs/ACCESS.YAML~", "docs/.access.yaml.swp"]) {
+    for (const path of ["docs/.dohc-access", "docs/.DOHC-ACCESS", ".dohc-access"]) {
       expect((await proposal(change(null, path), path)).status).toBe(403);
     }
     const authorization = authorizeShareAction({
@@ -1206,7 +1247,7 @@ describe("what a member reaches", () => {
         change("other/file.md", "other/file.md", sha256("editable")),
       ).allowed,
     ).toBe(true);
-    await ownerWrite(h, "other/access.yaml", "");
+    await ownerRule(h, "other", "");
     expect(() =>
       storage.insertShareProposal({
         proposalId: "late",
@@ -1233,8 +1274,8 @@ describe("what a member reaches", () => {
     const { h } = await seed();
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
-    await ownerWrite(h, "docs/access.yaml", "members: edit\n");
-    await ownerWrite(h, "private/access.yaml", "");
+    await ownerRule(h, "docs", "members: edit\n");
+    await ownerRule(h, "private", "");
     const text = "a page";
     expect((await uploadBlob(h, "ana", shareId, text)).status).toBe(200);
     const changes = (path: string) => [
@@ -1306,10 +1347,10 @@ describe("what a member reaches", () => {
       state: { editing: true },
     });
     expect(publish.status).toBe(200);
-    await ownerWrite(h, "docs/access.yaml", "members: view\n");
+    await ownerRule(h, "docs", "members: view\n");
     expect((await presence("ana")).status).toBe(200);
     expect((await commentOnFile(h, "ana", shareId)).status).toBe(403);
-    await ownerWrite(h, "docs/access.yaml", "");
+    await ownerRule(h, "docs", "");
     expect((await presence("ana")).status).toBe(404);
     const scrubbed = await notices();
     expect(await scrubbed.text()).not.toContain("SENTINEL");
@@ -2607,6 +2648,228 @@ describe("ending access", () => {
   });
 });
 
+describe("folder rules", () => {
+  async function created(h: SyncRelayHandler, folder: string, members: string | null) {
+    const response = await post(h, OWNER, FOLDER_RULES, { folder, members, people: [] });
+    expect(response.status, await response.clone().text()).toBe(200);
+    return ((await response.json()) as WorkspaceMembersView).folderRules!.at(-1)!;
+  }
+
+  it("lets the owner and admins set a folder's rule, and lists it for them only", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    const first = await post(h, OWNER, FOLDER_RULES, {
+      folder: "/docs/",
+      members: "view",
+      people: [{ email: "Ben@Dohc.test", level: "edit" }],
+    });
+    expect(first.status, await first.clone().text()).toBe(200);
+    const [rule] = ((await first.json()) as WorkspaceMembersView).folderRules!;
+    expect(rule).toEqual({
+      ruleId: expect.stringMatching(/^fr_[0-9a-f]{32}$/u),
+      revision: 1,
+      members: "view",
+      people: [{ email: "ben@dohc.test", level: "edit" }],
+      folders: [{ path: "docs", state: "covered" }],
+    });
+
+    expect((await membersView(h, "ana")).folderRules).toBeNull();
+    const refused = await post(h, "ana", FOLDER_RULES, {
+      folder: "else",
+      members: null,
+      people: [],
+    });
+    expect(refused.status).toBe(403);
+    expect(await code(refused)).toBe("members_forbidden");
+
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    const change = { ruleId: rule!.ruleId, revision: 1, members: "comment", people: [] };
+    const changed = await post(h, "ana", FOLDER_RULES, change);
+    expect(changed.status, await changed.clone().text()).toBe(200);
+    expect(((await changed.json()) as WorkspaceMembersView).folderRules).toMatchObject([
+      { revision: 2, members: "comment", people: [] },
+    ]);
+
+    // A change made from an older read would drop what the admin just set.
+    const stale = await post(h, OWNER, FOLDER_RULES, change);
+    expect(stale.status).toBe(409);
+    expect(await json(stale)).toMatchObject({
+      code: "conflict",
+      error: expect.stringMatching(/changed/),
+    });
+    const twin = await post(h, OWNER, FOLDER_RULES, { folder: "DOCS", members: null, people: [] });
+    expect(twin.status).toBe(409);
+    expect(await json(twin)).toMatchObject({
+      code: "conflict",
+      error: expect.stringMatching(/already/),
+    });
+    for (const bad of [
+      { folder: "../docs", members: null, people: [] },
+      { folder: "docs", members: "owner", people: [] },
+      { folder: "docs", members: null, people: [{ email: "nobody", level: "view" }] },
+      { ruleId: "fr_1", revision: 2, clear: true },
+    ]) {
+      expect((await post(h, OWNER, FOLDER_RULES, bad)).status, JSON.stringify(bad)).toBe(400);
+    }
+
+    const cleared = await post(h, OWNER, FOLDER_RULES, {
+      ruleId: rule!.ruleId,
+      revision: 2,
+      clear: true,
+    });
+    expect(cleared.status, await cleared.clone().text()).toBe(200);
+    expect(((await cleared.json()) as WorkspaceMembersView).folderRules).toEqual([]);
+    expect((await post(h, OWNER, FOLDER_RULES, { ...change, revision: 3 })).status).toBe(404);
+  });
+
+  it("writes each change as the relay's own moment, with its own place in the owner's log", async () => {
+    const { h, storage } = await seed();
+    const context = storage as unknown as StorageContext;
+    const rule = await created(h, "docs", "view");
+    const changed = await post(h, OWNER, FOLDER_RULES, {
+      ruleId: rule.ruleId,
+      revision: 1,
+      members: null,
+      people: [],
+    });
+    expect(changed.status, await changed.clone().text()).toBe(200);
+    const markers = context.db
+      .prepare(
+        `SELECT payload_json FROM sync_relay_log
+         WHERE workspace_id = ? AND origin_id = 'relay:folder-access' ORDER BY relay_seq`,
+      )
+      .all(WORKSPACE)
+      .map((row) => JSON.parse(String(row.payload_json)) as Record<string, unknown>);
+    expect(markers.map((payload) => [payload.path, payload.author ?? null])).toEqual([
+      ["docs/.dohc-access", null],
+      ["docs/.dohc-access", null],
+    ]);
+    const spans = context.db
+      .prepare(
+        "SELECT rule_text, to_seq FROM sync_relay_access_rules WHERE folder = 'docs' ORDER BY from_seq",
+      )
+      .all()
+      .map((row) => [row.rule_text, row.to_seq === null]);
+    expect(spans).toEqual([
+      ["members: view\n", false],
+      ["", true],
+    ]);
+  });
+
+  it("refuses a folder marker from an admin's share", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    const shareId = await shareIdOf(h, "ana");
+    const text = `rule fr_${"0".repeat(32)}\n`;
+    await uploadBlob(h, "ana", shareId, text);
+    const write = await post(h, "ana", `/sync/shares/${shareId}/log`, {
+      originId: "origin-ana-marker",
+      ops: [
+        logOp("moment.append", {
+          momentId: "m-ana-marker",
+          versionId: "main",
+          objectId: "object-ana-marker",
+          path: "docs/.dohc-access",
+          recordedAtMs: 5000,
+          operation: "write",
+          payloadBeforeBlobSha256: null,
+          payloadBeforePath: null,
+          payloadAfterBlobSha256: sha256(text),
+          payloadAfterPath: "docs/.dohc-access",
+          metadata: { origin: "user" },
+          beforePresent: "null",
+        }),
+      ],
+    });
+    expect(write.status, await write.clone().text()).not.toBe(200);
+    expect((await membersView(h, OWNER)).folderRules).toEqual([]);
+  });
+
+  it("hides a folder whose marker names no rule until an admin removes the marker", async () => {
+    const { h, storage } = await seed();
+    const context = storage as unknown as StorageContext;
+    await ownerWrite(h, "docs/.dohc-access", `rule fr_${"0".repeat(32)}\n`);
+    const open = () =>
+      context.db
+        .prepare(
+          "SELECT rule_text FROM sync_relay_access_rules WHERE folder = 'docs' AND to_seq IS NULL",
+        )
+        .all()
+        .map((row) => row.rule_text);
+    expect(open()).toEqual([null]);
+    expect((await post(h, OWNER, FOLDER_MARKERS, { folder: "else" })).status).toBe(404);
+    const removed = await post(h, OWNER, FOLDER_MARKERS, { folder: "docs" });
+    expect(removed.status, await removed.clone().text()).toBe(200);
+    expect(open()).toEqual([]);
+  });
+
+  it("keeps a rule whose folder was deleted, and writes it no new marker", async () => {
+    const { h, storage } = await seed();
+    const context = storage as unknown as StorageContext;
+    const rule = await created(h, "trip", "view");
+    const marker = context.db
+      .prepare(
+        "SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id = ? AND path = 'trip/.dohc-access'",
+      )
+      .get(WORKSPACE)!.blob_sha256;
+    await ownerAppend(h, [
+      logOp("moment.append", {
+        momentId: "m-trip-gone",
+        versionId: "main",
+        objectId: "object-trip-gone",
+        path: "trip/.dohc-access",
+        recordedAtMs: 6000,
+        operation: "delete",
+        payloadBeforeBlobSha256: marker,
+        payloadBeforePath: "trip/.dohc-access",
+        payloadAfterBlobSha256: null,
+        payloadAfterPath: null,
+        metadata: { origin: "user" },
+        beforePresent: "present",
+      }),
+    ]);
+    expect((await membersView(h, OWNER)).folderRules).toMatchObject([
+      { folders: [{ path: "trip", state: "folder-missing" }] },
+    ]);
+    const changed = await post(h, OWNER, FOLDER_RULES, {
+      ruleId: rule.ruleId,
+      revision: 1,
+      members: "edit",
+      people: [],
+    });
+    expect(changed.status, await changed.clone().text()).toBe(200);
+    expect(((await changed.json()) as WorkspaceMembersView).folderRules).toMatchObject([
+      { revision: 2, folders: [{ path: "trip", state: "folder-missing" }] },
+    ]);
+  });
+
+  it("keeps rules and their spans when the workspace's sync identity rotates", async () => {
+    const { h, storage } = await seed();
+    const context = storage as unknown as StorageContext;
+    await created(h, "docs", "view");
+    expect(
+      storage.rotateWorkspaceIdentity({
+        workspaceId: WORKSPACE,
+        ownerUserId: OWNER,
+        replicationEpoch: "epoch-2",
+        streamIdentity: "stream-2",
+        rotatedAtMs: 7000,
+      }),
+    ).toBe("rotated");
+    expect(
+      context.db
+        .prepare("SELECT folder, rule_text FROM sync_relay_access_rules WHERE to_seq IS NULL")
+        .all()
+        .map((row) => ({ ...row })),
+    ).toEqual([{ folder: "docs", rule_text: "members: view\n" }]);
+  });
+});
+
 describe("account deletion", () => {
   const KEY = "account-deletion-key-at-least-32-bytes";
   function deleteAccount(storage: unknown, userId: string): void {
@@ -2620,6 +2883,27 @@ describe("account deletion", () => {
       manifest ?? { workspaces: [], shareIds: [], datasets: [], grantIds: [], publicationIds: [] },
     );
   }
+
+  it("keeps the folder rules a deleted admin changed, without their account", async () => {
+    const { h, storage } = await seed();
+    const ana = await invited(h, "ana");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    const made = await post(h, "ana", FOLDER_RULES, {
+      folder: "docs",
+      members: "view",
+      people: [],
+    });
+    expect(made.status, await made.clone().text()).toBe(200);
+    deleteAccount(storage, "ana");
+    expect(
+      (storage as unknown as StorageContext).db
+        .prepare("SELECT rule_text, changed_by_user_id FROM sync_relay_folder_rules")
+        .all()
+        .map((row) => ({ ...row })),
+    ).toEqual([{ rule_text: "members: view\n", changed_by_user_id: null }]);
+  });
 
   it("removes a deleted admin's entry and keeps everyone they invited", async () => {
     const { h, storage } = await seed();
@@ -2735,8 +3019,8 @@ describe("account deletion", () => {
           userId.startsWith("sam-") ? SAM : `${userId}@dohc.test`,
       },
     });
-    await ownerWrite(h, "docs/access.yaml", `members: view\npeople:\n  ${SAM}: edit\n`);
-    await ownerWrite(h, "notes/access.yaml", `members: edit\npeople:\n  ${SAM}: view\n`);
+    await ownerRule(h, "docs", `members: view\npeople:\n  ${SAM}: edit\n`);
+    await ownerRule(h, "notes", `members: edit\npeople:\n  ${SAM}: view\n`);
     await ownerWrite(h, "notes/todo.md", "the todo");
     const token = (await inviteLink(h, OWNER, "turn-on"))!;
     const levels = async (userId: string) => {
@@ -2772,14 +3056,7 @@ describe("account deletion", () => {
           userId === "squatter" ? null : userId === "sam" ? SAM : `${userId}@dohc.test`,
       },
     });
-    await ownerWrite(
-      h,
-      "docs/access.yaml",
-      `members: view
-people:
-  ${SAM}: edit
-`,
-    );
+    await ownerRule(h, "docs", `members: view\npeople:\n  ${SAM}: edit\n`);
     const token = (await inviteLink(h, OWNER, "turn-on"))!;
     const level = async (userId: string) => {
       await pulledText(h, userId, await shareIdOf(h, userId));

@@ -124,6 +124,15 @@ async function seed() {
     });
     files.set(objectId, { path, sha });
   };
+  // Hides a folder from members with a folder rule, as Members settings does.
+  const ownerHides = async (folder: string) => {
+    const response = await post(h, OWNER, `/sync/${WORKSPACE}/members/folder-rules`, {
+      folder,
+      members: null,
+      people: [],
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+  };
   const ownerOps = await post(h, OWNER, `/sync/${WORKSPACE}/log`, {
     originId: "origin-owner",
     ops: [
@@ -227,6 +236,7 @@ async function seed() {
     ownerSays,
     ownerAppends,
     ownerWrite,
+    ownerHides,
     member,
     bindPush,
     notices,
@@ -433,7 +443,7 @@ describe("a Notice a member can no longer read", () => {
       const s = await seed();
       await s.member("cara");
       await s.ownerWrite("object-budget", "Plans/Budget.md", "totals");
-      await s.ownerWrite("object-private-rule", "Private/access.yaml", "");
+      await s.ownerHides("Private");
       await s.ownerAppends({
         opKind: "chat.thread.create",
         payload: {
@@ -449,7 +459,7 @@ describe("a Notice a member can no longer read", () => {
       expect(JSON.stringify(held.notices), how).toContain("Budget");
 
       if (how === "the folder is hidden") {
-        await s.ownerWrite("object-plans-rule", "Plans/access.yaml", "");
+        await s.ownerHides("Plans");
       } else {
         await s.ownerWrite("object-budget", "Private/Budget.md", "totals");
       }

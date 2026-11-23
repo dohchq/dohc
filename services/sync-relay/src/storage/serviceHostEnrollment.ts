@@ -13,7 +13,7 @@ import {
   type AnyShareSelector,
 } from "../shareFilter";
 import { authorizeShareGrantAction } from "../shareAuthorization";
-import { workspaceFileWriteReach } from "../workspaceReach";
+import { workspaceFileReach } from "../workspaceReach";
 import { readCurrentShareGrant } from "./currentShareGrant";
 import { getWorkspaceMembership, workspaceMemberGrantId } from "./workspaceMembers";
 import { parseWorkspaceId } from "../requestInputs";
@@ -907,9 +907,7 @@ function authorizeMemberOpen(
 }
 /** Whether a member's workspace reach edits the path. An admin reads rule files but writes none. */
 function memberEditsPath(selector: AnyShareSelector, path: string): boolean {
-  return (
-    isWorkspaceSelector(selector) && pathLevel(workspaceFileWriteReach(selector), path) === "edit"
-  );
+  return isWorkspaceSelector(selector) && pathLevel(workspaceFileReach(selector), path) === "edit";
 }
 function ensureInsideTransaction(
   storage: StorageContext,

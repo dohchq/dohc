@@ -1,6 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
-import { ACCESS_RULE_FILE } from "@dohc/security-contract/access-rule-files";
+import { FOLDER_MARKER_FILE } from "@dohc/security-contract/access-rules";
 
 /**
  * A move asked without `confirmAccessChange` that would change which folder
@@ -10,14 +10,14 @@ export class AccessChangeError extends Error {
   override name = "AccessChangeError";
 }
 
-// The folders above `parent`, and `parent` itself, that hold an access rule.
-// A moved folder's own rule moves with it, so only its parents count.
+// The folders above `parent`, and `parent` itself, that hold a rule's marker.
+// A moved folder's own marker moves with it, so only its parents count.
 async function ruleFoldersAt(rootPath: string, parent: string): Promise<Set<string>> {
   const parts = parent.split("/").filter(Boolean);
   const folders = parts.map((_, index) => parts.slice(0, index + 1).join("/"));
   const held = await Promise.all(
     folders.map((folder) =>
-      lstat(join(rootPath, ...folder.split("/"), ACCESS_RULE_FILE)).then(
+      lstat(join(rootPath, ...folder.split("/"), FOLDER_MARKER_FILE)).then(
         (entry) => entry.isFile(),
         () => false,
       ),
@@ -30,8 +30,8 @@ const parentOf = (path: string) => path.split("/").slice(0, -1).join("/");
 const nameOf = (path: string) => path.split("/").filter(Boolean).at(-1) ?? path;
 
 /**
- * Why a move may change who can see an item: the folders holding an
- * `access.yaml` above its old and new places differ. It parses no rule, so
+ * Why a move may change who can see an item: the folders holding a
+ * `.dohc-access` marker above its old and new places differ. It parses no rule, so
  * two rules that give the same access still warn. Null when nothing differs.
  */
 export async function moveAccessWarning(

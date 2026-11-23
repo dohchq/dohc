@@ -54,6 +54,7 @@ const view = (role: Role): MembersResult => ({
     memberLevel: "edit",
     inviteLink: role === "member" ? null : { enabled: false, url: null },
     groupRules: role === "member" ? null : [],
+    folderRules: role === "member" ? null : [],
     people: [],
   },
 });

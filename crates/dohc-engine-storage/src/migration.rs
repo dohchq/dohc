@@ -3762,16 +3762,9 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("share_view_fences.sql"),
         sets_user_version: None,
     },
-    // A folder whose rule changed on disk and waits for its owner.
-    Migration {
-        ordinal: 106,
-        id: "v2-access-rule-holds",
-        sql: include_str!("access_rule_holds.sql"),
-        sets_user_version: None,
-    },
     // A message the relay deleted, and the line it leaves.
     Migration {
-        ordinal: 107,
+        ordinal: 106,
         id: "v2-chat-deleted-messages",
         sql: include_str!("chat_deleted_messages.sql"),
         sets_user_version: None,
@@ -3779,7 +3772,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     // A thread's deleted messages, which every unread count takes off its
     // count. Without it each count reads every message row of the thread.
     Migration {
-        ordinal: 108,
+        ordinal: 107,
         id: "v2-chat-deleted-messages-index",
         sql: "CREATE INDEX idx_chat_messages_thread_deleted \
               ON chat_messages(workspace_id, thread_id, message_order) \
@@ -5771,10 +5764,6 @@ mod tests {
                 "106779c42c404b7cb144a53d3f7394ecf24da6458f1e391466b1967ea66b5315",
             ),
             (
-                "v2-access-rule-holds",
-                "6f2ba17f8a826ebe0c14b9d7bd6d89a3f708f789bf99489512f5379349f621a6",
-            ),
-            (
                 "v2-chat-deleted-messages",
                 "9d8802c0f5572c45eecf7dc8224163cc3cccee3cbc814a4e8a213be1debc0a3c",
             ),
@@ -7415,42 +7404,6 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM engine_ownership", [], |r| r.get(0))
             .expect("own");
         assert_eq!(owns, 1);
-    }
-
-    #[test]
-    fn deleting_a_version_cascades_its_access_rule_holds() {
-        let dir = tempdir();
-        let path = dir.join("access-rule-hold-version-cascade.db");
-        let ctx = MigrationContext::current(1_100);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("apply baseline");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
-                 VALUES ('ws', 'main', 'Main', 'main', 1),
-                        ('ws', 'feature', 'Feature', 'named', 2);
-             INSERT INTO access_rule_holds
-                 (workspace_id, version_id, folder, reason, observed_sha256, recorded_at_ms)
-                 VALUES ('ws', 'main', 'team', 'removed', NULL, 3),
-                        ('ws', 'feature', 'team', 'removed', NULL, 3);",
-        )
-        .expect("seed holds");
-        conn.execute(
-            "DELETE FROM versions WHERE workspace_id='ws' AND version_id='feature'",
-            [],
-        )
-        .expect("delete feature version");
-        let left: Vec<String> = conn
-            .prepare("SELECT version_id FROM access_rule_holds")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(left, ["main"]);
     }
 
     #[test]

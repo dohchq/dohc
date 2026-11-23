@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
+import { folderMarkerText } from "@dohc/security-contract/access-rules";
 import { describe, expect, it, vi } from "vitest";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { DaemonRefusalError, VERSIONED_METHOD, type Request } from "@dohc/workspace-engine-client";
@@ -250,6 +251,36 @@ async function fixture(
 }
 
 describe("agent moves and deletes", () => {
+  it("puts the access marker first when rolling back a folder move", async () => {
+    const renames: string[] = [];
+    const f = await fixture({
+      beforeRequest(request) {
+        if (request.method !== VERSIONED_METHOD.textRename) return;
+        const { fromPath, toPath } = request.params as { fromPath: string; toPath: string };
+        if (fromPath === "source/z.md") throw new Error("Move stopped");
+        renames.push(toPath);
+      },
+    });
+    try {
+      await write(f.rootPath, "source/.dohc-access", "rule fr_1\n");
+      await write(f.rootPath, "source/a.md", "first");
+      await write(f.rootPath, "source/z.md", "last");
+      await f.start();
+      expect(await f.move("source", "target")).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("Move stopped"),
+      });
+      expect(renames).toEqual([
+        "target/.dohc-access",
+        "target/a.md",
+        "source/.dohc-access",
+        "source/a.md",
+      ]);
+    } finally {
+      await f.engine().stop();
+    }
+  });
+
   it("stages the source when the filesystem refuses an exclusive rename", async () => {
     const requests: string[] = [];
     const f = await fixture({
@@ -367,7 +398,7 @@ describe("agent moves and deletes", () => {
   it("moves an agent's file under another folder rule at once, and answers with the warning a person is asked", async () => {
     const f = await fixture();
     await write(f.rootPath, "Plan.txt", "plan");
-    await write(f.rootPath, "Team/access.yaml", "members: view\n");
+    await write(f.rootPath, "Team/.dohc-access", folderMarkerText(`fr_${"1".repeat(32)}`, 1));
     await f.start();
 
     expect(await f.move("Plan.txt", "Team/Plan.txt")).toMatchObject({
