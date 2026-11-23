@@ -656,7 +656,7 @@ globalThis.unmountBrokerTest = () => root.unmount();`,
       ],
       [
         '<script src="missing.js"></script>',
-        "site/index.html links missing.js, which is not in the app. Add the file or fix the link.",
+        "site/index.html links missing.js, which is not in the app. Add the file, list it in app.publish.json, or fix the link.",
       ],
       [
         '<img src="map.svg">',

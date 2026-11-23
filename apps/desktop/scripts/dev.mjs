@@ -199,6 +199,14 @@ async function run() {
     { stdio: "inherit" },
     "stage the app backend runtime",
   );
+  if (process.platform === "win32") {
+    runRequired(
+      process.execPath,
+      [join(import.meta.dirname, "build-cli-bin.mjs")],
+      { stdio: "inherit" },
+      "stage the CLI and MCP bundles",
+    );
+  }
 
   const devServer = await buildThenStartDesktop();
   if (devServer.error) fail("start electron-vite", devServer.error);

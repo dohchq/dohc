@@ -30,14 +30,14 @@ Every transactional Collection is defined by `dataset.json`, a SQLite schema (`s
 
 ### Choosing between `create` and `prepare` + `approve`
 
-- **Generated CRUD Collection**: Call `dohc_dataset` with `{ action: "create", workspaceId, definition }`. dohc generates `dataset.json`, `schema.sql`, and `operations.js` and approves revision 1 in one step. Generated `create` operations take `input: { values: { "<fieldId>": value } }`.
+- **Generated CRUD Collection**: Call `dohc_dataset` with `{ request: { action: "create", workspaceId, definition } }`, where `definition` is a `dataset.json` descriptor object (`formatVersion: 1` or `2`, `name`, `schemaPath`, `operationsPath`, `tables`, `operations`, plus `datasetId` for `formatVersion: 1`). dohc generates `dataset.json`, `schema.sql`, and `operations.js` and approves revision 1 in one step. Generated `create` operations take `input: { values: { "<fieldId>": value } }`; generated `edit` operations take `input: { id, expectedVersion, values: { "<fieldId>": value } }` (keyed by field UUIDs from `describe`).
 - **Custom business rules (`backend.ts` or `operations.js`)**: Write `dataset.json`, `schema.sql`, and `backend.ts` with `dohc_write_file`, then call `prepare` followed by `approve`.
 
-### Exact `dataset.json` rules
+### Exact `dataset.json` rules (`formatVersion: 1`)
 
-Every violation fails validation:
+Every violation fails validation (for slug-based `formatVersion: 2` definitions where dohc derives UUIDs from SQL names, see `docs/reference/app-kit.md`):
 
-- `formatVersion` must be `1`.
+- `formatVersion` is `1` for explicit-UUID definitions (or `2` for slug-based definitions).
 - `datasetId`, every `tableId`, every `fieldId`, and every `operationId` must be valid UUIDs and globally unique across the entire definition.
 - `schemaPath` is workspace-relative and ends in `.sql`. `operationsPath` is workspace-relative and ends in `.js` or `.ts`.
 - Each table has `tableId`, `name`, `sqlName`, `primaryKey`, and `fields`. `primaryKey` must match a column field's `sqlColumn` whose `type` is `"text"` or `"number"`, with `required: true`, `unique: true`, and no `default`.

@@ -2486,7 +2486,7 @@ describe("CLI socket server", () => {
         actor: "agent",
         request: { ...request, workspaceId: "other" },
       }),
-    ).rejects.toThrow("owning workspace");
+    ).rejects.toThrow("workspaceId does not match this workspace");
     context.readOnly = true;
     await expect(
       invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request }),
@@ -5026,6 +5026,43 @@ describe("CLI socket server", () => {
     expect((await stat(server!.socketPath)).mode & 0o777).toBe(0o600);
     expect(calls.openWorkspace).toBe(0);
     expect(errors).toEqual([]);
+  });
+
+  it("explains how to find workspaceId when a dataset, appPublication, or ownerAppResponses request names another workspace", async () => {
+    const reached = vi.fn(async () => {
+      throw new Error("should not reach handler");
+    });
+    Object.assign(context, {
+      dataset: reached,
+      appPublication: reached,
+      ownerAppResponses: reached,
+    });
+    await expect(
+      invoke("dataset", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        request: { action: "list", workspaceId: "local" },
+      }),
+    ).rejects.toThrow("workspaceId does not match this workspace");
+    await expect(
+      invoke("appPublication", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        request: {
+          action: "cancel",
+          workspaceId: "local",
+          approvalId: "00000000-0000-4000-8000-000000000101",
+        },
+      }),
+    ).rejects.toThrow("workspaceId does not match this workspace");
+    await expect(
+      invoke("ownerAppResponses", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        request: { action: "list", workspaceId: "local", grantId: "g", limit: 10 },
+      }),
+    ).rejects.toThrow("workspaceId does not match this workspace");
+    expect(reached).not.toHaveBeenCalled();
   });
 });
 

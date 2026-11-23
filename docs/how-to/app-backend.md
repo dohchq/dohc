@@ -2,7 +2,7 @@
 
 App authors and self-host operators use this guide to create, share, and manage a Collection-backed app.
 An already connected agent can use the same commands. Run the CLI from the owning workspace while dohc is open.
-Replace uppercase values with IDs returned by dohc. JSON examples work in PowerShell 7 and POSIX shells.
+Replace uppercase values with IDs returned by dohc. JSON examples work in POSIX shells. In PowerShell on Windows, pipe the JSON to `-` instead (for example `'{"workspaceId":"WORKSPACE_ID"}' | dohc dataset list -`) so `dohc.cmd` keeps double quotes intact; in Windows PowerShell 5.1, set `$OutputEncoding = [System.Text.UTF8Encoding]::new($false)` first so non-ASCII text is sent as UTF-8.
 
 ## Create the Collection first
 
