@@ -78,6 +78,11 @@ describe("dohc members", () => {
     [["group", "Team", "--level", "view"], { action: "group", group: "Team", level: "view" }],
     [["group", "Team", "--level", "none"], { action: "group", group: "Team", level: "none" }],
     [["group", "Team", "--clear"], { action: "group", group: "Team", level: null }],
+    [
+      ["folder", "Team/Docs", "--clear"],
+      { action: "folder", change: { folder: "Team/Docs", clear: true } },
+    ],
+    [["remove-folder-marker", "Team/Docs"], { action: "folderMarker", folder: "Team/Docs" }],
   ])("parses members %j", (operands, request) => {
     expect(parseCliArguments(["members", ...operands], {})).toMatchObject({
       verb: "members",
@@ -98,8 +103,65 @@ describe("dohc members", () => {
     [["group", "Team", "--level", "comment"], "Choose post, view, or none."],
     [["group", "Team", "--level", "constructor"], "Choose post, view, or none."],
     [["group", "Team", "--level", "view", "--clear"], "Choose --level or --clear, not both."],
+    [["folder", "Team"], "Set --members to view, comment, edit, or none."],
+    [["folder", "Team", "--members", "edit", "--clear"], "Use --clear by itself"],
+    [["folder", "Team", "--clear", "--person", "bo@test=edit"], "Use --clear by itself"],
+    [["folder", "Team", "--members", "none", "--person", "bo@test"], "Enter --person as"],
   ])("refuses members %j", (operands, message) => {
     expect(() => parseCliArguments(["members", ...operands], {})).toThrow(message);
+  });
+
+  it("sends repeated folder person levels by path and prints the saved rule", async () => {
+    const people = [
+      { email: "bo@test", level: "comment" },
+      { email: "cy@test", level: "edit" },
+    ];
+    const folder = "Research/Notes";
+    const request = vi.fn(async () => ({
+      status: "ready",
+      view: {
+        ...view,
+        folderRules: [
+          {
+            ruleId: `fr_${"1".repeat(32)}`,
+            revision: 1,
+            members: null,
+            people,
+            folders: [{ path: folder, state: "covered" }],
+          },
+        ],
+      },
+    }));
+    const result = await executeCli({
+      argv: [
+        "members",
+        "folder",
+        folder,
+        "--members",
+        "none",
+        "--person",
+        "bo@test=comment",
+        "--person",
+        "cy@test=edit",
+      ],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verb: "members",
+        args: {
+          cwd: expect.any(String),
+          actor: "human",
+          request: { action: "folder", change: { folder, members: null, people } },
+        },
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(
+      "Research/Notes · covered\n  Members: none\n  bo@test: comment\n  cy@test: edit",
+    );
   });
 
   it("sends the request with no workspace, and prints people, invites, and removed accounts by name, with their ids last", async () => {

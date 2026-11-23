@@ -474,6 +474,12 @@ function renderMembers(result: CliResultByVerb["members"]): string {
         ]
       : []),
     ...(removed.length ? ["", "Removed (dohc members let-back-in <id>)", ...removed.map(row)] : []),
+    ...(view.folderRules ?? []).flatMap(({ folders, members, people }) => [
+      "",
+      ...folders.map(({ path, state }) => `${lineSafe(path) || "/"} · ${state.replace("-", " ")}`),
+      `  Members: ${members ?? "none"}`,
+      ...people.map(({ email, level }) => `  ${lineSafe(email)}: ${level}`),
+    ]),
   ].join("\n");
 }
 

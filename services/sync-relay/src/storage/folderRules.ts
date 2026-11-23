@@ -149,6 +149,9 @@ export function removeFolderMarkers(
     const statements = accessRuleStatements(storage.db);
     const markers = markersIn(statements, input.workspaceId, input.folder);
     if (markers.length === 0) return { ok: false, reason: "not-found" } as const;
+    const ruleId = folderMarkerRule(statements, input.workspaceId, input.folder);
+    if (ruleId !== null && statements.rule.get(input.workspaceId, ruleId))
+      return { ok: false, reason: "not-found" } as const;
     writeMarkers(storage, statements, {
       workspaceId: input.workspaceId,
       markers: markers.map((row) => ({ path: String(row.path), text: null })),

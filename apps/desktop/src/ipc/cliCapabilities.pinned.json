@@ -315,7 +315,9 @@
       "members.link.change",
       "members.end",
       "members.group.rule",
-      "chat.message.delete"
+      "chat.message.delete",
+      "members.folder.rule",
+      "members.folder.marker.remove"
     ]
   },
   "public": {
@@ -442,6 +444,10 @@
     "members member": "members.role.set",
     "members let-back-in": "members.readmit",
     "members link": "members.link.change",
+    "members folder": "members.folder.rule",
+    "members remove-folder-marker": "members.folder.marker.remove",
+    "members folder": "members.folder.rule",
+    "members remove-folder-marker": "members.folder.marker.remove",
     "members end": "members.end",
     "members group": "members.group.rule"
   }

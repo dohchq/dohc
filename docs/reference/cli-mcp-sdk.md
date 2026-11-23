@@ -83,9 +83,9 @@ Returns the requested action's result, listed under [`dohc app`](#dohc-app). Onl
 
 ### `dohc_members`
 
-Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); turn the invite link on or off or reset it; end membership for everyone; or delete a message in a Group or a file's Comments (deleteMessage, with its threadId and messageId). The server decides what your role allows: members see names and roles and delete their own messages; admins also invite, remove members, let them back in, set the level and a Group's access, manage the invite link, and delete any message in a Group or Comments; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Deleting a message can't be undone. It shows as deleted everywhere it syncs, but people who already read it may keep a copy. Ask the person you work for before you remove anyone, hide a Group, end membership, or delete someone else's message.
+Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); set or clear folder access (folder with change containing a workspace-relative folder and members plus people, or clear: true; use ruleId and revision from list to target a specific rule; members null hides the folder; people are email and level pairs); remove an unknown marker (folderMarker with folder); turn the invite link on or off or reset it; end membership for everyone; or delete a message in a Group or a file's Comments (deleteMessage, with its threadId and messageId). The server decides what your role allows: members see names and roles and delete their own messages; admins also invite, remove members, let them back in, set the level and folder or Group access, manage the invite link, and delete any message in a Group or Comments; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Deleting a message can't be undone. It shows as deleted everywhere it syncs, but people who already read it may keep a copy. Ask the person you work for before you remove anyone, hide a Group, narrow folder access, end membership, or delete someone else's message.
 
-- `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" } | { action: "group", group: string, level?: "comment" | "view" | "none" | null } | { action: "deleteMessage", threadId: string, messageId: string }`. Required.
+- `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" } | { action: "group", group: string, level?: "comment" | "view" | "none" | null } | { action: "deleteMessage", threadId: string, messageId: string } | { action: "folder", change: { folder: string, members: "view" | "comment" | "edit" | null, people: ({ email: string, level: "view" | "comment" | "edit" })[], create?: true } | { ruleId: string, revision: integer, members: "view" | "comment" | "edit" | null, people: ({ email: string, level: "view" | "comment" | "edit" })[] } | { folder: string, clear: true } | { ruleId: string, revision: integer, clear: true } } | { action: "folderMarker", folder: string }`. Required.
 
 Returns `{ status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } } | { status: "refused" } | { status: "done" } | { status: "group", name, level, memberLevel }`.
 
@@ -1180,6 +1180,32 @@ A Group is a name or id from dohc chat groups. General, direct messages and agen
 
 - `--level <post|view|none>`: Set the Group's access.
 - `--clear`: Remove the Group's access, so it takes the member level.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+
+#### `dohc members folder`
+
+```sh
+dohc members folder <path> [options]
+```
+
+Set or clear access to a workspace folder.
+
+Use a workspace-relative path, or / for the workspace root. Copies already on people's computers stay when access narrows.
+
+- `--members <view|comment|edit|none>`: Set the member level.
+- `--person <email=level>`: Set one person's level. Repeat for more people.
+- `--clear`: Remove the folder's rule.
+
+With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
+
+#### `dohc members remove-folder-marker`
+
+```sh
+dohc members remove-folder-marker <path> [options]
+```
+
+Remove an unknown or unreadable folder marker.
 
 With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, groupRules, folderRules, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }` or `{ schemaVersion, status: "group", name, level, memberLevel }`.
 
