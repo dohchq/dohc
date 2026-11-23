@@ -427,10 +427,6 @@ function writeRange(
       setBoundary(boundaryElement(reading, ends)!, reading.blocks[ends]!.node, block.block, null);
     return;
   }
-  if (continuesLaterBlock && oldEnd === reading.starts[ends]! + 1) {
-    const itsOwnStart = rest.findLastIndex((token) => "block" in token);
-    rest = rest.filter((_, at) => at !== itsOwnStart);
-  }
   const kept = countBelow(reading.starts, oldEnd);
   if (replaced && first.piece === null && startsWithBlock && !continuesLaterBlock) {
     const path = pathAt(reading, oldStart);
@@ -864,7 +860,7 @@ export function linesGivenBoundaries(
               "block" in again &&
               again.block.type !== reading.blocks[block]!.node.type;
             if (keepsItsStart) edits.add(block);
-            else if (!startsAgain || to > reading.starts[block]! + 1) gone.add(block);
+            else gone.add(block);
             if (!startsAgain || asAnotherKind) touch(block);
           }
         });

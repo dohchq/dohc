@@ -1946,7 +1946,7 @@ const ORACLE_COUNTS = {
     "range error": 0,
   },
   undone: 6289,
-  given: 3653,
+  given: 3569,
   excepted: {
     "a mark on an inline item": 467,
     "formatting stored under a code block's letters": 9,
@@ -2122,13 +2122,6 @@ describe("the note reads as the document ProseMirror computed", () => {
             above -= 1;
           const wasGivenItsOwn = givenFirst.includes(tokens[above]?.id ?? "");
           const standing = new Set(tokens.map((token) => token.id));
-          const cut = Y.decodeUpdate(a.sent.at(-1)!).ds.clients;
-          const wasCut = (id: string) => {
-            const [client, clock] = id.split(":").map(Number) as [number, number];
-            return (cut.get(client) ?? []).some(
-              (range) => clock >= range.clock && clock < range.clock + range.len,
-            );
-          };
           const runsAcrossBlocks = wrote.steps.some((step, order) => {
             let across = false;
             step.getMap().forEach((oldStart, oldEnd) => {
@@ -2144,8 +2137,7 @@ describe("the note reads as the document ProseMirror computed", () => {
               if (line.path !== JSON.stringify(attrs.path)) return false;
               if (line.next !== undefined)
                 return !runsAcrossBlocks && line.next === next.id && attrs.type === "paragraph";
-              const ranInto = runsAcrossBlocks && wasCut(line.items[0]!);
-              return !ranInto && line.items.find((id) => standing.has(id)) === next.id;
+              return !runsAcrossBlocks && line.items.find((id) => standing.has(id)) === next.id;
             });
           if (isItsOwn)
             throw new Error(
@@ -3620,6 +3612,27 @@ describe("a change next to the paragraph after a block that cannot hold its cont
     reference.doc.destroy();
   });
 
+  it("gives that paragraph nothing first when a delete takes its code block and ends at its start, as the reference writer does, and writes its boundary in the delete", () => {
+    const lines = [stored(CODE, "cc"), stored(CODE, "kk", HARD_BREAK, "abc")];
+    const a = person(noteOfLines(lines), 10);
+    const before = a.view.state.doc.toJSON();
+    const was = tokensOf(a.sequence);
+    const reference = declared(93);
+    Y.applyUpdate(reference.doc, noteOfLines(lines));
+    const change = deleteRange(schema, reference.doc, 0, 0, 2, 0, () => "fresh")!;
+    const start = a.view.state.doc.child(0).nodeSize + a.view.state.doc.child(1).nodeSize + 1;
+    a.view.dispatch(a.view.state.tr.delete(1, start));
+    expect(a.view.state.doc.toString()).toBe('doc(codeBlock, paragraph(hardBreak, "abc"))');
+    expect(change.given).toEqual([]);
+    expect(givenByEditor(a, was)).toEqual([]);
+    expect(a.sent).toHaveLength(1);
+    a.expectMirror();
+    expect(a.undo()).toBe(true);
+    expect(a.view.state.doc.toJSON()).toEqual(before);
+    a.expectMirror();
+    reference.doc.destroy();
+  });
+
   it("gives that paragraph its boundary first when the code block before it is split, as the reference writer does", () => {
     const lines = [stored(CODE, "ab", HARD_BREAK, "cd")];
     const a = person(noteOfLines(lines), 10);
@@ -3644,14 +3657,8 @@ type Differential = {
   givenDifferently: Record<string, number>;
   readDifferently: Record<string, number>;
 };
-const DIFFERENTIAL_COUNTS: Differential = {
-  compared: 1702,
-  onlyOne: 306,
-  neither: 205,
-  givenDifferently: {},
-  readDifferently: { "a change of kind to codeBlock": 19 },
-};
-const differential: Differential & { notes: number; examples: string[] } = {
+type Tally = Differential & { notes: number; examples: string[] };
+const tally = (): Tally => ({
   notes: 0,
   compared: 0,
   onlyOne: 0,
@@ -3659,148 +3666,247 @@ const differential: Differential & { notes: number; examples: string[] } = {
   givenDifferently: {},
   readDifferently: {},
   examples: [],
+});
+const sayTally = (name: string, { notes, examples, ...counts }: Tally) =>
+  `the editor against the reference writer, ${name}: ${String(notes)} notes; compared ${String(counts.compared)}; gave boundaries to other lines ${JSON.stringify(counts.givenDifferently)}; gave the same and read differently ${JSON.stringify(counts.readDifferently)}; only one of the two took the edit ${String(counts.onlyOne)}, neither ${String(counts.neither)}\n${examples.join("\n")}`;
+
+const DIFFERENTIAL_COUNTS: Differential = {
+  compared: 2264,
+  onlyOne: 483,
+  neither: 253,
+  givenDifferently: {},
+  readDifferently: { "a change of kind to codeBlock": 19, "a delete of a whole block": 1 },
+};
+const DIFFERENTIAL_COUNTS_AT_RANDOM: Differential = {
+  compared: 212,
+  onlyOne: 69,
+  neither: 35,
+  givenDifferently: {},
+  readDifferently: {
+    "a change of kind to codeBlock": 6,
+    "a delete of a whole block": 1,
+    "a join": 1,
+  },
 };
 
-describe("the editor and the reference writer, for the same edit of the same note", () => {
-  it.each(ORACLE_NOTES)("give boundaries to the same lines in %s", (_name, lines) => {
-    const baseline = noteOfLines(lines);
-    const start = declared(92);
-    Y.applyUpdate(start.doc, baseline);
-    const reading = createBodyReader(schema, start.sequence, start.containers).reading();
-    const was = tokensOf(start.sequence);
-    let fresh = 0;
-    const freshId = () => `fresh${String(fresh++)}`;
+/**
+ * Makes every edit both writers take on every block of one note, once through an editor and once
+ * through the reference writer, and counts where they give a boundary to different lines or read
+ * differently after.
+ */
+function compareWithReference(lines: readonly StoredLine[], counted: Tally): void {
+  const baseline = noteOfLines(lines);
+  const start = declared(92);
+  Y.applyUpdate(start.doc, baseline);
+  const reading = createBodyReader(schema, start.sequence, start.containers).reading();
+  const was = tokensOf(start.sequence);
+  let fresh = 0;
+  const freshId = () => `fresh${String(fresh++)}`;
 
-    const compare = (
-      edit: string,
-      label: string,
-      byReference: (doc: Y.Doc) => BodyChange | null,
-      byEditor: (a: Person) => void,
-    ) => {
-      const reference = declared(93);
-      Y.applyUpdate(reference.doc, baseline);
-      let change: BodyChange | null = null;
-      try {
-        change = byReference(reference.doc);
-      } catch (error) {
-        if (!(error instanceof RangeError)) throw error;
-      }
-      const a = person(baseline, 10);
-      try {
-        byEditor(a);
-      } catch (error) {
-        if (!(error instanceof RangeError)) throw error;
-      }
-      const wrote = a.sent.length > 0;
-      if (!change || !wrote) {
-        if (!change && !wrote) differential.neither += 1;
-        else differential.onlyOne += 1;
-      } else {
-        differential.compared += 1;
-        const where = `${edit} ${label} in ${reading.doc.toString()}`;
-        const byTheEditor = givenByEditor(a, was);
-        const byTheReference = change.given.map((each) => each.index);
-        writeBody(reference.doc, change, REFERENCE);
-        const read = readBodySequence(schema, reference.doc);
-        a.expectMirror();
-        const count = (counts: Record<string, number>, why: string) => {
-          counts[edit] = (counts[edit] ?? 0) + 1;
-          if (counts[edit] <= 2) differential.examples.push(`${why}: ${where}`);
-        };
-        if (JSON.stringify(byTheEditor) !== JSON.stringify(byTheReference))
-          count(
-            differential.givenDifferently,
-            `the editor gave ${JSON.stringify(byTheEditor)}, the reference ${JSON.stringify(byTheReference)}`,
-          );
-        else if (!a.view.state.doc.eq(read))
-          count(
-            differential.readDifferently,
-            `the editor reads ${a.view.state.doc.toString()}, the reference ${read.toString()}`,
-          );
-      }
-      reference.doc.destroy();
-      stopEveryone();
-    };
+  const placeOf = (block: number) =>
+    reading.lines[block]?.element
+      ? reading.bases[block]! + (reading.blocks[block]!.shown[0]?.index ?? 0)
+      : 0;
+  const compare = (
+    edit: string,
+    label: string,
+    byReference: (doc: Y.Doc) => BodyChange | null,
+    byEditor: (a: Person) => void,
+    startsInLineAbove = -1,
+  ) => {
+    const reference = declared(93);
+    Y.applyUpdate(reference.doc, baseline);
+    let change: BodyChange | null = null;
+    try {
+      change = byReference(reference.doc);
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+    }
+    const a = person(baseline, 10);
+    try {
+      byEditor(a);
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+    }
+    const wrote = a.sent.length > 0;
+    if (!change || !wrote) {
+      if (!change && !wrote) counted.neither += 1;
+      else counted.onlyOne += 1;
+    } else {
+      counted.compared += 1;
+      const where = `${edit} ${label} in ${reading.doc.toString()}`;
+      const lineAbove = startsInLineAbove >= 0 ? placeOf(startsInLineAbove) : -1;
+      const butTheLineAbove = (index: number) =>
+        index !== lineAbove || boundaryAt(reading, startsInLineAbove) >= 0;
+      const byTheEditor = givenByEditor(a, was).filter(butTheLineAbove);
+      const byTheReference = change.given.map((each) => each.index).filter(butTheLineAbove);
+      writeBody(reference.doc, change, REFERENCE);
+      const read = readBodySequence(schema, reference.doc);
+      a.expectMirror();
+      const count = (counts: Record<string, number>, why: string) => {
+        counts[edit] = (counts[edit] ?? 0) + 1;
+        if (counts[edit] <= 2) counted.examples.push(`${why}: ${where}`);
+      };
+      if (JSON.stringify(byTheEditor) !== JSON.stringify(byTheReference))
+        count(
+          counted.givenDifferently,
+          `the editor gave ${JSON.stringify(byTheEditor)}, the reference ${JSON.stringify(byTheReference)}`,
+        );
+      else if (!a.view.state.doc.eq(read))
+        count(
+          counted.readDifferently,
+          `the editor reads ${a.view.state.doc.toString()}, the reference ${read.toString()}`,
+        );
+    }
+    reference.doc.destroy();
+    stopEveryone();
+  };
 
-    reading.blocks.forEach((block, at) => {
-      const from = reading.starts[at]! + 1;
-      const size = block.node.isTextblock ? block.node.content.size : 0;
-      const kinds = [{ type: "heading", level: 2 }, { type: "codeBlock" }, { type: "paragraph" }];
-      for (const kind of kinds)
-        compare(
-          `a change of kind to ${kind.type}`,
-          `of block ${String(at)}`,
-          (doc) => setLineKind(schema, doc, at, kind),
-          (a) => {
-            a.select([at, 0]);
-            a.retype(kind.type, "level" in kind ? { level: kind.level } : undefined);
-          },
-        );
-      if (!block.node.isTextblock) return;
-      if (size > 0)
-        compare(
-          "a mark",
-          `over block ${String(at)}`,
-          (doc) => setMarks(schema, doc, at, 0, size, { bold: {} }),
-          (a) => {
-            a.select([at, 0], [at, size]);
-            a.toggle("bold");
-          },
-        );
-      for (const offset of new Set([0, Math.floor(size / 2), size])) {
-        const pos = from + offset;
-        compare(
-          "a letter",
-          `at ${String(offset)} of block ${String(at)}`,
-          (doc) => typeLetters(schema, doc, at, offset, "x", {}),
-          (a) => a.view.dispatch(a.view.state.tr.insertText("x", pos)),
-        );
-        compare(
-          "an inline item",
-          `at ${String(offset)} of block ${String(at)}`,
-          (doc) =>
-            insertInline(schema, doc, at, offset, "wikilink", { target: "Other", label: null }),
-          (a) =>
-            a.view.dispatch(
-              a.view.state.tr.insert(pos, schema.nodes.wikilink!.create({ target: "Other" })),
-            ),
-        );
-        compare(
-          "a split",
-          `at ${String(offset)} of block ${String(at)}`,
-          (doc) => splitLine(schema, doc, at, offset, freshId),
-          (a) => a.view.dispatch(a.view.state.tr.split(pos)),
-        );
-        if (offset < size)
+  const offsetsIn = (size: number) => [...new Set([0, Math.floor(size / 2), size])];
+  reading.blocks.forEach((block, at) => {
+    const from = reading.starts[at]! + 1;
+    const size = block.node.isTextblock ? block.node.content.size : 0;
+    const kinds = [{ type: "heading", level: 2 }, { type: "codeBlock" }, { type: "paragraph" }];
+    for (const kind of kinds)
+      compare(
+        `a change of kind to ${kind.type}`,
+        `of block ${String(at)}`,
+        (doc) => setLineKind(schema, doc, at, kind),
+        (a) => {
+          a.select([at, 0]);
+          a.retype(kind.type, "level" in kind ? { level: kind.level } : undefined);
+        },
+      );
+    const above = reading.blocks[at - 1]?.node;
+    if (above?.isTextblock)
+      compare(
+        "a delete of a whole block",
+        `of block ${String(at)}`,
+        (doc) => deleteRange(schema, doc, at - 1, above.content.size, at, size, freshId),
+        (a) =>
+          a.view.dispatch(
+            a.view.state.tr.delete(reading.starts[at]!, reading.starts[at]! + block.node.nodeSize),
+          ),
+        at - 1,
+      );
+    if (!block.node.isTextblock) return;
+    for (let toAt = at + 1; toAt <= at + 2 && toAt < reading.blocks.length; toAt++) {
+      const last = reading.blocks[toAt]!.node;
+      if (!last.isTextblock) continue;
+      for (const offset of offsetsIn(size))
+        for (const toOffset of offsetsIn(last.content.size))
           compare(
-            "a delete",
-            `from ${String(offset)} to the end of block ${String(at)}`,
-            (doc) => deleteRange(schema, doc, at, offset, at, size, freshId),
-            (a) => a.view.dispatch(a.view.state.tr.delete(pos, from + size)),
+            "a delete across blocks",
+            `from ${String(offset)} of block ${String(at)} to ${String(toOffset)} of block ${String(toAt)}`,
+            (doc) => deleteRange(schema, doc, at, offset, toAt, toOffset, freshId),
+            (a) =>
+              a.view.dispatch(
+                a.view.state.tr.delete(from + offset, reading.starts[toAt]! + 1 + toOffset),
+              ),
           );
-      }
-      if (at > 0)
+    }
+    if (size > 0)
+      compare(
+        "a mark",
+        `over block ${String(at)}`,
+        (doc) => setMarks(schema, doc, at, 0, size, { bold: {} }),
+        (a) => {
+          a.select([at, 0], [at, size]);
+          a.toggle("bold");
+        },
+      );
+    for (const offset of offsetsIn(size)) {
+      const pos = from + offset;
+      compare(
+        "a letter",
+        `at ${String(offset)} of block ${String(at)}`,
+        (doc) => typeLetters(schema, doc, at, offset, "x", {}),
+        (a) => a.view.dispatch(a.view.state.tr.insertText("x", pos)),
+      );
+      compare(
+        "an inline item",
+        `at ${String(offset)} of block ${String(at)}`,
+        (doc) =>
+          insertInline(schema, doc, at, offset, "wikilink", { target: "Other", label: null }),
+        (a) =>
+          a.view.dispatch(
+            a.view.state.tr.insert(pos, schema.nodes.wikilink!.create({ target: "Other" })),
+          ),
+      );
+      compare(
+        "a split",
+        `at ${String(offset)} of block ${String(at)}`,
+        (doc) => splitLine(schema, doc, at, offset, freshId),
+        (a) => a.view.dispatch(a.view.state.tr.split(pos)),
+      );
+      if (offset < size)
         compare(
-          "a join",
-          `of block ${String(at)} into the one above`,
-          (doc) => joinLine(schema, doc, at, freshId),
-          (a) => {
-            a.select([at, 0]);
-            a.press("Backspace");
-          },
+          "a delete",
+          `from ${String(offset)} to the end of block ${String(at)}`,
+          (doc) => deleteRange(schema, doc, at, offset, at, size, freshId),
+          (a) => a.view.dispatch(a.view.state.tr.delete(pos, from + size)),
         );
-    });
-    start.doc.destroy();
-    differential.notes += 1;
+    }
+    if (at > 0)
+      compare(
+        "a join",
+        `of block ${String(at)} into the one above`,
+        (doc) => joinLine(schema, doc, at, freshId),
+        (a) => {
+          a.select([at, 0]);
+          a.press("Backspace");
+        },
+      );
+  });
+  start.doc.destroy();
+  counted.notes += 1;
+}
+
+/** A note of two to four lines made at random: any kind, some in one list item, the first perhaps with no boundary. */
+function noteAtRandom(next: () => number): StoredLine[] {
+  const pick = <Option>(options: readonly Option[]) =>
+    options[Math.floor(next() * options.length)]!;
+  const count = 2 + Math.floor(next() * 3);
+  const itemFrom = pick([-9, 0, 1, 2]);
+  const itemTo = itemFrom + 1 + Math.floor(next() * 2);
+  return Array.from({ length: count }, (_, line) => {
+    const kind = pick<Record<string, unknown>>([
+      {},
+      {},
+      { type: "heading", level: 2 },
+      CODE,
+      RULE,
+      MATH,
+    ]);
+    const parts = Array.from({ length: Math.floor(next() * 4) }, () =>
+      pick<Part>(["ab", "c", HARD_BREAK, WIKILINK]),
+    );
+    if (line === 0 && next() < 0.3) return stored(null, ...parts);
+    return stored(line >= itemFrom && line < itemTo ? { ...kind, ...IN_ITEM } : kind, ...parts);
+  });
+}
+
+describe("the editor and the reference writer, for the same edit of the same note", () => {
+  const inOracleNotes = tally();
+  it.each(ORACLE_NOTES)("give boundaries to the same lines in %s", (_name, lines) => {
+    compareWithReference(lines, inOracleNotes);
   });
 
   it("compares as many edits as counted", () => {
-    const { notes, examples, ...counts } = differential;
-    console.log(
-      `the editor against the reference writer: ${String(notes)} notes; compared ${String(counts.compared)}; gave boundaries to other lines ${JSON.stringify(counts.givenDifferently)}; gave the same and read differently ${JSON.stringify(counts.readDifferently)}; only one of the two took the edit ${String(counts.onlyOne)}, neither ${String(counts.neither)}\n${examples.join("\n")}`,
-    );
+    console.log(sayTally("in the oracle's notes", inOracleNotes));
+    const { notes, examples: _examples, ...counts } = inOracleNotes;
     if (notes !== ORACLE_NOTES.length) return;
     expect(counts).toEqual(DIFFERENTIAL_COUNTS);
+  });
+
+  it("give boundaries to the same lines in notes made at random", () => {
+    const atRandom = tally();
+    for (let seed = 1; seed <= Math.ceil(SEEDS / 4); seed++)
+      compareWithReference(noteAtRandom(random(seed)), atRandom);
+    console.log(sayTally("in notes made at random", atRandom));
+    const { notes: _notes, examples: _examples, ...counts } = atRandom;
+    expect(counts.givenDifferently).toEqual(DIFFERENTIAL_COUNTS_AT_RANDOM.givenDifferently);
+    if (SEEDS === 40) expect(counts).toEqual(DIFFERENTIAL_COUNTS_AT_RANDOM);
   });
 });
 
