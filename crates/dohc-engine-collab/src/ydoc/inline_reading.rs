@@ -194,10 +194,7 @@ fn add_mark(marks: &[MarkdownMark], mark: MarkdownMark) -> Read<Vec<MarkdownMark
 }
 
 fn plain(kind: MarkKind) -> MarkdownMark {
-    MarkdownMark {
-        kind,
-        attrs: Value::Object(Default::default()),
-    }
+    MarkdownMark::new(kind, Value::Object(Default::default()))
 }
 
 // marked masks links, code spans and tags before it looks for closing
@@ -849,16 +846,14 @@ fn link(
         }
         out.push(InlinePiece::Image(attrs));
     } else {
-        let mark = MarkdownMark {
-            kind: MarkKind::Link,
-            attrs: json!({
-                "href": destination,
-                "target": "_blank",
-                "rel": LINK_REL,
-                "class": null,
-                "title": title,
-            }),
-        };
+        let attrs = json!({
+            "href": destination,
+            "target": "_blank",
+            "rel": LINK_REL,
+            "class": null,
+            "title": title,
+        });
+        let mark = MarkdownMark::new(MarkKind::Link, attrs);
         lex(label, &add_mark(marks, mark)?, true, work, out)?;
     }
     Ok(at + 1)
