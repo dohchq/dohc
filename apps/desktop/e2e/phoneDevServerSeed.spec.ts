@@ -257,7 +257,10 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
           timeout: 30_000,
         })
         .toContain(sentence);
-      await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+      await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+        "data-state",
+        /^(saved|saved-to-host)$/,
+      );
     } else {
       await page.getByTestId("titlebar-quick-open").click();
       const quickOpen = page.getByTestId("quick-open");

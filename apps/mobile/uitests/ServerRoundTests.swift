@@ -28,8 +28,8 @@ final class ServerRoundTests: XCTestCase {
     app.descendants(matching: .any).matching(identifier: "record-field")
   }
 
-  private func fieldShowing(_ app: XCUIApplication, _ text: String) -> XCUIElement {
-    app.descendants(matching: .any).matching(NSPredicate(format: "label ENDSWITH %@ OR value == %@", ", " + text, text)).firstMatch
+  private func nameShowing(_ app: XCUIApplication, _ text: String) -> XCUIElement {
+    app.descendants(matching: .any).matching(NSPredicate(format: "label == %@ OR value == %@", "Name, " + text, text)).firstMatch
   }
 
   private func say(_ line: String) {
@@ -101,7 +101,7 @@ final class ServerRoundTests: XCTestCase {
     let code = app.descendants(matching: .any).matching(NSPredicate(format: "label MATCHES %@", "([A-Za-z0-9-] )+[A-Za-z0-9-]")).firstMatch
     let end = Date().addingTimeInterval(40)
     while Date() < end && !code.exists {
-      if close.exists { close.tap() }
+      if close.exists && !code.exists { close.tap() }
       _ = code.waitForExistence(timeout: 1)
     }
     if !code.exists { say("SERVER ROUND SCREEN \(app.debugDescription)") }
@@ -289,7 +289,7 @@ final class ServerRoundTests: XCTestCase {
     row.tap()
     // In a field of the record's own screen, not the row it was opened from.
     XCTAssertTrue(recordFields(app).firstMatch.waitForExistence(timeout: 10), "The record's own screen should open")
-    let field = fieldShowing(app, value)
+    let field = nameShowing(app, value)
     if !field.waitForExistence(timeout: 10) { say("SERVER ROUND SCREEN \(app.debugDescription)") }
     XCTAssertTrue(field.exists, "The record's fields should show \(value)")
   }
@@ -360,7 +360,7 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertTrue(row.waitForExistence(timeout: 30), "\(name) should show a record with \(value)")
     row.tap()
     XCTAssertTrue(recordFields(app).firstMatch.waitForExistence(timeout: 10), "The record's own screen should open")
-    let field = fieldShowing(app, value)
+    let field = nameShowing(app, value)
     XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
     return field
   }
@@ -411,7 +411,7 @@ final class ServerRoundTests: XCTestCase {
     app.launch()
     let undo = app.buttons["Undo last edit"]
     let showing = { (text: String) in
-      self.fieldShowing(app, text)
+      self.nameShowing(app, text)
     }
     // `value` is a prefix of `changed`, so a field showing `value` must not also show `changed`.
     let only = { (text: String, what: String) in
@@ -467,7 +467,7 @@ final class ServerRoundTests: XCTestCase {
     let first = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Name, ")).firstMatch
     XCTAssertTrue(first.waitForExistence(timeout: 60), "The new record should open within 60 s, its Name ready for a change")
     edit(app, first, typing: added)
-    let named = fieldShowing(app, added)
+    let named = nameShowing(app, added)
     XCTAssertTrue(named.waitForExistence(timeout: 10), "The field should show \(added) as it saves")
     settled(app, named, "Naming the new record")
     _ = readAfterRelaunch(app, name, added)
