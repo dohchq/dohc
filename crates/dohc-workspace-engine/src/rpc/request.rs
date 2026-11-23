@@ -21,6 +21,7 @@ pub(super) struct OperationCancellation {
     /// the two report different wire codes with different retryability.
     deadline_hit: Arc<std::sync::atomic::AtomicBool>,
     bridge: tokio::task::JoinHandle<()>,
+    pub(super) has_deadline: bool,
 }
 
 impl OperationCancellation {
@@ -55,6 +56,7 @@ impl OperationCancellation {
             token,
             deadline_hit,
             bridge,
+            has_deadline: deadline.is_some(),
         }
     }
 

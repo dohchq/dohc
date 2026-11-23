@@ -1,6 +1,6 @@
 import { chatWords } from "@dohc/interface-words/notices";
 import { workspaceWords } from "@dohc/interface-words/workspace";
-import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
+import type { PhoneChatWake, PhoneMentionCandidate } from "@dohc/workspace-contracts/chat-wakes";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import {
   LegendList,
@@ -13,7 +13,7 @@ import { StyleSheet, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
-import type { ChatKind } from "../chats/sample";
+import type { ChatKind } from "../chats/types";
 import type { WakeTarget } from "../server/chatWakes";
 import { phoneWrites } from "../server/phoneWrites";
 import { views, type ViewState } from "../server/workspaceData";
@@ -174,9 +174,16 @@ interface ScreenWrites {
   answers(byId: ReadonlyMap<string, ChatMessage>, posts: ReadonlySet<string>): AnswerActions;
   /** Reply on a message. In a stream, `post` says it's a post, whose thread is its own. */
   reply(message: Message, post: boolean): void;
-  /** Null until the server says which lanes a stream takes, or its read fails. */
+  /**
+   * Null until the server says which lanes a stream takes, or its read fails. `mentions` are who the conversation's
+   * context read says it can mention, or null while that read loads or after it failed.
+   */
   readonly composer:
-    | ((onLayoutHeight: (height: number) => void, title: string) => ReactNode)
+    | ((
+        onLayoutHeight: (height: number) => void,
+        title: string,
+        mentions: readonly PhoneMentionCandidate[] | null,
+      ) => ReactNode)
     | null;
   /** Writes aren't blocked, and the screen still shows its activation, as they are when it's called. */
   writable(): boolean;
@@ -438,7 +445,11 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
   const composer = useMemo(
     () =>
       lanes && (lanes.post || lanes.send)
-        ? (onLayoutHeight: (height: number) => void, title: string) => (
+        ? (
+            onLayoutHeight: (height: number) => void,
+            title: string,
+            mentions: readonly PhoneMentionCandidate[] | null,
+          ) => (
             <Composer
               placeholder={chatWords.messageTo(title)}
               lanes={lanes}
@@ -449,6 +460,7 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
               onCancelReply={cancelReply}
               onSubmit={submit}
               onLayoutHeight={onLayoutHeight}
+              mentions={mentions}
             />
           )
         : lanesProblem
@@ -638,25 +650,31 @@ function WritableThread({
     setAnswering(null);
   }, []);
   const composer = useMemo(
-    () => (onLayoutHeight: (height: number) => void) => (
-      <Composer
-        placeholder={chatWords.reply}
-        lanes={REPLY_LANES}
-        blocked={
-          blocked ??
-          (question?.target.kind === "waiting" || (question === null && replyTarget === null)
-            ? "loading"
-            : null)
-        }
-        problem={problem}
-        replies
-        replyTo={question?.to ?? parent}
-        closed={question?.target.kind === "closed" ? chatWords.answerClosed : null}
-        onCancelReply={cancelReply}
-        onSubmit={submit}
-        onLayoutHeight={onLayoutHeight}
-      />
-    ),
+    () =>
+      (
+        onLayoutHeight: (height: number) => void,
+        _title: string,
+        mentions: readonly PhoneMentionCandidate[] | null,
+      ) => (
+        <Composer
+          placeholder={chatWords.reply}
+          lanes={REPLY_LANES}
+          blocked={
+            blocked ??
+            (question?.target.kind === "waiting" || (question === null && replyTarget === null)
+              ? "loading"
+              : null)
+          }
+          problem={problem}
+          replies
+          replyTo={question?.to ?? parent}
+          closed={question?.target.kind === "closed" ? chatWords.answerClosed : null}
+          onCancelReply={cancelReply}
+          onSubmit={submit}
+          onLayoutHeight={onLayoutHeight}
+          mentions={mentions}
+        />
+      ),
     [blocked, problem, question, replyTarget, parent, cancelReply, submit],
   );
   const threadWrites = useMemo<ScreenWrites>(
@@ -1058,7 +1076,9 @@ function Conversation({
           renderItem={({ item }) => renderItem(item)}
         />
       )}
-      {composer ? composer(setComposerHeight, title) : null}
+      {composer
+        ? composer(setComposerHeight, title, wakes && !wakes.failed ? wakes.mentions : null)
+        : null}
     </View>
   );
 }

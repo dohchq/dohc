@@ -72,7 +72,7 @@ it("retries an uncertain removal with the same identity and resumes the returned
     nextCursor: "accepted-100",
   });
   fireEvent.click(screen.getByRole("button", { name: "Retry removal" }));
-  await screen.findByText("Restore removed files from workspace history.");
+  await screen.findByText("Restore removed files from History.");
   expect(document.activeElement).toBe(screen.getByRole("heading", { name: "App responses" }));
   expect(api.ownerAppResponses.mock.calls[2][0]).toEqual(first);
   api.ownerAppResponses.mockResolvedValueOnce({
@@ -81,7 +81,7 @@ it("retries an uncertain removal with the same identity and resumes the returned
     nextCursor: null,
   });
   fireEvent.click(screen.getByRole("button", { name: "Continue removing responses" }));
-  await screen.findByText("0 removed. 0 already absent. 1 conflicts kept. 0 failed.");
+  await screen.findByText("0 removed. 0 already absent. 1 conflict kept. 0 failed.");
   expect(api.ownerAppResponses.mock.calls[3][0]).toEqual({
     ...first,
     afterAcceptanceId: "accepted-100",
@@ -135,7 +135,7 @@ it("clears earlier outcome counts on reload and a new failed removal", async () 
   api.ownerAppResponses.mockRejectedValueOnce(new Error("Connection ended."));
   remove();
   await screen.findByRole("alert");
-  expect(screen.queryByText("Restore removed files from workspace history.")).toBeNull();
+  expect(screen.queryByText("Restore removed files from History.")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Stop here" }));
   expect(screen.queryByRole("alert")).toBeNull();
 });

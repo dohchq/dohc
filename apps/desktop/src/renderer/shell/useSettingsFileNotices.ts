@@ -28,7 +28,9 @@ export function settingsFileNotice(fileName: string, read: SettingsRead | null):
   if (!first) return null;
   if (ignored.length === 1) {
     const why =
-      first.reason === "unknown" ? "it is not a setting dohc knows" : "its value is not valid";
+      first.reason === "unknown"
+        ? "dohc does not recognize that setting"
+        : "its value is not valid";
     return `dohc ignored ${first.key} in ${fileName} because ${why}. The other settings apply.`;
   }
   const keys = ignored

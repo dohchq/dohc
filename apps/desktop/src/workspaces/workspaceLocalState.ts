@@ -160,7 +160,7 @@ export const LOCAL_FOLDER_WORDS: Record<LocalFolderProblem, readonly [fact: stri
       "belongs to another user",
       "Make it and everything in it yours again, then try again.",
     ],
-    unreadable: ["can't be read", "Make sure you can open it, then try again."],
+    unreadable: ["cannot be read", "Check that you can open it, then try again."],
   };
 
 /** `.dohc` or `.dohc/local` is not a folder this user owns, so dohc trusts nothing in it. */

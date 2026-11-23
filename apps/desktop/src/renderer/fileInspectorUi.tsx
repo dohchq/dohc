@@ -101,7 +101,7 @@ export function ViewActions(props: {
   return slot ? createPortal(content, slot) : null;
 }
 
-export const LOSSY_NOTE_TITLE = "This note has parts dohc can't show.";
+export const LOSSY_NOTE_TITLE = "This note has parts dohc cannot save without rewriting.";
 
 // Only a Markdown page shows it, so it says page.
 export const OPENING_TITLE = "You can edit this page when it finishes opening.";
@@ -118,7 +118,7 @@ export function OpeningState() {
       data-state="opening"
       role="status"
       title={OPENING_TITLE}
-      className={slow ? "min-w-0 truncate text-[11px] leading-4 text-subtle" : "sr-only"}
+      className={slow ? "min-w-0 truncate text-[12px] leading-4 text-subtle" : "sr-only"}
     >
       Opening…
     </span>
@@ -127,8 +127,7 @@ export function OpeningState() {
 
 // A document's controls, the same pair in every phase of an open: the mode
 // toggle and the document menu. The toggle's box holds "Edit", "Source" and
-// "Editor", so the words it says on its own never move the menu or Share;
-// only a person's own click to "WYSIWYG" widens it. A truncated read never
+// "Editor", so the words never move the menu or Share. A truncated read never
 // has the whole document to copy, so it has no menu, and the menu's place
 // stays empty instead of closing up. A level that allows no editing has no
 // toggle at all.
@@ -171,7 +170,7 @@ export function DocumentControls(props: {
             if (toggle.disabled) return;
             toggle.onClick?.();
           }}
-          className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
+          className="min-w-16 shrink-0 rounded-md border border-line px-2 py-0.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
         >
           {toggle.label}
         </button>
@@ -203,14 +202,16 @@ export function EngineMayHoldDocumentNotice(props: {
   // dohc is still opening it by itself, so a ring shows beside the message
   // and no Try again.
   waiting?: boolean;
+  details?: string;
   children?: ReactNode;
   // The step that can fix the cause, in place of Try again, which would only fail again.
   action?: { label: string; run: () => void } | undefined;
 }) {
+  const { details } = props;
   return (
     <div
       data-testid="engine-may-hold-document-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-warning"
     >
       {/* A Markdown note is a "page", the noun the editing controls beside
           this already use ("You can edit this page when it finishes opening.").
@@ -235,6 +236,9 @@ export function EngineMayHoldDocumentNotice(props: {
       </span>
       <span className="flex shrink-0 items-center gap-3">
         {props.children}
+        {details ? (
+          <CopyButton label="Copy details" pinName iconOnly getText={() => details} />
+        ) : null}
         {props.waiting ? null : (
           <button
             type="button"
@@ -245,6 +249,20 @@ export function EngineMayHoldDocumentNotice(props: {
           </button>
         )}
       </span>
+    </div>
+  );
+}
+
+export function EditCopyNotice(props: { onOpenToEdit: () => void }) {
+  return (
+    <div
+      data-testid="edit-copy-notice"
+      className="flex items-center gap-3 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-muted"
+    >
+      <span>This copy is read-only.</span>
+      <SecondaryButton size="row" onClick={props.onOpenToEdit}>
+        Open to edit
+      </SecondaryButton>
     </div>
   );
 }
@@ -344,7 +362,7 @@ export function ReadOnlyPropertiesFlag(props: {
     <span
       data-testid={props.testId}
       role={props.role}
-      className={`flex min-w-0 max-w-full items-center gap-2 text-[11px] ${props.className ?? ""}`}
+      className={`flex min-w-0 max-w-full items-center gap-2 text-[12px] ${props.className ?? ""}`}
     >
       <span className="flex min-w-0 items-center gap-1">
         <Lock aria-hidden size={12} className="shrink-0 text-warning" />
@@ -373,7 +391,7 @@ export function LossyNoteNoticeView(props: {
         {props.tooLarge
           ? SAVE_STATE["too-large"].title
           : props.held
-            ? "dohc held a change, because saving it would rewrite parts it can't show."
+            ? "dohc held a change because saving it would rewrite parts of this note."
             : LOSSY_NOTE_TITLE}
       </span>
       <span className="flex shrink-0 items-center gap-3">{props.children}</span>
@@ -430,7 +448,7 @@ export function LossyNoteNotice(props: {
       : history.keeps === "kept"
         ? "History keeps the original."
         : history.keeps === "untracked"
-          ? "History does not track this file, so dohc can't restore the original."
+          ? "History does not track this file, so dohc cannot restore the original."
           : "dohc could not confirm that History can restore the original.";
   return (
     <>
@@ -495,7 +513,7 @@ export function LossyNoteNotice(props: {
           }}
         >
           <p>
-            Saving rewrites the parts dohc can't show, such as raw HTML or reference links.
+            Saving rewrites the parts dohc cannot keep as written.
             {historyLine ? ` ${historyLine}` : null}
           </p>
         </ConfirmDialog>
@@ -562,7 +580,7 @@ export function EngineArtifactAssetsInvalidNotice(props: {
   return (
     <div
       data-testid="engine-artifact-assets-invalid-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-warning"
     >
       <span>dohc could not verify this drawing's images. The drawing is read-only.</span>
       <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
@@ -656,7 +674,7 @@ export function SetAsideEditRow(props: {
   return (
     <div
       data-testid="orphaned-draft-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[12px]"
     >
       <span className="text-danger">{props.message}</span>
       <div className="flex items-center gap-2">
@@ -674,7 +692,7 @@ export function MarkdownSourceStrip(props: {
   getText: ComponentProps<typeof CopyButton>["getText"];
 }) {
   return (
-    <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-muted">
+    <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[12px] text-muted">
       <span>{props.words}</span>
       <CopyButton testId="markdown-source-copy" getText={props.getText} />
     </div>
@@ -689,7 +707,7 @@ export function EngineRemovalInProgressNotice(props: {
     <div
       data-testid="engine-removal-in-progress-notice"
       data-operation={props.removal.operation}
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-warning"
     >
       <span>{props.removal.message} Wait for it to finish.</span>
       <button type="button" onClick={props.onRetry} className="text-subtle hover:text-ink">

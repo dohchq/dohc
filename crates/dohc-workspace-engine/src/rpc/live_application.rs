@@ -1055,6 +1055,9 @@ impl EngineService {
             Some(&config.workspace),
             "liveApplication.provisionOwner",
         )?;
+        if let Some(ordinary) = self.ordinary_live_host.get() {
+            ordinary.claim(super::ordinary_live_host::LiveRole::Host)?;
+        }
         let _serial = Arc::clone(&open.session_ops).lock_owned().await;
         if !Arc::ptr_eq(&self.open(Some(&config.workspace))?, &open) {
             return Err(workspace_unavailable());

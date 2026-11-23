@@ -15,6 +15,7 @@ pub struct ConflictApplyResult {
     pub conflict_id: String,
     pub inserted: Option<bool>,
     pub matched: bool,
+    pub record_facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 pub fn apply_conflict_envelope(
@@ -220,6 +221,7 @@ fn apply_open(
         conflict_id: conflict.conflict_id,
         inserted: Some(inserted),
         matched: true,
+        record_facts: None,
     })
 }
 

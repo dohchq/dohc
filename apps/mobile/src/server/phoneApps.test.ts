@@ -91,6 +91,12 @@ describe("the phone's app operations", () => {
       ],
       sources: ["events/signup/index.ts"],
     });
+    // An app that requests nothing in the workspace reaches nothing there.
+    server.on("POST", "/sync/ws-1/ops/appReview", {
+      status: 200,
+      body: { ok: true, result: { ...review, capabilities: [] } },
+    });
+    expect(await ops.review(A)).toMatchObject({ reach: [] });
     // An answer for another app, or with a reach the phone can't name, is never shown.
     for (const changed of [
       { ...review, publicationId: B },

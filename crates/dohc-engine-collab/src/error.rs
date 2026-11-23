@@ -75,8 +75,15 @@ pub enum CollabError {
 
     /// Remote XML exceeded a structural projection bound before recursive
     /// descent or content-derived collection allocation.
-    #[error("Y.Doc projection exceeds the {max_depth}-deep/{max_nodes}-node structural cap")]
-    ProjectionTooComplex { max_depth: usize, max_nodes: usize },
+    #[error(
+        "Y.Doc projection stopped {depth} deep with {nodes_left} nodes left, over the {max_depth}-deep/{max_nodes}-node structural cap"
+    )]
+    ProjectionTooComplex {
+        depth: usize,
+        nodes_left: usize,
+        max_depth: usize,
+        max_nodes: usize,
+    },
 
     /// An identifier (`workspace_id`/`version_id`/`object_id`/`origin_id`) is
     /// empty or over the length bound.

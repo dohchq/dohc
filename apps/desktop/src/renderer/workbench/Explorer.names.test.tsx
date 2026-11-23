@@ -250,7 +250,7 @@ describe("pending share mark", () => {
     const row = treeRow("plan.md");
     expect(row.dataset.state).toBe("pending-share");
     expect(within(row).getByTestId("tree-row-pending-share")).toBeTruthy();
-    expect(row.getAttribute("aria-label")).toBe("plan.md, Saved locally · Pending share");
+    expect(row.getAttribute("aria-label")).toBe("plan.md, Saved locally · pending share");
     expect(within(treeRow("notes.md")).queryByTestId("tree-row-pending-share")).toBeNull();
     act(() => marks.set(["plan.md"], ["plan.md"]));
     expect(within(treeRow("plan.md")).queryByTestId("tree-row-pending-share")).toBeNull();

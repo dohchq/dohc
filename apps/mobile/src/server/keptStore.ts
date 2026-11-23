@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS notice_marks (
   notice_id TEXT NOT NULL,
   mark TEXT NOT NULL,
   at_ms INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS push_registrations (
+  origin TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  alerts INTEGER NOT NULL,
+  generation INTEGER,
+  signing_out INTEGER NOT NULL,
+  PRIMARY KEY (origin, account_id)
 ) STRICT`;
 
 /** Raise it when a table's layout, or the shape of a view's value, changes: an older cache.db is then deleted unread. */

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
+import { shownValue } from "@dohc/collection-views/table";
 import { deferred, type Deferred } from "../testing/deferred";
 import type { TransactionalField } from "./transactionalCollectionModel";
 import type { TransactionalInvoke } from "./TransactionalCollectionPage";
@@ -142,7 +143,7 @@ describe("the order changes go in", () => {
     queue.enqueue(edit(row(1, 2), name, "Alicia"));
     queue.enqueue(edit(row(2, 4), name, "Beatrice"));
     const words =
-      "dohc didn't save this change. This Collection is read-only until relay.test is reachable.";
+      "dohc did not save this change. This Collection is read-only until relay.test is reachable.";
     rules.calls[0]!.answer.reject(
       Object.assign(new Error(words), {
         code: "operation_refused",
@@ -161,6 +162,38 @@ describe("the order changes go in", () => {
     expect(rules.onError).toHaveBeenCalledWith(words, expect.any(Error), null);
   });
 
+  it("shows a cell's saved change, not the value before it, when this computer refuses a later change to it", async () => {
+    const rules = host(),
+      { queue, page } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue(edit(row(1, 2), name, "Alina"));
+    rules.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(rules.calls).toHaveLength(2));
+    const words =
+      "dohc did not save this change. This Collection is read-only until relay.test is reachable.";
+    rules.calls[1]!.answer.reject(
+      Object.assign(new Error(words), {
+        code: "operation_refused",
+        refusal: { code: "offline", message: words },
+      }),
+    );
+    await vi.waitFor(() => expect(queue.size).toBe(0));
+    // The page's copy is offline, and a read of it can still give the value from before the saved change.
+    page.sync({ ...rules, offline: true });
+    page.readShown(page.readStarted(), [row(1, 2)]);
+    const before = {
+      field: "Name",
+      value: "Alice",
+      validation: { status: "valid" as const },
+      resolvedRelations: [],
+    };
+    const status = page.statuses.get("1", "name");
+    expect(status).toMatchObject({ state: "refused", reason: words });
+    expect(shownValue("Name", before, status)?.value).toBe("Alicia");
+    // The next edit starts from what was typed.
+    expect(shownValue("Name", before, status, true)?.value).toBe("Alina");
+  });
+
   it("keeps a change that may have run as one dohc could not confirm, with its Try again, when its retry meets a refused connection", async () => {
     const rules = host(),
       { queue, page } = open(rules);
@@ -169,7 +202,7 @@ describe("the order changes go in", () => {
     await vi.waitFor(() => expect(state(page, 1, name)).toBe("unconfirmed"));
     queue.retry(lost);
     const words =
-      "dohc didn't save this change. This Collection is read-only until relay.test is reachable.";
+      "dohc did not save this change. This Collection is read-only until relay.test is reachable.";
     // The refused connection proves only that this try ran nothing: the first may have saved.
     rules.calls[1]!.answer.reject(
       Object.assign(new Error(words), {
@@ -883,7 +916,8 @@ describe("the rules of a table open at two revisions", () => {
     b.queue.enqueue(edit(row(1, 2), name, "Alicia"), b.page);
     expect(b.page.statuses.get("1", "name")).toMatchObject({
       state: "refused",
-      reason: "dohc didn't save this change. This Collection is read-only until it is back online.",
+      reason:
+        "dohc did not save this change. This Collection is read-only until it is back online.",
     });
     a.page.sync(old);
     b.queue.enqueue(edit(row(2, 4), name, "Bea"), b.page);

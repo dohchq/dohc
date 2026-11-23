@@ -14,11 +14,7 @@ const SESSION_HEADER = "x-dohc-link-session";
 // The largest of a Collection's own files: its automations.yaml.
 const MAX_FILE_BYTES = 256 * 1024;
 
-/** A Collection's collection.yaml or automations.yaml, as its schema and automations are named on disk. */
-export function isCollectionOwnFile(path: string): boolean {
-  const name = path.slice(path.lastIndexOf("/") + 1);
-  return path.includes("/") && (name === "collection.yaml" || name === "automations.yaml");
-}
+export { isCollectionOwnFile } from "./model";
 
 type Status =
   | { kind: "loading" }

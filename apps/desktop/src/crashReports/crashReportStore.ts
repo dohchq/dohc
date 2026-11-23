@@ -247,9 +247,15 @@ export function createCrashReportStore(deps: {
             signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
           });
         } catch (error) {
-          throw new Error("The connection to the report server failed.", { cause: error });
+          throw new Error(
+            "dohc could not reach the report server. Check your connection, then try again.",
+            { cause: error },
+          );
         }
-        if (!response.ok) throw new Error(`The report server answered ${response.status}.`);
+        if (!response.ok)
+          throw new Error(
+            `dohc could not send the crash report, HTTP ${response.status}. Try again later.`,
+          );
         removeThrough(through);
         return true;
       } finally {

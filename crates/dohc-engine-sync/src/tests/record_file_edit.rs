@@ -479,6 +479,7 @@ fn resolve_named(b: &mut EngineStore, resolution: ResolveConflictKind, name: &st
             },
             |tx, result, prepared| {
                 crate::commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                    .map(drop)
                     .map_err(map_error)
             },
         )
@@ -1047,6 +1048,135 @@ fn resolved_record_file_edit_conflicts_keep_the_choice_after_restart() {
     }
 }
 
+type StatusChange = (Option<String>, Option<String>, Option<String>);
+
+fn status_history(b: &EngineStore) -> Vec<StatusChange> {
+    b.read_with(|conn| {
+        conn.prepare(
+            "SELECT previous_value_json,next_value_json,author_origin_id \
+             FROM collection_field_history \
+             WHERE workspace_id='ws' AND field_name='Status' ORDER BY history_id",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect()
+    })
+    .expect("Status history")
+}
+
+fn status_change(previous: &str, next: &str, author: Option<&str>) -> StatusChange {
+    (
+        Some(format!("\"{previous}\"")),
+        Some(format!("\"{next}\"")),
+        author.map(str::to_owned),
+    )
+}
+
+#[test]
+fn choosing_a_side_that_changes_a_field_records_its_history() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let merged = {
+        let doc = richdoc(&flown);
+        doc.richdoc_append_paragraph(NOTES);
+        projected(&doc)
+    };
+    for claimed in [false, true] {
+        for resolution in [
+            ResolveConflictKind::ApplyIncoming,
+            ResolveConflictKind::ApplyMerged {
+                text: merged.clone(),
+            },
+        ] {
+            let label = format!("claimed={claimed} {resolution:?}");
+            let (_a_scratch, mut a) = device("device-a");
+            let created = a_creates_apollo(&mut a, &planned);
+            let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+            let doc = richdoc(&planned);
+            if claimed {
+                device_c_base(&mut b, &doc);
+                b_types(&mut b, &mut WriterDocCache::new(), &doc, &[NOTES], 2_001);
+            } else {
+                b_opens(&mut b, &doc, &planned, &[NOTES]);
+            }
+            let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+            hydrate(&mut b, &[&flown, &merged]);
+            assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+            let before = status_history(&b);
+
+            resolve(&mut b, resolution);
+            assert_eq!(indexed_status(&b), Some(json!("Flown")), "{label}");
+            let after = status_history(&b);
+            assert_eq!(
+                after[before.len()..],
+                [status_change("Planned", "Flown", None)],
+                "{label}"
+            );
+        }
+    }
+}
+
+#[test]
+fn another_computer_records_the_history_of_a_chosen_side() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    let (_c_scratch, _c_path, mut c) = device_b(&created, &planned);
+    let scrubbed = md(&PLANNED.replace("Planned", "Scrubbed"));
+    a_saves(
+        &mut b,
+        RECORD,
+        RECORD_PATH,
+        &scrubbed,
+        "apollo-scrubbed",
+        25,
+    );
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    hydrate(&mut b, &[&flown]);
+    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+    resolve(&mut b, ResolveConflictKind::ApplyIncoming);
+    let b_ops: Vec<ReplicationEnvelope> = b
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT origin_seq,op_kind,payload_json,recorded_at_ms \
+                 FROM replication_log WHERE workspace_id='ws' AND imported=0 \
+                 ORDER BY origin_seq",
+            )?
+            .query_map([], |row| {
+                Ok(ReplicationEnvelope {
+                    recorded_at_ms: row.get(3)?,
+                    ..envelope(
+                        "device-b",
+                        row.get(0)?,
+                        &row.get::<_, String>(1)?,
+                        serde_json::from_str(&row.get::<_, String>(2)?).expect("B's op"),
+                    )
+                })
+            })?
+            .collect()
+        })
+        .expect("B's ops");
+    let decision = b_ops
+        .iter()
+        .find(|op| op.op_kind == "conflict.resolve")
+        .expect("B journals its decision");
+    hydrate(&mut c, &[&scrubbed, &flown]);
+    let before = status_history(&c);
+
+    for op in b_ops.iter().chain([decision]) {
+        deliver(&mut c, op, &NoLiveLeases).expect("C takes B's ops");
+    }
+    assert!(open_conflicts(&c).is_empty());
+    assert_eq!(head_text(&c, RECORD), Some(flown));
+    assert_eq!(indexed_status(&c), Some(json!("Flown")));
+    assert_eq!(
+        status_history(&c)[before.len()..],
+        [
+            status_change("Planned", "Scrubbed", Some("device-b")),
+            status_change("Scrubbed", "Flown", Some("device-b"))
+        ]
+    );
+}
+
 #[test]
 fn a_save_from_the_head_of_a_claimed_record_comes_in() {
     let (planned, flown) = (md(PLANNED), md(FLOWN));
@@ -1535,6 +1665,119 @@ fn a_save_held_by_an_open_editor_holds_back_only_its_file() {
     for object in [RECORD, PACKING] {
         assert_eq!(head_text(&b, object), head_text(&a, object), "{object}");
     }
+}
+
+#[test]
+fn a_document_whose_path_holds_another_file_holds_back_only_itself() {
+    const NOTE_PATH: &str = "notes/note.md";
+    let planned = md(PLANNED);
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    let b_note = WriteText {
+        workspace_id: "ws".into(),
+        version_id: "main".into(),
+        object_id: "b-note".into(),
+        moment_id: "b-note-saved".into(),
+        path: NOTE_PATH.into(),
+        text: "B's note\n".into(),
+        metadata_origin: "api".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 2_050,
+        request_id: None,
+    };
+    b.write_with(&NoFaults, |tx| {
+        dohc_engine_domain::write_text_in_tx(tx, &b_note).map_err(SyncError::corrupt)?;
+        Ok::<_, SyncError>(())
+    })
+    .expect("B saves its own note");
+
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "A's note\n");
+    let state = doc.encode_full_state();
+    let state_sha = b.put_binary_blob(&state).expect("A's document state");
+    let payload = json!({
+        "versionId":"main", "objectId":"a-note", "path":NOTE_PATH,
+        "contentKind":"plaintext", "updateBlobSha256":state_sha,
+        "lineageClaimId":state_sha, "isBaseState":true,
+    });
+    let TxnOutcome::Committed(origin_seq) = a
+        .write_with(&NoFaults, |tx| {
+            journal_local_op_in_tx(tx, "ws", "ydoc.update", &payload, 30)
+        })
+        .expect("A journals its document")
+    else {
+        panic!("A's journal crashed");
+    };
+    let note_op = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: "ws".into(),
+        origin_id: "device-a".into(),
+        origin_seq,
+        op_kind: "ydoc.update".into(),
+        payload,
+        recorded_at_ms: 30,
+        relay_seq: None,
+    };
+    let packing_op = a_saves(
+        &mut a,
+        PACKING,
+        PACKING_PATH,
+        PACKING_TEXT,
+        "packing-saved",
+        40,
+    );
+
+    pull(&mut b, 2, &[note_op, packing_op.clone()], &[PACKING_TEXT]);
+    assert_eq!(
+        head_text(&b, PACKING),
+        Some(PACKING_TEXT.to_owned()),
+        "A's other file arrives"
+    );
+    assert_eq!(head_text(&b, "b-note"), Some("B's note\n".to_owned()));
+    assert_eq!(
+        count(&b, "SELECT COUNT(*) FROM relay_deferred_ops"),
+        1,
+        "A's document waits"
+    );
+    assert!(read_replication_acked_seq(&b, "ws", "device-a").expect("ack") < packing_op.origin_seq);
+
+    let moved = RenameTextFile {
+        workspace_id: "ws".into(),
+        version_id: "main".into(),
+        from_path: NOTE_PATH.into(),
+        to_path: "notes/b-note.md".into(),
+        moment_id: "b-note-moved".into(),
+        request_id: None,
+        metadata_origin: "api".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 2_200,
+    };
+    b.write_with(&NoFaults, |tx| {
+        dohc_engine_domain::rename_text_in_tx(tx, &moved, |_, _| Ok(()))
+            .map_err(SyncError::corrupt)?;
+        Ok::<_, SyncError>(())
+    })
+    .expect("B moves its note away");
+    pull(&mut b, 4, &[], &[]);
+    assert_eq!(count(&b, "SELECT COUNT(*) FROM relay_deferred_ops"), 0);
+    assert_eq!(
+        count(
+            &b,
+            "SELECT COUNT(*) FROM ydoc_docs WHERE object_id='a-note'"
+        ),
+        1,
+        "A's document arrives"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
+        packing_op.origin_seq
+    );
 }
 
 fn crew_status(b: &EngineStore) -> Option<String> {

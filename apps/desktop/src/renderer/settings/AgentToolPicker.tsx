@@ -9,10 +9,11 @@ import {
 } from "../../agents/agentToolCatalog";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
-import { useRequestSequence } from "../useRequestSequence";
 import { SecondaryButton } from "../ui/controls";
 import { pathPieces } from "../ui/PathLine";
 import { ToolReadiness } from "./ToolReadiness";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 // A whole path that wraps only between folders. Each folder is one box, so a
 // space or hyphen inside it is no break; it wraps inside only when wider than the line.
@@ -29,7 +30,7 @@ function WrappedPath(props: { path: string }) {
   );
 }
 
-const DETAILS = "m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] text-muted";
+const DETAILS = "m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12px] text-muted";
 
 // A tool card says what a person picks by: the tool, its version, and
 // whether it is signed in. Under the cards the chosen tool's permissions stay
@@ -47,40 +48,27 @@ export function AgentToolPicker(props: {
   onChange(profile: AgentLaunchProfile): void;
   onError(message: string, cause?: unknown): void;
 }) {
-  const [result, setResult] = useState<AgentToolsResult | null>(null);
-  const [loading, setLoading] = useState(true);
   const [refresh, setRefresh] = useState(0);
-  const requests = useRequestSequence([props.workspaceId]);
+  const detection = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([props.workspaceId, refresh]),
+    load: () => bridge().detectAgentTools({ workspaceId: props.workspaceId }),
+  });
+  const result: AgentToolsResult | null = detection.value ?? null;
+  const loading = detection.pending || (detection.value === undefined && detection.error === null);
   const onError = useRef(props.onError);
   onError.current = props.onError;
   useEffect(() => {
-    const token = requests.next();
-    setResult(null);
-    setLoading(true);
-    void bridge()
-      .detectAgentTools({ workspaceId: props.workspaceId })
-      .then((value) => {
-        if (requests.isCurrent(token)) setResult(value);
-      })
-      .catch((cause: unknown) => {
-        if (requests.isCurrent(token))
-          onError.current(
-            ipcErrorMessage(cause, "dohc could not detect agent tools. Try again."),
-            cause,
-          );
-      })
-      .finally(() => {
-        if (requests.isCurrent(token)) setLoading(false);
-      });
-    return () => {
-      requests.next();
-    };
-  }, [props.workspaceId, refresh, requests]);
+    if (detection.error !== null)
+      onError.current(
+        ipcErrorMessage(detection.error, "dohc could not detect agent tools. Try again."),
+        detection.error,
+      );
+  }, [detection.error]);
 
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] text-muted">
+        <span className="text-[12px] text-muted">
           {loading ? "Looking for installed tools…" : "Choose an installed tool"}
         </span>
         <SecondaryButton
@@ -117,7 +105,7 @@ export function AgentToolPicker(props: {
                 </span>
                 {selected ? <Check size={14} aria-hidden className="shrink-0 text-accent" /> : null}
               </span>
-              <span className="block text-[11px] text-muted">
+              <span className="block text-[12px] text-muted">
                 {loading
                   ? "Detecting…"
                   : !result
@@ -136,7 +124,7 @@ export function AgentToolPicker(props: {
                       ? "blocked"
                       : "unknown"
                 }
-                className="text-[11px]"
+                className="text-[12px]"
               >
                 {detected?.auth === "signed-in"
                   ? "Signed in"
@@ -147,10 +135,10 @@ export function AgentToolPicker(props: {
                       : "Sign-in unknown"}
               </ToolReadiness>
               {!supported ? (
-                <span className="mt-1 block text-[11px] text-muted">No launch profile yet</span>
+                <span className="mt-1 block text-[12px] text-muted">Not supported in dohc yet</span>
               ) : null}
               {tool.id === "claude" && detected?.probe === "detected" && !compatible ? (
-                <span className="mt-1 block text-[11px] text-muted">
+                <span className="mt-1 block text-[12px] text-muted">
                   Update Claude Code to {CLAUDE_MIN_VERSION} or later to use this profile.
                 </span>
               ) : null}
@@ -166,11 +154,11 @@ export function AgentToolPicker(props: {
           </dd>
         </dl>
       ) : props.usingCommand ? (
-        <p data-testid="agent-tool-using-command" className="m-0 text-[11px] text-muted">
+        <p data-testid="agent-tool-using-command" className="m-0 text-[12px] text-muted">
           Using your runner command.
         </p>
       ) : null}
-      <p className="m-0 text-[11px] text-muted">
+      <p className="m-0 text-[12px] text-muted">
         Detection does not test replies. Use Check to test a reply through dohc.
       </p>
       <details
@@ -182,11 +170,11 @@ export function AgentToolPicker(props: {
         {props.profile ? (
           <dl data-testid="agent-tool-launch" className={`${DETAILS} mt-2`}>
             <dt>Executable</dt>
-            <dd className="m-0 min-w-0 select-text wrap-break-word font-mono">
+            <dd className="m-0 min-w-0 select-text wrap-break-word">
               <WrappedPath path={props.profile.executable} />
             </dd>
             <dt>Working directory</dt>
-            <dd className="m-0 min-w-0 select-text wrap-break-word font-mono">
+            <dd className="m-0 min-w-0 select-text wrap-break-word">
               <WrappedPath path={result?.workingDirectory ?? "Current workspace"} />
             </dd>
             <dt>Prompt</dt>

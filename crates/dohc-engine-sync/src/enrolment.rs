@@ -52,7 +52,7 @@ pub(crate) fn backfill_enrolment_window_in_tx(
     crate::live_audit::enrollment::queue_history_in_tx(tx, workspace_id)?;
     let sharing_declined = if !crate::live_audit::enrollment::pending_in_tx(tx, workspace_id)? {
         let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
-        export_covered_heads_in_tx(tx, workspace_id, leases)?;
+        export_covered_heads_in_tx(tx, workspace_id)?;
         backfill_moments_and_conflict_bundles(tx, workspace_id)?;
         declined
     } else {
@@ -69,7 +69,7 @@ pub(crate) fn finish_live_history_enrolment_in_tx(
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
-    export_covered_heads_in_tx(tx, workspace_id, leases)?;
+    export_covered_heads_in_tx(tx, workspace_id)?;
     backfill_moments_and_conflict_bundles(tx, workspace_id)?;
     Ok(declined)
 }
@@ -359,9 +359,9 @@ fn covered_heads_in_tx(
         .map_err(SyncError::corrupt)
 }
 
-/// The paths whose first file record the sweeps would send now, but skip
-/// because an open editing session holds the document. Leaving the document
-/// ends its session, and the next pass sends the record.
+/// The new notes whose first file record waits because an open editing
+/// session holds their unclaimed lineage. The session's next record, or
+/// leaving the note, claims it, and the next pass sends the record.
 pub fn first_exports_held_open_in(
     conn: &rusqlite::Connection,
     workspace_id: &str,
@@ -405,11 +405,6 @@ fn first_exports_held_open_in_tx(
             paths.push(path);
         }
     }
-    for (_, version_id, object_id, _, _, _, _, _, path) in covered_heads_in_tx(tx, workspace_id)? {
-        if held(version_id, object_id) {
-            paths.push(path);
-        }
-    }
     paths.sort();
     paths.dedup();
     Ok(paths)
@@ -421,7 +416,6 @@ fn first_exports_held_open_in_tx(
 pub(crate) fn export_covered_heads_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
-    leases: &dyn LeaseProbe,
 ) -> Result<(), SyncError> {
     for (
         moment_id,
@@ -440,9 +434,6 @@ pub(crate) fn export_covered_heads_in_tx(
             version_id,
             object_id,
         };
-        if leases.is_live(&key) {
-            continue;
-        }
         // Keep attempts and asset waits in this transaction so rollback
         // cannot suppress a retry.
         tx.execute(
@@ -594,6 +585,23 @@ pub(crate) fn file_version_is_publishable_in_tx(
     ).map_err(SyncError::corrupt)
 }
 
+pub fn journal_owner_save_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    moment_id: &str,
+) -> Result<(), SyncError> {
+    if file_version_is_publishable_in_tx(tx, key, moment_id)? {
+        journal_file_version_in_tx(
+            tx,
+            key,
+            moment_id,
+            &mut FileExportBudget::default(),
+            crate::outbound::omit_unproven_hosted_authors,
+        )?;
+    }
+    Ok(())
+}
+
 /// The cut and all candidate admissions share the actor's writer transaction.
 pub(crate) fn backfill_file_versions_in_tx(
     tx: &Transaction<'_>,
@@ -637,7 +645,13 @@ pub(crate) fn backfill_file_versions_in_tx(
             object_id,
         };
         if file_version_is_publishable_in_tx(tx, &key, &moment_id)? {
-            journal_file_version_in_tx(tx, &key, &moment_id, &mut file_budget)?;
+            journal_file_version_in_tx(
+                tx,
+                &key,
+                &moment_id,
+                &mut file_budget,
+                crate::outbound::mark_unproven_hosted_authors,
+            )?;
         }
     }
     Ok(())
@@ -649,7 +663,7 @@ pub(crate) const LAST_FILE_EXPORT_SQL: &str = concat!("SELECT r.payload_json,m.m
          WHERE r.workspace_id=?1 AND r.op_kind='moment.append'
            AND json_extract(r.payload_json,'$.versionId')=+?2
            AND json_extract(r.payload_json,'$.objectId')=+?3
-           AND (r.imported=0 OR (COALESCE(m.sync_record_only,0)=0 AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
+           AND (r.imported=0 OR ((COALESCE(m.sync_record_only,0)=0 OR m.moment_id GLOB 'moment-ydoc-*') AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
              WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))
          AND ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " ORDER BY m.moment_order DESC,r.rowid DESC LIMIT 1");
 
@@ -749,6 +763,7 @@ pub(crate) fn journal_file_version_in_tx(
     key: &DocKey,
     moment_id: &str,
     budget: &mut FileExportBudget,
+    unproven: fn(&mut serde_json::Value) -> bool,
 ) -> Result<bool, SyncError> {
     let last = last_file_export_in_tx(tx, key)?;
     let (current, _) =
@@ -797,7 +812,13 @@ pub(crate) fn journal_file_version_in_tx(
     if blobs.values().sum::<i64>() > 20 * 1024 * 1024 {
         return Ok(false);
     }
-    crate::outbound::journal_moment_append_from_in_tx(tx, &key.workspace_id, moment_id, &before)?;
+    crate::outbound::journal_moment_append_from_in_tx(
+        tx,
+        &key.workspace_id,
+        moment_id,
+        &before,
+        unproven,
+    )?;
     budget.blobs = blobs;
     Ok(true)
 }
@@ -1244,7 +1265,9 @@ mod tests {
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     now_ms,
-                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                SecretDiskIntent::Materialize {
+                    check: &|_, _, _, _| Ok(dohc_engine_storage::Preimage::Absent),
                 },
                 &NoFaults,
             )
@@ -2669,7 +2692,7 @@ mod tests {
                     .map_err(SyncError::persist)?;
                     tx.execute(invalidate, []).map_err(SyncError::persist)?;
                     originate_live_ydoc_base_in_tx(tx, &key, 101)?;
-                    export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
+                    export_covered_heads_in_tx(tx, "ws")
                 })
                 .expect("backfill unproved artifact");
             assert!(

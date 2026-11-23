@@ -1,19 +1,21 @@
 import { documentWords } from "@dohc/interface-words/documents";
 import { Stack, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
-import { AlertTriangle } from "lucide-react-native";
+import { AlertTriangle, EllipsisVertical } from "lucide-react-native";
 import { useEffect, useMemo, useRef, useState, type ComponentRef } from "react";
-import { PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
+import { PixelRatio, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useReducedMotion } from "react-native-reanimated";
 import { Directory, File, Paths } from "expo-file-system";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { WebView } from "react-native-webview";
 import { PageScrollTop } from "../../modules/page-scroll-top";
+import { HeaderButton } from "../AndroidHeader";
 import { confirm } from "../confirm";
 import { copyText } from "../copy";
 import { demoMode } from "../demo";
 import { DohcMark } from "../DohcMark";
 import { ActionPill } from "../notices/ActionPill";
 import { SyncBand } from "../notices/SyncBand";
+import { documentActions } from "./documentActions";
 import { editorFolderUri, editorFontFiles, editorHtmlUri, isOutOfSpace } from "./editorFile";
 import {
   editAnywayMessage,
@@ -317,30 +319,45 @@ export function SamplePage() {
                 {name}
               </Text>
             ),
+          headerRight:
+            Platform.OS === "android"
+              ? () =>
+                  typing ? (
+                    <HeaderButton label="Done" onPress={endEditing} />
+                  ) : (
+                    <HeaderButton
+                      icon={EllipsisVertical}
+                      label={documentWords.documentActions}
+                      onPress={() => void documentActions(copyMarkdown)}
+                    />
+                  )
+              : undefined,
         }}
       />
-      <Stack.Toolbar placement="right">
-        {typing ? (
-          <Stack.Toolbar.Button variant="done" onPress={endEditing}>
-            Done
-          </Stack.Toolbar.Button>
-        ) : null}
-        <Stack.Toolbar.Button
-          hidden={typing}
-          icon="bubble.left"
-          accessibilityLabel={documentWords.openChat(name)}
-          onPress={() => router.back()}
-        />
-        <Stack.Toolbar.Menu
-          hidden={typing}
-          icon="ellipsis"
-          accessibilityLabel={documentWords.documentActions}
-        >
-          <Stack.Toolbar.MenuAction icon="doc.on.doc" onPress={copyMarkdown}>
-            {documentWords.copyAsMarkdown}
-          </Stack.Toolbar.MenuAction>
-        </Stack.Toolbar.Menu>
-      </Stack.Toolbar>
+      {Platform.OS === "ios" ? (
+        <Stack.Toolbar placement="right">
+          {typing ? (
+            <Stack.Toolbar.Button variant="done" onPress={endEditing}>
+              Done
+            </Stack.Toolbar.Button>
+          ) : null}
+          <Stack.Toolbar.Button
+            hidden={typing}
+            icon="bubble.left"
+            accessibilityLabel={documentWords.openChat(name)}
+            onPress={() => router.back()}
+          />
+          <Stack.Toolbar.Menu
+            hidden={typing}
+            icon="ellipsis"
+            accessibilityLabel={documentWords.documentActions}
+          >
+            <Stack.Toolbar.MenuAction icon="doc.on.doc" onPress={copyMarkdown}>
+              {documentWords.copyAsMarkdown}
+            </Stack.Toolbar.MenuAction>
+          </Stack.Toolbar.Menu>
+        </Stack.Toolbar>
+      ) : null}
       {demo.offline ? <SyncBand problem="serverUnreachable" /> : null}
       {failure ? (
         // As the desktop's empty state: a failure draws the triangle in danger, a missing thing the dohc mark.

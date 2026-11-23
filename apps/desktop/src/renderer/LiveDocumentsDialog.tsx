@@ -30,6 +30,7 @@ export type LiveDocumentRow = {
     | "session-host-refused"
     | "session-host-diverged"
     | "live-document-without-lineage"
+    | "live-document-too-large"
     | "live-edit-unadmitted"
     | "conflict-parent-withheld"
     | "live-history-over-budget"
@@ -179,15 +180,14 @@ type RefusalState =
 type Scope = { live: boolean };
 
 const readFailedMessage = "dohc could not load the live documents for this workspace.";
-const refusalsReadFailedMessage =
-  "dohc could not load the shares that could not start live editing.";
+const refusalsReadFailedMessage = "dohc could not load shares where live editing did not start.";
 const REFUSAL_SENTENCE = "This share could not start live editing automatically.";
 // Enough files to recognize the share without turning a row into a listing.
 const REFUSAL_PATHS_SHOWN = 5;
 
 const REFUSAL_REASONS: Record<string, string> = {
   quota_exceeded:
-    "A server limit is preventing live editing. Stop live editing for unused documents or check the server limits.",
+    "A server limit prevented live editing. Stop live editing for unused documents, or check the server limits.",
   bad_request:
     "The server could not accept this share for live editing. Copy the details to check the server setup.",
   conflict:
@@ -247,12 +247,13 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
   if (row.reason === "session-host-refused") return "Stopped by the server";
-  if (row.reason === "session-host-diverged") return "Server copy doesn't match";
+  if (row.reason === "session-host-diverged") return "Server copy does not match";
   if (row.reason === "live-document-without-lineage") return "Not started";
+  if (row.reason === "live-document-too-large") return "Too large";
   if (row.reason === "live-edit-unadmitted") return "Server copy is missing an edit";
-  if (row.reason === "conflict-parent-withheld") return "Can't resume";
+  if (row.reason === "conflict-parent-withheld") return "Cannot resume";
   if (row.reason === "live-history-over-budget") return "History too long";
-  if (row.reason === "live-start-failing") return "Can't start";
+  if (row.reason === "live-start-failing") return "Cannot start";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -348,9 +349,9 @@ function quarantineNote(row: LiveDocumentRow): string | null {
     case "not-written":
       return "When live editing stopped, dohc kept your unsent edits but could not write them to your file. Save a recovery copy to get them back.";
     case "cannot-write":
-      return "When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.";
+      return "When live editing stopped, dohc kept your unsent edits but cannot write them to your file. Save a recovery copy to get them back.";
     case "unreadable":
-      return "dohc kept edits on this computer but could not read them. Try again to read them.";
+      return "dohc kept edits on this computer but could not read them.";
     default:
       return null;
   }
@@ -387,7 +388,7 @@ function refusalLabel(row: LiveRefusalRow): string {
 function refusalBusyLabel(work: RefusalWork): string {
   if (work.kind === "retry") return `Retrying live editing for ${work.label}…`;
   if (work.kind === "refresh") return "Loading live documents…";
-  return "Loading shares that could not start live editing…";
+  return "Loading shares where live editing did not start…";
 }
 
 /** A read that covers both lists speaks for the dialog's main list; only an
@@ -639,7 +640,7 @@ export function LiveDocumentsDialog({
         if (work.kind === "stop" && waits) {
           onError(notReady ? LIVE_STOP_SERVER_NOT_READY : LIVE_STOP_WAITING, error, retry, {
             title: notReady
-              ? `Live editing didn't stop for ${work.path}`
+              ? `Live editing did not stop for ${work.path}`
               : `Stopping live editing for ${work.path}`,
             objectId: work.objectId,
           });
@@ -845,7 +846,7 @@ export function LiveDocumentsDialog({
             Live documents
           </h2>
           <p className="mt-1 text-[13px] text-muted">
-            Stopping live editing keeps the file and its history. Share permissions stay unchanged.
+            Stopping live editing keeps the file and its History. Share access stays unchanged.
           </p>
         </div>
         <SecondaryButton
@@ -878,7 +879,7 @@ export function LiveDocumentsDialog({
         <p className={`${rows.length ? "pb-2" : "py-6"} text-[13px] text-muted`}>
           {rows.length
             ? "dohc could not load the server's list. These edits are kept on this computer."
-            : "This list is not current. Reload to see this workspace's live documents."}
+            : "This list is out of date. Reload to see this workspace's live documents."}
         </p>
       ) : null}
 
@@ -905,7 +906,7 @@ export function LiveDocumentsDialog({
               >
                 <span
                   title={row.path}
-                  className="min-w-0 basis-full truncate font-mono text-[12px] text-ink sm:flex-1 sm:basis-0"
+                  className="min-w-0 basis-full truncate text-[12px] text-ink sm:flex-1 sm:basis-0"
                 >
                   {row.path}
                 </span>
@@ -1051,9 +1052,14 @@ export function LiveDocumentsDialog({
                 !pendingStops.has(row.objectId) &&
                 !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    Live editing can't start until you open this document once in dohc. After you
-                    open it, resume live editing. A note larger than 256 KB doesn't open as a
-                    document in dohc. Make it smaller or split it, then open it.
+                    Live editing cannot start until you open this document once in dohc. After you
+                    open it, resume live editing.
+                  </p>
+                ) : null}
+                {row.reason === "live-document-too-large" ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    This note is larger than 256 KB, so it cannot be edited live. Make it smaller or
+                    split it, then open it in dohc.
                   </p>
                 ) : null}
                 {/* A Resume retries the edit. One that would remove live work stays held. A deferred Stop's note already offers Resume. */}
@@ -1062,7 +1068,7 @@ export function LiveDocumentsDialog({
                 !pendingStops.has(row.objectId) &&
                 !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    The server hasn't applied an edit to this document. Resume live editing to try
+                    The server has not applied an edit to this document. Resume live editing to try
                     again.
                   </p>
                 ) : null}
@@ -1076,11 +1082,11 @@ export function LiveDocumentsDialog({
                     }
                     className="m-0 basis-full text-[12px] text-muted"
                   >
-                    {pendingStops.has(row.objectId) ? "Live editing didn't stop. " : ""}A conflict
-                    in this file was resolved, so live editing can't resume for it. People with the
+                    {pendingStops.has(row.objectId) ? "Live editing did not stop. " : ""}A conflict
+                    in this file was resolved, so live editing cannot resume for it. People with the
                     link can still read the last shared version.{" "}
                     {row.status === "retired"
-                      ? "You can keep editing it in dohc, but your edits won't reach them."
+                      ? "You can keep editing it in dohc, but your edits will not reach them."
                       : "You can keep editing it in dohc, but your edits may not reach them."}
                     {makeCopy && heldCopyable(row) && !pendingStops.has(row.objectId)
                       ? heldCopyNote(row)
@@ -1093,9 +1099,8 @@ export function LiveDocumentsDialog({
                 !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
                     This document's edit history is too long for the server to check, so live
-                    editing can't start. You can keep editing it in dohc and your edits keep
-                    syncing, but people you shared it with can't edit it live. Resume live editing
-                    to try again.
+                    editing cannot start. Your edits in dohc keep syncing, but others cannot edit it
+                    live. Resume live editing to try again.
                   </p>
                 ) : null}
                 {/* The server keeps trying it. Resume tries now, and Stop ends live editing for it. */}
@@ -1103,9 +1108,8 @@ export function LiveDocumentsDialog({
                 !pendingStops.has(row.objectId) &&
                 !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    The server can't start live editing for this document. It keeps trying. You can
-                    keep editing it in dohc and your edits keep syncing, but people you shared it
-                    with can't edit it live until it starts.
+                    The server cannot start live editing for this document and keeps trying. Your
+                    edits in dohc keep syncing, but others cannot edit it live until it starts.
                   </p>
                 ) : null}
                 {/* Any reason the server words this way, under its row's own sentence. */}
@@ -1191,7 +1195,7 @@ export function LiveDocumentsDialog({
           </ul>
         ) : (
           <div className="flex py-10">
-            <EmptyState title="No live documents in this workspace. Reload after a document starts live editing." />
+            <EmptyState title="No live documents in this workspace." />
           </div>
         )
       ) : null}
@@ -1201,11 +1205,11 @@ export function LiveDocumentsDialog({
       {refusalsShown ? (
         <section data-testid="live-refusals" className="mt-5">
           <h3 className="m-0 text-[13px] font-semibold text-ink">
-            Shares that could not start live editing
+            Shares where live editing did not start
           </h3>
           {refusalState.kind === "unknown" ? (
             <p className="mt-2 text-[13px] text-muted">
-              This list is not current. Reload to check these shares again.
+              This list is out of date. Reload to check these shares again.
             </p>
           ) : refusalRows.length === 0 ? (
             <p className="mt-2 text-[13px] text-muted">
@@ -1216,7 +1220,7 @@ export function LiveDocumentsDialog({
           ) : (
             <ul
               aria-busy={refusalBusy !== null}
-              aria-label="Shares that could not start live editing"
+              aria-label="Shares where live editing did not start"
               className="mt-2 divide-y divide-line border-y border-line"
             >
               {refusalRows.map((row) => (
@@ -1229,17 +1233,15 @@ export function LiveDocumentsDialog({
                     <p className="m-0 text-[12px] text-ink">{REFUSAL_SENTENCE}</p>
                     <p className="mb-1 mt-1 text-[12px] text-muted">{refusalReason(row)}</p>
                     {row.paths.slice(0, REFUSAL_PATHS_SHOWN).map((path) => (
-                      <p
-                        key={path}
-                        title={path}
-                        className="m-0 truncate font-mono text-[12px] text-muted"
-                      >
+                      <p key={path} title={path} className="m-0 truncate text-[12px] text-muted">
                         {path}
                       </p>
                     ))}
                     {row.paths.length > REFUSAL_PATHS_SHOWN ? (
                       <p className="m-0 text-[12px] text-subtle">
-                        {`and ${row.paths.length - REFUSAL_PATHS_SHOWN} more files`}
+                        {`and ${row.paths.length - REFUSAL_PATHS_SHOWN} more ${
+                          row.paths.length - REFUSAL_PATHS_SHOWN === 1 ? "file" : "files"
+                        }`}
                       </p>
                     ) : null}
                   </div>
@@ -1274,7 +1276,7 @@ export function LiveDocumentsDialog({
               <SecondaryButton
                 disabled={refusalBusy !== null}
                 data-testid="live-refusals-more"
-                aria-label="Next page of shares that could not start live editing"
+                aria-label="Next page of shares where live editing did not start"
                 onClick={() => performRefusals({ kind: "page", cursor: refusalNextCursor })}
               >
                 Next page

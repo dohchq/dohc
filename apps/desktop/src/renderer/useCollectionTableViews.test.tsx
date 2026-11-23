@@ -344,9 +344,7 @@ it("answers in words when the file changed elsewhere, and never writes over it",
   await act(async () => {
     answer = await latest!.create({ name: "Second", kind: "table" });
   });
-  expect(answer).toBe(
-    "dohc could not save this view. The saved views changed elsewhere. Try again.",
-  );
+  expect(answer).toBe("dohc could not save this view. The saved views changed elsewhere.");
   expect(file.text).toBe(theirs);
   // The popover shows the answer, so no toast repeats it.
   expect(onError).not.toHaveBeenCalled();

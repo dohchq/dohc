@@ -20,6 +20,12 @@ import {
 } from "@dohc/ydoc-projection/table-row-heights";
 import { assertSupportedListMarkdown } from "@dohc/ydoc-projection/list-markdown";
 import { activateReadOnlyLinkHref, type WorkspaceLinkTarget } from "../linkActivation";
+import {
+  BLOCKED_IMAGE_SRC,
+  isWorkspaceRelativeSrc,
+  resolveWorkspaceImageSrc,
+  type ImageSrcContext,
+} from "../editor/imageSrc";
 import { MARKDOWN_COMPONENTS } from "./markdownComponents";
 import { initialChunkCount, splitMarkdownBlocks } from "./splitMarkdownBlocks";
 
@@ -169,6 +175,29 @@ const OpenWorkspaceLink = createContext<
   RefObject<((target: WorkspaceLinkTarget) => void) | undefined>
 >({ current: undefined });
 
+const ReadOnlyImageContext = createContext<ImageSrcContext | null>(null);
+
+function resolveReadOnlyImageSrc(imageContext: ImageSrcContext, raw: string): string {
+  if (!isWorkspaceRelativeSrc(raw)) return resolveWorkspaceImageSrc(imageContext, raw);
+  let decoded = raw;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    decoded = raw;
+  }
+  if (!isWorkspaceRelativeSrc(decoded)) return BLOCKED_IMAGE_SRC;
+  return resolveWorkspaceImageSrc(imageContext, decoded);
+}
+
+function ReadOnlyImage({ src, alt, title, ...rest }: React.ImgHTMLAttributes<HTMLImageElement>) {
+  const imageContext = useContext(ReadOnlyImageContext);
+  const raw = typeof src === "string" ? src : "";
+  const resolved = imageContext ? resolveReadOnlyImageSrc(imageContext, raw) : raw;
+  return (
+    <img {...rest} src={resolved.length > 0 ? resolved : undefined} alt={alt ?? ""} title={title} />
+  );
+}
+
 function ReadOnlyLink({ children, href }: { children?: ReactNode; href?: string }) {
   const openWorkspaceLink = useContext(OpenWorkspaceLink);
   if (!href) {
@@ -211,7 +240,7 @@ export function createMarkdownChunkRenderer(maxBytes: number) {
         ? cached.element
         : Markdown({
             children: source,
-            components: { ...components, a: ReadOnlyLink },
+            components: { ...components, a: ReadOnlyLink, img: ReadOnlyImage },
             remarkPlugins: REMARK_PLUGINS,
           });
     if (source.length <= maxBytes) {
@@ -240,6 +269,7 @@ export function IncrementalMarkdownDocument(props: {
   body: string;
   components: Components;
   onOpenWorkspaceLink?: (target: WorkspaceLinkTarget) => void;
+  imageContext?: ImageSrcContext;
 }) {
   const onOpenWorkspaceLinkRef = useRef(props.onOpenWorkspaceLink);
   onOpenWorkspaceLinkRef.current = props.onOpenWorkspaceLink;
@@ -278,19 +308,22 @@ export function IncrementalMarkdownDocument(props: {
   }, [visibleCount, chunks]);
 
   return (
-    <OpenWorkspaceLink.Provider value={onOpenWorkspaceLinkRef}>
-      {chunks.slice(0, visibleCount).map((chunk, i) => (
-        // Chunks are content-stable for a given body; index keys are correct
-        // because a body change rebuilds the whole list.
-        <MarkdownChunk key={i} source={chunk} components={props.components} />
-      ))}
-    </OpenWorkspaceLink.Provider>
+    <ReadOnlyImageContext.Provider value={props.imageContext ?? null}>
+      <OpenWorkspaceLink.Provider value={onOpenWorkspaceLinkRef}>
+        {chunks.slice(0, visibleCount).map((chunk, i) => (
+          // Chunks are content-stable for a given body; index keys are correct
+          // because a body change rebuilds the whole list.
+          <MarkdownChunk key={i} source={chunk} components={props.components} />
+        ))}
+      </OpenWorkspaceLink.Provider>
+    </ReadOnlyImageContext.Provider>
   );
 }
 
 export type MarkdownReadViewProps = {
   body: string;
   onOpenWorkspaceLink?: (target: WorkspaceLinkTarget) => void;
+  imageContext?: ImageSrcContext;
   onRendered?: () => void;
 };
 
@@ -306,6 +339,7 @@ export default function MarkdownReadView(props: MarkdownReadViewProps) {
       body={props.body}
       components={MARKDOWN_COMPONENTS}
       onOpenWorkspaceLink={props.onOpenWorkspaceLink}
+      imageContext={props.imageContext}
     />
   );
 }

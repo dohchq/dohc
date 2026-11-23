@@ -273,7 +273,7 @@ describe("CollectionHistoryDialog", () => {
     );
     await screen.findByText("3");
     expect(screen.getAllByText("Caller reference")).toHaveLength(2);
-    fireEvent.click(screen.getByRole("button", { name: "Older operations" }));
+    fireEvent.click(screen.getByRole("button", { name: "Older actions" }));
     await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(2));
     expect(onLoad.mock.calls[1]![0]).toMatchObject({ datasetId, beforeRevision: 2, limit: 50 });
     await waitFor(() => expect(screen.queryByText("3")).toBeNull());

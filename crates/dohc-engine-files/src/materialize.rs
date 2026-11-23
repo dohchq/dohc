@@ -18,7 +18,9 @@
 //!    secret or not, and a new file's temp takes its folder's entries.
 //! 3. **Flush** per the per-OS [`DurabilityPolicy`], through
 //!    [`EngineStore::flush_before_commits`], so the file persists before the
-//!    job's status.
+//!    job's status. A version switch writes and flushes many temps at once
+//!    before their jobs run ([`PreparedTemps`]); a job takes its temp in place
+//!    of steps 2 and 3.
 //! 4. **Revalidate the preimage** immediately before the replace: if an external
 //!    editor produced newer content after the DB commit, do not overwrite —
 //!    preserve both and mark the job `conflict`.
@@ -93,6 +95,12 @@
 //! MoveFileExW without replacement when hard links are unavailable.
 //! Secret paths retain their single bound replacement and are excluded.
 //!
+//! On Windows a staged file keeps its own DACL through the rename, so each
+//! staging folder is private on its own and a file that stays staged is made
+//! private after its DACL is saved. It gets that DACL back before it leaves.
+//! A file with other names, or that another account owns, is left as it is.
+//! `staged_dacl` describes the moments a file is still open as before.
+//!
 //! These guarantees cover process crashes. Power-loss protection follows the
 //! flush policy: every flush persists its file before the commits after it.
 //! On Apple silicon a file on the database's device takes a barrier, and the
@@ -132,8 +140,43 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod prepared;
 #[cfg(windows)]
 mod readonly_link;
+#[cfg(windows)]
+mod staged_dacl;
+pub use prepared::PreparedTemps;
+
+#[cfg(not(windows))]
+mod staged_dacl {
+    use super::{EngineStore, MaterializeError};
+    use std::path::{Path, PathBuf};
+
+    pub(super) fn leave(
+        _: &EngineStore,
+        _: &Path,
+        _: i64,
+        leave: impl FnOnce() -> Result<bool, MaterializeError>,
+    ) -> Result<bool, MaterializeError> {
+        leave()
+    }
+
+    pub(super) fn keep_all_private(
+        _: &EngineStore,
+        _: &[PathBuf],
+        _: i64,
+    ) -> Result<(), MaterializeError> {
+        Ok(())
+    }
+
+    pub(super) fn saved_in(_: &EngineStore, _: &Path) -> Result<bool, MaterializeError> {
+        Ok(false)
+    }
+
+    pub(super) fn forget_folder(_: &EngineStore, _: &Path) -> Result<(), MaterializeError> {
+        Ok(())
+    }
+}
 
 /// Maximum bytes the pipeline will materialize or read back for comparison. A
 /// job's content came from a bounded blob; the on-disk comparison read is
@@ -1104,7 +1147,19 @@ pub fn materialize_one_ordinary(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
-    materialize_one_ordinary_with(store, root, job, options, false)
+    materialize_one_ordinary_prepared(store, root, job, options, &PreparedTemps::default())
+}
+
+/// [`materialize_one_ordinary`], placing the temp `prepared` holds for the
+/// job, if any, instead of writing one.
+pub fn materialize_one_ordinary_prepared(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    options: &MaterializeOptions<'_>,
+    prepared: &PreparedTemps,
+) -> Result<JobOutcome, MaterializeError> {
+    materialize_one_ordinary_with(store, root, job, options, false, prepared)
 }
 
 fn materialize_one_ordinary_with(
@@ -1113,9 +1168,23 @@ fn materialize_one_ordinary_with(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
     conflict_only: bool,
+    prepared: &PreparedTemps,
 ) -> Result<JobOutcome, MaterializeError> {
     require_materialization_owner(store)?;
-    let result = materialize_one_inner(store, root, job, options, conflict_only);
+    let result = materialize_one_inner(store, root, job, options, conflict_only, prepared);
+    if matches!(&result, Ok(JobOutcome::Conflict))
+        || matches!(&result, Err(error) if !matches!(error, MaterializeError::Storage(_)))
+    {
+        let kept = (|| {
+            let root =
+                std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+            let dir = job_staging_dir(store, &root, &job.job_id, false)?;
+            staged_dacl::keep_all_private(store, &[dir], options.now_ms)
+        })();
+        if let Err(error) = kept {
+            eprintln!("staged file privacy: {error}");
+        }
+    }
     if matches!(&result, Ok(outcome) if !matches!(outcome, JobOutcome::Crashed(_)))
         || matches!(
             &result,
@@ -1141,6 +1210,7 @@ fn materialize_one_inner(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
     conflict_only: bool,
+    prepared: &PreparedTemps,
 ) -> Result<JobOutcome, MaterializeError> {
     let MaterializeOptions { now_ms, faults, .. } = *options;
     // Canonicalizing the root deliberately accepts aliases above (or at) the
@@ -1179,6 +1249,7 @@ fn materialize_one_inner(
     // conflict, so the person is told.
     let (staging, kept) = recover_job_displacements(store, &canonical_root, &target, job, options)?;
     if kept {
+        prepared.discard(&job.job_id);
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Conflict);
     }
@@ -1231,6 +1302,7 @@ fn materialize_one_inner(
         job,
         &content,
         options,
+        prepared,
     )
 }
 
@@ -1243,7 +1315,8 @@ pub fn materialize_write_conflict(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
-    match materialize_one_ordinary_with(store, root, job, options, true) {
+    match materialize_one_ordinary_with(store, root, job, options, true, &PreparedTemps::default())
+    {
         Err(MaterializeError::SymlinkTarget | MaterializeError::RecoveryUnavailable) => {
             Ok(JobOutcome::Blocked)
         }
@@ -1252,9 +1325,8 @@ pub fn materialize_write_conflict(
 }
 
 /// Execute a secret write through the same atomic-replace pipeline without
-/// ever persisting plaintext in the content-blob table. Ordinary secret jobs
-/// adopt the current disk state as their immediate preimage; version-switch
-/// jobs retain the preimage probed during phase 1 so an intervening edit
+/// ever persisting plaintext in the content-blob table. Every secret job keeps
+/// the preimage probed when it was queued, so an edit made since then
 /// conflicts. Conflict handling never writes a plaintext `.conflict` sibling.
 pub fn materialize_secret_one(
     store: &EngineStore,
@@ -1304,23 +1376,11 @@ fn materialize_secret_one_with_remover(
         && hex_sha256(bytes) == desired_sha
         && !target_has_other_leaf_spelling(&target)
     {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        complete_secret_job_unrun(store, &canonical_root, job, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
     }
-    let preimage = if job.job_id.starts_with("version-switch-secret-mat_") {
-        job.preimage.clone()
-    } else {
-        match current {
-            CurrentTarget::Absent => Preimage::Absent,
-            CurrentTarget::Present(bytes) => Preimage::Present(hex_sha256(&bytes)),
-            CurrentTarget::Oversized => {
-                return Err(MaterializeError::BlockedTarget);
-            }
-        }
-    };
     let plaintext_job = MaterializationJob {
         content_sha256: desired_sha,
-        preimage,
         ..job.clone()
     };
     materialize_secret_write(
@@ -1334,13 +1394,58 @@ fn materialize_secret_one_with_remover(
     )
 }
 
+/// Mark a secret job complete without running it, as when a newer job for its
+/// file replaces it. A stopped run of this job may have left its plaintext
+/// temp beside the target, which only this job's own run would remove, so it
+/// is removed first. If the temp can't be removed, the job stays pending. A
+/// folder on the way that is now a file or a link holds no temp this job can
+/// reach, so the job completes.
+pub fn complete_secret_job_unrun(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    now_ms: i64,
+) -> Result<(), MaterializeError> {
+    require_materialization_owner(store)?;
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    match remove_secret_job_temp(&canonical_root, job) {
+        Ok(())
+        | Err(MaterializeError::SymlinkTarget)
+        | Err(MaterializeError::Io {
+            kind: ErrorKind::NotADirectory,
+            ..
+        }) => {}
+        Err(err) => return Err(err),
+    }
+    store.mark_materialization_complete(&job.job_id, now_ms)?;
+    Ok(())
+}
+
+fn remove_secret_job_temp(
+    canonical_root: &Path,
+    job: &MaterializationJob,
+) -> Result<(), MaterializeError> {
+    let target = resolve_target(canonical_root, &job.target_path)?;
+    let parent_path = target.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
+    if let Some(parent) = SecretParentGuard::open_existing(canonical_root, &target, parent_path)? {
+        let tmp = temp_sibling(&target, &job.job_id);
+        let tmp_name = tmp.file_name().ok_or(MaterializeError::UnsafeTargetPath)?;
+        match parent.remove_file(tmp_name, &tmp) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(MaterializeError::io(&tmp, &err)),
+        }
+    }
+    Ok(())
+}
+
 /// Execute an active-version secret delete after the runtime has resolved the
 /// versioned current tip. Unlike the generic pipeline, this deliberately has no
 /// workspace-wide generation fence: generations from another version cannot
-/// suppress deletion of the active disk projection. Ordinary keyless deletes
-/// adopt the current regular file; version-switch deletes retain their
-/// phase-1 plaintext hash so an intervening edit conflicts. Neither path emits
-/// a plaintext conflict artifact.
+/// suppress deletion of the active disk projection. Every delete keeps the
+/// preimage probed when it was queued, so an edit made since then conflicts.
+/// A conflict emits no plaintext artifact.
 /// Deletion does not use `options.replacer` or `options.backoff`.
 pub fn materialize_secret_delete_one(
     store: &EngineStore,
@@ -1394,18 +1499,14 @@ fn materialize_secret_delete_with_hook(
         faults,
         ..
     } = *options;
-    let current = read_current_no_follow(target)?;
-    let preimage = match current {
+    match read_current_no_follow(target)? {
         CurrentTarget::Absent => {
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             return Ok(JobOutcome::AlreadyMaterialized);
         }
-        CurrentTarget::Present(_) if job.job_id.starts_with("version-switch-secret-mat_") => {
-            job.preimage.clone()
-        }
-        CurrentTarget::Present(bytes) => Preimage::Present(hex_sha256(&bytes)),
+        CurrentTarget::Present(_) => {}
         CurrentTarget::Oversized => return Err(MaterializeError::BlockedTarget),
-    };
+    }
     if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeBeforePreimageRevalidate,
@@ -1420,10 +1521,6 @@ fn materialize_secret_delete_with_hook(
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
     };
-    // Re-read immediately before unlinking to preserve no-follow semantics.
-    // Any regular file currently at the active secret's own resolved path is
-    // the disk projection being retired; no plaintext hash or conflict copy is
-    // needed (or safe) for a secret delete.
     let current_now = parent.read_current(target_name, target)?;
     match &current_now {
         CurrentTarget::Absent => {
@@ -1433,7 +1530,7 @@ fn materialize_secret_delete_with_hook(
         CurrentTarget::Present(_) => {}
         CurrentTarget::Oversized => return Err(MaterializeError::BlockedTarget),
     }
-    if !preimage_matches(&preimage, &current_now) {
+    if !preimage_matches(&job.preimage, &current_now) {
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Conflict);
     }
@@ -1610,6 +1707,10 @@ enum OrdinaryWritePlacement<'a> {
 
 /// Write an ordinary job's content without overwriting bytes the preimage
 /// check did not see (module docs, "Stage, then place").
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a prepared temp replaces the write and flush of steps 2 and 3"
+)]
 fn materialize_ordinary_write(
     store: &EngineStore,
     root: &Path,
@@ -1618,6 +1719,7 @@ fn materialize_ordinary_write(
     job: &MaterializationJob,
     content: &[u8],
     options: &MaterializeOptions<'_>,
+    prepared: &PreparedTemps,
 ) -> Result<JobOutcome, MaterializeError> {
     let MaterializeOptions {
         policy,
@@ -1647,6 +1749,7 @@ fn materialize_ordinary_write(
             && respelled.is_none()
             && !target_has_other_leaf_spelling(target)
         {
+            prepared.discard(&job.job_id);
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             return Ok(JobOutcome::AlreadyMaterialized);
         }
@@ -1656,7 +1759,13 @@ fn materialize_ordinary_write(
     // secret path routed here still gets an owner-only temp.
     let tmp = temp_sibling(target, &job.job_id);
     let owner_only = crate::policy::normalized_path_is_secret(&job.target_path);
-    let temp_file = write_temp(target, &tmp, content, owner_only)?;
+    let temp_file = if matches!(placement, OrdinaryWritePlacement::Target(_))
+        && prepared.take(&job.job_id, &tmp, target)
+    {
+        None
+    } else {
+        Some(write_temp(target, &tmp, content, owner_only)?)
+    };
     if should_crash(faults, FaultPoint::MaterializeAfterTempWrite) {
         // A crash here leaves an orphan temp; startup replay ignores it (temp is
         // never captured as user content: it lives under a `.dohc-write-` name
@@ -1667,8 +1776,9 @@ fn materialize_ordinary_write(
     // Step 3: flush the temp FILE per the per-OS durability policy. The parent
     // directory is synced after the renames, which is where their durability
     // lives on POSIX.
-    flush_temp_file(store, &temp_file, &tmp, policy)?;
-    drop(temp_file);
+    if let Some(temp_file) = temp_file {
+        flush_temp_file(store, &temp_file, &tmp, policy)?;
+    }
     if should_crash(faults, FaultPoint::MaterializeAfterFlushBeforeRename) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterFlushBeforeRename,
@@ -2252,6 +2362,10 @@ fn stage_target_same_volume(
     if walk_target_components(root, &dir, ensure_real_directory).is_err() {
         return Ok(Stage::CrossVolume);
     }
+    #[cfg(windows)]
+    if dohc_windows_files::ensure_private_staging_dir(&dir).is_err() {
+        return Ok(Stage::CrossVolume);
+    }
     let rel = dir
         .strip_prefix(root)
         .map_err(|_| MaterializeError::UnsafeTargetPath)?
@@ -2290,6 +2404,10 @@ fn job_staging_dir(
     let dir = root.join(path);
     if create {
         walk_target_components(root, &dir, ensure_real_directory)?;
+        #[cfg(windows)]
+        if let Err(err) = dohc_windows_files::ensure_private_staging_dir(&dir) {
+            eprintln!("staging folder privacy {}: {err}", dir.display());
+        }
     } else {
         ensure_target_symlink_free(root, &dir)?;
     }
@@ -2331,7 +2449,8 @@ fn all_staging_dirs(
 
 /// Called on the writer thread, so cleanup cannot race a pending job's rename.
 /// Only empty sibling staging directories can be removed; retained and kept
-/// sources keep their directory and its location rows reachable.
+/// sources keep their directory and its location rows reachable. A missing
+/// one whose files have saved DACLs keeps its rows, since it may come back.
 pub fn cleanup_staging_directory(
     store: &EngineStore,
     root: &Path,
@@ -2369,7 +2488,11 @@ fn cleanup_staging_directory_with_sync(
     let relative = relative.to_string_lossy().replace('\\', "/");
     match std::fs::remove_dir(&directory) {
         Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            if staged_dacl::saved_in(store, &directory)? {
+                return Ok(());
+            }
+        }
         Err(e) if e.kind() == ErrorKind::DirectoryNotEmpty => return Ok(()),
         Err(e) => return Err(MaterializeError::io(&directory, &e)),
     }
@@ -2377,6 +2500,7 @@ fn cleanup_staging_directory_with_sync(
     if let Some(parent) = directory.parent() {
         sync(parent)?;
     }
+    staged_dacl::forget_folder(store, &directory)?;
     store.forget_staging_directory(&relative)?;
     Ok(())
 }
@@ -2700,8 +2824,10 @@ fn return_displaced(
     staged: &Path,
     options: &MaterializeOptions<'_>,
 ) -> Result<bool, MaterializeError> {
-    let returned = retry_while_locked(target, staged, options.backoff, RETURN_ATTEMPTS, || {
-        place_attempt(options.replacer, staged, target)
+    let returned = staged_dacl::leave(store, staged, options.now_ms, || {
+        retry_while_locked(target, staged, options.backoff, RETURN_ATTEMPTS, || {
+            place_attempt(options.replacer, staged, target)
+        })
     })?;
     if returned {
         sync_parent_dir(store, target.parent(), options.policy)?;
@@ -2783,8 +2909,9 @@ fn swap_back(
     if let Some(aside) = aside {
         let conflict_path = conflict_sibling(target, &aside.job_id);
         let resolution = if !entry_exists(&aside.path)?
-            || std::fs::rename(&aside.path, &conflict_path).is_ok()
-        {
+            || staged_dacl::leave(store, &aside.path, options.now_ms, || {
+                Ok(std::fs::rename(&aside.path, &conflict_path).is_ok())
+            })? {
             DisplacementResolution::Discard
         } else {
             // The job's content stays at its displaced name. Its kept row
@@ -2980,7 +3107,14 @@ fn dispose_known(
     {
         #[cfg(unix)]
         crate::retained::retain_known(store, root, path, file, sha256, spec, now_ms)?;
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let _ = (root, spec, file, sha256);
+            if std::fs::remove_file(path).is_err() {
+                staged_dacl::try_keep_private(store, path, now_ms)?;
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (store, root, spec, now_ms, file, sha256);
             let _ = std::fs::remove_file(path);
@@ -3574,8 +3708,8 @@ pub fn recover_displacements(
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let (dirs, mut unavailable) = all_staging_dirs(store, &canonical_root)?;
-    for dir in dirs {
-        match recover_displacements_in(store, &canonical_root, &dir, workspace_id, options) {
+    for dir in &dirs {
+        match recover_displacements_in(store, &canonical_root, dir, workspace_id, options) {
             Ok(()) => {}
             Err(
                 error @ MaterializeError::Io {
@@ -3599,7 +3733,7 @@ pub fn recover_displacements(
     // One verdict for the entire sweep. A later healthy directory cannot clear
     // an earlier failure; a subsequent complete healthy sweep can.
     set_recovery_unavailable(&canonical_root, unavailable);
-    Ok(())
+    staged_dacl::keep_all_private(store, &dirs, options.now_ms)
 }
 
 fn recover_displacements_in(
@@ -3772,7 +3906,8 @@ pub fn recover_path_displacements(
             conflict_if_pending(store, entry.job_id(), options.now_ms)?;
         }
     }
-    Ok(())
+    let (dirs, _) = all_staging_dirs(store, &canonical_root)?;
+    staged_dacl::keep_all_private(store, &dirs, options.now_ms)
 }
 
 /// What [`save_kept_displacement`] did with a kept file.
@@ -3906,11 +4041,17 @@ fn save_kept_displacement_with_cleanup(
                 continue;
             }
             #[cfg(windows)]
-            remove_placement_link(&kept, &copy).map_err(|err| MaterializeError::io(&kept, &err))?;
+            staged_dacl::leave(store, &kept, options.now_ms, || {
+                remove_placement_link(&kept, &copy)
+                    .map(|()| true)
+                    .map_err(|err| MaterializeError::io(&kept, &err))
+            })?;
             #[cfg(not(windows))]
             std::fs::remove_file(&kept).map_err(|err| MaterializeError::io(&kept, &err))?;
         } else {
-            match move_kept_copy(&kept, &copy, options) {
+            match staged_dacl::leave(store, &kept, options.now_ms, || {
+                move_kept_copy(&kept, &copy, options)
+            }) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(err) if names_too_long(&err) => return Ok(KeptCopySave::NoValidName),
@@ -6620,7 +6761,10 @@ mod tests {
 
     #[cfg(windows)]
     fn write_new_by_secret_job(scratch: &Scratch) {
-        let (store, job) = prepare_secret_job(scratch, "secret-write", ".env");
+        let (store, mut job) = prepare_secret_job(scratch, "secret-write", ".env");
+        if let Ok(before) = std::fs::read(scratch.root.join(".env")) {
+            job.preimage = Preimage::Present(hex_sha256(&before));
+        }
         let options = options_with(&StdReplacer);
         let outcome = materialize_secret_one(&store, &scratch.root, &job, b"new", &options);
         assert_eq!(outcome.unwrap(), JobOutcome::Completed);
@@ -7505,7 +7649,7 @@ mod tests {
                         workspace_id: "ws".to_owned(),
                         target_path: ".env".to_owned(),
                         content_sha256: staged_sha.clone(),
-                        preimage: Preimage::Absent,
+                        preimage: Preimage::Present(hex_sha256(b"ORIGINAL=preimage\n")),
                         target_generation: 1,
                         now_ms: 1,
                     },
@@ -7557,8 +7701,81 @@ mod tests {
             "plaintext secret temps leaked: {leaked:?}"
         );
     }
+
+    #[test]
+    fn a_secret_job_conflicts_with_a_file_edited_since_it_was_queued() {
+        for operation in [
+            MaterializationOperation::Write,
+            MaterializationOperation::Delete,
+        ] {
+            let scratch = Scratch::new("secret-edited-since-queued");
+            let target = scratch.root.join(".env");
+            std::fs::write(&target, b"EDITED=while-closed\n").unwrap();
+            let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+            let staged_sha = store.put_binary_blob(b"encrypted-placeholder").unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    let spec = MaterializationJobSpec {
+                        job_id: "secret-mat_restore".to_owned(),
+                        workspace_id: "ws".to_owned(),
+                        target_path: ".env".to_owned(),
+                        content_sha256: staged_sha.clone(),
+                        preimage: Preimage::Present(hex_sha256(b"QUEUED=over-this\n")),
+                        target_generation: 1,
+                        now_ms: 1,
+                    };
+                    match operation {
+                        MaterializationOperation::Write => enqueue_job(tx, &spec),
+                        MaterializationOperation::Delete => {
+                            dohc_engine_storage::enqueue_delete_job(tx, &spec)
+                        }
+                    }
+                })
+                .unwrap();
+            let job = store
+                .load_materialization_job("secret-mat_restore")
+                .unwrap()
+                .unwrap();
+            let options = options_with(&StdReplacer);
+
+            let outcome = match operation {
+                MaterializationOperation::Write => materialize_secret_one(
+                    &store,
+                    &scratch.root,
+                    &job,
+                    b"RESTORED=secret\n",
+                    &options,
+                ),
+                MaterializationOperation::Delete => {
+                    materialize_secret_delete_one(&store, &scratch.root, &job, &options)
+                }
+            }
+            .unwrap();
+
+            assert_eq!(outcome, JobOutcome::Conflict, "{operation:?}");
+            assert_eq!(
+                std::fs::read(&target).unwrap(),
+                b"EDITED=while-closed\n",
+                "{operation:?} keeps the edit"
+            );
+            let mut names = std::fs::read_dir(&scratch.root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            assert_eq!(names, [".dohc", ".env"], "{operation:?} leaves no sibling");
+        }
+    }
 }
 
 #[cfg(test)]
 #[path = "materialize/retention_tests.rs"]
 mod retention_tests;
+
+#[cfg(all(test, windows))]
+#[path = "materialize/staged_dacl_tests.rs"]
+mod staged_dacl_tests;
+
+#[cfg(test)]
+#[path = "materialize/prepared_tests.rs"]
+mod prepared_tests;

@@ -79,7 +79,7 @@ describe("New record row", () => {
       />,
     );
     expect(screen.getByRole("columnheader", { name: /title/ })).toBeDefined();
-    expect(screen.queryByText("No records in this collection yet.")).toBeNull();
+    expect(screen.queryByText("No records in this Collection yet.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "New record" }));
     expect(onNewRecord).toHaveBeenCalledTimes(1);
   });
@@ -94,7 +94,7 @@ describe("New record row", () => {
     );
     rerender(<TableView schema={schema} records={[]} />);
     expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
-    expect(screen.getByText("No records in this collection yet.")).toBeDefined();
+    expect(screen.getByText("No records in this Collection yet.")).toBeDefined();
   });
 });
 
@@ -133,8 +133,6 @@ describe("paused table editing", () => {
     expect(input.value).toBe("delta");
     expect(input.matches(":disabled")).toBe(false);
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onCreateOption).not.toHaveBeenCalled();
-    fireEvent.pointerDown(document.body);
     expect(onCreateOption).toHaveBeenCalledExactlyOnceWith({
       recordId: "rec-1",
       recordPath: records[0]!.path,
@@ -143,6 +141,8 @@ describe("paused table editing", () => {
       value: ["alpha", "delta"],
       previousValues: [["alpha"]],
     });
+    fireEvent.pointerDown(document.body);
+    expect(onCreateOption).toHaveBeenCalledTimes(1);
     expect(onCellChange).not.toHaveBeenCalled();
   });
 
@@ -453,16 +453,32 @@ describe("selection and keys", () => {
     expect(grid.scrollTop).toBe(0);
     press("ArrowDown");
     expect(grid.scrollTop).toBe(32);
-    // done ends at 36 + 260 + 180 + 180 = 656, past a width of 400.
-    expect(grid.scrollLeft).toBe(256);
+    // done ends at 36 + 260 + 112 + 88 = 496, past a width of 400.
+    expect(grid.scrollLeft).toBe(96);
     press("ArrowUp");
     press("ArrowUp");
     expect(grid.scrollTop).toBe(0);
     press("ArrowLeft");
-    expect(grid.scrollLeft).toBe(256);
+    // Column 1 starts at 36 + 260 = 296, which would be hidden under frozen column 0 at scrollLeft = 96.
+    expect(grid.scrollLeft).toBe(0);
     press("ArrowLeft");
     expect(grid.scrollLeft).toBe(0);
     expect(selection()).toEqual([0, 0]);
+  });
+
+  it("sticks pinned column 0 editors to the gutter throughout horizontal scrolling", () => {
+    const { grid, cell, editorInput } = setup({ onOpenRecord: vi.fn() });
+    Object.defineProperty(grid, "clientWidth", { configurable: true, value: 400 });
+    grid.scrollLeft = 180;
+
+    fireEvent.click(cell(0, 0));
+    const editor = editorInput()?.closest("fieldset") as HTMLElement | null;
+    expect(editor).not.toBeNull();
+    // Pinned column 0 editors stay sticky at OPEN_COLUMN_WIDTH (36px) across horizontal scroll.
+    expect(editor!.classList.contains("sticky")).toBe(true);
+    expect(editor!.classList.contains("z-10")).toBe(true);
+    expect(editor!.style.left).toBe("36px");
+    expect(editor!.parentElement?.style.paddingTop).toBe("0px");
   });
 
   it("starts an edit with Enter, cancels it with Escape, and keeps the cell selected", () => {
@@ -643,9 +659,7 @@ describe("selection and keys", () => {
     const input = editorInput()!;
     fireEvent.change(input, { target: { value: "twelve" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(screen.getByRole("alert").textContent).toBe(
-      "This value is not a number. Enter a number.",
-    );
+    expect(screen.getByRole("alert").textContent).toBe("Enter a number.");
     expect(editorInput()).toBe(input);
     expect(selection()).toEqual([0, 1]);
 
@@ -874,13 +888,13 @@ describe("pickers", () => {
     open(0, STATUS);
     expect(editor()?.style.left).toBe("260px");
     fireEvent.keyDown(search(), { key: "Escape" });
-    // tags starts at 440 and would end at 680. It moves left to end 8px inside the edge.
+    // tags starts at 410 and would end at 650. It moves left to end 8px inside the edge.
     open(0, TAGS);
     expect(editor()?.style.left).toBe("352px");
     fireEvent.keyDown(search(), { key: "Escape" });
     grid.scrollLeft = 300;
     open(0, DUE);
-    expect(editor()?.style.left).toBe("620px");
+    expect(editor()?.style.left).toBe("610px");
     fireEvent.keyDown(screen.getByRole("grid", { name: "due" }), { key: "Escape" });
     Object.defineProperty(grid, "clientWidth", { configurable: true, value: 500 });
     open(0, DUE);
@@ -901,6 +915,30 @@ describe("pickers", () => {
     expect(editor()).toBeNull();
     expect(selection()).toEqual([1, STATUS]);
     expect(document.activeElement).toBe(grid);
+  });
+
+  it("saves an option picked with the pointer inside a shadow root", () => {
+    // The website's demo mounts the table in a shadow root, where the document
+    // sees every press as the root's host.
+    const host = document.body.appendChild(document.createElement("div"));
+    const container = host
+      .attachShadow({ mode: "open" })
+      .appendChild(document.createElement("div"));
+    const onCellChange = vi.fn(() => 1);
+    render(<TableView schema={schema} records={pickerRecords()} onCellChange={onCellChange} />, {
+      container,
+    });
+    const shadow = within(container);
+    fireEvent.click(
+      shadow.getAllByRole("row")[2]!.querySelectorAll<HTMLElement>('[role="gridcell"]')[STATUS]!,
+    );
+    const doing = shadow.getByRole("option", { name: "doing" });
+    fireEvent.pointerDown(doing);
+    fireEvent.click(doing);
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ recordId: "rec-b", field: "status", value: "doing" }),
+    );
+    host.remove();
   });
 
   it("opens a picker with Enter, picks with the keys, and cancels with Escape", () => {
@@ -1091,15 +1129,13 @@ describe("pickers", () => {
     expect(chips()).toEqual(["gamma"]);
   });
 
-  it("creates a tags option with the picks when the picker closes, and starts the next edit from them", () => {
+  it("creates a tags option immediately with pending picks, and starts the next edit from them", () => {
     const onCreateOption = vi.fn((_create: { option: string }) => 41);
     const { open, option, search, chips, onCellChange } = setup({ onCreateOption });
     open(0, TAGS);
     fireEvent.click(option("beta"));
     fireEvent.change(search(), { target: { value: "delta" } });
     fireEvent.keyDown(search(), { key: "Enter" });
-    expect(onCreateOption).not.toHaveBeenCalled();
-    fireEvent.keyDown(search(), { key: "Tab" });
     expect(onCreateOption).toHaveBeenCalledExactlyOnceWith({
       recordId: "rec-a",
       recordPath: "tasks/rec-a.md",
@@ -1108,6 +1144,8 @@ describe("pickers", () => {
       value: ["alpha", "beta", "delta"],
       previousValues: [["alpha"]],
     });
+    fireEvent.keyDown(search(), { key: "Tab" });
+    expect(onCreateOption).toHaveBeenCalledTimes(1);
     expect(onCellChange).not.toHaveBeenCalled();
     open(0, TAGS);
     expect(chips()).toEqual(["alpha", "beta", "delta"]);
@@ -1117,7 +1155,7 @@ describe("pickers", () => {
     const onOptionColorChange = vi.fn();
     const { open, press, search } = setup({ onOptionColorChange });
     open(0, STATUS);
-    fireEvent.click(screen.getByRole("button", { name: "doing options" }));
+    fireEvent.click(screen.getByRole("button", { name: "Options for doing" }));
     const unchosen = screen
       .getAllByRole("radio")
       .find((swatch) => swatch.getAttribute("aria-checked") === "false")!;
@@ -1130,7 +1168,7 @@ describe("pickers", () => {
     fireEvent.keyDown(search(), { key: "Escape" });
     press("ArrowRight");
     press("Enter");
-    expect(screen.getByRole("button", { name: "beta options" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Options for beta" })).toBeDefined();
   });
 
   it("saves a picked date and gives the keys back to the grid", () => {
@@ -1158,7 +1196,7 @@ describe("pickers", () => {
     without.open(0, OWNER);
     expect(screen.queryByRole("combobox")).toBeNull();
     expect(without.editor()?.querySelector("input")?.value).toBe("user-7");
-    expect(without.editor()?.style.width).toBe("180px");
+    expect(without.editor()?.style.width).toBe("150px");
   });
 
   it("opens a filled link from its text, and edits it from a click beside the text", () => {

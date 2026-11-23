@@ -40,6 +40,9 @@ function fixture() {
       ...(phone ? { phone: { launchHash } } : {}),
       fetchRelay: async (request) => {
         relayed.push(request);
+        // Like the relay for an app that requests nothing in the workspace: it has no backend.
+        if (new URL(request.url).pathname.includes("/backend/"))
+          return new Response(null, { status: 404 });
         if (new URL(request.url).pathname.includes("/blobs/"))
           return new Response(bytes, { headers: { "content-type": file.contentType } });
         return Response.json({ publicationId, authorityRevision: 1, files: [file] });
@@ -91,7 +94,14 @@ function fixture() {
     const cookie = page.headers.get("set-cookie")!.split(";")[0]!;
     const call = (path: string) =>
       post(origin + path, "", { origin, cookie, "x-dohc-app-proof": proof });
-    return { action, html, call };
+    const backend = (body: unknown) =>
+      post(origin + "/backend", JSON.stringify(body), {
+        origin,
+        cookie,
+        "x-dohc-app-proof": proof,
+        "content-type": "application/json",
+      });
+    return { action, html, call, backend };
   };
   return {
     handler,
@@ -123,6 +133,23 @@ it("opens a phone launch from its grant alone, bound to the host it was redeemed
   for (const origin of [config.viewerOrigin, "null"])
     expect((await f.issue({ origin })).status, origin).toBe(404);
   expect((await f.issue({}, "H".repeat(43))).status).toBe(404);
+});
+
+it("opens a phone launch of an app with no backend, and answers its backend calls as missing", async () => {
+  const f = fixture();
+  const app = await f.open();
+  expect((await app.call("/document")).status).toBe(200);
+  const invoked = await app.backend({
+    id: "1",
+    op: "backend.invoke",
+    operation: "registrations.add",
+    idempotencyKey: "add-1",
+    input: {},
+  });
+  expect(invoked.status).toBe(404);
+  expect(new URL(f.relayed.at(-1)!.url).pathname).toBe(
+    `/sync/link/app-publications/${publicationId}/backend/invoke`,
+  );
 });
 
 it("keeps a browser launch's bootstrap to the viewer's Origin", async () => {

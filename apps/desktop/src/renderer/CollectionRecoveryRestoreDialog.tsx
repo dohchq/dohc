@@ -41,7 +41,7 @@ export function CollectionRecoveryRestoreDialog(props: {
       setRecovery(value);
     } catch (error) {
       if (!signal.aborted)
-        props.onError("Could not open this recovery file.", error, () => {
+        props.onError("dohc could not open this recovery file.", error, () => {
           void choose();
         });
     } finally {
@@ -61,7 +61,7 @@ export function CollectionRecoveryRestoreDialog(props: {
       }
     } catch (error) {
       if (!signal.aborted)
-        props.onError("Could not restore this Collection.", error, () => {
+        props.onError("dohc could not restore this Collection.", error, () => {
           void restore();
         });
     } finally {
@@ -77,7 +77,7 @@ export function CollectionRecoveryRestoreDialog(props: {
       if (!lifetime.current.signal.aborted) props.onClose();
     } catch (error) {
       if (!lifetime.current.signal.aborted)
-        props.onError("Could not cancel this recovery.", error, () => {
+        props.onError("dohc could not cancel this recovery.", error, () => {
           void cancel();
         });
     } finally {
@@ -120,7 +120,7 @@ export function CollectionRecoveryRestoreDialog(props: {
                 disabled={busy}
                 onChange={(event) => setStopped(event.target.checked)}
               />
-              I stopped the old host and will not restart it for this Collection.
+              I stopped the previous host and will not restart it for this Collection.
             </label>
           </>
         ) : (

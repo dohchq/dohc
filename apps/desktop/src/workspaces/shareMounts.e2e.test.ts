@@ -87,7 +87,7 @@ describe("share mounts real daemon", () => {
           "reserved",
         );
         await expect(mounted.reshare("shared-with-me/e2e-granter/docs")).rejects.toThrow(
-          "copy it into your own files to share it onward",
+          "Copy it into your own files to share it onward.",
         );
         await expect(readFile(mountedFile, "utf8")).resolves.toContain("The lighthouse memo.");
 

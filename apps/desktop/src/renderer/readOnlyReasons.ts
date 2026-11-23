@@ -6,7 +6,7 @@ export const SHARED_REASON = "This page is shared with you to read.";
 export const ACCESS_ENDED_REASON = "Your access to this page ended.";
 // The chip's Try again finishes the replacement.
 export const REPLACEMENT_FAILED_REASON =
-  "dohc could not finish replacing this page. Try again to finish it.";
+  "dohc could not replace this page. Choose Try again to finish.";
 // Tabs showing the document share one session. It stays read-only until every
 // tab closes, and reopening then starts a fresh one.
 export const CONNECTION_LOST_REASON =
@@ -22,7 +22,7 @@ export const LIVE_EDITING_PAUSED_REASON =
   "Live editing is paused for this page. Open Live documents to continue.";
 // Too many of its edits wait to reach the server. This ends by itself.
 export const LIVE_EDITS_WAITING_REASON =
-  "Live editing is paused until this page's waiting edits reach the server.";
+  "Live editing is paused until pending edits reach the server.";
 
 // Why this session became read-only, beside any row it set aside, since no row
 // says why. None when access ended, which has its own reason.

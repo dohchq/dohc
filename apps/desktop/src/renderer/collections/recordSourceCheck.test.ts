@@ -31,7 +31,7 @@ describe("useRecordSourceCheck", () => {
 
   it("finds a lossy note", async () => {
     readsAs(async () => ({
-      text: `${RECORD}\n<details>\n\nHidden.\n</details>\n`,
+      text: `${RECORD}\n1. Run this:\n\n       pnpm install\n\n2. Done\n`,
       contentHash: "5b".repeat(32),
       truncated: false,
     }));
@@ -56,7 +56,9 @@ describe("useRecordSourceCheck", () => {
   it("checks again for another record", async () => {
     readsAs(async ({ relativePath }) => ({
       text:
-        relativePath === "tasks/Plan.md" ? RECORD : `${RECORD}\n<details>\n\nHidden.\n</details>\n`,
+        relativePath === "tasks/Plan.md"
+          ? RECORD
+          : `${RECORD}\n1. Run this:\n\n       pnpm install\n\n2. Done\n`,
       contentHash: relativePath === "tasks/Plan.md" ? "5d".repeat(32) : "5e".repeat(32),
       truncated: false,
     }));

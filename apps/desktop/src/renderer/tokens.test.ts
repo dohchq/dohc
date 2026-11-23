@@ -436,7 +436,8 @@ describe("the type stacks name the bundled families", () => {
   const firstFamily = (stack: string) => stack.split(",")[0].trim().replace(/^"|"$/g, "");
 
   for (const [token, specifier] of [
-    ["--font-sans", "@fontsource-variable/inter"],
+    ["--font-sans", "@fontsource-variable/inter/opsz.css"],
+    ["--font-sans", "@fontsource-variable/inter/opsz-italic.css"],
     ["--font-mono", "@fontsource/ibm-plex-mono/400.css"],
   ] as const) {
     it(`${token} is the family ${specifier} declares`, () => {

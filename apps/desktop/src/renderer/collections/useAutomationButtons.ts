@@ -165,9 +165,9 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     const { onNotice } = report();
     if (outcome.outcome === "done") onNotice(`Ran ${run.field} on ${run.label}`);
     else if (outcome.outcome === "skipped")
-      onNotice(`${run.field} made no changes to ${run.label}`);
+      onNotice(`No changes from ${run.field} on ${run.label}`);
     // A press sent again after its run record was trimmed: it ended, and dohc cannot say how.
-    else if (outcome.outcome === "ended") onNotice(`${run.field} finished on ${run.label}`);
+    else if (outcome.outcome === "ended") onNotice(`Finished ${run.field} on ${run.label}`);
     // A failed run is main's to report, as every automation's is: its notice reaches
     // this person with Try again, and main takes it back once the run succeeds.
   }
@@ -316,7 +316,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
         if (closed) return;
         finish(key);
         report().onError(
-          `${field} did not start.`,
+          `dohc could not start ${field}.`,
           error,
           () => void live()?.press(field, record, pressId, confirmed),
         );

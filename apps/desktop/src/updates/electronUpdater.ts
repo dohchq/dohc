@@ -20,7 +20,7 @@ export type PublicUpdateState = {
   canInstall: boolean;
   version?: string;
   percent?: number;
-  // A Linux .deb that did not install: the command that installs it from a terminal.
+  // A Linux .deb or .rpm that did not install: the command that installs it from a terminal.
   installCommand?: string;
   // The last step that failed, while its state stands. `message` says why. A
   // new id is a new failure to report. `notInstalled` is the version of an
@@ -128,7 +128,7 @@ const OFFLINE_PATTERN =
   /ERR_INTERNET_DISCONNECTED|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|net::/i;
 
 // Whether quitting dohc installs an update the person downloaded, as well as
-// Restart to update. Never on Linux: a .deb installs with dpkg behind a
+// Restart to update. Never on Linux: a .deb or .rpm installs as root behind a
 // password prompt, which must never appear while someone closes the app.
 const INSTALL_ON_QUIT = true;
 
@@ -155,21 +155,22 @@ function readChosenUpdate(path: string): ChosenUpdate | null {
 const FAILED_STATUS = { check: "error", download: "available", install: "ready" } as const;
 
 /**
- * Why a Linux .deb did not install, and what the person can do. electron-updater installs it as root
- * through the first of gksudo, kdesudo, pkexec, and beesu it finds, or plain sudo, and reports a
- * failure as "Command <program> exited with code <status>". pkexec exits 126 when the person closes
- * its prompt, and 127 when it gets no authorization any other way: no agent to ask, a refusal, or
- * an error. Plain sudo has no terminal to ask from, and its failure looks like dpkg's, so its cause
- * stays unnamed.
+ * Why a Linux .deb or .rpm did not install, and what the person can do. electron-updater installs it
+ * as root through the first of gksudo, kdesudo, pkexec, and beesu it finds, or plain sudo, and
+ * reports a failure as "Command <program> exited with code <status>". pkexec exits 126 when the
+ * person closes its prompt, and 127 when it gets no authorization any other way: no agent to ask, a
+ * refusal, or an error. Plain sudo has no terminal to ask from, and its failure looks like the
+ * package manager's, so its cause stays unnamed.
  */
-export function debInstallFailure(error: Error, installer: string): InstallFailure {
+export function linuxPackageInstallFailure(error: Error, installer: string): InstallFailure {
   const [, program, status] = /^Command (\S+) exited with code (\d+)$/u.exec(error.message) ?? [];
   // Each sits under the title "dohc could not install the update", so none
   // says it again.
   if (program === "pkexec" && status === "126") {
     return { message: "The update needs your password." };
   }
-  const installCommand = `sudo apt install '${installer.replaceAll("'", "'\\''")}'`;
+  const packageManager = installer.endsWith(".rpm") ? "dnf" : "apt";
+  const installCommand = `sudo ${packageManager} install '${installer.replaceAll("'", "'\\''")}'`;
   return program === "pkexec" && status === "127"
     ? {
         message: "dohc did not get permission. Run this command in a terminal to install it.",
@@ -199,7 +200,7 @@ function checkFailure(error: unknown, macReleaseFeed: boolean): UpdateEvent {
 // error carries its response headers on the lines after the first.
 function causeOf(error: unknown): string {
   const line = (error instanceof Error ? error.message : String(error)).split("\n")[0]!.trim();
-  return (line || "The updater gave no reason.").slice(0, 500);
+  return (line || "dohc could not complete the update. Try again later.").slice(0, 500);
 }
 
 function boundedPercent(percent: number): number {
@@ -288,8 +289,8 @@ export async function startAutoUpdates(options: {
   let restartStaged = false;
   let failure: (InstallFailure & { step: UpdateStep; id: number }) | null = null;
   let failures = 0;
-  // The downloaded .deb on Linux, which a failed install names in its command.
-  let debInstaller: string | null = null;
+  // The downloaded .deb or .rpm on Linux, which a failed install names in its command.
+  let linuxPackage: string | null = null;
   // electron-updater reports a failed macOS staging twice: as Squirrel's
   // error, then as the download's rejection.
   let stagingError: unknown = null;
@@ -409,8 +410,8 @@ export async function startAutoUpdates(options: {
   );
   autoUpdater.on("update-downloaded", (info) => {
     failure = null;
-    debInstaller =
-      platform === "linux" && info.downloadedFile?.endsWith(".deb") ? info.downloadedFile : null;
+    const file = info.downloadedFile;
+    linuxPackage = platform === "linux" && file && /\.(?:deb|rpm)$/u.test(file) ? file : null;
     dispatch({ type: "downloaded", version: info.version });
   });
   autoUpdater.on("error", (error) => {
@@ -429,7 +430,9 @@ export async function startAutoUpdates(options: {
       restartStaged = false;
       fail(
         "install",
-        debInstaller ? debInstallFailure(error, debInstaller) : { message: causeOf(error) },
+        linuxPackage
+          ? linuxPackageInstallFailure(error, linuxPackage)
+          : { message: causeOf(error) },
         true,
       );
       emit();

@@ -1670,3 +1670,132 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
         vec![key("m-early"), key("m-now")]
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn choosing_a_side_records_field_history_and_claims_for_the_resolver() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    seed_collection_replica(
+        &db,
+        WS,
+        OBJECT,
+        PATH,
+        &format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha"),
+    );
+    enable_sync(&db, WS);
+    let mut store = EngineStore::open(&db, 10).expect("store");
+    let incoming = Ydoc::wire();
+    incoming
+        .rewrite_content_to_markdown(
+            ContentKind::Richdoc,
+            &format!("---\nid: {RECORD}\nstatus: done\n---\n\nAlpha"),
+        )
+        .expect("incoming record");
+    let sha = store
+        .put_binary_blob(&incoming.encode_full_state())
+        .expect("incoming blob");
+    apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: WS.to_owned(),
+            origin_id: "other-computer".to_owned(),
+            origin_seq: 0,
+            relay_seq: Some(0),
+            op_kind: "ydoc.update".to_owned(),
+            payload: serde_json::json!({
+                "versionId": "main", "objectId": OBJECT, "path": PATH,
+                "contentKind": "richdoc", "updateBlobSha256": sha,
+                "lineageClaimId": sha, "isBaseState": true
+            }),
+            recorded_at_ms: 20,
+        },
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("divergent record arrives");
+    subscribe_automation(
+        &mut store,
+        WS,
+        &subscription(AUTOMATION, None),
+        30,
+        &NoFaults,
+    )
+    .expect("subscribe automation");
+    let conflict_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT conflict_id FROM conflicts WHERE workspace_id=?1 AND status='open'",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("the divergent record opens a conflict");
+    drop(store);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 40).expect("actor").actor;
+    let resolved = handle
+        .conflict_resolve(
+            dohc_engine_domain::ResolveTextConflict {
+                workspace_id: WS.to_owned(),
+                conflict_id,
+                resolution: dohc_engine_domain::ResolveConflictKind::ApplyIncoming,
+                object_id: "unused-object".to_owned(),
+                write_moment_id: "m-resolve-write".to_owned(),
+                delete_moment_id: "m-resolve-delete".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: Some(
+                    r#"[{"kind":"agent","agentId":"resolver","onBehalfOf":"user:ice"}]"#.to_owned(),
+                ),
+                now_ms: 50,
+                request_id: None,
+                conflict_answer_budget_bytes: usize::MAX,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("choose the other computer's side");
+    supervisor.close(&db).expect("close actor");
+
+    let claims = resolved.write.expect("the choice writes").automation_claims;
+    assert_eq!(claims.len(), 1, "{claims:?}");
+    assert_eq!(claims[0].automation_id, AUTOMATION);
+    assert_eq!(claims[0].record_id.as_deref(), Some(RECORD));
+    assert_eq!(
+        claims[0].change.author_origin_id.as_deref(),
+        Some("resolver")
+    );
+    assert_eq!(claims[0].change.actor_kind, Some(ChangeActorKind::Agent));
+
+    let store = EngineStore::open(&db, 60).expect("inspect");
+    let history: Vec<(Option<String>, Option<String>, Option<String>)> = store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT previous_value_json, next_value_json, author_origin_id \
+                 FROM collection_field_history \
+                 WHERE workspace_id=?1 AND record_id=?2 AND field_name='status' \
+                 ORDER BY history_id",
+            )?
+            .query_map(rusqlite::params![WS, RECORD], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("read field history");
+    assert_eq!(
+        history.last(),
+        Some(&(
+            Some("\"open\"".to_owned()),
+            Some("\"done\"".to_owned()),
+            Some("resolver".to_owned())
+        )),
+        "{history:?}"
+    );
+}

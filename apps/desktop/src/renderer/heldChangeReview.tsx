@@ -1,7 +1,9 @@
 import { CircleAlert } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { HeldChange } from "@dohc/workspace-contracts/held-changes";
 import { bridge } from "./bridge";
+import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "./workspace/workspaceSession";
 import { Overlay } from "./Overlay";
 import { SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
@@ -29,25 +31,16 @@ export function HeldChangeDialog(props: {
   path: string;
   onClose: () => void;
 }) {
-  const [attempt, setAttempt] = useState(0);
-  const [read, setRead] = useState<HeldChangeRead>({ kind: "loading" });
-  useEffect(() => {
-    let live = true;
-    setRead({ kind: "loading" });
-    bridge()
-      .readHeldChange({ workspaceId: props.workspaceId, path: props.path })
-      .then(
-        ({ change }) => {
-          if (live) setRead({ kind: "ready", change });
-        },
-        () => {
-          if (live) setRead({ kind: "failed" });
-        },
-      );
-    return () => {
-      live = false;
-    };
-  }, [props.workspaceId, props.path, attempt]);
+  const query = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([props.workspaceId, props.path]),
+    load: () => bridge().readHeldChange({ workspaceId: props.workspaceId, path: props.path }),
+  });
+  const read: HeldChangeRead =
+    query.pending || (query.value === undefined && query.error === null)
+      ? { kind: "loading" }
+      : query.error !== null
+        ? { kind: "failed" }
+        : { kind: "ready", change: query.value!.change };
   return (
     <Overlay
       onClose={props.onClose}
@@ -63,7 +56,7 @@ export function HeldChangeDialog(props: {
       <HeldChangeCard
         path={props.path}
         read={read}
-        onRetry={() => setAttempt((count) => count + 1)}
+        onRetry={() => void query.retry()}
         onClose={props.onClose}
       />
     </Overlay>
@@ -136,7 +129,7 @@ export function HeldChangeCard(props: {
         ) : null}
         {unavailable === "unsupported" ? (
           <p data-testid="held-change-unavailable" className="m-0 text-[13px] text-muted">
-            dohc can't preview this change.
+            dohc cannot preview this change.
           </p>
         ) : null}
         {props.read.kind === "ready" && change === null ? (

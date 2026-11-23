@@ -8,7 +8,12 @@
 //!
 //! This is a chosen trade: a store that is already damaged when it opens is
 //! read and written until the check ends, where an open that checks first
-//! never touches it. In that time a write can make the damage worse, and a
+//! never touches it. A migration that was pending commits in that time too,
+//! so a damaged store can be migrated before it is refused, and a migration
+//! is not undone. A migration whose own writes break the store commits as
+//! well, where an open that checks first rolls it back, so that store is
+//! refused as damaged instead of waiting unchanged for a build that fixes
+//! the migration. In that time a write can make the damage worse, and a
 //! damaged row that still reads as valid can reach a workspace file, a live
 //! note's saved text, or the relay. Blob content is checked against its hash
 //! on those paths. Backups and recovery check for themselves.
@@ -21,6 +26,10 @@
 //! for as long as the store is open. After [`UNFINISHED_STARTS`] starts
 //! without a verdict it also marks the store, so a store that is always
 //! written to is checked at its next open instead of never.
+//!
+//! A store that closes before its check has a verdict is not marked, and each
+//! open counts its starts from none. A store that is never open for as long
+//! as one check takes is never checked, the pages a migration wrote included.
 
 use crate::checkpoint::{Checkpoints, WalPressure};
 use crate::error::StorageError;

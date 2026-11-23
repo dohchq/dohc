@@ -150,4 +150,25 @@ describe("sync relay startup guards", () => {
     expect(code).toBe(1);
     expect(stderr).toContain("FATAL: DOHC_RELAY_EXCHANGE_KEY must be at least 32 characters.");
   });
+
+  it("refuses to start when SMTP is partly configured", async () => {
+    const dbPath = join(await tempRoot("partial-smtp"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "test",
+      SYNC_RELAY_TEST_AUTH: "1",
+      DOHC_SMTP_HOST: "smtp.example.test",
+      DOHC_SMTP_PORT: undefined,
+      DOHC_SMTP_SECURE: undefined,
+      DOHC_SMTP_USER: undefined,
+      DOHC_SMTP_PASSWORD: undefined,
+      DOHC_SMTP_FROM: undefined,
+      SYNC_RELAY_PORT: "0",
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain(
+      "FATAL: SMTP is partly configured. Set DOHC_SMTP_PORT, DOHC_SMTP_SECURE, DOHC_SMTP_FROM.",
+    );
+  });
 });

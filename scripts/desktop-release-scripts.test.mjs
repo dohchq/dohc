@@ -1112,7 +1112,7 @@ test("desktop release workflow uploads only distributable release assets", () =>
   );
   assert.match(
     prepareReleaseUpload,
-    /latest\*\.yml\|nightly\*\.yml\|\*\.exe\|\*\.AppImage\|\*\.deb\|\*\.blockmap/,
+    /latest\*\.yml\|nightly\*\.yml\|\*\.exe\|\*\.AppImage\|\*\.deb\|\*\.rpm\|\*\.blockmap/,
     "release upload step must allow update manifests and configured installer artifacts",
   );
   assert.match(
@@ -1389,16 +1389,20 @@ async function artifactFixture(platform = "win", arch = "x64") {
   if (platform === "mac")
     await writeFile(join(directory, `dohc-${version}-mac-${arch}.dmg`), "dmg fixture");
   const files = [{ url: name, sha512, size: bytes.length }];
-  // electron-builder lists both Linux packages in one manifest, the .deb under amd64.
+  // electron-builder lists every Linux package in one manifest, the .deb under amd64.
   if (platform === "linux") {
-    const deb = Buffer.from("deb package fixture");
-    const debName = `dohc-${version}-linux-amd64.deb`;
-    await writeFile(join(directory, debName), deb);
-    files.push({
-      url: debName,
-      sha512: createHash("sha512").update(deb).digest("base64"),
-      size: deb.length,
-    });
+    for (const packageName of [
+      `dohc-${version}-linux-amd64.deb`,
+      `dohc-${version}-linux-x86_64.rpm`,
+    ]) {
+      const bytes = Buffer.from(`${packageName} fixture`);
+      await writeFile(join(directory, packageName), bytes);
+      files.push({
+        url: packageName,
+        sha512: createHash("sha512").update(bytes).digest("base64"),
+        size: bytes.length,
+      });
+    }
   }
   const manifest = { version, files, path: name, sha512 };
   const manifestPath = join(directory, `latest${platform === "win" ? "" : `-${platform}`}.yml`);
@@ -1420,19 +1424,30 @@ test("release verification hashes distributable files for each configured platfo
     const { options } = await artifactFixture(platform, arch);
     const result = await verifyDesktopReleaseArtifacts(options);
     assert.equal(result.status, "passed");
-    assert.equal(result.artifacts.length, platform === "win" ? 1 : 2);
+    assert.equal(result.artifacts.length, { win: 1, mac: 2, linux: 3 }[platform]);
     assert.ok(result.excludes.includes("installation"));
   }
-  // A Linux manifest that leaves out the .deb strands every .deb install on its version.
-  const linux = await artifactFixture("linux", "x64");
-  await writeFile(
-    linux.manifestPath,
-    updateManifest({ ...linux.manifest, files: linux.manifest.files.slice(0, 1) }),
-  );
-  await assert.rejects(
-    verifyDesktopReleaseArtifacts(linux.options),
-    /does not list the x64 update artifact: dohc-0\.1\.0-linux-amd64\.deb/,
-  );
+  // A Linux manifest that leaves out a package strands every install of that package on its version.
+  for (const [left, missing] of [
+    [
+      "dohc-0.1.0-linux-amd64.deb",
+      /does not list the x64 update artifact: dohc-0\.1\.0-linux-amd64\.deb/,
+    ],
+    [
+      "dohc-0.1.0-linux-x86_64.rpm",
+      /does not list the x64 update artifact: dohc-0\.1\.0-linux-x86_64\.rpm/,
+    ],
+  ]) {
+    const linux = await artifactFixture("linux", "x64");
+    await writeFile(
+      linux.manifestPath,
+      updateManifest({
+        ...linux.manifest,
+        files: linux.manifest.files.filter((file) => file.url !== left),
+      }),
+    );
+    await assert.rejects(verifyDesktopReleaseArtifacts(linux.options), missing);
+  }
   const intel = await artifactFixture("mac", "x64");
   await assert.rejects(
     verifyDesktopReleaseArtifacts(intel.options),

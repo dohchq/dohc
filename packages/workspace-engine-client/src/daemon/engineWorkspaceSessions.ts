@@ -131,6 +131,15 @@ export interface EngineWorkspaceRunOptions {
    * a relay request.
    */
   abandonAtQuit?: boolean;
+  /**
+   * At quit, the run retries no more. A retry that quit cuts short, whether
+   * waiting or about to start, raises `EngineWorkspaceShuttingDownError`. A
+   * run that used up its tries before quit keeps its usual error, an attempt
+   * already running finishes, and a store-busy refusal keeps its own wait,
+   * because a busy daemon answers. Enable only for a read that no write
+   * depends on.
+   */
+  endRetriesAtQuit?: boolean;
 }
 
 export interface EngineWorkspaceSessionsOptions {
@@ -246,8 +255,8 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
 }
 
 // Work that quit abandons: a bounded region asked to start after
-// `beginShutdown`, a run that would wait on a workspace's first open, or a run
-// marked `abandonAtQuit`. Each is refused before it reaches the daemon or
+// `beginShutdown`, a run that would wait on a workspace's first open, a run
+// marked `abandonAtQuit`, or a failed run marked `endRetriesAtQuit`. Each is refused before it reaches the daemon or
 // stops waiting, because the app is quitting and the work is abandonable.
 export class EngineWorkspaceShuttingDownError extends Error {
   constructor() {
@@ -717,6 +726,7 @@ export class EngineWorkspaceSessions {
             attempt,
             lastAttempt: attempt >= maxAttempts,
             backoff: retryAfterTransport,
+            endsAtQuit: options.endRetriesAtQuit === true,
             cause: error,
           });
           if (next === "stop") throw error;
@@ -998,6 +1008,7 @@ export class EngineWorkspaceSessions {
     delayMs?: number;
     // Ends the backoff early; the caller decides what that means.
     stop?: AbortSignal;
+    endsAtQuit?: boolean;
     cause: unknown;
   }): Promise<"retry" | "stop"> {
     const checkDeadline = (): void => {
@@ -1011,7 +1022,7 @@ export class EngineWorkspaceSessions {
     // attempt rather than spend the budget on a daemon that is not coming
     // back.
     //
-    // Only a bounded region. `beginShutdown` is a global flag, and its scope
+    // Only a bounded region or a read. `beginShutdown` is a global flag, and its scope
     // is the document open, which is safe to abandon because an opening
     // document is read-only and holds no edit. Work outside a region is the
     // opposite obligation: an already-open document retrying a journal write
@@ -1019,9 +1030,9 @@ export class EngineWorkspaceSessions {
     // retry discards the edit while `closeAllEngineYDocSessions` swallows the
     // failure. An open that cannot finish is abandoned; a write already
     // accepted is not.
-    const abandonable = this.activeBudget() !== undefined;
+    const abandonable = this.activeBudget() !== undefined || gate.endsAtQuit === true;
     if (this.shuttingDown && abandonable) {
-      return "stop";
+      return this.stopAtQuit(gate);
     }
     checkDeadline();
     if (!gate.backoff) return "retry";
@@ -1043,16 +1054,21 @@ export class EngineWorkspaceSessions {
       abandonable,
       gate.stop,
     );
-    // Same scope as before the wait: quit ends a bounded region's retries, and
-    // only a bounded region's.
-    if (this.shuttingDown && this.activeBudget() !== undefined) {
-      return "stop";
+    // Same scope as before the wait: quit ends the retries of a bounded region
+    // or a read, and only theirs.
+    if (this.shuttingDown && abandonable) {
+      return this.stopAtQuit(gate);
     }
     checkDeadline();
     return "retry";
   }
 
-  // `cancellable` marks a wait that quit may end: an abandonable region's.
+  private stopAtQuit(gate: { endsAtQuit?: boolean }): "stop" {
+    if (gate.endsAtQuit === true) throw new EngineWorkspaceShuttingDownError();
+    return "stop";
+  }
+
+  // `cancellable` marks a wait that quit may end: an abandonable region's or a read's.
   // A wait for work that must not be abandoned runs its full backoff, because
   // the daemon it is waiting for is the one that has to answer.
   // `stop` ends any wait early.
@@ -1086,6 +1102,10 @@ export class EngineWorkspaceSessions {
 
   rememberShareMount(workspace: ShareMountEngineWorkspace): void {
     this.shareMounts.add(this.sessionKey(workspace));
+  }
+
+  private opensAsShareMount(workspace: EngineWorkspace): boolean {
+    return workspace.shareMount === true || this.shareMounts.has(this.sessionKey(workspace));
   }
 
   beginRebuild(workspace: AttachedEngineWorkspace): void {
@@ -1342,6 +1362,7 @@ export class EngineWorkspaceSessions {
           // relaunching, or it requested backoff itself. Anything else
           // re-opens at once, as it always has.
           backoff: daemonMayBeRelaunching(error) || requiresBackoff(error),
+          endsAtQuit: options.endRetriesAtQuit === true,
           cause: error,
         });
         if (next === "stop") break;
@@ -1413,6 +1434,7 @@ export class EngineWorkspaceSessions {
           attempt,
           lastAttempt,
           backoff: true,
+          endsAtQuit: options.endRetriesAtQuit === true,
           cause: churn,
         });
         if (next === "stop") {
@@ -1426,7 +1448,9 @@ export class EngineWorkspaceSessions {
       entry.binding = binding;
       entry.opened = true;
       try {
-        this.onOpened?.(workspace);
+        this.onOpened?.(
+          this.opensAsShareMount(workspace) ? { ...workspace, shareMount: true } : workspace,
+        );
       } catch (error) {
         console.warn("[engine] workspace-open observer failed", error);
       }
@@ -1472,7 +1496,7 @@ export class EngineWorkspaceSessions {
     const requester = new WorkspaceDaemonRequester(client);
     const sessionKey = this.sessionKey(workspace);
     const hasCaptureAuthor = this.captureAuthors.has(sessionKey);
-    const shareMount = workspace.shareMount === true || this.shareMounts.has(sessionKey);
+    const shareMount = this.opensAsShareMount(workspace);
     const captureDisabled = shareMount || workspace.captureMode === "none";
     const raw = await requester.request(
       WORKSPACE_METHOD.open,

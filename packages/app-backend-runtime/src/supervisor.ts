@@ -278,7 +278,7 @@ const sameAuthority = (left: DatasetCursor, right: DatasetCursor) =>
  * Generated Collection rules use the request id as a new record's id and list by id when no sort is set,
  * so records list in the order they were added.
  */
-function orderedRequestIds(now: () => number): () => string {
+export function orderedRequestIds(now: () => number = Date.now): () => string {
   let lastMs = -1,
     counter = 0;
   return () => {

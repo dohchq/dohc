@@ -92,7 +92,7 @@ export interface ReplicaRestoreCancellation {
 }
 /** One entry of a replica page, in journal order. */
 export type ReplicaJournalEntry = ReplicaJournalRow | ReplicaRestoreCancellation;
-export interface ReplicaFrontiers {
+interface ReplicaFrontiers {
   readonly revision: number;
   readonly logCursor: number;
   readonly journalCursor: number;
@@ -102,7 +102,7 @@ export interface ReplicaPageResult extends ReplicaFrontiers {
   readonly skipped: number;
   readonly blockedCursor: number | null;
 }
-export function replicaFrontiers(value: unknown): ReplicaFrontiers {
+function replicaFrontiers(value: unknown): ReplicaFrontiers {
   const r = value as ReplicaFrontiers;
   if (
     !r ||

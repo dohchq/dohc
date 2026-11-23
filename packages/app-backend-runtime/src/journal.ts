@@ -36,6 +36,7 @@ export interface DatasetHead {
   schemaSql: string;
   definitionJson: string;
   capacityBytes: number;
+  checkpointSha256: string;
 }
 export interface JournalEvent {
   cursor: DatasetCursor;
@@ -1485,6 +1486,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           schemaSql,
           definitionJson,
           capacityBytes,
+          checkpointSha256,
         } = storedHead(key);
         return {
           cursor: current,
@@ -1493,6 +1495,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           schemaSql,
           definitionJson,
           capacityBytes,
+          checkpointSha256,
         };
       });
     },

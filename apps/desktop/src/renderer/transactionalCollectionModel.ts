@@ -57,7 +57,7 @@ export interface TransactionalPage {
 
 export function object(value: AppBackendJson): Record<string, AppBackendJson> {
   if (value === null || typeof value !== "object" || Array.isArray(value))
-    throw new Error("The collection returned an invalid result.");
+    throw new Error("The Collection returned an invalid result.");
   return value;
 }
 function key(value: AppBackendJson | undefined): string | number {
@@ -66,7 +66,7 @@ function key(value: AppBackendJson | undefined): string | number {
     (typeof value === "number" && Number.isSafeInteger(value))
   )
     return value;
-  throw new Error("The collection returned an invalid record identity.");
+  throw new Error("The Collection returned an invalid record ID.");
 }
 export function parsePage(value: unknown, allowedFields: readonly string[]): TransactionalPage {
   const result = object(parseAppBackendJson(value));
@@ -75,7 +75,7 @@ export function parsePage(value: unknown, allowedFields: readonly string[]): Tra
     result.rows.length > 50 ||
     !Object.hasOwn(result, "nextCursor")
   )
-    throw new Error("The collection returned an invalid page.");
+    throw new Error("The Collection returned an invalid page.");
   const ids = new Set<string>();
   const rows = result.rows.map((value) => {
     const row = object(value);
@@ -87,7 +87,7 @@ export function parsePage(value: unknown, allowedFields: readonly string[]): Tra
       !Number.isSafeInteger(row.version) ||
       row.version < 1
     )
-      throw new Error("The collection returned an invalid record.");
+      throw new Error("The Collection returned an invalid record.");
     ids.add(encoded);
     const values = object(row.values!);
     return {
@@ -102,7 +102,7 @@ export function parsePage(value: unknown, allowedFields: readonly string[]): Tra
   if (result.nextCursor !== null) {
     const cursor = object(result.nextCursor!);
     if (!Object.hasOwn(cursor, "value"))
-      throw new Error("The collection returned an invalid cursor.");
+      throw new Error("The Collection returned an invalid cursor.");
     nextCursor = { id: key(cursor.id), value: cursor.value! };
   }
   return { rows, nextCursor };

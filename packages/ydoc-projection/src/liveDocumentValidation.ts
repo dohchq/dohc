@@ -14,11 +14,22 @@ import {
   readMarkdownSourceWitness,
   resolveMarkdownSource,
 } from "./artifact-markdown.js";
+import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
+import {
+  bodySequenceChangeLimit,
+  bodySequenceChangeRefusal,
+  bodySequenceRoomPolicy,
+  bodySequenceStateRefusal,
+  type BodySequenceIntakeRules,
+  type BodySequenceIntakeWork,
+} from "./bodySequenceIntake.js";
+import { holdsBodySequence } from "./bodySequenceYjs.js";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,
   isEmptyShell,
+  yDocPropertiesToMarkdown,
   yDocToMarkdown,
 } from "./import-export.js";
 import {
@@ -29,10 +40,11 @@ import {
   type OrderedLiveUpdateCutPolicy,
   type OrderedLiveUpdateCutFinalizeResult,
   type ProjectionTopology,
+  type BodySequenceCut,
   type ValidatedLiveUpdateCut,
   type OrderedLiveUpdateCutRefusal,
 } from "./orderedLiveUpdateCut.js";
-import { withinLiveNoteCapacity } from "./liveValidationPolicy.js";
+import { WORKER_LIVE_VALIDATION_POLICY, withinLiveNoteCapacity } from "./liveValidationPolicy.js";
 
 const INPUT_FIELDS = ["document", "currentPath", "checkpoint"] as const;
 const JOURNAL_INPUT_FIELDS = [...INPUT_FIELDS, "suffix", "candidate"] as const;
@@ -52,6 +64,11 @@ const MIN_INT64 = -(1n << 63n);
 const MAX_INT64 = (1n << 63n) - 1n;
 const SHARED_BIGINT_KEY = "$dohcBigInt";
 const PUBLIC_ROOTS = new Set(["body", "frontmatter", "meta"]);
+const BODY_SEQUENCE_NOTE_ROOTS = new Set([
+  ...PUBLIC_ROOTS,
+  BODY_SEQUENCE_FIELD,
+  BODY_CONTAINERS_FIELD,
+]);
 const META_KEYS = new Set([
   "schemaVersion",
   "dohcMarkdownCrlf",
@@ -67,6 +84,53 @@ const PROJECTION_SOURCE_META_KEYS = [...SOURCE_META_KEYS, "dohcFrontmatterSource
 const FRONTMATTER_SOURCE_ITEM_META_PREFIX = "dohcFrontmatterSourceItem:";
 // Metadata only the engine's Markdown reader writes.
 const ENGINE_META_KEYS = new Set(["dohcLineageEpoch", "dohcMarkdownSourceReader"]);
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+let bodySequenceNotesAdmitted = false;
+
+/**
+ * The relay's one setting for notes whose body is one sequence. While it is off, which is how
+ * every process starts, each check in this module refuses such a note and every change to one.
+ */
+export function admitBodySequenceNotes(admitted: boolean): void {
+  bodySequenceNotesAdmitted = admitted;
+}
+
+/** Each key's own rule from `validateMetadata`, for one item of a body-sequence note's metadata. */
+function bodySequenceMetadata(engineReader: boolean): BodySequenceIntakeRules["metadata"] {
+  return (key, shown) => {
+    const kept = key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX);
+    if (!kept && !META_KEYS.has(key) && !(engineReader && ENGINE_META_KEYS.has(key))) return false;
+    if (!shown) return true;
+    const { value } = shown;
+    if (key === "dohcMarkdownCrlf") return value === true;
+    if (key === "dohcMarkdownSourceReader") return value === 1;
+    if (typeof value !== "string") return false;
+    if (kept || key === "dohcMarkdownSource") return true;
+    if (key === "dohcFrontmatterSource") return !exceedsLiveMarkdownLimit(value);
+    return SHA256_HEX.test(value);
+  };
+}
+
+const ROOM_METADATA = bodySequenceMetadata(false);
+
+function bodySequenceCut(
+  policy: OrderedLiveUpdateCutPolicy,
+  engineReader: boolean,
+): BodySequenceCut | undefined {
+  if (!bodySequenceNotesAdmitted) return undefined;
+  const rules = { policy, metadata: bodySequenceMetadata(engineReader) };
+  return {
+    holds: holdsBodySequence,
+    entry(document, bytes, apply, kind) {
+      if (kind === "state") return bodySequenceStateRefusal(document, bytes, apply, rules);
+      if (holdsBodySequence(document))
+        return bodySequenceChangeRefusal(document, bytes, apply, rules);
+      apply();
+      return holdsBodySequence(document) ? "invalid-schema" : undefined;
+    },
+  };
+}
 const ByteArray = Uint8Array;
 const typedArrayPrototype = Object.getPrototypeOf(ByteArray.prototype) as object;
 const byteTag = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)!.get!;
@@ -264,6 +328,7 @@ function validateRegistrationInput(
   const result = validateRegistrationCutForProjection(
     { mode: "registration", checkpoint },
     ownedPolicy,
+    bodySequenceCut(ownedPolicy, false),
   );
   if (result.kind === "refused") return refusal(result.reason, "registration-input");
   const { cut, topology } = result;
@@ -471,6 +536,7 @@ function journalValidator(
       ownedPolicy,
       engineReader,
       prefixes && prefixProjection(prefixes),
+      bodySequenceCut(ownedPolicy, engineReader),
     );
     if (timing) timing.replayMs = performance.now() - replayStarted!;
     let failure: Pick<OrderedLiveUpdateCutRefusal, "reason" | "stage">;
@@ -867,8 +933,64 @@ type Shared = ReturnType<Y.Doc["get"]>;
  * placed each item by then, so this reads where it really sits. It checks no values or nesting;
  * the full check at save does that. False when the edit can't be applied whole. After false,
  * `copy` may hold part of the edit, so the caller builds it again.
+ *
+ * The copy's `meta.schemaVersion` says which format the note is: 2 for a note whose body is one
+ * sequence, and 1 or none for the first format, which the rules above are for. A note whose body
+ * is one sequence gets that format's intake instead, when the relay admits such notes, and takes
+ * no edit at all when it does not. An edit may give a first-format note that has no
+ * `meta.schemaVersion` the number 1 and no other value, so no edit makes a note the other format.
+ * No edit may replace or delete the one a note of either format has: the engine writes it once,
+ * and a page that changed it would change what every reader takes the note to be before the save
+ * refused it.
  */
 export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
+  return liveEditRefusal(copy, update) === undefined;
+}
+
+/**
+ * Why a room does not take an edit. `limit` is there for an edit past a limit of its own: a
+ * sentence that names the limit, its unit and what the edit holds.
+ */
+export interface LiveEditRefusal {
+  readonly reason: "invalid-update" | "capacity-refused";
+  readonly limit?: string;
+}
+
+/**
+ * Why `liveEditFitsCopy` is false. An edit to a note whose body is one sequence that is large
+ * enough to be past a limit is counted first, and refused for capacity when it alone holds more
+ * than the save could take: more values than `BODY_SEQUENCE_CHANGE_MAX_VALUES`, or more items or
+ * weight than a note may have. Then it is read once under the save's `policy` divided by how
+ * often the save reads each thing, hashing nothing, so an edit a room takes is one whose counts
+ * the save has room for. Without a policy it uses the validation worker's.
+ */
+export function liveEditRefusal(
+  copy: Y.Doc,
+  update: Uint8Array,
+  policy: OrderedLiveUpdateCutPolicy = WORKER_LIVE_VALIDATION_POLICY,
+  work?: BodySequenceIntakeWork,
+): LiveEditRefusal | undefined {
+  const invalid: LiveEditRefusal = { reason: "invalid-update" };
+  if (!holdsBodySequence(copy)) return editFitsFormat1(copy, update) ? undefined : invalid;
+  if (!bodySequenceNotesAdmitted) return invalid;
+  try {
+    const limit = bodySequenceChangeLimit(update, policy, work);
+    if (limit !== undefined) return { reason: "capacity-refused", limit };
+    const refusal = bodySequenceChangeRefusal(
+      copy,
+      update,
+      () => Y.applyUpdate(copy, update),
+      { policy: bodySequenceRoomPolicy(policy), metadata: ROOM_METADATA },
+      work,
+    );
+    if (refusal === undefined) return undefined;
+    return refusal === "capacity-refused" ? { reason: refusal } : invalid;
+  } catch {
+    return invalid;
+  }
+}
+
+function editFitsFormat1(copy: Y.Doc, update: Uint8Array): boolean {
   try {
     for (const struct of Y.decodeUpdate(update).structs) {
       // Yjs takes an empty item without moving its editor's clock, so the check would never read it.
@@ -887,6 +1009,8 @@ export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
   } catch {
     return false;
   }
+  const version = copy.share.get("meta")?._map.get("schemaVersion");
+  const hadVersion = version !== undefined && !version.deleted;
   let fits = true;
   // Read before the change ends: Yjs then joins each new item to the one before it from the same
   // editor without comparing their parents.
@@ -901,7 +1025,12 @@ export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
   } finally {
     copy.off("beforeObserverCalls", read);
   }
-  return fits && copy.store.pendingStructs === null && copy.store.pendingDs === null;
+  return (
+    fits &&
+    !(hadVersion && version.deleted) &&
+    copy.store.pendingStructs === null &&
+    copy.store.pendingDs === null
+  );
 }
 
 function placedItemsFit(copy: Y.Doc, transaction: Y.Transaction): boolean {
@@ -941,6 +1070,15 @@ function placedItemsFit(copy: Y.Doc, transaction: Y.Transaction): boolean {
       if (
         typeof parent === "string" &&
         (!PUBLIC_ROOTS.has(parent) || (parent === "body") !== (sub === null))
+      )
+        return false;
+      if (
+        parent === "meta" &&
+        sub === "schemaVersion" &&
+        (item.deleted ||
+          item.length !== 1 ||
+          !(content instanceof Y.ContentAny) ||
+          content.arr[0] !== 1)
       )
         return false;
       // A removed item stays removed, so what it holds never shows.
@@ -1106,6 +1244,7 @@ function validateMetadata(
   meta: Y.Map<unknown>,
   zeroStructSeed: boolean,
   engineReader: boolean,
+  schemaVersion: number,
 ): { metadata: Record<string, unknown>; witness: ReturnType<typeof readMarkdownSourceWitness> } {
   const snapshot: Record<string, unknown> = Object.create(null);
   for (const [key, value] of meta.entries()) {
@@ -1124,7 +1263,7 @@ function validateMetadata(
     snapshot[key] = value;
   }
   if (Object.hasOwn(snapshot, "schemaVersion")) {
-    if (snapshot.schemaVersion !== 1) refuse("invalid-schema");
+    if (snapshot.schemaVersion !== schemaVersion) refuse("invalid-schema");
   } else if (!zeroStructSeed) refuse("invalid-schema");
   if (Object.hasOwn(snapshot, "dohcMarkdownCrlf") && snapshot.dohcMarkdownCrlf !== true) {
     refuse("invalid-schema");
@@ -1149,6 +1288,39 @@ function validateMetadata(
   return { metadata: snapshot, witness };
 }
 
+/** A format-1 body: what it shows must be what it stores, with nothing the schema refuses. */
+function validateBody(
+  body: Y.XmlFragment,
+  originalFingerprint: XmlFingerprint[],
+  hasActiveItem: boolean,
+): void {
+  let rootNode: ReturnType<typeof yXmlFragmentToProseMirrorRootNode>;
+  try {
+    rootNode = yXmlFragmentToProseMirrorRootNode(body, getDohcProseMirrorSchema());
+    if (!hasActiveItem) {
+      const json = rootNode.toJSON();
+      if (Object.keys(json).length !== 1 || json.type !== "doc") refuse("invalid-schema");
+    } else rootNode.check();
+  } catch (error) {
+    // Only a schema verdict refuses the document; anything else is a validator failure.
+    if (!isProseMirrorSchemaError(error)) throw error;
+    refuse("invalid-schema");
+  }
+  if (!hasActiveItem) return;
+  const rebuilt = new Y.Doc({ gc: false });
+  try {
+    const rebuiltBody = rebuilt.getXmlFragment("body");
+    prosemirrorJSONToYXmlFragment(getDohcProseMirrorSchema(), rootNode.toJSON(), rebuiltBody);
+    if (!semanticEqual(originalFingerprint, bodyFingerprint(rebuiltBody, null)))
+      refuse("invalid-schema");
+  } catch (error) {
+    if (!isProseMirrorSchemaError(error)) throw error;
+    refuse("invalid-schema");
+  } finally {
+    rebuilt.destroy();
+  }
+}
+
 function validatePublicState(
   scratch: Y.Doc,
   policy: OrderedLiveUpdateCutPolicy,
@@ -1158,9 +1330,11 @@ function validatePublicState(
 ): string {
   // Projection and reimport are the costliest steps, so a note too dense for them is refused first.
   if (!withinLiveNoteCapacity(scratch, policy)) refuse("capacity-refused");
+  const bodySequence = bodySequenceNotesAdmitted && holdsBodySequence(scratch);
+  const roots = bodySequence ? BODY_SEQUENCE_NOTE_ROOTS : PUBLIC_ROOTS;
   if (
-    scratch.share.size !== 3 ||
-    [...scratch.share.keys()].some((key) => !PUBLIC_ROOTS.has(key)) ||
+    [...PUBLIC_ROOTS].some((key) => !scratch.share.has(key)) ||
+    [...scratch.share.keys()].some((key) => !roots.has(key)) ||
     !(scratch.share.get("body") instanceof Y.XmlFragment) ||
     !(scratch.share.get("frontmatter") instanceof Y.Map) ||
     !(scratch.share.get("meta") instanceof Y.Map)
@@ -1175,42 +1349,20 @@ function validatePublicState(
     body.length === 0 &&
     frontmatter.size === 0 &&
     meta.size === 0;
-  const { metadata, witness } = validateMetadata(meta, zeroStructSeed, engineReader);
+  const { metadata, witness } = validateMetadata(
+    meta,
+    zeroStructSeed,
+    engineReader,
+    bodySequence ? 2 : 1,
+  );
   const budget = new ProjectionBudget();
   for (const value of frontmatter.values()) visitPublicValue(value, 0, budget, new Set());
-  const originalFingerprint = bodyFingerprint(body, budget);
+  const storedBody = bodySequence ? undefined : bodyFingerprint(body, budget);
   const frontmatterSnapshot = getDohcYDocFrontmatter(scratch);
-  let rootNode: ReturnType<typeof yXmlFragmentToProseMirrorRootNode>;
-  try {
-    rootNode = yXmlFragmentToProseMirrorRootNode(body, getDohcProseMirrorSchema());
-    if (!topology.bodyHasActiveItem) {
-      const json = rootNode.toJSON();
-      if (Object.keys(json).length !== 1 || json.type !== "doc") refuse("invalid-schema");
-    } else rootNode.check();
-  } catch (error) {
-    // Only a schema verdict refuses the document; anything else is a validator failure.
-    if (!isProseMirrorSchemaError(error)) throw error;
-    refuse("invalid-schema");
-  }
-
-  if (topology.bodyHasActiveItem) {
-    const rebuilt = new Y.Doc({ gc: false });
-    try {
-      const rebuiltBody = rebuilt.getXmlFragment("body");
-      prosemirrorJSONToYXmlFragment(getDohcProseMirrorSchema(), rootNode.toJSON(), rebuiltBody);
-      if (!semanticEqual(originalFingerprint, bodyFingerprint(rebuiltBody, null)))
-        refuse("invalid-schema");
-    } catch (error) {
-      if (!isProseMirrorSchemaError(error)) throw error;
-      refuse("invalid-schema");
-    } finally {
-      rebuilt.destroy();
-    }
-  }
-
+  if (storedBody) validateBody(body, storedBody, topology.bodyHasActiveItem);
   const projectedMarkdown = yDocToMarkdown(scratch);
   if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse("capacity-refused");
-  if (metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes("\r\n"))
+  if (!bodySequence && metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes("\r\n"))
     refuse("invalid-schema");
   const source = resolveMarkdownSource(scratch, projectedMarkdown, witness, engineReader);
   if (source.kind === "capacity-refused") refuse("capacity-refused");
@@ -1220,7 +1372,16 @@ function validatePublicState(
     (source.kind === "unverified" && unverifiedSource === "refuse")
   )
     refuse("invalid-schema");
-  if (!zeroStructSeed) {
+  if (bodySequence) {
+    // What the body holds never decides this: the properties are written with no body and read back.
+    const written = markdownToYDoc(yDocPropertiesToMarkdown(scratch));
+    try {
+      if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(written)))
+        refuse("invalid-schema");
+    } finally {
+      written.destroy();
+    }
+  } else if (!zeroStructSeed) {
     const reimported = markdownToYDoc(projectedMarkdown);
     try {
       if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(reimported)))

@@ -3,10 +3,14 @@ import type { ClearRequest, FieldChange } from "../../modules/chat-composer";
 import { clearedBy, EMPTY_DRAFT, fieldChanged, type Draft } from "./conversationWrites";
 import {
   acceptsReport,
+  activeMention,
   askReplacement,
   composing,
   latestSnapshot,
+  mentionCompletion,
+  mentionMatches,
   NO_REPLACING,
+  phoneMentions,
   replacementAnswered,
   replacePending,
   replaceRequest,
@@ -276,5 +280,105 @@ describe("asking the field for a replacement", () => {
     expect(replacementAnswered(NO_REPLACING, { replaced: { token: 0, applied: true } })).toBe(
       NO_REPLACING,
     );
+  });
+});
+
+describe("the @name menu", () => {
+  const people = phoneMentions([
+    { kind: "person", handle: "maya", label: "Maya" },
+    { kind: "person", handle: "mark", label: "Mark Chen" },
+    { kind: "agent", handle: "nova", label: "Nova", computers: ["Ice's Mac"] },
+    { kind: "personalAgent", handle: "claude", label: "Claude" },
+  ]);
+  const handles = (text: string, fields: Partial<FieldChange> = {}) => {
+    const active = activeMention(snap(text, fields));
+    return active && mentionMatches(active, people).map((candidate) => candidate.handle);
+  };
+  const choose = (text: string, handle: string, fields: Partial<FieldChange> = {}) => {
+    const snapshot = snap(text, fields);
+    const active = activeMention(snapshot);
+    const candidate = people.find((each) => each.handle === handle);
+    if (!active || !candidate) throw new Error("no menu");
+    return mentionCompletion(snapshot, active, candidate);
+  };
+
+  it("maps a person to a user and both kinds of agent to an agent", () => {
+    expect(people.map(({ kind, connected }) => [kind, connected])).toEqual([
+      ["user", false],
+      ["user", false],
+      ["agent", false],
+      ["agent", true],
+    ]);
+  });
+
+  it("offers the matches for an @ at the start and mid-sentence, best first", () => {
+    expect(handles("Can @may")).toEqual(["maya"]);
+    // Equal matches go agents first, then by name.
+    expect(handles("@ma")).toEqual(["mark", "maya"]);
+    expect(handles("Can @ma")).toEqual(["mark", "maya"]);
+    expect(handles("Can @")).toEqual(["claude", "nova", "mark", "maya"]);
+    expect(handles("Can @zz")).toEqual([]);
+    expect(handles("email@ma")).toBeNull();
+    expect(handles("Can @maya ")).toBeNull();
+  });
+
+  it("offers nothing for an @ in inline code or a code fence", () => {
+    expect(handles("Run `x @ma` now", { selectionStart: 10, selectionEnd: 10 })).toBeNull();
+    expect(handles("```\nping @ma")).toBeNull();
+    expect(handles("```\ncode\n```\nping @ma")).toEqual(["mark", "maya"]);
+  });
+
+  it("offers nothing while an input method composes, or for a selection", () => {
+    expect(handles("Can @ma", { composing: { start: 5, end: 7 } })).toBeNull();
+    expect(handles("Can @ma", { selectionStart: 5, selectionEnd: 7 })).toBeNull();
+  });
+
+  it("completes the query to the handle and a space, with the caret after it", () => {
+    const edit = choose("Can @ma", "maya");
+    expect(edit).toEqual({ start: 4, end: 7, replacement: "@maya ", caret: 10 });
+    const asked = askReplacement(NO_REPLACING, snap("Can @ma"), edit);
+    expect(asked.kind === "asked" && asked.replacing.request).toMatchObject({
+      expected: "@ma",
+      replacement: "@maya ",
+      caret: 10,
+    });
+  });
+
+  it("keeps the text after the caret", () => {
+    const fields = { selectionStart: 7, selectionEnd: 7 };
+    const edit = choose("Can @ma help?", "maya", fields);
+    const snapshot = snap("Can @ma help?", fields);
+    const asked = askReplacement(NO_REPLACING, snapshot, edit);
+    expect(asked.kind).toBe("asked");
+    const { text } = snapshot;
+    expect(text.slice(0, edit.start) + edit.replacement + text.slice(edit.end)).toBe(
+      "Can @maya  help?",
+    );
+  });
+
+  it("lists both candidates of a colliding handle, and either writes the same text", () => {
+    const twins = phoneMentions([
+      { kind: "person", handle: "sam", label: "Sam" },
+      { kind: "agent", handle: "sam", label: "Sam", computers: ["Studio"] },
+    ]);
+    const snapshot = snap("hi @sa");
+    const active = activeMention(snapshot);
+    if (!active) throw new Error("no menu");
+    const [first, second] = mentionMatches(active, twins);
+    expect(first && second && first.id !== second.id).toBe(true);
+    if (!first || !second) return;
+    expect(mentionCompletion(snapshot, active, first)).toEqual(
+      mentionCompletion(snapshot, active, second),
+    );
+  });
+
+  it("asks nothing again after the field refuses a completion", () => {
+    const asked = askReplacement(NO_REPLACING, snap("Can @ma"), choose("Can @ma", "maya"));
+    if (asked.kind !== "asked") throw new Error("not asked");
+    const refused = replacementAnswered(asked.replacing, {
+      replaced: { token: 1, applied: false },
+    });
+    expect(replacePending(refused)).toBe(false);
+    expect(refused.request.token).toBe(1);
   });
 });

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { CalendarDays, SquareKanban, Table2, X } from "lucide-react";
 import { datasetColumnFields, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { Overlay } from "./Overlay";
-import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { FieldError, IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { inputClass, selectClass } from "./collections/FieldForm";
 import {
   CollectionTableView,
@@ -96,6 +97,8 @@ export interface CollectionTableViewsState {
   /** Saves a new view and opens it. Answers what went wrong as a sentence, or null. */
   create(view: NewCollectionView): Promise<string | null>;
   rename(viewId: string, name: string): Promise<string | null>;
+  /** Duplicates a saved view and opens the copy. */
+  duplicate(viewId: string): void;
   /** Deletes a view, and offers Undo. */
   remove(viewId: string): void;
   /** Saves the field a board groups by, or the date field a calendar uses. */
@@ -110,6 +113,22 @@ export interface CollectionTableViewsState {
 
 const VIEW_LIMIT = 50;
 const NOT_READ = "dohc could not read this Collection's views. Try again.";
+const VIEW_ICONS: Record<CollectionTableView["kind"], typeof Table2> = {
+  table: Table2,
+  board: SquareKanban,
+  calendar: CalendarDays,
+};
+
+function uniqueCopyName(base: string, taken: ReadonlySet<string>): string {
+  const stem = base.trim() || "View";
+  const first = `${stem} copy`.slice(0, 100);
+  if (!taken.has(first)) return first;
+  for (let n = 2; ; n += 1) {
+    const suffix = ` copy ${n}`;
+    const candidate = `${stem.slice(0, 100 - suffix.length)}${suffix}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
 
 /**
  * Reads and writes a Data Collection table's saved views, in
@@ -172,7 +191,7 @@ export function useCollectionTableViews(props: {
       localStorage.setItem(selectionKey, view?.viewId ?? "");
     } catch (error) {
       setActive(null);
-      onError("Could not open this saved view.", error);
+      onError("dohc could not open this saved view.", error);
     }
   }
   async function refresh() {
@@ -193,7 +212,7 @@ export function useCollectionTableViews(props: {
       select(view);
     } catch (error) {
       if (request === current.current && !controller.current.signal.aborted)
-        onError("Could not read saved views.", error, () => {
+        onError("dohc could not read saved views.", error, () => {
           void refresh();
         });
     } finally {
@@ -221,7 +240,7 @@ export function useCollectionTableViews(props: {
       void refresh();
       return NOT_READ;
     }
-    if (saving.current) return "dohc is saving another change to these views. Try again.";
+    if (saving.current) return "dohc is already saving a change to these views.";
     saving.current = true;
     setBusy(true);
     const request = current.current,
@@ -241,7 +260,7 @@ export function useCollectionTableViews(props: {
     } catch (error) {
       if (request !== current.current || controller.current.signal.aborted) return null;
       if (report)
-        onError("Could not save Collection views.", error, () => {
+        onError("dohc could not save Collection views.", error, () => {
           void refresh();
         });
       // The file may have changed, so the next change starts from what it holds now.
@@ -362,10 +381,10 @@ export function useCollectionTableViews(props: {
         >
           <section
             aria-label="Collection views"
-            className="dohc-elevated flex max-h-[85vh] w-130 max-w-[85vw] flex-col gap-3 overflow-auto rounded-xl border border-line bg-panel p-5"
+            className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-130 max-w-[85vw] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5"
           >
-            <header className="flex items-center justify-between">
-              <h2 className="m-0 text-base font-semibold text-ink">Views</h2>
+            <header className="flex items-center gap-2">
+              <h2 className="m-0 flex-1 text-base font-semibold text-ink">Views</h2>
               <SecondaryButton
                 disabled={busy}
                 onClick={() => {
@@ -374,42 +393,58 @@ export function useCollectionTableViews(props: {
               >
                 Refresh views
               </SecondaryButton>
+              <IconButton
+                aria-label="Close"
+                title="Close"
+                disabled={busy}
+                onClick={() => {
+                  setOpen(false);
+                  setDraft(null);
+                  setProblem(null);
+                }}
+              >
+                <X size={14} aria-hidden />
+              </IconButton>
             </header>
             {views.length === 0 && (
               <p className="m-0 text-sm text-muted">
-                No saved views yet. Create a view for the records you need.
+                No saved views yet. Create a view to filter or sort records.
               </p>
             )}
-            {views.map((view) => (
-              <div key={view.viewId} className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{view.name}</span>
-                <SecondaryButton
-                  aria-label={`Edit view ${view.name}`}
-                  disabled={busy}
-                  onClick={() => {
-                    setDraft(structuredClone(view));
-                    setProblem(null);
-                  }}
-                >
-                  Edit
-                </SecondaryButton>
-                <SecondaryButton
-                  aria-label={`Delete view ${view.name}`}
-                  disabled={busy}
-                  onClick={() => {
-                    void save(
-                      views.filter((item) => item.viewId !== view.viewId),
-                      selected === view.viewId
-                        ? null
-                        : (views.find((item) => item.viewId === selected) ?? null),
-                      () => setUndo(view),
-                    );
-                  }}
-                >
-                  Delete
-                </SecondaryButton>
-              </div>
-            ))}
+            {views.map((view) => {
+              const Icon = VIEW_ICONS[view.kind];
+              return (
+                <div key={view.viewId} className="flex items-center gap-2">
+                  <Icon size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+                  <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{view.name}</span>
+                  <SecondaryButton
+                    aria-label={`Edit view ${view.name}`}
+                    disabled={busy}
+                    onClick={() => {
+                      setDraft(structuredClone(view));
+                      setProblem(null);
+                    }}
+                  >
+                    Edit
+                  </SecondaryButton>
+                  <SecondaryButton
+                    aria-label={`Delete view ${view.name}`}
+                    disabled={busy}
+                    onClick={() => {
+                      void save(
+                        views.filter((item) => item.viewId !== view.viewId),
+                        selected === view.viewId
+                          ? null
+                          : (views.find((item) => item.viewId === selected) ?? null),
+                        () => setUndo(view),
+                      );
+                    }}
+                  >
+                    Delete
+                  </SecondaryButton>
+                </div>
+              );
+            })}
             {undo && (
               <SecondaryButton
                 disabled={busy}
@@ -646,15 +681,10 @@ export function useCollectionTableViews(props: {
                 >
                   Add filter
                 </SecondaryButton>
-                {problem && (
-                  <p role="alert" className="m-0 text-sm text-danger">
-                    {problem}
-                  </p>
-                )}
-                <div className="flex gap-2">
-                  <PrimaryButton type="submit" disabled={busy}>
-                    Save view
-                  </PrimaryButton>
+                {problem ? (
+                  <FieldError id="collection-table-view-error">{problem}</FieldError>
+                ) : null}
+                <div className="flex justify-end gap-2">
                   <SecondaryButton
                     disabled={busy}
                     onClick={() => {
@@ -664,6 +694,9 @@ export function useCollectionTableViews(props: {
                   >
                     Cancel
                   </SecondaryButton>
+                  <PrimaryButton type="submit" disabled={busy}>
+                    Save view
+                  </PrimaryButton>
                 </div>
               </form>
             )}
@@ -704,6 +737,19 @@ export function useCollectionTableViews(props: {
     rename: async (viewId, name) => {
       const view = find(viewId);
       return view ? put({ ...view, name }, false, undefined, true) : NOT_READ;
+    },
+    duplicate: (viewId) => {
+      const view = find(viewId);
+      if (!view) return;
+      const taken = new Set((held.current?.document.views ?? []).map((entry) => entry.name));
+      const copy: CollectionTableView = {
+        ...structuredClone(view),
+        viewId: crypto.randomUUID(),
+        name: uniqueCopyName(view.name, taken),
+      };
+      void put(copy, true).then((failure) => {
+        if (failure !== null) onError(failure, new Error(failure));
+      });
     },
     remove: (viewId) => {
       const view = find(viewId);

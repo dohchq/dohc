@@ -29,8 +29,57 @@ function installedCompiler(): string {
   );
 }
 
+function extractCompilerLocations(stderr: string): string | undefined {
+  const lines = stderr.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split(/\r?\n/);
+  const locations: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^    <stdin>:(\d+):(\d+):$/.exec(lines[index] ?? "");
+    if (!match) continue;
+    const nextLine = lines[index + 1] ?? "";
+    if (!new RegExp(`^\\s+${match[1]}\\s+[│|]`).test(nextLine)) continue;
+    const label = `line ${match[1]}, column ${match[2]}`;
+    if (!seen.has(label)) {
+      seen.add(label);
+      locations.push(label);
+      if (locations.length >= 3) break;
+    }
+  }
+  return locations.length > 0 ? locations.join("; ") : undefined;
+}
+
+function compilerFailureMessage(error: unknown, stderr: string): string {
+  const execError = error as { killed?: boolean; code?: string | number; signal?: string } | null;
+  if (execError?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+    return "dohc could not build these Collection actions within this host's limits. Simplify the source. Then approve again.";
+  }
+  if (execError?.killed || execError?.signal === "SIGTERM" || execError?.code === "ETIMEDOUT") {
+    return "dohc timed out while building these Collection actions. Simplify the source. Then approve again.";
+  }
+  const locations = extractCompilerLocations(stderr);
+  if (locations) {
+    return `dohc could not build these Collection actions: syntax error at ${locations}. Fix the source. Then approve again.`;
+  }
+  return "dohc could not build these Collection actions within this host's limits. Check the source. Then approve again.";
+}
+
 function assertClosedScript(source: string): void {
-  const nodes: unknown[] = [parse(source, { ecmaVersion: "latest", sourceType: "script" })];
+  let root: unknown;
+  try {
+    root = parse(source, { ecmaVersion: "latest", sourceType: "script" });
+  } catch (error) {
+    const loc = (error as { loc?: { line?: number; column?: number } } | null)?.loc;
+    const location =
+      typeof loc?.line === "number" && typeof loc?.column === "number"
+        ? ` at line ${loc.line}, column ${loc.column}`
+        : "";
+    throw new DatasetCompilerError(
+      "invalid",
+      `dohc could not parse the compiled Collection actions${location}. Fix the source. Then approve again.`,
+      { cause: error },
+    );
+  }
+  const nodes: unknown[] = [root];
   while (nodes.length) {
     const value = nodes.pop();
     if (!value || typeof value !== "object") continue;
@@ -90,12 +139,12 @@ export async function compileDatasetOperations(
             encoding: "utf8",
             signal: options.signal,
           },
-          (error, stdout) => {
+          (error, stdout, stderr) => {
             if (error)
               reject(
                 new DatasetCompilerError(
                   "invalid",
-                  "dohc could not build these Collection actions within this host's limits. Check the source. Then approve again.",
+                  compilerFailureMessage(error, typeof stderr === "string" ? stderr : ""),
                   { cause: error },
                 ),
               );

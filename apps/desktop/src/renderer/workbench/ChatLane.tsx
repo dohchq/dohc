@@ -36,6 +36,7 @@ import { CollectionChangeCard } from "./CollectionChangeCard";
 import { ComposerNotice, DispatchAnnouncement, dispatchAnnouncement } from "./ChatsControls";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import type { AgentSetupSummary } from "./ChatsView";
+import { agentChatIdentity, type SettingsAgent } from "./agentChat";
 import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 import { WorkStatus } from "./WorkCard";
 import { neutralPresentation } from "./actorPresentation";
@@ -49,15 +50,23 @@ const changeFileOf = (message: ChatMessageRecord) =>
   )?.pathHint;
 
 type PaintedLane = {
-  threadId: string | null;
-  revision: number;
+  // The conversation's threads, oldest first.
+  laneIds: string;
+  // Each one's revision.
+  revisions: string;
   // An agent DM's earlier posts, by id, last change and size.
   postsKey: string;
   // A run ends without a new message, so its details repaint when the run changes.
   liveRunId: string | null;
-  messageCount: number;
+  // How many messages each conversation thread held when painted, to mark read.
+  read: readonly { threadId: string; messageCount: number }[];
   readState: "retry" | "pending" | "done";
 };
+
+const byAge = (
+  left: { createdAtMs: number; id: string },
+  right: { createdAtMs: number; id: string },
+) => left.createdAtMs - right.createdAtMs || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 
 function postAsThread(messages: readonly ChatMessageRecord[]): ChatMessageRecord[] {
   const first = messages[0];
@@ -67,11 +76,12 @@ function postAsThread(messages: readonly ChatMessageRecord[]): ChatMessageRecord
   );
 }
 
-// A conversation: a group's chat lane or an agent DM. The lane is the
-// group's oldest chat-lane thread; the first message starts it. Any message
-// can start a thread, which opens beside the conversation. Every response is
-// guarded by the mount token so a slow answer for a group the user left
-// never repaints the one they opened.
+// A conversation: a group's chat lane or an agent DM. The lane shows every
+// chat-lane thread of the group, since two devices can each start one before
+// they sync; a new message goes on in the oldest. The first message starts
+// it. Any message can start a thread, which opens beside the conversation.
+// Every response is guarded by the mount token so a slow answer for a group
+// the user left never repaints the one they opened.
 export function ChatLane(props: {
   workspaceId: string;
   channel: ChatChannelRecord;
@@ -88,9 +98,10 @@ export function ChatLane(props: {
   onOpenAgentSettings?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
-  // What a picked agent's offer says. Only an agent DM's lane reads its
-  // dispatch, to show and stop the agent's run.
+  // What a picked agent's offer says.
   agentSetup?: AgentSetupSummary | null;
+  // The agents in Settings, to name and color the one at work here.
+  agents?: readonly SettingsAgent[];
   // An agent DM's agent, by the name and colors its row shows.
   agentName?: string;
   agentPresentation?: ActorPresentation;
@@ -118,7 +129,9 @@ export function ChatLane(props: {
   // One the lane does not hold leaves it at its end.
   focusMessageId?: string;
 }) {
-  const [threadId, setThreadId] = useState<string | null>(null);
+  // The conversation's threads, oldest first. A new message goes in the first.
+  const [laneIds, setLaneIds] = useState<readonly string[]>([]);
+  const threadId = laneIds[0] ?? null;
   const [postThreadIds, setPostThreadIds] = useState<readonly string[]>([]);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
@@ -141,6 +154,7 @@ export function ChatLane(props: {
   const onThreadRead = useRef(props.onThreadRead);
   onThreadRead.current = props.onThreadRead;
   const listRef = useRef<ChatMessageListHandle | null>(null);
+  const composerHandle = useRef<MentionComposerHandle>(null);
   const paintedRevision = useRef<PaintedLane | null>(null);
   const { workspaceId, onError, focusMessageId } = props;
   const channelId = props.channel.id;
@@ -162,27 +176,28 @@ export function ChatLane(props: {
 
   const markRead = useCallback(
     (painted: PaintedLane) => {
-      const laneId = painted.threadId;
-      if (painted.readState !== "retry" || laneId === null) return;
+      if (painted.readState !== "retry" || painted.read.length === 0) return;
       const current = token.current;
       const isCurrent = () => current === token.current && paintedRevision.current === painted;
       painted.readState = "pending";
-      void bridge()
-        .markChatThreadRead({
-          workspaceId,
-          threadId: laneId,
-          upToSequence: painted.messageCount,
-        })
-        .then(
-          () => {
-            if (!isCurrent()) return;
-            painted.readState = "done";
-            onThreadRead.current?.();
-          },
-          () => {
-            if (isCurrent()) painted.readState = "retry";
-          },
-        );
+      void Promise.all(
+        painted.read.map((read) =>
+          bridge().markChatThreadRead({
+            workspaceId,
+            threadId: read.threadId,
+            upToSequence: read.messageCount,
+          }),
+        ),
+      ).then(
+        () => {
+          if (!isCurrent()) return;
+          painted.readState = "done";
+          onThreadRead.current?.();
+        },
+        () => {
+          if (isCurrent()) painted.readState = "retry";
+        },
+      );
     },
     [workspaceId],
   );
@@ -198,18 +213,16 @@ export function ChatLane(props: {
           agentDm ? bridge().listChannelThreads({ workspaceId, channelId, lane: "posts" }) : null,
         ]);
         if (!isCurrent()) return;
-        const lane = [...listed.threads].sort(
-          (left, right) =>
-            left.createdAtMs - right.createdAtMs ||
-            (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
-        )[0];
+        const lane = [...listed.threads].sort(byAge);
+        const nextLaneIds = lane.map((each) => each.id);
+        const laneKey = nextLaneIds.join("|");
         const posts = listedPosts?.threads ?? [];
         const postsKey = posts
           .map((post) => `${post.id}:${post.updatedAtMs}:${post.messageCount}`)
           .join("|");
-        if (!lane && posts.length === 0) {
+        if (lane.length === 0 && posts.length === 0) {
           paintedRevision.current = null;
-          setThreadId(null);
+          setLaneIds([]);
           setMessages([]);
           setDecisions([]);
           setRuns({});
@@ -223,32 +236,34 @@ export function ChatLane(props: {
         // read on every pass. Without it the lane shows no Stop, not no chat.
         // A reply to an earlier post can wait for the agent too, so the one
         // read covers the posts.
-        const laneId = lane?.id ?? null;
         const postIds = posts.slice(0, CHAT_DISPATCH_POST_THREADS_MAX).map((post) => post.id);
-        const [revision, nextDispatch] = await Promise.all([
-          laneId
-            ? bridge()
-                .getChatThreadRevision({ workspaceId, threadId: laneId })
-                .then((read) => read.revision)
-            : 0,
-          agentDm
-            ? bridge()
-                .chatDispatchStateForThread({
-                  workspaceId,
-                  threadId: laneId,
-                  ...(postIds.length > 0 ? { postThreadIds: postIds } : {}),
-                })
-                .catch(() => null)
-            : null,
+        const laneRest = nextLaneIds.slice(1, CHAT_DISPATCH_POST_THREADS_MAX + 1);
+        const [revisionList, nextDispatch] = await Promise.all([
+          Promise.all(
+            nextLaneIds.map((id) =>
+              bridge()
+                .getChatThreadRevision({ workspaceId, threadId: id })
+                .then((read) => read.revision),
+            ),
+          ),
+          bridge()
+            .chatDispatchStateForThread({
+              workspaceId,
+              threadId: nextLaneIds[0] ?? null,
+              ...(postIds.length > 0 ? { postThreadIds: postIds } : {}),
+              ...(laneRest.length > 0 ? { laneThreadIds: laneRest } : {}),
+            })
+            .catch(() => null),
         ]);
         if (!isCurrent()) return;
         setDispatch(nextDispatch);
         const nextRunId = nextDispatch?.liveRunId ?? null;
+        const revisions = revisionList.join("|");
         const painted = paintedRevision.current;
         if (
           !force &&
-          painted?.threadId === laneId &&
-          painted.revision === revision &&
+          painted?.laneIds === laneKey &&
+          painted.revisions === revisions &&
           painted.postsKey === postsKey &&
           painted.liveRunId === nextRunId
         ) {
@@ -261,12 +276,10 @@ export function ChatLane(props: {
             bridge().listChatMessages({ workspaceId, threadId: id }),
             bridge().listChatReactions({ workspaceId, threadId: id }),
             bridge().listChatThreadDecisions({ workspaceId, threadId: id }),
-            // Only an agent's replies have runs. Without them the chat still shows.
-            agentDm
-              ? bridge()
-                  .chatRunRecordsForThread({ workspaceId, threadId: id })
-                  .catch(() => null)
-              : null,
+            // Without an agent's runs the chat still shows.
+            bridge()
+              .chatRunRecordsForThread({ workspaceId, threadId: id })
+              .catch(() => null),
           ]);
           return {
             id,
@@ -276,34 +289,43 @@ export function ChatLane(props: {
             runs: ran?.runs ?? {},
           };
         };
-        const [laneRead, ...postReads] = await Promise.all([
-          laneId ? readThread(laneId) : null,
+        const reads = await Promise.all([
+          ...lane.map((each) => readThread(each.id)),
           ...posts.map((post) => readThread(post.id)),
         ]);
-        const reads = laneRead ? [laneRead, ...postReads] : postReads;
         reactions.ingest(reads.map((read) => ({ threadId: read.id, ...read.reacted, ticket })));
         if (!isCurrent()) return;
-        const laneMessages = laneRead?.messages ?? [];
-        if (lane && paintedRevision.current?.threadId !== lane.id) {
-          const firstUnread =
-            lane.unreadCount > 0 ? laneMessages[lane.lastReadSequence] : undefined;
+        const laneReads = reads.slice(0, lane.length);
+        const postReads = reads.slice(lane.length);
+        if (lane.length > 0 && paintedRevision.current?.laneIds !== laneKey) {
+          // The earliest message the reader had not seen, in any of its threads.
+          const firstUnread = lane
+            .flatMap((each, at) => {
+              const unread = laneReads[at]?.messages[each.lastReadSequence];
+              return each.unreadCount > 0 && unread ? [unread] : [];
+            })
+            .sort(compareMessageOrder)[0];
           setFirstUnreadMessageId(firstUnread?.id ?? null);
         }
         const next: PaintedLane = {
-          threadId: laneId,
-          revision,
+          laneIds: laneKey,
+          revisions,
           postsKey,
           liveRunId: nextRunId,
-          messageCount: laneMessages.length,
+          read: laneReads.map((read) => ({
+            threadId: read.id,
+            messageCount: read.messages.length,
+          })),
           readState: "retry",
         };
         paintedRevision.current = next;
-        setThreadId(laneId);
+        setLaneIds(nextLaneIds);
         setPostThreadIds(posts.map((post) => post.id));
         setMessages(
-          [...postReads.flatMap((read) => postAsThread(read.messages)), ...laneMessages].sort(
-            compareMessageOrder,
-          ),
+          [
+            ...postReads.flatMap((read) => postAsThread(read.messages)),
+            ...laneReads.flatMap((read) => read.messages),
+          ].sort(compareMessageOrder),
         );
         setDecisions(reads.flatMap((read) => read.decisions));
         setRuns(Object.assign({}, ...reads.map((read) => read.runs)));
@@ -329,7 +351,7 @@ export function ChatLane(props: {
       } catch (error) {
         if (!isCurrent()) return;
         setLoading(false);
-        onError(ipcErrorMessage(error, "Could not load the chat."), error);
+        onError(ipcErrorMessage(error, "dohc could not load this chat."), error);
       }
     },
     [agentDm, channelId, markRead, onError, reactions, workspaceId],
@@ -388,7 +410,7 @@ export function ChatLane(props: {
   );
 
   useEffect(() => {
-    setThreadId(null);
+    setLaneIds([]);
     setPostThreadIds([]);
     setMessages([]);
     setDecisions([]);
@@ -527,7 +549,7 @@ export function ChatLane(props: {
           if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
           loadSequence.current += 1;
           listRef.current?.scrollToEnd();
-          setThreadId(result.thread.id);
+          setLaneIds([result.thread.id]);
           setMessages([result.message]);
         }
       }
@@ -536,7 +558,7 @@ export function ChatLane(props: {
       void load(true);
     } catch (error) {
       if (current !== token.current) return;
-      onError(ipcErrorMessage(error, "Could not send that message."), error);
+      onError(ipcErrorMessage(error, "dohc could not send that message."), error);
     } finally {
       if (current === token.current) setSending(false);
     }
@@ -560,10 +582,9 @@ export function ChatLane(props: {
   // earlier post goes on in that post. A reply after Answer answers its question.
   const sendReply = useCallback(
     async (rootId: string, body: string, answers?: string) => {
-      const post = messages.find(
-        (message) => message.id === rootId && message.threadId !== threadId,
-      )?.threadId;
-      const target = post ?? threadId;
+      const root = messages.find((message) => message.id === rootId)?.threadId;
+      const post = root !== undefined && postThreadIds.includes(root) ? root : undefined;
+      const target = root ?? threadId;
       if (!target || props.locked) return false;
       const current = token.current;
       try {
@@ -606,7 +627,7 @@ export function ChatLane(props: {
         return true;
       } catch (error) {
         if (current === token.current)
-          onError(ipcErrorMessage(error, "Could not send that reply."), error);
+          onError(ipcErrorMessage(error, "dohc could not send that reply."), error);
         return false;
       }
     },
@@ -614,6 +635,7 @@ export function ChatLane(props: {
       load,
       messages,
       onError,
+      postThreadIds,
       props.locked,
       props.onAgentWaitsForTrust,
       reportStillOpen,
@@ -627,8 +649,8 @@ export function ChatLane(props: {
     async (decision: ChatDecisionRecord, option: string) => {
       // The answer goes where the poll is: its thread, or its earlier post.
       const asked = messages.find((message) => message.id === decision.messageId);
-      const post = asked && asked.threadId !== threadId ? asked.threadId : undefined;
-      const target = post ?? threadId;
+      const post = asked && postThreadIds.includes(asked.threadId) ? asked.threadId : undefined;
+      const target = asked?.threadId ?? threadId;
       if (!target || sending || loading || props.locked) return;
       const parentMessageId = post ? undefined : asked?.parentMessageId;
       const current = token.current;
@@ -674,7 +696,7 @@ export function ChatLane(props: {
       } catch (error) {
         // A choice that saved answers, so a refused one saved nothing.
         if (current === token.current)
-          onError(ipcErrorMessage(error, "Could not send that choice."), error);
+          onError(ipcErrorMessage(error, "dohc could not send that choice."), error);
       } finally {
         if (current === token.current) {
           setSending(false);
@@ -692,6 +714,7 @@ export function ChatLane(props: {
       onError,
       load,
       messages,
+      postThreadIds,
       reportStillOpen,
       reportUnshown,
     ],
@@ -705,9 +728,8 @@ export function ChatLane(props: {
       path: string,
       input: { body: string; resolves: boolean; attach?: string },
     ) => {
-      const post = asked.threadId !== threadId ? asked.threadId : undefined;
-      const target = post ?? threadId;
-      if (!target) throw new Error("dohc couldn't find this chat.");
+      const post = postThreadIds.includes(asked.threadId) ? asked.threadId : undefined;
+      const target = asked.threadId;
       const parentMessageId = post ? undefined : asked.parentMessageId;
       const current = token.current;
       const result = await bridge().sendChatMessage({
@@ -737,14 +759,14 @@ export function ChatLane(props: {
       }
       if (result.resolveFailure)
         onError(
-          ipcErrorMessage(result.resolveFailure, "dohc couldn't mark this message answered."),
+          ipcErrorMessage(result.resolveFailure, "dohc could not mark this message answered."),
           result.resolveFailure,
         );
       else if ("failure" in result)
         reportUnshown("Sent your reply. dohc could not show it yet.", result.failure);
       void load(true);
     },
-    [load, onError, reportUnshown, threadId, workspaceId],
+    [load, onError, postThreadIds, reportUnshown, workspaceId],
   );
 
   const liveRunId = dispatch?.liveRunId ?? null;
@@ -754,10 +776,13 @@ export function ChatLane(props: {
     setStopping(true);
     try {
       await bridge().stopAgentRun({ workspaceId, runId: liveRunId });
-      if (current === token.current) void load();
+      if (current !== token.current) return;
+      // Stop leaves with the strip, so the reader goes on in the composer.
+      composerHandle.current?.focus();
+      void load();
     } catch (error) {
       if (current === token.current)
-        onError(ipcErrorMessage(error, "Could not stop this agent run."), error);
+        onError(ipcErrorMessage(error, "dohc could not stop this agent run."), error);
     } finally {
       if (current === token.current) setStopping(false);
     }
@@ -790,20 +815,38 @@ export function ChatLane(props: {
     }
   }, [failedRun, load, onError, props.agentName, retrying, threadId, workspaceId]);
 
-  // The agent at work. Its answer lands in the thread it was asked in, or at
-  // the end of the conversation.
-  const working = useMemo<ChatWorking | null>(
-    () =>
-      liveRunId === null
-        ? null
+  // The agent at work on this computer. Its answer lands in the thread it was
+  // asked in, or at the end of the conversation. Anyone who can post here can
+  // stop it.
+  const liveAgentId = dispatch?.liveAgent?.agentId;
+  const liveAgentName = dispatch?.liveAgent?.name;
+  const working = useMemo<ChatWorking | null>(() => {
+    if (liveRunId === null) return null;
+    const identity =
+      liveAgentId !== undefined && liveAgentName !== undefined && liveAgentId !== chatAgentId
+        ? agentChatIdentity({ agentId: liveAgentId, name: liveAgentName }, props.agents ?? [])
         : {
-            agentName: props.agentName ?? "Your agent",
-            presentation: props.agentPresentation ?? { group: "", hue: null, self: false },
-            stopping,
-            ...(props.locked ? {} : { onStop: () => void stopRun() }),
-          },
-    [liveRunId, props.agentName, props.agentPresentation, props.locked, stopping, stopRun],
-  );
+            label: props.agentName ?? "Your agent",
+            presentation: props.agentPresentation ?? neutralPresentation,
+          };
+    return {
+      agentName: identity.label,
+      presentation: identity.presentation,
+      stopping,
+      ...(props.locked ? {} : { onStop: () => void stopRun() }),
+    };
+  }, [
+    chatAgentId,
+    liveAgentId,
+    liveAgentName,
+    liveRunId,
+    props.agentName,
+    props.agentPresentation,
+    props.agents,
+    props.locked,
+    stopping,
+    stopRun,
+  ]);
   // The messages that wait for the agent to end its run, which none do while
   // a pause holds them. Another agent asked here takes the default agent color.
   const waiting = dispatchPaused ? undefined : dispatch?.waiting;
@@ -813,10 +856,7 @@ export function ChatLane(props: {
     neutralPresentation;
   // Reactions live with each message's own thread: the conversation's, or an
   // earlier post's.
-  const reactionThreads = useMemo(
-    () => (threadId ? [threadId, ...postThreadIds] : postThreadIds),
-    [postThreadIds, threadId],
-  );
+  const reactionThreads = useMemo(() => [...laneIds, ...postThreadIds], [laneIds, postThreadIds]);
   const reactionViews = reactionThreads.map((id) => reactions.view(id));
   const viewerAuthorId = reactionViews.find((view) => view.viewerAuthorId)?.viewerAuthorId ?? "";
   const reactionControls: ChatReactionControls | undefined =
@@ -860,7 +900,6 @@ export function ChatLane(props: {
     ? `your chat with ${props.agentName ?? "your agent"}`
     : `#${props.channel.name}`;
   // A failed run's ask-again readies this composer; it never sends.
-  const composerHandle = useRef<MentionComposerHandle>(null);
   const askAgain = useCallback((agentId: string, mention: boolean) => {
     if (mention) composerHandle.current?.mention(agentMentionId(agentId));
     else composerHandle.current?.focus();
@@ -978,7 +1017,7 @@ export function ChatLane(props: {
     <ThreadedChat
       key={`${workspaceId}:${channelId}`}
       testIdPrefix="chats-lane"
-      chatId={threadId}
+      chatIds={laneIds}
       messages={messages}
       runs={runs}
       loading={loading}
@@ -1008,7 +1047,7 @@ export function ChatLane(props: {
       composer={(inset) =>
         props.locked ? (
           <ComposerNotice testId="chats-lane-readonly">
-            This group is read-only for you.
+            This Group is read-only for you.
           </ComposerNotice>
         ) : (
           <MentionComposer
@@ -1042,7 +1081,7 @@ export function ChatLane(props: {
       replyNotice={
         props.locked ? (
           <ComposerNotice testId="chats-lane-thread-readonly">
-            This group is read-only for you.
+            This Group is read-only for you.
           </ComposerNotice>
         ) : undefined
       }

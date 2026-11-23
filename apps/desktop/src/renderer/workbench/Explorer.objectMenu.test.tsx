@@ -429,7 +429,7 @@ describe("Undo after a rename, a move or a delete", () => {
     act(() => undo());
     await waitFor(() =>
       expect(props.onError).toHaveBeenCalledWith(
-        "Cannot undo the rename.",
+        "dohc could not undo the rename.",
         expect.objectContaining({ message: reason }),
         expect.any(Function),
       ),
@@ -521,9 +521,9 @@ describe("Undo after a rename, a move or a delete", () => {
   it.each([
     [
       { code: "old-path-occupied", path: "notes.md" } as const,
-      "Cannot undo the rename. Move the new notes.md first.",
+      "dohc could not undo the rename. Move the new notes.md first.",
     ],
-    [{ code: "unexplained" } as const, "Cannot undo the rename."],
+    [{ code: "unexplained" } as const, "dohc could not undo the rename."],
   ])("words a refused Undo from its refusal: %o", async (refusal, words) => {
     const reason = "domain error: Undo refused: old path occupied: notes.md";
     bridge.undoHistoryOperation.mockResolvedValueOnce({ ok: false, reason, refusal });
@@ -567,7 +567,7 @@ describe("Undo after a rename, a move or a delete", () => {
       await waitFor(() => expect(settle).toHaveBeenCalledOnce());
       expect(settle).toHaveBeenCalledWith(settled);
       expect(props.onError).toHaveBeenCalledWith(
-        expect.stringMatching(/^Cannot undo the rename\./),
+        expect.stringMatching(/^dohc could not undo the rename\./),
         expect.anything(),
         expect.any(Function),
       );
@@ -589,7 +589,7 @@ describe("Undo after a rename, a move or a delete", () => {
     act(() => undo());
     await waitFor(() =>
       expect(props.onError).toHaveBeenCalledWith(
-        "Cannot undo the rename. Stop live editing for ideas.md first.",
+        "dohc could not undo the rename. Stop live editing for ideas.md first.",
         expect.objectContaining({ message: reason }),
         expect.any(Function),
         undefined,

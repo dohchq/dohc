@@ -168,7 +168,7 @@ it("reads the question of the line's workspace, agent and request, and holds its
     { workspaceId: "ws-a", agentId: "nova", requestId: "q-1" },
   ]);
   expect(dialog().dataset.view).toBe("loading");
-  expect(within(dialog()).getByRole("status").textContent).toBe("Loading the question");
+  expect(within(dialog()).getByRole("status").textContent).toBe("Loading the question…");
   // Nothing can be sent before the question shows.
   send();
   expect(sends).toHaveLength(0);
@@ -342,7 +342,7 @@ it("keeps a required question from being sent unanswered, and says what it needs
 
 it.each([
   ["already-answered", "This question was already answered."],
-  ["closed", "This question no longer waits for an answer."],
+  ["closed", "This question is no longer waiting for an answer."],
 ] as const)("says so when the read finds the question %s", async (status, words) => {
   const { reads, sends } = asking();
   await settle(() => reads[0]!.answer.resolve({ status }));
@@ -360,7 +360,7 @@ it.each([
 
 it.each([
   ["already-answered", "This question was already answered."],
-  ["closed", "This question no longer waits for an answer."],
+  ["closed", "This question is no longer waiting for an answer."],
 ] as const)("says so when the send finds the question %s", async (status, words) => {
   const { sends } = await answering(question({ allowCustomAnswer: true }));
   fireEvent.change(screen.getByRole("textbox", { name: "Your own answer" }), {
@@ -472,7 +472,7 @@ it("sends nothing while the second read is out, so no send outlives the dialog",
   // It was closed: the dialog says so, and can be closed with nothing on its way.
   await settle(() => reads[1]!.answer.resolve({ status: "closed" }));
   expect(within(dialog()).getByRole("status").textContent).toBe(
-    "This question no longer waits for an answer.",
+    "This question is no longer waiting for an answer.",
   );
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByRole("dialog")).toBeNull();

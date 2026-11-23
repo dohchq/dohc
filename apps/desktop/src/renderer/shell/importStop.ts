@@ -12,22 +12,22 @@ export function importStopSentence(stop: ImportStop): string {
   // The target has to come back before the link can be imported, so the
   // steps come in that order.
   if (stop.refusal === "dangling-link") {
-    return `dohc did not import ${file}, a symbolic link to a missing file. Restore that file, then import it instead.`;
+    return `dohc did not import ${file} because its link target is missing. Restore the target file, then import it.`;
   }
   // A dropped file, or a folder on either side, that is not what dohc
   // checked, such as one replaced by a link. Nothing is copied through it.
   if (stop.refusal === "changed") {
-    return `dohc did not import ${file}, because a file or folder changed while dohc copied it.`;
+    return `dohc did not import ${file} because a file or folder changed during the copy.`;
   }
   switch (stop.code) {
     case "EACCES":
     case "EPERM":
-      return `dohc isn't allowed to read ${file} or write to this folder.`;
+      return `dohc does not have permission to read ${file} or write to this folder.`;
     case "ENOSPC":
       return "The disk is full.";
     // The source or the destination folder can be the missing side.
     case "ENOENT":
-      return `dohc could not find ${file} or this folder anymore.`;
+      return `dohc could not find ${file} or the destination folder.`;
     default:
       return `dohc could not copy ${file}.`;
   }

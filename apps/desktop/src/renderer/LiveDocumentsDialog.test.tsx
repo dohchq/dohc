@@ -90,7 +90,7 @@ it("shows a document whose edit history the server can't check, with Resume and 
   expect(long.children[1]?.textContent).toBe("History too long");
   expect(
     within(long).getByText(
-      "This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc and your edits keep syncing, but people you shared it with can't edit it live. Resume live editing to try again.",
+      "This document's edit history is too long for the server to check, so live editing cannot start. Your edits in dohc keep syncing, but others cannot edit it live. Resume live editing to try again.",
     ),
   ).toBeDefined();
   expect(actions("docs/long.md").filter((name) => name?.endsWith("live editing"))).toEqual([
@@ -119,10 +119,10 @@ it("shows a document whose live start keeps failing, with the server's reason to
   );
   render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
   const failing = await screen.findByTestId("live-document-row-docs/failing.md");
-  expect(failing.children[1]?.textContent).toBe("Can't start");
+  expect(failing.children[1]?.textContent).toBe("Cannot start");
   expect(
     within(failing).getByText(
-      "The server can't start live editing for this document. It keeps trying. You can keep editing it in dohc and your edits keep syncing, but people you shared it with can't edit it live until it starts.",
+      "The server cannot start live editing for this document and keeps trying. Your edits in dohc keep syncing, but others cannot edit it live until it starts.",
     ),
   ).toBeDefined();
   const line = `Server's reason: engine-refused, since ${formatShortTime(Date.parse(since))}`;
@@ -185,7 +185,7 @@ describe("LiveDocumentsDialog", () => {
       render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
       fireEvent.click(await screen.findByRole("button", { name: "Stop live editing for a.md" }));
       const note =
-        "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.";
+        "Live editing did not stop. Recent edits have not reached the server yet. Resume live editing to send them, then stop it.";
       await screen.findByText(note);
       const live = screen.getByTestId("live-document-row-a.md");
       expect(live.children[1]?.textContent).toBe(label);
@@ -226,7 +226,7 @@ describe("LiveDocumentsDialog", () => {
     expect(document.activeElement).toBe(retry);
     expect(live.children[1]?.textContent).toBe("Live");
     expect(live.textContent).toContain(
-      "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.",
+      "Live editing did not stop. The server has not finished applying edits to this document.",
     );
     expect(actions("a.md")).toEqual(["Try again"]);
     expect(h.onError).not.toHaveBeenCalled();
@@ -238,7 +238,7 @@ describe("LiveDocumentsDialog", () => {
     );
     expect(
       screen.queryByText(
-        "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.",
+        "Live editing did not stop. The server has not finished applying edits to this document.",
       ),
     ).toBeNull();
   });
@@ -339,7 +339,7 @@ describe("LiveDocumentsDialog", () => {
       "Live editing stopped. 2 unsent edits remain on this computer. Resume live editing to try sending them. You can keep editing.",
     );
     const held =
-      "The server hasn't applied an edit to this document. Resume live editing to try again.";
+      "The server has not applied an edit to this document. Resume live editing to try again.";
     expect(screen.getAllByText(held)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-edited.md").textContent).toContain(held);
     for (const path of ["deferred.md", "edited.md"]) {
@@ -432,6 +432,11 @@ describe("LiveDocumentsDialog", () => {
           reason: "live-document-without-lineage",
           canResume: true,
         }),
+        row("docs/large.md", {
+          status: "unavailable",
+          reason: "live-document-too-large",
+          canResume: false,
+        }),
         row("docs/diverged.md", {
           status: "unavailable",
           reason: "session-host-diverged",
@@ -466,19 +471,20 @@ describe("LiveDocumentsDialog", () => {
       "Workspace changed",
       "Stopped by the server",
       "Not started",
-      "Server copy doesn't match",
+      "Too large",
+      "Server copy does not match",
       "Server copy is missing an edit",
-      "Can't resume",
+      "Cannot resume",
       "Stopped",
       "Stopped",
     ]);
     const edited =
-      "The server hasn't applied an edit to this document. Resume live editing to try again.";
+      "The server has not applied an edit to this document. Resume live editing to try again.";
     expect(screen.getAllByText(edited)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/edited.md").textContent).toContain(edited);
     expect(actions("docs/edited.md")).toEqual(["Resume live editing", "Stop live editing"]);
     const held =
-      "A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them. A copy of it can go live. If you shared only this file, share the copy too.";
+      "A conflict in this file was resolved, so live editing cannot resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them. A copy of it can go live. If you shared only this file, share the copy too.";
     expect(screen.getAllByText(held)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/held.md").textContent).toContain(held);
     expect(actions("docs/held.md")).toEqual(["Stop live editing", "Make a copy"]);
@@ -490,11 +496,16 @@ describe("LiveDocumentsDialog", () => {
     );
     expect(actions("docs/diverged.md")).toEqual([]);
     const openFirst =
-      "Live editing can't start until you open this document once in dohc. After you open it, resume live editing. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.";
+      "Live editing cannot start until you open this document once in dohc. After you open it, resume live editing.";
     expect(screen.getAllByText(openFirst)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/unopened.md").textContent).toContain(
       openFirst,
     );
+    const large =
+      "This note is larger than 256 KB, so it cannot be edited live. Make it smaller or split it, then open it in dohc.";
+    expect(screen.getAllByText(large)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-docs/large.md").textContent).toContain(large);
+    expect(actions("docs/large.md")).toEqual(["Stop live editing"]);
 
     expect(actions("docs/live.md")).toEqual(["Stop live editing"]);
     expect(actions("docs/preparing.md")).toEqual(["Stop live editing"]);
@@ -749,11 +760,11 @@ describe("LiveDocumentsDialog", () => {
       );
       expect(
         screen.getByText(
-          "This list is not current. Reload to see this workspace's live documents.",
+          "This list is out of date. Reload to see this workspace's live documents.",
         ),
       ).toBeTruthy();
       expect(
-        screen.getByText("This list is not current. Reload to check these shares again."),
+        screen.getByText("This list is out of date. Reload to check these shares again."),
       ).toBeTruthy();
 
       await act(async () => {
@@ -817,7 +828,7 @@ describe("LiveDocumentsDialog", () => {
       const kept = await screen.findByTestId("live-document-row-docs/a.md");
       expect(within(kept).getByText("Can't read edits")).toBeTruthy();
       expect(kept.textContent).toContain(
-        "dohc kept edits on this computer but could not read them. Try again to read them.",
+        "dohc kept edits on this computer but could not read them.",
       );
       expect(actions("docs/a.md")).toEqual([
         "Stop live editing",
@@ -901,7 +912,7 @@ it("shows a Stop that answered while a closed opening loaded in the next opening
   await act(async () => loading.resolve(page([row("a.md")])));
   expect(onStopPending).not.toHaveBeenCalled();
   await within(live).findByText(
-    "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.",
+    "Live editing did not stop. The server has not finished applying edits to this document. Try again in a moment.",
   );
   expect(onStopPending).not.toHaveBeenCalled();
   expect(h.onError).not.toHaveBeenCalled();
@@ -955,11 +966,11 @@ it("focuses the withheld conflict cause once after Stop refuses, without retry o
   render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
   fireEvent.click(await screen.findByRole("button", { name: "Stop live editing for held.md" }));
   const words =
-    "Live editing didn't stop. A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.";
+    "Live editing did not stop. A conflict in this file was resolved, so live editing cannot resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.";
   const note = await screen.findByText(words);
   const live = screen.getByTestId("live-document-row-held.md");
   expect(document.activeElement).toBe(note);
-  expect(live.children[1]?.textContent).toBe("Can't resume");
+  expect(live.children[1]?.textContent).toBe("Cannot resume");
   expect(live.querySelectorAll("p")).toHaveLength(1);
   expect(actions("held.md")).toEqual([]);
 });
@@ -981,7 +992,7 @@ it.each(
   const cause = live.querySelector("p")!.textContent;
   fireEvent.click(within(live).getByRole("button", { name: "Stop live editing for held.md" }));
   const note = await within(live).findByText(
-    "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.",
+    "Live editing did not stop. The server has not finished applying edits to this document. Try again in a moment.",
   );
   expect(document.activeElement).toBe(
     within(live).getByRole("button", { name: "Try again to stop live editing for held.md" }),

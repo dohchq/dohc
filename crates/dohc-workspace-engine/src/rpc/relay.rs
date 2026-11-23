@@ -1689,6 +1689,37 @@ impl EngineService {
                 "ordinary cursor materialization is incomplete",
             ));
         }
+        let page_paths = lock(&self.pending_cursors)
+            .get(&token)
+            .filter(|issued| {
+                matches!(kind, PendingCursorKind::Relay)
+                    && issued.handle == *bound_handle
+                    && issued.workspace_id == open.workspace_id
+                    && issued_as(&issued.cursor, kind)
+                    && !issued.materialized
+            })
+            .map(|issued| issued.materialization_paths.clone())
+            .unwrap_or_default();
+        if !page_paths.is_empty() {
+            let cancellation = OperationCancellation::new(ctx);
+            let _apply = tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => return Err(cancellation.interruption("sync.commitCursor")),
+                guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+            };
+            Self::read_under_ctx(
+                &cancellation,
+                "sync.commitCursor",
+                open.actor.end_relay_page_projection_writes(
+                    open.workspace_id.clone(),
+                    open.root.clone(),
+                    page_paths,
+                    Arc::new(self.self_writes.scoped(&open.root)),
+                    now_ms()?,
+                ),
+            )
+            .await?;
+        }
         let consumed =
             self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
         let reconcile_collections = consumed.reconcile_collections;

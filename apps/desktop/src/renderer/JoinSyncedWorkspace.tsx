@@ -1,6 +1,7 @@
 import { useMouseBackButton } from "./useMouseBackButton";
 import { isComposingKey } from "./ui/keys";
 import { useRequestSequence } from "./useRequestSequence";
+import { isCloudSyncFolderCancelled } from "../ipc/errorWords";
 import { ipcErrorMessage } from "./ipcError";
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
@@ -32,7 +33,7 @@ type FieldErrors = { code?: string; folder?: string; passphrase?: string };
 const CODE_ERROR = "Enter a workspace code.";
 const FOLDER_ERROR = "Choose an empty folder.";
 const PASSPHRASE_ERROR = "Enter the protected-file passphrase.";
-const WRONG_PASSPHRASE_ERROR = "That passphrase didn't unlock the protected files.";
+const WRONG_PASSPHRASE_ERROR = "That passphrase did not unlock the protected files.";
 
 function isWindows(): boolean {
   return bridge().platform === "win32";
@@ -57,6 +58,8 @@ export function JoinSyncedWorkspace(
   const [usedFolder, setUsedFolder] = useState<string | null>(null);
   const [passphrase, setPassphrase] = useState("");
   const [joining, setJoining] = useState(false);
+  const [codeTouched, setCodeTouched] = useState(false);
+  const [passphraseTouched, setPassphraseTouched] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [error, setError] = useState<string | null>(null);
   useMouseBackButton(joining ? undefined : props.onBack);
@@ -111,6 +114,20 @@ export function JoinSyncedWorkspace(
     if (needsPassphrase) passphraseField.current?.focus();
   }, [needsPassphrase]);
 
+  const onBackRef = useRef(props.onBack);
+  onBackRef.current = props.onBack;
+  useEffect(() => {
+    if (joining) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || isComposingKey(event)) return;
+      if (document.documentElement.dataset.menuOpen !== undefined) return;
+      event.preventDefault();
+      onBackRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [joining]);
+
   function setFieldError(field: keyof FieldErrors, message: string | undefined) {
     setFieldErrors((errors) => ({ ...errors, [field]: message }));
   }
@@ -125,6 +142,8 @@ export function JoinSyncedWorkspace(
 
   async function join() {
     if (joining) return;
+    setCodeTouched(true);
+    if (needsPassphrase) setPassphraseTouched(true);
     const found: FieldErrors = {
       code: code.trim() ? undefined : CODE_ERROR,
       folder: folder ? undefined : FOLDER_ERROR,
@@ -150,7 +169,8 @@ export function JoinSyncedWorkspace(
       props.onWorkspaceReady(result.workspace);
     } catch (cause) {
       if (!actionRequests.isCurrent(actionRequest)) return;
-      const message = ipcErrorMessage(cause, "Couldn't join the workspace.");
+      if (isCloudSyncFolderCancelled(cause)) return;
+      const message = ipcErrorMessage(cause, "dohc could not join this workspace.");
       const required = /passphrase required to unlock synced secrets/i.test(message);
       const wrong = /^Passphrase could not\b/u.test(message);
       if (required || wrong) {
@@ -216,7 +236,7 @@ export function JoinSyncedWorkspace(
           ) : (
             <>
               <p className="sr-only">
-                Connect your server first, then enter the code from your other machine.
+                Connect your server first, then enter the code from your other computer.
               </p>
               <CloudLogin
                 onConnected={checkSession}
@@ -231,7 +251,7 @@ export function JoinSyncedWorkspace(
 
         <Step
           number={2}
-          title="Enter the code from your other machine"
+          title="Enter the code from your other computer"
           state={fieldState}
           labelFor="join-sync-code"
         >
@@ -241,14 +261,19 @@ export function JoinSyncedWorkspace(
             data-testid="join-sync-code"
             value={code}
             onChange={(event) => {
+              setCodeTouched(true);
               setCode(event.currentTarget.value);
               setNeedsPassphrase(false);
               setUsedFolder(null);
               setPassphrase("");
+              setPassphraseTouched(false);
               setFieldErrors(({ folder: folderError }) => ({ folder: folderError }));
               setError(null);
             }}
-            onBlur={() => setFieldError("code", code.trim() ? undefined : CODE_ERROR)}
+            onBlur={() => {
+              if (!codeTouched && code.trim() === "") return;
+              setFieldError("code", code.trim() ? undefined : CODE_ERROR);
+            }}
             aria-invalid={fieldErrors.code ? true : undefined}
             aria-describedby={fieldErrors.code ? "join-sync-code-error" : undefined}
             placeholder="dohc-sync:…"
@@ -275,11 +300,13 @@ export function JoinSyncedWorkspace(
                 spellCheck={false}
                 readOnly={joining}
                 onChange={(event) => {
+                  setPassphraseTouched(true);
                   setPassphrase(event.currentTarget.value);
                   setFieldError("passphrase", undefined);
                 }}
                 // Adds only the empty error: one that failed to unlock stays until edited.
                 onBlur={() => {
+                  if (!passphraseTouched && !passphrase) return;
                   if (!passphrase) setFieldError("passphrase", PASSPHRASE_ERROR);
                 }}
                 aria-invalid={fieldErrors.passphrase ? true : undefined}
@@ -294,7 +321,7 @@ export function JoinSyncedWorkspace(
           ) : null}
         </Step>
 
-        <Step number={3} title="Choose an empty folder on this machine" state={fieldState} last>
+        <Step number={3} title="Choose an empty folder on this computer" state={fieldState} last>
           <FolderChip
             ref={folderChip}
             folder={folder ? displayPath(folder) : null}
@@ -309,7 +336,7 @@ export function JoinSyncedWorkspace(
           ) : null}
           {usedFolder ? (
             <p data-testid="join-used-folder" className="m-0 text-xs text-muted">
-              Files stay in {displayPath(usedFolder)}.
+              Files from the last attempt stay in {displayPath(usedFolder)}.
             </p>
           ) : null}
 

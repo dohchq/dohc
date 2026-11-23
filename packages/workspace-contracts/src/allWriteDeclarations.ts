@@ -1,3 +1,4 @@
+import { AGENT_RUN_UNDO_WRITE_DECLARATIONS } from "./agentRunUndoWriteDeclarations";
 import { ENVELOPE_FIELDS } from "./operationDeclaration";
 import { PROTECTED_COPY_WRITE_DECLARATIONS } from "./protectedCopyWriteDeclarations";
 import { STOPPED_RUN_WRITE_DECLARATIONS } from "./stoppedRunWriteDeclarations";
@@ -7,6 +8,7 @@ import { ADMISSION_RULES, type SocketAdmission, type WriteFamily } from "./write
 // CLI socket, the MCP server, and the IPC tables take their families from here,
 // so each door loads the checks below.
 export const WRITE_DECLARATION_FAMILIES = {
+  agentRunUndo: AGENT_RUN_UNDO_WRITE_DECLARATIONS,
   stoppedRun: STOPPED_RUN_WRITE_DECLARATIONS,
   protectedCopy: PROTECTED_COPY_WRITE_DECLARATIONS,
 } as const;

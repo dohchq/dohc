@@ -22,8 +22,10 @@ import { binaryFileDataFromArtifact, sameArtifactAssetDescriptor } from "../exca
 import {
   captureOrphanedDraft,
   orphanedDraftStorageRefused,
+  orphanedDraftStoreSettled,
   replaceOrphanedDraft,
 } from "../orphanedDrafts";
+import { isStoredDraftPending } from "../orphanedDraftStorage";
 import { reportDocumentReplacement } from "../shell/useDocumentSaveNotices";
 import { bytesToBase64 } from "../base64";
 import {
@@ -156,6 +158,7 @@ type EngineDocOpenOutcome =
   | { kind: "live-host-unavailable" }
   | { kind: "shared-waiting"; waiting: SharedDocumentOpenState }
   | { kind: "engine-may-hold-document" }
+  | { kind: "engine-refused-open"; detail: string }
   | { kind: "artifact-assets-invalid" }
   | { kind: "removal-in-progress"; removal: EngineRemovalInProgress };
 
@@ -212,6 +215,7 @@ function makeTransport(
         ...(result.documentUnavailable ? { documentUnavailable: true } : {}),
         ...(result.captureHeld ? { captureHeld: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
+        ...(result.engineRefusedOpen ? { engineRefusedOpen: result.engineRefusedOpen } : {}),
         ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
         ...(result.removalInProgress ? { removalInProgress: result.removalInProgress } : {}),
       };
@@ -250,6 +254,7 @@ function makeTransport(
       if (!result.accepted) {
         throw new EngineYDocDeliveryRefusedError(result.reason);
       }
+      return result.batchDelayMs;
     },
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
@@ -1124,8 +1129,10 @@ function createEngineDocSession(input: EngineDocInput, requestKey: string): Engi
     detachSaveObserver = () => doc.off("update", onUpdate);
   };
 
-  const preserveRetiredDocument = (retired: Y.Doc): void => {
+  const preserveRetiredDocument = async (retired: Y.Doc): Promise<void> => {
     writesRefused.current = true;
+    const answering = retiredDrafts.get(retired)?.draftId ?? recovery.draftId;
+    if (answering !== null) await orphanedDraftStoreSettled(answering);
     const retiredRecoverySlot = recovery;
     // A deletion (or other capture) already owns a draft for this mirror —
     // the retired preserve refines that row instead of adding a sibling.
@@ -1296,14 +1303,18 @@ function createEngineDocSession(input: EngineDocInput, requestKey: string): Engi
     retired.on("update", onRetiredUpdate);
     retiredDraft.detach = () => retired.off("update", onRetiredUpdate);
     retiredDrafts.set(retired, retiredDraft);
-    assertRetiredDocumentStored();
+    const checked = assertRetiredDocumentStored();
+    if (checked) await checked;
     setOutcome(null);
   };
 
   // The retired editor stays until storage keeps its edits, and the winner
   // waits for Try again. Checked again right before the acknowledgement,
   // because a late edit can reach a draft that storage refuses.
-  const assertRetiredDocumentStored = (): void => {
+  const assertRetiredDocumentStored = (): void | Promise<void> => {
+    const answering = replacedDraftId;
+    if (answering !== null && isStoredDraftPending(answering))
+      return orphanedDraftStoreSettled(answering).then(assertRetiredDocumentStored);
     if (replacedDraftUnstored()) throw new Error("Storage refused the earlier edits.");
   };
 
@@ -1385,6 +1396,8 @@ function createEngineDocSession(input: EngineDocInput, requestKey: string): Engi
               setOutcome({ kind: "artifact-assets-invalid" });
             } else if (bound.engineMayHoldDocument) {
               setOutcome({ kind: "engine-may-hold-document" });
+            } else if (bound.engineRefusedOpen) {
+              setOutcome({ kind: "engine-refused-open", detail: bound.engineRefusedOpen.detail });
             } else if (bound.removalInProgress) {
               writesRefused.current = true;
               setOutcome({

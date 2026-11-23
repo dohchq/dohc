@@ -567,7 +567,7 @@ export function createChatRunnerProcess(
     // trust entry (codexRunConfig.ts).
     if (codexBehindCmd && args.some((arg) => arg.includes('"'))) {
       throw new Error(
-        "Codex can't start here because this folder's path has an apostrophe and Codex was installed with npm. Rename the folder, or install Codex with OpenAI's installer.",
+        "Codex cannot start here because this folder's path has an apostrophe and Codex was installed with npm. Rename the folder, or install Codex with OpenAI's installer.",
       );
     }
     const resolved = resolveSpawnCommand(executable, args, {
@@ -580,16 +580,16 @@ export function createChatRunnerProcess(
     if (platform === "win32" && !win32.isAbsolute(resolved.command)) {
       throw new Error(
         resolved.windowsVerbatimArguments
-          ? "Windows' command interpreter (ComSpec) isn't set to a full path. Set ComSpec to the full path of cmd.exe, then restart dohc."
+          ? "Windows' command interpreter, ComSpec, is not set to a full path. Set ComSpec to the full path of cmd.exe, then restart dohc."
           : /[\\/]/u.test(executable)
-            ? `${executable} doesn't exist. Use its full path in the runner command.`
-            : `Couldn't find ${executable} on PATH. Use its full path in the runner command.`,
+            ? `${executable} does not exist. Use its full path in the runner command.`
+            : `dohc could not find ${executable} on PATH. Use its full path in the runner command.`,
       );
     }
     if (readOnly && input.profile?.tool === "codex") {
       if (codexRequirementsRefuseReadOnly(codexFiles, platform)) {
         throw new Error(
-          "Your organization's Codex settings don't allow automations to start this agent.",
+          "Your organization's Codex settings do not allow automations to start this agent.",
         );
       }
       await checkCodexServers(executable, runArguments, env, input.rootPath);
@@ -642,17 +642,17 @@ export function createChatRunnerProcess(
       );
     } catch {
       throw new Error(
-        "Codex couldn't list its MCP servers, so dohc didn't start it. Run `codex mcp list` to see why.",
+        "Codex could not list its MCP servers, so dohc did not start it. Run `codex mcp list` to see why.",
       );
     }
     const enabled = enabledCodexServers(stdout);
     if (enabled === null || !enabled.includes("dohc")) {
-      throw new Error("Codex didn't list dohc's MCP server, so dohc didn't start it.");
+      throw new Error("Codex did not list dohc's MCP server, so dohc did not start it.");
     }
     const others = enabled.filter((name) => name !== "dohc");
     if (others.length > 0) {
       throw new Error(
-        `Codex would also start ${others.map((name) => `\`${name}\``).join(", ")}, so dohc didn't start it. dohc turns off only the MCP servers named in your Codex config.toml.`,
+        `Codex would also start ${others.map((name) => `\`${name}\``).join(", ")}, so dohc did not start it. dohc turns off only the MCP servers named in your Codex config.toml.`,
       );
     }
   }

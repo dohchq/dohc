@@ -146,6 +146,9 @@ export function EditorGroupLayout(props: {
                 onPointerUp={(event) => resizeCommit.commit(event.pointerId)}
                 onPointerCancel={(event) => resizeCommit.commit(event.pointerId)}
                 onLostPointerCapture={(event) => resizeCommit.commit(event.pointerId)}
+                onDoubleClick={() =>
+                  props.onResizeGroups(group.id, next.id, (group.size + next.size) / 2)
+                }
                 className="group/resize relative z-10 w-px shrink-0 cursor-col-resize bg-line outline-none before:absolute before:-left-1 before:inset-y-0 before:w-[9px] keyboard:focus-visible:bg-ink/50"
               >
                 <span

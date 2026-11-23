@@ -560,7 +560,7 @@ describe("a shared workspace forgotten and attached again", () => {
       mode: "local-first",
     });
     const reason =
-      "dohc could not check who can edit Trip. Sync this workspace in Settings → Sync and sharing, then try again.";
+      "dohc could not check who can edit Trip. Sync this workspace in Settings › Sync and sharing, then try again.";
     expect(await check()).toEqual(steps.map(() => ({ allowed: false, reason })));
 
     const record = join(root, ".dohc", "sync-history.json");

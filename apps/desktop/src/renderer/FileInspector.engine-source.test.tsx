@@ -429,7 +429,7 @@ describe("engine markdown source view", () => {
     const notices = screen.getAllByTestId("orphaned-draft-notice");
     expect(notices.map((notice) => notice.querySelector("span")?.textContent)).toEqual([
       "This document reopened before your last edit saved. Copy your edits to keep them.",
-      "This document became read-only. Copy your edits to keep them.",
+      "This file became read-only before your edits saved. Copy your edits to keep them.",
     ]);
     await user.click(within(notices[1]!).getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
@@ -574,6 +574,45 @@ describe("engine markdown source view", () => {
 
     await user.click(screen.getByText("Try again"));
     await waitFor(() => expect(opens).toBe(2));
+  });
+
+  it("holds editing with one sentence when the engine refuses to open a note, and opens it after Try again", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    const openBound = bridgeMock.openEngineYDocSession;
+    let refused = true;
+    const openEngineYDocSession = vi.fn(async (...args: Parameters<typeof openBound>) =>
+      refused
+        ? { available: false, engineRefusedOpen: { detail: "INVALID_PARAMS owner-outbox-frozen" } }
+        : await openBound(...args),
+    );
+    vi.stubGlobal("dohcDesktop", { ...bridgeMock, openEngineYDocSession });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const notice = await screen.findByTestId("engine-may-hold-document-notice");
+    expect(notice.textContent).toBe(
+      "dohc could not open this page for editing. You can still read it.Try again",
+    );
+    expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph.");
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(true);
+    const toggle = screen.getByTestId("markdown-edit-toggle");
+    expect(toggle.hasAttribute("disabled") || toggle.getAttribute("aria-disabled") === "true").toBe(
+      true,
+    );
+    await user.click(within(notice).getByRole("button", { name: "Copy details" }));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("INVALID_PARAMS owner-outbox-frozen"),
+    );
+    expect(openEngineYDocSession).toHaveBeenCalledOnce();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    refused = false;
+    await user.click(within(notice).getByRole("button", { name: "Try again" }));
+    await screen.findByTestId("markdown-source-toggle");
+    expect(openEngineYDocSession).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("engine-may-hold-document-notice")).toBeNull();
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(false);
   });
 
   it("offers Try again when the content read failed, and opens no session for unchecked bytes", async () => {

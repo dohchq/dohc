@@ -1,4 +1,6 @@
 // Every page cascades in one order: the named recipient styles, the shared styles, then the route's own.
+import "@fontsource-variable/inter/opsz.css";
+import "@fontsource-variable/inter/opsz-italic.css";
 import "./namedRecipient.css";
 import "./styles.css";
 import { StrictMode, type ReactNode } from "react";

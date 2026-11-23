@@ -110,6 +110,10 @@ pub(crate) fn omit_client_identity_authors(payload: &mut serde_json::Value) -> b
     payload.get("authors") != before.as_ref()
 }
 
+pub(crate) fn omit_unproven_hosted_authors(payload: &mut serde_json::Value) -> bool {
+    mark_unproven_hosted_authors(&mut payload.clone()) && omit_client_identity_authors(payload)
+}
+
 pub(crate) fn relay_person_id(id: &str) -> Option<&str> {
     (!id.starts_with("local:")).then_some(id)
 }
@@ -393,9 +397,10 @@ pub(crate) fn journal_moment_append_from_in_tx(
     workspace_id: &str,
     moment_id: &str,
     before: &PortableBefore,
+    unproven: fn(&mut serde_json::Value) -> bool,
 ) -> Result<(), SyncError> {
     let (payload, recorded_at_ms) =
-        moment_payload_in_tx(tx, workspace_id, moment_id, Some(before))?;
+        moment_payload_in_tx(tx, workspace_id, moment_id, Some(before), unproven)?;
     let sequence =
         journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms)?;
     mark_export_in_tx(tx, workspace_id, sequence, payload, recorded_at_ms)
@@ -412,7 +417,8 @@ pub(crate) fn journal_saved_settlement_moment_in_tx(
     if let Some(sequence) = prior {
         return Ok(sequence);
     }
-    let (payload, recorded) = moment_payload_in_tx(tx, workspace, moment, before)?;
+    let (payload, recorded) =
+        moment_payload_in_tx(tx, workspace, moment, before, mark_unproven_hosted_authors)?;
     let sequence = journal_local_op_in_tx(tx, workspace, "moment.append", &payload, recorded)?;
     mark_export_in_tx(tx, workspace, sequence, payload, recorded)?;
     Ok(sequence)
@@ -424,7 +430,14 @@ pub(crate) fn moment_append_payload_from_in_tx(
     moment_id: &str,
     before: &PortableBefore,
 ) -> Result<serde_json::Value, SyncError> {
-    moment_payload_in_tx(tx, workspace_id, moment_id, Some(before)).map(|(payload, _)| payload)
+    moment_payload_in_tx(
+        tx,
+        workspace_id,
+        moment_id,
+        Some(before),
+        mark_unproven_hosted_authors,
+    )
+    .map(|(payload, _)| payload)
 }
 
 pub(crate) fn moment_append_payload_in_tx(
@@ -432,7 +445,13 @@ pub(crate) fn moment_append_payload_in_tx(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<(serde_json::Value, i64), SyncError> {
-    moment_payload_in_tx(tx, workspace_id, moment_id, None)
+    moment_payload_in_tx(
+        tx,
+        workspace_id,
+        moment_id,
+        None,
+        mark_unproven_hosted_authors,
+    )
 }
 
 fn mark_export_in_tx(
@@ -472,6 +491,7 @@ fn moment_payload_in_tx(
     workspace_id: &str,
     moment_id: &str,
     portable_before: Option<&PortableBefore>,
+    unproven: fn(&mut serde_json::Value) -> bool,
 ) -> Result<(serde_json::Value, i64), SyncError> {
     let row = tx
         .query_row(
@@ -616,7 +636,7 @@ fn moment_payload_in_tx(
         payload["authorContext"] = context;
     }
     if !proof_ready {
-        mark_unproven_hosted_authors(&mut payload);
+        unproven(&mut payload);
     }
     omit_local_person_authors(&mut payload);
     if let Some(authors) = payload

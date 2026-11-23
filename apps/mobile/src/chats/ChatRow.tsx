@@ -4,7 +4,8 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { AgentMark } from "../AgentMark";
 import { useTheme, type Theme } from "../theme";
 import { chatWords, countText } from "./chatLabels";
-import type { ChatRowData } from "./sample";
+import type { ChatRowData } from "./types";
+import { symbolFallback } from "../symbolFallback";
 
 // One line per chat, as in Slack: the leading mark says what it is, bold says unread, grey says muted.
 export const ChatRow = memo(function ChatRow({
@@ -39,7 +40,12 @@ export const ChatRow = memo(function ChatRow({
       </Text>
       {row.muted ? (
         <View style={styles.trailing}>
-          <SymbolView name="bell.slash" size={15} tintColor={theme.subtle} fallback={null} />
+          <SymbolView
+            name="bell.slash"
+            size={15}
+            tintColor={theme.subtle}
+            fallback={symbolFallback("bell.slash", 15, theme.subtle)}
+          />
         </View>
       ) : null}
       {row.count ? (

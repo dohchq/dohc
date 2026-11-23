@@ -1109,24 +1109,102 @@ impl StoreCaptureSink {
         only_if_text_head: bool,
         summary: Option<String>,
     ) -> Result<(), CaptureError> {
-        self.retire_head_with(path, only_if_text_head, summary, true, false, None)
+        self.retire_head_with(path, only_if_text_head, summary, true, false, None, None)
     }
 
     /// Retire a head because its file is gone. The actor confirms the absence
     /// on its own thread and refuses while the file is back, so a replace
-    /// caught between its two renames is never recorded as a delete.
-    fn retire_absent_head(&self, path: &str, summary: Option<String>) -> Result<(), CaptureError> {
-        self.retire_head_with(path, false, summary, true, true, None)
+    /// caught between its two renames is never recorded as a delete. A head
+    /// another route wrote retires too when the file last held its bytes.
+    fn retire_absent_head(
+        &self,
+        path: &str,
+        summary: Option<String>,
+        seen_sha256: Option<&str>,
+    ) -> Result<(), CaptureError> {
+        self.retire_head_with(path, false, summary, true, true, seen_sha256, None)
     }
 
     /// A deleted file's head waits while its document is open: the session
     /// still holds it, refuses every save over the missing file, and the
     /// person decides whether to save the file again.
-    fn retire_deleted(&self, path: &str) -> Result<RetireOutcome, CaptureError> {
-        match self.retire_absent_head(path, self.provenance.for_path(path).summary) {
+    fn retire_deleted(
+        &self,
+        path: &str,
+        seen_sha256: Option<&str>,
+    ) -> Result<RetireOutcome, CaptureError> {
+        match self.retire_absent_head(path, self.provenance.for_path(path).summary, seen_sha256) {
             Ok(()) => Ok(RetireOutcome::Retired),
             Err(RETIRE_HELD) => Ok(RetireOutcome::Deferred),
             Err(error) => Err(error),
+        }
+    }
+
+    /// Retire a missing tracked path. `seen_sha256` is what capture last saw
+    /// there, when it saw the file.
+    fn retire_path(
+        &mut self,
+        path: &str,
+        seen_sha256: Option<&str>,
+    ) -> Result<RetireOutcome, CaptureError> {
+        match classify_engine_file_path_normalized(path) {
+            (PathClassification::Ignored, _) => Ok(RetireOutcome::Retired),
+            (PathClassification::Secret, normalized) => {
+                // Nothing was ever stored under a non-canonical literal name.
+                if normalized.as_deref() != Some(path) {
+                    return Ok(RetireOutcome::Retired);
+                }
+                // Apply-time absence confirmation, then the KEYLESS secret
+                // retire (a delete never decrypts). Mirrors the text arm's
+                // reappearance refusal.
+                let absolute = self.shadow_root.join(path);
+                match self.path_containment(path) {
+                    Containment::Contained => {}
+                    Containment::Absent => {
+                        return self.retire_secret(path).map(|()| RetireOutcome::Retired);
+                    }
+                    Containment::Escaped => return Err(ESCAPES_ROOT),
+                }
+                match std::fs::symlink_metadata(&absolute) {
+                    Ok(metadata) if metadata.file_type().is_file() => Err(RETIRE_RACED),
+                    Ok(_) => self.retire_secret(path),
+                    Err(err) if absent_error(&err) => self.retire_secret(path),
+                    Err(_) => Err(SECRET_RETIRE_FAILED),
+                }
+                .map(|()| RetireOutcome::Retired)
+            }
+            (PathClassification::Tracked, Some(normalized)) if normalized == path => {
+                // Apply-time absence confirmation, mirroring both the TS
+                // oracle (`pathConfirmedAbsentOnDisk` runs immediately before
+                // `deleteIfTracked`) and `StdAbsenceProbe`'s semantics: a
+                // regular file that reappeared between scan and apply must not
+                // be retired — fail the op so the path stays dirty and the
+                // rescan captures the live content instead.
+                let absolute = self.shadow_root.join(path);
+                // Same ancestor containment as read_current: the probe's
+                // verdict must never be based on an off-root file reached
+                // through a symlinked ancestor. A missing parent confirms the
+                // tracked file gone; an escape retains last-known-good.
+                match self.path_containment(path) {
+                    Containment::Contained => {}
+                    Containment::Absent => return self.retire_deleted(path, seen_sha256),
+                    Containment::Escaped => return Err(ESCAPES_ROOT),
+                }
+                match std::fs::symlink_metadata(&absolute) {
+                    Ok(metadata) if metadata.file_type().is_file() => Err(RETIRE_RACED),
+                    // A non-regular replacement confirms the tracked regular
+                    // file gone; absence confirms it outright.
+                    Ok(_) => self
+                        .retire_head(path, false, self.provenance.for_path(path).summary)
+                        .map(|()| RetireOutcome::Retired),
+                    Err(err) if absent_error(&err) => self.retire_deleted(path, seen_sha256),
+                    // Indeterminate (permissions, locks): cannot prove
+                    // absence — retain last-known-good, fail-safe.
+                    Err(_) => Err(RETIRE_FAILED),
+                }
+            }
+            // Nothing was ever stored under a non-canonical literal name.
+            (PathClassification::Tracked, _) => Ok(RetireOutcome::Retired),
         }
     }
 
@@ -1145,6 +1223,7 @@ impl StoreCaptureSink {
             self.provenance.for_path(path).summary,
             true,
             false,
+            None,
             Some(to),
         ) {
             Ok(()) => Ok(RespelledRetire::Retired),
@@ -1153,6 +1232,7 @@ impl StoreCaptureSink {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn retire_head_with(
         &self,
         path: &str,
@@ -1160,6 +1240,7 @@ impl StoreCaptureSink {
         summary: Option<String>,
         allow_ydoc_origin: bool,
         confirm_absent: bool,
+        seen_sha256: Option<&str>,
         respelled_to: Option<&Respelling>,
     ) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
@@ -1190,6 +1271,7 @@ impl StoreCaptureSink {
                 input.clone(),
                 self.shadow_root.clone(),
                 confirm_absent,
+                seen_sha256.map(str::to_owned),
                 Arc::new(self.self_writes.clone()),
                 self.leases.clone(),
                 Arc::new(NoFaults),
@@ -1829,7 +1911,7 @@ impl CaptureSink for StoreCaptureSink {
                 // report NotOwned so the manifest forgets the path. A refused
                 // or deferred retire keeps the self-write identity: the file
                 // can come back, and the rescan may find dohc's own bytes.
-                match self.retire_deleted(path)? {
+                match self.retire_deleted(path, None)? {
                     RetireOutcome::Retired => {
                         if changed {
                             self.self_writes.clear_path(&self.workspace_id, path);
@@ -1872,6 +1954,7 @@ impl CaptureSink for StoreCaptureSink {
                     false,
                     false,
                     None,
+                    None,
                 )?;
                 Ok(IngestOutcome::NotOwned)
             }
@@ -1907,65 +1990,11 @@ impl CaptureSink for StoreCaptureSink {
     }
 
     fn retire(&mut self, path: &str) -> Result<RetireOutcome, CaptureError> {
-        match classify_engine_file_path_normalized(path) {
-            (PathClassification::Ignored, _) => Ok(RetireOutcome::Retired),
-            (PathClassification::Secret, normalized) => {
-                // Nothing was ever stored under a non-canonical literal name.
-                if normalized.as_deref() != Some(path) {
-                    return Ok(RetireOutcome::Retired);
-                }
-                // Apply-time absence confirmation, then the KEYLESS secret
-                // retire (a delete never decrypts). Mirrors the text arm's
-                // reappearance refusal.
-                let absolute = self.shadow_root.join(path);
-                match self.path_containment(path) {
-                    Containment::Contained => {}
-                    Containment::Absent => {
-                        return self.retire_secret(path).map(|()| RetireOutcome::Retired);
-                    }
-                    Containment::Escaped => return Err(ESCAPES_ROOT),
-                }
-                match std::fs::symlink_metadata(&absolute) {
-                    Ok(metadata) if metadata.file_type().is_file() => Err(RETIRE_RACED),
-                    Ok(_) => self.retire_secret(path),
-                    Err(err) if absent_error(&err) => self.retire_secret(path),
-                    Err(_) => Err(SECRET_RETIRE_FAILED),
-                }
-                .map(|()| RetireOutcome::Retired)
-            }
-            (PathClassification::Tracked, Some(normalized)) if normalized == path => {
-                // Apply-time absence confirmation, mirroring both the TS
-                // oracle (`pathConfirmedAbsentOnDisk` runs immediately before
-                // `deleteIfTracked`) and `StdAbsenceProbe`'s semantics: a
-                // regular file that reappeared between scan and apply must not
-                // be retired — fail the op so the path stays dirty and the
-                // rescan captures the live content instead.
-                let absolute = self.shadow_root.join(path);
-                // Same ancestor containment as read_current: the probe's
-                // verdict must never be based on an off-root file reached
-                // through a symlinked ancestor. A missing parent confirms the
-                // tracked file gone; an escape retains last-known-good.
-                match self.path_containment(path) {
-                    Containment::Contained => {}
-                    Containment::Absent => return self.retire_deleted(path),
-                    Containment::Escaped => return Err(ESCAPES_ROOT),
-                }
-                match std::fs::symlink_metadata(&absolute) {
-                    Ok(metadata) if metadata.file_type().is_file() => Err(RETIRE_RACED),
-                    // A non-regular replacement confirms the tracked regular
-                    // file gone; absence confirms it outright.
-                    Ok(_) => self
-                        .retire_head(path, false, self.provenance.for_path(path).summary)
-                        .map(|()| RetireOutcome::Retired),
-                    Err(err) if absent_error(&err) => self.retire_deleted(path),
-                    // Indeterminate (permissions, locks): cannot prove
-                    // absence — retain last-known-good, fail-safe.
-                    Err(_) => Err(RETIRE_FAILED),
-                }
-            }
-            // Nothing was ever stored under a non-canonical literal name.
-            (PathClassification::Tracked, _) => Ok(RetireOutcome::Retired),
-        }
+        self.retire_path(path, None)
+    }
+
+    fn retire_seen(&mut self, path: &str, sha256: &str) -> Result<RetireOutcome, CaptureError> {
+        self.retire_path(path, Some(sha256))
     }
 
     fn retire_respelled(

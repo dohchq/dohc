@@ -47,6 +47,8 @@ export interface WorkspaceListStore {
   state(): WorkspaceList;
   subscribe(listener: () => void): () => void;
   reload(): void;
+  /** Reads the list now and answers it; a Show on phone change made meanwhile wins over the answer. */
+  fresh(): Promise<readonly AccountWorkspace[]>;
   /** Changes Show on phone at once, then as the server answers. A workspace takes one change at a time. */
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
 }
@@ -101,12 +103,14 @@ export function createWorkspaceList(
         if (!reads.isLatest(request) || pending.size > 0) return;
         settle(workspaces, afterChanges && state.status === "ready" ? state.problem : null);
       },
-      (error: unknown) => {
-        const problem = shownProblem(error);
-        if (!reads.isLatest(request) || problem === null) return;
-        set(state.status === "ready" ? { ...state, problem } : { status: "failed", problem });
-      },
+      (error: unknown) => failed(request, error),
     );
+  }
+
+  function failed(request: number, error: unknown) {
+    const problem = shownProblem(error);
+    if (!reads.isLatest(request) || problem === null) return;
+    set(state.status === "ready" ? { ...state, problem } : { status: "failed", problem });
   }
 
   return {
@@ -116,6 +120,15 @@ export function createWorkspaceList(
       return () => listeners.delete(listener);
     },
     reload: () => read(false),
+    async fresh() {
+      const request = reads.next();
+      const workspaces = await listWorkspaces(signIn.client).catch((error: unknown) => {
+        failed(request, error);
+        throw error;
+      });
+      if (reads.isLatest(request) && pending.size === 0) settle(workspaces, null);
+      return state.status === "ready" ? state.workspaces : [];
+    },
     setShowOnPhone(workspaceId, showOnPhone) {
       if (state.status !== "ready" || pending.has(workspaceId)) return;
       const confirmed = state.workspaces.find(

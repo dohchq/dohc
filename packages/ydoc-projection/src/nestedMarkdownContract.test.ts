@@ -38,6 +38,7 @@ const corpus = JSON.parse(
     canonical?: string;
     rereadCanonical?: string;
     sourceCanonical?: string;
+    projectedCanonical?: string;
     witnessSeed?: boolean;
     foldRefuse?: boolean;
     refuse?: boolean;
@@ -337,14 +338,19 @@ it.each(["-", "1.", "- [ ]"])(
   },
 );
 
-it.each(["-", "1.", "- [ ]"])("resolves later reference definitions in every %s item", (marker) => {
-  for (const source of [
-    `${marker} See [docs]\n${marker} Next\n\nAfter\n\n[docs]: https://example.com`,
-    `- a\n  ${marker} See [docs]\n\n[docs]: https://example.com`,
-    `> ${marker} See [docs]\n> ${marker} Next\n\n[docs]: https://example.com`,
-  ])
-    expect(JSON.stringify(parseRichdocMarkdown(source))).toContain('"href":"https://example.com"');
-});
+it.each(["-", "1.", "- [ ]"])(
+  "seals a link through a later definition in every %s item",
+  (marker) => {
+    for (const source of [
+      `${marker} See [docs]\n${marker} Next\n\nAfter\n\n[docs]: https://example.com`,
+      `- a\n  ${marker} See [docs]\n\n[docs]: https://example.com`,
+      `> ${marker} See [docs]\n> ${marker} Next\n\n[docs]: https://example.com`,
+    ])
+      expect(JSON.stringify(parseRichdocMarkdown(source))).toContain(
+        '{"type":"rawInline","attrs":{"source":"[docs]"}}',
+      );
+  },
+);
 
 it.each(["source", "projection"] as const)(
   "refuses bare empty-child chains in %s reading",
@@ -419,7 +425,7 @@ it.each(corpus.cases.filter((item) => item.name.startsWith("r26-")))(
   (item) => {
     const doc = markdownToYDoc(item.source, { reading: "projection" });
     try {
-      expect(yDocToMarkdown(doc)).toBe(item.canonical);
+      expect(yDocToMarkdown(doc)).toBe(item.projectedCanonical ?? item.canonical);
     } finally {
       doc.destroy();
     }

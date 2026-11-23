@@ -156,7 +156,7 @@ test("a window Forget left showing its workspace stops and follows the window th
       window.close();
     }, reopenedContents);
     await reopenedClosed;
-    await expect(heading).toHaveText("This window can't edit this workspace anymore.", {
+    await expect(heading).toHaveText("This window cannot edit this workspace anymore.", {
       timeout: 30_000,
     });
     await expect(state.getByRole("button")).toHaveCount(1);

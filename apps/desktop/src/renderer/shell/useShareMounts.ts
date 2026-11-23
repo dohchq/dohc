@@ -166,8 +166,8 @@ export function useShareMounts(
           warned = true;
           reportShellFailure({
             message:
-              `dohc could not read its record of your files with the same path as a file in ${row.label}. ` +
-              "dohc keeps these files apart.",
+              `dohc could not read its list of files that share a path with ${row.label}. ` +
+              "Your files stay separate.",
             identity: collisionRecordSetAside(row.shareId),
             tone: "warning",
           });
@@ -187,7 +187,8 @@ export function useShareMounts(
       try {
         ({ results, abortMessage } = await bridge().refreshShareMounts({ workspaceId }));
       } catch (error) {
-        if (newest()) reportShellError("Couldn't refresh shares.", error, null, "share-refresh");
+        if (newest())
+          reportShellError("dohc could not refresh shares.", error, null, "share-refresh");
         return;
       }
       const wroteRows = rowsToken === rowsRefreshToken.current;
@@ -201,7 +202,7 @@ export function useShareMounts(
       if (!newest()) return;
       if (abortMessage !== undefined) {
         reportShellError(
-          "Couldn't refresh shares.",
+          "dohc could not refresh shares.",
           new Error(abortMessage),
           null,
           "share-refresh",
@@ -281,7 +282,7 @@ export function useShareMounts(
         folderLeft = result?.folderLeft === true;
       } catch (error) {
         reportShellError(
-          "Couldn't remove the share.",
+          "dohc could not remove this share.",
           error,
           () => void unmountShareRef.current(path),
         );
@@ -305,7 +306,7 @@ export function useShareMounts(
       // disk, so say where they are and leave the choice to the user.
       showSuccessNotice(
         folderLeft
-          ? `Removed ${label} from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.`
+          ? `Removed ${label} from this workspace. Its folder stays in shared-with-me/, so delete it if you do not need it.`
           : `Removed ${label} from this workspace.`,
       );
     },

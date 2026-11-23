@@ -72,8 +72,8 @@ function revision(value: unknown): number {
  * review and declared source, the phone's approval, and launch grants that
  * share-web redeems for an app session. Only a publication row is ever
  * listed or launched, so an app approved to run only on a computer is absent.
- * So far the phone opens only an app over one transactional Collection; any
- * other app is absent too.
+ * So far the phone opens only an app over one transactional Collection or one
+ * that requests nothing in the workspace; any other app is absent too.
  */
 export function createPhoneApps(options: {
   storage: SyncRelayStorage;
@@ -101,7 +101,8 @@ export function createPhoneApps(options: {
     }
   }
 
-  // Active, not taken down, its share still current, not under a hidden path, and over one transactional Collection.
+  // Active, not taken down, its share still current, not under a hidden path, and over one transactional
+  // Collection or nothing in the workspace.
   function publication(userId: string, workspaceId: string, id: string) {
     if (!options.limits) throw notFound();
     let row;
@@ -120,8 +121,8 @@ export function createPhoneApps(options: {
       !row.active ||
       row.operatorTakedown ||
       hiddenFile(row.candidate.appRoot) ||
-      row.candidate.capabilities.length !== 1 ||
-      row.candidate.capabilities[0]!.kind !== "dataset" ||
+      row.candidate.capabilities.length > 1 ||
+      row.candidate.capabilities.some((capability) => capability.kind !== "dataset") ||
       !publicationLinkIsCurrent(storage as StorageContext, row.owner) ||
       !servable(userId, workspaceId, id)
     )
@@ -192,9 +193,9 @@ export function createPhoneApps(options: {
             row.operatorTakedown ||
             !row.linkCurrent ||
             hiddenFile(row.appRoot) ||
-            row.datasetCapability === null ||
             row.datasetCapability === "unavailable" ||
             row.collectionCapability !== null ||
+            // Serves only a dataset app or one that requests nothing; a Collection awaiting approval is neither.
             !servable(userId, workspaceId, row.publicationId)
               ? []
               : [

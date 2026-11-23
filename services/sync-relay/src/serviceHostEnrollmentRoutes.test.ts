@@ -1267,7 +1267,7 @@ it("waits to stop a hosted document until its pending edit is delivered, then re
   expect(await waiting.json()).toEqual({
     ok: false,
     code: "edits-pending",
-    error: "Live editing didn't stop. Recent edits haven't reached the server yet.",
+    error: "Live editing did not stop. Recent edits have not reached the server yet.",
   });
   expect(retirement()).toBeNull();
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject(
@@ -1483,7 +1483,7 @@ it("waits to stop a retained activation that no running host can prepare", async
     code: "host-not-loaded",
     sessionHost: "starting",
     error:
-      "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.",
+      "Live editing did not stop. The server has not loaded this document yet and may hold recent edits to it. Try again in a moment.",
   });
   expect(readServiceActivationRetirement(f.storage as StorageContext, enrolled)).toBeNull();
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);

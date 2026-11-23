@@ -251,9 +251,9 @@ describe("RelationPicker", () => {
         close={vi.fn()}
       />,
     );
-    expect(screen.getByText("Loading records...")).toBeDefined();
+    expect(screen.getByText("Loading records…")).toBeDefined();
     gate.resolve(makeQueryResult([]));
-    expect(await screen.findByText("No records in the related collection yet.")).toBeDefined();
+    expect(await screen.findByText("No records in the related Collection yet.")).toBeDefined();
   });
 
   it("clears the prior collection's records while the next query is in flight", async () => {
@@ -278,7 +278,7 @@ describe("RelationPicker", () => {
 
     rerender(view({ ...SINGLE, collection: "projects" }));
     expect(screen.queryByRole("option")).toBeNull();
-    expect(screen.getByText("Loading records...")).toBeDefined();
+    expect(screen.getByText("Loading records…")).toBeDefined();
     expect(emit).not.toHaveBeenCalled();
 
     gate.resolve(makeQueryResult([makeRecord("proj-1", [indexedValue("title", "Roadmap")])]));
@@ -301,7 +301,7 @@ describe("RelationPicker", () => {
     );
     expect(
       await screen.findByText(
-        "dohc could not read the related collection's records. engine offline",
+        "dohc could not read the related Collection's records. engine offline",
       ),
     ).toBeDefined();
   });

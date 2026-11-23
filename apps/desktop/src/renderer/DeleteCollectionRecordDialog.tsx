@@ -20,8 +20,8 @@ export function DeleteCollectionRecordDialog(props: {
       onConfirm={props.onConfirm}
     >
       <p>
-        This deletes record <span className="font-mono text-[12px]">{props.recordId}</span>. You
-        cannot undo this deletion in dohc.
+        Deletes record <span className="font-mono text-[12px]">{props.recordId}</span>. This cannot
+        be undone.
       </p>
     </ConfirmDialog>
   );

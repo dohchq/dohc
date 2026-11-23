@@ -309,6 +309,27 @@ describe("desktop CLI proxy", () => {
     });
   });
 
+  it("normalizes CLI th_ thread handles passed to readChat", async () => {
+    await withWorkspace(async (base) => {
+      const seen: unknown[] = [];
+      const ctx: ToolContext = {
+        ...base,
+        request: async (request) => {
+          seen.push(request);
+          return results.chat;
+        },
+      };
+      const result = await readChat(ctx, { threadId: "th_123" });
+      expect(result.ok).toBe(true);
+      expect(seen).toEqual([
+        expect.objectContaining({
+          verb: "chat",
+          args: expect.objectContaining({ threadId: "thread-123" }),
+        }),
+      ]);
+    });
+  });
+
   it("returns engine ids from chat writes so dohc_read_chat and dohc_list_groups accept them", async () => {
     await withWorkspace(async (base) => {
       const { ctx } = recordingContext(base);

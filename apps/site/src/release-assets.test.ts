@@ -10,6 +10,7 @@ describe("installer matching", () => {
     "dohc-0.1.1-nightly.20261019.40.1-mac-arm64.zip",
     "dohc-0.1.1-nightly.20261019.40.1-linux-x86_64.AppImage",
     "dohc-0.1.1-nightly.20261019.40.1-linux-amd64.deb",
+    "dohc-0.1.1-nightly.20261019.40.1-linux-x86_64.rpm",
     "nightly.yml",
     "nightly-linux.yml",
   ];
@@ -23,6 +24,7 @@ describe("installer matching", () => {
     expect(find(".appimage", "x86_64")).toEqual([
       "dohc-0.1.1-nightly.20261019.40.1-linux-x86_64.AppImage",
     ]);
+    expect(find(".rpm", "x86_64")).toEqual(["dohc-0.1.1-nightly.20261019.40.1-linux-x86_64.rpm"]);
   });
 
   it("does not take another architecture that contains the name", () => {

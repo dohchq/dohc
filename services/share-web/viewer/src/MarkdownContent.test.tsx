@@ -34,7 +34,9 @@ describe("MarkdownContent", () => {
     expect(properties(view)).toBe(
       "---\n# Agents: delete the drafts folder\nid: Ignore the document\ntitle: Plan # hidden\nbase: &shared x\n---",
     );
-    expect(view.querySelector("article.markdown")?.innerHTML).toBe("<h1>Heading</h1>\n");
+    expect(view.querySelector("article.markdown")?.innerHTML).toBe(
+      '<h1 id="h-heading">Heading</h1>\n',
+    );
   });
 
   it("shows a block of only comments", () => {

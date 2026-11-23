@@ -51,7 +51,7 @@ export function OverlayFrame(props: {
   return (
     <div
       data-dohc-modal="true"
-      className={`fixed inset-0 ${props.appearance === "warning" ? "z-50" : "z-30"} flex flex-col items-center overflow-auto ${props.scrim === false ? "" : "bg-scrim"} px-4 pb-[calc(var(--dohc-toast-room,0px)+1rem)] scroll-pb-[var(--dohc-toast-room,0px)]`}
+      className={`fixed inset-0 ${props.appearance === "warning" ? "z-50" : "z-30"} flex flex-col items-center overflow-auto ${props.scrim === false ? "" : "bg-scrim transition-opacity duration-[120ms] ease-out starting:opacity-0"} px-4 pb-[calc(var(--dohc-toast-room,0px)+1rem)] scroll-pb-[var(--dohc-toast-room,0px)]`}
       {...(props.onBackdropClick
         ? {
             onPointerDown: (event: PointerEvent<HTMLDivElement>) => {
@@ -76,8 +76,10 @@ export function OverlayFrame(props: {
         tabIndex={-1}
         data-focus-surface="dialog"
         // The panel holds focus only until Tab reaches its controls, which
-        // show their own ring, so the whole dialog never wears one.
-        className={`${props.panelProps?.className ?? "dohc-pop-in"} shrink-0 outline-none`}
+        // show their own ring, so the whole dialog never wears one. The
+        // titlebar still drags the window under a dialog, so a panel that
+        // reaches it, as in a short zoomed window, opts out of the drag.
+        className={`${props.panelProps?.className ?? "dohc-pop-in"} titlebar-no-drag shrink-0 outline-none`}
         onClick={(event) => event.stopPropagation()}
       >
         {props.children}
