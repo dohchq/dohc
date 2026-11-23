@@ -1597,6 +1597,40 @@ const LISTED_CAPABILITIES = {
     ipc: ["deleteWorkspaceSecret"],
     mcpReason: "Desktop UI only; local and connected agents cannot delete workspace secrets.",
   }),
+  "workspace.webhooks.list": capability(
+    "List incoming webhook metadata and recent deliveries for this workspace.",
+    {
+      ipc: ["listIncomingWebhooks"],
+      mcpReason: "Desktop UI only; incoming webhooks are managed by the owner in Settings.",
+    },
+  ),
+  "workspace.webhooks.create": capability(
+    "Create an incoming webhook URL for a private Collection in this workspace.",
+    {
+      ipc: ["createIncomingWebhook"],
+      mcpReason:
+        "Desktop UI only; local and connected agents cannot create public incoming webhook URLs.",
+    },
+  ),
+  "workspace.webhooks.update": capability(
+    "Rename, pause, or resume an incoming webhook in this workspace.",
+    {
+      ipc: ["updateIncomingWebhook"],
+      mcpReason: "Desktop UI only; incoming webhooks are managed by the owner in Settings.",
+    },
+  ),
+  "workspace.webhooks.rotate": capability(
+    "Rotate an incoming webhook token, invalidating its previous URL.",
+    {
+      ipc: ["rotateIncomingWebhook"],
+      mcpReason:
+        "Desktop UI only; local and connected agents cannot rotate public incoming webhook URLs.",
+    },
+  ),
+  "workspace.webhooks.delete": capability("Delete an incoming webhook from this workspace.", {
+    ipc: ["deleteIncomingWebhook"],
+    mcpReason: "Desktop UI only; incoming webhooks are managed by the owner in Settings.",
+  }),
 } as const;
 
 // Each declared operation joins its capability after the listed rows and tools.

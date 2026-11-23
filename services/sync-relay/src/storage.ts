@@ -154,6 +154,7 @@ import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as workspaceSecretStorage from "./storage/workspaceSecrets";
 import * as outboundWebhookStorage from "./storage/outboundWebhooks";
+import * as incomingWebhookStorage from "./storage/incomingWebhooks";
 import * as logStorage from "./storage/log";
 import * as linkChatStorage from "./storage/linkChat";
 import * as agentConnectionStorage from "./storage/agentConnections";
@@ -2657,6 +2658,116 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   committedWorkspaceFileExists(workspaceId: string, versionId: string, path: string) {
     return outboundWebhookStorage.committedWorkspaceFileExists(this, workspaceId, versionId, path);
+  }
+
+  listIncomingWebhooks(workspaceId: string) {
+    return incomingWebhookStorage.listIncomingWebhooks(this, workspaceId);
+  }
+
+  createIncomingWebhook(input: Parameters<typeof incomingWebhookStorage.createIncomingWebhook>[1]) {
+    return incomingWebhookStorage.createIncomingWebhook(this, input);
+  }
+
+  updateIncomingWebhook(input: Parameters<typeof incomingWebhookStorage.updateIncomingWebhook>[1]) {
+    return incomingWebhookStorage.updateIncomingWebhook(this, input);
+  }
+
+  rotateIncomingWebhookToken(
+    input: Parameters<typeof incomingWebhookStorage.rotateIncomingWebhookToken>[1],
+  ) {
+    return incomingWebhookStorage.rotateIncomingWebhookToken(this, input);
+  }
+
+  deleteIncomingWebhook(workspaceId: string, ownerUserId: string, webhookId: string) {
+    return incomingWebhookStorage.deleteIncomingWebhook(this, workspaceId, ownerUserId, webhookId);
+  }
+
+  lookupActiveIncomingWebhookByToken(linkKey: string | Uint8Array, token: string) {
+    return incomingWebhookStorage.lookupActiveIncomingWebhookByToken(this, linkKey, token);
+  }
+
+  precheckIncomingWebhookBudgets(
+    webhookId: string,
+    workspaceId: string,
+    nowMs: number,
+    deliveryKey?: string | null,
+  ) {
+    return incomingWebhookStorage.precheckIncomingWebhookBudgets(
+      this,
+      webhookId,
+      workspaceId,
+      nowMs,
+      deliveryKey,
+    );
+  }
+
+  enqueueIncomingWebhookDelivery(
+    input: Parameters<typeof incomingWebhookStorage.enqueueIncomingWebhookDelivery>[1],
+  ) {
+    return incomingWebhookStorage.enqueueIncomingWebhookDelivery(this, input);
+  }
+
+  recoverAcceptedIncomingWebhookDeliveries(
+    input: Parameters<typeof incomingWebhookStorage.recoverAcceptedIncomingWebhookDeliveries>[1],
+  ) {
+    return incomingWebhookStorage.recoverAcceptedIncomingWebhookDeliveries(this, input);
+  }
+
+  claimNextIncomingWebhookDelivery(
+    input: Parameters<typeof incomingWebhookStorage.claimNextIncomingWebhookDelivery>[1],
+  ) {
+    return incomingWebhookStorage.claimNextIncomingWebhookDelivery(this, input);
+  }
+
+  verifyIncomingWebhookPublicationAuthority(
+    input: Parameters<typeof incomingWebhookStorage.verifyIncomingWebhookPublicationAuthority>[1],
+  ) {
+    return incomingWebhookStorage.verifyIncomingWebhookPublicationAuthority(this, input);
+  }
+
+  settleIncomingWebhookDelivery(
+    input: Parameters<typeof incomingWebhookStorage.settleIncomingWebhookDelivery>[1],
+  ) {
+    return incomingWebhookStorage.settleIncomingWebhookDelivery(this, input);
+  }
+
+  releaseAcceptedIncomingWebhookDelivery(
+    input: Parameters<typeof incomingWebhookStorage.releaseAcceptedIncomingWebhookDelivery>[1],
+  ) {
+    return incomingWebhookStorage.releaseAcceptedIncomingWebhookDelivery(this, input);
+  }
+
+  recordFailedIncomingWebhookAttempt(
+    input: Parameters<typeof incomingWebhookStorage.recordFailedIncomingWebhookAttempt>[1],
+  ) {
+    return incomingWebhookStorage.recordFailedIncomingWebhookAttempt(this, input);
+  }
+
+  hasPendingIncomingWebhookDeliveries(
+    workspaceId: string,
+    nowMs?: number,
+    ownerUserId?: string,
+    leaseId?: string,
+  ) {
+    return incomingWebhookStorage.hasPendingIncomingWebhookDeliveries(
+      this,
+      workspaceId,
+      nowMs,
+      ownerUserId,
+      leaseId,
+    );
+  }
+
+  nextIncomingWebhookRetryAtMs(workspaceId: string, ownerUserId?: string) {
+    return incomingWebhookStorage.nextIncomingWebhookRetryAtMs(this, workspaceId, ownerUserId);
+  }
+
+  workspacesWithIncomingWebhooks() {
+    return incomingWebhookStorage.workspacesWithIncomingWebhooks(this);
+  }
+
+  pruneExpiredIncomingWebhookDeliveries(nowMs: number, workspaceId?: string) {
+    return incomingWebhookStorage.pruneExpiredIncomingWebhookDeliveries(this, nowMs, workspaceId);
   }
 }
 import { hasRelayWriteObservers, notifyRelayWrite } from "./relayWriteChanges";

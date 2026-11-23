@@ -21,6 +21,7 @@ import {
   type SyncRelayIndependentGrantInventoryPage,
 } from "./types";
 import { accountIsFenced } from "./accountDeletion";
+import { pauseIncomingWebhooksForShareInTx } from "./incomingWebhooks";
 import { advanceNoticeHead } from "./notices";
 import { type StorageContext } from "./context";
 import { nextShareDiscussionRevision } from "./discussion";
@@ -81,6 +82,15 @@ export function createShare(
     if (recipient !== null && accountIsFenced(storage, recipient)) return false;
     insertShare(storage, input.share);
     insertShareGrant(storage, input.grant);
+    pauseIncomingWebhooksForShareInTx(storage, {
+      workspaceId: input.share.workspaceId,
+      granterUserId: input.share.granterUserId,
+      principalKind: input.grant.principalKind,
+      principalUserId: input.grant.principalUserId,
+      selectorJson: input.share.selectorJson,
+      access: input.grant.access,
+      nowMs: input.grant.createdAtMs,
+    });
     // A named grant tells its person the share arrived. The waiting row
     // commits with the grant, so a crash cannot lose the notice, and an
     // email grant waits until an account claims it.
@@ -130,6 +140,15 @@ export function createFileLinkShare(
     insertShare(storage, share);
     insertShareGrant(storage, grant);
     insertLinkCredential(storage, credential);
+    pauseIncomingWebhooksForShareInTx(storage, {
+      workspaceId: share.workspaceId,
+      granterUserId: share.granterUserId,
+      principalKind: grant.principalKind,
+      principalUserId: grant.principalUserId,
+      selectorJson: share.selectorJson,
+      access: grant.access,
+      nowMs: grant.createdAtMs,
+    });
     if (input.operation)
       storage.db
         .prepare(
@@ -179,9 +198,19 @@ export function createLinkGrant(
            LIMIT 1`,
       )
       .get(grant.shareId);
-    if (!storage.getShare(grant.shareId) || !activeShare) return false;
+    const existingShare = storage.getShare(grant.shareId);
+    if (!existingShare || !activeShare) return false;
     insertShareGrant(storage, grant);
     insertLinkCredential(storage, credential);
+    pauseIncomingWebhooksForShareInTx(storage, {
+      workspaceId: existingShare.workspaceId,
+      granterUserId: existingShare.granterUserId,
+      principalKind: grant.principalKind,
+      principalUserId: grant.principalUserId,
+      selectorJson: existingShare.selectorJson,
+      access: grant.access,
+      nowMs: grant.createdAtMs,
+    });
     return true;
   });
 }

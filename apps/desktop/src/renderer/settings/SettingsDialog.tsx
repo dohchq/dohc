@@ -47,6 +47,7 @@ import { KeyboardSettings } from "./KeyboardSettings";
 import { ProfileHeader } from "./ProfileHeader";
 import { ScheduleHostRow } from "./ScheduleHostRow";
 import { WorkspaceSecretsSettings } from "./WorkspaceSecretsSettings";
+import { WorkspaceWebhooksSettings } from "./WorkspaceWebhooksSettings";
 import {
   ColorControl,
   HueControl,
@@ -1109,8 +1110,12 @@ export function SettingsDialog(props: {
         );
       case "secrets":
         return (
-          <div data-testid={settingsSectionPin("secrets")}>
+          <div data-testid={settingsSectionPin("secrets")} className="flex flex-col gap-10">
             <WorkspaceSecretsSettings
+              workspaceId={props.workspaceId}
+              {...(props.onError ? { onError: props.onError } : {})}
+            />
+            <WorkspaceWebhooksSettings
               workspaceId={props.workspaceId}
               {...(props.onError ? { onError: props.onError } : {})}
             />

@@ -30,19 +30,33 @@ export interface AutomationShare {
   shareId?: string;
 }
 
-/** The one sentence the dialog says when a share would stop automation steps, or null. */
+/** The sentence(s) the dialog says when a share would stop automation steps or pause incoming webhooks, or null. */
 export function automationShareWarning(
   stops: AutomationShareImpactResult["stops"],
   recipient: string | null,
+  pausedWebhooks: AutomationShareImpactResult["pausedWebhooks"] = [],
 ): string | null {
-  if (stops.length === 0) return null;
-  const automations = new Map(
-    stops.map((stop) => [stop.automationId, `"${stop.automationName}" in ${stop.collectionPath}`]),
-  );
-  const reach = [...new Set(stops.map((stop) => automationReachCopy(stop, true)))];
-  const what = `${automations.size === 1 ? "the automation" : "the automations"} ${AND.format([...automations.values()])}`;
-  const who = recipient ?? "anyone who opens this link";
-  return `This share stops ${what} because ${who} cannot ${OR.format(reach)}.`;
+  const parts: string[] = [];
+  if (stops.length > 0) {
+    const automations = new Map(
+      stops.map((stop) => [
+        stop.automationId,
+        `"${stop.automationName}" in ${stop.collectionPath}`,
+      ]),
+    );
+    const reach = [...new Set(stops.map((stop) => automationReachCopy(stop, true)))];
+    const what = `${automations.size === 1 ? "the automation" : "the automations"} ${AND.format([...automations.values()])}`;
+    const who = recipient ?? "anyone who opens this link";
+    parts.push(`This share stops ${what} because ${who} cannot ${OR.format(reach)}.`);
+  }
+  if (pausedWebhooks && pausedWebhooks.length > 0) {
+    const hooks = pausedWebhooks.map((hook) => `"${hook.name}" in ${hook.collectionPath}`);
+    const what = `${hooks.length === 1 ? "the incoming webhook" : "the incoming webhooks"} ${AND.format(hooks)}`;
+    parts.push(
+      `This share pauses ${what} because incoming webhooks run only in private Collections.`,
+    );
+  }
+  return parts.length > 0 ? parts.join(" ") : null;
 }
 
 export function useAutomationShareCheck(workspaceId: string, target: RelayShareTarget) {
@@ -62,9 +76,11 @@ export function useAutomationShareCheck(workspaceId: string, target: RelayShareT
   } | null>(null);
   /** The warning or the failed check for the share on screen, or null. */
   const noteFor = (share: AutomationShare) => (checked?.key === keyOf(share) ? checked : null);
-  /** Whether Create for this share asks main first: Edit on files, and no warning shown yet. */
+  /** Whether Create/Change asks main first: any Edit share, or any new path share (which can pause incoming webhooks). */
   const asks = (share: AutomationShare) =>
-    share.access === "edit" && target.kind === "paths" && noteFor(share)?.warning == null;
+    target.kind === "paths" &&
+    (share.access === "edit" || share.shareId === undefined) &&
+    noteFor(share)?.warning == null;
   return {
     noteFor,
     asks,
@@ -77,21 +93,27 @@ export function useAutomationShareCheck(workspaceId: string, target: RelayShareT
     async mayShare(share: AutomationShare, isCurrent: () => boolean): Promise<boolean> {
       if (target.kind !== "paths" || !asks(share)) return true;
       const key = keyOf(share);
-      let stops: AutomationShareImpactResult["stops"];
+      const access: "view" | "comment" | "edit" =
+        share.access === "edit" || share.access === "comment" ? share.access : "view";
+      let result: AutomationShareImpactResult;
       try {
-        ({ stops } = await bridge().automationShareImpact({
+        result = await bridge().automationShareImpact({
           workspaceId,
           recipientEmail: share.recipientEmail,
           paths: target.paths,
-          access: "edit",
-        }));
+          access,
+        });
       } catch {
         if (!isCurrent()) return false;
         setChecked({ key, warning: null, failed: true });
         return true;
       }
       if (!isCurrent()) return false;
-      const warning = automationShareWarning(stops, share.recipientName ?? share.recipientEmail);
+      const warning = automationShareWarning(
+        result.stops,
+        share.recipientName ?? share.recipientEmail,
+        result.pausedWebhooks,
+      );
       setChecked({ key, warning, failed: false });
       return warning === null;
     },

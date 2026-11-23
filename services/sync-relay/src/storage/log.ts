@@ -1,4 +1,5 @@
 import { commitHostedSettlement, settlementResponseIdentifier } from "./hostedSettlement";
+import { admitIncomingWebhookOpsInTransaction } from "./incomingWebhooks";
 import { indexWorkReferenceSnapshot } from "./workReferenceSchema";
 import { registerWorkReferencesInTransaction, updateWorkReferenceScopes } from "./workReferences";
 import { type StorageContext } from "./context";
@@ -255,6 +256,7 @@ export function appendLogBatchInTransaction(
     }
   }
 
+  admitIncomingWebhookOpsInTransaction(storage, input.workspaceId, newOps, Date.now());
   input.admit?.(newOps);
   for (const op of newOps) {
     // Only the relay writes a refusal, and only as one.

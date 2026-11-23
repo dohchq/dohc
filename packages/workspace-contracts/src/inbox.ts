@@ -132,15 +132,21 @@ export function safeInboxSlug(seed: string, fallback = "item", maxChars = 60): s
   return slug;
 }
 
-export function safeCodeFence(content: string, info = ""): string {
+export function safeCodeFence(
+  content: string,
+  info = "",
+  options?: { readonly preserveVerbatim?: boolean },
+): string {
   let longest = 0;
   for (const match of content.matchAll(/`+/gu)) {
     if (match[0].length > longest) longest = match[0].length;
   }
   const fence = "`".repeat(Math.max(3, longest + 1));
   const safeInfo = info.replace(/[^a-zA-Z0-9_+-]/gu, "");
-  const normalizedBody = content.replace(/\u0000/gu, "").replace(/\r\n?/gu, "\n");
-  return `${fence}${safeInfo}\n${normalizedBody}${normalizedBody.endsWith("\n") ? "" : "\n"}${fence}`;
+  const body = options?.preserveVerbatim
+    ? content
+    : content.replace(/\u0000/gu, "").replace(/\r\n?/gu, "\n");
+  return `${fence}${safeInfo}\n${body}${body.endsWith("\n") ? "" : "\n"}${fence}`;
 }
 
 export function isInboxRecordPath(path: string): boolean {
@@ -191,6 +197,9 @@ export interface FormatInboxRecordInput {
   body?: string;
   quarantineBodyAsCodeBlock?: boolean;
   quarantineBodyInfo?: string;
+  quarantineBodyHeader?: string;
+  preserveVerbatimBody?: boolean;
+  maxBodyBytes?: number;
 }
 
 export function formatInboxRecordMarkdown(input: FormatInboxRecordInput): string {
@@ -255,16 +264,31 @@ export function formatInboxRecordMarkdown(input: FormatInboxRecordInput): string
   }
 
   const rawBody = input.body ?? "";
-  const cleanedBody = rawBody.replace(/\u0000/gu, "").replace(/\r\n?/gu, "\n");
-  if (Buffer.byteLength(cleanedBody, "utf8") > MAX_INBOX_BODY_BYTES) {
-    throw new Error(`Inbox body exceeds ${MAX_INBOX_BODY_BYTES} bytes. Shorten the text.`);
+  const cleanedBody = input.preserveVerbatimBody
+    ? rawBody
+    : rawBody.replace(/\u0000/gu, "").replace(/\r\n?/gu, "\n");
+  const maxBodyBytes = input.maxBodyBytes ?? MAX_INBOX_BODY_BYTES;
+  if (Buffer.byteLength(cleanedBody, "utf8") > maxBodyBytes) {
+    throw new Error(`Inbox body exceeds ${maxBodyBytes} bytes. Shorten the text.`);
   }
-  if (cleanedBody.trim().length > 0) {
+  const cleanedHeader = (input.quarantineBodyHeader ?? "")
+    .replace(/\u0000/gu, "")
+    .replace(/\r\n?/gu, "\n")
+    .trimEnd();
+  if (input.quarantineBodyAsCodeBlock && (cleanedHeader.length > 0 || cleanedBody.length > 0)) {
+    const fencedContent =
+      cleanedHeader.length > 0 && cleanedBody.length > 0
+        ? `${cleanedHeader}\n\n${cleanedBody}`
+        : cleanedHeader.length > 0
+          ? cleanedHeader
+          : cleanedBody;
     sections.push(
-      input.quarantineBodyAsCodeBlock
-        ? safeCodeFence(cleanedBody, input.quarantineBodyInfo ?? "text")
-        : cleanedBody.trimEnd(),
+      safeCodeFence(fencedContent, input.quarantineBodyInfo ?? "text", {
+        preserveVerbatim: input.preserveVerbatimBody === true,
+      }),
     );
+  } else if (cleanedBody.trim().length > 0) {
+    sections.push(cleanedBody.trimEnd());
   }
 
   const bodyBlock = sections.length > 0 ? `\n${sections.join("\n\n")}\n` : "";

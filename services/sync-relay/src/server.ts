@@ -71,6 +71,11 @@ import {
   type OutboundWebhookExecutionDependencies,
   type OutboundWebhookLimiters,
 } from "./outboundWebhookRoutes";
+import {
+  createIncomingWebhookLimiters,
+  createIncomingWebhookRoutes,
+  MAX_INCOMING_WEBHOOK_ADMIN_BODY_BYTES,
+} from "./incomingWebhookRoutes";
 import type {
   OutboundWebhookDispatchRequest,
   OutboundWebhookDispatchResponse,
@@ -717,6 +722,15 @@ export function createSyncRelayHandler({
     ...(sendOutboundRequest ? { sendRequest: sendOutboundRequest } : {}),
   };
   const respondToOutboundWebhooks = createOutboundWebhookRoutes(outboundWebhookDeps);
+  const incomingWebhookLimiters = createIncomingWebhookLimiters();
+  const incomingWebhooks = createIncomingWebhookRoutes({
+    storage,
+    linkKey,
+    ...(relayPublicOrigin ? { publicOrigin: relayPublicOrigin } : {}),
+    nowMs,
+    limiters: incomingWebhookLimiters,
+    automationServer: automationServer ?? null,
+  });
 
   const noticeWaits = createNoticeWaits(storage, discussionActivity);
   const respondToNotices = createNoticeRoutes(
@@ -1274,6 +1288,9 @@ export function createSyncRelayHandler({
       }
       const route = parseRoute(request);
       SYNC_RELAY_REQUEST_LOG.mark(request, RELAY_ROUTE_PATTERNS[route.route]);
+      if (route.route === "incoming-webhook") {
+        return await incomingWebhooks.respondToPublicIngress(request, route.token);
+      }
       if (
         route.route === "work-reference" ||
         route.route === "work-references" ||
@@ -1748,7 +1765,10 @@ export function createSyncRelayHandler({
         route.route === "workspace-secrets" ||
         route.route === "workspace-secret" ||
         route.route === "workspace-http-approvals" ||
-        route.route === "workspace-outbound-dispatch"
+        route.route === "workspace-outbound-dispatch" ||
+        route.route === "workspace-webhooks" ||
+        route.route === "workspace-webhook" ||
+        route.route === "workspace-webhook-rotate"
       ) {
         const sessionResolver = resolvePhoneCapableAccountSession ?? resolveAccountSession;
         if (!sessionResolver) throw notFound();
@@ -1766,10 +1786,24 @@ export function createSyncRelayHandler({
         const session = await authorizeDesktopOwner();
         const recheckSession = async () => {
           const current = await authorizeDesktopOwner();
-          if (current.userId !== session.userId) throw notFound();
+          if (current.userId !== session.userId || current.sessionId !== session.sessionId) {
+            throw notFound();
+          }
         };
         if (route.route === "workspace-secrets" || route.route === "workspace-secret") {
           return await respondToWorkspaceSecrets(request, route, session.userId, recheckSession);
+        }
+        if (
+          route.route === "workspace-webhooks" ||
+          route.route === "workspace-webhook" ||
+          route.route === "workspace-webhook-rotate"
+        ) {
+          return await incomingWebhooks.respondToOwnerManagement(
+            request,
+            route,
+            session.userId,
+            recheckSession,
+          );
         }
         return await respondToOutboundWebhooks(request, route, session.userId, recheckSession);
       }
@@ -1987,6 +2021,10 @@ export function maxRequestBodyBytes(url: URL): number {
       return MAX_HTTP_APPROVAL_BODY_BYTES;
     case "workspace-outbound-dispatch":
       return MAX_OUTBOUND_DISPATCH_BODY_BYTES;
+    case "workspace-webhooks":
+    case "workspace-webhook":
+    case "workspace-webhook-rotate":
+      return MAX_INCOMING_WEBHOOK_ADMIN_BODY_BYTES;
     default:
       return DEFAULT_BODY_BYTES;
   }
@@ -2039,6 +2077,7 @@ export function streamsRequestBody(url: URL, method: string): boolean {
     const route = parseRoute({ url: url.href });
     return (
       (route.route === "dataset" && route.action === "import" && method === "POST") ||
+      (route.route === "incoming-webhook" && method === "POST") ||
       route.route === "share-collection-writes" ||
       route.route === "link-collection-writes" ||
       route.route === "account-operation" ||

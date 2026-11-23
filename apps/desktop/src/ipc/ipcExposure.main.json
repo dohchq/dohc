@@ -414,7 +414,12 @@
     "desktop:inbox-capture-files",
     "desktop:inbox-move",
     "desktop:inbox-undo-archive",
-    "desktop:inbox-undo-move"
+    "desktop:inbox-undo-move",
+    "desktop:list-incoming-webhooks",
+    "desktop:create-incoming-webhook",
+    "desktop:update-incoming-webhook",
+    "desktop:rotate-incoming-webhook",
+    "desktop:delete-incoming-webhook"
   ],
   "guards": {
     "desktop:held-note-change": "active-workspace",
@@ -485,6 +490,11 @@
     "desktop:inbox-capture-files": "trusted-sender",
     "desktop:inbox-move": "active-workspace",
     "desktop:inbox-undo-archive": "active-workspace",
-    "desktop:inbox-undo-move": "active-workspace"
+    "desktop:inbox-undo-move": "active-workspace",
+    "desktop:list-incoming-webhooks": "trusted-sender",
+    "desktop:create-incoming-webhook": "trusted-sender",
+    "desktop:update-incoming-webhook": "trusted-sender",
+    "desktop:rotate-incoming-webhook": "trusted-sender",
+    "desktop:delete-incoming-webhook": "trusted-sender"
   }
 }

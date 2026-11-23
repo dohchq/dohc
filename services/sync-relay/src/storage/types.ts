@@ -2126,6 +2126,69 @@ export interface SyncRelayStorage {
     maxBytes: number,
   ): string | null;
   committedWorkspaceFileExists(workspaceId: string, versionId: string, path: string): boolean;
+  listIncomingWebhooks(
+    workspaceId: string,
+  ): import("@dohc/workspace-contracts/incoming-webhooks").IncomingWebhookSummary[];
+  createIncomingWebhook(
+    input: Parameters<typeof import("./incomingWebhooks").createIncomingWebhook>[1],
+  ): import("./incomingWebhooks").CreateIncomingWebhookResult;
+  updateIncomingWebhook(
+    input: Parameters<typeof import("./incomingWebhooks").updateIncomingWebhook>[1],
+  ): import("./incomingWebhooks").UpdateIncomingWebhookResult;
+  rotateIncomingWebhookToken(
+    input: Parameters<typeof import("./incomingWebhooks").rotateIncomingWebhookToken>[1],
+  ): import("./incomingWebhooks").RotateIncomingWebhookResult;
+  deleteIncomingWebhook(
+    workspaceId: string,
+    ownerUserId: string,
+    webhookId: string,
+  ): import("./incomingWebhooks").DeleteIncomingWebhookResult;
+  lookupActiveIncomingWebhookByToken(
+    linkKey: string | Uint8Array,
+    token: string,
+  ): import("./incomingWebhooks").ResolvedIncomingWebhook | null;
+  precheckIncomingWebhookBudgets(
+    webhookId: string,
+    workspaceId: string,
+    nowMs: number,
+    deliveryKey?: string | null,
+  ): ReturnType<typeof import("./incomingWebhooks").precheckIncomingWebhookBudgets>;
+  enqueueIncomingWebhookDelivery(
+    input: Parameters<typeof import("./incomingWebhooks").enqueueIncomingWebhookDelivery>[1],
+  ): import("./incomingWebhooks").EnqueueIncomingWebhookDeliveryResult;
+  claimNextIncomingWebhookDelivery(
+    input: Parameters<typeof import("./incomingWebhooks").claimNextIncomingWebhookDelivery>[1],
+  ): import("./incomingWebhooks").ClaimedIncomingWebhookDelivery | null;
+  verifyIncomingWebhookPublicationAuthority(
+    input: Parameters<
+      typeof import("./incomingWebhooks").verifyIncomingWebhookPublicationAuthority
+    >[1],
+  ): ReturnType<typeof import("./incomingWebhooks").verifyIncomingWebhookPublicationAuthority>;
+  settleIncomingWebhookDelivery(
+    input: Parameters<typeof import("./incomingWebhooks").settleIncomingWebhookDelivery>[1],
+  ): boolean;
+  releaseAcceptedIncomingWebhookDelivery(
+    input: Parameters<
+      typeof import("./incomingWebhooks").releaseAcceptedIncomingWebhookDelivery
+    >[1],
+  ): void;
+  recoverAcceptedIncomingWebhookDeliveries(
+    input: Parameters<
+      typeof import("./incomingWebhooks").recoverAcceptedIncomingWebhookDeliveries
+    >[1],
+  ): number;
+  recordFailedIncomingWebhookAttempt(
+    input: Parameters<typeof import("./incomingWebhooks").recordFailedIncomingWebhookAttempt>[1],
+  ): ReturnType<typeof import("./incomingWebhooks").recordFailedIncomingWebhookAttempt>;
+  hasPendingIncomingWebhookDeliveries(
+    workspaceId: string,
+    nowMs?: number,
+    ownerUserId?: string,
+    leaseId?: string,
+  ): boolean;
+  nextIncomingWebhookRetryAtMs(workspaceId: string, ownerUserId?: string): number | null;
+  workspacesWithIncomingWebhooks(): string[];
+  pruneExpiredIncomingWebhookDeliveries(nowMs: number, workspaceId?: string): number;
 }
 
 // The two wire shapes a file-linked thread create carries, kept apart because

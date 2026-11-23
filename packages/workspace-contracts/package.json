@@ -72,7 +72,8 @@
     "./http-step-approvals": "./src/httpStepApprovals.ts",
     "./inbox": "./src/inbox.ts",
     "./inbox-declarations": "./src/inboxDeclarations.ts",
-    "./inbox-write-declarations": "./src/inboxWriteDeclarations.ts"
+    "./inbox-write-declarations": "./src/inboxWriteDeclarations.ts",
+    "./incoming-webhooks": "./src/incomingWebhooks.ts"
   },
   "scripts": {
     "test": "vitest run",
