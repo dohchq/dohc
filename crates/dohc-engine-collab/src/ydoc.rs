@@ -44,6 +44,7 @@ use yrs::{
 use crate::error::CollabError;
 use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
+mod body_sequence;
 mod bounded_encoder;
 mod frontmatter_yaml;
 mod inline_reading;
@@ -96,12 +97,30 @@ pub(crate) fn reader_source_meta_key(key: &str) -> bool {
 pub const ROOT_BODY: &str = "body";
 /// The plaintext-document body: a single `Y.Text`.
 pub const ROOT_PLAINTEXT: &str = "plainText";
+/// A format-2 note's body: one `Y.Text` of letters, block boundaries, and
+/// inline items (`docs/engineering/note-body-sequence.md`).
+pub const ROOT_SEQUENCE: &str = "sequence";
+/// A format-2 note's container records: a `Y.Map` keyed `<id>` and
+/// `<id>.<attribute>`.
+pub const ROOT_CONTAINERS: &str = "containers";
 /// Immutable Excalidraw element snapshots, keyed by revision tuple JSON.
 pub const ROOT_SCENE_REVISIONS: &str = "excalidraw:revisions";
 /// Excalidraw app-state properties, keyed by property name.
 pub const ROOT_SCENE_APP_STATE: &str = "excalidraw:app-state";
 /// Durable Excalidraw asset metadata, keyed by file id.
 pub const ROOT_SCENE_ASSETS: &str = "excalidraw:assets";
+
+/// The engine's setting for format-2 notes. An engine started with this
+/// environment variable set to `1` reads a note whose `meta.schemaVersion`
+/// is 2 from [`ROOT_SEQUENCE`] and [`ROOT_CONTAINERS`], and admits it as a
+/// public baseline. Any other engine refuses such a note as a baseline and
+/// writes what is under [`ROOT_BODY`].
+pub const BODY_SEQUENCE_SETTING: &str = "DOHC_ENGINE_NOTE_BODY_SEQUENCE";
+
+fn body_sequence_setting() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var(BODY_SEQUENCE_SETTING).is_ok_and(|value| value == "1"))
+}
 
 /// Which offset mode a `Doc` is built with. `Utf16` is the only wire-safe mode;
 /// `Bytes` exists solely so the pinned divergence probe can demonstrate the
@@ -425,6 +444,7 @@ pub struct MarkdownSourceReference {
 /// A wire-facing durable Y.Doc.
 pub struct Ydoc {
     doc: Doc,
+    reads_body_sequence: bool,
 }
 
 impl std::fmt::Debug for Ydoc {
@@ -477,7 +497,32 @@ impl Ydoc {
         doc.get_or_insert_map(ROOT_SCENE_REVISIONS);
         doc.get_or_insert_map(ROOT_SCENE_APP_STATE);
         doc.get_or_insert_map(ROOT_SCENE_ASSETS);
-        Ydoc { doc }
+        Ydoc {
+            doc,
+            reads_body_sequence: body_sequence_setting(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reading_body_sequence(mut self) -> Self {
+        self.reads_body_sequence = true;
+        self
+    }
+
+    fn body_sequence_roots(&self) -> Option<(yrs::TextRef, MapRef)> {
+        if !self.reads_body_sequence {
+            return None;
+        }
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let reading = self.doc.transact();
+        let version = body_sequence::stored_under(&meta, "schemaVersion");
+        drop(reading);
+        if !matches!(version, Some(Any::Number(2.0))) {
+            return None;
+        }
+        let sequence = self.doc.get_or_insert_text(ROOT_SEQUENCE);
+        let containers = self.doc.get_or_insert_map(ROOT_CONTAINERS);
+        Some((sequence, containers))
     }
 
     /// Validate an update without mutating any doc: decode the whole v1 update.
@@ -783,14 +828,22 @@ impl Ydoc {
     fn validate_public_baseline_as(&self, bytes: &[u8], reader: bool) -> Result<(), CollabError> {
         let meta = self.doc.get_or_insert_map(ROOT_META);
         self.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let sequence_roots = self.body_sequence_roots();
+        let sequence_note = sequence_roots.is_some();
         let txn = self.doc.transact();
         let invalid = || CollabError::MalformedUpdate {
             reason: "invalid public baseline schema".into(),
         };
+        if let Some((sequence, containers)) = &sequence_roots {
+            if !body_sequence::roots_hold_only_their_own_items(&body, sequence, containers) {
+                return Err(invalid());
+            }
+        }
         for (name, root) in txn.root_refs() {
             match name {
                 ROOT_META | ROOT_FRONTMATTER | ROOT_BODY => {}
+                ROOT_SEQUENCE | ROOT_CONTAINERS if sequence_note => {}
                 ROOT_SCENE_REVISIONS | ROOT_SCENE_APP_STATE | ROOT_SCENE_ASSETS => {
                     if !matches!(root, Out::YMap(ref map) if map.len(&txn) == 0) {
                         return Err(invalid());
@@ -821,7 +874,8 @@ impl Ydoc {
                     (key, &value),
                     (MARKDOWN_SOURCE_READER_META_KEY, Out::Any(Any::Number(1.0)))
                 );
-            if !valid && !item_record && !reader_meta {
+            let sequence_version = sequence_note && key == "schemaVersion";
+            if !valid && !item_record && !reader_meta && !sequence_version {
                 return Err(invalid());
             }
         }
@@ -1244,7 +1298,9 @@ impl Ydoc {
         let frontmatter = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let roots = self.body_sequence_roots();
         let txn = self.doc.transact();
+        let sequence = roots.filter(|roots| body_sequence::holds_the_body(&roots.0, &body));
         let uses_crlf = matches!(
             meta.get(&txn, MARKDOWN_CRLF_META_KEY),
             Some(Out::Any(Any::Bool(true)))
@@ -1281,11 +1337,21 @@ impl Ydoc {
             }
         }
         let mut children = Vec::new();
-        for child in body.children(&txn) {
-            let child =
-                markdown_node(&txn, child, 0, &mut remaining_nodes, &mut source_text_bytes)?;
-            if !empty_list_or_item(&child) {
-                children.push(child);
+        if let Some((sequence, containers)) = &sequence {
+            children = body_sequence::blocks(
+                &txn,
+                sequence,
+                containers,
+                &mut remaining_nodes,
+                &mut source_text_bytes,
+            )?;
+        } else {
+            for child in body.children(&txn) {
+                let child =
+                    markdown_node(&txn, child, 0, &mut remaining_nodes, &mut source_text_bytes)?;
+                if !empty_list_or_item(&child) {
+                    children.push(child);
+                }
             }
         }
         let body_markdown = markdown_document(&children)?;
@@ -5358,6 +5424,8 @@ fn consume_projection_value_node(
 ) -> ProjectionResult<()> {
     if depth > MAX_PROJECTION_DEPTH || *remaining_nodes == 0 {
         return Err(CollabError::ProjectionTooComplex {
+            depth,
+            nodes_left: *remaining_nodes,
             max_depth: MAX_PROJECTION_DEPTH,
             max_nodes: MAX_PROJECTION_NODES,
         });
@@ -6102,13 +6170,7 @@ fn markdown_node<T: ReadTxn>(
     remaining_nodes: &mut usize,
     source_text_bytes: &mut usize,
 ) -> ProjectionResult<MarkdownNode> {
-    if depth > MAX_PROJECTION_DEPTH || *remaining_nodes == 0 {
-        return Err(CollabError::ProjectionTooComplex {
-            max_depth: MAX_PROJECTION_DEPTH,
-            max_nodes: MAX_PROJECTION_NODES,
-        });
-    }
-    *remaining_nodes -= 1;
+    consume_projection_value_node(depth, remaining_nodes)?;
     match node {
         XmlOut::Text(text) => {
             let mut runs = Vec::new();
@@ -9895,11 +9957,14 @@ mod projection_tests {
         }
         let doc = remote_doc_with_body([child]);
 
+        const ONE_TOO_DEEP: usize = MAX_PROJECTION_DEPTH + 1;
         assert!(matches!(
             doc.project(ContentKind::Richdoc),
             Err(CollabError::ProjectionTooComplex {
+                depth: ONE_TOO_DEEP,
                 max_depth: MAX_PROJECTION_DEPTH,
-                max_nodes: MAX_PROJECTION_NODES
+                max_nodes: MAX_PROJECTION_NODES,
+                ..
             })
         ));
     }

@@ -60,7 +60,9 @@ const whole = (value: unknown): unknown =>
   value >= BigInt(Number.MIN_SAFE_INTEGER) &&
   value <= BigInt(Number.MAX_SAFE_INTEGER)
     ? Number(value)
-    : value;
+    : Object.is(value, -0)
+      ? 0
+      : value;
 
 const MAX_SPAN = 1000;
 const MAX_LIST_START = 999_999_999;

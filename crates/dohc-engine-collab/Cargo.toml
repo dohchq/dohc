@@ -68,6 +68,9 @@ base64 = "0.23"
 [dev-dependencies]
 dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
 rusqlite = { version = "0.41", features = ["limits"] }
+# The shared note-body fixtures hold a document 64 quotes deep, past the 128
+# levels serde_json reads by default.
+serde_json = { version = "1", features = ["float_roundtrip", "unbounded_depth"] }
 # Integration tests need the library built with its test APIs.
 dohc-engine-collab = { path = ".", features = ["test-support"] }
 dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }

@@ -286,6 +286,7 @@ describe("reading any sequence", () => {
     for (const bad of [1e9, 0, -5, 1.5, Infinity, "2"])
       expect(cell([["c.colspan", bad]]).colspan, String(bad)).toBe(1);
     expect(cell([["c.colwidth", [100n, 20]]]).colwidth).toEqual([100, 20]);
+    expect(cell([["c.colwidth", [-0, 2 ** 53, 1e21]]]).colwidth).toEqual([0, 2 ** 53, 1e21]);
     expect(cell([["c.colwidth", [Infinity]]]).colwidth).toBeNull();
     expect(cell([["c.colwidth", [-1]]]).colwidth).toBeNull();
     expect(cell([["c.colwidth", Array(1)]]).colwidth).toBeNull();
@@ -302,6 +303,7 @@ describe("reading any sequence", () => {
       read([["l.start", value]], ["l", "i"]).firstChild!.attrs.start as unknown;
     expect(start(7)).toBe(7);
     expect(start(0)).toBe(0);
+    expect(start(-0)).toBe(0);
     for (const bad of [1.5, -5, 1e20]) expect(start(bad), String(bad)).toBe(1);
     const height = (value: unknown) =>
       read([["r.height", value]], ["t", "r", "c"]).firstChild!.firstChild!.attrs.height as unknown;
