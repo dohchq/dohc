@@ -346,8 +346,8 @@ describe("opening a sent notice", () => {
     await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
     expect(getRelayReceivedShare).toHaveBeenCalledWith({ shareId: "share-1" });
     expect(onOpenShare).toHaveBeenCalledWith({
-      resolvedShare: { shareId: "share-1", shareCode: "code-1" },
-      liveEditing: true,
+      resolvedShare: { shareId: "share-1", shareCode: "code-1", share: RECEIVED.share },
+      level: "edit",
       path: "Trips/Japan/report.md",
     });
   });
@@ -588,7 +588,7 @@ describe("opening a sent notice", () => {
     await act(async () => result.current.onReadAllSentNotices());
     expect(sentNotices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "a" }]);
     expect(reportShellError).toHaveBeenCalledWith(
-      "dohc could not mark notices read.",
+      "dohc could not mark Notices as read.",
       expect.any(Error),
       expect.any(Function),
     );
@@ -1080,8 +1080,8 @@ describe("a failed run's notice", () => {
     const notAdded = setup([copy], [workspace("notes")]);
     await notAdded.result.current.onOpenSentNotice(copy, live());
     expect(notAdded.onOpenShare).toHaveBeenCalledWith({
-      resolvedShare: { shareId: "share-1", shareCode: "code-1" },
-      liveEditing: true,
+      resolvedShare: { shareId: "share-1", shareCode: "code-1", share: RECEIVED.share },
+      level: "edit",
       path: "Tasks/automations.yaml",
       controls: {
         to: "automation-controls",
@@ -1145,7 +1145,7 @@ describe("the list itself", () => {
       listFailure: { error },
     });
     expect(reportShellError).toHaveBeenCalledWith(
-      "dohc could not read notices sent to you.",
+      "dohc could not read Notices sent to you.",
       error,
       sentNotices.relist,
     );

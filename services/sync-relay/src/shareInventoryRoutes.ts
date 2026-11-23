@@ -37,7 +37,7 @@ export function createShareInventoryRoutes(
     | "listSharesGrantedPage"
     | "listSharesReceivedBy"
     | "listReceivedShareIdsPage"
-    | "listRemovedSharesForRecipient"
+    | "listRemovedSharesInRecipientList"
     | "getShare"
     | "setShareLabels"
     | "shareHasActiveGrants"
@@ -197,7 +197,7 @@ export function createShareInventoryRoutes(
         // Re-read removals after asynchronous serialization; a grant can end during a page.
         const pageIds = new Set(page.shareIds);
         const removed = storage
-          .listRemovedSharesForRecipient(actor.userId)
+          .listRemovedSharesInRecipientList(actor.userId)
           .filter((row) => pageIds.has(row.shareId));
         return jsonResponse({
           ok: true,
@@ -253,7 +253,7 @@ export function createShareInventoryRoutes(
         ok: true,
         granted,
         received,
-        removed: storage.listRemovedSharesForRecipient(actor.userId),
+        removed: storage.listRemovedSharesInRecipientList(actor.userId),
       });
     }
     if (route.route === "shares-list") throw relayError("method_not_allowed");

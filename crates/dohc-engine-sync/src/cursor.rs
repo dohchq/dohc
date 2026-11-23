@@ -161,7 +161,7 @@ pub fn commit_relay_cursor(
                     now_ms,
                 )?;
                 writer_cache_changed |= tx.total_changes() != before_origination;
-                crate::enrolment::export_covered_heads_in_tx(tx, workspace_id, leases)?;
+                crate::enrolment::export_covered_heads_in_tx(tx, workspace_id)?;
                 declined
             } else {
                 // Enrollment can claim lineages until it completes.

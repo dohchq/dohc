@@ -2,7 +2,7 @@ import { documentChange, stopEditorMouseEvent } from "./pmHelpers";
 import { ownersByPlace } from "./widgetOwnership";
 import { isComposingKey } from "../ui/keys";
 import type { Node } from "@tiptap/pm/model";
-import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
 const calloutChromeKey = new PluginKey<DecorationSet>("dohc-callout-chrome");
@@ -124,7 +124,7 @@ function buildCalloutHeader(
   const chevron = document.createElement("button");
   chevron.type = "button";
   chevron.className = "dohc-callout-fold";
-  chevron.setAttribute("aria-label", folded ? "expand callout" : "collapse callout");
+  chevron.setAttribute("aria-label", folded ? "Expand callout" : "Collapse callout");
   chevron.setAttribute("aria-expanded", folded ? "false" : "true");
   chevron.disabled = view.editable === false;
   chevron.appendChild(makeCalloutSvg('<path d="m9 18 6-6-6-6"/>', "dohc-callout-chevron"));
@@ -149,7 +149,7 @@ function buildCalloutHeader(
   const typeTrigger = document.createElement("button");
   typeTrigger.type = "button";
   typeTrigger.className = "dohc-callout-type-trigger";
-  typeTrigger.setAttribute("aria-label", "change callout type");
+  typeTrigger.setAttribute("aria-label", "Change callout type");
   typeTrigger.setAttribute("aria-haspopup", "listbox");
   typeTrigger.setAttribute("aria-expanded", "false");
   typeTrigger.disabled = view.editable === false;
@@ -169,7 +169,7 @@ function buildCalloutHeader(
   const typeMenu = document.createElement("div");
   typeMenu.className = "dohc-callout-type-menu";
   typeMenu.setAttribute("role", "listbox");
-  typeMenu.setAttribute("aria-label", "callout type");
+  typeMenu.setAttribute("aria-label", "Callout type");
   typeMenu.hidden = true;
 
   const setTypeMenuOpen = (open: boolean) => {
@@ -191,7 +191,13 @@ function buildCalloutHeader(
     optionButton.setAttribute("role", "option");
     optionButton.setAttribute("aria-selected", String(option.value === attrs.type));
     optionButton.dataset.calloutType = option.value;
-    optionButton.textContent = option.label;
+    const optionIcon = makeCalloutSvg(
+      calloutIconPath(option.value),
+      "dohc-callout-type-option-icon",
+    );
+    const optionLabel = document.createElement("span");
+    optionLabel.textContent = option.label;
+    optionButton.append(optionIcon, optionLabel);
     optionButton.addEventListener("mousedown", (event) => event.stopPropagation());
     optionButton.addEventListener("click", (event) => {
       event.preventDefault();
@@ -290,13 +296,37 @@ function buildCalloutHeader(
     if (isComposingKey(event)) return;
     if (event.key === "Enter") {
       event.preventDefault();
-      input.blur();
+      const callout = resolveCallout(view, getPos);
+      if (callout && view.editable !== false) {
+        const patch: Record<string, unknown> = {};
+        if (input.value !== focusTitle && input.value !== String(callout.attrs.title ?? "")) {
+          patch.title = input.value;
+          focusTitle = input.value;
+        }
+        if (callout.attrs.fold === "-") {
+          patch.fold = "";
+        }
+        let tr = view.state.tr;
+        if (Object.keys(patch).length > 0) {
+          tr = tr.setNodeMarkup(callout.pos, undefined, { ...callout.attrs, ...patch });
+        }
+        const insidePos = Math.min(callout.pos + 1, tr.doc.content.size);
+        tr = tr.setSelection(TextSelection.near(tr.doc.resolve(insidePos), 1));
+        view.dispatch(tr);
+        view.focus();
+      } else {
+        input.blur();
+        view.focus();
+      }
     }
     if (event.key === "Escape") {
       event.preventDefault();
       // Cancel to the current node title, not the stale closure snapshot.
-      input.value = liveCalloutTitle() ?? attrs.title;
+      const liveTitle = liveCalloutTitle() ?? attrs.title;
+      input.value = liveTitle;
+      focusTitle = liveTitle;
       input.blur();
+      view.focus();
     }
   });
   const commitTitle = () => {

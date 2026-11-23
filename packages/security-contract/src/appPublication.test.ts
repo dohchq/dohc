@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseAppPublicationCandidate, type AppPublicationCandidate } from "./appPublication";
+import { APP_DATASET_MAX_BINDINGS, parseDatasetAlias } from "./dataset";
+import { parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "./appBackend";
 
 const limits = { maxFiles: 512, maxMetadataBytes: 256 * 1024, maxBundleBytes: 32 * 1024 * 1024 };
 const hash = "a".repeat(64);
@@ -140,5 +142,92 @@ describe("dataset publication inventory", () => {
       readFields: [],
     });
     expect(() => parseAppPublicationCandidate(value, limits)).toThrow(/capabilities/);
+  });
+
+  it("supports up to 16 aliased dataset capabilities sorted deterministically by datasetId", () => {
+    const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    const makeCap = (n: number, alias?: string) => ({
+      kind: "dataset" as const,
+      ...(alias === undefined ? {} : { alias }),
+      name: `Collection ${n}`,
+      datasetId: id(n),
+      revision: 1,
+      revisionSha256: hash,
+      operationIds: [operationId],
+      operations: [{ operationId, name: "submit", access: "owner" as const, readOnly: false }],
+    });
+    const value = datasetCandidate();
+    value.capabilities = [makeCap(20, "workouts"), makeCap(10, "expenses")];
+    const parsed = parseAppPublicationCandidate(value, limits);
+    expect(
+      parsed.capabilities.map((cap) => (cap.kind === "dataset" ? [cap.alias, cap.datasetId] : [])),
+    ).toEqual([
+      ["expenses", id(10)],
+      ["workouts", id(20)],
+    ]);
+
+    // Missing alias on multi-dataset capability is refused.
+    const missingAlias = datasetCandidate();
+    missingAlias.capabilities = [makeCap(10, "expenses"), makeCap(20)];
+    expect(() => parseAppPublicationCandidate(missingAlias, limits)).toThrow(/capabilities/);
+
+    // Duplicate alias or duplicate datasetId is refused.
+    const dupAlias = datasetCandidate();
+    dupAlias.capabilities = [makeCap(10, "expenses"), makeCap(20, "expenses")];
+    expect(() => parseAppPublicationCandidate(dupAlias, limits)).toThrow(/capabilities/);
+
+    const dupDataset = datasetCandidate();
+    dupDataset.capabilities = [makeCap(10, "a"), makeCap(10, "b")];
+    expect(() => parseAppPublicationCandidate(dupDataset, limits)).toThrow(/capabilities/);
+
+    // More than APP_DATASET_MAX_BINDINGS is refused.
+    const tooMany = datasetCandidate();
+    tooMany.capabilities = Array.from({ length: APP_DATASET_MAX_BINDINGS + 1 }, (_, index) =>
+      makeCap(index + 1, `c${index + 1}`),
+    );
+    expect(() => parseAppPublicationCandidate(tooMany, limits)).toThrow(/capabilities/);
+
+    // Alias validation rejects uppercase, leading digits, and prototype keys.
+    expect(parseDatasetAlias("expenses_2026-q1")).toBe("expenses_2026-q1");
+    for (const bad of ["Expenses", "1bad", "prototype", "constructor", "__proto__", "a.b"]) {
+      expect(() => parseDatasetAlias(bad)).toThrow();
+    }
+
+    // Optional dataset alias on invoke & upload requests preserves omission when absent.
+    const plainInvoke = parseAppBackendInvokeRequest({
+      authorityRevision: 1,
+      operation: "list",
+      idempotencyKey: "k1",
+      input: {},
+    });
+    expect("dataset" in plainInvoke).toBe(false);
+    expect(
+      parseAppBackendInvokeRequest({
+        authorityRevision: 1,
+        dataset: "expenses",
+        operation: "list",
+        idempotencyKey: "k1",
+        input: {},
+      }).dataset,
+    ).toBe("expenses");
+    expect(() =>
+      parseAppBackendInvokeRequest({
+        authorityRevision: 1,
+        dataset: "BadAlias",
+        operation: "list",
+        idempotencyKey: "k1",
+        input: {},
+      }),
+    ).toThrow(/alias/);
+    expect(
+      parseAppBackendUploadRequest({
+        authorityRevision: 1,
+        dataset: "expenses",
+        idempotencyKey: "u1",
+        name: "a.txt",
+        contentType: "text/plain",
+        bytesBase64: "QQ==",
+      }).dataset,
+    ).toBe("expenses");
   });
 });

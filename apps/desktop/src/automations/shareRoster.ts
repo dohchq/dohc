@@ -16,7 +16,7 @@ export const SHARE_ROSTER_REFRESH_MS = 10 * 60_000;
 // Before a run, a roster listed longer ago than this is listed again if the
 // relay answers. Listings are also at most this frequent when they fail.
 export const SHARE_ROSTER_FRESH_MS = 60_000;
-const SYNC_AGAIN = "Sync this workspace in Settings → Sync and sharing, then try again.";
+const SYNC_AGAIN = "Sync this workspace in Settings › Sync and sharing, then try again.";
 
 /**
  * The stored copy. `version` rises when the listing changes.
@@ -366,7 +366,7 @@ export function createShareRosters(dependencies: {
     const next =
       noAnswer?.next ??
       (entry.pausedRemote
-        ? "Turn sync on in Settings → Sync and sharing, then try again."
+        ? "Turn sync on in Settings › Sync and sharing, then try again."
         : "Try again in a moment.");
     if (remote && !entry.shareView && (overlapped || stale(workspaceId, state))) {
       return {

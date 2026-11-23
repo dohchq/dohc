@@ -345,7 +345,7 @@ describe("MentionComposer autocomplete", () => {
     render(<Harness surface="post" />);
     const composer = screen.getByTestId("chats-composer");
     await userEvent.click(screen.getByTestId("chats-open"));
-    await userEvent.click(await screen.findByRole("button", { name: "Attach a file" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Attach file" }));
     const fileOption = await screen.findByTestId("chats-file-mention-option");
     expect(composer.getAttribute("aria-activedescendant")).toBe(fileOption.id);
     expect(fileOption.getAttribute("aria-selected")).toBe("true");

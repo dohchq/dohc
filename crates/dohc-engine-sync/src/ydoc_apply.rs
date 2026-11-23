@@ -1789,6 +1789,14 @@ fn complete_drain_cleanup(
         if removed {
             crate::moment_apply::open_artifacts::clear_settled_mark_in_tx(tx, &cleanup.key)?;
         }
+        if removed
+            && let Some(moment) = &cleanup.owner_save
+            && dohc_engine_collab::owner_outbox::release::owner_saves_publish_in(tx, &cleanup.key)
+                .map_err(map_owner_retirement_error)?
+            && crate::workspace_journals_file_moments_in_tx(tx, &cleanup.key.workspace_id)?
+        {
+            crate::enrolment::journal_owner_save_in_tx(tx, &cleanup.key, moment)?;
+        }
         // Recovery a released hold stopped did not fail.
         if let Some((key, _)) = recovery {
             let (waiting, path): (bool, Option<String>) = tx.query_row("SELECT settle_prior_update_seq IS NOT NULL,path FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(SyncError::corrupt)?;
@@ -1898,6 +1906,11 @@ pub(crate) fn complete_ended_session_cleanup(
     complete_drain_cleanup(store, cleanup, faults, Some((key, leases)))
 }
 
+fn owner_edits_unsettled_in(conn: &Connection, key: &DocKey) -> Result<bool, SyncError> {
+    conn.query_row("SELECT last_local_update_seq>COALESCE(settled_update_seq,0) FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)
+}
+
 fn require_recovery_closed(
     conn: &Connection,
     key: &DocKey,
@@ -1906,9 +1919,7 @@ fn require_recovery_closed(
     if leases.is_live(key) {
         return Err(SyncError::LiveDocumentBindingActive);
     }
-    let draft: bool=conn.query_row("SELECT last_local_update_seq>COALESCE(settled_update_seq,0) FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)?;
-    if draft {
+    if owner_edits_unsettled_in(conn, key)? {
         return Err(SyncError::RetryableState {
             reason: "local-document-unsettled",
         });
@@ -2005,6 +2016,7 @@ pub struct YdocDrainCleanup {
     projected: Option<(DocKey, String)>,
     /// The drain kept a row queued for released retained work.
     released_hold: bool,
+    owner_save: Option<String>,
 }
 
 impl YdocDrainCleanup {
@@ -2175,6 +2187,7 @@ fn drain_deferred_ydoc(
                 report: None,
                 projected: None,
                 released_hold: false,
+                owner_save: None,
             },
         )
     };
@@ -2302,6 +2315,7 @@ fn drain_deferred_ydoc(
     let mut unadmitted = false;
     let mut projected_lineage = None;
     let mut projected_moment = None;
+    let mut owner_save = None;
     // Rows held for released retained work while the head waits for
     // dependencies, earliest first. Each stays queued, and each row applied
     // past them brings them back to be decided against the new head.
@@ -2798,6 +2812,7 @@ fn drain_deferred_ydoc(
         Some((origin, seq)) => (origin.as_str(), *seq),
         None => ("deferred-drain", payload_recorded_at),
     };
+    let owner_edits_unsettled = store.read_with(|conn| owner_edits_unsettled_in(conn, key))?;
     if waiting.is_none()
         && let Some(payload) = last_payload
         && let Some((projected, projected_kind)) = project_final_drained_doc(
@@ -2820,6 +2835,9 @@ fn drain_deferred_ydoc(
                 .and_then(|marker| marker.lineage_claim_id)
                 .map(|lineage| (key.clone(), lineage));
             let moment = ydoc_apply_moment_id(key, &payload.path, drain_origin, drain_seq);
+            if owner_edits_unsettled {
+                owner_save = Some(moment.clone());
+            }
             projected_moment = Some(moment);
         }
         match projected {
@@ -2928,6 +2946,7 @@ fn drain_deferred_ydoc(
             report: None,
             projected: projected_lineage,
             released_hold: !held_rows.is_empty() || archived_held,
+            owner_save,
         },
     ))
 }
@@ -4740,21 +4759,40 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     resulting: ResultingHead<'_>,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
     match resulting {
-        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+        ResultingHead::Text { path, text } => match fold_complete_ydoc_lineage_in_tx(
             tx,
             &complete,
             path,
             text,
-            LineageFoldAuthor::default(),
+            LineageFoldAuthor {
+                actor_origin_id,
+                ..LineageFoldAuthor::default()
+            },
             now_ms,
             LineageFoldCause::ConflictParent,
-        )
-        .map(|_| ()),
-        ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
+        )? {
+            LineageFold::Folded { facts, .. } => Ok(facts.map(|facts| *facts)),
+            LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
+                tx,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+                path,
+                text,
+                actor_origin_id,
+                None,
+                now_ms,
+            )
+            .map_err(map_domain_hard_error),
+        },
+        ResultingHead::BinaryOrAbsent => {
+            retire_complete_ydoc_lineage_in_tx(tx, &complete).map(|()| None)
+        }
     }
 }
 
@@ -5333,11 +5371,28 @@ pub fn fold_resolution_into_ydoc_in_tx(
     chosen_text: &str,
     now_ms: i64,
 ) -> Result<(), SyncError> {
-    let key =
-        DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
+    fold_authored_resolution_in_tx(
+        tx,
+        &DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "conflict resolution coordinates are invalid",
-        })?;
-    let complete = match ydoc_lineage_completeness_in_tx(tx, &key)? {
+        })?,
+        path,
+        chosen_text,
+        LineageFoldAuthor::default(),
+        now_ms,
+    )
+    .map(drop)
+}
+
+pub(crate) fn fold_authored_resolution_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    chosen_text: &str,
+    author: LineageFoldAuthor<'_>,
+    now_ms: i64,
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
+    let complete = match ydoc_lineage_completeness_in_tx(tx, key)? {
         YdocLineageCompleteness::Complete(complete) => complete,
         YdocLineageCompleteness::DeferredUpdates => {
             return Err(SyncError::InvalidInput {
@@ -5351,7 +5406,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         }
     };
     let complete = CompleteYdocLineage {
-        key,
+        key: key.clone(),
         state: complete,
     };
     // Read before the supersede drops a reserved settle attempt's authors.
@@ -5365,7 +5420,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         &complete,
         path,
         chosen_text,
-        LineageFoldAuthor::default(),
+        author,
         now_ms,
         LineageFoldCause::LocalMutation { unsettled_authors },
     ) {
@@ -5375,9 +5430,12 @@ pub fn fold_resolution_into_ydoc_in_tx(
             marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
         }) && empty_seed_never_replicated_in_tx(tx, &complete.key)? =>
         {
-            retire_unclaimed_resolution_lineage_in_tx(tx, &complete.key, now_ms)
+            retire_unclaimed_resolution_lineage_in_tx(tx, &complete.key, now_ms).map(|()| None)
         }
-        folded => folded.map(|_| ()),
+        folded => folded.map(|fold| match fold {
+            LineageFold::Folded { facts, .. } => facts.map(|facts| *facts),
+            LineageFold::NoContent => None,
+        }),
     }
 }
 
@@ -7954,10 +8012,17 @@ pub fn project_and_write_in_tx(
         now_ms,
     )
     .map_err(map_collab_hard_error)?;
+    let settles_owner_edits = !result.deduped
+        && owner_edits_unsettled_in(tx, key)?
+        && dohc_engine_collab::owner_outbox::release::owner_saves_publish_in(tx, key)
+            .map_err(map_owner_retirement_error)?;
     // Later envelopes may supersede this disk projection; the history moment already covers its interval.
     if !(replayed && result.deduped) {
         dohc_engine_collab::author_coverage::advance_in(tx, key, false)
             .map_err(map_collab_hard_error)?;
+    }
+    if settles_owner_edits && crate::workspace_journals_file_moments_in_tx(tx, &key.workspace_id)? {
+        crate::enrolment::journal_owner_save_in_tx(tx, key, &result.moment.moment_id)?;
     }
     // The pulled projection IS the settled artifact (its job materializes
     // it): advance the marker exactly like a local settle would. Leaving the

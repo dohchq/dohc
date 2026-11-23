@@ -1,13 +1,12 @@
-import { appWords } from "@dohc/interface-words/apps";
-import { confirmWords } from "@dohc/interface-words/confirmations";
 import { Stack, useRouter } from "expo-router";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Alert, AppState, Linking, View } from "react-native";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { AppState, View } from "react-native";
 import { WebView } from "react-native-webview";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { useTheme } from "../theme";
 import { createNavigationRule, externalLink } from "./appNavigation";
 import type { RunningApp } from "./appStore";
+import { offerLink } from "./offerLink";
 
 // The running app, full screen in its own WebView, on an iPhone only (canOpenApps.ts). Native Back closes it, and the
 // screen leaves whenever the runner ends the app. While it runs, the workspace's apps are read again every CHECK_MS
@@ -56,27 +55,6 @@ export function AppRunScreen() {
 
 function AppView({ app, serverOrigin }: { app: RunningApp; serverOrigin: string }) {
   const [allows] = useState(() => createNavigationRule(app.action));
-  const asking = useRef(false);
-  const offer = (url: string) => {
-    if (asking.current) return;
-    asking.current = true;
-    const done = () => void (asking.current = false);
-    Alert.alert(
-      appWords.openOutside,
-      new URL(url).host,
-      [
-        { text: confirmWords.cancel, style: "cancel", onPress: done },
-        {
-          text: appWords.open,
-          onPress: () => {
-            done();
-            void Linking.openURL(url).catch(ignore);
-          },
-        },
-      ],
-      { onDismiss: done },
-    );
-  };
   return (
     <WebView
       style={{ flex: 1 }}
@@ -94,7 +72,7 @@ function AppView({ app, serverOrigin }: { app: RunningApp; serverOrigin: string 
       onShouldStartLoadWithRequest={allows}
       onOpenWindow={(event) => {
         const url = externalLink(event.nativeEvent.targetUrl, app.action, serverOrigin);
-        if (url) offer(url);
+        if (url) offerLink(url);
       }}
       onFileDownload={ignore}
       mediaCapturePermissionGrantType="deny"

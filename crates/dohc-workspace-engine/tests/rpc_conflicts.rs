@@ -1080,3 +1080,94 @@ async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
         json!({ "status": "gone" })
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resolution_places_the_chosen_copy_on_disk() {
+    let (scratch, transport, handle, workspace_id) = fixture("places-choice").await;
+    let path = "conflict-000.md";
+    let current = transport
+        .call(
+            RequestContext::unbounded(),
+            keyed_request(
+                10,
+                "versionedText.write",
+                Some(handle.clone()),
+                "seed-placed-current",
+                json!({
+                    "versionId": "main",
+                    "objectId": "placed-object",
+                    "path": path,
+                    "text": "recorded current",
+                    "momentId": "placed-recorded",
+                    "origin": "api",
+                    "publish": true,
+                    "nowMs": 10,
+                }),
+            ),
+        )
+        .await
+        .expect("seed a current head on disk");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(path)).expect("seeded file"),
+        "recorded current"
+    );
+    let snapshot = &current.result["snapshot"];
+    let mut payload = conflict_payload(&workspace_id, 0, "incoming");
+    payload["conflict"]["current"]["snapshot"] = json!({
+        "workspaceId": snapshot["workspaceId"],
+        "versionId": snapshot["versionId"],
+        "objectId": snapshot["objectId"],
+        "path": snapshot["path"],
+        "text": snapshot["text"],
+        "blobSha256": snapshot["blobSha256"],
+        "updatedAtMs": snapshot["updatedAtMs"],
+        "latestMomentId": snapshot["latestMomentId"],
+        "metadataOrigin": snapshot["metadataOrigin"],
+    });
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(11, "conflicts.open", Some(handle.clone()), payload),
+        )
+        .await
+        .expect("open a conflict against the head on disk");
+
+    let resolved = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "local": {
+                    "conflictId": "conflict-000",
+                    "resolution": "apply-incoming",
+                    "objectId": "placed-resolution-object",
+                    "writeMomentId": "placed-resolution-write",
+                    "deleteMomentId": "placed-resolution-delete",
+                    "metadataOrigin": "api",
+                    "nowMs": 20,
+                }}),
+            ),
+        )
+        .await
+        .expect("resolve to the incoming copy");
+    assert_eq!(resolved.result["placed"], true);
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(path)).expect("resolved file"),
+        "incoming"
+    );
+    let waiting: i64 = dohc_engine_storage::EngineStore::open_read_only(
+        &scratch.path().join(".dohc/engine/engine.db"),
+    )
+    .expect("open the store")
+    .read_with(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
+            [],
+            |row| row.get(0),
+        )
+    })
+    .expect("count waiting writes");
+    assert_eq!(waiting, 0);
+}

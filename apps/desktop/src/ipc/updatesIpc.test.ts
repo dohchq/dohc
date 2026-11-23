@@ -201,7 +201,7 @@ describe("registered updater IPC", () => {
     expect([...h.handlers.keys()]).toEqual(channels);
     expect(h.invoke(CHANNELS.getUpdateState, { ignored: true })).toEqual({
       status: "idle",
-      message: "Updates have not been checked yet.",
+      message: "dohc has not checked for updates yet.",
       currentVersion: "1.2.3",
       channel: "latest",
       canCheck: false,

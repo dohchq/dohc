@@ -41,8 +41,8 @@ use crate::records::{ApplySecretFileFromVersion, InbandSecret};
 use crate::store::{validate_identifier, validate_path};
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
 use dohc_engine_storage::{
-    EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
-    enqueue_delete_job, enqueue_job, put_binary_blob,
+    EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
+    StorageError, TxnOutcome, enqueue_delete_job, enqueue_job, put_binary_blob,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use zeroize::Zeroize;
@@ -118,15 +118,24 @@ pub struct SecretWrite {
     pub metadata_summary: Option<String>,
     pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
-    pub disk_intent: SecretDiskIntent,
 }
 
+/// What a job queued for the active version's protected file expects that
+/// file to hold, given the version, the path and the job's operation. It runs
+/// inside the change's transaction, only when the change queues a job for the
+/// active version, so a refusal leaves nothing recorded. A job for another
+/// version expects what the change itself knows, and the version switch
+/// checks the file.
+pub type SecretDiskCheck<'a> =
+    &'a dyn Fn(&Connection, &str, &str, MaterializationOperation) -> Result<Preimage, DomainError>;
+
 /// Whether a secret write's plaintext must reach disk or is already there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecretDiskIntent {
+#[derive(Clone, Copy)]
+pub enum SecretDiskIntent<'a> {
     /// Enqueue a pending materialization job: the secret-aware executor will
-    /// decrypt the tip and write the plaintext to the workspace file.
-    Materialize,
+    /// decrypt the tip and write the plaintext to the workspace file, only
+    /// while the file still holds what `check` gives.
+    Materialize { check: SecretDiskCheck<'a> },
     /// Capture: the plaintext came FROM the workspace file, so nothing must
     /// ever run — but a completed job marker is recorded so the
     /// materializer's staleness gate supersedes any older still-pending job
@@ -329,9 +338,10 @@ impl<'a> SecretFileStore<'a> {
     pub fn write_secret_file(
         &mut self,
         input: &SecretWrite,
+        disk_intent: SecretDiskIntent<'_>,
         faults: &dyn FaultInjector,
     ) -> Result<SecretWriteResult, DomainError> {
-        self.write_secret_file_with(input, faults, |_, _| Ok(()))
+        self.write_secret_file_with(input, disk_intent, faults, |_, _| Ok(()))
     }
 
     /// Callback contract for secret `_with` mutations:
@@ -348,6 +358,7 @@ impl<'a> SecretFileStore<'a> {
     pub fn write_secret_file_with<F>(
         &mut self,
         input: &SecretWrite,
+        disk_intent: SecretDiskIntent<'_>,
         faults: &dyn FaultInjector,
         after: F,
     ) -> Result<SecretWriteResult, DomainError>
@@ -409,7 +420,7 @@ impl<'a> SecretFileStore<'a> {
                 &moment,
                 moment_order,
                 Some(&sealed),
-                matches!(input.disk_intent, SecretDiskIntent::AlreadyOnDisk),
+                matches!(disk_intent, SecretDiskIntent::AlreadyOnDisk),
             )?;
             upsert_tip(tx, &moment, moment_order, &sealed)?;
             // Persist the ciphertext blob (never plaintext), then enqueue the
@@ -421,16 +432,18 @@ impl<'a> SecretFileStore<'a> {
                 workspace_id: input.workspace_id.clone(),
                 target_path: path.clone(),
                 content_sha256: ciphertext_sha,
-                // The secret-aware executor decrypts the tip and writes
-                // plaintext; preimage revalidation is its concern (it knows
-                // the plaintext it is about to write), so the durable intent
-                // records no on-disk preimage here.
                 preimage: Preimage::Absent,
                 target_generation: moment_order,
                 now_ms: input.now_ms,
             };
-            match input.disk_intent {
-                SecretDiskIntent::Materialize => enqueue_job(tx, &spec)?,
+            match disk_intent {
+                SecretDiskIntent::Materialize { check } => queue_secret_job(
+                    tx,
+                    check,
+                    &input.version_id,
+                    MaterializationOperation::Write,
+                    spec,
+                )?,
                 SecretDiskIntent::AlreadyOnDisk => {
                     dohc_engine_storage::record_completed_job(tx, &spec)?;
                 }
@@ -454,9 +467,10 @@ impl<'a> SecretFileStore<'a> {
     pub fn delete_secret_file(
         &mut self,
         input: &SecretDelete,
+        check: SecretDiskCheck<'_>,
         faults: &dyn FaultInjector,
     ) -> Result<Option<SecretMomentRecord>, DomainError> {
-        delete_secret_file_keyless_with(self.store, input, faults, |_, _| Ok(()))
+        delete_secret_file_keyless_with(self.store, input, check, faults, |_, _| Ok(()))
     }
 
     /// Autonomous secret capture: derives the moment id via the length-framed
@@ -531,8 +545,8 @@ impl<'a> SecretFileStore<'a> {
                 ),
                 metadata_correlation_id: input.metadata_correlation_id.clone(),
                 now_ms: input.now_ms,
-                disk_intent: SecretDiskIntent::AlreadyOnDisk,
             },
+            SecretDiskIntent::AlreadyOnDisk,
             faults,
             after,
         )?;
@@ -843,10 +857,13 @@ where
 /// The keyless secret delete: records a delete moment and removes the tip. A
 /// no-op (no moment) when there is no current tip. Free-standing because a
 /// delete never decrypts — capture retire must work even when the workspace
-/// key is unavailable. `after` runs inside the delete transaction.
+/// key is unavailable. The queued delete removes the workspace file only while
+/// it still holds what `check` gives. `after` runs inside the delete
+/// transaction.
 pub fn delete_secret_file_keyless_with<F>(
     store: &mut EngineStore,
     input: &SecretDelete,
+    check: SecretDiskCheck<'_>,
     faults: &dyn FaultInjector,
     after: F,
 ) -> Result<Option<SecretMomentRecord>, DomainError>
@@ -856,7 +873,7 @@ where
     delete_secret_file_inner(
         store,
         input,
-        SecretDeleteDiskIntent::Materialize,
+        SecretDeleteDiskIntent::Materialize { check },
         faults,
         after,
     )
@@ -1151,12 +1168,14 @@ pub fn compare_secret_files_page_keyless(
 }
 
 /// Three-way-apply one source-version secret state to the destination. The key
-/// is used only for equality/base comparisons; writes copy sealed fields.
-/// `after` runs inside the apply transaction.
+/// is used only for equality/base comparisons; writes copy sealed fields. The
+/// queued write or delete changes the workspace file only while it still
+/// holds what `check` gives. `after` runs inside the apply transaction.
 pub fn apply_secret_file_from_version_with<F>(
     store: &mut EngineStore,
     key: &SecretDataKey,
     input: &ApplySecretFileFromVersion,
+    check: SecretDiskCheck<'_>,
     faults: &dyn FaultInjector,
     after: F,
 ) -> Result<SecretWriteResult, DomainError>
@@ -1241,9 +1260,12 @@ where
         if let Some(source) = source.as_ref() {
             upsert_tip(tx, &moment, moment_order, source)?;
             let ciphertext_sha = put_binary_blob(tx, source.ciphertext())?;
-            enqueue_job(
+            queue_secret_job(
                 tx,
-                &MaterializationJobSpec {
+                check,
+                to_version_id,
+                MaterializationOperation::Write,
+                MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
                     workspace_id: workspace_id.to_owned(),
                     target_path: path.clone(),
@@ -1261,9 +1283,12 @@ where
                 reason: "secret delete apply has no target plaintext",
             })?;
             let ciphertext_sha = put_binary_blob(tx, target.ciphertext())?;
-            enqueue_delete_job(
+            queue_secret_job(
                 tx,
-                &MaterializationJobSpec {
+                check,
+                to_version_id,
+                MaterializationOperation::Delete,
+                MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
                     workspace_id: workspace_id.to_owned(),
                     target_path: path.clone(),
@@ -1306,7 +1331,8 @@ fn secret_plaintexts_equal(
 
 /// Restore the sealed state that existed immediately before a secret moment.
 /// The prior ciphertext is copied forward verbatim; history is append-only.
-/// `after` runs inside the restore transaction.
+/// The queued write or delete changes the workspace file only while it still
+/// holds what `check` gives. `after` runs inside the restore transaction.
 #[allow(clippy::too_many_arguments)]
 pub fn restore_secret_file_verbatim_with_metadata_and_after<F>(
     store: &mut EngineStore,
@@ -1318,6 +1344,7 @@ pub fn restore_secret_file_verbatim_with_metadata_and_after<F>(
     metadata_summary: Option<String>,
     metadata_correlation_id: Option<String>,
     now_ms: i64,
+    check: SecretDiskCheck<'_>,
     faults: &dyn FaultInjector,
     after: F,
 ) -> Result<SecretRestoreResult, DomainError>
@@ -1412,9 +1439,12 @@ where
         if let Some(sealed) = target.as_ref() {
             upsert_tip(tx, &record, moment_order, sealed)?;
             let ciphertext_sha = put_binary_blob(tx, sealed.ciphertext())?;
-            enqueue_job(
+            queue_secret_job(
                 tx,
-                &MaterializationJobSpec {
+                check,
+                &record.version_id,
+                MaterializationOperation::Write,
+                MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
                     workspace_id: workspace_id.to_owned(),
                     target_path: record.path.clone(),
@@ -1429,9 +1459,12 @@ where
                 reason: "secret restore delete has no outgoing tip",
             })?;
             let content_sha256 = put_binary_blob(tx, outgoing.ciphertext())?;
-            enqueue_delete_job(
+            queue_secret_job(
                 tx,
-                &MaterializationJobSpec {
+                check,
+                &record.version_id,
+                MaterializationOperation::Delete,
+                MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
                     workspace_id: workspace_id.to_owned(),
                     target_path: record.path.clone(),
@@ -1460,16 +1493,36 @@ where
     committed(outcome)
 }
 
-#[derive(Debug, Clone, Copy)]
-enum SecretDeleteDiskIntent {
-    Materialize,
+/// Queue the job a protected change makes for `spec`'s file. For the active
+/// version, `check` gives what the job expects the file to hold. A job for
+/// another version keeps `spec.preimage`.
+fn queue_secret_job(
+    tx: &Transaction<'_>,
+    check: SecretDiskCheck<'_>,
+    version_id: &str,
+    operation: MaterializationOperation,
+    mut spec: MaterializationJobSpec,
+) -> Result<(), DomainError> {
+    if crate::store::version_is_active(tx, &spec.workspace_id, version_id)? {
+        spec.preimage = check(tx, version_id, &spec.target_path, operation)?;
+    }
+    match operation {
+        MaterializationOperation::Write => enqueue_job(tx, &spec)?,
+        MaterializationOperation::Delete => enqueue_delete_job(tx, &spec)?,
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum SecretDeleteDiskIntent<'a> {
+    Materialize { check: SecretDiskCheck<'a> },
     AlreadyAbsent,
 }
 
 fn delete_secret_file_inner(
     store: &mut EngineStore,
     input: &SecretDelete,
-    disk_intent: SecretDeleteDiskIntent,
+    disk_intent: SecretDeleteDiskIntent<'_>,
     faults: &dyn FaultInjector,
     after: impl FnOnce(&Transaction<'_>, &SecretMomentRecord) -> Result<(), DomainError>,
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
@@ -1545,15 +1598,18 @@ fn delete_secret_file_inner(
                     workspace_id: input.workspace_id.clone(),
                     target_path: path.clone(),
                     content_sha256,
-                    // The keyless RPC delete cannot derive a plaintext hash.
-                    // The secret-only executor adopts the current disk file
-                    // and never emits a plaintext conflict artifact.
                     preimage: Preimage::Absent,
                     target_generation: moment_order,
                     now_ms: input.now_ms,
                 };
                 match disk_intent {
-                    SecretDeleteDiskIntent::Materialize => enqueue_delete_job(tx, &spec)?,
+                    SecretDeleteDiskIntent::Materialize { check } => queue_secret_job(
+                        tx,
+                        check,
+                        &input.version_id,
+                        MaterializationOperation::Delete,
+                        spec,
+                    )?,
                     SecretDeleteDiskIntent::AlreadyAbsent => {
                         dohc_engine_storage::record_completed_job(tx, &spec)?;
                     }
@@ -1797,7 +1853,7 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 /// Structural validation runs first; a safe path that is not classified
 /// secret gets the dedicated compatibility error rather than being hidden in
 /// encrypted storage where normal history/search would no longer see it.
-fn validate_secret_path(path: &str) -> Result<String, DomainError> {
+pub fn validate_secret_path(path: &str) -> Result<String, DomainError> {
     validate_path(path)?;
     let (classification, normalized) =
         dohc_engine_files::policy::classify_engine_file_path_normalized(path);

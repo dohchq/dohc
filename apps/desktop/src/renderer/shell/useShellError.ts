@@ -99,10 +99,12 @@ export type ShellErrorKind =
   | "share-refresh"
   | "share-capture"
   | "share-collision-record"
+  | "share-editing-not-ready"
   | "kept-copies-summary"
   | "kept-copies-more"
   | "drive-no-atomic-placement"
   | "network-share"
+  | "cloud-sync-folder"
   | "file-recovery-unavailable"
   | "secret-key-unavailable"
   | "kept-files"
@@ -207,9 +209,9 @@ function secretKeyWords(reason: string): string {
     case "volume-shares-new-files":
       return VOLUME_SHARES_NEW_FILES_WORDS;
     case "key-missing":
-      return `The workspace secret key file is missing. Restore ${SECRET_KEY_FILE} from a backup, then choose Try again.`;
+      return `The workspace secret key file is missing. Restore ${SECRET_KEY_FILE} from a backup.`;
     case "key-corrupt":
-      return `The workspace secret key file is damaged. Restore ${SECRET_KEY_FILE} from a backup, then choose Try again.`;
+      return `The workspace secret key file is damaged. Restore ${SECRET_KEY_FILE} from a backup.`;
     default:
       return "dohc could not read the workspace secret key file.";
   }
@@ -266,8 +268,8 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     (
       error: Omit<ShellError, "id" | "atMs" | "seen"> & { id?: string },
       seen: boolean | "keep" | "repeat" | "reader" | "quiet" = false,
-    ) => {
-      if (currentWorkspace.current !== workspaceId) return;
+    ): string | null => {
+      if (currentWorkspace.current !== workspaceId) return null;
       nextId.current += 1;
       const id = error.id ?? `shell-error-${nextId.current}`;
       const atMs = Date.now();
@@ -307,6 +309,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         };
         return [...current.filter((existing) => !matches(existing)), next];
       });
+      return id;
     },
     [workspaceId],
   );
@@ -423,12 +426,12 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
               ? [
                   checked > 0 || sortedPaths.length > 0
                     ? "dohc checked only some of this share's files."
-                    : "dohc couldn't check this share's files.",
+                    : "dohc could not check this share's files.",
                 ]
               : []),
             ...(sortedPaths.length
               ? [
-                  "dohc couldn't confirm these changes reached the share.",
+                  "dohc could not confirm these changes reached the share.",
                   ...(ended
                     ? ["They are kept on this computer."]
                     : [
@@ -475,8 +478,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   const clearTabLimitError = useCallback(() => clearKind("tab-limit"), [clearKind]);
   const showSingletonTabSplitError = useCallback(() => {
     push({
-      message:
-        "This tab owns its process and cannot be split. Open another tab before you create an editor group.",
+      message: "This tab cannot be split. Open another tab first.",
       retry: null,
       kind: "singleton-tab-split",
     });
@@ -845,6 +847,24 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       ),
     [push],
   );
+  const reportCloudSyncFolder = useCallback(
+    (notice: { title: string; message: string; service: string | null; toast: boolean }) =>
+      push(
+        {
+          tone: "warning",
+          title: notice.title,
+          message: notice.message,
+          details: [
+            ["Detail", "cloud-sync-folder"],
+            ...(notice.service ? ([["Service", notice.service]] as const) : []),
+          ],
+          retry: null,
+          kind: "cloud-sync-folder",
+        },
+        !notice.toast,
+      ),
+    [push],
+  );
   const reportRecoveryUnavailable = useCallback(
     (unavailable: boolean, retry: () => void, openFolder: () => void) => {
       if (!unavailable) {
@@ -853,7 +873,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       }
       push({
         message:
-          "dohc could not read the recovery folder. File recovery is waiting. Check folder access, then try again.",
+          "dohc could not read the recovery folder, so file recovery is waiting. Check folder permissions.",
         details: [["Folder", ".dohc/engine/displaced"]],
         retry,
         action: { label: "Show recovery folder", run: openFolder },
@@ -873,7 +893,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       push(
         {
           title: "History could not save protected files",
-          message: secretKeyWords(reason),
+          message: `${secretKeyWords(reason)} Until then, History saves no changes to protected files. Once the key works, it saves only the text they have then.`,
           details: [
             ["File", SECRET_KEY_FILE],
             ["Reason", reason],
@@ -930,7 +950,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
                 : stopped.length === 0
                   ? "History is still paused. Restart dohc to try again."
                   : stopped.length === 1
-                    ? `Close every tab showing "${stopped[0]}", then reopen it and try again. Live editing on that page stopped.`
+                    ? `Live editing stopped on "${stopped[0]}". Close every tab showing it, then reopen it.`
                     : `History is still paused because live editing stopped on ${stopped.length} pages. Restart dohc to try again.`,
           ...(details.length ? { details } : {}),
           retry: notice.retry,
@@ -1140,8 +1160,8 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       kind?: ShellErrorKind,
       action?: ShellError["action"],
       target?: NoticeTarget,
-    ) => {
-      push({
+    ): (() => void) => {
+      const id = push({
         message,
         retry: null,
         tone: "success",
@@ -1149,6 +1169,14 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         ...(target ? { target } : {}),
         ...(action ? { action } : undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
       });
+      return () => {
+        if (!id) return;
+        setShellErrors((current) =>
+          current.some((error) => error.id === id)
+            ? current.filter((error) => error.id !== id)
+            : current,
+        );
+      };
     },
     [push],
   );
@@ -1185,8 +1213,14 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     [clearKind, push],
   );
   const showWarningNotice = useCallback(
-    (message: string, paths?: readonly string[]) => {
-      push({ message, retry: null, tone: "warning", ...(paths ? { paths } : {}) });
+    (message: string, paths?: readonly string[], identity?: string) => {
+      push({
+        message,
+        retry: null,
+        tone: "warning",
+        ...(paths ? { paths } : {}),
+        ...(identity ? { identity } : {}),
+      });
     },
     [push],
   );
@@ -1231,7 +1265,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     if (summarized) {
       fresh.push(
         row({
-          message: `dohc kept ${arrived.length} copies of files other programs changed.`,
+          message: `dohc kept ${arrived.length} copies of files changed outside dohc.`,
           retry: null,
           kind: "kept-copies-summary",
           seen: false,
@@ -1521,13 +1555,15 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     // a failure that is being retried is no longer the newest thing this
     // surface knows. The retry runs once, outside the updater. Only the row
     // retried goes, so a failure the retry has already reported again stays.
-    // A share's collision-record row stays until a refresh completes.
+    // A share's collision-record row stays until a refresh completes, and
+    // its editing row until editing is on.
     setShellErrors((current) =>
       target?.kind === "sync-refusal" ||
       target?.kind === "capture-held" ||
       target?.kind === "outside-copy-read" ||
       target?.kind === "protected-copy-read" ||
-      target?.kind === "share-collision-record"
+      target?.kind === "share-collision-record" ||
+      target?.kind === "share-editing-not-ready"
         ? current
         : current.filter((error) => error !== target),
     );
@@ -1559,6 +1595,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     clearCollectionsWaiting,
     reportDriveLimit,
     reportNetworkShare,
+    reportCloudSyncFolder,
     reportKeptFiles,
     reportImportSkips,
     showRetainedCopies,

@@ -20,6 +20,11 @@ export function ShellTitlebar(props: {
   setQuickOpenOpen: (open: boolean) => void;
   syncStatus: SyncStatusResult | null;
   failedSaves: number;
+  onOpenConflicts?: () => void;
+  onOpenSyncSettings?: () => void;
+  onConnectServer?: () => void;
+  onSignInAgain?: () => void;
+  onOpenNotices?: () => void;
   showWorkbenchMenu: (context: "status") => Promise<void>;
   agentActive: boolean;
   restrictedMode?: { asking: boolean; onTrust: () => void };
@@ -50,7 +55,15 @@ export function ShellTitlebar(props: {
       version={props.version}
       workspaceStatus={
         <>
-          <WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} />
+          <WorkspaceSyncStatus
+            syncStatus={syncStatus}
+            failedSaves={failedSaves}
+            onOpenConflicts={props.onOpenConflicts}
+            onOpenSyncSettings={props.onOpenSyncSettings}
+            onConnectServer={props.onConnectServer}
+            onSignInAgain={props.onSignInAgain}
+            onOpenNotices={props.onOpenNotices}
+          />
           {props.restrictedMode ? <RestrictedModeIndicator {...props.restrictedMode} /> : null}
         </>
       }

@@ -6,6 +6,10 @@ export const SHARE_CODE_SECRET: CopySecret = {
   what: "the share code",
   again: "Copy it again from Shared by me while the share is active.",
 };
+export const INVITATION_SECRET: CopySecret = {
+  what: "the invitation",
+  again: "Copy it again from the person's row in Share while the share is active.",
+};
 export const BROWSER_INVITATION_SECRET: CopySecret = {
   what: "the browser invitation",
   again: "Copy it again from Shared by me while the share is active.",

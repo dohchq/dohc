@@ -1,6 +1,12 @@
+import { agentRunHistoryOperations } from "./ipc/agentRunHistoryOperations";
 import { captureOperations } from "./ipc/captureOperations";
 import { linksOperations } from "./ipc/linksOperations";
-import { protectedCopyOperations, stoppedRunOperations } from "./ipc/writeOperations";
+import { retrievalOperations } from "./ipc/retrievalOperations";
+import {
+  agentRunUndoOperations,
+  protectedCopyOperations,
+  stoppedRunOperations,
+} from "./ipc/writeOperations";
 import { heldChangeOperations } from "./ipc/heldChangeOperations";
 import {
   shareHandoffOperations,
@@ -66,6 +72,7 @@ import {
   CollectionCopyChangedEvent,
   NoticesChangedEvent,
   LiveDraftRecoveryChangedEvent,
+  SetAsideDraftChange,
   SearchResultsEvent,
   FolderAppAnswer,
   ShareHandoffStatus,
@@ -92,6 +99,7 @@ import {
   UsageRecordStoppedEvent,
   noticeOperations,
   liveDraftRecoveryOperations,
+  setAsideDraftOperations,
   stopAndRestoreRecoveryOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
@@ -191,7 +199,9 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(shareCopyOperations, invoke),
   ...operationBridge(linksOperations, invoke),
+  ...operationBridge(retrievalOperations, invoke),
   ...operationBridge(captureOperations, invoke),
+  ...operationBridge(agentRunHistoryOperations, invoke),
   ...operationBridge(heldChangeOperations, invoke),
   ...operationBridge(accessOperations, invoke),
   ...operationBridge(memberOperations, invoke),
@@ -313,6 +323,7 @@ const bridge: DohcDesktopBridge = {
   stopAndRestore: (payload) => ipcRenderer.invoke(CHANNELS.stopAndRestore, payload),
   ...operationBridge(stopAndRestoreRecoveryOperations, invoke),
   ...operationBridge(liveDraftRecoveryOperations, invoke),
+  ...operationBridge(setAsideDraftOperations, invoke),
   undoStopAndRestore: (payload) => ipcRenderer.invoke(CHANNELS.undoStopAndRestore, payload),
   confirmCollectionAutomationStep: (payload) =>
     ipcRenderer.invoke(CHANNELS.confirmCollectionAutomationStep, payload),
@@ -580,6 +591,8 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.noticesChanged, NoticesChangedEvent, () => listener()),
   onLiveDraftRecoveryChanged: (listener) =>
     onEvent(CHANNELS.liveDraftRecoveryChanged, LiveDraftRecoveryChangedEvent, listener),
+  onSetAsideDraftChanged: (listener) =>
+    onEvent(CHANNELS.setAsideDraftChanged, SetAsideDraftChange, listener),
   onScheduleHostChanged: (listener) =>
     onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
   onChatDispatchNotices: (listener) =>
@@ -588,6 +601,7 @@ const bridge: DohcDesktopBridge = {
   onAgentRunState: (listener) => onEvent(CHANNELS.agentRunState, AgentRunStateEvent, listener),
   ...operationBridge(stoppedRunOperations, invoke),
   ...operationBridge(protectedCopyOperations, invoke),
+  ...operationBridge(agentRunUndoOperations, invoke),
   ...operationBridge(chatDispatchPauseOperations, invoke),
   ...operationBridge(agentThreadOperations, invoke),
   onChatDispatchPaused: (listener) =>

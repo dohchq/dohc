@@ -199,7 +199,7 @@ describe("this computer's .dohc/local", () => {
         );
         expect(refused).toBeInstanceOf(LocalStateFolderError);
         expect((refused as Error).message).toBe(
-          "This workspace's .dohc/local can't be read. Make sure you can open it, then try again.",
+          "This workspace's .dohc/local cannot be read. Check that you can open it, then try again.",
         );
         await expect(existingLocalStateFolder(workspace.rootPath, "trash")).rejects.toBeInstanceOf(
           LocalStateFolderError,

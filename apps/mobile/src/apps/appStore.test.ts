@@ -11,7 +11,13 @@ import {
   signedIn,
   version,
 } from "../server/testApps";
-import { deferred, memoryStore, testServer, type Answer } from "../server/testServer";
+import {
+  deferred,
+  memoryStore,
+  serveSessionEnd,
+  testServer,
+  type Answer,
+} from "../server/testServer";
 import { appTeardown, createAppRunner, createWorkspaceApps } from "./appStore";
 
 const app = { ...version(A, true), name: "signup" };
@@ -107,6 +113,7 @@ describe("teardown", () => {
   it("ends the app before Sign out's delete, and at a 401", async () => {
     for (const end of ["sign-out", "401"] as const) {
       const server = testServer();
+      serveSessionEnd(server);
       const stored = { origin: server.origin, token: "tok", userId: "u-1", email: "a@example.com" };
       const runner = createAppRunner();
       const teardown = appTeardown(runner);

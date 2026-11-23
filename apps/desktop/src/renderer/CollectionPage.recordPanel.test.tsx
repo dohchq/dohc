@@ -1,6 +1,16 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderBare,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
+import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -38,6 +48,11 @@ import type { CollectionCellChange } from "@dohc/collection-views";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { deferred } from "../testing/deferred";
 import { TextNotSavedError } from "./shell/copyDetails";
+
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="test">{children}</WorkspaceSessionProvider>;
+}
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: Session });
 
 // A document Collection's record, open in the panel beside its view. The
 // page, the panel, the fields and the write queue are real. The record's

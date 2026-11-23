@@ -26,6 +26,10 @@ import { createAccountDeletionRoute } from "./accountDeletionRoute";
 import { NOTICE_DISMISSED_RETENTION_MS } from "@dohc/workspace-contracts/relay";
 import { noticeIdFrom } from "./storage/notices";
 import { deletionScope } from "./storage/accountDeletion";
+import {
+  admitShareInvitationEmail,
+  SHARE_INVITATION_EMAILS,
+} from "./storage/shareInvitationEmails";
 import type { StorageContext } from "./storage/context";
 import { createRelayDatasetHost } from "./datasetHost";
 import { deriveServiceHostBearer, authorizeServiceHostReplication } from "./serviceHostCredential";
@@ -603,6 +607,11 @@ async function fixture() {
     ),
   ];
   seedJournal(storage, ownedShare);
+  storage.db
+    .prepare(
+      "INSERT INTO sync_relay_share_departures (share_id, recipient_user_id, left_at_ms) VALUES (?, ?, ?)",
+    )
+    .run(ownedShare, "other", 1);
   const ownedIds = {
     shareIds: storage.db
       .prepare("SELECT share_id FROM sync_relay_shares WHERE granter_user_id=?")
@@ -738,6 +747,17 @@ async function fixture() {
       )
       .get(),
   ).toBeTruthy();
+  for (const inviterUserId of [deleted, "other"])
+    expect(
+      admitShareInvitationEmail(storage, {
+        inviterUserId,
+        grantId: `invited-by-${inviterUserId}`,
+        nowMs: Date.now(),
+        limit: 50,
+        windowMs: 86_400_000,
+        grantIntervalMs: 60_000,
+      }),
+    ).toMatchObject({ admitted: true });
   const manager = (afterPhase?: (phase: "fenced" | "runtime" | "sql") => void) =>
     createAccountDeletionRoute({
       storage,
@@ -801,6 +821,12 @@ async function fixture() {
           .prepare("SELECT 1 FROM dohc_dataset_automation_presses WHERE press_id='deleted-button'")
           .get(),
       ).toBeUndefined();
+      expect(
+        storage.db
+          .prepare(`SELECT inviter_user_id FROM ${SHARE_INVITATION_EMAILS}`)
+          .all()
+          .map((row) => row.inviter_user_id),
+      ).toEqual(["other"]);
       expect(storage.workspaceIsOwnedBy(otherWorkspace, "other")).toBe(true);
       expect(
         storage.db

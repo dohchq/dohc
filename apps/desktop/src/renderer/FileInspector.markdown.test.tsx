@@ -88,6 +88,12 @@ describe("FileInspector renders markdown through the shared component map", () =
       truncated: false,
     })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+    createWorkspaceFile: vi.fn(async ({ relativePath }: { relativePath: string }) => ({
+      path: relativePath,
+    })),
+    linksResolve: vi.fn(async () => ({
+      results: [] as Array<{ path: string | null; create: string; fragment: string | null }>,
+    })),
     openFileExternally: vi.fn(async () => undefined),
     linksIn: vi.fn(async () => null),
     listWorkspaceFiles: vi.fn(async () => ({
@@ -237,7 +243,7 @@ describe("FileInspector renders markdown through the shared component map", () =
     // About lists the links into a document, so the document asks for none.
     expect(bridgeMock.linksIn).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open the full file externally" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open full file externally" }));
     await waitFor(() =>
       expect(bridgeMock.openFileExternally).toHaveBeenCalledWith({
         workspaceId: "ws-1",
@@ -280,4 +286,59 @@ describe("FileInspector renders markdown through the shared component map", () =
       }
     },
   );
+
+  it("explains that a large non-truncated note opens in Markdown source for edits", async () => {
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    const notice = await screen.findByTestId("large-note-notice");
+    expect(notice.textContent).toBe("This note is over 256 KB. Edits open in Markdown source.");
+  });
+
+  it("creates an unresolved link target before opening it, and avoids creation in read-only shares", async () => {
+    const read = bridgeMock.readWorkspaceText.getMockImplementation();
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({
+      text: `See [Missing Page](Missing%20Page.md) here.\n\n${"x".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES)}\n`,
+      truncated: false,
+    }));
+    bridgeMock.linksResolve.mockResolvedValue({
+      results: [{ path: null, create: "Missing Page.md", fragment: null }],
+    });
+    try {
+      const onOpenPath = vi.fn();
+      const first = render(
+        <FileInspector workspaceId="ws-1" path="a.md" onOpenPath={onOpenPath} />,
+      );
+      const link = await screen.findByRole("link", { name: "Missing Page" });
+      fireEvent.click(link);
+      await waitFor(() => expect(onOpenPath).toHaveBeenCalledWith("Missing Page.md", undefined));
+      expect(bridgeMock.createWorkspaceFile).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "Missing Page.md",
+        initialText: "",
+        exclusive: true,
+      });
+      first.unmount();
+
+      bridgeMock.createWorkspaceFile.mockClear();
+      onOpenPath.mockClear();
+      const onButtonNotice = vi.fn();
+      render(
+        <FileInspector
+          workspaceId="ws-1"
+          path="a.md"
+          readOnly
+          onOpenPath={onOpenPath}
+          onButtonNotice={onButtonNotice}
+        />,
+      );
+      const roLink = await screen.findByRole("link", { name: "Missing Page" });
+      fireEvent.click(roLink);
+      await waitFor(() =>
+        expect(onButtonNotice).toHaveBeenCalledWith("This linked page does not exist yet."),
+      );
+      expect(bridgeMock.createWorkspaceFile).not.toHaveBeenCalled();
+      expect(onOpenPath).not.toHaveBeenCalled();
+    } finally {
+      if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
+    }
+  });
 });

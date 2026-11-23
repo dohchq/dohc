@@ -35,9 +35,9 @@ The share page also advertises `/api/mcp` through its HTTP `Link` header. That e
 An agent signs in with the standard MCP authorization (MCP 2025-06-18):
 
 1. The MCP client connects without a token. share-web answers 401, and its `WWW-Authenticate` header names `/.well-known/oauth-protected-resource/mcp/s/<secret>`.
-2. The client reads that document and `/.well-known/oauth-authorization-server`, then registers at `/oauth/register`.
+2. The client reads that document and `/.well-known/oauth-authorization-server` (which advertises RFC 9207 `authorization_response_iss_parameter_supported`), then registers at `/oauth/register`.
 3. The client opens `/oauth/authorize` in a browser with an S256 PKCE challenge. Its `resource` is the full MCP address.
-4. A person reads the consent page and selects **Allow**. The page names the share, its access, the name the agent reported, and the host the browser returns to. Anyone who has the MCP address can do this step, because the address holds the link secret.
+4. A person reads the consent page and selects **Allow**. The page names the share, its access, the name the agent reported, the host the browser returns to, and a note that dohc limits only what the agent reaches here. The redirect back to the client carries `iss` matching the server's `issuer`. Anyone who has the MCP address can do this step, because the address holds the link secret.
 5. The client trades the code for tokens at `/oauth/token`. It sends `Authorization: Bearer <access token>` on each MCP request.
 
 An access token lasts 1 hour. The client gets a new one with its refresh token.
@@ -92,7 +92,7 @@ The sign-in follows the steps above, with its own metadata at `/.well-known/oaut
 If the browser is signed out, `/oauth/authorize` first asks for the account's email and password, then returns to the same request.
 The consent page shows the signed-in account with **Not you?**, which signs the browser out.
 The person names a new agent, or chooses one of their agents to sign in again.
-They choose View, Comment, Edit, or None for each workspace the account owns. The address's workspace starts at Edit and the rest at None. Signing in again starts from the agent's current reach.
+They choose View, Comment, Edit, or None for each workspace the account owns. The address's workspace starts at View and the rest at None. Signing in again starts from the agent's current reach.
 **Allow** asks for no password. If the account's password changed after this browser signed in, the page asks the browser to sign in again first.
 The page runs no script, so choosing who the agent is posts the form and draws the page again.
 The relay keeps the agent, its reach, and its tokens, as it does for a link. Restarting share-web does not sign it out.
@@ -449,9 +449,14 @@ Each phone sign-in holds at most one binding, so no request names a device or an
 - `PUT` takes `{token, environment}`: the APNs device token in lowercase hex, and `sandbox` or `production`.
 - `DELETE` takes `{generation}` and removes the binding only while it still has that generation.
 
-Configure both relay values: `DOHC_RELAY_APNS_TOPIC`, the app's bundle ID, and `DOHC_RELAY_APNS_ENVIRONMENTS`, a comma-separated list of the environments phones may register in.
-Partial configuration stops the relay and names each missing value.
-With neither set, every method returns `{ok: true, available: false}`, and `PUT` receives 409.
+Configure all five relay values:
+- `DOHC_RELAY_APNS_TOPIC`: the app's bundle ID.
+- `DOHC_RELAY_APNS_ENVIRONMENTS`: a comma-separated list of the environments phones may register in.
+- `DOHC_RELAY_APNS_KEY_FILE`: the path to Apple's `.p8` token-signing key. The relay reads it once, at startup.
+- `DOHC_RELAY_APNS_KEY_ID` and `DOHC_RELAY_APNS_TEAM_ID`: the key's 10-character ID and your Apple team ID.
+
+Partial or invalid configuration stops the relay and names each variable, never its value.
+With none set, every method returns `{ok: true, available: false}`, and `PUT` receives 409.
 Otherwise each returns `{ok: true, available: true, enabled, generation}`. The server never returns a token.
 A token another sign-in holds moves to the caller, and the answer is the same whether it was held or free.
 Revoking the sign-in through the relay and deleting the account end the binding at once. A sign-in revoked through the relay receives 404 on `PUT`, even for a request that was already in flight. A sign-out or password reset through the account server leaves it until the sign-in expires, and the relay never sends to a binding whose sign-in has ended.

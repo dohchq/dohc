@@ -17,7 +17,7 @@ it("explains private contents and keeps cancelled save dialogs reversible", asyn
     />,
   );
   expect(
-    screen.getByText(/private records, uploads, source, history, and retry credentials/),
+    screen.getByText(/private record, upload, source file, history entry, and retry credential/),
   ).toBeTruthy();
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Save recovery file" }));

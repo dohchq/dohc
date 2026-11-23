@@ -3,6 +3,9 @@
 pub(crate) mod cache;
 mod edges;
 pub(crate) mod incoming;
+#[cfg(test)]
+pub(crate) mod parser;
+#[cfg(not(test))]
 mod parser;
 pub(crate) mod query;
 pub(crate) mod resolver;
@@ -212,7 +215,7 @@ fn normalize_path(path: &str) -> Option<String> {
     }
     Some(parts.join("/"))
 }
-fn path_keys(path: &str) -> Vec<(&'static str, String)> {
+pub(crate) fn path_keys(path: &str) -> Vec<(&'static str, String)> {
     let folded = path.to_lowercase();
     let name = path.rsplit('/').next().unwrap_or(path);
     let stem = resolver::without_extension(name);

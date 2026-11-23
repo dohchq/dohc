@@ -35,7 +35,7 @@ describe("workspaceName", () => {
   it("uses the final path segment and ignores trailing separators", () => {
     expect(workspaceName({ ...workspace, rootPath: "/home/sam/dohc/" })).toBe("dohc");
     expect(workspaceName({ ...workspace, rootPath: "C:\\Users\\ice\\dohc\\" })).toBe("dohc");
-    expect(workspaceName({ ...workspace, rootPath: "/" })).toBe("workspace");
+    expect(workspaceName({ ...workspace, rootPath: "/" })).toBe("Workspace");
   });
 
   // A shared view's folder is named after its share ID.
@@ -140,7 +140,7 @@ describe("Titlebar", () => {
       />,
     );
 
-    const primary = screen.getByRole("button", { name: "Toggle primary sidebar" });
+    const primary = screen.getByRole("button", { name: "Toggle sidebar" });
     const about = screen.getByRole("button", { name: "Toggle About" });
     expect(primary.getAttribute("aria-pressed")).toBe("true");
     expect(about.getAttribute("aria-pressed")).toBe("false");
@@ -406,7 +406,7 @@ it("returns focus after choosing a workspace", async () => {
   const trigger = screen.getByTestId("workspace-switcher");
   trigger.focus();
   fireEvent.click(trigger);
-  const option = screen.getAllByTestId("workspace-switcher-option")[1]!;
+  const option = screen.getAllByTestId("workspace-switcher-option")[1]!.querySelector("button")!;
   option.focus();
   fireEvent.click(option);
   await waitFor(() => expect(document.activeElement).toBe(trigger));

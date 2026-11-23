@@ -477,7 +477,7 @@ describe("desktop bootstrap", () => {
     await ready;
     expect(boxes).toEqual([
       {
-        title: "dohc couldn't read its workspace registry",
+        title: "dohc could not read its workspace list",
         content: expect.stringContaining(`File: ${registryFile}\n`),
       },
     ]);

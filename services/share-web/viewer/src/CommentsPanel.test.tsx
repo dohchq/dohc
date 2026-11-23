@@ -34,6 +34,12 @@ const TOMBSTONE = {
   deleted: true as const,
 };
 
+function rowText(row: Element): string {
+  const clone = row.cloneNode(true) as Element;
+  for (const time of clone.querySelectorAll("time")) time.remove();
+  return clone.textContent ?? "";
+}
+
 function failedBodyResponse(): Response {
   return new Response(
     new ReadableStream<Uint8Array>({
@@ -423,9 +429,12 @@ describe("CommentsPanel", () => {
           ? "Anyone with the link can read what you selected."
           : "Anyone with the link can also comment. Names they give are not verified.",
       );
-      expect(container.textContent).toContain("Named PersonNamed body");
-      expect(container.textContent).toContain("Link PersonUnverifiedLink body");
-      expect(container.textContent).toContain("Comment deleted by the owner");
+      expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
+        "Named PersonNamed body",
+        "Link PersonUnverifiedLink body",
+        "Comment deleted by the owner",
+      ]);
+      expect(container.querySelectorAll(".comment-row time")).toHaveLength(2);
       expect(container.textContent).not.toContain("message-deleted");
       expect(container.querySelectorAll("form")).toHaveLength(access === "comment" ? 1 : 0);
       if (access === "comment") {
@@ -512,7 +521,9 @@ describe("CommentsPanel", () => {
       root.render(<CommentsPanel access="comment" session={THIRD_SESSION} />);
     });
     await settle(() => nameInput().value === "" && !nameInput().disabled);
-    expect(container.textContent).toContain("Stable NameUnverifiedFirst comment");
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toContain(
+      "Stable NameUnverifiedFirst comment",
+    );
     for (const internal of [FIRST_SESSION, SECOND_SESSION, THIRD_SESSION, "profile-sentinel"]) {
       expect(container.textContent).not.toContain(internal);
     }
@@ -543,7 +554,7 @@ describe("CommentsPanel", () => {
     await render("view");
 
     const row = container.querySelector(".comment-row");
-    expect(row?.textContent).toBe(`${hostileName}Unverified${hostileBody}`);
+    expect(row ? rowText(row) : null).toBe(`${hostileName}Unverified${hostileBody}`);
     expect(
       row?.querySelectorAll("a, img, script, style, svg, iframe, object, embed, form"),
     ).toHaveLength(0);
@@ -1349,7 +1360,7 @@ describe("CommentsPanel", () => {
       "/api/view/discussion?direction=newest-first",
       "/api/view/discussion/activity?since=7&hold=0&limit=100",
     ]);
-    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent)).toEqual([
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
       "Link PersonUnverifiedLink body",
       "Comment deleted by the owner",
     ]);
@@ -1358,7 +1369,7 @@ describe("CommentsPanel", () => {
     expect(paths.filter((path) => path.includes("cursor=cursor_one"))).toEqual([
       "/api/view/discussion?direction=newest-first&cursor=cursor_one",
     ]);
-    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent)).toEqual([
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
       "Named PersonNamed body",
       "Link PersonUnverifiedLink body",
       "Comment deleted by the owner",
@@ -1451,7 +1462,7 @@ describe("CommentsPanel", () => {
         parkedSignal !== undefined &&
         container.textContent?.includes("Concurrent activity") === true,
     );
-    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent)).toEqual([
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
       "Named PersonInitial tail",
       "Link PersonUnverifiedConcurrent activity",
     ]);
@@ -1471,7 +1482,7 @@ describe("CommentsPanel", () => {
         container.textContent?.includes("Earlier comments didn't load.") === true,
     );
 
-    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent)).toEqual([
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
       "Named PersonEarlier history",
       "Comment deleted by the owner",
       "Named PersonInitial tail",
@@ -1526,7 +1537,7 @@ describe("CommentsPanel", () => {
     await render("view");
     await settle(() => parkedSignal !== undefined);
 
-    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent)).toEqual([
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
       "Named PersonConcurrent body",
       "Link PersonUnverifiedInitial body",
     ]);
@@ -1579,10 +1590,60 @@ describe("CommentsPanel", () => {
     expect(posts).toBe(1);
     expect(bodyInput().value).toBe("");
     expect(container.textContent).not.toContain("The comment didn't post. Try again.");
-    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent)).toEqual([
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
       "Link PersonUnverifiedBackdated submit",
       "Link PersonUnverifiedExisting tail",
     ]);
+  });
+
+  it("submits a comment with Ctrl+Enter from the comment textarea", async () => {
+    const committed = {
+      ...LINK_MESSAGE,
+      messageId: "message-shortcut",
+      createdAtMs: Date.now(),
+      body: "Shortcut comment",
+    };
+    let posts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (path === "/api/view/discussion" && init?.method === "POST") {
+          posts += 1;
+          return jsonResponse({ ok: true, message: committed });
+        }
+        if (path === "/api/view/discussion?direction=newest-first") {
+          return discussionPageAt(7, []);
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return availableActivityAt(7);
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+          return await new Promise<Response>(() => undefined);
+        }
+        throw new Error(`unexpected request: ${path}`);
+      }),
+    );
+
+    await render("comment");
+    setControlValue(bodyInput(), committed.body);
+    await act(async () => {
+      bodyInput().dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await settle(() => bodyInput().value === "");
+
+    expect(posts).toBe(1);
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
+      "Link PersonUnverifiedShortcut comment",
+    ]);
+    expect(container.querySelector(".comment-row time")?.textContent).toBe("just now");
   });
 
   it("adds a backdated live revision to a partial window without importing its tombstone", async () => {
@@ -1646,7 +1707,7 @@ describe("CommentsPanel", () => {
     await settle(() => parkedSignal !== undefined);
 
     expect(paths.filter((path) => path.includes("cursor=cursor_hidden"))).toHaveLength(0);
-    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent)).toEqual([
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
       "Named PersonBackdated live",
       "Link PersonUnverifiedLoaded oldest",
       "Named PersonLoaded tail",
@@ -1657,7 +1718,7 @@ describe("CommentsPanel", () => {
     expect(paths.filter((path) => path.includes("cursor=cursor_hidden"))).toEqual([
       "/api/view/discussion?direction=newest-first&cursor=cursor_hidden",
     ]);
-    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent)).toEqual([
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
       "Comment deleted by the owner",
       "Named PersonBackdated live",
       "Link PersonUnverifiedLoaded oldest",
@@ -1913,7 +1974,7 @@ describe("CommentsPanel", () => {
       "/api/view/discussion/activity?since=11&hold=30000&limit=100",
     ]);
     expect(paths.at(-1)).toBe("/api/view/discussion/activity?since=11&hold=30000&limit=100");
-    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent)).toEqual([
+    expect([...container.querySelectorAll(".comment-row")].map(rowText)).toEqual([
       "Named PersonNamed body",
       "Link PersonUnverifiedLink body",
       "Comment deleted by the owner",

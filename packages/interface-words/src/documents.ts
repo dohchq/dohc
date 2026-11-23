@@ -11,7 +11,7 @@ export const documentWords = {
   opening: "Opening…",
   openingExplanation: "You can edit this document when it finishes opening.",
   tryAgain: "Try again",
-  couldntRead: "Couldn't read this file.",
+  couldntRead: "dohc could not read this file.",
   /** Phone: the page's view couldn't load (or its editor files couldn't be written), so nothing is on screen. */
   couldntOpen: "dohc could not open this file.",
   /** Phone: under "dohc could not open this file." when the editor files could not be written for lack of space. */
@@ -21,13 +21,13 @@ export const documentWords = {
   documentActions: "Document actions",
   copyAsMarkdown: "Copy as Markdown",
   copied: "Copied",
-  couldntCopy: "Couldn't copy",
+  couldntCopy: "Could not copy",
   /** The save mark. Calm states (saved, saving) draw nothing. */
   mark: {
     couldntSave: {
-      label: "Couldn't save",
+      label: "Could not save",
       explanation:
-        "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit.",
+        "Your edits are still here, but dohc cannot confirm the file on disk matches them. Keep this document open and try another edit.",
     },
     readOnlyShared: {
       label: "Read-only",
@@ -65,13 +65,15 @@ export const documentWords = {
   lossyHeld: "dohc held a change to this note. Saving it would also change parts dohc can't show.",
   editAnyway: "Edit anyway",
   editAnywayTitle: "Edit this note anyway?",
-  editAnywayBody: "Saving rewrites the parts dohc can't show, such as raw HTML or reference links.",
+  editAnywayBody: "Saving rewrites the parts dohc can't show.",
   historyKeeps: "History keeps the original.",
   historyDoesNotTrack: "History does not track this file, so dohc can't restore the original.",
   historyUnconfirmed: "dohc could not confirm that History can restore the original.",
   /** Phone: the server refuses a file over the editor's limit before reading any of it, so nothing shows. */
   tooLargeToOpen: "This file is too large to open on a phone. Open it on a computer.",
   restoring: "This page is being restored.",
+  /** Phone: a page in a note format only a newer dohc opens. The desktop's sentence, said of the page. */
+  needsNewerDohc: "This page needs a newer version of dohc. Update dohc to open it.",
   /** Phone: the desktop's button opens the full file in another app; the phone points to a computer. */
   largeFile: "Showing the start of a large file. Open it on a computer to see all of it.",
   setAsideReadOnly,

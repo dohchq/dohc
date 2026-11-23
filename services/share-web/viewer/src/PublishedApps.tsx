@@ -4,11 +4,14 @@ import { OpenSharedApp } from "./OpenSharedApp";
 import { Icon } from "./icons";
 import { LINK_REFUSALS, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
 
-interface Publication {
+export interface PublishedAppItem {
   publicationId: string;
   name: string;
 }
-function parsePage(value: unknown): { publications: Publication[]; nextCursor: string | null } {
+function parsePage(value: unknown): {
+  publications: PublishedAppItem[];
+  nextCursor: string | null;
+} {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
   const page = value as Record<string, unknown>;
   if (
@@ -29,7 +32,7 @@ function parsePage(value: unknown): { publications: Publication[]; nextCursor: s
       item.name.length > 128
     )
       throw new Error();
-  return page as unknown as { publications: Publication[]; nextCursor: string | null };
+  return page as unknown as { publications: PublishedAppItem[]; nextCursor: string | null };
 }
 
 /** Whether a link has apps to show. A list that could not load, or has more to load, counts as some, so its Retry and Load more stay reachable. */
@@ -37,20 +40,31 @@ export type AppsState = "loading" | "none" | "some";
 export function PublishedApps({
   session,
   onState,
+  onPublications,
 }: {
   session: string;
   onState?: (state: AppsState) => void;
+  onPublications?: (publications: readonly PublishedAppItem[]) => void;
 }) {
-  return <PublicationList key={session} session={session} onState={onState} />;
+  return (
+    <PublicationList
+      key={session}
+      session={session}
+      onState={onState}
+      onPublications={onPublications}
+    />
+  );
 }
 function PublicationList({
   session,
   onState,
+  onPublications,
 }: {
   session: string;
   onState?: (state: AppsState) => void;
+  onPublications?: (publications: readonly PublishedAppItem[]) => void;
 }) {
-  const [publications, setPublications] = useState<Publication[]>([]);
+  const [publications, setPublications] = useState<PublishedAppItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "failed">("loading");
   const [error, setError] = useState("Could not load apps.");
@@ -106,6 +120,9 @@ function PublicationList({
   useLayoutEffect(() => {
     onState?.(state);
   }, [onState, state]);
+  useEffect(() => {
+    onPublications?.(publications);
+  }, [onPublications, publications]);
   return (
     <section aria-label="Shared apps">
       <h2>Apps</h2>
@@ -131,7 +148,7 @@ function PublicationList({
       {status === "failed" && (
         <>
           <p role="status">{error}</p>
-          <button className="handoff-button" onClick={() => void load(cursor)}>
+          <button className="handoff-button secondary" onClick={() => void load(cursor)}>
             Retry
           </button>
         </>
@@ -140,7 +157,7 @@ function PublicationList({
         <p>No apps are available on this link. Ask the owner to publish one.</p>
       )}
       {status === "ready" && cursor !== null && (
-        <button className="handoff-button" onClick={() => void load(cursor)}>
+        <button className="handoff-button secondary" onClick={() => void load(cursor)}>
           Load more apps
         </button>
       )}

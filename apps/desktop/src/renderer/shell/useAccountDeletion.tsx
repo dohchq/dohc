@@ -79,7 +79,7 @@ export function useAccountDeletion(): { deletion: AccountDeletion; dialog: React
         );
       } else {
         to.showWarning(
-          `${result.server} blocked ${result.email} and will finish deleting its data. Workspaces on this computer stay.`,
+          `The server ${result.server} blocked ${result.email} and will finish deleting its data. Workspaces on this computer stay.`,
         );
       }
       if (result.disconnectError !== null)

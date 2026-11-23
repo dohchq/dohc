@@ -33,7 +33,7 @@ export function Step(props: {
       )}
       <span
         aria-hidden
-        className={`grid size-6 place-items-center rounded-full border font-mono text-[11px] font-medium ${marker}`}
+        className={`grid size-6 place-items-center rounded-full border tabular-nums text-[11px] font-medium ${marker}`}
       >
         {props.state === "done" ? <Check size={12} strokeWidth={2.4} /> : props.number}
       </span>
@@ -46,7 +46,7 @@ export function Step(props: {
           <span className={titleClass}>{props.title}</span>
         )}
         {props.state === "done" && props.summary ? (
-          <span className="truncate font-mono text-[12px] text-muted">{props.summary}</span>
+          <span className="truncate text-[12px] text-muted">{props.summary}</span>
         ) : null}
         {props.state === "current" ? props.children : null}
       </div>
@@ -85,13 +85,13 @@ export const FolderChip = forwardRef<
     >
       <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
       <code
-        className={`min-w-0 flex-1 truncate font-mono text-[13px] leading-snug group-hover:text-ink ${
+        className={`min-w-0 flex-1 truncate font-sans text-[13px] leading-snug group-hover:text-ink ${
           props.folder ? "text-ink" : "text-subtle"
         }`}
       >
         {props.folder ?? props.placeholder}
       </code>
-      <span aria-hidden className="shrink-0 text-[11px] text-subtle group-hover:text-ink">
+      <span aria-hidden className="shrink-0 text-[12px] text-subtle group-hover:text-ink">
         {props.folder ? "Change" : "Browse"}
       </span>
     </button>

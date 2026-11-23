@@ -20,6 +20,7 @@ import { hashLinkProfileSecret } from "./linkSecurity";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createOwnerAppPublicationRoutes } from "./ownerAppPublicationRoutes";
 import { createPhoneApps } from "./phoneApps";
+import { createPhoneCollections } from "./phoneCollections";
 import type { PhoneAppLaunchScope } from "./storage/phoneApps";
 import { readOwnerAppResponses } from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
@@ -98,6 +99,7 @@ import {
   type PersonalAgents,
 } from "./personalAgents";
 import type { CredentialFence } from "@dohc/workspace-auth/credentialFence";
+import type { SendEmail } from "@dohc/workspace-auth/smtp";
 import { accountDisplayName } from "./accountDisplayName";
 import { createDiscussionRoutes } from "./discussionRoutes";
 import { shareSenderLabel as formatShareSender } from "@dohc/security-contract/share-labels";
@@ -112,6 +114,7 @@ import {
 } from "./linkAuthority";
 import { createShareSummaries } from "./shareSummaries";
 import { createShareGrantRoutes } from "./shareGrantRoutes";
+import { createShareInvitationEmailer } from "./shareInvitationEmail";
 import { createShareInventoryRoutes } from "./shareInventoryRoutes";
 import {
   hashRelayExchangeKey,
@@ -139,7 +142,6 @@ import { DiscussionActivityHub } from "./discussionActivity";
 import { createWorkspaceMemberRoutes, isWorkspaceMemberRoute } from "./workspaceMemberRoutes";
 import { PresenceHub } from "./presence";
 import { ReplicaWatches } from "./replicaWatches";
-import type { DevelopmentReplicaReads } from "./replicaLinkReadService";
 import { createPresenceRoutes } from "./presenceRoutes";
 import { createProposalRoutes } from "./proposalRoutes";
 import { parseShareId, parseWorkspaceId } from "./requestInputs";
@@ -158,7 +160,7 @@ import { serverLogLine } from "./serverLogWords";
 export { MAX_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 export { MAX_KEY_ENVELOPE_BYTES } from "./keyEnvelopeRoutes";
 export { ACCOUNT_NAME_LOOKUP_DEADLINE_MS } from "./accountDisplayName";
-export { LINK_FRESHNESS_PAGE_BUDGET, MAX_RAW_ROWS_PER_LINK_PAGE } from "./shareReadQueries";
+export { LINK_FRESHNESS_PAGE_BUDGET, MAX_RAW_ROWS_PER_SHARE_PAGE } from "./shareReadQueries";
 
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
 
@@ -202,6 +204,7 @@ export interface CreateSyncRelayHandlerOptions {
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
   lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>;
+  sendShareInvitationEmail?: SendEmail;
   // Better Auth display name for discussion authorship; never used for authz.
   lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
   newShareId?: () => string;
@@ -219,8 +222,7 @@ export interface CreateSyncRelayHandlerOptions {
   // Wake-only long-poll coordination. Durable revisions and data stay in
   // storage, so replacing this hub cannot invalidate a client watermark.
   discussionActivity?: DiscussionActivityHub;
-  replicaWatches?: Pick<ReplicaWatches, "watched"> & Partial<Pick<ReplicaWatches, "holdReader">>;
-  developmentReplicaReads?: DevelopmentReplicaReads;
+  replicaWatches?: Pick<ReplicaWatches, "watched">;
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
@@ -306,6 +308,7 @@ export function createSyncRelayHandler({
   lookupVerifiedUserEmail,
   lookupUserEmail,
   lookupUserEmails,
+  sendShareInvitationEmail,
   lookupUserDisplayName,
   newShareId = () => randomUUID(),
   newGrantId = () => randomUUID(),
@@ -313,7 +316,6 @@ export function createSyncRelayHandler({
   presence = new PresenceHub(),
   discussionActivity = new DiscussionActivityHub(),
   replicaWatches = new ReplicaWatches(discussionActivity),
-  developmentReplicaReads,
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
@@ -499,7 +501,7 @@ export function createSyncRelayHandler({
     endShareWebLaunches: endShareWebAppLaunches,
     // The app backend's own check, as it runs on every launch call: never an app approved only on a computer.
     servable(userId, workspaceId, publicationId) {
-      const published = datasetHost?.publication(
+      const published = datasetHost?.servedPublication(
         { kind: "named", workspaceId, userId },
         publicationId,
       );
@@ -716,6 +718,7 @@ export function createSyncRelayHandler({
         lookupUserDisplayName,
         serverUrl: relayPublicOrigin,
         phoneApps,
+        phoneCollections: createPhoneCollections({ storage, host: datasetHost }),
         ...(phonePages ? { phonePages } : {}),
       })
     : undefined;
@@ -896,6 +899,13 @@ export function createSyncRelayHandler({
     namedGrantTransitionBody,
     dependentGrantSummary,
     namedBrowserInvitation,
+    createShareInvitationEmailer({
+      storage,
+      nowMs,
+      sendEmail: sendShareInvitationEmail,
+      lookupVerifiedUserEmail,
+      relayPublicOrigin,
+    }),
     publicEditRelease,
     liveRooms,
   );
@@ -1126,15 +1136,6 @@ export function createSyncRelayHandler({
     reads: { chatResolverFor },
   });
 
-  const replicaLinkReads = developmentReplicaReads
-    ? storage.createReplicaLinkReadService(
-        developmentReplicaReads,
-        { holdReader: (authorized) => replicaWatches.holdReader?.(authorized) },
-        discussionActivity,
-        newestFilteredOpFreshness,
-        linkKey,
-      )
-    : undefined;
   const respondToLinkRead = createLinkReadRoutes(
     storage,
     nowMs,
@@ -1153,7 +1154,6 @@ export function createSyncRelayHandler({
     admitLinkBlobBytes,
     respondWithLinkBytes,
     linkKey,
-    replicaLinkReads,
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({
@@ -1703,8 +1703,11 @@ export function createSyncRelayHandler({
         route.route === "share-link-rotate" ||
         route.route === "share-link-retune" ||
         route.route === "share-grant-promote" ||
+        route.route === "share-grant-retune" ||
         route.route === "share-grant-revoke" ||
+        route.route === "share-grant-invitation-email" ||
         route.route === "share-undo" ||
+        route.route === "share-leave" ||
         route.route === "share-revoke"
       ) {
         return await respondToShareGrantTransition(request, route, actor);
@@ -1815,7 +1818,6 @@ export function createSyncRelayHandler({
     personalAgents,
     personalLimiter: linkReadRateLimiter,
     dispose() {
-      replicaLinkReads?.close();
       accountFeedWaits.close();
       chatWakeWaits.close();
       noticeWaits.close();

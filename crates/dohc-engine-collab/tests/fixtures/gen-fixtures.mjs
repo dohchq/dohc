@@ -77,6 +77,7 @@ const projectionUrl = pathToFileURL(
 const unregisterTsx = register();
 const {
   getDohcProseMirrorSchema,
+  getDohcYDocBodyFragment,
   markdownToYDoc,
   yDocToMarkdown,
 } = await import(projectionUrl);
@@ -975,6 +976,28 @@ const RICHDOC_PROJECTION_CASES = [
           tableRow([tableCell("tableCell", "[](a&lt;br&gt;b)")]),
           tableRow([tableCell("tableCell", [xmlText("&lt;br&gt;", { code: {} })])]),
           tableRow([tableCell("tableCell", [xmlText("&amp;lt;br&amp;gt;", { code: {} })])]),
+          // A backtick or backslash in the text moves where both writers
+          // find the code spans that keep a spelled break. Their written
+          // form is a known gap, not the wanted output: a cell writes its
+          // text's backticks and backslashes unescaped.
+          tableRow([
+            tableCell("tableCell", [xmlText("a ` <br> b "), xmlText("x", { code: {} })]),
+          ]),
+          tableRow([
+            tableCell("tableCell", [
+              xmlText("\\"),
+              xmlText("a", { code: {} }),
+              xmlText("<br>"),
+              xmlText("b", { code: {} }),
+            ]),
+          ]),
+          // Each block of a cell finds its own code spans.
+          tableRow([
+            xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
+              paragraph("`"),
+              paragraph([xmlText("<br>"), xmlText("x", { code: {} })]),
+            ]),
+          ]),
           tableRow([
             xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
               table([tableRow([tableCell("tableHeader", "a|b")])]),
@@ -1086,6 +1109,60 @@ const RICHDOC_PROJECTION_CASES = [
     // A note holding only a sealed entity is not an empty note.
     name: "sealed-entity-alone",
     makeDoc: () => directRichdoc([paragraph([xmlElement("rawInline", { source: "&nbsp;" })])]),
+  },
+  {
+    // #4107: two edits merged at once can leave a list with no items or an
+    // item with nothing in it. The editor leaves them out, so the file does.
+    name: "empty-list-items",
+    makeDoc: () =>
+      directRichdoc([
+        xmlElement("orderedList", { start: 1 }, [
+          xmlElement("listItem"),
+          xmlElement("listItem", {}, [paragraph("a")]),
+          xmlElement("listItem"),
+          xmlElement("listItem", {}, [paragraph("b")]),
+        ]),
+        xmlElement("taskList", {}, [
+          xmlElement("taskItem", { checked: false }, [paragraph("c")]),
+          xmlElement("taskItem", { checked: false }),
+          xmlElement("taskItem", { checked: true }),
+          xmlElement("taskItem", { checked: false }, [paragraph("d")]),
+        ]),
+      ]),
+  },
+  {
+    name: "empty-lists",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph("a"),
+        xmlElement("bulletList"),
+        paragraph("b"),
+        xmlElement("bulletList", {}, [xmlElement("listItem"), xmlElement("listItem")]),
+        xmlElement("bulletList", {}, [
+          xmlElement("listItem", {}, [xmlElement("bulletList"), paragraph("c")]),
+          xmlElement("listItem", {}, [paragraph("d"), xmlElement("orderedList", { start: 1 })]),
+        ]),
+        xmlElement("taskList", {}, [
+          xmlElement("taskItem", { checked: true }, [xmlElement("bulletList")]),
+          xmlElement("taskItem", { checked: false }, [paragraph("e")]),
+        ]),
+      ]),
+  },
+  {
+    name: "empty-list-in-table-cell",
+    makeDoc: () =>
+      directRichdoc([
+        table([
+          tableRow([tableCell("tableHeader", "head")]),
+          tableRow([
+            xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
+              paragraph("a"),
+              xmlElement("bulletList"),
+              paragraph("b"),
+            ]),
+          ]),
+        ]),
+      ]),
   },
 ];
 
@@ -1297,6 +1374,98 @@ function makeMarkedOracle() {
   };
 }
 
+// How the editor reads inline Markdown, for a shared corpus of paragraphs and
+// headings: each block's elements with their non-default attributes, and its
+// text as runs of one set of marks. The engine reads the same corpus and must
+// read each block the editor's way wherever it reads marks at all.
+function makeReaderParity() {
+  const random = rng(0x1d1e);
+  const pick = (pool) => pool[Math.floor(random() * pool.length)];
+  const phrase = (pool, max) =>
+    Array.from({ length: 1 + Math.floor(random() * max) }, () => pick(pool)).join("");
+  const DEFAULTS = { colspan: 1, rowspan: 1, loose: false, checked: false };
+  const reading = (node) => {
+    if (typeof node.toDelta === "function") {
+      const runs = [];
+      for (const { insert, attributes } of node.toDelta()) {
+        const marks = attributes ?? {};
+        const last = runs.at(-1);
+        if (last && JSON.stringify(last.m ?? {}) === JSON.stringify(marks)) last.x += insert;
+        else runs.push(Object.keys(marks).length ? { x: insert, m: marks } : { x: insert });
+      }
+      return runs;
+    }
+    const children = node.toArray().flatMap(reading);
+    const merged = [];
+    for (const child of children) {
+      const last = merged.at(-1);
+      if (last && "x" in last && "x" in child && JSON.stringify(last.m ?? {}) === JSON.stringify(child.m ?? {})) last.x += child.x;
+      else merged.push(child);
+    }
+    if (typeof node.getAttributes !== "function") return merged;
+    const attrs = Object.fromEntries(
+      Object.entries(node.getAttributes()).filter(([key, value]) => value != null && DEFAULTS[key] !== value),
+    );
+    return [{ t: node.nodeName, ...(Object.keys(attrs).length ? { a: attrs } : {}), ...(merged.length ? { c: merged } : {}) }];
+  };
+  const INLINE = [
+    "*", "*", "**", "_", "__", "~", "~~", "`", "``", "a", "b", "word", " ", " ",
+    "\n", ".", ",", "!", "?", "(", ")", "-", "#", "'", "\"", "é", "日本", "😀",
+    "[a](https://e.example)", "[b](u \"t\")", "[**c**](x.md)", "![alt](x.png)",
+    "![p](https://e.example/p.png \"t\")", "[", "]", "](", "![", "`code`",
+    "*em*", "**strong**", "~~del~~", "_u_", "__s__", "1.", "*a*b", "x_y_z",
+    "[`c`](u)", "[a `b` c](https://e.example)", "&amp;", "&lt;", "&gt;",
+  ];
+  const curated = [
+    "plain text", "*em* and **strong** and ***both***", "_em_ and __strong__",
+    "~~gone~~ and ~one~", "`code` and ``two `ticks` ``", "` padded `",
+    "[label](https://e.example/a)", "[label](rel/path.md \"Title\")",
+    "[**bold** label](https://e.example)", "![alt text](https://e.example/i.png)",
+    "![alt](i.png \"t\")", "text ![a](i.png) between ![b](j.png) images",
+    "**[link](https://e.example)** inside", "*a **b** c*", "**a *b* c**",
+    "a*b*c", "a_b_c", "snake_case_name", "*unclosed", "**unclosed *em*",
+    "`unclosed code", "[not a link]", "[a] (b)", "*a*b*", "**a**b**",
+    "line one\nline *two*", "# heading **bold**", "## `code` heading",
+    "### [link](https://e.example) heading", "***", "* * *", "*a\n*b",
+    "~~a~~~", "~~~a~~", "**`code`**", "[`code`](https://e.example)",
+    "Run `make` and see [`npm install`](https://docs.example/install).",
+    "Some **bold** and a [link](https://a.example).", "[a`]`](u)", "[``a`](u)",
+    "[`a](u)", "[``](u) `x](v)", "*see [`x`](u)*", "~~`gone`~~",
+    "Use `a<b> & {c}` and *em*", "`&amp;` and **strong**",
+    "`{{atom:x}}` and `$x$` and `a==b++c[[d` *em*", "[`a<b`](https://e.example) *em*",
+    "*a* `x>` and `<y` *b*", "`<a` *x* `b>`", "``<a`b`` *x* ``c`>``",
+    "``a`<`` _x_ ``>`b``", "`a&b` *em* <b>tag</b>", "[a](https://e.example/?a=1&b=2) *em*",
+    "*em* &amp; &lt;b&gt; and **s**", "- &amp; *x*\n  - child", "[a &amp; b](https://e.example) *em*",
+    "&amp;lt; and &amp;amp; *x*", "`&amp;` &amp; *x*", "a &copy; *x*", "AT&T *x*",
+    "*a&amp;*b and **&lt;**x", "# Title &amp; *x*", "&lt;b&gt;hidden&lt;/b&gt; *x*", "x &amp *y*",
+    "&gt; not a quote *x*",
+  ];
+  const read = (markdown) => getDohcYDocBodyFragment(markdownToYDoc(markdown)).toArray().flatMap(reading);
+  const accepted = (markdown) => {
+    try {
+      read(markdown);
+      return true;
+    } catch (error) {
+      if (!String(error?.message).includes("not representable by the live document contract")) throw error;
+      return false;
+    }
+  };
+  const texts = [
+    ...curated,
+    ...Array.from({ length: 1500 }, (_, index) =>
+      `${index % 5 === 0 ? "# " : ""}${phrase(INLINE, index % 10 === 0 ? 40 : 12)}`).filter(accepted),
+  ];
+  return {
+    seed: -5,
+    contentKind: "richdoc",
+    kind: "readerParity",
+    updates: [],
+    expected: {
+      cases: texts.map((markdown) => ({ markdown, reading: read(markdown) })),
+    },
+  };
+}
+
 // Clear old generated fixtures in the selected output directory only.
 for (const f of readdirSync(outputDir)) {
   if (f.endsWith(".json")) unlinkSync(join(outputDir, f));
@@ -1347,11 +1516,12 @@ emit(makeOffsetProbe());
 emit(makeSurrogateProbe());
 emit(makeNestedFrontmatter());
 emit(makeMarkedOracle());
+emit(makeReaderParity());
 
 writeFileSync(
   join(outputDir, "_manifest.json"),
   JSON.stringify({ fixtures: manifest }, null, 1),
 );
 console.log(
-  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${projectionFixtures.length} richdoc projection + 3 probes + marked oracle)`,
+  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${projectionFixtures.length} richdoc projection + 3 probes + marked oracle + reader parity)`,
 );

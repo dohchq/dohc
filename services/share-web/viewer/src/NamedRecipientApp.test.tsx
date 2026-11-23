@@ -373,9 +373,52 @@ it.each([200, 401, 403])(
     } else {
       expect(container.textContent).not.toContain("Alice");
       expect(error).toContain("Check your email and password");
+      expect(container.querySelector<HTMLInputElement>('input[name="email"]')?.value).toBe(
+        "alice@example.test",
+      );
+      const passwordInput = container.querySelector<HTMLInputElement>('input[name="password"]')!;
+      expect(passwordInput.value).toBe("");
+      expect(passwordInput.type).toBe("password");
+      const toggle = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Show password"]',
+      )!;
+      await act(async () => toggle.click());
+      expect(passwordInput.type).toBe("text");
+      expect(toggle.getAttribute("aria-label")).toBe("Hide password");
     }
   },
 );
+it("clears and hides the password on submit while keeping the email after a failed sign-in", async () => {
+  const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path === "/api/account/session") return jsonResponse({ user: null });
+    if (path === "/api/account/sign-in") {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        email: "alice@example.test",
+        password: "secret",
+      });
+      return jsonResponse({ ok: false }, 401);
+    }
+    throw Error(path);
+  });
+  vi.stubGlobal("fetch", fetch);
+  await render();
+  const emailInput = container.querySelector<HTMLInputElement>('input[name="email"]')!;
+  const passwordInput = container.querySelector<HTMLInputElement>('input[name="password"]')!;
+  await act(async () => {
+    setControlValue(emailInput, "alice@example.test");
+    setControlValue(passwordInput, "secret");
+  });
+  const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Show password"]')!;
+  await act(async () => toggle.click());
+  expect(passwordInput.type).toBe("text");
+  await click("Sign in");
+  expect(emailInput.value).toBe("alice@example.test");
+  expect(passwordInput.value).toBe("");
+  expect(passwordInput.type).toBe("password");
+  expect(toggle.getAttribute("aria-label")).toBe("Show password");
+  expect(toggle.getAttribute("aria-pressed")).toBe("false");
+});
 it("ignores a late invitation response after navigation changes the grant", async () => {
   let resolve!: (value: Response) => void;
   vi.stubGlobal(
@@ -428,4 +471,54 @@ it("tells the named recipient the owner removed access", async () => {
   await render();
   expect(container.textContent).toContain("The owner removed your access.");
   expect(container.textContent).not.toContain("docs/a.md");
+});
+
+it("collapses the file list behind a toggle after picking a file on narrow viewports", async () => {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: query.includes("max-width: 720px"),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })),
+  );
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/account/session"
+        ? jsonResponse({ user: { id: "alice", name: "Alice" } })
+        : jsonResponse(files()),
+    ),
+  );
+  await render();
+  expect(container.querySelector(".named-files-toggle")).toBeNull();
+  await click("docs/a.md");
+  const toggle = container.querySelector<HTMLButtonElement>(".named-files-toggle");
+  const panelNode = container.querySelector<HTMLElement>("#named-files-panel");
+  expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+  expect(panelNode?.hidden).toBe(true);
+  expect(document.activeElement).toBe(toggle);
+  await act(async () => toggle!.click());
+  expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+  expect(panelNode?.hidden).toBe(false);
+});
+
+it("tells a signed-in recipient when their session ends on refresh", async () => {
+  let signedIn = true;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/account/session"
+        ? jsonResponse({ user: signedIn ? { id: "alice", name: "Alice" } : null })
+        : jsonResponse(files()),
+    ),
+  );
+  await render();
+  expect(container.textContent).toContain("Alice");
+  signedIn = false;
+  await click("Refresh files");
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+    "Your session ended. Sign in again.",
+  );
 });

@@ -53,6 +53,7 @@ export interface ShellSidePanelProps {
   reportShellError: SitePreviewPageProps["reportError"];
   appNotices: SitePreviewPageProps["notices"];
   appAccess: SitePreviewPageProps["access"];
+  onCollectionsChange?: SitePreviewPageProps["onCollectionsChange"];
   setShareTarget: (target: RelayShareTarget) => void;
 }
 
@@ -71,6 +72,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
     reportShellError,
     appNotices,
     appAccess,
+    onCollectionsChange,
     setAppPinned,
     setShareTarget,
     showAppsInExplorer,
@@ -107,13 +109,13 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
         {view ? (
           view.render(props)
         ) : wb.activeView === SHARING_VIEW_ID ? (
-          <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing..." />}>
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing…" />}>
             <LazySharingView {...sharing} />
           </Suspense>
         ) : selectedAppRoot !== null ? (
           // The same sealed preview an app's tab runs: a sandboxed frame
           // on a dohc loopback server, with no dohc bridge.
-          <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading app…" />}>
             <LazySitePreviewPage
               key={selectedAppRoot}
               variant="panel"
@@ -127,6 +129,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
               onShareSite={(target) =>
                 setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
               }
+              onCollectionsChange={onCollectionsChange}
               access={appAccess}
             />
           </Suspense>

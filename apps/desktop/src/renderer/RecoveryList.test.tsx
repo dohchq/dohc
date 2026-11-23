@@ -32,7 +32,7 @@ it("reports failed dismissal through the shell with retry", async () => {
   fireEvent.click(screen.getByTestId("recovery-dismiss-confirm"));
   await waitFor(() =>
     expect(report).toHaveBeenCalledWith({
-      message: "dohc could not dismiss this draft. Your saved copy remains available.",
+      message: "dohc could not dismiss this draft. Your saved copy is still here.",
       cause: error,
       retry: expect.any(Function),
     }),

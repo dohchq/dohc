@@ -12,3 +12,7 @@ export const protectedCopyOperations = declaredWriteRows(
   "protectedCopy",
   WORKSPACE_ID,
 ) satisfies OperationTable;
+export const agentRunUndoOperations = declaredWriteRows(
+  "agentRunUndo",
+  WORKSPACE_ID,
+) satisfies OperationTable;

@@ -59,7 +59,7 @@ describe("CollectionActionDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(invoke.mock.calls[0]![1].aborted).toBe(true);
     await screen.findByText("Action cancelled");
-    expect(screen.getByText(/may have changed records/)).toBeTruthy();
+    expect(screen.getByText(/see if anything changed/)).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
     expect(onSettled).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));

@@ -72,11 +72,11 @@ describe("useNetworkShareNotice", () => {
 
   it("names the place that keeps History private on this computer", () => {
     const sentence =
-      "Anyone who can read the share can read its History, including text deleted from its files.";
+      "Anyone who can read this network share can read its History, including deleted text.";
     for (const [platform, destination] of [
-      ["darwin", "to this computer's disk"],
-      ["linux", "to this computer's disk"],
-      ["win32", "into your user folder on this computer"],
+      ["darwin", "to this computer's drive"],
+      ["linux", "to this computer's drive"],
+      ["win32", "to your user folder on this computer"],
     ] as const) {
       const shell = mountShell(`ws-${platform}`, true, platform);
       expect(shell.result.current.shell.shellErrors).toMatchObject([

@@ -241,7 +241,7 @@ function unattributedTitle(path: string | null | undefined): string {
   if (!name) return lead;
   // Room for the name between its two quotes.
   const room = NOTICE_TITLE_MAX_CHARS - lead.length - " for ".length - 2;
-  const title = `${lead} for “${cutText(name, room)}”`;
+  const title = `${lead} for "${cutText(name, room)}"`;
   return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : lead;
 }
 
@@ -601,7 +601,7 @@ export function createNoticeStore(deps: {
             noticeId: `${SERVER_OUTDATED_KIND}:${accountFileName(account)}`,
             kind: SERVER_OUTDATED_KIND,
             workspaceId: null,
-            title: "Your server doesn't sync notices",
+            title: "Your server does not sync Notices",
             body: "Notices stay on this computer until the server runs a newer version of dohc.",
             target: {},
           },
@@ -924,7 +924,7 @@ export function createNoticeStore(deps: {
             continue;
           }
           const document = refusal.document;
-          const name = document?.path ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
+          const name = document?.path ? `"${[...document.path].slice(0, 180).join("")}"` : "a file";
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
           const bindingChanged = refusal.reason === SETTLEMENT_BINDING_CHANGED;
           const markdownHeld = refusal.reason === "markdown-write-held";
@@ -933,7 +933,7 @@ export function createNoticeStore(deps: {
           const target =
             NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
           const body = markdownHeld
-            ? "Saving it would also change parts dohc can't show, such as raw HTML or reference links."
+            ? "Saving it would also change parts dohc cannot show."
             : attributionRefused
               ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
               : bindingChanged
@@ -1106,7 +1106,7 @@ export function createNoticeStore(deps: {
   ): Promise<void> {
     if (await locked(async () => (await loadAccount(session.account)).routesMissing)) {
       throw new NoticeNotSentError(
-        "Your server doesn't sync notices. Update the server, then try again.",
+        "Your server does not sync Notices. Update the server, then try again.",
       );
     }
     signal?.throwIfAborted();
@@ -1118,16 +1118,16 @@ export function createNoticeStore(deps: {
         case "routes-missing":
           await noteRoutesMissing(session);
           throw new NoticeNotSentError(
-            "Your server doesn't sync notices. Update the server, then try again.",
+            "Your server does not sync Notices. Update the server, then try again.",
           );
         case "refused":
-          throw new NoticeNotSentError("This person can't open what the notice points to.");
+          throw new NoticeNotSentError("This person cannot open what the Notice points to.");
         case "rate-limited":
           throw new NoticeNotSentError(
-            "Too many notices went to other people. Wait a minute, then try again.",
+            "Too many Notices went to other people. Wait a minute, then try again.",
           );
         case "list-full":
-          throw new NoticeNotSentError("This person has too many unread notices to get this one.");
+          throw new NoticeNotSentError("This person has too many unread Notices to get this one.");
         case "invalid":
           throw error;
       }
@@ -1258,7 +1258,7 @@ export function createNoticeStore(deps: {
           if (mark === "dismissed" && isRefusalNoticeKind(row.kind) && row.workspaceId) {
             const shown = ref.refusalCoordinates;
             if (!shown?.length || !deps.dismissRefusal)
-              throw new Error("The engine could not dismiss this Notice. Try again.");
+              throw new Error("dohc could not dismiss this Notice. Try again.");
             await deps.dismissRefusal(row.workspaceId, row.noticeId, shown);
             row.pendingRefusalDismissals = [
               ...(row.pendingRefusalDismissals ?? []),

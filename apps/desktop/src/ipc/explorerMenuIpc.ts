@@ -1,7 +1,11 @@
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { OperationHandlers } from "./operationTable";
 import type { explorerMenuOperations } from "./explorerMenuOperations";
-import { explorerMenuEntries, type ExplorerMenuScope } from "../workspaces/explorerMenu";
+import {
+  explorerMenuEntries,
+  pathInShareMount,
+  type ExplorerMenuScope,
+} from "../workspaces/explorerMenu";
 import { storedShareMounts } from "../workspaces/shareViewFilesTarget";
 import { usableShareMountRecord } from "../workspaces/shareMounts";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
@@ -27,10 +31,12 @@ export function createExplorerMenuIpc<
       const shareView = sharedViewOf(workspace.workspaceId);
       const isMountPath = shareView === null && !!input.path && isSharedWithMePath(input.path);
       const mounts = isMountPath ? storedShareMounts(workspace) : [];
-      const hasMountRecord = mounts.some(
-        (mount) =>
-          usableShareMountRecord(mounts, mount) && input.path === `shared-with-me/${mount.label}`,
-      );
+      const hasMountRecord =
+        !!input.path &&
+        pathInShareMount(
+          input.path,
+          mounts.flatMap((mount) => (usableShareMountRecord(mounts, mount) ? [mount.label] : [])),
+        );
       return explorerMenuEntries(
         {
           kind: input.kind,

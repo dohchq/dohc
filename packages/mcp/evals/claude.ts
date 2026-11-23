@@ -6,19 +6,26 @@
 // agent gets no shell.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { EvalCase, RecordedCall, RunRecord } from "./case";
+import type {
+  DatasetSnapshot,
+  EvalCase,
+  FrontendVerificationRecord,
+  RecordedCall,
+  RunRecord,
+} from "./case";
 
 const BUILT_IN_TOOLS = "Read,Glob,Grep,Edit,Write";
 const MCP_PREFIX = "mcp__dohc__";
 
 export interface SampleUsage {
-  /** What the tokens would cost at API prices. A subscription run is not billed this. */
-  costUsd: number;
+  /** What the tokens would cost at API prices, when the harness reports it. */
+  costUsd?: number;
   inputTokens: number;
   outputTokens: number;
   turns: number;
@@ -32,6 +39,7 @@ export interface SampleOutcome {
   error?: string;
   usage: SampleUsage;
   harness?: string;
+  refusals?: string[];
 }
 
 interface StreamEvent {
@@ -157,23 +165,63 @@ export function workspacePaths(calls: readonly RecordedCall[], root: string): Re
 }
 
 /** Makes the workspace folder and writes the case's files into it. */
-export async function seedWorkspace(root: string, evalCase: EvalCase): Promise<void> {
-  await mkdir(root);
+export async function seedWorkspace(
+  root: string,
+  evalCase: EvalCase,
+  home?: string,
+): Promise<void> {
+  await mkdir(root, { recursive: true });
   for (const [path, content] of Object.entries(evalCase.files ?? {})) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), content);
   }
+  if (evalCase.workspaceId) {
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await writeFile(
+      join(root, ".dohc", "manifest.json"),
+      JSON.stringify({ workspaceId: evalCase.workspaceId, version: 1 }, null, 2) + "\n",
+    );
+    if (home) {
+      await mkdir(home, { recursive: true });
+      await writeFile(
+        join(home, "dohc-workspaces.json"),
+        JSON.stringify(
+          {
+            workspaces: [{ workspaceId: evalCase.workspaceId, rootPath: root, kind: "local" }],
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+    }
+  }
 }
 
-/** The workspace's files as a case names them. */
+/** The workspace's files as a case names them. Leaves out hidden .dohc metadata. */
 export async function workspaceFiles(root: string): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
   for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
     if (!entry.isFile()) continue;
     const absolute = join(entry.parentPath, entry.name);
-    files[relative(root, absolute).split(sep).join("/")] = await readFile(absolute, "utf8");
+    const rel = relative(root, absolute).split(sep).join("/");
+    if (rel === ".dohc" || rel.startsWith(".dohc/")) continue;
+    files[rel] = await readFile(absolute, "utf8");
   }
   return files;
+}
+
+/** Raw-byte SHA-256 hashes of every workspace file outside .dohc, safe for binary files. */
+export async function workspaceFileHashes(root: string): Promise<Map<string, string>> {
+  const hashes = new Map<string, string>();
+  for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const absolute = join(entry.parentPath, entry.name);
+    const rel = relative(root, absolute).split(sep).join("/");
+    if (rel === ".dohc" || rel.startsWith(".dohc/")) continue;
+    const bytes = await readFile(absolute);
+    hashes.set(rel, createHash("sha256").update(bytes).digest("hex"));
+  }
+  return hashes;
 }
 
 /**
@@ -194,6 +242,7 @@ export function claudeArguments(input: {
   prompt: string;
   model: string;
   mcpConfigPath: string;
+  skillPrompt?: string;
 }): string[] {
   return [
     "-p",
@@ -212,7 +261,47 @@ export function claudeArguments(input: {
     "--allowedTools",
     `mcp__dohc,${BUILT_IN_TOOLS}`,
     "--no-session-persistence",
+    ...(input.skillPrompt ? ["--append-system-prompt", input.skillPrompt] : []),
   ];
+}
+
+/** Builds the shared stdio MCP server argv used by both Claude and Codex eval harnesses. */
+export function evalServerArgs(input: {
+  caseId: string;
+  root: string;
+  unansweredLog: string;
+  home: string;
+  writesLog?: string;
+  snapshotsFile: string;
+  verificationsFile: string;
+}): string[] {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+  return [
+    "--import",
+    tsxLoader,
+    join(here, "server.ts"),
+    input.caseId,
+    input.root,
+    input.unansweredLog,
+    input.home,
+    input.writesLog ?? "",
+    input.snapshotsFile,
+    input.verificationsFile,
+  ];
+}
+
+/** Reads an optional JSON record written by evals/server.ts. */
+export async function readEvalJsonRecord<T>(
+  filePath: string,
+): Promise<Record<string, T> | undefined> {
+  const raw = await readFile(filePath, "utf8").catch(() => "");
+  if (!raw.trim()) return undefined;
+  try {
+    return JSON.parse(raw) as Record<string, T>;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function runClaudeSample(input: {
@@ -220,29 +309,31 @@ export async function runClaudeSample(input: {
   model: string;
   timeoutMs: number;
   keepSessionRoute: boolean;
+  skillPrompt?: string;
 }): Promise<SampleOutcome> {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
   const sampleDir = await mkdtemp(join(tmpdir(), "dohc-eval-"));
   const root = join(sampleDir, "workspace");
+  const home = join(sampleDir, "home");
   const unansweredLog = join(sampleDir, "unanswered.log");
+  const snapshotsFile = join(sampleDir, "datasets.json");
+  const verificationsFile = join(sampleDir, "verifications.json");
   const mcpConfigPath = join(sampleDir, "mcp.json");
   try {
-    await seedWorkspace(root, input.evalCase);
+    await seedWorkspace(root, input.evalCase, home);
     await writeFile(
       mcpConfigPath,
       JSON.stringify({
         mcpServers: {
           dohc: {
             command: process.execPath,
-            args: [
-              "--import",
-              tsxLoader,
-              join(here, "server.ts"),
-              input.evalCase.id,
+            args: evalServerArgs({
+              caseId: input.evalCase.id,
               root,
               unansweredLog,
-            ],
+              home,
+              snapshotsFile,
+              verificationsFile,
+            }),
           },
         },
       }),
@@ -250,7 +341,12 @@ export async function runClaudeSample(input: {
 
     const child = spawn(
       "claude",
-      claudeArguments({ prompt: input.evalCase.prompt, model: input.model, mcpConfigPath }),
+      claudeArguments({
+        prompt: input.evalCase.prompt,
+        model: input.model,
+        mcpConfigPath,
+        ...(input.skillPrompt ? { skillPrompt: input.skillPrompt } : {}),
+      }),
       {
         cwd: root,
         env: input.keepSessionRoute ? process.env : sampleEnvironment(process.env),
@@ -293,12 +389,17 @@ export async function runClaudeSample(input: {
               : undefined));
     const harness = transcript.harness ? { harness: transcript.harness } : {};
     if (error) return { error, usage: transcript.usage, ...harness };
+    const datasetSnapshots = await readEvalJsonRecord<DatasetSnapshot>(snapshotsFile);
+    const frontendVerifications =
+      await readEvalJsonRecord<FrontendVerificationRecord>(verificationsFile);
     return {
       ...harness,
       run: {
         calls: workspacePaths(transcript.calls, root),
         text: transcript.text,
         files: await workspaceFiles(root),
+        ...(datasetSnapshots ? { datasetSnapshots } : {}),
+        ...(frontendVerifications ? { frontendVerifications } : {}),
       },
       usage: transcript.usage,
     };

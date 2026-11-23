@@ -9,7 +9,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import { Children, useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { Children, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   nextStepSettingsAction,
   nextStepWords,
@@ -105,7 +105,7 @@ function AgentReplyPeek(props: {
     <div
       data-testid={`${props.testIdPrefix}-thread-peek`}
       onClick={props.onOpen}
-      className={`mt-1.5 cursor-pointer border-l-2 border-current/55 pl-3 ${ink}`}
+      className={`mt-1.5 cursor-pointer rounded-r-md border-l-2 border-current/55 py-1 pl-3 pr-2 transition-colors duration-75 hover:bg-hover ${ink}`}
     >
       <span className="flex items-center gap-1.5 leading-5">
         <ChatAvatar
@@ -186,17 +186,17 @@ export function WorkingDots(props: { presentation: ActorPresentation }) {
 
 function StopButton(props: { testIdPrefix: string; stopping: boolean; onStop: () => void }) {
   return (
-    <button
-      type="button"
+    <SecondaryButton
+      size="row"
       data-testid={`${props.testIdPrefix}-stop-agent-run`}
       aria-label="Stop agent run"
       disabled={props.stopping}
       onClick={props.onStop}
-      className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-[5px] border border-line bg-bg px-2 text-[12px] font-medium text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
+      className="shrink-0"
     >
-      <Square size={9} strokeWidth={2} aria-hidden />
+      <Square size={12} strokeWidth={2} aria-hidden />
       Stop
-    </button>
+    </SecondaryButton>
   );
 }
 
@@ -222,7 +222,7 @@ export function WorkingLine(props: { testIdPrefix: string; working: ChatWorking 
         kind="agent"
         size="strip"
       />
-      <span className="min-w-0 truncate">{working.agentName} is working</span>
+      <span className="min-w-0 truncate">{`Working: ${working.agentName}`}</span>
       <WorkingDots presentation={working.presentation} />
       {working.onStop ? (
         <StopButton
@@ -254,7 +254,7 @@ export function WaitingLine(props: {
         kind="agent"
         size="strip"
       />
-      <span className="min-w-0 truncate">{`${props.agentName} will reply when it's free.`}</span>
+      <span className="min-w-0 truncate">{`Waiting for ${props.agentName} to finish its current run.`}</span>
     </div>
   );
 }
@@ -284,7 +284,7 @@ export function FailedRunLine(props: {
   return (
     <div
       data-testid={`${props.testIdPrefix}-run-failed`}
-      className={`flex flex-col gap-1 text-[13px] text-muted ${props.className ?? ""}`}
+      className={`flex flex-col gap-1.5 rounded-lg border border-line bg-panel px-3 py-2 text-[13px] text-muted ${props.className ?? ""}`}
     >
       <span className="flex min-h-7 items-center">
         <span className="flex min-w-0 items-start gap-x-2">
@@ -415,6 +415,12 @@ export function WorkingRow(props: {
 // One thread beside its conversation: the message it hangs from, its
 // replies, and a composer. Narrow, it takes the conversation's place and
 // leads with a way back. Everything it shows comes in through its props.
+const THREAD_PANEL_DEFAULT_WIDTH = 400;
+const THREAD_PANEL_MIN_WIDTH = 320;
+const THREAD_PANEL_MAX_WIDTH = 560;
+const clampThreadWidth = (width: number) =>
+  Math.min(THREAD_PANEL_MAX_WIDTH, Math.max(THREAD_PANEL_MIN_WIDTH, width));
+
 export function ChatThreadPanel(props: {
   testIdPrefix: string;
   // Where the thread is: "# general" or the agent's name.
@@ -435,6 +441,9 @@ export function ChatThreadPanel(props: {
   composer: ReactNode;
 }) {
   const root = useRef<HTMLElement | null>(null);
+  const [panelWidth, setPanelWidth] = useState(THREAD_PANEL_DEFAULT_WIDTH);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => resizeCleanupRef.current?.(), []);
   const parentId = props.parent?.id ?? null;
   // Opening a thread puts the cursor in its composer.
   useEffect(() => {
@@ -454,8 +463,51 @@ export function ChatThreadPanel(props: {
         event.preventDefault();
         props.onClose();
       }}
-      className={`flex min-h-0 min-w-0 flex-col bg-bg ${props.narrow ? "flex-1" : "w-[400px] shrink-0 border-l border-line"}`}
+      style={props.narrow ? undefined : { width: panelWidth }}
+      className={`relative flex min-h-0 min-w-0 flex-col bg-bg ${props.narrow ? "flex-1" : "shrink-0 border-l border-line"}`}
     >
+      {props.narrow ? null : (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize thread panel"
+          aria-valuenow={panelWidth}
+          aria-valuemin={THREAD_PANEL_MIN_WIDTH}
+          aria-valuemax={THREAD_PANEL_MAX_WIDTH}
+          tabIndex={0}
+          data-testid={`${props.testIdPrefix}-thread-resize`}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            resizeCleanupRef.current?.();
+            const startX = event.clientX;
+            const startWidth = panelWidth;
+            const onMove = (move: PointerEvent) => {
+              setPanelWidth(clampThreadWidth(startWidth + (startX - move.clientX)));
+            };
+            const stop = () => {
+              window.removeEventListener("pointermove", onMove);
+              window.removeEventListener("pointerup", stop);
+              window.removeEventListener("pointercancel", stop);
+              resizeCleanupRef.current = null;
+            };
+            window.addEventListener("pointermove", onMove);
+            window.addEventListener("pointerup", stop);
+            window.addEventListener("pointercancel", stop);
+            resizeCleanupRef.current = stop;
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft") {
+              event.preventDefault();
+              setPanelWidth((width) => clampThreadWidth(width + 16));
+            } else if (event.key === "ArrowRight") {
+              event.preventDefault();
+              setPanelWidth((width) => clampThreadWidth(width - 16));
+            }
+          }}
+          className="absolute inset-y-0 -left-0.5 z-10 w-1 cursor-col-resize transition-colors hover:bg-accent/50 active:bg-accent"
+        />
+      )}
       <header
         className={`flex shrink-0 items-center gap-2 border-b border-line ${props.narrow ? "h-11 px-2" : "h-12 pl-4 pr-3"}`}
       >
@@ -488,7 +540,7 @@ export function ChatThreadPanel(props: {
         testIdPrefix={`${props.testIdPrefix}-thread`}
         messages={messages}
         loading={props.loading && !props.parent}
-        emptyLabel="This message isn't here anymore."
+        emptyLabel="This message is no longer here."
         key={parentId ?? "none"}
         listRef={props.listRef}
         flashMessageId={props.flashMessageId}

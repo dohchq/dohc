@@ -1,16 +1,22 @@
 import { useState } from "react";
-import { X } from "lucide-react";
+import { CalendarDays, SquareKanban, Table2, X } from "lucide-react";
 import { isComposingKey } from "../ui/keys";
 import type { CollectionSchema, ViewDefinition, ViewKind } from "@dohc/workspace-contracts";
 import { Overlay } from "../Overlay";
 import {
   DangerButton,
+  FieldError,
   IconButton,
   PrimaryButton,
   SecondaryButton,
   SectionLabel,
 } from "../ui/controls";
-import { addView, deleteView, renameView } from "./schemaAuthoring";
+import {
+  addViewPreservingTable,
+  deleteView,
+  orderGroupFields,
+  renameView,
+} from "./schemaAuthoring";
 import { useSchemaRun, type SchemaApply } from "./FieldsDialog";
 import { inputClass, selectClass } from "./FieldForm";
 
@@ -24,6 +30,11 @@ const VIEW_KIND_LABELS: Record<ViewKind, string> = {
   table: "Table",
   board: "Board",
   calendar: "Calendar",
+};
+const VIEW_KIND_ICONS: Record<ViewKind, typeof Table2> = {
+  table: Table2,
+  board: SquareKanban,
+  calendar: CalendarDays,
 };
 
 export function ViewsDialog(props: {
@@ -46,10 +57,7 @@ export function ViewsDialog(props: {
   const { pending, error, setError, run } = useSchemaRun(props.apply);
 
   const viewNames = props.schema.views.map((view) => view.name);
-  // A board groups by stored values, and a button stores none.
-  const groupFieldNames = props.schema.fields
-    .filter((field) => field.type !== "button")
-    .map((field) => field.name);
+  const groupFieldNames = orderGroupFields(props.schema.fields).map((field) => field.name);
   const dateFieldNames = props.schema.fields
     .filter((field) => field.type === "date")
     .map((field) => field.name);
@@ -94,7 +102,11 @@ export function ViewsDialog(props: {
 
   async function create() {
     const name = newName.trim();
-    let problem = nameProblem(name, viewNames);
+    let problem =
+      nameProblem(name, viewNames) ??
+      (props.schema.views.length === 0 && newKind !== "table" && name.toLowerCase() === "table"
+        ? `A view named "${name}" already exists. Choose another name.`
+        : null);
     if (problem === null && newKind === "board" && newGroupBy === "") {
       problem = "Choose a field to group by.";
     }
@@ -114,7 +126,7 @@ export function ViewsDialog(props: {
     };
     await run(
       problem,
-      (schema) => addView(schema, view),
+      (schema) => addViewPreservingTable(schema, view),
       () => {
         setNewName("");
         setNewGroupBy("");
@@ -127,7 +139,7 @@ export function ViewsDialog(props: {
     <Overlay onClose={props.onClose}>
       <div
         data-testid="collection-views-dialog"
-        className="dohc-elevated flex w-130 max-w-[85vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
+        className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-130 max-w-[85vw] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex items-center gap-2">
           <h2 className="m-0 flex-1 text-base font-semibold text-ink">Views</h2>
@@ -138,7 +150,7 @@ export function ViewsDialog(props: {
         <div className="flex flex-col gap-1">
           {props.schema.views.length === 0 ? (
             <span className="text-sm text-muted">
-              No saved views yet. This collection shows a table. Create a view below.
+              No saved views yet. This Collection shows a table. Create a view below.
             </span>
           ) : null}
           {props.schema.views.map((view) =>
@@ -167,8 +179,19 @@ export function ViewsDialog(props: {
               </div>
             ) : (
               <div key={view.name} className="flex h-8 items-center gap-2 rounded-md px-2">
+                {(() => {
+                  const Icon = VIEW_KIND_ICONS[view.kind];
+                  return (
+                    <Icon
+                      size={14}
+                      strokeWidth={1.9}
+                      aria-hidden
+                      className="shrink-0 text-subtle"
+                    />
+                  );
+                })()}
                 <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{view.name}</span>
-                <span className="shrink-0 text-[11px] text-subtle">
+                <span className="shrink-0 text-[12px] text-subtle">
                   {VIEW_KIND_LABELS[view.kind]}
                 </span>
                 <SecondaryButton
@@ -191,7 +214,7 @@ export function ViewsDialog(props: {
                     disabled={pending}
                     onClick={() => void remove(view.name)}
                   >
-                    Confirm delete
+                    Delete view
                   </DangerButton>
                 ) : (
                   <SecondaryButton
@@ -274,7 +297,7 @@ export function ViewsDialog(props: {
             Create view
           </SecondaryButton>
         </div>
-        {error ? <p className="m-0 text-xs text-danger">{error}</p> : null}
+        {error ? <FieldError id="collection-views-error">{error}</FieldError> : null}
       </div>
     </Overlay>
   );

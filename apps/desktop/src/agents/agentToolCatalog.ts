@@ -166,14 +166,14 @@ export const AGENT_TOOLS = [
     name: "OpenCode",
     command: "opencode",
     authArgs: ["auth", "list", "--pure"],
-    permissions: "No launch profile yet",
+    permissions: "Not supported in dohc yet",
   },
   {
     id: "cursor",
     name: "Cursor",
     command: "cursor-agent",
     authArgs: ["status", "--format", "json"],
-    permissions: "No launch profile yet",
+    permissions: "Not supported in dohc yet",
   },
 ] as const;
 

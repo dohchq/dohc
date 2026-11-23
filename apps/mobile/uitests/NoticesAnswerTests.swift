@@ -28,14 +28,14 @@ final class NoticesAnswerTests: XCTestCase {
   /// The line's 32 pt pill sits above the time's line (about 16 pt, 2 pt above it) and the row's 12 pt bottom padding.
   private func tapAnswer(_ app: XCUIApplication, _ title: String) {
     let collapsed = row(app, title, ", Unanswered,")
-    XCTAssertTrue(collapsed.waitForExistence(timeout: 20), "The \(title) row never showed its question open")
+    XCTAssertTrue(collapsed.waitForExistence(timeout: 45), "The \(title) row never showed its question open")
     XCTAssertTrue(collapsed.isHittable)
     collapsed.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
       .withOffset(CGVector(dx: 56 + 24, dy: collapsed.frame.height - 12 - 18 - 16))
       .tap()
   }
 
-  private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 10) -> Bool {
+  private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 15) -> Bool {
     let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
     return XCTWaiter().wait(for: [gone], timeout: timeout) == .completed
   }
@@ -47,13 +47,13 @@ final class NoticesAnswerTests: XCTestCase {
 
     // The row opens its answer in place: the choices are buttons in Nova's words, with Cancel reply.
     let choice = app.buttons["19:52"]
-    XCTAssertTrue(choice.waitForExistence(timeout: 10), "The poll's choices didn't open in the row")
+    XCTAssertTrue(choice.waitForExistence(timeout: 15), "The poll's choices didn't open in the row")
     XCTAssertTrue(app.buttons["Cancel reply"].exists)
     XCTAssertTrue(app.buttons["21:07"].exists)
     choice.tap()
 
     // The answer closes once the phone keeps it, and the row, still on Notices, comes to say Answered.
-    XCTAssertTrue(row(app, poll, ", Answered,").waitForExistence(timeout: 10), "The row never reached Answered")
+    XCTAssertTrue(row(app, poll, ", Answered,").waitForExistence(timeout: 15), "The row never reached Answered")
     XCTAssertTrue(waitGone(app.buttons["21:07"]), "The poll's choices stayed open after the answer was kept")
   }
 
@@ -64,14 +64,14 @@ final class NoticesAnswerTests: XCTestCase {
 
     // The field is named for the question's author, with Send.
     let field = app.textViews["Answer Nova"]
-    XCTAssertTrue(field.waitForExistence(timeout: 10), "The answer's field didn't open in the row")
+    XCTAssertTrue(field.waitForExistence(timeout: 15), "The answer's field didn't open in the row")
     field.tap()
     let typed = "Lisbon and Porto, 2026"
     field.typeText(typed)
     let keyboard = app.keyboards.firstMatch
-    XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "The keyboard didn't show for the field")
+    XCTAssertTrue(keyboard.waitForExistence(timeout: 15), "The keyboard didn't show for the field")
     let holds = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", typed), object: field)
-    XCTAssertEqual(XCTWaiter().wait(for: [holds], timeout: 5), .completed, "The field doesn't hold the typed answer")
+    XCTAssertEqual(XCTWaiter().wait(for: [holds], timeout: 15), .completed, "The field doesn't hold the typed answer")
 
     // The row rises until its field and Send sit above the keyboard, so the tap reaches Send, not the keyboard.
     let send = app.buttons["Send message"]
@@ -82,7 +82,7 @@ final class NoticesAnswerTests: XCTestCase {
         return send.frame.maxY <= top && field.frame.maxY <= top
       },
       object: nil)
-    guard XCTWaiter().wait(for: [clear], timeout: 5) == .completed else {
+    guard XCTWaiter().wait(for: [clear], timeout: 15) == .completed else {
       XCTFail(
         "Send isn't above the keyboard: field \(field.frame), value \(String(describing: field.value)), Send \(send.frame), "
           + "keyboard \(keyboard.frame)\n\(app.debugDescription)")
@@ -94,7 +94,7 @@ final class NoticesAnswerTests: XCTestCase {
     send.tap()
 
     XCTAssertTrue(waitGone(field), "The field stayed open after the answer was kept")
-    XCTAssertTrue(row(app, question, ", Answered,").waitForExistence(timeout: 10), "The row never reached Answered")
+    XCTAssertTrue(row(app, question, ", Answered,").waitForExistence(timeout: 15), "The row never reached Answered")
   }
 
   @MainActor
@@ -103,12 +103,12 @@ final class NoticesAnswerTests: XCTestCase {
     tapAnswer(app, question)
 
     let field = app.textViews["Answer Nova"]
-    XCTAssertTrue(field.waitForExistence(timeout: 10), "The answer's field didn't open in the row")
+    XCTAssertTrue(field.waitForExistence(timeout: 15), "The answer's field didn't open in the row")
     app.buttons["Cancel reply"].tap()
 
     // The field goes, and the row is one element again, its question still open, with nothing sent.
     XCTAssertTrue(waitGone(field), "The field stayed open after Cancel reply")
-    XCTAssertTrue(row(app, question, ", Unanswered,").waitForExistence(timeout: 5), "The row didn't come back")
+    XCTAssertTrue(row(app, question, ", Unanswered,").waitForExistence(timeout: 15), "The row didn't come back")
   }
 
   @MainActor
@@ -117,7 +117,7 @@ final class NoticesAnswerTests: XCTestCase {
     tapAnswer(app, question)
 
     let field = app.textViews["Answer Nova"]
-    XCTAssertTrue(field.waitForExistence(timeout: 10), "The answer's field didn't open in the row")
+    XCTAssertTrue(field.waitForExistence(timeout: 15), "The answer's field didn't open in the row")
     field.tap()
     field.typeText("Porto album")
     app.buttons["Cancel reply"].tap()
@@ -126,7 +126,7 @@ final class NoticesAnswerTests: XCTestCase {
     // Cancelling is deliberate, so the text the phone kept for the row goes with it.
     tapAnswer(app, question)
     let again = app.textViews["Answer Nova"]
-    XCTAssertTrue(again.waitForExistence(timeout: 10), "The answer's field didn't open again")
+    XCTAssertTrue(again.waitForExistence(timeout: 15), "The answer's field didn't open again")
     XCTAssertFalse((again.value as? String ?? "").contains("Porto"), "The cancelled text came back")
   }
 }

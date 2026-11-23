@@ -15,6 +15,7 @@ import {
   ConflictReviewDialog,
   VersionComparePage,
   VersionMergeDialog,
+  type WorkspaceVersions,
   conflictCountCopy,
 } from "./WorkspaceVersions";
 import { VersionMenuHarness } from "./WorkspaceVersions.testHarness";
@@ -265,11 +266,11 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     await settle();
     expect(screen.getByTestId("version-conflict-error").textContent).toBe(
-      "dohc can't bring back c-1.md, because that could stop sync",
+      "dohc cannot bring back c-1.md, because that could stop sync",
     );
     const notice = readError(report.mock.calls[0]![1]);
     expect(notice.words).toBe(
-      "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for c-1.md, keep the removal there.",
+      "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other computer shows a conflict for c-1.md, keep the removal there.",
     );
     expect(notice.canRetry).toBe(false);
   });
@@ -292,7 +293,7 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     await openSurface(async () => () => {}, vi.fn(), row, report);
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     await settle();
-    const title = "dohc can't settle the conflict in c-1.md";
+    const title = "dohc cannot settle the conflict in c-1.md";
     expect(screen.getByTestId("version-conflict-error").textContent).toBe(
       shape === "sync-delete" ? title : "dohc could not apply that choice.",
     );
@@ -305,7 +306,7 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
       expect(notice.canRetry).toBe(false);
       // The Reason says why once. The error's own message repeats it, so it adds no Cause.
       expect(notice.details).toBe(
-        "c-1.md changed on this machine after the conflict appeared, so either choice would overwrite the newer lines.",
+        "c-1.md changed on this computer after the conflict appeared, so either choice would overwrite the newer lines.",
       );
       expect(notice.cause).toBeNull();
     }
@@ -738,7 +739,7 @@ describe("VersionComparePage paging", () => {
     render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
     await settle();
 
-    expect(screen.getByRole("alert").textContent).toBe("Could not compare with Main.");
+    expect(screen.getByRole("alert").textContent).toBe("dohc could not compare with Main.");
   });
 
   it("says a version with no differences matches Main, under the versions picture", async () => {
@@ -836,6 +837,157 @@ describe("VersionComparePage paging", () => {
     ).toBe("Show more files");
     expect(showMore.disabled).toBe(false);
   });
+
+  function mockVersions(overrides: Partial<WorkspaceVersions> = {}): WorkspaceVersions {
+    const main = {
+      id: "main",
+      name: "Main",
+      kind: "main" as const,
+      createdAtMs: 1,
+      canMergeIntoMain: false,
+    };
+    const draft = {
+      id: "v-1",
+      name: "Draft",
+      kind: "named" as const,
+      createdAtMs: 2,
+      canMergeIntoMain: true,
+    };
+    const nested = {
+      id: "v-nested",
+      name: "Nested",
+      kind: "named" as const,
+      createdAtMs: 3,
+      madeFromVersionId: "v-1",
+      canMergeIntoMain: false,
+    };
+    return {
+      snapshot: { versions: [main, draft, nested], activeVersionId: "v-1" },
+      active: draft,
+      onMain: false,
+      busy: null,
+      loadFailed: false,
+      reload: vi.fn(),
+      requestSwitch: vi.fn(),
+      openCreate: vi.fn(),
+      openMerge: vi.fn(),
+      dialogs: null,
+      ...overrides,
+    };
+  }
+
+  it("offers Keep in Main and Back to Main when comparing a mergeable version with differences", async () => {
+    const versions = mockVersions();
+    bridgeMock.listWorkspaceVersions.mockResolvedValue(versions.snapshot!);
+    bridgeMock.compareWorkspaceVersions.mockResolvedValue({
+      files: [compareRow("plan.md")],
+      nextAfterPath: null,
+    });
+    render(<VersionComparePage workspaceId="ws-1" versionId="v-1" versions={versions} />);
+    await settle();
+
+    expect(screen.getByTestId("version-compare-scope").textContent).toContain("Agent link");
+    fireEvent.click(screen.getByTestId("version-compare-keep-in-main"));
+    expect(versions.openMerge).toHaveBeenCalledExactlyOnceWith(versions.snapshot!.versions[1]);
+    fireEvent.click(screen.getByTestId("version-compare-back-to-main"));
+    expect(versions.requestSwitch).toHaveBeenCalledExactlyOnceWith("main");
+  });
+
+  it("hides Keep in Main and explains why for a version started from another version", async () => {
+    const versions = mockVersions();
+    bridgeMock.listWorkspaceVersions.mockResolvedValue(versions.snapshot!);
+    bridgeMock.compareWorkspaceVersions.mockResolvedValue({
+      files: [compareRow("plan.md")],
+      nextAfterPath: null,
+    });
+    render(<VersionComparePage workspaceId="ws-1" versionId="v-nested" versions={versions} />);
+    await settle();
+
+    expect(screen.queryByTestId("version-compare-keep-in-main")).toBeNull();
+    expect(screen.getByTestId("version-compare-scope").textContent).toContain(
+      "Only versions made from Main can merge into Main.",
+    );
+    expect(screen.getByTestId("version-compare-back-to-main")).toBeTruthy();
+  });
+
+  it("hides Keep in Main while loading or after a comparison error", async () => {
+    const versions = mockVersions();
+    let resolveCompare!: (page: {
+      files: Array<ReturnType<typeof compareRow>>;
+      nextAfterPath: string | null;
+    }) => void;
+    bridgeMock.listWorkspaceVersions.mockResolvedValue(versions.snapshot!);
+    bridgeMock.compareWorkspaceVersions.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCompare = resolve;
+        }),
+    );
+    const view = render(
+      <VersionComparePage workspaceId="ws-1" versionId="v-1" versions={versions} />,
+    );
+    expect(screen.queryByTestId("version-compare-keep-in-main")).toBeNull();
+    resolveCompare({ files: [compareRow("plan.md")], nextAfterPath: null });
+    await settle();
+    expect(screen.getByTestId("version-compare-keep-in-main")).toBeTruthy();
+
+    bridgeMock.compareWorkspaceVersions.mockRejectedValueOnce(new Error("compare failed"));
+    fireEvent.click(screen.getByTestId("version-compare-refresh"));
+    await settle();
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.queryByTestId("version-compare-keep-in-main")).toBeNull();
+    view.unmount();
+  });
+
+  it("hides Keep in Main when no files differ, hides Back to Main when already on Main, and disables both while busy or disabled", async () => {
+    const versions = mockVersions();
+    bridgeMock.listWorkspaceVersions.mockResolvedValue(versions.snapshot!);
+    bridgeMock.compareWorkspaceVersions.mockResolvedValue({ files: [], nextAfterPath: null });
+    const view = render(
+      <VersionComparePage workspaceId="ws-1" versionId="v-1" versions={versions} />,
+    );
+    await settle();
+    expect(screen.queryByTestId("version-compare-keep-in-main")).toBeNull();
+    expect(screen.getByTestId("version-compare-back-to-main")).toBeTruthy();
+
+    view.rerender(
+      <VersionComparePage
+        workspaceId="ws-1"
+        versionId="v-1"
+        versions={mockVersions({ onMain: true })}
+      />,
+    );
+    expect(screen.queryByTestId("version-compare-back-to-main")).toBeNull();
+
+    bridgeMock.compareWorkspaceVersions.mockResolvedValue({
+      files: [compareRow("plan.md")],
+      nextAfterPath: null,
+    });
+    view.rerender(
+      <VersionComparePage
+        workspaceId="ws-1"
+        versionId="v-1"
+        versions={mockVersions({ busy: "switch" })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("version-compare-refresh"));
+    await settle();
+    const back = screen.getByTestId("version-compare-back-to-main") as HTMLButtonElement;
+    const keep = screen.getByTestId("version-compare-keep-in-main") as HTMLButtonElement;
+    expect(back.disabled).toBe(true);
+    expect(back.textContent).toBe("Switching…");
+    expect(keep.disabled).toBe(true);
+
+    view.rerender(
+      <VersionComparePage workspaceId="ws-1" versionId="v-1" versions={mockVersions()} disabled />,
+    );
+    expect((screen.getByTestId("version-compare-back-to-main") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect((screen.getByTestId("version-compare-keep-in-main") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
 });
 
 it("reports a refused conflict choice from the Versions menu's merge with the refusal's own words", async () => {
@@ -883,7 +1035,7 @@ it("reports a refused conflict choice from the Versions menu's merge with the re
     expect.anything(),
   );
   expect(readError(onConflictError.mock.calls[0]![1]).title).toBe(
-    "dohc can't bring back c-1.md, because that could stop sync",
+    "dohc cannot bring back c-1.md, because that could stop sync",
   );
   expect(onError).not.toHaveBeenCalled();
 });

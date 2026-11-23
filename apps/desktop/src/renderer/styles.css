@@ -268,7 +268,7 @@ body {
  * grid's cell draws the focus outline for the field inside it
  * (ui/DataGrid.tsx), so this rule skips that field; a database cell's editor
  * draws its own underline (DatabaseStudioView.tsx). */
-:is(input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color'], [type='button'], [type='submit'], [type='reset']), textarea, select):not([data-grid-cell] *):focus {
+:is(input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color'], [type='button'], [type='submit'], [type='reset']), textarea, select):not([data-grid-cell] *, [data-framed-input]):focus {
   outline: none;
   border-color: var(--dohc-muted);
   box-shadow: inset 0 -1px 0 var(--dohc-muted);
@@ -317,12 +317,14 @@ table {
 
 [data-theme='dark'] .dohc-popover {
   box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--dohc-ink) 6%, transparent),
     0 1px 2px rgba(0, 0, 0, 0.3),
     0 10px 28px rgba(0, 0, 0, 0.45);
 }
 
 [data-theme='dark'] .dohc-elevated {
   box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--dohc-ink) 6%, transparent),
     0 1px 2px rgba(0, 0, 0, 0.3),
     0 12px 32px rgba(0, 0, 0, 0.4),
     0 28px 64px rgba(0, 0, 0, 0.35);
@@ -482,13 +484,13 @@ body {
 :root:not([data-platform="darwin"]) ::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--dohc-ink) 18%, transparent);
+  background: color-mix(in srgb, var(--dohc-ink) 15%, transparent);
   background-clip: padding-box;
 }
 
 :root:not([data-platform="darwin"])::-webkit-scrollbar-thumb:hover,
 :root:not([data-platform="darwin"]) ::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--dohc-ink) 32%, transparent);
+  background: color-mix(in srgb, var(--dohc-ink) 30%, transparent);
   background-clip: padding-box;
 }
 
@@ -554,9 +556,10 @@ body {
 .titlebar-no-drag {
   -webkit-app-region: no-drag;
 }
-/* While a menu (useDismiss) or a dialog (overlayStack) is open, a press on
- * the titlebar must reach the page so it can close it. */
-:root:is([data-menu-open], [data-modal-open]) .titlebar-drag {
+/* While a menu (useDismiss) is open, a press on the titlebar must reach the
+ * page so it can close the menu. An open dialog leaves the titlebar dragging
+ * the window, as a native modal does. */
+:root[data-menu-open] .titlebar-drag {
   -webkit-app-region: no-drag;
 }
 
@@ -565,7 +568,8 @@ body {
  * blocks, rendered slash-command components, and absolutely-positioned code
  * toolbar so every editable surface begins on the same left edge. */
 .dohc-tiptap-editor,
-.dohc-readable-text {
+.dohc-readable-text,
+.dohc-notion-editor {
   --dohc-editor-measure: 720px;
   /* How far framed blocks (code, tables, callouts, mermaid previews) extend
    * past the text column on each side. Their inner horizontal padding equals
@@ -576,9 +580,18 @@ body {
 
 .dohc-tiptap-editor {
   position: relative;
-  height: 100%;
-  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+  height: auto;
+  min-height: 0;
   background: var(--dohc-bg);
+}
+
+.dohc-editor-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* A document read without the editor (MarkdownView's read body, with
@@ -587,7 +600,8 @@ body {
 .dohc-notion-editor {
   position: relative;
   box-sizing: border-box;
-  min-height: 100%;
+  flex: 1 0 auto;
+  min-height: 0;
   /* Top matter (PageIdentity + inline properties) supplies the space above
    * the body now, so this only needs a small settle gap — not the old 40px
    * chasm that stacked under the title. */
@@ -746,23 +760,23 @@ body {
 .dohc-notion-editor h1 {
   margin: 32px auto 12px;
   font-size: calc(var(--dohc-editor-font-size) * 31 / 15);
-  font-weight: 700;
-  letter-spacing: -0.021em;
+  font-weight: 600;
+  letter-spacing: -0.022em;
   line-height: 1.15;
 }
 
 .dohc-notion-editor h2 {
   margin: 30px auto 10px;
-  font-size: calc(var(--dohc-editor-font-size) * 22 / 15);
-  font-weight: 650;
-  letter-spacing: -0.014em;
+  font-size: calc(var(--dohc-editor-font-size) * 20 / 15);
+  font-weight: 600;
+  letter-spacing: -0.016em;
   line-height: 1.25;
 }
 
 .dohc-notion-editor h3 {
   margin: 24px auto 8px;
   font-size: calc(var(--dohc-editor-font-size) * 17 / 15);
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: -0.008em;
 }
 
@@ -886,7 +900,7 @@ body {
 }
 
 /* Done is done: checked items recede instead of shouting. */
-.dohc-notion-editor li[data-checked="true"] > div {
+.dohc-notion-editor li[data-checked="true"] > div > p {
   color: var(--dohc-muted);
   text-decoration: line-through;
   text-decoration-color: var(--dohc-line);
@@ -941,6 +955,11 @@ body {
   /* 1px border + 15px = one block inset: code text lands on the content edge
    * when the frame extends past the column (see the alignment comment). */
   padding: 44px calc(var(--dohc-editor-block-inset) - 1px) 14px;
+}
+
+.dohc-notion-editor pre.dohc-raw-block {
+  padding-top: 14px;
+  white-space: pre-wrap;
 }
 
 .dohc-notion-editor pre code {
@@ -1069,6 +1088,16 @@ body {
   outline-offset: 2px;
 }
 
+.dohc-notion-editor > .ProseMirror-selectednode {
+  background: var(--dohc-selection);
+  border-radius: 6px;
+}
+
+.dohc-notion-editor > :is(hr, .dohc-math-block, .dohc-callout, pre, .tableWrapper).ProseMirror-selectednode {
+  outline: 2px solid var(--dohc-accent);
+  outline-offset: 2px;
+}
+
 /* Gapcursor (the caret shown between/around block nodes and atoms) also ships
  * unstyled without prosemirror-gapcursor's base CSS — theme it to warm ink so
  * navigating past an image or code block shows a visible insertion point. */
@@ -1111,13 +1140,13 @@ body {
   --dohc-block-gutter: max(var(--dohc-editor-gutter), 50% - var(--dohc-editor-measure) / 2);
   --dohc-block-gap: min(
     max(10px, var(--dohc-block-hang) + 6px),
-    var(--dohc-block-gutter) - 18px
+    var(--dohc-block-gutter) - 20px
   );
   position: absolute;
   top: auto;
   right: calc(100% - var(--dohc-block-gutter) + var(--dohc-block-gap));
-  width: clamp(18px, var(--dohc-block-gutter) - 8px - var(--dohc-block-gap), 38px);
-  transform: translateY(0.2em);
+  width: clamp(20px, var(--dohc-block-gutter) - 8px - var(--dohc-block-gap), 42px);
+  transform: translateY(0.15em);
   z-index: 3;
   display: inline-flex;
   flex-wrap: wrap;
@@ -1166,8 +1195,8 @@ body {
 
 .dohc-block-gutter-btn {
   display: inline-grid;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   place-items: center;
   padding: 0;
   border: 1px solid transparent;
@@ -1181,14 +1210,6 @@ body {
     background-color 100ms ease-out,
     border-color 100ms ease-out,
     color 100ms ease-out;
-}
-
-.dohc-block-plus::before {
-  content: "+";
-}
-
-.dohc-block-handle::before {
-  content: "⋮";
 }
 
 .dohc-block-handle {
@@ -1260,22 +1281,98 @@ body {
   gap: 6px;
 }
 
-.dohc-code-language-select {
+.dohc-code-block-toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dohc-code-language-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   border: 1px solid transparent;
   border-radius: 6px;
-  background: transparent;
+  padding: 2px 6px;
   color: var(--dohc-muted);
-  font: inherit;
   transition:
     background-color 120ms ease-out,
     color 120ms ease-out,
     border-color 120ms ease-out;
 }
 
-.dohc-code-language-select:hover {
+.dohc-code-language-picker:hover:not(:has(select:disabled)) {
   border-color: var(--dohc-line);
   @apply bg-hover;
   color: var(--dohc-ink);
+}
+
+[data-keyboard-nav] .dohc-code-language-picker:has(select:focus-visible) {
+  outline: 2px solid var(--dohc-focus);
+}
+
+.dohc-code-language-label {
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.dohc-code-language-chevron {
+  flex: 0 0 auto;
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.dohc-code-language-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.dohc-code-language-select:disabled {
+  cursor: default;
+}
+
+.dohc-code-language-select:focus {
+  box-shadow: none;
+}
+
+.dohc-code-wrap-btn {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dohc-muted);
+  cursor: pointer;
+  transition:
+    background-color 100ms ease-out,
+    color 100ms ease-out;
+}
+
+.dohc-code-wrap-btn:hover {
+  @apply bg-hover;
+  color: var(--dohc-ink);
+}
+
+.dohc-code-wrap-btn.is-active {
+  @apply bg-selected;
+  color: var(--dohc-ink);
+}
+
+.dohc-code-block-toolbar.is-wrapped + pre,
+.dohc-notion-editor pre.dohc-code-wrapped {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* The bubble menu shares the Menu part's frame: border, 8px radius, panel
@@ -1294,6 +1391,7 @@ body {
 
 [data-theme='dark'] .dohc-bubble-menu {
   box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--dohc-ink) 6%, transparent),
     0 1px 2px rgba(0, 0, 0, 0.3),
     0 10px 28px rgba(0, 0, 0, 0.45);
 }
@@ -1413,7 +1511,7 @@ body {
 }
 
 .dohc-bubble-menu__button.is-active {
-  background: var(--dohc-line);
+  background: var(--dohc-selected);
   color: var(--dohc-accent);
 }
 
@@ -1430,7 +1528,7 @@ body {
   background: var(--dohc-panel);
   padding: 3px 8px;
   color: var(--dohc-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .dohc-editor-presence-dot {
@@ -1448,31 +1546,41 @@ body {
  * separate dark-mode block. */
 .dohc-notion-editor pre code .hljs-keyword,
 .dohc-notion-editor pre code .hljs-tag,
-.dohc-notion-editor pre code .hljs-name {
+.dohc-notion-editor pre code .hljs-name,
+.dohc-code-syntax .hljs-keyword,
+.dohc-code-syntax .hljs-tag,
+.dohc-code-syntax .hljs-name {
   color: var(--dohc-ink);
   font-weight: 600;
 }
 
 .dohc-notion-editor pre code .hljs-string,
-.dohc-notion-editor pre code .hljs-regexp {
+.dohc-notion-editor pre code .hljs-regexp,
+.dohc-code-syntax .hljs-string,
+.dohc-code-syntax .hljs-regexp {
   color: var(--dohc-success);
 }
 
-.dohc-notion-editor pre code .hljs-comment {
+.dohc-notion-editor pre code .hljs-comment,
+.dohc-code-syntax .hljs-comment {
   /* muted, not subtle: comments are still code and must clear AA on the
    * code-block background in both themes. */
   color: var(--dohc-muted);
   font-style: italic;
 }
 
-.dohc-notion-editor pre code .hljs-doctag {
+.dohc-notion-editor pre code .hljs-doctag,
+.dohc-code-syntax .hljs-doctag {
   font-style: normal;
   font-weight: 600;
 }
 
 .dohc-notion-editor pre code .hljs-number,
 .dohc-notion-editor pre code .hljs-literal,
-.dohc-notion-editor pre code .hljs-symbol {
+.dohc-notion-editor pre code .hljs-symbol,
+.dohc-code-syntax .hljs-number,
+.dohc-code-syntax .hljs-literal,
+.dohc-code-syntax .hljs-symbol {
   color: var(--dohc-warning);
 }
 
@@ -1482,7 +1590,14 @@ body {
 .dohc-notion-editor pre code .hljs-selector-class,
 .dohc-notion-editor pre code .hljs-selector-id,
 .dohc-notion-editor pre code .hljs-section,
-.dohc-notion-editor pre code .hljs-link {
+.dohc-notion-editor pre code .hljs-link,
+.dohc-code-syntax .hljs-title,
+.dohc-code-syntax .hljs-built_in,
+.dohc-code-syntax .hljs-type,
+.dohc-code-syntax .hljs-selector-class,
+.dohc-code-syntax .hljs-selector-id,
+.dohc-code-syntax .hljs-section,
+.dohc-code-syntax .hljs-link {
   color: var(--dohc-agent);
 }
 
@@ -1490,15 +1605,22 @@ body {
 .dohc-notion-editor pre code .hljs-attribute,
 .dohc-notion-editor pre code .hljs-meta,
 .dohc-notion-editor pre code .hljs-bullet,
-.dohc-notion-editor pre code .hljs-punctuation {
+.dohc-notion-editor pre code .hljs-punctuation,
+.dohc-code-syntax .hljs-attr,
+.dohc-code-syntax .hljs-attribute,
+.dohc-code-syntax .hljs-meta,
+.dohc-code-syntax .hljs-bullet,
+.dohc-code-syntax .hljs-punctuation {
   color: var(--dohc-muted);
 }
 
-.dohc-notion-editor pre code .hljs-strong {
+.dohc-notion-editor pre code .hljs-strong,
+.dohc-code-syntax .hljs-strong {
   font-weight: 700;
 }
 
-.dohc-notion-editor pre code .hljs-emphasis {
+.dohc-notion-editor pre code .hljs-emphasis,
+.dohc-code-syntax .hljs-emphasis {
   font-style: italic;
 }
 
@@ -1534,6 +1656,7 @@ body {
 
 [data-theme='dark'] .dohc-link-menu {
   box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--dohc-ink) 6%, transparent),
     0 1px 2px rgba(0, 0, 0, 0.3),
     0 10px 28px rgba(0, 0, 0, 0.45);
 }
@@ -1594,7 +1717,7 @@ body {
   margin-top: 5px;
   padding: 0 2px;
   color: var(--dohc-danger);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 /* ── find & replace ───────────────────────────────────────────────────
@@ -1633,11 +1756,22 @@ body {
   color: var(--dohc-bg);
 }
 
+.dohc-find-replace-anchor {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: 0;
+  overflow: visible;
+  display: flex;
+  justify-content: flex-end;
+  padding-right: 12px;
+  pointer-events: none;
+}
+
 .dohc-find-replace {
-  position: absolute;
-  top: 8px;
-  right: 12px;
-  z-index: 4;
+  position: relative;
+  align-self: flex-start;
+  margin-top: 8px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1645,13 +1779,19 @@ body {
   border-radius: 10px;
   background: var(--dohc-panel);
   padding: 6px;
+  pointer-events: auto;
   box-shadow:
     0 1px 2px rgba(28, 27, 24, 0.05),
     0 8px 24px rgba(28, 27, 24, 0.12);
 }
 
+.dohc-editor-presence ~ .dohc-find-replace-anchor .dohc-find-replace {
+  margin-top: 40px;
+}
+
 [data-theme='dark'] .dohc-find-replace {
   box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--dohc-ink) 6%, transparent),
     0 1px 2px rgba(0, 0, 0, 0.3),
     0 10px 28px rgba(0, 0, 0, 0.45);
 }
@@ -1677,8 +1817,12 @@ body {
   min-width: 36px;
   color: var(--dohc-subtle);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 12px;
   text-align: center;
+}
+
+.dohc-find-replace__count.is-empty {
+  color: var(--dohc-danger);
 }
 
 .dohc-find-replace__icon-btn {
@@ -1719,7 +1863,7 @@ body {
   background: transparent;
   padding: 4px 8px;
   color: var(--dohc-muted);
-  font-size: 11px;
+  font-size: 12px;
   transition:
     background-color 100ms ease-out,
     color 100ms ease-out;
@@ -2330,8 +2474,9 @@ body {
 .dohc-editor-surface {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  height: 100%;
-  min-height: 100%;
+  flex: 1 0 auto;
+  height: auto;
+  min-height: 0;
   container-type: inline-size;
   container-name: dohc-editor;
 }
@@ -2351,6 +2496,21 @@ body {
   margin-right: 18px;
   overflow: visible;
   z-index: 3;
+}
+
+.dohc-outline::after {
+  content: "";
+  position: absolute;
+  top: -10px;
+  right: 100%;
+  width: 12px;
+  height: min(60vh, 420px);
+  pointer-events: none;
+}
+
+.dohc-outline:hover::after,
+.dohc-outline:focus-within::after {
+  pointer-events: auto;
 }
 
 @container dohc-editor (max-width: 900px) {
@@ -2487,7 +2647,7 @@ body {
   padding-top: 8px;
   color: var(--dohc-subtle);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 [data-theme='dark'] .dohc-outline-panel {
@@ -2541,7 +2701,9 @@ body {
   border-radius: 10px;
   background: var(--dohc-panel);
   padding: 8px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14);
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
 }
 
 .dohc-page-identity__picker-grid {
@@ -2610,7 +2772,10 @@ body {
 }
 
 [data-theme='dark'] .dohc-page-identity__picker {
-  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--dohc-ink) 6%, transparent),
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
 }
 
 /* ===================================================================== *
@@ -2779,6 +2944,7 @@ body {
 }
 [data-theme='dark'] .dohc-callout-type-menu {
   box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--dohc-ink) 6%, transparent),
     0 1px 2px rgba(0, 0, 0, 0.3),
     0 10px 28px rgba(0, 0, 0, 0.45);
 }
@@ -2789,6 +2955,7 @@ body {
   display: flex;
   width: 100%;
   align-items: center;
+  gap: 7px;
   padding: 6px 8px;
   border: 0;
   border-radius: 5px;
@@ -2799,6 +2966,27 @@ body {
   font-weight: 500;
   text-align: left;
   cursor: pointer;
+}
+.dohc-callout-type-option-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: var(--dohc-match);
+}
+.dohc-callout-type-option[data-callout-type="tip"] .dohc-callout-type-option-icon {
+  color: var(--dohc-success);
+}
+.dohc-callout-type-option[data-callout-type="info"] .dohc-callout-type-option-icon {
+  color: var(--dohc-match);
+}
+.dohc-callout-type-option[data-callout-type="warning"] .dohc-callout-type-option-icon {
+  color: var(--dohc-warning);
+}
+.dohc-callout-type-option[data-callout-type="danger"] .dohc-callout-type-option-icon {
+  color: var(--dohc-danger);
+}
+.dohc-callout-type-option[data-callout-type="quote"] .dohc-callout-type-option-icon {
+  color: var(--dohc-muted);
 }
 .dohc-callout-type-option:hover {
   @apply bg-hover;
@@ -2905,7 +3093,7 @@ mark.dohc-highlight,
   border-radius: 6px;
   padding: 6px 10px;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -2918,7 +3106,7 @@ mark.dohc-highlight,
 .dohc-mermaid-preview--skipped .dohc-mermaid-preview-status {
   border: 1px solid var(--dohc-line);
   background: var(--dohc-panel-2);
-  /* subtle-on-panel-2 fails WCAG AA at this 11.5px size (light 3.46:1, dark
+  /* subtle-on-panel-2 fails WCAG AA at this size (light 3.46:1, dark
    * 4.16:1). muted clears AA in both themes (light 6.37:1, dark 7.28:1). */
   color: var(--dohc-muted);
 }
@@ -2934,10 +3122,7 @@ mark.dohc-highlight,
  * field, and the empty/error states so math reads correctly in both themes.
  * KaTeX renders with `currentColor`, so math inherits --dohc-ink for free. */
 :root {
-  --dohc-math-error-color: #9d3c28;
-}
-[data-theme='dark'] {
-  --dohc-math-error-color: #e1866c;
+  --dohc-math-error-color: var(--dohc-danger);
 }
 
 .dohc-math-inline {
@@ -2978,7 +3163,7 @@ mark.dohc-highlight,
  * visible and clickable instead of collapsing to nothing. */
 .dohc-math--empty .dohc-math__preview::after,
 .dohc-math__preview.dohc-math--empty::after {
-  content: 'Empty math — click to edit';
+  content: 'Empty math. Click to edit.';
   color: var(--dohc-subtle);
   font-size: 12px;
   font-style: italic;

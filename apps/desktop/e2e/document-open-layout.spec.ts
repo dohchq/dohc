@@ -446,7 +446,7 @@ test("no block sits elsewhere because blocks away from the viewport skip their l
       await releaseDocumentOpens(desktop);
       const editor = page.getByTestId("markdown-editor");
       if (!note.editable) {
-        await expect(page.getByText("This note has parts dohc can't show.")).toBeVisible({
+        await expect(page.getByText("This note has parts dohc cannot show.")).toBeVisible({
           timeout: 60_000,
         });
         continue;

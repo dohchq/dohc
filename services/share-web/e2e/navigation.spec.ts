@@ -107,10 +107,13 @@ test("keeps authored navigation inert until the user follows an allowed link", a
       .getByRole("link", { name: "Open external probe" });
     const externalUrl = `${probe.url}${EXTERNAL_PROBE_PATH}`;
     await expect(externalLink).toHaveAttribute("href", externalUrl);
+    await expect(externalLink).toHaveAttribute("target", "_blank");
+    await expect(externalLink).toHaveAttribute("rel", "noopener noreferrer");
     expect(probe.requests).toEqual([]);
 
-    await externalLink.click();
-    await expect(page).toHaveURL(externalUrl);
+    const [popup] = await Promise.all([context.waitForEvent("page"), externalLink.click()]);
+    await expect(popup).toHaveURL(externalUrl);
+    expect(page.url()).toBe(viewerUrl);
     await expect
       .poll(() => probe.requests.filter((request) => request.path === EXTERNAL_PROBE_PATH).length)
       .toBe(1);

@@ -49,7 +49,7 @@ export function ProfileHeader(props: {
       await props.onChange(preferredName);
     } catch {
       setDraft(props.value ?? "");
-      setError("Could not save your name.");
+      setError("dohc could not save your name.");
     } finally {
       setSaving(false);
     }

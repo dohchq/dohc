@@ -34,9 +34,9 @@ it("gives up on a check past its deadline, and remembers no verdict", async () =
 });
 
 it("remembers an answered verdict by content hash", async () => {
-  await expect(checkLossyNote("f".repeat(64), "<details>\n\nHidden.\n</details>\n")).resolves.toBe(
-    true,
-  );
+  await expect(
+    checkLossyNote("f".repeat(64), "1. Run this:\n\n       pnpm install\n\n2. Done\n"),
+  ).resolves.toBe(true);
   expect(knownLossyNoteVerdict("f".repeat(64))).toBe(true);
 });
 
@@ -45,7 +45,7 @@ it("remembers verdicts across a restart of a built app, for the same checker onl
   try {
     // A restart is a new window: a fresh module that reads storage again.
     await expect(
-      checkLossyNote("a".repeat(64), "<details>\n\nHidden.\n</details>\n"),
+      checkLossyNote("a".repeat(64), "1. Run this:\n\n       pnpm install\n\n2. Done\n"),
     ).resolves.toBe(true);
     await expect(checkLossyNote("b".repeat(64), "# Note\n")).resolves.toBe(false);
     vi.resetModules();
@@ -94,7 +94,7 @@ it("keeps verdicts out of storage on a dev server", async () => {
 });
 
 describe("useBoundNoteCheck", () => {
-  const LOSSY = "# Note\n\n<details>\n\nHidden.\n</details>\n";
+  const LOSSY = "# Note\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n";
   const sha = (text: string) => createHash("sha256").update(text).digest("hex");
   // A session seeded from LOSSY, with the witness the desktop records.
   function seeded(): Y.Doc {

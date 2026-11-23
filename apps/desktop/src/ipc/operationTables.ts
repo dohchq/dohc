@@ -1,5 +1,7 @@
 import { captureOperations } from "./captureOperations";
 import { linksOperations } from "./linksOperations";
+import { retrievalOperations } from "./retrievalOperations";
+import { agentRunHistoryOperations } from "./agentRunHistoryOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
 import {
   shareHandoffOperations,
@@ -29,6 +31,7 @@ import {
   workspaceTrustOperations,
   engineYDocAdmissionOperations,
   liveDraftRecoveryOperations,
+  setAsideDraftOperations,
   stopAndRestoreRecoveryOperations,
   engineYDocSaveOperations,
   captureRecoveryOperations,
@@ -48,7 +51,11 @@ import {
   appViewOperations,
 } from "./bridgeContract";
 import { settingsOperations } from "./settingsOperations";
-import { protectedCopyOperations, stoppedRunOperations } from "./writeOperations";
+import {
+  agentRunUndoOperations,
+  protectedCopyOperations,
+  stoppedRunOperations,
+} from "./writeOperations";
 import { CHANNELS } from "./channels";
 import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
 import type { OperationFamily } from "@dohc/workspace-contracts/operation-declaration";
@@ -75,7 +82,9 @@ export const OPERATION_TABLES = [
   relayShareOperations,
   shareCopyOperations,
   linksOperations,
+  retrievalOperations,
   captureOperations,
+  agentRunHistoryOperations,
   heldChangeOperations,
   workspaceSyncOperations,
   workspaceFolderNameOperations,
@@ -98,6 +107,7 @@ export const OPERATION_TABLES = [
   usageRecordOperations,
   engineYDocAdmissionOperations,
   liveDraftRecoveryOperations,
+  setAsideDraftOperations,
   stopAndRestoreRecoveryOperations,
   engineYDocSaveOperations,
   captureRecoveryOperations,
@@ -106,6 +116,7 @@ export const OPERATION_TABLES = [
   agentRunStateOperations,
   stoppedRunOperations,
   protectedCopyOperations,
+  agentRunUndoOperations,
   chatDispatchPauseOperations,
   agentThreadOperations,
   agentsListeningOperations,

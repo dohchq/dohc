@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { describe, expect, it, vi } from "vitest";
-import { ACCOUNT_CSS_PATH, ACCOUNT_JS_PATH } from "./assets";
+import { ACCOUNT_CSS_PATH, ACCOUNT_FONT_PATH, ACCOUNT_JS_PATH } from "./assets";
 import type { ServerDescriptor } from "./config";
 import { createCrashReportIntake } from "./crashReports";
 import type { ReadinessReport } from "./readiness";
@@ -239,6 +241,9 @@ describe("account pages", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(body).toContain(ACCOUNT_CSS_PATH);
     expect(body).toContain(ACCOUNT_JS_PATH);
+    expect(body).toContain('class="brand-mark"');
+    expect(body).not.toContain("<script>");
+    expect(body).not.toContain("<style");
     expect(body).not.toMatch(/https?:\/\/(?!localhost)/);
   });
 
@@ -356,6 +361,26 @@ describe("account pages", () => {
     const js = await router()(get(ACCOUNT_JS_PATH));
     expect(js.headers.get("content-type")).toContain("javascript");
   });
+
+  it("serves the font its stylesheet names, which the pages' policy lets them load", async () => {
+    const page = await router()(get("/account/sign-in"));
+    expect(page.headers.get("content-security-policy")).toContain("font-src 'self'");
+    const css = await (await router()(get(ACCOUNT_CSS_PATH))).text();
+    expect(css).toContain(`url("${ACCOUNT_FONT_PATH}")`);
+    const font = await router()(get(ACCOUNT_FONT_PATH));
+    expect(font.status).toBe(200);
+    expect(font.headers.get("content-type")).toBe("font/woff2");
+    expect(font.headers.get("cache-control")).toContain("immutable");
+    const packaged = readFileSync(
+      createRequire(import.meta.url).resolve(
+        "@fontsource-variable/inter/files/inter-latin-opsz-normal.woff2",
+      ),
+    );
+    expect(
+      Buffer.from(await font.arrayBuffer()).equals(packaged),
+      "src/accountFont.ts is not the installed Inter file. Run pnpm --filter @dohc/workspace-api write:account-font.",
+    ).toBe(true);
+  });
 });
 
 describe("device verification page", () => {
@@ -388,6 +413,7 @@ describe("device verification page", () => {
     expect(body).toContain("ABCD-EFGH");
     expect(body).toContain("Approve");
     expect(body).toContain("Deny");
+    expect(body.indexOf('id="deny"')).toBeLessThan(body.indexOf('id="approve"'));
     expect(body).toContain("ada@example.com");
     expect(body).toContain("Connect this phone to dohc?");
     expect(body).toContain(

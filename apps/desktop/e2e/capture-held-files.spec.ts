@@ -63,7 +63,7 @@ test("a real daemon holds a deep quote, shows its notice, and clears it after an
       .filter({ hasText: "Outside edit not recorded" });
     await expect(toast).toHaveCount(1);
     await expect(toast).toContainText('dohc did not record the outside edit to "held.md".');
-    await expect(toast).toContainText("dohc cannot take in this file's Markdown.");
+    await expect(toast).toContainText("dohc cannot read this file's Markdown.");
     expect(await readFile(join(temp.rootPath, "held.md"), "utf8")).toBe(deep);
     for (const theme of ["light", "dark"] as const) {
       await page.evaluate(
@@ -94,7 +94,7 @@ test("a real daemon holds a deep quote, shows its notice, and clears it after an
     await page.keyboard.press("Enter");
     const held = page.getByTestId("engine-may-hold-document-notice");
     await expect(held).toContainText('dohc cannot open "held.md" for live editing');
-    await expect(held).toContainText("Restore the file's exact contents from before that edit.");
+    await expect(held).toContainText("Copy it first, then restore the file's earlier contents.");
     await expect(held.getByRole("button", { name: "Open externally" })).toBeVisible();
     await expect(page.getByTestId("lossy-note-notice")).toHaveCount(0);
     await expect(page.getByTestId("lossy-note-edit-anyway")).toHaveCount(0);

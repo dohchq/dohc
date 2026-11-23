@@ -25,6 +25,7 @@ const READY_WATCHER_STATUS = {
   terminal: false,
   noAtomicPlacement: false,
   recoveryUnavailable: false,
+  secretKeyChecked: true,
   deferredWrites: [],
   keptFiles: [],
   captureRecoveries: [],

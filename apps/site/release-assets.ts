@@ -10,7 +10,7 @@ interface Release {
 
 // Installers are named <product>-<version>-<os>-<architecture>.<extension>.
 // Each package format spells the architecture its own way: x86_64 for the
-// AppImage and amd64 for the .deb.
+// AppImage and .rpm, and amd64 for the .deb.
 export function matchesBuild(extension: string, architecture: string): (name: string) => boolean {
   const architecturePattern = new RegExp(`(?:^|[-_])${architecture}(?:[-_.]|$)`, "i");
   return (name) => name.toLowerCase().endsWith(extension) && architecturePattern.test(name);

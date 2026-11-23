@@ -98,7 +98,7 @@ describe("AppErrorBoundary", () => {
       </AppErrorBoundary>,
     );
     expect(screen.getByTestId("app-crash-screen")).toBeTruthy();
-    expect(screen.getByText("something went wrong")).toBeTruthy();
+    expect(screen.getByText("dohc ran into an unexpected error")).toBeTruthy();
     expect(screen.getByText("kaboom in a view")).toBeTruthy();
     fireEvent.click(screen.getByTestId("app-crash-reload"));
     expect(reloadRenderer).toHaveBeenCalledOnce();

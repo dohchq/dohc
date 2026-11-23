@@ -52,6 +52,7 @@ import {
   observeExit,
   closeOwnedPackage,
   benchmarkCancellation,
+  fileTextOrEmpty,
   verifyRestartInput,
 } from "./packaged-process.mjs";
 import { snapshotMacProcesses } from "./packaged-process-snapshot.mjs";
@@ -2193,7 +2194,7 @@ try {
               data.typing = [await typing(fresh.page, "small.md")];
               await waitUntil(
                 async () =>
-                  (await readFile(join(f.workspaces[0].rootPath, "small.md"), "utf8")).includes(
+                  (await fileTextOrEmpty(join(f.workspaces[0].rootPath, "small.md"))).includes(
                     "x".repeat(keystrokes),
                   ),
                 10000,
@@ -2486,7 +2487,7 @@ try {
             for (const name of ["small.md", "large.md"]) {
               await waitUntil(
                 async () =>
-                  (await readFile(join(f.workspaces[0].rootPath, name), "utf8")).includes(
+                  (await fileTextOrEmpty(join(f.workspaces[0].rootPath, name))).includes(
                     "x".repeat(keystrokes),
                   ),
                 60000,

@@ -77,8 +77,8 @@ export function NewFileDialog(props: {
             New file
           </h2>
           <p id="new-file-help" className="m-0 text-xs text-muted">
-            Name it like a path — any folders you name are created for you. No extension means
-            markdown (.md).
+            Include folders in the path to create them. Files without an extension default to
+            Markdown, .md.
           </p>
         </div>
         <input
@@ -95,7 +95,7 @@ export function NewFileDialog(props: {
           }}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? "new-file-name-error" : undefined}
-          className={`w-full rounded-md border ${error ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-line"} bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle disabled:opacity-50`}
+          className={`w-full rounded-md border ${error ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-line"} bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle disabled:opacity-50`}
         />
         {error ? (
           <p id="new-file-name-error" role="alert" className="m-0 text-xs text-danger">

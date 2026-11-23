@@ -62,10 +62,10 @@ export function downloadCollectionFile(
     response.bytesBase64.length % 4 !== 0 ||
     !/^[A-Za-z0-9+/]*={0,2}$/.test(response.bytesBase64)
   )
-    throw new Error("The collection returned an invalid file.");
+    throw new Error("The Collection returned an invalid file.");
   const bytes = Uint8Array.from(atob(response.bytesBase64), (char) => char.charCodeAt(0));
   if (bytes.byteLength !== file.byteLength)
-    throw new Error("The collection returned an incomplete file.");
+    throw new Error("The Collection returned an incomplete file.");
   const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
   const link = document.createElement("a");
   link.href = url;

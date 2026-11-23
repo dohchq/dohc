@@ -6,14 +6,14 @@ import type { ToPage } from "./liveBridge";
 import { facts, liveServer, OPEN, pageSide, ready } from "./liveFixtures";
 import { createPageHost } from "./pageHost";
 import {
-  createLivePages,
   createPageLive,
+  createScopedEnds,
   liveMark,
-  type LivePages,
-  type PageScope,
+  type ScopedEnds,
+  type WorkspaceScope,
 } from "./pageLive";
 
-function setup(scope: PageScope, pages: LivePages, ...answers: Answer[]) {
+function setup(scope: WorkspaceScope, pages: ScopedEnds, ...answers: Answer[]) {
   const t = liveServer(...answers);
   const injected: { mount: number; message: ToPage }[] = [];
   const host = createPageHost({
@@ -41,7 +41,7 @@ function setup(scope: PageScope, pages: LivePages, ...answers: Answer[]) {
 
 describe("a page's web view and its session", () => {
   it("opens for the web view that drew, ends with it, and opens again in the next one", async () => {
-    const t = setup({ signIn: {}, workspaceId: "ws-1" }, createLivePages(), ready());
+    const t = setup({ signIn: {}, workspaceId: "ws-1" }, createScopedEnds(), ready());
     t.open();
     expect(t.host.state().live).toBeNull();
     t.painted();
@@ -78,7 +78,7 @@ describe("a page's web view and its session", () => {
   });
 
   it("ignores a late painted report from a web view it replaced", () => {
-    const t = setup({ signIn: {}, workspaceId: "ws-1" }, createLivePages(), ready());
+    const t = setup({ signIn: {}, workspaceId: "ws-1" }, createScopedEnds(), ready());
     t.host.gone();
     t.host.painted(0);
     t.open();
@@ -92,7 +92,7 @@ describe("teardown", () => {
     for (const trigger of ["sign-out", "failed sign-out", "401", "another workspace", "hidden"]) {
       const server = testServer();
       const stored = { origin: server.origin, token: "tok", userId: "u-1", email: "a@example.com" };
-      const pages = createLivePages();
+      const pages = createScopedEnds();
       const teardown = appTeardown(createAppRunner(), pages);
       let atDelete: object | null = null;
       const account = createAccount({
@@ -146,7 +146,7 @@ describe("teardown", () => {
 
   it("reaches a page before its first paint and while its web view recovers, so neither opens afterwards", async () => {
     for (const when of ["before the first paint", "while recovering"]) {
-      const pages = createLivePages();
+      const pages = createScopedEnds();
       const teardown = appTeardown(createAppRunner(), pages);
       const t = setup({ signIn: {}, workspaceId: "ws-1" }, pages, ready());
       if (when === "while recovering") {

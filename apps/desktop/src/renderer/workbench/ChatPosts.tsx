@@ -87,7 +87,7 @@ function RunLine(props: {
       data-testid="chats-run-line"
       role="status"
       data-state={endedAtMs === undefined ? "running" : failed ? "failed" : "done"}
-      className="mt-1 flex items-center gap-2 px-2 text-[11px] text-subtle"
+      className="mt-1 flex items-center gap-2 px-2 text-[12px] text-subtle"
     >
       <span
         aria-hidden
@@ -250,13 +250,13 @@ function AttachmentChip(props: {
   const changeLabel = useCollectionChangeLabel(props.workspaceId, pathHint);
   // A shared view can hold an attachment whose path it may not read: the
   // chip names it only as an attachment and opens nothing.
-  if (!pathHint) return <Ref path="" title="attachment" testId="chats-attachment-chip" />;
+  if (!pathHint) return <Ref path="" title="Attachment" testId="chats-attachment-chip" />;
   // An attachment is named by what it shows: the file and its heading, or
   // the Collection a change file changes, with the Collection's glyph. The
   // tooltip keeps the path.
   const label =
     changeLabel ??
-    `${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${headingText ? `#${headingText}` : ""}`;
+    `${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "Attachment"}${headingText ? `#${headingText}` : ""}`;
   return (
     <Ref
       path={pathHint}
@@ -282,7 +282,7 @@ function RunAskedBy(props: { message: ChatMessageRecord }) {
     <span
       data-testid="chats-run-asked-by"
       title={person ? `for ${person}` : undefined}
-      className="inline-flex min-w-0 items-center gap-1 text-[11px] text-subtle"
+      className="inline-flex min-w-0 items-center gap-1 text-[12px] text-subtle"
     >
       <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
       <span className="truncate text-muted">Asked by {props.message.authorDisplayName}</span>
@@ -339,7 +339,7 @@ function RunChip(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
-        className="rounded px-1 text-[11px] text-muted underline decoration-line underline-offset-2 hover:text-ink hover:decoration-ink"
+        className="rounded px-1 text-[12px] text-muted underline decoration-line underline-offset-2 hover:text-ink hover:decoration-ink"
       >
         Details
       </button>
@@ -366,17 +366,17 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
   return (
     <>
       <span className="grid gap-1">
-        <span className="text-[11px] text-muted">Command</span>
-        <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
+        <span className="text-[12px] text-muted">Command</span>
+        <code data-testid="chats-run-command" className="wrap-anywhere text-[12px] text-ink">
           {props.run.command}
         </code>
       </span>
       <span className="grid gap-1">
-        <span className="text-[11px] text-muted">Run</span>
+        <span className="text-[12px] text-muted">Run</span>
         <span className="flex min-w-0 items-center gap-1.5">
           <code
             data-testid="chats-run-id"
-            className="min-w-0 flex-1 break-all text-[11px] text-ink"
+            className="min-w-0 flex-1 break-all text-[12px] text-ink"
           >
             {props.run.runId}
           </code>
@@ -391,50 +391,50 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
       </span>
       {product ? (
         <span className="grid gap-1">
-          <span className="text-[11px] text-muted">Product</span>
-          <span data-testid="chats-run-product" className="wrap-anywhere text-[11px] text-ink">
+          <span className="text-[12px] text-muted">Product</span>
+          <span data-testid="chats-run-product" className="wrap-anywhere text-[12px] text-ink">
             {product} <span className="text-muted">{AS_REPORTED}</span>
           </span>
         </span>
       ) : null}
       {model ? (
         <span className="grid gap-1">
-          <span className="text-[11px] text-muted">Model</span>
-          <span data-testid="chats-run-model" className="wrap-anywhere text-[11px] text-ink">
+          <span className="text-[12px] text-muted">Model</span>
+          <span data-testid="chats-run-model" className="wrap-anywhere text-[12px] text-ink">
             {model} <span className="text-muted">{AS_REPORTED}</span>
           </span>
         </span>
       ) : null}
       <span className="grid grid-cols-2 gap-2">
         <span className="grid gap-1">
-          <span className="text-[11px] text-muted">Started</span>
+          <span className="text-[12px] text-muted">Started</span>
           <time
             data-testid="chats-run-started"
             dateTime={started.iso}
-            className="text-[11px] tabular-nums text-ink"
+            className="text-[12px] tabular-nums text-ink"
           >
             {started.label}
           </time>
         </span>
         <span className="grid gap-1">
-          <span className="text-[11px] text-muted">Exit code</span>
-          <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
-            {props.run.exitCode ?? "—"}
+          <span className="text-[12px] text-muted">Exit code</span>
+          <span data-testid="chats-run-exit-code" className="text-[12px] tabular-nums text-ink">
+            {props.run.exitCode ?? "-"}
           </span>
         </span>
       </span>
       <span className="grid gap-1">
-        <span className="text-[11px] text-muted">Log</span>
+        <span className="text-[12px] text-muted">Log</span>
         {props.run.logRemoved ? (
           // dohc removed it after the time the settings file keeps run logs.
-          <span data-testid="chats-run-log-removed" className="text-[11px] text-ink">
+          <span data-testid="chats-run-log-removed" className="text-[12px] text-ink">
             Removed
           </span>
         ) : (
           <span className="flex min-w-0 items-center gap-1.5">
             <code
               data-testid="chats-run-log-path"
-              className="min-w-0 flex-1 break-all text-[11px] text-ink"
+              className="min-w-0 flex-1 break-all text-[12px] text-ink"
             >
               {props.run.logPath ?? "No log path"}
             </code>
@@ -488,7 +488,7 @@ export function BookmarkAction(props: {
             aria-label={props.active ? "Remove chat bookmark" : "Bookmark chat as live file"}
             title={
               props.active
-                ? "Remove bookmark (the Markdown file moves to Archived)"
+                ? "Remove bookmark. The Markdown file moves to Archived."
                 : "Bookmark as a live Markdown file"
             }
             disabled={props.busy}
@@ -593,7 +593,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     setMessageNode,
   } = props;
   if (messagesLoading) {
-    return <SkeletonRows label="Loading..." className="pt-4" />;
+    return <SkeletonRows label="Loading…" className="pt-4" />;
   }
   const openingMessage = messages[0] ?? null;
   if (openingMessage === null) {
@@ -702,9 +702,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               props.onNavCommand?.(nav);
               scrollToMessage(parent.id);
             }}
-            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink"
+            className="mb-1 w-fit rounded px-1 text-left text-[12px] text-subtle hover:text-ink"
           >
-            ↳ replying to {chatAuthorLabel(parent)}
+            ↳ Replying to {chatAuthorLabel(parent)}
           </button>
         ) : null}
         <AgentColorScope
@@ -793,7 +793,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 data-testid="chats-message-time"
                 dateTime={commentTime.iso}
                 title={commentTime.label}
-                className="text-[11px] tabular-nums text-subtle"
+                className="text-[12px] tabular-nums text-subtle"
               >
                 {formatShortTime(comment.createdAtMs)}
               </time>
@@ -820,7 +820,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ) : null}
             {comment.work ? (
               <div className="mt-2">
-                <WorkStatus testIdPrefix="chats-comment" work={comment.work} />
+                <WorkStatus testIdPrefix="chats-comment" work={comment.work} className="mt-0" />
               </div>
             ) : null}
             {commentDecision ? (
@@ -839,7 +839,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             {replyCount > 0 ? (
               <span
                 data-testid="chats-reply-count"
-                className="mt-1 block text-[11px] tabular-nums text-subtle"
+                className="mt-1 block text-[12px] tabular-nums text-subtle"
               >
                 {replyCount} {replyCount === 1 ? "reply" : "replies"}
               </span>
@@ -907,7 +907,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           <ol
             data-testid="chats-replies"
             aria-label={`Replies to ${chatAuthorLabel(comment)}`}
-            className={`relative mt-3 list-none p-0 ${depth < 3 ? "" : "-ml-[38px]"}`}
+            className={`relative mt-3 list-none p-0 ${
+              depth < 3 ? "-ml-6 border-l border-line pl-6" : "-ml-[38px]"
+            }`}
           >
             {node.replies.map((reply, index) =>
               renderThreadComment(reply, depth + 1, comment, node.replies[index - 1]),
@@ -934,7 +936,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           }`}
         >
           <p data-testid="chats-thread-eyebrow" className="sr-only">
-            {`${channelLabel} · thread`}
+            {`${channelLabel} · Thread`}
           </p>
           <AgentColorAvatar>
             <ChatAvatar
@@ -978,12 +980,12 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                   onOpenPath={props.onOpenPath}
                 />
               ) : null}
-              <span className="truncate text-[11px] tabular-nums text-subtle">{channelLabel}</span>
+              <span className="truncate text-[12px] tabular-nums text-subtle">{channelLabel}</span>
               <time
                 data-testid="chats-message-time"
                 dateTime={openingTime.iso}
                 title={openingTime.label}
-                className="shrink-0 text-[11px] tabular-nums text-subtle"
+                className="shrink-0 text-[12px] tabular-nums text-subtle"
               >
                 {formatShortTime(openingMessage.createdAtMs)}
               </time>
@@ -1026,7 +1028,11 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             {openingMessage.work || openingDecision || runRecords[openingMessage.id] ? (
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 {openingMessage.work ? (
-                  <WorkStatus testIdPrefix="chats-message" work={openingMessage.work} />
+                  <WorkStatus
+                    testIdPrefix="chats-message"
+                    work={openingMessage.work}
+                    className="mt-0"
+                  />
                 ) : null}
                 {openingDecision ? (
                   <DecisionStatus
@@ -1092,7 +1098,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
       {commentCount > 0 ? (
         <div
           data-testid="chats-comments-divider"
-          className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 text-[11px] tabular-nums text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
+          className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 text-[12px] tabular-nums text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
         >
           <span className="inline-flex items-center gap-1">
             <MessageSquare size={12} strokeWidth={1.9} aria-hidden />

@@ -18,9 +18,12 @@ import {
   type OwnerLiveQuarantine,
   saveOnlyLiveDocuments,
   SaveOwnerLiveRecoveryCopyResult,
+  ListOwnerLiveRecoveryPackagesResult,
   type StopOwnerLiveDocumentResult,
   type ResumeOwnerLiveDocumentResult,
   CreateRelayShareResult,
+  InvitationEmail,
+  InvitationEmailLimit,
   GetRelayReceivedShareResult,
   ListRelaySharesResult,
   RelayShareReceivedRow,
@@ -35,6 +38,7 @@ import {
   CreateRelayShareLinkResult,
   DeleteRelayShareDiscussionMessageResult,
   ListRelayShareDiscussionResult,
+  LeaveRelayShareResult,
   ListRelayShareLinksResult,
   PauseRelayShareDiscussionResult,
   PollRelayShareDiscussionActivityResult,
@@ -46,7 +50,9 @@ import {
   RelayShareDiscussionPageResponse,
   RelayShareDiscussionPauseResponse,
   RelayShareGrantPromotionResponse,
+  RelayShareGrantRetuneResponse,
   RelayShareGrantRevokeResponse,
+  RelayShareLeaveResponse,
   RelayShareLinkCreateResponse,
   RelayShareLinkDependentConflict,
   RelayShareLinkEndResponse,
@@ -57,6 +63,9 @@ import {
   RetuneRelayShareLinkResult,
   ResumeRelayShareDiscussionResult,
   RotateRelayShareLinkResult,
+  RetuneRelayShareGrantResult,
+  RelayShareInvitationResendResponse,
+  ResendRelayShareInvitationResult,
   RevokeRelayShareGrantResult,
   RevokeRelayShareLinkResult,
   UnblockRelayShareDiscussionPrincipalResult,
@@ -75,6 +84,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { createPresencePollRegistry } from "../collab/presencePollRegistry";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/change-author";
 import { liveChangeOutcome, type LiveDocumentStatus } from "@dohc/workspace-contracts/live-changes";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const liveDocumentStatus = OwnerLiveDocument.omit({ canResume: true }).strip();
@@ -153,6 +163,15 @@ interface RelayShareRequest {
 
 /** What Stop and Resume of one live document need, for the window and for agents alike. */
 export interface OwnerLiveDocumentActionDependencies<Workspace> {
+  /** Ends the server's pause of the note at `path` and returns its cause; null when it is not paused. */
+  resumeOwnerLivePause?(
+    workspace: Workspace,
+    path: string,
+  ): Promise<"refused" | "failing" | "ended" | null>;
+  /** The notes the server paused, as this computer last settled them. */
+  ownerLivePauses?(
+    workspace: Workspace,
+  ): readonly { objectId: string; cause: "refused" | "failing" | "ended" }[];
   remoteForWorkspace(
     workspace: Workspace,
     options?: { allowPaused: boolean },
@@ -200,6 +219,8 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
   ): Promise<OwnerLiveStop | "requested" | undefined>;
   // This computer's Stops, as the engine holds them.
   listOwnerLiveStops(workspace: Workspace): Promise<OwnerLiveStop[]>;
+  // The size of the file at a path on this computer. Null when there is none.
+  noteBytes(workspace: Workspace, path: string): Promise<number | null>;
   // Who stopped or resumed a document, as this computer's engine records it. Absent where nothing records it.
   liveChanges?: OwnerLiveChangeRecord<Workspace>;
   // The person at this computer, who the window's Stop and Resume record as their author. The renderer names no author.
@@ -306,6 +327,8 @@ export function createOwnerLiveDocumentActions<
     credentialGeneration: currentCredentialGeneration,
   });
   const changed = () => new Error("This document changed. Open Live documents to check it.");
+  const tooLarge = async (workspace: Workspace, path: string) =>
+    ((await dependencies.noteBytes(workspace, path)) ?? 0) > WYSIWYG_MARKDOWN_THRESHOLD_BYTES;
   // A Stop reports "recovered" only when the engine says settlement wrote the
   // refused edits into the file. Otherwise they stay kept: in their queue, or
   // in the document with a record that its file still needs them.
@@ -738,6 +761,21 @@ export function createOwnerLiveDocumentActions<
       input.workspaceId,
       input.path,
       async (): Promise<ResumeOwnerLiveDocumentResult> => {
+        const large = await tooLarge(operation.workspace, input.path);
+        operation.assertCurrent();
+        if (large) {
+          const row = await serverRow(operation, { path: input.path });
+          operation.assertCurrent();
+          if (row !== "unread" && row?.reason === "live-document-without-lineage")
+            throw new Error(
+              `dohc could not resume live editing for ${input.path} because it is larger than 256 KB. Make it smaller or split it, then open it in dohc.`,
+            );
+        }
+        // A note the server paused for good resumes there first; the rest is an ordinary Resume.
+        const paused = await dependencies.resumeOwnerLivePause?.(operation.workspace, input.path);
+        operation.assertCurrent();
+        // A note whose file was moved, deleted or replaced has nothing at its path to start again.
+        if (paused === "ended") return { ended: true };
         // A Resume names its document by path, and the server resumes its own document there: the record names that one.
         const row =
           record && input.author ? await serverRow(operation, { path: input.path }) : null;
@@ -768,7 +806,8 @@ export function createOwnerLiveDocumentActions<
             })
             .parse(result);
           // Credit only the document this request resumed, and only when the server's answer says it did.
-          const answer = changedBy(result);
+          // Ending the server's pause resumed it, though the server never stopped hosting it.
+          const answer = paused ? "applied" : changedBy(result);
           if (named)
             await finishChange(
               operation,
@@ -896,16 +935,35 @@ export function createOwnerLiveDocumentActions<
         );
         // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
         const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
+        const pauses = dependencies.ownerLivePauses?.(operation.workspace) ?? [];
+        const notStarted = [...documents.values()].filter(
+          (row) => row.reason === "live-document-without-lineage",
+        );
+        const large = await Promise.all(
+          notStarted.map((row) => tooLarge(operation.workspace, row.path)),
+        );
+        session.assertCurrent();
+        notStarted.forEach((row, index) => {
+          if (large[index])
+            Object.assign(row, { reason: "live-document-too-large", canResume: false });
+        });
         for (const row of documents.values()) {
           // Each row speaks for the server's document, never for another that had or has its path.
           const deferred = localStops.find(
             (stop) => stop.document.objectId === row.objectId,
           )?.deferred;
-          if (deferred)
+          const startable =
+            row.reason !== "session-host-diverged" &&
+            row.reason !== "conflict-parent-withheld" &&
+            row.reason !== "live-document-too-large";
+          if (deferred) Object.assign(row, { deferredStop: deferred, canResume: startable });
+          // A note the server paused stays enrolled until Resume ends its pause.
+          // Resume of an ended pause starts nothing, so only it ignores the server's copy.
+          const pause = pauses.find((candidate) => candidate.objectId === row.objectId);
+          if (pause)
             Object.assign(row, {
-              deferredStop: deferred,
-              canResume:
-                row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld",
+              status: "paused",
+              canResume: pause.cause === "ended" || startable,
             });
           // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
           const kept = quarantines.filter(
@@ -1026,8 +1084,12 @@ export function createRelaySharesIpcHandlers<
       path: string,
       incident?: string,
     ): Promise<SaveOwnerLiveRecoveryCopyResult>;
+    listOwnerLiveRecoveryPackages(
+      workspace: Workspace,
+    ): Promise<ListOwnerLiveRecoveryPackagesResult>;
     // A grant changed on the relay. Null when the change names no workspace.
     sharesChanged(workspaceId: string | null): void;
+    receivedSharesChanged(leftHere: boolean): void;
     sendRendererActivity(scope: { workspaceId: string; liveDocumentStopped: string }): void;
     // An authenticated account listing, applied to this machine's received
     // shares so a share the owner restored resumes.
@@ -1258,7 +1320,7 @@ export function createRelaySharesIpcHandlers<
     // authoritative gate); this adds the honest product copy.
     if (input.paths?.some((path) => isSharedWithMePath(path))) {
       throw new Error(
-        "This came to you through a share — copy it into your own files to share it onward.",
+        "This came to you through a share. Copy it into your own files to share it onward.",
       );
     }
     return ownerRelayShareOperation(
@@ -1272,6 +1334,8 @@ export function createRelaySharesIpcHandlers<
               shareId: string;
               grantId: string;
               browserInvitationUrl?: string;
+              invitationEmail?: unknown;
+              invitationEmailLimit?: unknown;
             }>(credentials, `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`, {
               method: "POST",
               body: JSON.stringify({
@@ -1287,12 +1351,23 @@ export function createRelaySharesIpcHandlers<
           shareId: created.shareId,
           relayUrl: credentials.relayUrl!,
         });
+        const emailed = InvitationEmail.safeParse(created.invitationEmail);
+        const limit = InvitationEmailLimit.safeParse(created.invitationEmailLimit);
+        const invitationEmail = !emailed.success
+          ? "unavailable"
+          : emailed.data === "limit" && !limit.success
+            ? "failed"
+            : emailed.data;
         return CreateRelayShareResult.parse({
           shareId: created.shareId,
           grantId: created.grantId,
           browserInvitationUrl: created.browserInvitationUrl,
           shareCode,
           recipientEmail: input.recipientEmail,
+          invitationEmail,
+          ...(invitationEmail === "limit" && limit.success
+            ? { invitationEmailLimit: limit.data }
+            : {}),
         });
       },
       assertOriginalWorkspace,
@@ -1387,6 +1462,20 @@ export function createRelaySharesIpcHandlers<
       throw new Error(relayShareErrorCopy(500, null));
     }
     return RevokeRelayShareResult.parse({ undo: parsed.data.undo });
+  };
+
+  const leaveRelayShare: Handlers["leaveRelayShare"] = async (input) => {
+    const relayResult = await relayShareJson<unknown>(
+      `/sync/shares/${encodeURIComponent(input.shareId)}/leave`,
+      { method: "POST", body: JSON.stringify({ ended: input.ended }) },
+    );
+    const parsed = RelayShareLeaveResponse.safeParse(relayResult);
+    if (!parsed.success) {
+      dependencies.receivedSharesChanged(true);
+      throw new Error(relayShareErrorCopy(500, null));
+    }
+    dependencies.receivedSharesChanged(parsed.data.left);
+    return LeaveRelayShareResult.parse({ left: parsed.data.left });
   };
 
   // Restores what a removal ended, from the receipt the removal returned.
@@ -1688,7 +1777,7 @@ export function createRelaySharesIpcHandlers<
     try {
       operation.assertCurrent();
       if (shareViewIsPresent(operation.workspace.shareView)) {
-        throw new Error("This is a shared view — only the original workspace can be shared.");
+        throw new Error("This is a shared view. Only the original workspace can be shared.");
       }
       const { credentials, credentialGeneration } = await remoteForWorkspace(operation.workspace);
       operation.assertCurrent();
@@ -1973,6 +2062,68 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
+  const retuneRelayShareGrant: Handlers["retuneRelayShareGrant"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const relayResult = await session.run(
+          changingGrants(operation.workspace.workspaceId, () =>
+            relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/retune`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                  access: input.access,
+                }),
+              },
+            ),
+          ),
+        );
+        const parsed = RelayShareGrantRetuneResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return RetuneRelayShareGrantResult.parse({
+          grantId: parsed.data.grantId,
+          access: parsed.data.access,
+          generation: parsed.data.generation,
+          status: parsed.data.status,
+          revokedAtMs: parsed.data.revokedAtMs,
+          parentGrantId: parsed.data.parentGrantId,
+        });
+      },
+      assertOriginalWorkspace,
+    );
+  };
+
+  const resendRelayShareInvitation: Handlers["resendRelayShareInvitation"] = async (
+    input,
+    { operation },
+  ) => {
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const relayResult = await session.run(() =>
+          relayShareJsonWithCredentials<unknown>(
+            credentials,
+            `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/invitation-email`,
+            {
+              method: "POST",
+              body: JSON.stringify({ workspaceId: operation.workspace.workspaceId }),
+            },
+          ),
+        );
+        const answer = RelayShareInvitationResendResponse.safeParse(relayResult);
+        return ResendRelayShareInvitationResult.parse(
+          answer.success ? answer.data : { invitationEmail: "failed" },
+        );
+      },
+      assertOriginalWorkspace,
+    );
+  };
+
   const revokeRelayShareGrant: Handlers["revokeRelayShareGrant"] = async (input, { operation }) => {
     return ownerRelayShareOperation(
       operation,
@@ -2051,10 +2202,20 @@ export function createRelaySharesIpcHandlers<
       operation.assertCurrent();
       return saved;
     },
+    listOwnerLiveRecoveryPackages: async (_input, { operation }) => {
+      operation.assertCurrent();
+      assertOriginalWorkspace(operation.workspace);
+      const listed = ListOwnerLiveRecoveryPackagesResult.parse(
+        await dependencies.listOwnerLiveRecoveryPackages(operation.workspace),
+      );
+      operation.assertCurrent();
+      return listed;
+    },
     createRelayShare,
     listRelayShares,
     getRelayReceivedShare,
     revokeRelayShare,
+    leaveRelayShare,
     undoRelayShare,
     createRelayShareLink,
     addRelayShareLink,
@@ -2074,6 +2235,8 @@ export function createRelaySharesIpcHandlers<
     pauseRelayShareDiscussion,
     resumeRelayShareDiscussion,
     promoteRelayShareGrant,
+    retuneRelayShareGrant,
+    resendRelayShareInvitation,
     revokeRelayShareGrant,
   };
 }

@@ -37,6 +37,12 @@ import {
 import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import { stableJsonStringify } from "../canonicalJson";
 import { recordPushDeliveries } from "./pushDeliveries";
+import {
+  bindStoppedNoteClient,
+  isOwnerSaveOfStoppedNote,
+  isOwnerSaveOfUnhostedNote,
+  isResumedHostSave,
+} from "./serviceHostEnrollment";
 
 function withAdmittedChatName(
   op: SyncRelayLogInput,
@@ -317,7 +323,10 @@ export function appendLogBatchInTransaction(
   const objectMomentStmt = storage.db.prepare(OBJECT_MOMENT_INSERT_SQL);
   const versionSnapshotBlobStmt = storage.db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
   const currentFileStmt = currentFileStatements(storage.db);
+  const owner = input.workReferences?.userId;
   const pushMessages: number[] = [];
+  const ownerEdits: Array<{ userId: string; payloadJson: string; authors: LiveAuthorSnapshot }> =
+    [];
   for (const op of newOps) {
     const result = insertStmt.run(
       input.workspaceId,
@@ -341,6 +350,12 @@ export function appendLogBatchInTransaction(
     )
       continue;
     if (op.opKind === "chat.message.append") pushMessages.push(Number(result.lastInsertRowid));
+    if (op.opKind === "ydoc.update" && owner !== undefined && op.admittedAuthorSnapshot)
+      ownerEdits.push({
+        userId: owner,
+        payloadJson: op.payloadJson,
+        authors: op.admittedAuthorSnapshot,
+      });
     // Keep "where is this object now?" answerable by primary
     // key. The relay_seq this row just took IS the order the guard in the
     // upsert compares, so a later moment always wins and an out-of-order
@@ -352,6 +367,25 @@ export function appendLogBatchInTransaction(
         op.payloadJson,
         Number(result.lastInsertRowid),
       );
+    const replacesStoredFile = () => {
+      if (op.opKind !== "moment.append") return false;
+      if (owner === undefined)
+        return isResumedHostSave(storage, {
+          workspaceId: input.workspaceId,
+          originId: input.originId,
+          payloadJson: op.payloadJson,
+        });
+      const ownerSave = {
+        workspaceId: input.workspaceId,
+        userId: owner,
+        payloadJson: op.payloadJson,
+        recordedAtMs: op.recordedAtMs,
+      };
+      return (
+        isOwnerSaveOfStoppedNote(storage, ownerSave) ||
+        isOwnerSaveOfUnhostedNote(storage, ownerSave)
+      );
+    };
     if (op.opKind === "moment.append") {
       const resolved = objectPathFromMomentPayload(op.payloadJson);
       if (resolved) {
@@ -417,9 +451,12 @@ export function appendLogBatchInTransaction(
       op.opKind,
       op.payloadJson,
       Number(result.lastInsertRowid),
+      replacesStoredFile,
     );
   }
   for (const relaySeq of pushMessages) recordPushDeliveries(storage, relaySeq);
+  for (const edit of ownerEdits)
+    bindStoppedNoteClient(storage, { workspaceId: input.workspaceId, ...edit });
   const settlementRefusals = input.ops
     .filter((op) => op.settlementAdmission?.status === "refused")
     .map((op) => ({

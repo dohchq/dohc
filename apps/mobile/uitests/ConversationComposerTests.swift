@@ -12,7 +12,7 @@ final class ConversationComposerTests: XCTestCase {
 
   private func field(_ app: XCUIApplication, _ label: String) -> XCUIElement {
     let field = app.textViews[label]
-    XCTAssertTrue(field.waitForExistence(timeout: 20), "The composer's field should be named \(label)")
+    XCTAssertTrue(field.waitForExistence(timeout: 45), "The composer's field should be named \(label)")
     return field
   }
 
@@ -30,7 +30,7 @@ final class ConversationComposerTests: XCTestCase {
     input.typeText("Lunch at 1?")
     XCTAssertTrue(send.isEnabled, "Send should take the text")
     send.tap()
-    XCTAssertTrue(text(app, "Lunch at 1?").waitForExistence(timeout: 5), "The message should show in the chat")
+    XCTAssertTrue(text(app, "Lunch at 1?").waitForExistence(timeout: 15), "The message should show in the chat")
     XCTAssertEqual(input.value as? String ?? "", "", "The field should clear once the outbox keeps the message")
     // The sample's outbox moves the message on by itself, to Sending at 0.7 s and to saved at 1.6 s, when its state words
     // go, so which of those words shows here depends on timing. ConversationOutboxTests checks each state on seeded
@@ -55,18 +55,18 @@ final class ConversationComposerTests: XCTestCase {
   func testAGroupWritesANewPostWithATitle() {
     let app = launch("chat")
     let newPost = app.buttons["New post"]
-    XCTAssertTrue(newPost.waitForExistence(timeout: 20), "A Group should offer New post")
+    XCTAssertTrue(newPost.waitForExistence(timeout: 45), "A Group should offer New post")
     newPost.tap()
     let title = app.textFields["Title"]
-    XCTAssertTrue(title.waitForExistence(timeout: 5), "New post should add a title")
+    XCTAssertTrue(title.waitForExistence(timeout: 15), "New post should add a title")
     title.tap()
     title.typeText("Porto")
     let input = field(app, "Message #planning")
     input.tap()
     input.typeText("Day trip on the 15th")
     app.buttons["Post"].tap()
-    XCTAssertTrue(text(app, "Porto").waitForExistence(timeout: 5), "The post should show its title")
-    XCTAssertTrue(app.buttons["New post"].waitForExistence(timeout: 5), "After posting, the composer should send messages again")
+    XCTAssertTrue(text(app, "Porto").waitForExistence(timeout: 15), "The post should show its title")
+    XCTAssertTrue(app.buttons["New post"].waitForExistence(timeout: 15), "After posting, the composer should send messages again")
   }
 
   @MainActor

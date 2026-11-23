@@ -3,7 +3,7 @@ import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 
 const LEFT_REASON =
-  "A dohc window left this workspace while the change waited, so nothing changed. Try again.";
+  "A dohc window switched away while the version change was waiting, so nothing changed. Try again.";
 
 // A version change from the CLI or the MCP reaches main, not this window, so
 // main asks first (versionRounds.ts). The window saves its open edits and
@@ -53,7 +53,7 @@ export function useVersionRounds(
             holds.delete(roundId);
             const reason = ipcErrorMessage(
               error,
-              "A dohc window couldn't save its open edits, so nothing changed.",
+              "A dohc window could not save its open edits, so nothing changed.",
             );
             return bridge().answerVersionRound({
               roundId,

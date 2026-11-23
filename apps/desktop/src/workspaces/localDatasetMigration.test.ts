@@ -182,6 +182,7 @@ describe("owner Collection migration", () => {
         beforeValues: { id: 1, name: 1 },
         afterValues: { id: 1, name: 1, note: 0 },
         clearedValues: { id: 0, name: 0 },
+        replacedValues: { id: 0, name: 1 },
       },
     ]);
     expect(review.candidate.preview.firstPage.changes).toMatchObject([
@@ -297,6 +298,43 @@ describe("owner Collection migration", () => {
     await expect(prepare(host, f)).rejects.toThrow(/schema/i);
     expect(host.approvedArtifacts(id(1)).revision).toEqual(first);
     expect((await host.query(call(first, id(5)))).result).toEqual([]);
+  });
+
+  it("supports migrationPath: null for operations-only changes and refuses it when schema SQL changes", async () => {
+    const { host } = await open(),
+      f = fixture(),
+      first = await activate(host, f);
+    await host.action(call(first, id(6), { name: "Keep me" }));
+
+    // Operations-only change with migrationPath: null succeeds using SELECT 1; and preserves records.
+    f.files.set(definition.operationsPath, source.replace("ORDER BY id", "ORDER BY id DESC"));
+    const prepared = await host.prepareMigration({
+      datasetId: id(1),
+      descriptorPath: "items/dataset.json",
+      migrationPath: null,
+      adapter: f.adapter,
+    });
+    expect(prepared.migrationSql).toBe("SELECT 1;");
+    const migrated = await host.approveMigration({
+      preparationId: prepared.preparationId,
+      revisionSha256: prepared.revision.revisionSha256,
+      approvalDigest: prepared.approvalDigest,
+    });
+    expect(migrated.revision.revision).toBe(2);
+    expect((await host.query(call(migrated.revision, id(5)))).result).toEqual([
+      expect.objectContaining({ name: "Keep me" }),
+    ]);
+
+    // Schema change with migrationPath: null is refused cleanly.
+    f.next();
+    await expect(
+      host.prepareMigration({
+        datasetId: id(1),
+        descriptorPath: "items/dataset.json",
+        migrationPath: null,
+        adapter: f.adapter,
+      }),
+    ).rejects.toThrow(/migrationPath/i);
   });
 });
 

@@ -31,9 +31,9 @@ const PASSPHRASE_TOO_SHORT = "Enter at least 8 characters to protect synced secr
 // What turning sync off leaves alone. Groups and received shares sync on
 // their own, so a pause here does not reach them.
 export const SYNC_OFF_KEEPS =
-  "Turning this off keeps your work, history, and shares; groups you joined keep syncing.";
+  "Turning this off keeps your work, History, and shares. Groups you joined keep syncing.";
 export const SYNC_OFF_KEEPS_WITH_RECEIVED =
-  "Turning this off keeps your work, history, and shares; groups you joined and files shared with you keep syncing.";
+  "Turning this off keeps your work, History, and shares. Groups you joined and received shares keep syncing.";
 // Why the switch cannot turn on while nobody is signed in. Connect server sits
 // in the row above.
 export const SYNC_ON_NEEDS_SERVER = "Connect your server to turn sync on.";
@@ -196,7 +196,7 @@ export function CloudSyncSettings(props: {
         setPassphrasePurpose(/unlock/i.test(message) ? "unlock" : "protect");
         setSyncError(
           /could not/i.test(message)
-            ? "That passphrase couldn't unlock synced secrets."
+            ? "That passphrase could not unlock synced secrets."
             : PASSPHRASE_TOO_SHORT,
         );
         return;

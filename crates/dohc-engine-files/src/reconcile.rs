@@ -107,6 +107,8 @@ pub struct ReconcilePlan {
     /// still opens the file, which is stored under another spelling. Each
     /// names the ingest of that spelling.
     pub respelled_retires: BTreeMap<String, Respelling>,
+    /// What each retired path held when capture last saw its file.
+    pub removed_sha256: BTreeMap<String, String>,
     /// The pass saw one or more readability failures or an unconfirmed retire.
     /// Callers mirror TS `onCaptureOutcome({ok:false})` while still applying
     /// every independent safe operation.
@@ -226,6 +228,7 @@ impl ReconcilePlan {
             retained_unread: diff.retained_unread,
             unconfirmed_removed: diff.unconfirmed_removed,
             respelled_retires,
+            removed_sha256: BTreeMap::new(),
             degraded,
             degraded_paths,
             prepared_from_dirty,
@@ -697,8 +700,12 @@ impl ReconcileController {
         // permission denial, locks, and other errors retain last-known-good.
         let mut confirmed_removed = Vec::with_capacity(diff.removed.len());
         let mut lstat_unconfirmed = Vec::new();
+        let mut removed_sha256 = BTreeMap::new();
         for path in diff.removed.drain(..) {
             if absence_probe.confirms_absent(root, &path) {
+                if let Some(entry) = self.manifest.get(&path) {
+                    removed_sha256.insert(path.clone(), entry.sha256.clone());
+                }
                 confirmed_removed.push(path);
             } else {
                 lstat_unconfirmed.push(path);
@@ -722,7 +729,7 @@ impl ReconcileController {
         let to = from.next();
         let prepared_from_dirty = self.dirty;
         let dirty_epoch = self.dirty_epoch;
-        let plan = ReconcilePlan::from_diff(
+        let mut plan = ReconcilePlan::from_diff(
             diff,
             |path| stored_spelling(root, path),
             from,
@@ -732,6 +739,7 @@ impl ReconcileController {
             degraded,
             degraded_paths,
         );
+        plan.removed_sha256 = removed_sha256;
         self.outstanding = true;
         Ok(ReconcileRun::Completed(plan))
     }
@@ -1107,6 +1115,7 @@ mod ack_receipt_tests {
             retained_unread: Vec::new(),
             unconfirmed_removed: Vec::new(),
             respelled_retires: BTreeMap::new(),
+            removed_sha256: Default::default(),
             degraded: false,
             degraded_paths: Vec::new(),
             prepared_from_dirty: true,
@@ -1153,6 +1162,7 @@ mod ack_receipt_tests {
             retained_unread: vec!["over-cap.md".to_owned()],
             unconfirmed_removed: Vec::new(),
             respelled_retires: BTreeMap::new(),
+            removed_sha256: Default::default(),
             degraded: false,
             degraded_paths: Vec::new(),
             prepared_from_dirty: true,

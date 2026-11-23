@@ -21,7 +21,10 @@ import {
 } from "@dohc/workspace-auth/credentialFence";
 import { readApnsConfig, readPushConfig } from "./pushConfig";
 import { createPushSender } from "./pushSender";
+import { createApnsClient } from "./apnsClient";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
+import { createSmtpSender, smtpSettingsFromEnv } from "@dohc/workspace-auth/smtp";
+import { SHARE_INVITATION_EMAIL_TIMEOUT_MS } from "./shareInvitationEmail";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -31,6 +34,7 @@ import {
   jsonResponse,
   parseGracePeriodMs,
   serveFetchHandler,
+  waitsOnQuery,
 } from "@dohc/service-http";
 import { Pool, type QueryConfig } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
@@ -74,6 +78,7 @@ import {
   type NamedLiveBrowserHttpLimits,
 } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
+import type { SyncRelayOpenPart } from "./storage/types";
 import { createDeviceControl } from "./deviceControl";
 import { readOwnerAdmissionConfig, startOwnerAdmission } from "./ownerAdmissionConfig";
 import { liveValidation } from "./liveValidation.js";
@@ -85,6 +90,8 @@ import { operatorSecretPath, operatorSocketPath } from "./appPublicationOperator
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { checkReaderConfig } from "./readerConfig";
+import { admitBodySequenceNotes } from "@dohc/ydoc-projection/live-journal-validation";
+import { BODY_SEQUENCE_SETTING, bodySequenceNotesAdmitted } from "./bodySequenceSetting";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots } from "./serviceLiveHost";
 import { startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
@@ -150,6 +157,11 @@ import {
   authorizeAutomationReplication,
 } from "./automationReplicaCredential";
 import { serverLogLine } from "./serverLogWords";
+import { createStartTimeline } from "./startTimeline";
+
+// Node starting, and every module above loading.
+const startTimeline = createStartTimeline();
+startTimeline.done("code");
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test"
@@ -195,6 +207,11 @@ if (automationsSetting !== undefined && !["0", "1"].includes(automationsSetting)
   fatal("FATAL: DOHC_RELAY_AUTOMATIONS must be 0 or 1.");
 const automationsOn =
   automationsSetting === undefined ? selfHostedLive : automationsSetting === "1";
+try {
+  admitBodySequenceNotes(bodySequenceNotesAdmitted());
+} catch {
+  fatal(`FATAL: ${BODY_SEQUENCE_SETTING} must be 0 or 1.`);
+}
 // This server keeps copies of workspaces to run their automations and to answer their owners' phones.
 // A self-hosted server always keeps them; a development relay only while it runs automations.
 const copiesOn = automationsOn || selfHostedLive;
@@ -497,6 +514,7 @@ const accountResolvers: {
         credentialFence,
       };
     })();
+startTimeline.done("accounts");
 const resolveAccountActor = accountResolvers.actor;
 const resolveAccountSession = accountResolvers.session;
 const resolvePhoneCapableAccountSession = accountResolvers.phoneCapableSession;
@@ -518,6 +536,13 @@ const apnsConfig = (() => {
     fatal(`FATAL: ${error instanceof Error ? error.message : "Invalid APNs configuration."}`);
   }
 })();
+const smtpSettings = (() => {
+  try {
+    return smtpSettingsFromEnv(process.env);
+  } catch (error) {
+    fatal(`FATAL: ${error instanceof Error ? error.message : "Invalid SMTP configuration."}`);
+  }
+})();
 
 const documentProjection = projectionExecutable
   ? await startEngineProjection({
@@ -527,10 +552,13 @@ const documentProjection = projectionExecutable
       fatal(`FATAL: Document projection could not start: ${serverLogLine(error)}`),
     )
   : undefined;
+startTimeline.done("engine check");
 const storageOptions = {
   workspaceQuotaBytes,
   pushConfigured: Boolean(pool && pushConfig),
+  apnsConfigured: Boolean(pool && apnsConfig),
   ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}),
+  opened: (part: SyncRelayOpenPart) => startTimeline.done(`database ${part}`),
 };
 const deployment = deploymentConfig
   ? openRelayDeployment(deploymentConfig, storageOptions)
@@ -700,6 +728,13 @@ const relayApplication = createSyncRelayHandler({
     return new Map(result.rows.map((row) => [row.id, row.email]));
   },
   lookupVerifiedUserEmail: (userId) => lookupVerifiedUserEmail(userId),
+  ...(smtpSettings
+    ? {
+        sendShareInvitationEmail: createSmtpSender(smtpSettings, {
+          timeoutMs: SHARE_INVITATION_EMAIL_TIMEOUT_MS,
+        }),
+      }
+    : {}),
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
   presence,
   linkKey,
@@ -867,7 +902,9 @@ const deletions = createAccountDeletionRoute({
     await datasetHost.deleteWorkspaces(manifest.datasets);
   },
 });
+startTimeline.done("collections");
 const pendingDeletions = pool ? await fencePendingAccountDeletions(pool, deletions) : [];
+startTimeline.done("account deletions");
 const signUpInvites =
   secret.length >= 32
     ? createSignUpInviteRoute({
@@ -1024,6 +1061,10 @@ setInterval(() => {
 const server = serveFetchHandler({
   handler: fetchHandler,
   streamBody: streamsRequestBody,
+  // Reads kept open to hear of a change. `hold`: a page's log, chat and comment activity, sent on by the share
+  // service, presence, and a session's operation changes. `wait`: a computer's chat wakes and a session's notices.
+  // `waitMs`: a computer's button presses.
+  waits: waitsOnQuery("hold", "wait", "waitMs"),
   requestLog: SYNC_RELAY_REQUEST_LOG,
   bodiesInFlight: BODIES_IN_FLIGHT,
   busy: () => errorBody("server_busy"),
@@ -1301,47 +1342,45 @@ if (namedLiveConfig) {
     storage.readLiveAuthority.bind(storage),
   );
   const bounds = namedLiveConfig.host;
-  // Off unless DOHC_RELAY_LIVE_ROOMS=1 while the room is built and tested in stages.
-  const rooms =
-    process.env.DOHC_RELAY_LIVE_ROOMS === "1"
-      ? createLiveRooms({
-          storage,
-          maxUpdateBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
-          maxNoteBytes: bounds.maxAdmissionBytes,
-          maxAppliedBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
-          // Off until the engine that credits every sender in one save is deployed with it.
-          namesEverySender: process.env.DOHC_RELAY_LIVE_ROOM_NAMES === "1",
-          // A room saves as the workspace's owner, whoever is connected.
-          async openSaver(document, signal) {
-            const ownerUserId = workspaceOwner(storage as StorageContext, document.workspaceId);
-            if (!ownerUserId) throw new Error("The workspace has no owner.");
-            const current = storage.resolveCurrentLiveDocumentBinding({
-              document,
-              actor: { kind: "owner", userId: ownerUserId },
-            });
-            // A moved, deleted or replaced file, or an ended lineage, doesn't come back by itself.
-            if (current.kind !== "current")
-              throw current.reason === "stale-document"
-                ? new LiveRoomBindingEndedError()
-                : new Error("The owner's binding is not current.");
-            return captureOwnerLiveFrameHost({
-              authenticatedUserId: ownerUserId,
-              storage,
-              native: await captureNative(current.binding, signal),
-              bounds,
-              validate: namedLiveConfig.validate,
-            });
-          },
-        })
-      : undefined;
+  const everyRoom = createLiveRooms({
+    storage,
+    maxUpdateBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
+    maxNoteBytes: bounds.maxAdmissionBytes,
+    maxAppliedBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
+    // A room saves as the workspace's owner, whoever is connected.
+    async openSaver(document, signal) {
+      const ownerUserId = workspaceOwner(storage as StorageContext, document.workspaceId);
+      if (!ownerUserId) throw new Error("The workspace has no owner.");
+      const current = storage.resolveCurrentLiveDocumentBinding({
+        document,
+        actor: { kind: "owner", userId: ownerUserId },
+      });
+      // A moved, deleted or replaced file, or an ended lineage, doesn't come back by itself.
+      if (current.kind !== "current")
+        throw current.reason === "stale-document"
+          ? new LiveRoomBindingEndedError()
+          : new Error("The owner's binding is not current.");
+      return captureOwnerLiveFrameHost({
+        authenticatedUserId: ownerUserId,
+        storage,
+        native: await captureNative(current.binding, signal),
+        bounds,
+        validate: namedLiveConfig.validate,
+      });
+    },
+  });
+  // A desktop that hosts its own notes takes each edit itself, so only a session service's notes edit in a room.
+  const rooms: LiveRooms = {
+    ...everyRoom,
+    join: (host, options) =>
+      storage.getLiveHostControl()?.configuredMode === "service"
+        ? everyRoom.join(host, options)
+        : host,
+  };
   liveRooms = rooms;
   // A paused note is refused to editors as a held one is: only its owner can start it again.
-  const editorsBlocked = rooms
-    ? (document: { workspaceId: string; objectId: string }) =>
-        liveRoomPaused(storage as StorageContext, document)
-          ? "held"
-          : sessionHostBlocked?.(document)
-    : sessionHostBlocked;
+  const editorsBlocked = (document: { workspaceId: string; objectId: string }) =>
+    liveRoomPaused(storage as StorageContext, document) ? "held" : sessionHostBlocked?.(document);
   namedLive = createNamedLiveRoutes({
     rooms,
     kind: "named",
@@ -1467,8 +1506,7 @@ if (namedLiveConfig) {
     process.once("SIGTERM", desktopLive.close);
   }
   ownerLive = createOwnerLiveRoutes({
-    // Off unless DOHC_RELAY_LIVE_ROOM_OWNER=1 too, until the desktop that reads room rows ships.
-    ...(rooms && process.env.DOHC_RELAY_LIVE_ROOM_OWNER === "1" ? { rooms } : {}),
+    rooms,
     storage,
     // The Bearer sign-in, a phone's included. A phone also needs a ticket, which only an uncached sign-in read admits.
     resolveAccountSession: resolvePhoneCapableAccountSession!,
@@ -1528,6 +1566,7 @@ if (namedLiveConfig) {
   process.once("SIGINT", namedLive.close);
   process.once("SIGTERM", namedLive.close);
 }
+startTimeline.done("live host");
 const publicationOperator = await startPublicationOperator(
   storage,
   operatorSocketPath(),
@@ -1617,6 +1656,7 @@ copies =
       })
     : undefined);
 
+startTimeline.done("apps and automations");
 let journalCheck: ReturnType<typeof startLiveJournalCheck> | undefined;
 // pg reads query_timeout from each query's config, but its QueryConfig type doesn't declare it.
 const pushQuery = (text: string, values: unknown[]): QueryConfig & { query_timeout: number } => ({
@@ -1627,6 +1667,7 @@ const pushQuery = (text: string, values: unknown[]): QueryConfig & { query_timeo
 const pushSender = createPushSender({
   storage: storage as StorageContext,
   config: pool ? pushConfig : undefined,
+  apns: pool && apnsConfig ? createApnsClient(apnsConfig) : undefined,
   async lookupAccountName(userId, signal) {
     signal.throwIfAborted();
     const result = await pool!.query<{ name: string | null }>(
@@ -1648,6 +1689,10 @@ const pushSender = createPushSender({
     return result.rowCount === 1;
   },
   onError: () => console.error("[sync-relay] Push delivery could not finish."),
+  onApnsRefused: () =>
+    console.error(
+      "[sync-relay] Apple refused the APNs key, team, or topic. Phone alerts wait 20 minutes.",
+    ),
 });
 const stopPushSender = () => {
   void pushSender.close().catch(() => console.error("[sync-relay] Push sender could not close."));
@@ -1660,6 +1705,8 @@ process.once("SIGINT", stopJournalCheck);
 process.once("SIGTERM", stopJournalCheck);
 server.once("close", stopJournalCheck);
 server.listen(requestedPort, host, () => {
+  // First, so the work this callback starts is not counted as binding the port.
+  startTimeline.done("listening");
   journalCheck = startLiveJournalCheck((storage as StorageContext).db);
   pushSender.start();
   void (async () => {
@@ -1671,6 +1718,7 @@ server.listen(requestedPort, host, () => {
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;
   console.log(`[sync-relay] listening on ${host}:${actualPort}`);
+  console.log(`[sync-relay] ${startTimeline.line()}`);
   console.log(`SYNC_RELAY_LISTENING host=${host} port=${actualPort}`);
   if (testAuthSeam) console.log("[sync-relay] SYNC_RELAY_TEST_AUTH seam ENABLED (dev/test only)");
 });

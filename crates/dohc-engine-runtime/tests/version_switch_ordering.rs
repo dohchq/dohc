@@ -1,7 +1,8 @@
 use dohc_engine_crypto::create_key_file;
-use dohc_engine_domain::{CreateNamedVersion, SecretDiskIntent, SecretWrite, WriteText};
+use dohc_engine_domain::{CreateNamedVersion, SecretWrite, WriteText};
 use dohc_engine_runtime::{
-    ActiveVersionSwitch, CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor,
+    ActiveVersionSwitch, CancellationToken, NoFaults, RuntimeError, SecretWriteDisk,
+    WorkspaceSupervisor,
 };
 use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
 use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults, engine_db_path};
@@ -180,8 +181,8 @@ async fn secret_switch_write_preserves_an_edit_between_planning_and_phase_two() 
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 2,
-                disk_intent: SecretDiskIntent::AlreadyOnDisk,
             },
+            SecretWriteDisk::AlreadyOnDisk,
             key,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -219,7 +220,9 @@ async fn secret_switch_write_preserves_an_edit_between_planning_and_phase_two() 
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 4,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretWriteDisk::Queue {
+                root_dir: scratch.path().to_path_buf(),
             },
             key,
             Arc::new(NoFaults),
@@ -382,7 +385,7 @@ async fn write_secret(
     moment_id: &str,
     now_ms: i64,
     key: dohc_engine_crypto::SecretDataKey,
-    disk_intent: SecretDiskIntent,
+    disk: SecretWriteDisk,
 ) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut delay = std::time::Duration::from_millis(5);
@@ -399,8 +402,8 @@ async fn write_secret(
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     now_ms,
-                    disk_intent,
                 },
+                disk.clone(),
                 key.clone(),
                 Arc::new(NoFaults),
                 CancellationToken::new(),
@@ -476,7 +479,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
         "switch-scan-main",
         2,
         key,
-        SecretDiskIntent::AlreadyOnDisk,
+        SecretWriteDisk::AlreadyOnDisk,
     )
     .await;
     std::fs::write(&env_path, main_text.as_bytes()).expect("seed disk");
@@ -506,7 +509,9 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
         "switch-scan-feature",
         4,
         key,
-        SecretDiskIntent::Materialize,
+        SecretWriteDisk::Queue {
+            root_dir: scratch.path().to_path_buf(),
+        },
     )
     .await;
 
@@ -821,13 +826,15 @@ async fn a_folder_gives_way_to_a_file_of_either_kind_only_when_the_switch_clears
             .expect("later");
         let key_dir = scratch.path().join(".dohc/engine");
         create_key_file(&key_dir).expect("secret key");
-        for (version_id, path, secret, text, disk_intent, now_ms) in [
+        for (version_id, path, secret, text, disk, now_ms) in [
             (
                 "later",
                 folder,
                 folder_secret,
                 "MODE=later\n",
-                SecretDiskIntent::Materialize,
+                SecretWriteDisk::Queue {
+                    root_dir: scratch.path().to_path_buf(),
+                },
                 3,
             ),
             (
@@ -835,7 +842,7 @@ async fn a_folder_gives_way_to_a_file_of_either_kind_only_when_the_switch_clears
                 inner,
                 inner_secret,
                 "TRIP=main\n",
-                SecretDiskIntent::AlreadyOnDisk,
+                SecretWriteDisk::AlreadyOnDisk,
                 4,
             ),
         ] {
@@ -845,14 +852,7 @@ async fn a_folder_gives_way_to_a_file_of_either_kind_only_when_the_switch_clears
                     .expect("load key")
                     .expect("key exists");
                 write_secret(
-                    &actor,
-                    version_id,
-                    path,
-                    text,
-                    &moment_id,
-                    now_ms,
-                    key,
-                    disk_intent,
+                    &actor, version_id, path, text, &moment_id, now_ms, key, disk,
                 )
                 .await;
             } else {
@@ -1246,7 +1246,7 @@ async fn secret_capture_waits_for_a_switch_to_replace_the_previous_versions_secr
         "waiting-secret-main",
         2,
         key.clone(),
-        SecretDiskIntent::AlreadyOnDisk,
+        SecretWriteDisk::AlreadyOnDisk,
     )
     .await;
     std::fs::write(&env, MAIN_SECRET).expect("seed disk");
@@ -1273,7 +1273,9 @@ async fn secret_capture_waits_for_a_switch_to_replace_the_previous_versions_secr
         "waiting-secret-feature",
         4,
         key.clone(),
-        SecretDiskIntent::Materialize,
+        SecretWriteDisk::Queue {
+            root_dir: scratch.path().to_path_buf(),
+        },
     )
     .await;
     let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);

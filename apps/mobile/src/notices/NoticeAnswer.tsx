@@ -12,6 +12,7 @@ import type { AnswerActions } from "../conversation/useOutbox";
 import { WakeState } from "../conversation/WakeState";
 import { useTheme } from "../theme";
 import type { NoticeAnswerView } from "./phoneNotice";
+import { symbolFallback } from "../symbolFallback";
 
 // An agent's question in its Notice's row. Collapsed, the row shows where the question stands, in its one element.
 // Expanded, as a group whose controls VoiceOver reaches one by one, it shows the whole question as a read verified it,
@@ -29,7 +30,12 @@ export function AnswerStatus({ answer }: { answer: NoticeAnswerView }) {
   const status = statusOf(answer.decision, theme);
   return (
     <View style={styles.status}>
-      <SymbolView name={status.symbol} size={15} tintColor={status.color} fallback={null} />
+      <SymbolView
+        name={status.symbol}
+        size={15}
+        tintColor={status.color}
+        fallback={symbolFallback(status.symbol, 15, status.color)}
+      />
       <Text style={[styles.statusText, { color: status.color }]}>{status.label}</Text>
     </View>
   );

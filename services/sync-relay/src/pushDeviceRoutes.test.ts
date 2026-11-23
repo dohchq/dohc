@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   UnauthorizedError,
   type AccountSession,
@@ -6,6 +6,7 @@ import {
   type ResolveAccountSession,
   type SessionKind,
 } from "@dohc/workspace-auth/session";
+import { generateKeyPairSync } from "node:crypto";
 import { readApnsConfig } from "./pushConfig";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
@@ -28,6 +29,21 @@ afterEach(closeTestStorages);
 const TOPIC = "com.example.phone";
 const token = (n: number) => n.toString(16).padStart(2, "0").repeat(32);
 const DELETION_KEY = "account-deletion-key-at-least-32-bytes";
+const KEY_PATH = "/run/secrets/apns-key.p8";
+const pem = (curve: string, type: "pkcs8" | "sec1" = "pkcs8") =>
+  generateKeyPairSync("ec", { namedCurve: curve })
+    .privateKey.export({ type, format: "pem" })
+    .toString();
+const PEM = pem("prime256v1");
+// Apple's key settings, a throwaway key in place of the `.p8` file.
+const apnsEnv = (environments: string, overrides: Record<string, string | undefined> = {}) => ({
+  DOHC_RELAY_APNS_TOPIC: TOPIC,
+  DOHC_RELAY_APNS_ENVIRONMENTS: environments,
+  DOHC_RELAY_APNS_KEY_FILE: KEY_PATH,
+  DOHC_RELAY_APNS_KEY_ID: "KEY1234567",
+  DOHC_RELAY_APNS_TEAM_ID: "TEAM123456",
+  ...overrides,
+});
 
 async function relay(environments: string | null = "sandbox,production") {
   const storage = (await testStorage()) as StorageContext;
@@ -120,10 +136,7 @@ async function relay(environments: string | null = "sandbox,production") {
     ...(environments === null
       ? {}
       : {
-          apnsConfig: readApnsConfig({
-            DOHC_RELAY_APNS_TOPIC: TOPIC,
-            DOHC_RELAY_APNS_ENVIRONMENTS: environments,
-          })!,
+          apnsConfig: readApnsConfig(apnsEnv(environments), () => PEM)!,
         }),
   });
   await claimWorkspace(h, "ana", "trip");
@@ -232,16 +245,65 @@ describe("a phone's alert binding", () => {
     expect((await f.put("ana-phone")).status).toBe(409);
     expect(f.bindings()).toEqual([]);
     expect(readApnsConfig({})).toBeUndefined();
-    expect(() => readApnsConfig({ DOHC_RELAY_APNS_TOPIC: TOPIC })).toThrow(
-      "Missing APNs configuration: DOHC_RELAY_APNS_ENVIRONMENTS.",
+    // PR 1's two settings alone no longer turn alerts on: a server must be able to send what it accepts.
+    expect(() =>
+      readApnsConfig({ DOHC_RELAY_APNS_TOPIC: TOPIC, DOHC_RELAY_APNS_ENVIRONMENTS: "sandbox" }),
+    ).toThrow(
+      "Missing APNs configuration: DOHC_RELAY_APNS_KEY_FILE, DOHC_RELAY_APNS_KEY_ID, DOHC_RELAY_APNS_TEAM_ID.",
     );
-    for (const environments of ["staging", "sandbox,sandbox", ""])
-      expect(() =>
-        readApnsConfig({
-          DOHC_RELAY_APNS_TOPIC: TOPIC,
-          DOHC_RELAY_APNS_ENVIRONMENTS: environments,
+    expect(
+      readApnsConfig(
+        apnsEnv("", {
+          DOHC_RELAY_APNS_TOPIC: "",
+          DOHC_RELAY_APNS_KEY_FILE: "",
+          DOHC_RELAY_APNS_KEY_ID: "",
+          DOHC_RELAY_APNS_TEAM_ID: "",
         }),
-      ).toThrow("APNs configuration");
+      ),
+    ).toBeUndefined();
+    expect(() =>
+      readApnsConfig(
+        apnsEnv("sandbox", { DOHC_RELAY_APNS_KEY_FILE: "", DOHC_RELAY_APNS_TEAM_ID: "" }),
+        () => PEM,
+      ),
+    ).toThrow("Missing APNs configuration: DOHC_RELAY_APNS_KEY_FILE, DOHC_RELAY_APNS_TEAM_ID.");
+    for (const environments of ["staging", "sandbox,sandbox", ""])
+      expect(() => readApnsConfig(apnsEnv(environments), () => PEM)).toThrow("APNs configuration");
+  });
+
+  it("reads the key once at startup, as a P-256 PKCS#8 key, naming variables but never values", () => {
+    const readKeyFile = vi.fn(() => PEM);
+    const config = readApnsConfig(apnsEnv("sandbox"), readKeyFile)!;
+    expect(readKeyFile).toHaveBeenCalledExactlyOnceWith(KEY_PATH);
+    expect(config).toMatchObject({ keyId: "KEY1234567", teamId: "TEAM123456" });
+    expect(config.privateKey.asymmetricKeyDetails?.namedCurve).toBe("prime256v1");
+    const refusals: Array<[Record<string, string>, () => string, string]> = [
+      [{}, () => pem("prime256v1", "sec1"), "DOHC_RELAY_APNS_KEY_FILE"],
+      [{}, () => pem("secp384r1"), "DOHC_RELAY_APNS_KEY_FILE"],
+      [{}, () => "not a key", "DOHC_RELAY_APNS_KEY_FILE"],
+      [
+        {},
+        () => {
+          throw new Error(`ENOENT: no such file, open '${KEY_PATH}'`);
+        },
+        "DOHC_RELAY_APNS_KEY_FILE",
+      ],
+      [{ DOHC_RELAY_APNS_KEY_ID: "key-1" }, () => PEM, "DOHC_RELAY_APNS_KEY_ID"],
+      [{ DOHC_RELAY_APNS_TEAM_ID: "team123456" }, () => PEM, "DOHC_RELAY_APNS_TEAM_ID"],
+    ];
+    for (const [overrides, read, name] of refusals) {
+      const error = (() => {
+        try {
+          readApnsConfig(apnsEnv("sandbox", overrides), read);
+        } catch (thrown) {
+          return thrown as Error;
+        }
+        throw new Error("expected a refusal");
+      })();
+      expect(error.message).toContain(name);
+      for (const value of [KEY_PATH, "key-1", "team123456", PEM.split("\n")[1]!])
+        expect(error.message).not.toContain(value);
+    }
   });
 
   it("takes identity only from the session, and only a bounded token in an allowed environment", async () => {
