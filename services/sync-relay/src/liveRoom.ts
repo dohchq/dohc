@@ -193,7 +193,9 @@ type SaveOutcome =
 /**
  * The largest note, as the room holds it, whose saves may leave edits out. Such a save holds a note
  * nobody had, whose Markdown can come out a few bytes past any that was, so near the largest note
- * saves keep the order edits were taken in. A note's Markdown runs below the room's bytes for it.
+ * saves keep the order edits were taken in. Most notes' Markdown runs below the room's bytes for
+ * them, but text full of escaped characters such as `&` can run several times larger, and such a
+ * note near the largest can still pause when a save leaves edits out.
  */
 const REORDERED_NOTE_MAX_BYTES = LIVE_MARKDOWN_MAX_BYTES / 2;
 // A capture that went stale is replaced, and the next save goes through the new one.
