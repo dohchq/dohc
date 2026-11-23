@@ -212,8 +212,11 @@ describe("the personal agents roster in main", () => {
         "change what Grok Bot can reach",
       ),
     ).toEqual({ ok: false, error: "What Grok Bot can reach changed. Check it and save again." });
-    await vi.waitFor(() => expect(relay.requests).toContain("GET /sync/personal-agents"));
-    expect(relay.agents[0]?.reach).toEqual([{ workspaceId: "ws-1", level: "view" }]);
+    // The roster read again and kept the reach the relay holds.
+    await vi.waitFor(() => expect(roster.view().accounts[0]?.roster?.revision).toBe(4));
+    expect(roster.view().accounts[0]?.roster?.agents[0]?.reach).toEqual([
+      { workspaceId: "ws-1", level: "view" },
+    ]);
   });
 
   it("ends the session when the relay refuses its token", async () => {
