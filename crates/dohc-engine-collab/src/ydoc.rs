@@ -29,6 +29,7 @@
 //!    state unchanged, and the caller persists only bytes an apply accepted.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -5533,6 +5534,7 @@ thread_local! {
     static INLINE_PARTS_MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static EMPTY_LINK_READER_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LITERAL_LINKS_WRITTEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MARK_VALUES_COMPARED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn append_admitted_projection_text(target: &mut String, text: &str) {
@@ -6095,10 +6097,33 @@ impl Clone for TextRun {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 struct MarkdownMark {
     kind: MarkKind,
-    attrs: Value,
+    attrs: Arc<Value>,
+}
+
+impl MarkdownMark {
+    fn new(kind: MarkKind, attrs: Value) -> Self {
+        Self {
+            kind,
+            attrs: Arc::new(attrs),
+        }
+    }
+}
+
+impl PartialEq for MarkdownMark {
+    fn eq(&self, other: &Self) -> bool {
+        if self.kind != other.kind {
+            return false;
+        }
+        if Arc::ptr_eq(&self.attrs, &other.attrs) {
+            return true;
+        }
+        #[cfg(test)]
+        MARK_VALUES_COMPARED.with(|count| count.set(count.get() + 1));
+        self.attrs == other.attrs
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -6345,10 +6370,8 @@ fn push_mark(
     source_text_bytes: &mut usize,
 ) -> ProjectionResult<()> {
     if let Some(attrs) = attrs {
-        marks.push(MarkdownMark {
-            kind,
-            attrs: projection_any_to_json(attrs, depth, remaining_nodes, source_text_bytes)?,
-        });
+        let attrs = projection_any_to_json(attrs, depth, remaining_nodes, source_text_bytes)?;
+        marks.push(MarkdownMark::new(kind, attrs));
     }
     Ok(())
 }
@@ -8290,6 +8313,21 @@ fn render_inline(
         }
     }
 
+    fn share_marks_equal_to_the_run_before(parts: &mut [InlinePart<'_>]) {
+        let mut before: Vec<MarkdownMark> = Vec::new();
+        for part in parts {
+            let InlinePart::Text { run, .. } = part else {
+                continue;
+            };
+            for mark in &mut run.marks {
+                if let Some(same) = before.iter().find(|same| **same == *mark) {
+                    mark.attrs = Arc::clone(&same.attrs);
+                }
+            }
+            before.clone_from(&run.marks);
+        }
+    }
+
     #[derive(Clone)]
     enum ReplacementText {
         /// A literal Markdown part of its own.
@@ -8828,7 +8866,7 @@ fn render_inline(
         let mut end = source_index;
         while let Some(SourceInlinePart::Text(candidate)) = source_parts.get(end) {
             if active_mark(&candidate.marks, MarkKind::Code)
-                .is_none_or(|candidate_code| candidate_code.attrs != code_mark.attrs)
+                .is_none_or(|candidate_code| candidate_code != code_mark)
             {
                 break;
             }
@@ -8848,6 +8886,7 @@ fn render_inline(
         });
         source_index = end;
     }
+    share_marks_equal_to_the_run_before(&mut parts);
 
     if !code_context {
         let raw_html = raw_html_replacements(&parts, table_cell, definition)?;
@@ -9445,9 +9484,7 @@ fn has_mark(marks: &[MarkdownMark], kind: MarkKind) -> bool {
 }
 
 fn contains_same_mark(marks: &[MarkdownMark], expected: &MarkdownMark) -> bool {
-    marks
-        .iter()
-        .any(|mark| mark.kind == expected.kind && mark.attrs == expected.attrs)
+    marks.contains(expected)
 }
 
 fn active_mark(marks: &[MarkdownMark], kind: MarkKind) -> Option<&MarkdownMark> {
@@ -9883,6 +9920,35 @@ mod projection_tests {
             .expect("test update is valid");
         remote
     }
+    #[test]
+    fn splitting_a_run_into_more_pieces_compares_no_more_mark_values() {
+        let values_compared_writing = |lines: usize| {
+            let source = Ydoc::wire();
+            let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            {
+                let mut txn = source.doc.transact_mut();
+                let paragraph = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+                let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+                let link = json_to_any(&json!({ "href": "https://example.com" }));
+                let linked = Attrs::from([("link".into(), link.clone())]);
+                let bold = json_to_any(&json!({}));
+                let linked_and_bold = Attrs::from([("link".into(), link), ("bold".into(), bold)]);
+                text.insert_with_attributes(&mut txn, 0, "x", linked);
+                text.insert_with_attributes(&mut txn, 1, &"\n#".repeat(lines), linked_and_bold);
+            }
+            let remote = Ydoc::wire();
+            let update = source.encode_full_state();
+            remote.apply(&update).expect("the note applies");
+            MARK_VALUES_COMPARED.with(|count| count.set(0));
+            let written = remote.project_richdoc().expect("it writes");
+            assert_eq!(written.matches("&#35;").count(), lines);
+            MARK_VALUES_COMPARED.with(|count| count.get())
+        };
+        let compared = values_compared_writing(10);
+        assert!(compared > 0);
+        assert_eq!(values_compared_writing(1_000), compared);
+    }
+
     #[test]
     fn hostile_remote_heading_level_is_clamped_before_allocation() {
         let doc = remote_doc_with_body([xml_element(

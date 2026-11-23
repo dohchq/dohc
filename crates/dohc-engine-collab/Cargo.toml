@@ -76,10 +76,10 @@ dohc-engine-collab = { path = ".", features = ["test-support"] }
 dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-test-scratch = { path = "../dohc-test-scratch" }
-# The heap profiler the held-proof memory measurement reads, and the crate
-# that installs it as the global allocator, outside this crate's
-# `forbid(unsafe_code)`; the unit tests link it only under the
-# `held-proof-memory` feature.
+# The heap profiler the memory measurements read, and the crate that installs
+# it as the global allocator, outside this crate's `forbid(unsafe_code)`. The
+# unit tests link it only under the `held-proof-memory` feature. The
+# `markdown_memory` test always links it.
 dhat = "0.3"
 dohc-heap-profiler = { path = "../dohc-heap-profiler" }
 
@@ -90,3 +90,7 @@ workspace = true
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+
+[[test]]
+name = "markdown_memory"
+path = "tests/markdown_memory.rs"
