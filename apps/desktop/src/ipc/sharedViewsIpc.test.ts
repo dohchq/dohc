@@ -481,6 +481,28 @@ describe("metadata-only access checks", () => {
     ).toEqual({ status: "current", access: "edit", levelChanged: true });
     expect(levelAt("notes/Budget.md")).toBe("edit");
   });
+  // A rule on the whole workspace can hold members at View. The copy then sends
+  // no file changes, so it follows a raised member level with no identity.
+  it("follows a membership's level to Edit when its reach lists no Edit", async () => {
+    const h = await harness();
+    const viewOnly = (signature: string) => ({
+      signature,
+      visibilitySignature: "v1",
+      rootLevel: "view" as const,
+      folders: [],
+    });
+    Object.assign(h.workspace.shareView!, {
+      grantedSelector: { paths: [], versionId: null, access: "view", wholeWorkspace: true },
+      reach: viewOnly("r1"),
+    });
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
+    h.fetchReach.mockResolvedValue(viewOnly("r2"));
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "edit", levelChanged: true });
+    expect(h.workspace.shareView!.grantedSelector.access).toBe("edit");
+    expect(h.workspace.shareView!.reach).toEqual(viewOnly("r2"));
+  });
   // The window runs the check beside a pull, and the pull can close the copy
   // for a rebuild while the reach is read. The check then leaves the record
   // to the rebuild.
@@ -1303,6 +1325,25 @@ describe("registered received-view handlers", () => {
       expect(h.recordIdentity.mock.invocationCallOrder[0]).toBeLessThan(
         h.reconcile.mock.invocationCallOrder[1]!,
       );
+    });
+
+    it("enrolls for sending at open when only a folder lists Edit", async () => {
+      const h = await harness();
+      const viewer = { ...member.selector!, access: "view" as const };
+      h.fetchInfo.mockResolvedValue({ ...member, selector: viewer });
+      const listed = {
+        signature: "r1",
+        visibilitySignature: "v1",
+        rootLevel: "view" as const,
+        folders: [{ path: "Notes", level: "edit" as const }],
+      };
+      h.fetchReach.mockResolvedValue(listed);
+      await h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
+      expect(h.recordIdentity).toHaveBeenCalledExactlyOnceWith({
+        grantedSelector: viewer,
+        reach: listed,
+      });
+      expect(h.steps.indexOf("identity")).toBeLessThan(h.steps.indexOf("reconcile"));
     });
 
     // The levels moved, and the visibility moved before the pull that follows
