@@ -21,6 +21,13 @@ import {
 } from "./CollectionMigrationDataPreview";
 
 export type { DatasetMigrationPreparation } from "@dohc/cli/dataset";
+export function boundAppStatusLabel(status: "compatible" | "needs-refresh" | "incompatible") {
+  return status === "incompatible"
+    ? "Needs update"
+    : status === "needs-refresh"
+      ? "Needs approval again"
+      : "";
+}
 export interface CollectionMigrationReviewDialogProps {
   workspaceId: string;
   datasetId: string;
@@ -275,6 +282,11 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
   const historyCanReverse =
     !!preparation &&
     datasetRevisionHistoryReversible(preparation.previousRevision, preparation.revision);
+  const affectedBoundApps = useMemo(
+    () => (preparation?.boundApps ?? []).filter((app) => app.status !== "compatible"),
+    [preparation],
+  );
+  const hasAffectedBoundApps = affectedBoundApps.length > 0;
   const namesOnly = !!props.generatedChange && preservesAccess && noRecordChanges;
   const previewTotals = useMemo(
     () =>
@@ -686,26 +698,80 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                 </div>
               </div>
             ) : null}
+            {hasAffectedBoundApps || preparation.boundAppsIncomplete ? (
+              <section
+                aria-label="Connected apps"
+                className="flex flex-col gap-2 rounded-lg border border-line bg-panel-2 p-3 text-[12px]"
+              >
+                <p className="m-0 font-medium text-ink">
+                  {hasAffectedBoundApps
+                    ? `Connected apps (${affectedBoundApps.length})`
+                    : "Connected apps"}
+                </p>
+                {hasAffectedBoundApps ? (
+                  <ul className="m-0 flex list-none flex-col gap-2 p-0">
+                    {affectedBoundApps.map((app) => (
+                      <li
+                        key={`${app.scope}:${app.publicationId}`}
+                        className="flex flex-col gap-1 border-t border-line/60 pt-2 first:border-t-0 first:pt-0"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-mono text-[11px] text-ink">{app.appRoot}</span>
+                            {app.alias ? (
+                              <span className="text-[11px] text-muted">({app.alias})</span>
+                            ) : null}
+                            <span className="rounded bg-panel px-1.5 py-0.5 text-[11px] text-muted">
+                              {app.scope === "link" ? "Share link" : "Local"}
+                            </span>
+                          </span>
+                          <span
+                            className={`text-[11px] font-medium ${app.status === "incompatible" ? "text-danger" : "text-warning"}`}
+                          >
+                            {boundAppStatusLabel(app.status)}
+                          </span>
+                        </div>
+                        {app.reasons?.length ? (
+                          <ul className="m-0 list-disc pl-4 text-[11px] text-muted">
+                            {app.reasons.map((reason) => (
+                              <li key={reason}>{reason}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {preparation.boundAppsIncomplete ? (
+                  <p className="m-0 text-[11px] text-muted">
+                    Some connected apps could not be checked right now. Check Collection access
+                    after applying this change.
+                  </p>
+                ) : null}
+              </section>
+            ) : null}
             <p className="m-0 text-[12px] text-muted">
               This preview used a saved copy. Approval applies this exact result if the Collection
               has not changed.
             </p>
             <p
               className={
-                namesOnly
+                namesOnly && !hasAffectedBoundApps && !preparation.boundAppsIncomplete
                   ? "m-0 text-[12px] text-muted"
                   : "m-0 rounded-lg border border-warning/50 bg-panel-2 p-3 text-[12px] text-ink"
               }
             >
-              {preservesAccess && noRecordChanges
-                ? "Existing shared apps keep working. Access stays unchanged."
-                : preservesAccess
-                  ? candidateMatches
-                    ? "Existing shared apps keep working and access stays unchanged. Review the record changes above before approving."
-                    : "Existing shared apps keep working. Access stays unchanged."
-                  : candidateMatches
-                    ? "Review changed values before approval. Changed rules require renewed app and collaborator approval."
-                    : "Changed rules require renewed app and collaborator approval."}
+              {preservesAccess
+                ? hasAffectedBoundApps
+                  ? `This change keeps current access rules, though the connected apps listed above still need review.${!noRecordChanges && candidateMatches ? " Review the record changes above before approving." : ""}`
+                  : preparation.boundAppsIncomplete
+                    ? `This change keeps current access rules, though some connected apps could not be checked right now.${!noRecordChanges && candidateMatches ? " Review the record changes above before approving." : ""}`
+                    : !noRecordChanges && candidateMatches
+                      ? "Existing shared apps keep working and access stays unchanged. Review the record changes above before approving."
+                      : "Existing shared apps keep working. Access stays unchanged."
+                : candidateMatches
+                  ? "Review changed values before approval. Changed rules require renewed app and collaborator approval."
+                  : "Changed rules require renewed app and collaborator approval."}
               {!warningHeadline
                 ? namesOnly && historyCanReverse
                   ? " Collection History can reverse name and button changes."

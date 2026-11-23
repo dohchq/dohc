@@ -8,6 +8,9 @@ import {
 import { invalidateDatasetAddresses } from "../workspaces/datasetAddress";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
+import type { ShareLinkPublication } from "../workspaces/datasetBoundApps";
 import { isDatasetOwnerOnly } from "./errorWords";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
@@ -1701,4 +1704,140 @@ it("computes generatedSources on historyRevision from both schemaSql and operati
     }),
   );
   expect(triggered).toMatchObject({ kind: "history-revision", generatedSources: false });
+});
+
+it("surfaces local and share-link boundApps on permissions and migration previews without opening a missing local store", async () => {
+  const emptyRoot = await createTestScratch("dataset-ipc-bound-apps-");
+  const f = fixture();
+  const def = f.revision.definition;
+  const rev1 = describeDatasetRevision({
+    definition: def,
+    revision: 1,
+    schemaSql: generateDatasetSchema(def),
+    operationSource: generateDatasetOperations(def),
+  });
+  const linkPubId = createHash("sha256").update("share-link-pub").digest("hex");
+  const linkCap = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      datasetId: rev1.datasetId,
+      revision: 1,
+      revisionSha256: rev1.revisionSha256,
+      operationIds: [def.operations[0]!.operationId],
+    },
+    rev1,
+  );
+  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
+    throw new Error("Should not open local store when no SQLite file exists.");
+  });
+  const readShareLinkPublication = vi.fn(
+    async (
+      _workspace: { workspaceId: string },
+      publicationId: string,
+    ): Promise<ShareLinkPublication | null> =>
+      publicationId === linkPubId
+        ? {
+            publicationId: linkPubId,
+            active: true,
+            authorityRevision: 2,
+            shareId: "share-1",
+            grantId: "grant-1",
+            candidate: {
+              appRoot: "apps/signup",
+              versionId: "main",
+              sourceRevision: "a".repeat(64),
+              sourceDigest: "d".repeat(64),
+              dependencyLockDigest: "e".repeat(64),
+              bundleDigest: "f".repeat(64),
+              buildDigest: "1".repeat(64),
+              entryPath: "apps/signup/index.html",
+              inputs: [{ path: "apps/signup/index.html", sha256: "b".repeat(64), byteLength: 10 }],
+              packageMap: {},
+              dependencies: ["apps/signup/index.html"],
+              compilerIdentity: { recipe: "test", version: "1", binarySha256: "2".repeat(64) },
+              files: [
+                {
+                  path: "bundle.js",
+                  sha256: "c".repeat(64),
+                  byteLength: 10,
+                  contentType: "text/javascript; charset=utf-8",
+                },
+              ],
+              capabilities: [linkCap],
+            },
+          }
+        : null,
+  );
+  const abort = new AbortController();
+  const workspace = { workspaceId: "workspace", rootPath: emptyRoot };
+  const sources = new Map([["data/dataset.json", JSON.stringify(def)]]);
+  const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace" });
+  const remote = {
+    list: vi.fn(async () => ({ datasets: [], nextCursor: null })),
+    describe: vi.fn(async () => describeApprovedDataset(rev1, def.operations)),
+    approvedArtifacts: vi.fn(async () => ({
+      active: true,
+      revision: rev1,
+      schemaSql: generateDatasetSchema(def),
+      operationSource: generateDatasetOperations(def),
+      cursor: {
+        workspaceId: "workspace",
+        datasetId: rev1.datasetId,
+        hostEpoch: "epoch",
+        approvedRevisionHash: rev1.revisionSha256,
+        revision: 1,
+        digest: "d".repeat(64),
+      },
+    })),
+    permissions: vi.fn(async () => ({
+      permissions: [
+        {
+          kind: "app" as const,
+          principal: linkPubId,
+          current: true,
+          metadata: {
+            kind: "dataset" as const,
+            datasetId: rev1.datasetId,
+            revision: 1,
+            revisionSha256: rev1.revisionSha256,
+            operationIds: [def.operations[0]!.operationId],
+          },
+        },
+      ],
+      nextCursor: null,
+    })),
+  };
+  const handler = createDatasetHandler({
+    flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }),
+    withWorkspaceOperation: async (_caller: string, _id, work) =>
+      work({ workspace, signal: abort.signal, assertCurrent() {} }),
+    hostForWorkspace: localHost,
+    dataForWorkspace: async () => remote as unknown as OwnerDatasetData,
+    withAdapter: async (_ws, work) => work(adapter),
+    createSources: async () => {},
+    readShareLinkPublication,
+  });
+  const perms = DatasetResult.parse(
+    await handler("window", {
+      workspaceId: "workspace",
+      action: "permissions",
+      datasetPath: "data/dataset.json",
+    }),
+  );
+  expect(localHost).not.toHaveBeenCalled();
+  expect(readShareLinkPublication).toHaveBeenCalledTimes(1);
+  expect(perms).toMatchObject({
+    kind: "permissions",
+    boundApps: [
+      {
+        scope: "link",
+        publicationId: linkPubId,
+        authorityRevision: 2,
+        appRoot: "apps/signup",
+        shareId: "share-1",
+        grantId: "grant-1",
+        status: "compatible",
+      },
+    ],
+  });
 });

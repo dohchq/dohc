@@ -260,6 +260,10 @@ export function createLocalAppStore(options: {
       return !!lookup(publicationId);
     },
     list,
+    heldRow(publicationId: string) {
+      const value = lookup(publicationId);
+      return value && held(value) ? value : null;
+    },
     /** `displaced` is another kind's publication that holds the root; the commit deactivates it. */
     activate(
       input: {

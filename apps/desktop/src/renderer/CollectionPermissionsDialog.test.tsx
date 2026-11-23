@@ -181,3 +181,57 @@ it("says in place that the access wasn't saved, keeps the choices and focus, fil
   );
   expect(onError).not.toHaveBeenCalled();
 });
+
+it("shows bound app names, drift statuses, reasons, and incomplete notice", async () => {
+  const pubId = "a".repeat(64);
+  api.dataset.mockResolvedValue({
+    kind: "permissions",
+    permissions: [
+      {
+        kind: "app",
+        principal: pubId,
+        current: false,
+        metadata: {
+          kind: "dataset",
+          datasetId: id(1),
+          revision: 1,
+          revisionSha256: "b".repeat(64),
+          operationIds: [id(2)],
+        },
+      },
+    ],
+    nextCursor: null,
+    boundApps: [
+      {
+        scope: "link",
+        publicationId: pubId,
+        authorityRevision: 2,
+        appRoot: "apps/order-form",
+        shareId: "s1",
+        grantId: "g1",
+        pinnedRevision: 1,
+        pinnedRevisionSha256: "b".repeat(64),
+        operationIds: [id(2)],
+        status: "incompatible",
+        reasons: ['Action "Read orders" changed the input format for Amount.'],
+      },
+    ],
+    boundAppsIncomplete: true,
+  });
+  api.listRelayShares.mockResolvedValue({ granted: [] });
+  render(
+    <CollectionPermissionsDialog
+      datasetPath="data/dataset.json"
+      workspaceId="w"
+      dataset={dataset}
+      onClose={vi.fn()}
+      onError={vi.fn()}
+    />,
+  );
+  await screen.findByText("apps/order-form");
+  expect(screen.getByText("App · Share link · Needs update")).toBeTruthy();
+  expect(
+    screen.getByText('Action "Read orders" changed the input format for Amount.'),
+  ).toBeTruthy();
+  expect(screen.getByText(/Some connected apps could not be checked right now/)).toBeTruthy();
+});

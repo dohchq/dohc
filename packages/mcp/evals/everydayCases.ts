@@ -14,6 +14,7 @@ import {
   datasetRevisionDigestContent,
   parseAppDatasetReference,
   parseDatasetDefinition,
+  type AppDatasetCapability,
   type DatasetDefinition,
 } from "@dohc/security-contract/dataset";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
@@ -118,6 +119,145 @@ const CLIENTS_REV1_SHA = sha256(
     definition: CLIENTS_DEF,
   }),
 );
+
+const CLIENTS_PORTAL_CAPABILITY: AppDatasetCapability = {
+  kind: "dataset",
+  datasetId: CLIENTS_DEF.datasetId,
+  name: CLIENTS_DEF.name,
+  revision: 1,
+  revisionSha256: CLIENTS_REV1_SHA,
+  operationIds: [uuid("c1000000", 6)],
+  operations: [
+    {
+      operationId: uuid("c1000000", 6),
+      name: "listClients",
+      access: "owner",
+      readOnly: true,
+    },
+  ],
+};
+
+const PLEDGES_DEF: DatasetDefinition = {
+  formatVersion: 1,
+  datasetId: uuid("f5000000", 1),
+  name: "Fundraiser Pledges",
+  schemaPath: "fundraiser/schema.sql",
+  operationsPath: "fundraiser/operations.js",
+  tables: [
+    {
+      tableId: uuid("f5000000", 2),
+      name: "Pledges",
+      sqlName: "pledges",
+      primaryKey: "id",
+      fields: [
+        {
+          fieldId: uuid("f5000000", 3),
+          name: "Record ID",
+          sqlColumn: "id",
+          type: "text",
+          required: true,
+          unique: true,
+          generated: "record-id",
+        },
+        {
+          fieldId: uuid("f5000000", 4),
+          name: "Supporter",
+          sqlColumn: "supporter",
+          type: "text",
+          required: true,
+          unique: false,
+        },
+        {
+          fieldId: uuid("f5000000", 5),
+          name: "Amount",
+          sqlColumn: "amount",
+          type: "number",
+          required: true,
+          unique: false,
+        },
+      ],
+    },
+  ],
+  operations: [
+    {
+      operationId: uuid("f5000000", 6),
+      name: "listPledges",
+      label: "List pledges",
+      tableId: uuid("f5000000", 2),
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [uuid("f5000000", 3), uuid("f5000000", 4), uuid("f5000000", 5)],
+    },
+    {
+      operationId: uuid("f5000000", 7),
+      name: "createPledge",
+      label: "Create pledge",
+      tableId: uuid("f5000000", 2),
+      kind: "create",
+      access: "link",
+      readOnly: false,
+      fieldIds: [uuid("f5000000", 4), uuid("f5000000", 5)],
+    },
+  ],
+};
+const PLEDGES_SCHEMA = `CREATE TABLE "pledges" (
+  "id" TEXT PRIMARY KEY NOT NULL,
+  "supporter" TEXT NOT NULL,
+  "amount" REAL NOT NULL,
+  "_record_version" INTEGER NOT NULL DEFAULT 1
+);
+`;
+const PLEDGES_OPS = generateDatasetOperations(PLEDGES_DEF);
+const PLEDGES_REV1_SHA = sha256(
+  datasetRevisionDigestContent({
+    datasetId: PLEDGES_DEF.datasetId,
+    revision: 1,
+    revisionSha256: "0".repeat(64),
+    definitionSha256: sha256(datasetDefinitionDigestContent(PLEDGES_DEF)),
+    schemaSha256: sha256(PLEDGES_SCHEMA),
+    operationsSha256: sha256(PLEDGES_OPS),
+    definition: PLEDGES_DEF,
+  }),
+);
+const PLEDGES_ORGANIZER_CAP: AppDatasetCapability = {
+  kind: "dataset",
+  datasetId: PLEDGES_DEF.datasetId,
+  name: PLEDGES_DEF.name,
+  revision: 1,
+  revisionSha256: PLEDGES_REV1_SHA,
+  operationIds: [uuid("f5000000", 6)],
+  operations: [
+    {
+      operationId: uuid("f5000000", 6),
+      name: "listPledges",
+      access: "owner",
+      readOnly: true,
+    },
+  ],
+};
+const PLEDGES_FORM_CAP: AppDatasetCapability = {
+  kind: "dataset",
+  datasetId: PLEDGES_DEF.datasetId,
+  name: PLEDGES_DEF.name,
+  revision: 1,
+  revisionSha256: PLEDGES_REV1_SHA,
+  operationIds: [uuid("f5000000", 7)],
+  createFields: [
+    {
+      operationId: uuid("f5000000", 7),
+      fieldIds: [uuid("f5000000", 4), uuid("f5000000", 5)],
+    },
+  ],
+  operations: [
+    {
+      operationId: uuid("f5000000", 7),
+      name: "createPledge",
+      access: "link",
+      readOnly: false,
+    },
+  ],
+};
 
 const EVENTS_DEF: DatasetDefinition = {
   formatVersion: 1,
@@ -1737,11 +1877,19 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
               ],
             },
           ],
+          localPublications: [
+            {
+              appRoot: "apps/client-portal",
+              publicationId: sha256("seed-client-portal-v1"),
+              sourceRevision: sha256("seed-client-portal-src"),
+              capabilities: [CLIENTS_PORTAL_CAPABILITY],
+            },
+          ],
         },
         options,
       ),
     prompt:
-      'Add a required select field called "Tier" (options: "Standard", "VIP", default: "Standard") to the Clients Collection (`clients/dataset.json`) safely without losing the 3 existing client records. Then update `apps/client-portal/app.publish.json` to the new approved revision and prepare and approve `apps/client-portal` locally.',
+      'Add a required select field called "Tier" (options: "Standard", "VIP", default: "Standard") to the Clients Collection (`clients/dataset.json`) safely without losing the 3 existing client records. Then remove the stale `revision`/`revisionSha256` pin from `apps/client-portal/app.publish.json` and prepare and approve `apps/client-portal` locally.',
     expect: {
       calls: [
         {
@@ -1799,53 +1947,25 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           run,
           "apps/client-portal/app.publish.json",
           "clients/dataset.json",
-          (ref) => {
-            const { revision, revisionSha256 } = ref;
-            if (revision === undefined || revisionSha256 === undefined) {
-              return null;
-            }
-            if (revision < 2 || revisionSha256 === CLIENTS_REV1_SHA) {
-              return `still pinned to revision ${revision}`;
-            }
-            if (
-              snapshot &&
-              (revision !== snapshot.revision || revisionSha256 !== snapshot.revisionSha256)
-            ) {
-              return `manifest rev ${revision} (${revisionSha256.slice(0, 8)}) does not match approved snapshot rev ${snapshot.revision} (${snapshot.revisionSha256.slice(0, 8)})`;
-            }
-            if (def) {
-              const schemaSql = run.files[def.schemaPath];
-              const opSource = run.files[def.operationsPath];
-              if (schemaSql === undefined || opSource === undefined) {
-                return "missing migrated schema.sql or operations.js";
-              }
-              const schemaCandidates = [schemaSql, schemaSql.replace(/\r?\n$/, "")];
-              const opsCandidates = [opSource, opSource.replace(/\r?\n$/, "")];
-              const definitionSha256 = sha256(datasetDefinitionDigestContent(def));
-              const matchesDisk = schemaCandidates.some((s) =>
-                opsCandidates.some(
-                  (o) =>
-                    sha256(
-                      datasetRevisionDigestContent({
-                        datasetId: def.datasetId,
-                        revision,
-                        revisionSha256: "0".repeat(64),
-                        definitionSha256,
-                        schemaSha256: sha256(s),
-                        operationsSha256: sha256(o),
-                        definition: def,
-                      }),
-                    ) === revisionSha256,
-                ),
-              );
-              if (!matchesDisk) {
-                return "manifest revisionSha256 does not match workspace clients/dataset.json";
-              }
-            }
-            return null;
-          },
+          (ref) =>
+            ref.revision === undefined && ref.revisionSha256 === undefined
+              ? null
+              : `manifest still pins revision ${ref.revision}; remove revision and revisionSha256`,
         ),
       );
+      const portalApproved = Boolean(
+        snapshot?.boundApps?.some(
+          (app) =>
+            app.scope === "local" &&
+            app.appRoot === "apps/client-portal" &&
+            app.status === "compatible" &&
+            app.pinnedRevision === snapshot.revision,
+        ),
+      );
+      checks.push({
+        name: "apps/client-portal is approved on the migrated Clients revision",
+        pass: portalApproved,
+      });
       const recordsCheckName =
         'all 3 seeded client records survive migration with Tier = "Standard"';
       if (!snapshot || !def || !clientsTable || !tierField || tierField.type === "button") {
@@ -1981,8 +2101,6 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
                 dataset: {
                   kind: "dataset",
                   datasetPath: "clients/dataset.json",
-                  revision: prep.revision.revision,
-                  revisionSha256: prep.revision.revisionSha256,
                   operationIds: [uuid("c1000000", 6)],
                 },
               },
@@ -2513,6 +2631,280 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           },
         });
         await callTool("dohc_list_automations", { collectionPath: "inventory" });
+      },
+    },
+  },
+  {
+    id: "everyday-bound-app-migration-drift",
+    suite: "everyday",
+    kind: "everyday",
+    experience:
+      "After a standalone Collection migration, boundApps in migration-prepared and permissions names affected local and share-link apps so modern unpinned manifests can be re-approved cleanly without editing app.publish.json or widening share-link access.",
+    source: "everyday-job-4",
+    workspaceId: WS,
+    files: {
+      "fundraiser/dataset.json": JSON.stringify(PLEDGES_DEF, null, 2) + "\n",
+      "fundraiser/schema.sql": PLEDGES_SCHEMA,
+      "fundraiser/operations.js": PLEDGES_OPS,
+      "apps/organizer/index.html": "<!doctype html><h1>Pledges</h1>\n",
+      "apps/organizer/app.publish.json":
+        JSON.stringify(
+          {
+            version: 1,
+            entryPath: "index.html",
+            dataset: {
+              kind: "dataset",
+              datasetPath: "fundraiser/dataset.json",
+              operations: ["listPledges"],
+            },
+          },
+          null,
+          2,
+        ) + "\n",
+      "apps/pledge-form/index.html": "<!doctype html><h1>Pledge form</h1>\n",
+      "apps/pledge-form/app.publish.json":
+        JSON.stringify(
+          {
+            version: 1,
+            entryPath: "index.html",
+            inputs: ["index.html"],
+            packageMap: {},
+            dataset: {
+              kind: "dataset",
+              datasetPath: "fundraiser/dataset.json",
+              operationIds: [uuid("f5000000", 7)],
+              createFields: [
+                {
+                  operationId: uuid("f5000000", 7),
+                  fieldIds: [uuid("f5000000", 4), uuid("f5000000", 5)],
+                },
+              ],
+            },
+          },
+          null,
+          2,
+        ) + "\n",
+    },
+    setupDesktop: (root, options) =>
+      createEverydayDesktop(
+        root,
+        {
+          workspaceId: WS,
+          datasets: [{ datasetPath: "fundraiser/dataset.json", generated: true }],
+          links: [
+            {
+              shareId: "share_pledge",
+              grantId: "grant_pledge",
+              paths: ["apps/pledge-form"],
+              access: "view",
+            },
+          ],
+          localPublications: [
+            {
+              appRoot: "apps/organizer",
+              publicationId: sha256("seed-organizer-v1"),
+              sourceRevision: sha256("seed-organizer-src"),
+              capabilities: [PLEDGES_ORGANIZER_CAP],
+            },
+          ],
+          shareLinkPublications: [
+            {
+              appRoot: "apps/pledge-form",
+              publicationId: sha256("seed-pledge-form-v1"),
+              sourceRevision: sha256("seed-pledge-form-src"),
+              shareId: "share_pledge",
+              grantId: "grant_pledge",
+              capabilities: [PLEDGES_FORM_CAP],
+            },
+          ],
+        },
+        options,
+      ),
+    prompt:
+      'Add an optional text field called "Notes" to the Fundraiser Pledges Collection (`fundraiser/dataset.json`). Check which connected apps are affected by the change, re-approve every affected app (both local and share-link, keeping share-link permissions strictly limited to public pledge creation), and check `permissions` afterward.',
+    expect: {
+      calls: [
+        { tool: "dohc_dataset", args: { "request.action": "prepareSchemaChange" }, ok: true },
+        { tool: "dohc_dataset", args: { "request.action": "approveMigration" }, ok: true },
+        {
+          tool: "dohc_publish_app",
+          args: { "request.action": "prepareLocal", "request.appRoot": "apps/organizer" },
+          ok: true,
+        },
+        {
+          tool: "dohc_publish_app",
+          args: {
+            "request.action": "prepare",
+            "request.appRoot": "apps/pledge-form",
+            "request.shareId": "share_pledge",
+            "request.grantId": "grant_pledge",
+          },
+          ok: true,
+        },
+        { tool: "dohc_publish_app", args: { "request.action": "approve" }, ok: true },
+        {
+          tool: "dohc_dataset",
+          args: {
+            "request.action": "permissions",
+            "request.datasetPath": "fundraiser/dataset.json",
+          },
+          ok: true,
+        },
+      ],
+    },
+    gradeRun: (run) => {
+      const checks: Check[] = [checkDatasetJsonValid(run, "fundraiser/dataset.json")];
+      let def: DatasetDefinition | undefined;
+      try {
+        def = parseDatasetDefinition(JSON.parse(run.files["fundraiser/dataset.json"] ?? ""));
+      } catch {
+        def = undefined;
+      }
+      const hasNotes = Boolean(
+        def?.tables
+          .find((t) => t.tableId === uuid("f5000000", 2))
+          ?.fields.find(
+            (f) =>
+              f.type === "text" && f.required === false && f.name.trim().toLowerCase() === "notes",
+          ),
+      );
+      checks.push({
+        name: 'fundraiser/dataset.json adds optional text field "Notes"',
+        pass: hasNotes,
+      });
+      checks.push(
+        checkAppPublishDataset(
+          run,
+          "apps/organizer/app.publish.json",
+          "fundraiser/dataset.json",
+          (ref) =>
+            referencedOperationIds(ref, def).includes(uuid("f5000000", 6))
+              ? null
+              : "missing listPledges operation",
+        ),
+      );
+      checks.push(
+        checkAppPublishDataset(
+          run,
+          "apps/pledge-form/app.publish.json",
+          "fundraiser/dataset.json",
+          (ref) => {
+            const ops = referencedOperationIds(ref, def);
+            if (ops.includes(uuid("f5000000", 6))) {
+              return "leaked owner-only listPledges operation into public form";
+            }
+            if (!ops.includes(uuid("f5000000", 7))) {
+              return "missing public createPledge operation";
+            }
+            return null;
+          },
+        ),
+      );
+      const snapshot = run.datasetSnapshots?.["fundraiser/dataset.json"];
+      const organizerCurrent = Boolean(
+        snapshot?.boundApps?.some(
+          (app) =>
+            app.scope === "local" &&
+            app.appRoot === "apps/organizer" &&
+            app.status === "compatible" &&
+            app.pinnedRevision === snapshot.revision,
+        ),
+      );
+      const formCurrent = Boolean(
+        snapshot?.boundApps?.some(
+          (app) =>
+            app.scope === "link" &&
+            app.appRoot === "apps/pledge-form" &&
+            app.status === "compatible" &&
+            app.pinnedRevision === snapshot.revision &&
+            app.operationIds.length === 1 &&
+            app.operationIds[0] === uuid("f5000000", 7),
+        ),
+      );
+      checks.push({
+        name: "apps/organizer local publication is approved on the migrated revision",
+        pass: organizerCurrent,
+      });
+      checks.push({
+        name: "apps/pledge-form share-link publication is approved on the migrated revision",
+        pass: formCurrent,
+      });
+      return checks;
+    },
+    solution: {
+      run: async (callTool) => {
+        const described = (await callTool("dohc_dataset", {
+          request: { action: "describe", workspaceId: WS, datasetPath: "fundraiser/dataset.json" },
+        })) as { dataset: { revision: number; revisionSha256: string } };
+        const prep = (await callTool("dohc_dataset", {
+          request: {
+            action: "prepareSchemaChange",
+            workspaceId: WS,
+            datasetPath: "fundraiser/dataset.json",
+            revision: described.dataset.revision,
+            revisionSha256: described.dataset.revisionSha256,
+            change: {
+              kind: "addField",
+              tableId: uuid("f5000000", 2),
+              field: {
+                name: "Notes",
+                type: "text",
+                required: false,
+                unique: false,
+              },
+            },
+          },
+        })) as {
+          preparationId: string;
+          approvalDigest: string;
+          revision: { revision: number; revisionSha256: string };
+          boundApps?: Array<{
+            scope: "local" | "link";
+            appRoot: string;
+            shareId?: string;
+            grantId?: string;
+            status: string;
+          }>;
+        };
+        await callTool("dohc_dataset", {
+          request: {
+            action: "approveMigration",
+            workspaceId: WS,
+            preparationId: prep.preparationId,
+            revisionSha256: prep.revision.revisionSha256,
+            approvalDigest: prep.approvalDigest,
+          },
+        });
+        for (const app of prep.boundApps ?? []) {
+          if (app.status === "compatible") continue;
+          const preparedApp = (await callTool("dohc_publish_app", {
+            request:
+              app.scope === "local"
+                ? { action: "prepareLocal", workspaceId: WS, appRoot: app.appRoot }
+                : {
+                    action: "prepare",
+                    workspaceId: WS,
+                    appRoot: app.appRoot,
+                    shareId: app.shareId!,
+                    grantId: app.grantId!,
+                  },
+          })) as { approvalId: string; candidateDigest: string };
+          await callTool("dohc_publish_app", {
+            request: {
+              action: "approve",
+              workspaceId: WS,
+              approvalId: preparedApp.approvalId,
+              candidateDigest: preparedApp.candidateDigest,
+            },
+          });
+        }
+        await callTool("dohc_dataset", {
+          request: {
+            action: "permissions",
+            workspaceId: WS,
+            datasetPath: "fundraiser/dataset.json",
+          },
+        });
       },
     },
   },

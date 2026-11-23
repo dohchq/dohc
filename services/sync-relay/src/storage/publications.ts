@@ -366,8 +366,11 @@ export function publishAppPublication(
 export function readAppPublication(
   storage: StorageContext,
   input: ReadAppPublicationInput,
-): AppPublicationRow {
-  return storage.readTx(() => withOperatorTakedown(storage, stored(storage, input)));
+): AppPublicationRow & { linkCurrent: boolean } {
+  return storage.readTx(() => {
+    const row = withOperatorTakedown(storage, stored(storage, input));
+    return { ...row, linkCurrent: publicationLinkIsCurrent(storage, row.owner) };
+  });
 }
 
 export interface ListAppPublicationsInput {

@@ -105,6 +105,7 @@ import {
   USE_THIS_COMPUTER,
   withErrorWords,
 } from "./ipc/errorWords";
+import { parseShareLinkPublication } from "./workspaces/datasetBoundApps";
 import { liveStopHostCopy, liveStopRelayError } from "./ipc/liveEditingStop";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { onNetworkShare } from "./workspaces/networkShare";
@@ -9743,6 +9744,33 @@ function registerIpcHandlers(): void {
       return collectionPlace(
         await finishedTransferOf(workspace, authority.local, datasetId, signal),
       );
+    },
+    readShareLinkPublication: async (
+      workspace: DesktopRendererWorkspaceOperation["workspace"],
+      publicationId: string,
+      signal: AbortSignal,
+    ) => {
+      if (!workspace.remote && !workspace.pausedRemote) return null;
+      try {
+        const remote = await remoteForWorkspace(workspace, { allowPaused: true });
+        const result = await relayShareJsonWithCredentials(
+          remote.credentials,
+          `/sync/${encodeURIComponent(workspace.workspaceId)}/app-publications/${encodeURIComponent(publicationId)}`,
+          { signal },
+          { retainNotFound: true },
+        );
+        return result.kind === "success"
+          ? parseShareLinkPublication(
+              workspace.workspaceId,
+              remote.credentials.userId,
+              publicationId,
+              result.body,
+            )
+          : null;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        return null;
+      }
     },
     automationName: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],
