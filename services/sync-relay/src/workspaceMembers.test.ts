@@ -2533,6 +2533,13 @@ describe("folder rules", () => {
     ]);
   });
 
+  it("binds a rule typed in another case to the folder the owner has", async () => {
+    const { h } = await seed();
+    await ownerWrite(h, "Team/plan.md", "plan");
+    const rule = await created(h, "team", null);
+    expect(rule.folders).toMatchObject([{ path: "Team", state: "covered" }]);
+  });
+
   it("keeps rules and their spans when the workspace's sync identity rotates", async () => {
     const { h, storage } = await seed();
     const context = storage as unknown as StorageContext;
