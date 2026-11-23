@@ -7,7 +7,6 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import * as Y from "yjs";
-import { openRelayDeployment } from "./relayDeployment.js";
 import { openEmptyRelayTestDeployment } from "./testing/emptyRelayDeployment.js";
 import {
   startServiceLiveHost,
@@ -34,7 +33,6 @@ import {
 } from "./storage/serviceActivation.js";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery.js";
 import { initialAcceptedHistoryDigest } from "./liveAcceptedHistory.js";
-import { nativeRestoreFence } from "./storage/liveRestoreOperation.js";
 import { ServiceActivationDriver } from "./serviceActivationDriver.js";
 import { ServiceHostedReplication } from "./serviceHostedReplication.js";
 import { startSelfHostedLiveHost } from "./selfHostedLiveHost.js";
@@ -63,18 +61,7 @@ import {
   validateOrdinaryActivation,
 } from "./storage/ordinaryActivationValidation.js";
 import { ServiceActivationTooLarge } from "./storage/ordinaryActivationSource.js";
-import {
-  nativeSettlementId,
-  prepareHostedSettlements,
-  settlementRecordDigest,
-} from "./storage/hostedSettlement.js";
-import { stableJsonStringify } from "./canonicalJson.js";
-import { encodeNativeRestoreProposal } from "./liveRestoreProposal.js";
-import { resolveLiveRestorePoint } from "../../../packages/ydoc-projection/src/liveRestorePoint.js";
-import {
-  policy as restorePolicy,
-  restore as restoreValidation,
-} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
+import { policy as validationPolicy } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
 
 const spawn = vi.hoisted(() => vi.fn());
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -468,7 +455,10 @@ it("logs a pass over a second at most once a minute, with cut ids, timings and f
     .mockImplementation(async (_target, signal, settle) => {
       clock += 1500;
       await settle?.(consumer as never, document, signal);
-      return { kind: "pending", reason: "Waiting for its restore to finish." };
+      return {
+        kind: "pending",
+        reason: "Waiting for its hosted replica to confirm the document parked.",
+      };
     });
   const pull = vi
     .spyOn(ServiceHostedReplication.prototype, "pull")
@@ -505,7 +495,7 @@ it("logs a pass over a second at most once a minute, with cut ids, timings and f
     for (const hidden of [
       "file.md",
       "object-with",
-      "Waiting for its restore",
+      "Waiting for its hosted replica",
       "Engine settle failed",
     ])
       expect(shown).not.toContain(hidden);
@@ -542,7 +532,6 @@ async function completedServiceOwner(
     limits?: DrainLimits;
     pollIntervalMs?: number;
     selfHosted?: boolean;
-    restore?: boolean;
     idleClock?: IdleClock;
     paced?: Paced;
     nowMs?: () => number;
@@ -783,7 +772,6 @@ async function completedServiceOwner(
     Object.assign(f.config, {
       settlement: { maxApplicationsPerSettlement: options.maxApplications },
     });
-  if (options.restore) Object.assign(f.config, { restore: RESTORE });
   if (options.empty) f.config.workspaces = [];
   await f.save();
 
@@ -866,7 +854,6 @@ async function completedServiceOwner(
     capture: NativeOwnerActivation;
     adoption: { activationId: string; throughCursor: number | null };
     generation?: number;
-    fenceCommitted?: boolean;
     abandonableSeed?: boolean;
     prepared?: Record<string, unknown>;
     prepareFailure?: Error;
@@ -1463,70 +1450,6 @@ async function completedServiceOwner(
             },
           });
         }
-        case "liveApplication.fenceRestore":
-          return reply({ status: "pending", reason: "native-fence-pending" });
-        // Unless `fenceCommitted` says the native fence committed, a Decline ends the restore at its old generation,
-        // under the binding it began with. After a committed fence, it keeps the fenced generation.
-        case "liveApplication.cancelRestoreFence": {
-          const basis = JSON.parse(
-            String(
-              raw
-                .prepare(
-                  "SELECT basis_json FROM sync_relay_live_restore_operations WHERE operation_id=?",
-                )
-                .get(request.params.operationId as string)!.basis_json,
-            ),
-          );
-          const newFence = request.params.newFence as number;
-          if (!engine.fenceCommitted)
-            return reply({
-              status: "cancelled",
-              hostId: request.params.hostId,
-              generation: newFence - 1,
-              binding: basis.ownerBinding,
-            });
-          const saved = f.storage.readStopRestore(stopLookup)!,
-            fence = nativeRestoreFence(saved.applied!, newFence, saved.intent);
-          const binding = { ...fence.oldBinding, restoreFenceGeneration: newFence },
-            endpoint =
-              fence.terminal === null
-                ? {
-                    terminalReceipt: null,
-                    eventCount: 0,
-                    historyEvidenceDigest: initialAcceptedHistoryDigest(
-                      f.history.namespace,
-                      document,
-                    ),
-                  }
-                : ((row) => ({
-                    terminalReceipt: fence.terminal,
-                    eventCount: row.accepted_event_count,
-                    historyEvidenceDigest: row.accepted_evidence_digest,
-                  }))(
-                    raw
-                      .prepare(
-                        "SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE object_id='object' AND journal_cursor=?",
-                      )
-                      .get(fence.terminal.journalCursor)!,
-                  );
-          engine.generation = newFence;
-          return reply({
-            status: "fenceCancelled",
-            hostId: request.params.hostId,
-            generation: newFence,
-            binding,
-            receipt: {
-              fence: {
-                operation: fence,
-                localHeadSequence: fence.appliedSequence,
-                recordedAtMs: 55,
-              },
-              binding,
-              endpoint,
-              recordedAtMs: 55,
-            },
-          });
-        }
         case "ydoc.ownerOutbox.retry":
           if (request.params.outboxId === NATIVE) {
             native.retryDeliveryId = native.entries[0]!.deliveryId;
@@ -1747,19 +1670,6 @@ async function completedServiceOwner(
         receivedAtMs: 5,
       });
   };
-  const beginRestore = () => {
-    const plan = f.storage.readStopRestorePlan({
-      document,
-      ownerUserId: "owner",
-      operationId: "restore",
-      shareId: "share",
-      grantId: "grant",
-      restorePointCursor: 0,
-      restorePointReceiptDigest: document.lineageClaimId,
-      maxOutputBytes: 1_000_000,
-    });
-    f.storage.beginStopRestore(plan.intent, 40);
-  };
   const nativeEdits = (...values: string[]) => {
     const read = f.storage.readLiveUpdateJournalCut({ document });
     if (read.kind !== "cut") throw new Error("Missing live journal.");
@@ -1884,49 +1794,8 @@ async function completedServiceOwner(
       parked = { method, entered: deferred<void>(), release: deferred<void>() };
       return parked;
     },
-    beginRestore,
-    restore() {
-      beginRestore();
-      f.storage.advanceStopRestoreFence(
-        { operationId: "restore", workspaceId: "workspace", ownerUserId: "owner" },
-        50,
-      );
-    },
   };
 }
-
-it.each(["drain"] as const)(
-  "fails an in-flight public %s and queued public calls as incomplete after a restore fence",
-  async (method) => {
-    const o = await completedServiceOwner();
-    expect(o.host.isDocumentReady(o.document)).toBe(true);
-    const parked = o.park("liveApplication.ownerState"),
-      inflight = o.host[method](o.document);
-    await parked.entered.promise;
-    const drains = vi.spyOn(OwnerCommittedDelivery.prototype, "drain"),
-      settles = vi.spyOn(OwnerCommittedDelivery.prototype, "settle");
-    try {
-      const queuedDrain = o.host.drain(o.document),
-        queuedSettle = o.host.settle(o.document),
-        requests = o.ownerRequests();
-      o.restore();
-      expect(o.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()).toEqual({
-        admission_state: "closed",
-      });
-      expect(o.host.isDocumentReady(o.document)).toBe(false);
-      parked.release.resolve();
-      await expect(inflight).rejects.toThrow("Service document activation is incomplete.");
-      await expect(queuedDrain).rejects.toThrow("Service document activation is incomplete.");
-      await expect(queuedSettle).rejects.toThrow("Service document activation is incomplete.");
-      expect(o.ownerRequests()).toBe(requests);
-      expect(drains).not.toHaveBeenCalled();
-      expect(settles).not.toHaveBeenCalled();
-    } finally {
-      drains.mockRestore();
-      settles.mockRestore();
-    }
-  },
-);
 
 // A drain queued behind a document's work must not log each wait, or someone
 // with Edit submitting from several connections could fill the log. Proves: a
@@ -1957,8 +1826,6 @@ it("logs drains that waited over 100 ms for their document once a minute, with f
   ]);
 });
 
-const stopLookup = { operationId: "restore", workspaceId: "workspace", ownerUserId: "owner" };
-
 const unready = () =>
   new EngineRequestError(1, {
     code: "CONFLICT",
@@ -1988,49 +1855,6 @@ const appendDocumentRow = (
     );
 };
 
-const engineMethods = (client: { sendRequest: { mock: { calls: unknown[][] } } }) =>
-  client.sendRequest.mock.calls.map((call) => (call[0] as { method: string }).method);
-
-it("refuses a restore after a configured restart until its replica checked its origin", async () => {
-  const o = await completedServiceOwner({ polling: true });
-  await o.host.close();
-  const log = vi.spyOn(console, "error").mockImplementation(() => {});
-  cleanup.push(async () => log.mockRestore());
-  o.replies.create = new Error("Relay unreachable.");
-  const restarted = await startServiceLiveHost(o.f);
-  cleanup.push(() => restarted.close());
-  const creates = () =>
-    engineMethods(o.client()).filter((method) => method === "sync.createHostedReplica").length;
-  await vi.waitFor(() => expect(creates()).toBeGreaterThan(2));
-  o.restore();
-  await expect(restarted.stopRestore(stopLookup)).rejects.toThrow(
-    "Service restore source is unavailable.",
-  );
-  expect(new Set(engineMethods(o.client()))).toEqual(
-    new Set(["liveApplication.hosts", "sync.createHostedReplica"]),
-  );
-  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
-  expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
-  o.replies.create = undefined;
-  await vi.waitFor(() => expect(o.client().captureOwnerActivation).toHaveBeenCalled());
-  const methods = engineMethods(o.client()),
-    checked = methods.lastIndexOf("sync.createHostedReplica");
-  expect(
-    methods
-      .slice(0, checked)
-      .every(
-        (method) => method === "liveApplication.hosts" || method === "sync.createHostedReplica",
-      ),
-  ).toBe(true);
-  expect(o.client().sendRequest.mock.invocationCallOrder[checked]).toBeLessThan(
-    o.client().captureOwnerActivation.mock.invocationCallOrder[0]!,
-  );
-  await expect(restarted.stopRestore(stopLookup)).resolves.toEqual({
-    kind: "pending",
-    reason: "native-fence-pending",
-  });
-});
-
 async function emptyServiceHost(
   options: {
     frameChanges?: boolean;
@@ -2040,7 +1864,6 @@ async function emptyServiceHost(
     limits?: DrainLimits;
     pollIntervalMs?: number;
     selfHosted?: boolean;
-    restore?: boolean;
     idleClock?: IdleClock;
     paced?: Paced;
     requestDeadlineMs?: number;
@@ -2367,7 +2190,7 @@ it("frees a cancelled held read's slot on the engine's answer, and answers the e
 
 // An empty host with the document shared with Edit, enrolled and ready.
 // With `supervised`, the self-host supervisor runs the host as its daemon,
-// configured for restore, and sends it every membership update.
+// and sends it every membership update.
 // With `polls`, passes run only when the host wakes itself, or the test runs one, as in setup here, and a
 // supervisor reconciles only on its own wakes too.
 async function enrolledServiceHost({
@@ -2384,7 +2207,6 @@ async function enrolledServiceHost({
     maxApplications,
     limits,
     selfHosted: supervised,
-    restore: supervised,
     ...(polls ? { pollIntervalMs: HELD_POLL_MS } : {}),
     ...(paced ? { paced } : {}),
   });
@@ -3180,16 +3002,6 @@ const moveAway = (o: Enrolled) => {
     input.path === o.sibling.path ? "another-object" : at(input),
   );
 };
-// The current daemon's engine requests that reconcile, release or unload a leaving document. Each daemon has its own client, so these start at its spawn.
-const leaving = (o: Enrolled) =>
-  o
-    .calls(0)
-    .filter(
-      (method) =>
-        method === "liveApplication.reconcileActivation" ||
-        method === "liveApplication.releaseActivation" ||
-        method === "liveApplication.unloadDocument",
-    );
 const retirementKey = (o: Enrolled) => {
   const open = readServiceActivationRetirement(o.f.storage as StorageContext, o.document)!;
   return {
@@ -3200,657 +3012,6 @@ const retirementKey = (o: Enrolled) => {
     acceptedThrough: open.acceptedThrough,
   };
 };
-
-// Another Edit grant on the share, which keeps the document covered once the restore revokes the fixture's grant.
-const anotherEditGrant = (o: Enrolled) =>
-  o.raw
-    .exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,
-  created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('editor-grant','share','user','editor',NULL,'edit',1,'active',0,NULL,NULL)`);
-// The owner's restore fences the document. The document then moves from its
-// enrolled path, and the host restarts, with `replacement` hosted at the old
-// path when it is given. Unless `covered` leaves the document covered by
-// another Edit grant, or `live` leaves the owner's live session the restore
-// kept, each with no retirement open, the owner's Pause after the restore
-// began opens its retirement. `paused` has another Edit grant cover it too,
-// so the restore's revocation keeps nothing.
-// `kept` first records an edit the server refused. Unless `stopped` is false,
-// the restore's first step runs before the restart. `pending` has the relay
-// accept an edit after the adoption cut that no activation pass delivers.
-// `admitted` has the relay admit the restore before the document moves, and
-// configures restore preparation on the restarted host. With `polls`, the
-// restarted host runs passes only when it wakes itself, or the test runs one,
-// as its first passes here.
-const movedDuringRestore = async ({
-  replacement = false,
-  paused = false,
-  covered = false,
-  live = false,
-  kept = false,
-  stopped = true,
-  pending = false,
-  admitted = false,
-  polls = undefined as ReturnType<typeof heldPolls> | undefined,
-} = {}) => {
-  const o = await enrolledServiceHost(),
-    k = kept ? keptEdits(o) : undefined;
-  const log = vi.spyOn(console, "error").mockImplementation(() => {});
-  const restoring = waiting("Waiting for its restore to finish.");
-  const passed = async (held = false) => {
-    if (held)
-      await polls!.until(o.f, () =>
-        log.mock.calls.some((call) => call[0] === restoring[0] && call[1] === restoring[1]),
-      );
-    await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...restoring));
-  };
-  if (paused || covered) anotherEditGrant(o);
-  if (pending) {
-    o.passes.deliver = false;
-    o.acceptEdit("pending");
-  }
-  o.beginRestore();
-  if (!covered && !live) {
-    o.f.storage.setServiceHostEnrollmentEnabled({
-      workspaceId: "workspace",
-      path: o.sibling.path,
-      ownerUserId: "owner",
-      enabled: false,
-      nowMs: 60,
-      guard() {},
-    });
-    await o.depart();
-    await passed();
-  } else expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
-  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
-  if (stopped)
-    await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({
-      kind: "pending",
-      reason: "native-fence-pending",
-    });
-  const admission = admitted ? await admitMovedRestore(o) : undefined;
-  await o.host.close();
-  log.mockClear();
-  o.passes.deliver = true;
-  if (admitted) {
-    Object.assign(o.f.config, { restore: RESTORE });
-    await o.f.save();
-  }
-  if (polls) {
-    const config = o.f.config as unknown as { activation: Record<string, unknown> };
-    config.activation = { ...config.activation, pollIntervalMs: HELD_POLL_MS };
-    await o.f.save();
-  }
-  moveAway(o);
-  const other = { ...o.sibling, objectId: "another-object" };
-  let driver: ServiceActivationDriver | undefined;
-  const addTarget = ServiceActivationDriver.prototype.addTarget;
-  vi.spyOn(ServiceActivationDriver.prototype, "addTarget").mockImplementation(function (
-    this: ServiceActivationDriver,
-    ...args
-  ) {
-    driver = this;
-    return addTarget.apply(this, args);
-  });
-  if (replacement) o.refuseCaptureAt(o.sibling.path, new Error("Replacement capture refused."));
-  const host = replacement
-    ? await startServiceLiveHost({ ...o.f, frameChanges: createNamedFrameChanges(16) })
-    : await restartedHost(o);
-  if (replacement) {
-    cleanup.push(() => host.close());
-    await host.update({ workspaces: [o.workspace], documents: [other], departing: [o.sibling] });
-  }
-  await passed(polls !== undefined);
-  expect(leaving(o)).toEqual([]);
-  expect(host.retains(o.sibling)).toBe(true);
-  expect(host.drained("workspace")).toBe(false);
-  return { o, host, other, log, k, admission, driver: () => driver };
-};
-const RESTORE = {
-  maxBytes: 1_000_000,
-  maxEvents: 10,
-  aggregateBytes: 17_000_000,
-  workingReserveBytes: 1_000_000,
-  maxOperations: 1,
-  validation: restorePolicy,
-};
-const jsonHash = (value: unknown) => sha256(Buffer.from(JSON.stringify(value)));
-const admitMovedRestore = async (o: Enrolled) => {
-  const before = retirementKey(o);
-  return { proposalDigest: await admitRestore(o), before };
-};
-const admitRestore = async (o: Enrolled) => {
-  const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
-  const input = {
-    ...stopLookup,
-    host: o.host.coordinate,
-    maxBytes: RESTORE.maxBytes,
-    maxEvents: RESTORE.maxEvents,
-  };
-  const fence = {
-    operation: store.pendingStopRestoreFence(input).operation,
-    localHeadSequence: 11,
-    recordedAtMs: 100,
-  };
-  store.acknowledgeStopRestoreFence(input, fence);
-  const selected = store.captureStopRestorePoint(input),
-    accepted = store.captureStopRestoreAcceptedCut(input);
-  const point = new Y.Doc({ gc: false }),
-    head = new Y.Doc({ gc: false });
-  let encoded: Uint8Array;
-  try {
-    Y.applyUpdate(point, selected.checkpoint.bytes);
-    for (const e of selected.events) Y.applyUpdate(point, e.updateBytes);
-    Y.applyUpdate(head, accepted.checkpoint.bytes);
-    for (const e of accepted.events) Y.applyUpdate(head, e.updateBytes);
-    const frozen = Y.encodeStateAsUpdate(head),
-      pointBytes = Y.encodeStateAsUpdate(point),
-      vector = Y.encodeStateVector(head);
-    const used = Y.decodeStateVector(vector);
-    let client = 1;
-    while (used.has(client)) client++;
-    head.clientID = client;
-    head.transact(() => {
-      const body = head.getXmlFragment("body");
-      body.delete(0, body.length);
-      body.insert(
-        0,
-        point
-          .getXmlFragment("body")
-          .toArray()
-          .map((node) => {
-            if (!(node instanceof Y.XmlElement || node instanceof Y.XmlText))
-              throw new Error("Unexpected fixture body.");
-            return node.clone();
-          }),
-      );
-      const fields = head.getMap("frontmatter");
-      for (const key of fields.keys()) fields.delete(key);
-      for (const [key, value] of point.getMap("frontmatter").entries())
-        fields.set(key, structuredClone(value));
-    });
-    const candidate = Y.encodeStateAsUpdate(head, vector);
-    const validated = createLiveMarkdownJournalValidator(restorePolicy)({
-      document: o.document,
-      currentPath: selected.binding.currentPath,
-      checkpoint: frozen,
-      suffix: [],
-      candidate,
-    });
-    if (validated.kind !== "accepted") throw new Error(validated.reason);
-    const receipt = {
-      fence,
-      point: resolveLiveRestorePoint(selected, restorePolicy),
-      candidateDigest: sha256(candidate),
-      frozenStateDigest: sha256(frozen),
-      pointStateDigest: sha256(pointBytes),
-      finalContentDigest: "d".repeat(64),
-      beforeStateVector: [...vector],
-      afterStateVector: [...Y.encodeStateVector(head)],
-      replacementRanges: [...validated.evidence.candidate.ranges],
-      originEvidenceDigest: store.captureStopRestoreOwnerOrigin(input).evidenceDigest,
-      selectedHistory: selected.proof,
-      acceptedHistory: accepted.proof,
-      nativeSources: [],
-      nativeSourceManifestDigest: jsonHash([fence, []]),
-    };
-    encoded = encodeNativeRestoreProposal(
-      JSON.stringify(receipt),
-      {
-        candidateBytes: candidate,
-        frozenStateBytes: frozen,
-        pointStateBytes: pointBytes,
-        nativeSourceBytes: [],
-      },
-      input,
-    );
-  } finally {
-    point.destroy();
-    head.destroy();
-  }
-  const { proposalDigest } = await store.recordStopRestoreProposal(
-    input,
-    encoded,
-    restoreValidation,
-    200,
-  );
-  await store.admitStopRestoreProposal(input, proposalDigest, restoreValidation, 201);
-  return proposalDigest;
-};
-// The engine's side of the admitted restore's end, on `host`, after the
-// document moved. It answers apply, settle and resume from the admission the
-// relay holds. `publish` appends the restore's settlement, as the retiring
-// host's push does, which the retirement waits for.
-const restoreEngine = (o: Enrolled, host: Awaited<ReturnType<typeof startServiceLiveHost>>) => {
-  const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history),
-    coordinate = host.coordinate;
-  const input = {
-    ...stopLookup,
-    host: coordinate,
-    maxBytes: RESTORE.maxBytes,
-    maxEvents: RESTORE.maxEvents,
-  };
-  const hostCoordinate = {
-    hostId: coordinate.hostId,
-    hostEpoch: coordinate.hostEpoch,
-    instanceId: coordinate.instanceId,
-    connectionId: coordinate.connectionId,
-  };
-  const admission = () => {
-    const lifecycle = store.readStopRestoreLifecycle(input);
-    if (!lifecycle) throw new Error("Missing restore admission.");
-    return lifecycle;
-  };
-  // The engine's receipts, as admitRestore in liveRestoreDrain.test.ts builds them. The settlement
-  // counts only the restore's own application: this journal holds fewer rows than that test's three.
-  const answer = (operation: string) => {
-    const { preparation, candidateDigest, nativeSourceManifestDigest, admitted } = admission(),
-      localHeadSequence = preparation.fence.localHeadSequence + 1;
-    const settlementId = "restore-settlement",
-      momentId = "restore-moment",
-      markdownDigest = preparation.point.markdownDigest;
-    if (operation === "apply")
-      return {
-        fence: preparation.fence,
-        candidateDigest,
-        nativeSourceManifestDigest,
-        admitted,
-        localHeadSequence,
-        hostCoordinate,
-        recordedAtMs: 202,
-      };
-    if (operation === "settle")
-      return {
-        settlementId,
-        previousCursor: 0,
-        terminalCursor: admitted.accepted.receipt.journalCursor,
-        applicationCount: 1,
-        localYDocSequence: localHeadSequence,
-        momentId,
-        markdownDigest,
-        materialized: true,
-        collectionReconcileRequired: false,
-      };
-    return {
-      relayDatabaseNamespace: preparation.fence.operation.relayDatabaseNamespace,
-      operationId: stopLookup.operationId,
-      binding: admitted.accepted.binding,
-      applicationReceipt: admitted.accepted.receipt,
-      settlementId,
-      momentId,
-      markdownDigest,
-      localHeadSequence,
-      recordedAtMs: 204,
-    };
-  };
-  const sendLiveRestore = vi.fn(async (_request: unknown, operation: string) => ({
-    bytes: Buffer.from(JSON.stringify(answer(operation))),
-  }));
-  Object.assign(o.client(), { sendLiveRestore });
-  const publish = async () => {
-    const { admitted } = admission(),
-      document = o.document,
-      terminal = admitted.accepted.receipt.journalCursor,
-      binding = { ...admitted.accepted.binding };
-    const row = o.raw
-      .prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?")
-      .get(terminal)!;
-    const bytes = row.validation_checkpoint_bytes as Uint8Array;
-    const normalized = createLiveMarkdownRegistrationValidator(restorePolicy)({
-      document,
-      currentPath: binding.currentPath,
-      checkpoint: bytes,
-    });
-    if (normalized.kind !== "accepted") throw new Error(normalized.reason);
-    const markdown = Buffer.from(normalized.evidence.projectedMarkdown),
-      markdownDigest = sha256(markdown),
-      stateDigest = sha256(bytes);
-    for (const [digest, content] of [
-      [stateDigest, bytes],
-      [markdownDigest, markdown],
-    ] as const)
-      o.f.storage.putBlob({
-        workspaceId: document.workspaceId,
-        sha256: digest,
-        content,
-        createdAtMs: 1,
-      });
-    const before = String(
-      o.raw
-        .prepare(
-          "SELECT baseline_projected_sha256 FROM sync_relay_live_documents WHERE object_id=?",
-        )
-        .get(document.objectId)!.baseline_projected_sha256,
-    );
-    const namespace = String(row.relay_database_namespace),
-      key = [
-        namespace,
-        document.workspaceId,
-        document.mainVersionId,
-        document.objectId,
-        document.lineageClaimId,
-      ];
-    const acceptedEventCount = Number(row.accepted_event_count);
-    const record = {
-      settlementId: "",
-      relayDatabaseNamespace: namespace,
-      binding,
-      hostCoordinate,
-      previousCursor: 0,
-      terminalCursor: terminal,
-      previousYdocSequence: 0,
-      localYdocSequence: 1,
-      applicationCount: acceptedEventCount,
-      nativeIntervalDigest: sha256(Buffer.from("native-interval-restore")),
-      acceptedEventCount,
-      acceptedIntervalDigest: jsonHash([
-        "live-settlement-accepted-interval-v1",
-        key,
-        [0, 0, initialAcceptedHistoryDigest(namespace, document)],
-        [acceptedEventCount, terminal, row.accepted_evidence_digest],
-      ]),
-      momentId: "restore-publication",
-      markdownDigest,
-      sourceStateVectorDigest: sha256(Buffer.from("state-vector-restore")),
-      acceptedStateBlobSha256: stateDigest,
-      recordedAtMs: 1,
-      restoreOperationId: null,
-    };
-    record.settlementId = nativeSettlementId(record);
-    const payload = {
-      momentId: record.momentId,
-      objectId: document.objectId,
-      versionId: "main",
-      path: binding.currentPath,
-      operation: "write",
-      payloadBeforePath: binding.currentPath,
-      payloadAfterPath: binding.currentPath,
-      payloadBeforeContentKind: "text",
-      payloadAfterContentKind: "text",
-      payloadBeforeBlobSha256: before,
-      payloadAfterBlobSha256: markdownDigest,
-      payloadAfterByteLength: markdown.byteLength,
-      recordedAtMs: 1,
-      settlementReference: {
-        formatVersion: 1,
-        recordDigest: settlementRecordDigest(record),
-        record,
-      },
-    };
-    const op = {
-      originSeq: 0,
-      opKind: "moment.append",
-      payloadJson: stableJsonStringify(payload),
-      recordedAtMs: 1,
-    };
-    await prepareHostedSettlements(o.f.storage as StorageContext, {
-      workspaceId: "workspace",
-      originId: "proof",
-      ops: [op],
-    });
-    expect(op).toMatchObject({ settlementAdmission: { status: "accepted" } });
-    expect(
-      o.f.storage.appendLogBatch({ workspaceId: "workspace", originId: "proof", ops: [op] }),
-    ).toMatchObject({ inserted: 1 });
-  };
-  return { sendLiveRestore, publish };
-};
-
-// Proves: a moved document's restore that the relay admitted, which no Decline
-// can end, completes through the restarted host's route: the relay admitted it
-// before the move, and the restarted host records each engine step through
-// resume. Once the restore's settlement
-// is published, its retirement runs at the key the admission left, not the one
-// before it, and completes, and the route ends.
-it("completes a moved document's admitted restore through a restarted host, then retires it", async () => {
-  const { o, host, admission } = await movedDuringRestore({ admitted: true });
-  const { proposalDigest, before } = admission!,
-    { sendLiveRestore, publish } = restoreEngine(o, host);
-  const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement");
-  await expect(host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({
-    kind: "resumed",
-    proposalDigest,
-  });
-  expect(sendLiveRestore.mock.calls.map((call) => call[1])).toEqual(["apply", "settle", "resume"]);
-  expect(o.f.storage.readStopRestore(stopLookup)?.phase).toBe("resumed");
-  const moved = retirementKey(o);
-  expect(moved.acceptedThrough).toBeGreaterThan(before.acceptedThrough);
-  expect(retiredRow(o).retired).toBe(false);
-  await publish();
-  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), { timeout: 10_000 });
-  expect(retiredRow(o).retired).toBe(true);
-  expect(complete).toHaveBeenLastCalledWith(expect.objectContaining({ key: moved }));
-  expect(complete).not.toHaveBeenCalledWith(expect.objectContaining({ key: before }));
-  // The retirement may settle again on each pass that waited for the settlement.
-  const settles = retiringSettles(o, 0).map(
-    ([, params]) => (params as { retirement: unknown }).retirement,
-  );
-  expect(settles.length).toBeGreaterThan(0);
-  expect(settles).toEqual(settles.map(() => moved));
-  expect(leaving(o)).toContain("liveApplication.releaseActivation");
-  expect(leaving(o)).not.toContain("liveApplication.unloadDocument");
-  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
-  expect(host.retains(o.sibling)).toBe(false);
-  await expect(host.completeRestore(stopLookup, proposalDigest)).rejects.toThrow(
-    "Service restore source is unavailable.",
-  );
-});
-
-const ownerCovers = (o: Enrolled) =>
-  o.f.storage.serviceHostEnrollmentCovered({
-    workspaceId: "workspace",
-    objectId: "object",
-    ownerUserId: "owner",
-    shareId: "share",
-    path: o.sibling.path,
-  });
-const activations = (o: Enrolled) =>
-  o.raw
-    .prepare("SELECT activation_id FROM sync_relay_service_activations ORDER BY rowid")
-    .all()
-    .map((row) => row.activation_id);
-const ownerBinding = (o: Enrolled) =>
-  o.f.storage.resolveCurrentLiveDocumentBinding({
-    document: o.document,
-    actor: { kind: "owner", userId: "owner" },
-  });
-const restoreRequest = (o: Enrolled) =>
-  o.f.storage.readStopRestorePlan({
-    document: o.document,
-    ownerUserId: "owner",
-    operationId: "restore",
-    shareId: "share",
-    grantId: "grant",
-    restorePointCursor: 0,
-    restorePointReceiptDigest: o.document.lineageClaimId,
-    maxOutputBytes: 1_000_000,
-  }).intent;
-const usage = (o: Enrolled) =>
-  Number(
-    o.raw
-      .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'")
-      .get()!.usage_bytes,
-  );
-// The note's text in the relay's accepted journal, applied in order. The mocked engine applies no text, so this is not the native file's.
-const journalText = (o: Enrolled) => {
-  const read = o.f.storage.readLiveUpdateJournalCut({ document: o.document });
-  if (read.kind !== "cut") throw new Error("Missing live journal.");
-  const doc = new Y.Doc();
-  for (const bytes of [read.cut.checkpoint.bytes, ...read.cut.suffix.map((row) => row.bytes)])
-    Y.applyUpdate(doc, bytes);
-  const text = yDocToMarkdown(doc);
-  doc.destroy();
-  return text;
-};
-const restoredText = (edit?: string) => {
-  const doc = markdownToYDoc("Original");
-  if (edit !== undefined) doc.getMap("frontmatter").set("edit", edit);
-  const text = yDocToMarkdown(doc);
-  doc.destroy();
-  return text;
-};
-// Closes the relay database and opens the same file again, as a relay restart does. The fixture's closures read `o.f`, so they use the reopened store.
-const reopenRelay = (o: Enrolled) => {
-  o.f.closeStorage();
-  const reopened = openRelayDeployment(join(o.f.root, "deployment.json"));
-  let closed = false;
-  const closeStorage = () => {
-    if (!closed) {
-      reopened.storage.close();
-      closed = true;
-    }
-  };
-  cleanup.push(async () => closeStorage());
-  Object.assign(o.f, { ...reopened, closeStorage });
-};
-const hostingAgain = async (
-  o: Enrolled,
-  previous: Awaited<ReturnType<typeof startServiceLiveHost>>,
-) => {
-  await previous.close();
-  reopenRelay(o);
-  Object.assign(o.f.config, { restore: RESTORE });
-  await o.f.save();
-  const host = await startServiceLiveHost({ ...o.f, frameChanges: createNamedFrameChanges(16) });
-  cleanup.push(() => host.close());
-  await host.update({ workspaces: [o.workspace], documents: [o.sibling], ...stay });
-  return host;
-};
-const ownerEditsAgain = async (
-  o: Enrolled,
-  host: Awaited<ReturnType<typeof startServiceLiveHost>>,
-  fence: number,
-) => {
-  await vi.waitFor(() => expect(host.isDocumentReady(o.document)).toBe(true), { timeout: 10_000 });
-  expect(activations(o)).toEqual([ACTIVATION]);
-  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
-  expect(ownerBinding(o)).toMatchObject({
-    kind: "current",
-    binding: { restoreFenceGeneration: fence },
-  });
-  expect(
-    o.f.storage.resolveCurrentLiveDocumentBinding({
-      document: o.document,
-      actor: { kind: "named", userId: "reader", grantId: "grant" },
-    }).kind,
-  ).toBe("refused");
-  expect(o.f.storage.getShareGrant("grant")).toMatchObject({ status: "revoked" });
-};
-const delivered = (o: Enrolled) =>
-  o
-    .client()
-    .sendLiveApplication.mock.calls.map(
-      ([, event]) =>
-        (event as { metadata: { accepted: { receipt: { deliveryId: string } } } }).metadata.accepted
-          .receipt.deliveryId,
-    );
-const editOnce = async (
-  o: Enrolled,
-  host: Awaited<ReturnType<typeof startServiceLiveHost>>,
-  value: string,
-) => {
-  const edit = o.acceptEdit(value, host.coordinate);
-  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true), { timeout: 10_000 });
-  expect(await host.settle(o.document)).toMatchObject({
-    terminalCursor: edit.journalCursor,
-    materialized: true,
-  });
-  expect(
-    o
-      .ownerCalls()
-      .filter(([method]) => method === "liveApplication.settle")
-      .at(-1)?.[1],
-  ).toMatchObject({
-    terminalReceipt: { deliveryId: edit.deliveryId, journalCursor: edit.journalCursor },
-  });
-  expect(delivered(o).filter((id) => id === edit.deliveryId)).toHaveLength(1);
-  expect(
-    o.raw
-      .prepare("SELECT count(*) AS count FROM sync_relay_live_update_journal WHERE delivery_id=?")
-      .get(edit.deliveryId)!.count,
-  ).toBe(1);
-  expect(journalText(o)).toBe(restoredText(value));
-};
-
-// Proves: the owner keeps editing a note after restoring it, when the restore
-// ended its last Edit grant. The restore keeps the owner's live session: its
-// activation never retires and no successor starts. Once the restore resumed,
-// that session registers at the restored fence, the relay's journal holds the
-// restored text, and the owner's next edit is sent once and settled. A relay
-// restart that reopens its database while the restore is unfinished, and
-// another after it resumed, change none of this. A begin or a completion
-// retried after a lost reply records and charges nothing more.
-it("keeps the owner editing a note after restoring it, when the restore ended its last Edit grant", async () => {
-  const o = await enrolledServiceHost();
-  vi.spyOn(console, "error").mockImplementation(() => {});
-  const fence = o.binding.restoreFenceGeneration + 1;
-  const intent = () =>
-    String(
-      o.raw
-        .prepare(
-          "SELECT intent_json FROM sync_relay_live_restore_operations WHERE operation_id='restore'",
-        )
-        .get()!.intent_json,
-    );
-  const request = restoreRequest(o),
-    begun = o.f.storage.beginStopRestore(request, 40),
-    charged = usage(o),
-    marked = intent();
-  expect(o.f.storage.beginStopRestore(request, 40)).toEqual(begun);
-  expect(usage(o)).toBe(charged);
-  expect(intent()).toBe(marked);
-  expect(
-    o.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_restore_operations").get()!.count,
-  ).toBe(1);
-  expect(marked.split('"keptRun"')).toHaveLength(2);
-  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
-  expect(JSON.parse(marked)).toMatchObject({
-    keptRun: { runToken: 10, ownerUserId: "owner", activationId: ACTIVATION },
-  });
-  expect(ownerCovers(o)).toBe(true);
-  expect(ownerBinding(o).kind).toBe("refused");
-  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
-  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({
-    kind: "pending",
-    reason: "native-fence-pending",
-  });
-  const proposalDigest = await admitRestore(o);
-  let host = await hostingAgain(o, o.host);
-  expect(ownerCovers(o)).toBe(true);
-  expect(activations(o)).toEqual([ACTIVATION]);
-  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
-  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(true);
-  const { publish } = restoreEngine(o, host);
-  const resumed = await host.completeRestore(stopLookup, proposalDigest);
-  expect(resumed).toMatchObject({ kind: "resumed", proposalDigest });
-  const completed = usage(o),
-    recorded = intent();
-  expect(await host.completeRestore(stopLookup, proposalDigest)).toEqual(resumed);
-  expect(usage(o)).toBe(completed);
-  expect(intent()).toBe(recorded);
-  expect(recorded.split('"keptRun"')).toHaveLength(2);
-  await publish();
-  await ownerEditsAgain(o, host, fence);
-  const registered = o
-    .ownerCalls()
-    .filter(([method]) => method === "liveApplication.register")
-    .map(([, params]) => params);
-  expect(registered.at(-1)).toMatchObject({
-    activationId: ACTIVATION,
-    binding: { restoreFenceGeneration: fence },
-  });
-  expect(journalText(o)).toBe(restoredText());
-  await editOnce(o, host, "after");
-  host = await hostingAgain(o, host);
-  await ownerEditsAgain(o, host, fence);
-  expect(delivered(o)).not.toContain("edit-after");
-  expect(journalText(o)).toBe(restoredText("after"));
-  await editOnce(o, host, "again");
-  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
-});
-
-// Proves: the owner's restore is charged for the record it stores, and no
-// more. A restore that keeps nothing fits in exactly the room it needs, and one
-// byte less refuses it. Keeping the owner's live session adds only the bytes of
-// its marker. A refused restore records nothing and leaves the Edit grant active.
 
 const endLiveEditing = {
   unshare: (o: Enrolled) => expect(o.f.storage.revokeShare("share", 30)).toBe(true),
@@ -4196,7 +3357,7 @@ const documentMoves = (o: Enrolled) => {
         objectId: row.objectId,
         lineageClaimId: capture.source.lineageClaimId,
       };
-      const normalized = createLiveMarkdownRegistrationValidator(restorePolicy)({
+      const normalized = createLiveMarkdownRegistrationValidator(validationPolicy)({
         document,
         currentPath: before.path,
         checkpoint: capture.baselineBytes,
@@ -4549,7 +3710,7 @@ it("keeps accepted edits and queued edits when another device removes an enrolle
     objectId: o.sibling.objectId,
     versionId: "main",
   })!;
-  const normalized = createLiveMarkdownRegistrationValidator(restorePolicy)({
+  const normalized = createLiveMarkdownRegistrationValidator(validationPolicy)({
     document: o.document,
     currentPath: o.sibling.path,
     checkpoint: o.engine.capture.baselineBytes,
@@ -4763,21 +3924,6 @@ it("resumes a document that moved away and back while another document took its 
     ).toBeGreaterThan(pushed),
   );
 });
-
-// Proves: a restarted host's ordinary recovery of a departing document reads
-// only that document's activation, though a moved document's restore keeps its
-// own activation at the same path. The replacement's first resume is refused as
-// not ready, so it parks; the next pull still lists it departed, and it resumes
-// again. Every activation read and engine request of that departure names the
-// replacement's object and activation, never the moved document's, whose
-// restore and activation stay as they were. The departure then settles,
-// publishes and unloads the replacement, as ordinary recovery does.
-
-// Proves: settling a moved document's finished restore route leaves the
-// readiness of a replacement now hosted at its old path alone. The route waits
-// on an unload the engine holds pending, and a pass activates one document, so
-// the replacement and an ordinary document take turns. On every pass the
-// replacement stays ready and the workspace pushes before it pulls.
 
 // Proves: reconciliation that names deliveries the engine cannot prove gets the
 // journal's answer for each in its next request: the receipt of one the relay
@@ -6920,56 +6066,6 @@ it("pulls only the workspace a write reached, and each of two written in one tic
 // Lifecycle work and idle deadlines must not wait for the next periodic pass to be found.
 // Each test below holds periodic passes, so only the host's own wakes, or a pass the test runs, move it on.
 
-// Proves: reopening a moved document's workspace wakes the pass that gives its restore route back, and
-// Decline wakes the passes that end the route, unload what it loaded and drain the workspace, with no periodic pass.
-it.each(["detaches and attaches"])(
-  "gives a moved document's restore route back after a running host %s its workspace, with passes held",
-  async (change) => {
-    const polls = heldPolls(),
-      { o, host } = await movedDuringRestore({ covered: true, polls });
-    const forgetMoved = vi.spyOn(ServiceActivationDriver.prototype, "forgetMoved");
-    await vi.waitFor(() => expect(polls.paused()).toBe(true));
-    let passed = false;
-    const nextPass = () => {
-      void afterPasses(o.f, 0).then(() => {
-        passed = true;
-      });
-    };
-    if (change === "detaches and attaches") {
-      nextPass();
-      await host.update({
-        workspaces: [{ ...o.workspace, maxRegistrations: 7 }],
-        documents: [],
-        departing: [o.sibling],
-      });
-    } else {
-      await host.update({ workspaces: [], documents: [], departing: [] });
-      await vi.waitFor(() => expect(polls.paused()).toBe(true));
-      nextPass();
-      await host.update({ workspaces: [o.workspace], documents: [], departing: [o.sibling] });
-    }
-    expect(forgetMoved).toHaveBeenCalledWith(
-      expect.objectContaining({ path: o.sibling.path }),
-      o.sibling.objectId,
-    );
-    expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(true);
-    expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
-    // The pass the reopening woke gives the route back.
-    await vi.waitFor(() => expect(passed).toBe(true));
-    expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
-    await expect(host.declineRestore(stopLookup)).resolves.toEqual({ kind: "declined" });
-    expect(o.ownerCalls().map(([method]) => method)).toContain(
-      "liveApplication.cancelRestoreFence",
-    );
-    await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), { timeout: 10_000 });
-    expect(host.retains(o.sibling)).toBe(false);
-    expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(false);
-    expect(leaving(o)).toContain("liveApplication.unloadDocument");
-    expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
-    expect(polls.early()).toBeGreaterThan(0);
-  },
-);
-
 // Proves: a stopped document kept for its recovery copy retires once the copy is saved. The release of the copy's
 // store, as the copy route asks, wakes the passes that retire the document, free its rows and drain the workspace.
 it("retires a stopped document once its recovery copy is saved, with passes held", async () => {
@@ -7597,11 +6693,6 @@ it("a document read answers no state for a registered note while its idle unload
 
 // Proves: an idle unload whose reply was lost goes again at its retry deadline, not before, without settling first,
 // and a reconnect sends it once more before reloading the document, with passes held.
-
-// Proves: a restore step that reloads a dormant document wakes the pass that visits it again, and one that
-// changes nothing a pass continues wakes none, with passes held. Such a wake would only run a pass that
-// retries a capture the engine refused. A pass visits both documents: the unload put this one last in pass
-// order, so a pass that visits one document visits the other first.
 
 // Measures: a ready workspace whose document unloaded idle runs no idle sweep before a deadline and no lifecycle
 // retry, and pulls nothing more, over 100 passes.
@@ -8529,16 +7620,6 @@ it("drains an idle note again after a new row, a pending drain, and a Try again"
   } finally {
     drains.mockRestore();
   }
-});
-
-// Proves: after a restore moves the note's binding, a drain does not answer from the drain before it.
-it("does not answer a drain from before a restore fence", async () => {
-  const { o } = await idleNote();
-  await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
-  o.restore();
-  await expect(o.host.drain(o.document)).rejects.toThrow(
-    "Service document activation is incomplete.",
-  );
 });
 
 // An owner's desktop that is not in a live session pushes its edit to the relay's log. The host's pull brings it to

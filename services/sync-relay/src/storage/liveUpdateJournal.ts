@@ -5,12 +5,6 @@ import {
   automationPressAdmissionAllowed,
   automationGrantAdmissionAllowed,
 } from "./automationPresses";
-import {
-  readRestoreAdmission,
-  verifyRestoreCheckpoint,
-  type RestoreAdmission,
-} from "./liveRestoreCheckpoint";
-import { acrossDeclinedRestores } from "./liveRestoreLifecycleStorage";
 import { liveJournalHistoryNamespace, requireLiveJournalHistory } from "./liveJournalHistory";
 import { liveJournalCheckpointDue } from "./liveJournalCheckpoint";
 import {
@@ -82,12 +76,6 @@ import type {
   StoredLiveDocumentAuthority,
 } from "./types";
 import { LiveJournalAdmittedCapacityError } from "./errors";
-import { LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_SOURCE_RANGES } from "./liveRestoreOperationSchema";
-import { LIVE_RESTORE_CANCELLATIONS } from "./liveRestoreCancellationSchema";
-import {
-  parseNativeRestoreCancellationAnswer,
-  type NativeRestoreCancellationReceipt,
-} from "../liveRestoreFence";
 import { LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE } from "./schema";
 import { snapshotHostCoordinate } from "../liveTicketInputs";
 import { readLiveHostControl } from "./hostControl";
@@ -504,14 +492,8 @@ export function assertJournalCheckpointPosition(
     restoreOperationId: string | null;
     history: { namespace: string };
   },
-  budget?: { bytes: number; chargeBytes(value: number): void },
 ): { count: number; bytes: number } {
-  const restored = verifyRestoreCheckpoint(
-    db,
-    row,
-    budget?.bytes,
-    budget ? (value) => budget.chargeBytes(value) : undefined,
-  );
+  const restored = row.restoreOperationId !== null;
   const { binding, receipt } = row.admitted.metadata.accepted;
   const predecessor = db
     .prepare(
@@ -521,16 +503,7 @@ export function assertJournalCheckpointPosition(
   if (predecessor)
     journalIntegrity(
       predecessor.current_path === binding.currentPath &&
-        (restored
-          ? predecessor.restore_fence_generation ===
-            acrossDeclinedRestores(
-              db,
-              row.history.namespace,
-              restored.preparation.fence.operation.oldBinding,
-              authorityInteger(predecessor.journal_cursor, 1),
-              budget ? (value) => budget.chargeBytes(value) : undefined,
-            )?.restoreFenceGeneration
-          : predecessor.restore_fence_generation === binding.restoreFenceGeneration),
+        (restored || predecessor.restore_fence_generation === binding.restoreFenceGeneration),
     );
   const previous = db
     .prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE}
@@ -557,9 +530,7 @@ export function assertJournalCheckpointPosition(
     const due = liveJournalCheckpointDue(index + 1, bytes) || authorDue;
     const hasCheckpoint = raw.has_checkpoint_bytes === 1;
     journalIntegrity(hasCheckpoint === (raw.has_checkpoint_digest === 1));
-    journalIntegrity(
-      (due || (restored !== null && index === segment.length - 1)) === hasCheckpoint,
-    );
+    journalIntegrity((due || (restored && index === segment.length - 1)) === hasCheckpoint);
     if (index < segment.length - 1) journalIntegrity(!due);
   }
   return { count: segment.length, bytes };
@@ -590,7 +561,7 @@ function replicaMetadataBytes(raw: Record<string, unknown>, retained = true): nu
   );
 }
 export const REPLICA_LIVE_JOURNAL_MAX_BYTES = 32 * 1024 * 1024;
-// Independent documents and restores can checkpoint within the same page.
+// Independent documents can checkpoint within the same page.
 const REPLICA_LIVE_JOURNAL_MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 
 export interface ReplicaLiveJournalAuthority {
@@ -607,30 +578,12 @@ export interface ReplicaLiveJournalRow {
   readonly relayDatabaseNamespace: string;
   readonly evidenceDigest: string;
   readonly journalCursor: number;
-  readonly restore: {
-    readonly operationId: string;
-    readonly checkpoint: { readonly digest: string; readonly bytes: string };
-    readonly proof: RestoreAdmission;
-  } | null;
   // A retired object has no current authority until another lineage is registered.
   readonly authority: ReplicaLiveJournalAuthority | null;
 }
 
-/**
- * A restore declined after its native fence committed, at the journal cursor
- * the relay gave its host's receipt. It is no delivery and carries no bytes:
- * a replica advances the document's generation and nothing else.
- */
-export interface ReplicaLiveJournalCancellation {
-  readonly relayDatabaseNamespace: string;
-  readonly journalCursor: number;
-  readonly cancellation: NativeRestoreCancellationReceipt;
-  // The document's current authority, as rows carry it, so a replica can skip a lineage it never saw that has since retired.
-  readonly authority: ReplicaLiveJournalAuthority | null;
-}
-
 export interface ReplicaLiveJournalPage {
-  readonly rows: readonly (ReplicaLiveJournalRow | ReplicaLiveJournalCancellation)[];
+  readonly rows: readonly ReplicaLiveJournalRow[];
   readonly nextCursor: number;
   readonly hasMore: boolean;
 }
@@ -649,7 +602,6 @@ interface ReplicaJournalSnapshotRow {
   provenance: Record<string, unknown>[];
   predecessor: Record<string, unknown> | undefined;
   projected: ReplicaJournalProjection;
-  restoreProof: RestoreAdmission | null;
 }
 
 interface ReplicaJournalProjection {
@@ -685,34 +637,16 @@ function captureReplicaJournalRows(
     const updateLength = (raw.update_bytes as Uint8Array).byteLength;
     const checkpointLength =
       (raw.validation_checkpoint_bytes as Uint8Array | null)?.byteLength ?? 0;
-    let retainedBytes = updateLength + checkpointLength + replicaMetadataBytes(raw);
-    let encodedBytes =
+    const retainedBytes = updateLength + checkpointLength + replicaMetadataBytes(raw);
+    const encodedBytes =
       4 * Math.ceil(updateLength / 3) +
       replicaMetadataBytes(raw, false) +
       REPLICA_JOURNAL_ROW_FRAME_BYTES +
-      Buffer.byteLength(JSON.stringify(String(raw.relay_database_namespace))) +
-      (raw.restore_operation_id === null
-        ? 0
-        : 4 * Math.ceil(checkpointLength / 3) +
-          Buffer.byteLength(JSON.stringify(String(raw.restore_operation_id))));
+      Buffer.byteLength(JSON.stringify(String(raw.relay_database_namespace)));
     const cursor = authorityInteger(raw.journal_cursor, 1);
     // Keep the first admitted row even when it exceeds a cap.
     if (!fits(encodedBytes, retainedBytes, cursor)) break;
-    const proofBytes =
-      raw.restore_operation_id === null
-        ? 0
-        : authorityInteger(
-            storage.db
-              .prepare(
-                `SELECT length(CAST(l.admission_json AS BLOB)) AS bytes FROM sync_relay_live_restore_lifecycles l JOIN ${LIVE_RESTORE_OPERATIONS} o USING(relay_database_namespace,operation_id)
-        WHERE l.relay_database_namespace=? AND l.operation_id=? AND o.workspace_id=?`,
-              )
-              .get(raw.relay_database_namespace, raw.restore_operation_id, workspaceId)?.bytes,
-            1,
-          );
-    encodedBytes += proofBytes;
-    retainedBytes += proofBytes;
-    if (!fits(encodedBytes, retainedBytes, cursor)) break;
+    journalIntegrity(raw.restore_operation_id === null);
     rawRows.push(raw);
     rowBytes += encodedBytes;
     captureBytes += retainedBytes;
@@ -742,20 +676,11 @@ function captureReplicaJournalRows(
       previous.get(key) ??
       predecessorQuery.get(...documentParams(projection.document), projection.journalCursor);
     previous.set(key, raw);
-    const restoreProof =
-      raw.restore_operation_id === null
-        ? null
-        : readRestoreAdmission(
-            storage.db,
-            parseLiveUpdateIdentifier(raw.relay_database_namespace),
-            parseLiveUpdateIdentifier(raw.restore_operation_id),
-          );
     return {
       raw,
       projected: projection,
       provenance: provenance.get(projection.journalCursor) ?? [],
       predecessor,
-      restoreProof,
     };
   });
 }
@@ -898,59 +823,13 @@ export async function readReplicaLiveJournal(
       projectedRows,
       maxBytes,
     );
-    // Cancellation control entries take cursors between deliveries; one past the limit shows there are more.
-    const controls = storage.db
-      .prepare(`SELECT relay_database_namespace,journal_cursor,acknowledgment_json FROM ${LIVE_RESTORE_CANCELLATIONS}
-      WHERE workspace_id=? AND journal_cursor IS NOT NULL AND journal_cursor>? ORDER BY journal_cursor LIMIT ?`)
-      .all(workspaceId, after, limit + 1)
-      .map((row) => {
-        const answer = parseNativeRestoreCancellationAnswer(
-          JSON.parse(String(row.acknowledgment_json)),
-        );
-        journalIntegrity(
-          answer.status === "fenceCancelled" && answer.receipt.binding.workspaceId === workspaceId,
-        );
-        const { mainVersionId, objectId } = answer.receipt.binding;
-        return {
-          relayDatabaseNamespace: parseLiveUpdateIdentifier(row.relay_database_namespace),
-          journalCursor: authorityInteger(row.journal_cursor, 1),
-          cancellation: answer.receipt,
-          authority: authorityOf(mainVersionId, objectId),
-        } satisfies ReplicaLiveJournalCancellation;
-      });
-    return { captured, controls, hasMore: hasMore || captured.length < projectedRows.length };
+    return { captured, hasMore: hasMore || captured.length < projectedRows.length };
   });
-  const rows: (ReplicaLiveJournalRow | ReplicaLiveJournalCancellation)[] = [];
+  const rows: ReplicaLiveJournalRow[] = [];
   let workBytes = 0,
     rowBytes = 0,
     nextCursor = after,
-    hasMore = snapshot.hasMore,
-    control = 0;
-  const serveControls = (cursor: number) => {
-    for (
-      ;
-      control < snapshot.controls.length && snapshot.controls[control]!.journalCursor < cursor;
-      control++
-    ) {
-      const entry = snapshot.controls[control]!,
-        encodedBytes = Buffer.byteLength(JSON.stringify(entry));
-      if (
-        rows.length === limit ||
-        (rows.length > 0 &&
-          replicaJournalResponseBytes(
-            rowBytes + encodedBytes,
-            rows.length + 1,
-            entry.journalCursor,
-            false,
-          ) > maxBytes)
-      )
-        return false;
-      rows.push(entry);
-      rowBytes += encodedBytes;
-      nextCursor = entry.journalCursor;
-    }
-    return true;
-  };
+    hasMore = snapshot.hasMore;
   if (replicaJournalResponseBytes(0, 0, after, false) > maxBytes)
     throw new RangeError("Replica journal response exceeds the byte budget.");
   const yieldWork = async () => {
@@ -977,7 +856,7 @@ export async function readReplicaLiveJournal(
     return encoded.join("");
   };
   for (const [index, entry] of snapshot.captured.entries()) {
-    if (!serveControls(entry.projected.journalCursor) || rows.length === limit) {
+    if (rows.length === limit) {
       hasMore = true;
       break;
     }
@@ -993,18 +872,10 @@ export async function readReplicaLiveJournal(
       evidenceDigest: decoded.history.evidenceDigest,
       journalCursor: entry.projected.journalCursor,
       authority: entry.projected.authority,
-      restore: entry.restoreProof
-        ? {
-            operationId: decoded.restoreOperationId!,
-            checkpoint: { digest: decoded.checkpoint!.digest, bytes: "" },
-            proof: entry.restoreProof,
-          }
-        : null,
     };
     const encodedBytes =
       Buffer.byteLength(JSON.stringify(row)) +
-      4 * Math.ceil(decoded.admitted.updateBytes.byteLength / 3) +
-      (row.restore ? 4 * Math.ceil(decoded.checkpoint!.bytes.byteLength / 3) : 0);
+      4 * Math.ceil(decoded.admitted.updateBytes.byteLength / 3);
     if (
       rows.length > 0 &&
       replicaJournalResponseBytes(
@@ -1018,36 +889,17 @@ export async function readReplicaLiveJournal(
       break;
     }
     verifyJournalHistoryLink(decoded.admitted.metadata, decoded.history, entry.predecessor);
-    if (entry.restoreProof)
-      journalIntegrity(
-        decoded.checkpoint &&
-          decoded.checkpoint.digest === entry.restoreProof.checkpointDigest &&
-          isDeepStrictEqual(decoded.admitted.metadata, entry.restoreProof.admitted),
-      );
     const update = await verifyAndEncode(
       decoded.admitted.updateBytes,
       decoded.admitted.metadata.accepted.receipt.updateDigest,
       true,
     );
-    const checkpoint = decoded.checkpoint
-      ? await verifyAndEncode(
-          decoded.checkpoint.bytes,
-          decoded.checkpoint.digest,
-          decoded.restoreOperationId !== null,
-        )
-      : null;
-    rows.push({
-      ...row,
-      admitted: { ...row.admitted, updateBytes: update },
-      restore: row.restore
-        ? { ...row.restore, checkpoint: { ...row.restore.checkpoint, bytes: checkpoint! } }
-        : null,
-    });
+    if (decoded.checkpoint)
+      await verifyAndEncode(decoded.checkpoint.bytes, decoded.checkpoint.digest, false);
+    rows.push({ ...row, admitted: { ...row.admitted, updateBytes: update } });
     rowBytes += encodedBytes;
     nextCursor = row.journalCursor;
   }
-  // Entries after the last served delivery belong to this page only when no delivery was left for the next.
-  if (!hasMore && !serveControls(Number.MAX_SAFE_INTEGER)) hasMore = true;
   check();
   return { rows, nextCursor, hasMore };
 }
@@ -1537,7 +1389,6 @@ export function appendValidatedLiveJournal(
     firstSeenDeletes?: readonly LiveUpdateStructRange[];
     seedFirstSeen?: readonly LiveUpdateStructRange[];
     checkpointCoverage?: readonly LiveCheckpointAuthorCoverage[];
-    restoreOperationId?: string;
     firstSeen: AdmittedLiveUpdate["metadata"]["firstSeen"];
     checkpointBytes: Uint8Array | null;
     checkpointDigest: string | null;
@@ -1575,8 +1426,6 @@ export function appendValidatedLiveJournal(
   for (const bytes of [updateBytes, checkpointBytes])
     if (bytes !== null && (bytes.byteLength < 1 || bytes.byteLength > 20_971_520))
       throw new TypeError("Invalid journal bytes.");
-  const restoreOperationId = input.restoreOperationId ?? null;
-  journalIntegrity(restoreOperationId === null || checkpointBytes !== null);
   requireLiveJournalHistory(storage);
   journalIntegrity(liveJournalHistoryNamespace(storage) === namespace);
   const sequenceRows = storage.db
@@ -1666,7 +1515,7 @@ export function appendValidatedLiveJournal(
       eventCount,
       evidenceDigest,
       acceptedMetadataBytes,
-      restoreOperationId,
+      null,
       2,
       authorContextJson,
       authorSnapshotJson,
@@ -1727,7 +1576,7 @@ export function appendValidatedLiveJournal(
       eventCount,
       evidenceDigest,
       acceptedMetadataBytes,
-      restoreOperationId,
+      null,
       2,
       authorContextJson,
       authorSnapshotJson,
@@ -2076,13 +1925,12 @@ export function commitLiveUpdateJournal(
         document,
         validation.evidence.candidate.ranges,
       );
-      requireRestoreSourceCoverage(
-        storage,
-        document,
-        namespace,
-        validation.evidence.candidate.ranges,
-        validation.evidence.checkpointRanges,
-        coverage,
+      const checkpointOnly = subtractJournalRanges(validation.evidence.checkpointRanges, coverage);
+      journalIntegrity(
+        isDeepStrictEqual(
+          subtractJournalRanges(validation.evidence.candidate.ranges, checkpointOnly),
+          validation.evidence.candidate.ranges,
+        ),
       );
       const allFirstSeen = validation.evidence.candidate.firstSeen;
       journalIntegrity(
@@ -2550,72 +2398,4 @@ export function readCommittedLiveUpdate(
     return { kind: "committed", admitted: result.row.admitted };
   }
   return result;
-}
-
-function requireRestoreSourceCoverage(
-  storage: StorageContext,
-  document: LiveDocumentKey,
-  namespace: string,
-  candidate: readonly LiveUpdateStructRange[],
-  checkpoint: readonly LiveUpdateStructRange[],
-  accepted: readonly LiveUpdateStructRange[],
-): void {
-  const checkpointOnly = subtractJournalRanges(checkpoint, accepted);
-  const lookup = storage.db
-    .prepare(`SELECT * FROM ${LIVE_RESTORE_SOURCE_RANGES} WHERE relay_database_namespace=?
-    AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND client_id=?
-    AND start_clock<=? AND end_clock>? ORDER BY end_clock DESC LIMIT 1`);
-  let retained:
-    | { operationId: string; admission: ReturnType<typeof readRestoreAdmission> }
-    | undefined;
-  let checkpointIndex = 0;
-  // Both range lists are ordered by client and start clock.
-  for (const next of candidate) {
-    while (
-      checkpointIndex < checkpointOnly.length &&
-      (checkpointOnly[checkpointIndex]!.clientId < next.clientId ||
-        (checkpointOnly[checkpointIndex]!.clientId === next.clientId &&
-          checkpointOnly[checkpointIndex]!.endClock <= next.startClock))
-    )
-      checkpointIndex++;
-    for (let index = checkpointIndex; index < checkpointOnly.length; index++) {
-      const range = checkpointOnly[index]!;
-      if (range.clientId > next.clientId || range.startClock >= next.endClock) break;
-      let start = Math.max(next.startClock, range.startClock),
-        end = Math.min(next.endClock, range.endClock);
-      while (start < end) {
-        const row = lookup.get(
-          namespace,
-          ...documentParams(document),
-          range.clientId,
-          start,
-          start,
-        );
-        journalIntegrity(row);
-        const operationId = parseLiveUpdateIdentifier(row.operation_id);
-        if (retained?.operationId !== operationId)
-          retained = {
-            operationId,
-            admission: readRestoreAdmission(storage.db, namespace, operationId),
-          };
-        const admission = retained.admission;
-        journalIntegrity(
-          isDeepStrictEqual(
-            documentParams(admission.admitted.accepted.binding),
-            documentParams(document),
-          ) &&
-            row.proposal_sha256 === admission.proposalDigest &&
-            admission.sourceRanges.some(
-              (source) =>
-                source.sourceOrdinal === row.source_ordinal &&
-                source.clientId === row.client_id &&
-                source.startClock === row.start_clock &&
-                source.endClock === row.end_clock &&
-                source.sourceDigest === row.source_sha256,
-            ),
-        );
-        start = Math.min(end, authorityInteger(row.end_clock, 1));
-      }
-    }
-  }
 }

@@ -785,7 +785,7 @@ export function resolveLiveObjectHostBinding(
       lineageClaimId: parseLiveUpdateDigest(row.lineage_claim_id),
     };
     const actor = liveBrowserActor(scope);
-    if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined))
+    if (!serviceHostDocumentEnabled(storage, document))
       return { kind: "refused", reason: "host-unavailable" };
     if (scope.kind !== "link") {
       const current = currentLiveDocumentBinding(storage, { document, actor });
@@ -1679,7 +1679,7 @@ export function authorizeLiveDocument(
   > | null,
   activation?: ServiceActivationAccess,
 ): CurrentLiveBindingResult {
-  if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined))
+  if (!serviceHostDocumentEnabled(storage, document))
     return { kind: "refused", reason: "host-unavailable" };
   let bound: BoundLiveDocument | LiveBindingRefusal;
   let authority: ServerDerivedLiveUpdateAuthority;

@@ -34,15 +34,12 @@ import {
   ServiceActivationRefused,
   ServiceActivationStaleCut,
   ServiceActivationTooLarge,
-  type ServiceActivationStore,
 } from "./storage/serviceActivation";
 import { knownRefusalWord, refusalHead, type KnownRefusalWord } from "./serverLogWords";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import type { SyncRelayStorage, LiveHostConnectionCoordinate } from "./storage";
 import type { DepartedOwnerDelivery } from "./storage/liveCommittedDelivery";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
-import type { LiveRestorePreparation } from "./liveRestorePreparation";
-import type { StopRestoreLookup } from "./storage/liveRestoreOperation";
 import type { ServiceHostedHold, ServiceHostedPullPage } from "./serviceHostedReplication";
 import type { ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits";
 import type { RetirableServiceActivation } from "./storage/serviceActivationRetirement";
@@ -268,7 +265,7 @@ export class ServiceActivationDriver {
       history: LiveJournalHistoryAuthority;
       client: EngineClient;
       host: LiveHostConnectionCoordinate;
-      /** An attached workspace whose replica checked its origin. Activation, restore and departures reach no other. */
+      /** An attached workspace whose replica checked its origin. Activation and departures reach no other. */
       workspace(
         workspaceId: string,
       ):
@@ -276,7 +273,6 @@ export class ServiceActivationDriver {
         | undefined;
       config: ServiceActivationConfig;
       adoption: { maxBytes: number; maxEvents: number };
-      restore?: LiveRestorePreparation;
       nextRequestId(): number;
       deadlineMs: number;
       /** The engine's settlement bound, which also bounds a retirement's applications. Configuration admission requires it. */
@@ -374,7 +370,7 @@ export class ServiceActivationDriver {
   removeTarget(target: ServiceActivationTarget) {
     this.#forget(targetKey(target));
   }
-  /** Forgets the target of a moved document's restore, which `restoreConsumer` and `retire` were given as moved. */
+  /** Forgets the target of a moved document, which `retire` was given as moved. */
   forgetMoved(target: ServiceActivationTarget, objectId: string) {
     this.#forget(movedKey(target, objectId));
   }
@@ -621,115 +617,6 @@ export class ServiceActivationDriver {
       this.options.config.maxCaptureBytes,
       objectId,
     );
-  }
-  /**
-   * The owner through which a restore step reaches the document. `moved` is the
-   * frozen target of a document that left its enrolled path, whose unfinished
-   * restore continues there although it is no longer a target. Either way only
-   * the document's own activation is read, and a target at the same path that
-   * holds another document is passed over.
-   */
-  restoreConsumer(
-    document: LiveDocumentKey,
-    lookup: StopRestoreLookup,
-    moved?: ServiceActivationTarget,
-  ) {
-    const o = this.options,
-      key = JSON.stringify(parseLiveDocumentKey(document));
-    let target: ServiceActivationTarget | undefined,
-      saved: ReturnType<ServiceActivationStore["read"]> = null;
-    for (const row of moved ? [moved] : this.#targets) {
-      const object = moved ? undefined : this.#objects.get(targetKey(row));
-      if (
-        row.workspaceId !== document.workspaceId ||
-        (object !== undefined && object !== document.objectId)
-      )
-        continue;
-      const read = this.#store.read(
-        row.workspaceId,
-        row.path,
-        o.config.maxCaptureBytes,
-        document.objectId,
-      );
-      if (
-        read?.completed &&
-        read.source.objectId === document.objectId &&
-        read.source.lineageClaimId === document.lineageClaimId
-      ) {
-        target = row;
-        saved = read;
-        break;
-      }
-    }
-    const workspace = o.workspace(document.workspaceId);
-    if (!target || !saved || !workspace) throw new Error("Service restore source is unavailable.");
-    // Stopping access re-registers the retained owner. Only the activated session's
-    // verified transport can check that adoption.
-    const activated = this.#owners.get(key);
-    if (activated && !activated.activationPending) return activated.consumer;
-    // Without that session, as for a dormant document or after a restart, the
-    // owner takes the operation's binding, whose adoption must be that activation.
-    // Only a step that registers reloads the retained activation into a new native session.
-    const operation = o.storage.readStopRestore(lookup),
-      origin = operation?.basis.ownerOrigin;
-    if (
-      !operation ||
-      operation.intent.deliveryKind !== "owner" ||
-      !isDeepStrictEqual(operation.intent.document, parseLiveDocumentKey(document)) ||
-      operation.intent.ownerUserId !== saved.ownerUserId ||
-      !origin ||
-      JSON.parse(origin)?.adoptionId !== saved.activationId
-    )
-      throw new Error("Service restore owner adoption is unavailable.");
-    const slot = moved ? movedKey(target, document.objectId) : targetKey(target);
-    const owner: Owner = this.#owner(
-      target,
-      async (signal) => {
-        const sleeping = this.#dormant.get(slot);
-        // Once sent, the capture may load the session whatever its reply, so a dormant target
-        // rejoins passes, which settle it and resume its session as for an awake document.
-        // Only the engine's refusal, which loads nothing, leaves it dormant.
-        this.#loaded.add(slot);
-        this.#dormant.delete(slot);
-        let capture: NativeOwnerActivation;
-        try {
-          capture = await o.client.captureOwnerActivation(
-            { id: o.nextRequestId(), workspace: workspace.handle, deadlineMs: o.deadlineMs },
-            target.path,
-            o.config.maxCaptureBytes,
-            signal,
-            saved.activationId,
-          );
-        } catch (error) {
-          if (
-            sleeping !== undefined &&
-            error instanceof EngineRequestError &&
-            error.wireError?.code === "INVALID_PARAMS"
-          )
-            this.#dormant.set(slot, sleeping);
-          throw error;
-        }
-        signal?.throwIfAborted();
-        o.assertCurrent();
-        this.#held.delete(slot);
-        this.#objects.set(slot, document.objectId);
-        if (
-          capture.activationId !== saved.activationId ||
-          !isDeepStrictEqual(capture.source, saved.source)
-        )
-          throw new Error("Native service activation source changed.");
-        this.#owners.set(key, owner);
-        return capture;
-      },
-      {
-        binding: operation.basis.ownerBinding,
-        activationPending: false,
-        ownerUserId: saved.ownerUserId,
-      },
-      undefined,
-      slot,
-    );
-    return owner.consumer;
   }
   workspaceReady(workspaceId: string) {
     return this.#targets
@@ -1017,9 +904,8 @@ export class ServiceActivationDriver {
    * relay retires it. Its target then leaves activation, which captures its
    * successor once the document is hosted again. Undefined while none is open.
    * It needs no document work: it reaches only the activation the obligation
-   * names, which the engine no longer registers or opens. A `moved` target, as
-   * `restoreConsumer` takes it, is forgotten instead, and no target at its path
-   * changes.
+   * names, which the engine no longer registers or opens. A `moved` target is
+   * forgotten instead, and no target at its path changes.
    */
   async retire(
     target: ServiceActivationTarget,
@@ -1032,10 +918,6 @@ export class ServiceActivationDriver {
       open = o.storage.serviceActivationRetirement({ workspaceId: target.workspaceId, objectId });
     if (!open) return undefined;
     const slot = moved ? movedKey(target, objectId) : targetKey(target);
-    // An unfinished restore moves the generation the key names and continues through the
-    // document's owner and target, so nothing retires, or leaves activation, until it ends.
-    if (o.storage.serviceRestoreInProgress(open))
-      return { kind: "pending", reason: "Waiting for its restore to finish." };
     const workspace = o.workspace(target.workspaceId),
       maxApplications = o.maxApplications;
     if (!workspace) throw new Error("Service activation workspace is not attached.");
@@ -1202,20 +1084,15 @@ export class ServiceActivationDriver {
         kind: "pending",
         reason: "Waiting for its hosted replica to confirm the document parked.",
       };
-    // A key at a restore's accepted row waits for that restore's settlement to publish; the next pass replays the release.
-    if (
-      this.#store.completeRetirement({
-        workspaceId: open.workspaceId,
-        key,
-        boundary: released.boundary as RetainedPrefixBody | null,
-        host: o.host,
-        registeredAtMs: Date.now(),
-        nowMs: Date.now(),
-        guard: check,
-      }).status === "pending"
-    ) {
-      return { kind: "pending", reason: "Waiting for its restore to finish." };
-    }
+    this.#store.completeRetirement({
+      workspaceId: open.workspaceId,
+      key,
+      boundary: released.boundary as RetainedPrefixBody | null,
+      host: o.host,
+      registeredAtMs: Date.now(),
+      nowMs: Date.now(),
+      guard: check,
+    });
     o.registered();
     check();
     if (moved) this.#forget(slot);
@@ -1379,7 +1256,7 @@ export class ServiceActivationDriver {
       : undefined;
     let owner = document ? this.#owners.get(JSON.stringify(document)) : undefined;
     if (owner?.completed && document && this.#invalidated(owner, document)) {
-      // A fenced binding keeps its owner for the restore; another binding activates again.
+      // A fenced binding keeps its owner; another binding activates again.
       owner = this.#owners.get(JSON.stringify(document));
       if (owner) return fenced;
     }
@@ -1528,7 +1405,7 @@ export class ServiceActivationDriver {
       return applying;
     }
     return o.runDocument(document!, signal, async () => {
-      // A restore can fence the binding while this pass waits for the document
+      // The document's binding can change while this pass waits for the document
       // or for the engine. Readiness waits until the exact binding opens again;
       // another binding reactivates on a later pass.
       if (!held.activationPending && this.#invalidated(held, document!)) return fenced;
@@ -1594,7 +1471,6 @@ export class ServiceActivationDriver {
       deadlineMs: o.deadlineMs,
       nextRequestId: o.nextRequestId,
       bounds: o.adoption,
-      restore: o.restore,
       publish: (signal) => workspace.replica.publish(signal),
       seedDelivery: transport.seedDelivery,
       changes: o.changes,

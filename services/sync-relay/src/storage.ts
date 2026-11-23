@@ -17,8 +17,6 @@ import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
 import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
 import * as serviceKeptEditsStorage from "./storage/serviceKeptEdits";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
-import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
-import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
 import { RelayWriteOwner } from "./storage/writeOwner";
 import { isAsyncFunction } from "node:util/types";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
@@ -676,30 +674,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ) {
     return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment);
   }
-  serviceHostDocumentEnabled(
-    document: { workspaceId: string; objectId: string },
-    owner?: { userId: string },
-    restoring?: boolean,
-  ) {
-    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(
-      this,
-      document,
-      owner,
-      restoring,
-    );
+  serviceHostDocumentEnabled(document: { workspaceId: string; objectId: string }) {
+    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document);
   }
   serviceActivationRetirement(document: { workspaceId: string; objectId: string }) {
     return serviceActivationRetirementStorage.readServiceActivationRetirement(this, document);
   }
   serviceActivationRetirements(workspaceId: string) {
     return serviceActivationRetirementStorage.listServiceActivationRetirements(this, workspaceId);
-  }
-  serviceRestoreInProgress(document: { workspaceId: string; objectId: string }) {
-    return serviceHostEnrollmentStorage.restoreInProgress(
-      this,
-      document.workspaceId,
-      document.objectId,
-    );
   }
   serviceActivationRetirementDecision(
     document: { workspaceId: string; objectId: string },
@@ -735,48 +717,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (result)
       notifyDesktopReadiness(this, { workspaceId: result.workspaceId, path: result.path });
     return result;
-  }
-
-  readStopRestorePlan(
-    input: Parameters<typeof liveRestoreOperationStorage.readStopRestorePlan>[1],
-  ) {
-    return liveRestoreOperationStorage.readStopRestorePlan(this, input);
-  }
-  readOwnerRestoreOptions(
-    input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerRestoreOptions>[1],
-  ) {
-    return ownerRestoreOptionsStorage.readOwnerRestoreOptions(this, input);
-  }
-  readOwnerRestoreStatus(
-    input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerRestoreStatus>[1],
-  ) {
-    return ownerRestoreOptionsStorage.readOwnerRestoreStatus(this, input);
-  }
-  readOwnerUnfinishedRestores(
-    input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerUnfinishedRestores>[1],
-  ) {
-    return ownerRestoreOptionsStorage.readOwnerUnfinishedRestores(this, input);
-  }
-  beginStopRestore(
-    input: Parameters<typeof liveRestoreOperationStorage.beginStopRestore>[1],
-    now: number,
-  ) {
-    return liveRestoreOperationStorage.beginStopRestore(this, input, now);
-  }
-  advanceStopRestoreFence(
-    input: Parameters<typeof liveRestoreOperationStorage.advanceStopRestoreFence>[1],
-    now: number,
-  ) {
-    return liveRestoreOperationStorage.advanceStopRestoreFence(this, input, now);
-  }
-  declineStopRestore(
-    input: Parameters<typeof liveRestoreOperationStorage.declineStopRestore>[1],
-    now: number,
-  ) {
-    return liveRestoreOperationStorage.declineStopRestore(this, input, now);
-  }
-  readStopRestore(input: Parameters<typeof liveRestoreOperationStorage.readStopRestore>[1]) {
-    return liveRestoreOperationStorage.readStopRestore(this, input);
   }
 
   resolveCurrentLiveDocumentBinding(
@@ -816,10 +756,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     const document = liveDocumentAuthorityStorage.currentLiveDocument(this, workspaceId, path);
     if (document === null) return { kind: "none" };
     const read = this.readLiveUpdateJournalCut({ document });
-    if (read.kind === "cut") return read.cut.currentPath === path ? read : { kind: "none" };
-    return serviceHostEnrollmentStorage.restoreInProgress(this, workspaceId, document.objectId)
-      ? { kind: "restoring" }
-      : { kind: "none" };
+    return read.kind === "cut" && read.cut.currentPath === path ? read : { kind: "none" };
   }
 
   /** Internal replica refresh hint; accepted bytes still pass the journal's validated sync path. */

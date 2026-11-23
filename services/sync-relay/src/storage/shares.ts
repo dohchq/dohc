@@ -45,7 +45,6 @@ import {
 import {
   retireUncoveredServiceActivations,
   serviceHostEnrollmentsCoveredByShare,
-  type KeptServiceActivation,
 } from "./serviceHostEnrollment";
 import { retireAgentConnectionsInTransaction } from "./agentConnections";
 
@@ -504,11 +503,9 @@ export function revokeShareGrant(
 }
 
 // The caller owns the synchronous relay transaction.
-/** `keep` is only for the owner's restore that revokes the grant; see `retireUncoveredServiceActivations`. */
 export function revokeShareGrantInTransaction(
   storage: StorageContext,
   input: RevokeShareGrantInput,
-  keep?: KeptServiceActivation,
 ): LinkGrantTransitionResult {
   input.guard?.();
   const grant = storage.getShareGrant(input.grantId);
@@ -559,7 +556,7 @@ export function revokeShareGrantInTransaction(
         AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
     .run(grant.shareId, grant.shareId);
-  retireUncoveredServiceActivations(storage, covered, revokedAtMs, keep);
+  retireUncoveredServiceActivations(storage, covered, revokedAtMs);
   return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
 }
 

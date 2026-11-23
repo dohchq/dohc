@@ -79,7 +79,6 @@ export const RELAY_ROUTE_PATTERNS = {
   "owner-app-publication": "/sync/:workspaceId/app-publications/*",
   "held-documents": "/sync/:workspaceId/held-documents/*",
   "live-pauses": "/sync/:workspaceId/live-pauses/*",
-  "owner-restore": "/sync/:workspaceId/live-restores/*",
   "blob-have": "/sync/:workspaceId/blobs/have",
   blob: "/sync/:workspaceId/blobs/:sha256",
   gc: "/sync/:workspaceId/maintenance/gc",

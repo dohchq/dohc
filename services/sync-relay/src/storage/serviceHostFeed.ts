@@ -9,7 +9,7 @@ import {
   pathVisibleThroughShare,
 } from "../shareFilter";
 import { canonicalLiveSelector } from "./liveDocumentAuthority";
-import { currentServiceHostEnrollments, serviceHostOwnerRetains } from "./serviceHostEnrollment";
+import { currentServiceHostEnrollments } from "./serviceHostEnrollment";
 import {
   listServiceActivationRetirements,
   type ServiceActivationRetirement,
@@ -135,12 +135,11 @@ export function readServiceHostFeedScope(
       departed.add(row.objectId);
     // A Pause cuts reads at once, like a revoked grant, while the enabled
     // enrollment takes the host's settled work until the host releases it.
-    // Recorded demand, or the owner's restore that kept its live session, keeps it shared.
+    // Recorded demand keeps it shared.
     else if (
       row.ownerStop === null &&
       (row.demandAtMs !== null ||
-        selectors.some((selector) => pathVisibleThroughShare(selector, row.path)) ||
-        serviceHostOwnerRetains(storage, row))
+        selectors.some((selector) => pathVisibleThroughShare(selector, row.path)))
     ) {
       shared.set(row.objectId, row.path);
     }
