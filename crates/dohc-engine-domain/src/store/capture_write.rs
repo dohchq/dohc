@@ -1379,7 +1379,10 @@ pub fn capture_manifest_seed(
         }
         // The relay writes folder markers, so their heads are never capture
         // heads. A placed one still belongs here: a folder renamed while dohc
-        // was closed must retire its old marker. LIKE only narrows the rows.
+        // was closed must retire its old marker. A pulled marker has no job,
+        // so one the desktop had yet to place counts as placed and is retired
+        // too; the relay keeps its folder ruled while it has files. LIKE only
+        // narrows the rows.
         let mut markers = conn
             .prepare(
                 "SELECT a.path, s.blob_sha256, tb.byte_length FROM path_aliases a \
