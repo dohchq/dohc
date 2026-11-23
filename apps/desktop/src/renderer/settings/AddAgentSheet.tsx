@@ -318,252 +318,254 @@ export function AddAgentSheet(props: {
           event.preventDefault();
           submit();
         }}
-        className="dohc-elevated dohc-pop-in flex w-[min(520px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
+        className="dohc-elevated dohc-pop-in flex max-h-[calc(100vh-32px)] w-[min(520px,calc(100vw-32px))] flex-col gap-4 overflow-hidden rounded-xl border border-line bg-panel p-5"
       >
-        <h2 id="agent-add-title" className="m-0 text-base font-semibold text-ink">
+        <h2 id="agent-add-title" className="m-0 shrink-0 text-base font-semibold text-ink">
           Add agent
         </h2>
-        {choice === "link" ? (
-          // The sign-in page names the agent, so a name typed here would belong to nobody.
-          <div data-testid="agent-add-link-name" className="flex items-center gap-3">
-            <span
-              aria-hidden
-              className="grid size-9 shrink-0 place-items-center rounded-lg border border-dashed border-line text-subtle"
-            >
-              <Link size={16} />
-            </span>
-            <p className="m-0 min-w-0 text-[13px] text-muted">You name it when it signs in.</p>
-          </div>
-        ) : (
-          <>
-            <div className="flex flex-col gap-1">
-              <label htmlFor="agent-add-name" className="text-[12px] text-muted">
-                Name
-              </label>
-              <input
-                id="agent-add-name"
-                data-testid="agent-add-name"
-                autoFocus
-                value={name}
-                maxLength={MAX_PREFERRED_NAME_LENGTH}
-                autoComplete="off"
-                spellCheck={false}
-                aria-invalid={error ? true : undefined}
-                aria-describedby="agent-add-name-note"
-                onChange={(event) => {
-                  setTyped(event.currentTarget.value);
-                  setShownError(false);
-                }}
-                className={`h-8 rounded-md border bg-bg px-2.5 text-[13px] text-ink ${error ? "border-danger" : "border-line focus:border-ink"}`}
-              />
-              <p
-                id="agent-add-name-note"
-                role={error ? "alert" : undefined}
-                className={`m-0 flex min-h-4 items-center gap-1 text-[12px] ${error ? "text-danger" : "text-muted"}`}
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
+          {choice === "link" ? (
+            // The sign-in page names the agent, so a name typed here would belong to nobody.
+            <div data-testid="agent-add-link-name" className="flex items-center gap-3">
+              <span
+                aria-hidden
+                className="grid size-9 shrink-0 place-items-center rounded-lg border border-dashed border-line text-subtle"
               >
-                {error ? (
-                  <>
-                    <CircleAlert size={12} aria-hidden />
-                    {error}
-                  </>
-                ) : handle ? (
-                  <>
-                    People mention it as <span className="font-mono text-ink">@{handle}</span>
-                  </>
-                ) : null}
-              </p>
+                <Link size={16} />
+              </span>
+              <p className="m-0 min-w-0 text-[13px] text-muted">You name it when it signs in.</p>
             </div>
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[12px] text-muted">Color</span>
-              <HueControl label="Agent color" shape="agent" value={hue} onChange={setHue} />
-            </div>
-          </>
-        )}
-        <div className="flex flex-col gap-1.5">
-          <span id="agent-add-runs-with" className="text-[12px] text-muted">
-            Runs with
-          </span>
-          <div
-            role="radiogroup"
-            aria-labelledby="agent-add-runs-with"
-            className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1"
-          >
-            {tools.map((tool) => {
-              const toolName = baseName(tool);
-              const found = props.toolState(tool);
-              return option(
-                tool,
-                toolName,
-                found ? (
-                  <ToolReadiness tone={TILE_STATE[found.status].tone} className="mt-0.5">
-                    {TILE_STATE[found.status].text}
-                  </ToolReadiness>
-                ) : props.detectionFailed ? (
-                  <span className="text-muted">Could not check</span>
-                ) : (
+          ) : (
+            <>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="agent-add-name" className="text-[12px] text-muted">
+                  Name
+                </label>
+                <input
+                  id="agent-add-name"
+                  data-testid="agent-add-name"
+                  autoFocus
+                  value={name}
+                  maxLength={MAX_PREFERRED_NAME_LENGTH}
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-invalid={error ? true : undefined}
+                  aria-describedby="agent-add-name-note"
+                  onChange={(event) => {
+                    setTyped(event.currentTarget.value);
+                    setShownError(false);
+                  }}
+                  className={`h-8 rounded-md border bg-bg px-2.5 text-[13px] text-ink ${error ? "border-danger" : "border-line focus:border-ink"}`}
+                />
+                <p
+                  id="agent-add-name-note"
+                  role={error ? "alert" : undefined}
+                  className={`m-0 flex min-h-4 items-center gap-1 text-[12px] ${error ? "text-danger" : "text-muted"}`}
+                >
+                  {error ? (
+                    <>
+                      <CircleAlert size={12} aria-hidden />
+                      {error}
+                    </>
+                  ) : handle ? (
+                    <>
+                      People mention it as <span className="font-mono text-ink">@{handle}</span>
+                    </>
+                  ) : null}
+                </p>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[12px] text-muted">Color</span>
+                <HueControl label="Agent color" shape="agent" value={hue} onChange={setHue} />
+              </div>
+            </>
+          )}
+          <div className="flex flex-col gap-1.5">
+            <span id="agent-add-runs-with" className="text-[12px] text-muted">
+              Runs with
+            </span>
+            <div
+              role="radiogroup"
+              aria-labelledby="agent-add-runs-with"
+              className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1"
+            >
+              {tools.map((tool) => {
+                const toolName = baseName(tool);
+                const found = props.toolState(tool);
+                return option(
+                  tool,
+                  toolName,
+                  found ? (
+                    <ToolReadiness tone={TILE_STATE[found.status].tone} className="mt-0.5">
+                      {TILE_STATE[found.status].text}
+                    </ToolReadiness>
+                  ) : props.detectionFailed ? (
+                    <span className="text-muted">Could not check</span>
+                  ) : (
+                    <span className="flex text-muted">
+                      <LoaderCircle
+                        size={12}
+                        aria-label={`Looking for ${toolName}`}
+                        className="animate-spin"
+                      />
+                    </span>
+                  ),
+                  found?.status !== "ready",
+                  found?.status === "update" ? `Update ${toolName} to use it here.` : undefined,
+                );
+              })}
+              {option(
+                "t3-code",
+                T3_CODE,
+                <span className="text-muted">A thread you have</span>,
+                false,
+              )}
+              {option(
+                "mcp",
+                "Another agent",
+                <span className="inline-flex items-center gap-1 text-muted">
+                  <Plug size={12} aria-hidden />
+                  Through MCP
+                </span>,
+                false,
+                "Claude Desktop, Cursor, or any local MCP app",
+              )}
+              {option(
+                "link",
+                "Agent link",
+                link.status === "ready" ? (
+                  <span className="flex min-w-0 items-center gap-1 text-muted">
+                    <Link size={12} aria-hidden className="shrink-0" />
+                    <span className="truncate">{link.host}</span>
+                  </span>
+                ) : link.status === "loading" ? (
                   <span className="flex text-muted">
                     <LoaderCircle
                       size={12}
-                      aria-label={`Looking for ${toolName}`}
+                      aria-label="Looking for your server account"
                       className="animate-spin"
                     />
                   </span>
+                ) : (
+                  <span className="text-muted">
+                    {link.status === "failed" ? "Could not check" : "Not signed in to a server"}
+                  </span>
                 ),
-                found?.status !== "ready",
-                found?.status === "update" ? `Update ${toolName} to use it here.` : undefined,
-              );
-            })}
-            {option(
-              "t3-code",
-              T3_CODE,
-              <span className="text-muted">A thread you have</span>,
-              false,
-            )}
-            {option(
-              "mcp",
-              "Another agent",
-              <span className="inline-flex items-center gap-1 text-muted">
-                <Plug size={12} aria-hidden />
-                Through MCP
-              </span>,
-              false,
-              "Claude Desktop, Cursor, or any local MCP app",
-            )}
-            {option(
-              "link",
-              "Agent link",
-              link.status === "ready" ? (
-                <span className="flex min-w-0 items-center gap-1 text-muted">
-                  <Link size={12} aria-hidden className="shrink-0" />
-                  <span className="truncate">{link.host}</span>
-                </span>
-              ) : link.status === "loading" ? (
-                <span className="flex text-muted">
-                  <LoaderCircle
-                    size={12}
-                    aria-label="Looking for your server account"
-                    className="animate-spin"
-                  />
-                </span>
-              ) : (
-                <span className="text-muted">
-                  {link.status === "failed" ? "Could not check" : "Not signed in to a server"}
-                </span>
-              ),
-              link.status !== "ready",
-              link.status === "no-server"
-                ? "Sign in to a server to connect Claude, ChatGPT, OpenClaw, or another agent with a link."
-                : link.status === "ready"
-                  ? "Claude, ChatGPT, OpenClaw, and other MCP apps"
-                  : undefined,
-            )}
-          </div>
-        </div>
-        {choice === "link" && link.status === "ready" ? (
-          <>
-            <div
-              data-testid="agent-add-link"
-              className="flex min-h-11 items-center gap-3 rounded-lg border border-line bg-bg px-3 py-2"
-            >
-              {link.link !== null ? (
-                <Link size={14} aria-hidden className="shrink-0 text-muted" />
-              ) : (
-                <CloudOff size={14} aria-hidden className="shrink-0 text-muted" />
+                link.status !== "ready",
+                link.status === "no-server"
+                  ? "Sign in to a server to connect Claude, ChatGPT, OpenClaw, or another agent with a link."
+                  : link.status === "ready"
+                    ? "Claude, ChatGPT, OpenClaw, and other MCP apps"
+                    : undefined,
               )}
-              <span className="min-w-0 truncate text-[13px] text-ink">{link.workspaceName}</span>
-              <span className="ml-auto min-w-0 truncate text-[12px] text-muted">
-                {link.link !== null ? link.host : "Not synced"}
-              </span>
-              <AgentLinkAppMenu
-                link={link.link}
-                server="dohc-personal"
-                testId="agent-add-link-apps"
-              />
             </div>
-            <p data-testid="agent-add-link-note" className="m-0 -mt-2 text-[12px] text-muted">
-              {link.link !== null
-                ? "Copy the link and add it as a custom MCP connector in Claude, ChatGPT, OpenClaw, or another MCP app. Your browser opens to name it and choose what it can reach."
-                : `Sync this workspace to ${link.host} to give an agent a link.`}
-            </p>
-            {cloudWarning !== null ? (
-              <p
-                data-testid="agent-add-link-private-note"
-                className="m-0 -mt-1 flex items-start gap-2 rounded-lg bg-panel-2 px-3 py-2 text-[12px] text-muted"
-              >
-                <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-                <span className="min-w-0">{cloudWarning}</span>
-              </p>
-            ) : null}
-          </>
-        ) : choice === "mcp" ? (
-          <>
-            <div data-testid="agent-add-connect" className="rounded-lg border border-line bg-bg">
-              <div className="flex min-h-11 items-center gap-3 border-b border-line px-3 py-2">
-                <span className="text-[13px] text-ink">
-                  Paste this into your agent's MCP settings
-                </span>
-                <span className="ml-auto">
-                  <CopyButton
-                    label="Copy MCP config"
-                    size="button"
-                    testId="agent-add-config-copy"
-                    disabled={config === null}
-                    getText={() => config}
-                  />
-                </span>
-              </div>
-              {config !== null ? (
-                <pre className="m-0 overflow-x-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed text-ink">
-                  {config}
-                </pre>
-              ) : props.mcpUnavailable ? (
-                <p className="m-0 px-3 py-2.5 text-[12px] text-danger">{props.mcpUnavailable}</p>
-              ) : null}
-            </div>
-            {config !== null || link.status === "no-server" ? (
-              <p data-testid="agent-add-mcp-note" className="m-0 -mt-2 text-[12px] text-muted">
-                {[
-                  config !== null
-                    ? "For local apps on this computer such as Claude Desktop or Cursor. Save the app's MCP config file, then restart the app."
-                    : null,
-                  link.status === "no-server"
-                    ? "To connect Claude, ChatGPT, or OpenClaw with a link instead, sign in to a server and sync this workspace."
-                    : null,
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-              </p>
-            ) : null}
-          </>
-        ) : choice === "t3-code" ? (
-          <T3CodeChoice
-            picked={thread?.id ?? null}
-            onPick={pickThread}
-            error={threadMissing ? "Choose a thread." : null}
-            searchId={THREAD_SEARCH_ID}
-            onReady={setT3CodeReady}
-          />
-        ) : choice !== null && choice !== "link" ? (
-          <div className="flex min-h-11 items-center gap-3 rounded-lg border border-line bg-bg px-3 py-2">
-            <span id="agent-add-run-label" className="text-[13px] text-ink">
-              Run on this computer
-            </span>
-            <span className="ml-auto">
-              <SwitchControl
-                label="Run on this computer"
-                labelledBy="agent-add-run-label"
-                checked={enabled}
-                onChange={setEnabled}
-              />
-            </span>
           </div>
-        ) : null}
-        {props.addError ? (
-          <FieldError id="agent-add-error" testId="agent-add-error">
-            {props.addError}
-          </FieldError>
-        ) : null}
-        <div className="flex items-center justify-end gap-2">
+          {choice === "link" && link.status === "ready" ? (
+            <>
+              <div
+                data-testid="agent-add-link"
+                className="flex min-h-11 items-center gap-3 rounded-lg border border-line bg-bg px-3 py-2"
+              >
+                {link.link !== null ? (
+                  <Link size={14} aria-hidden className="shrink-0 text-muted" />
+                ) : (
+                  <CloudOff size={14} aria-hidden className="shrink-0 text-muted" />
+                )}
+                <span className="min-w-0 truncate text-[13px] text-ink">{link.workspaceName}</span>
+                <span className="ml-auto min-w-0 truncate text-[12px] text-muted">
+                  {link.link !== null ? link.host : "Not synced"}
+                </span>
+                <AgentLinkAppMenu
+                  link={link.link}
+                  server="dohc-personal"
+                  testId="agent-add-link-apps"
+                />
+              </div>
+              <p data-testid="agent-add-link-note" className="m-0 -mt-2 text-[12px] text-muted">
+                {link.link !== null
+                  ? "Copy the link and add it as a custom MCP connector in Claude, ChatGPT, OpenClaw, or another MCP app. Your browser opens to name it and choose what it can reach."
+                  : `Sync this workspace to ${link.host} to give an agent a link.`}
+              </p>
+              {cloudWarning !== null ? (
+                <p
+                  data-testid="agent-add-link-private-note"
+                  className="m-0 -mt-1 flex items-start gap-2 rounded-lg bg-panel-2 px-3 py-2 text-[12px] text-muted"
+                >
+                  <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+                  <span className="min-w-0">{cloudWarning}</span>
+                </p>
+              ) : null}
+            </>
+          ) : choice === "mcp" ? (
+            <>
+              <div data-testid="agent-add-connect" className="rounded-lg border border-line bg-bg">
+                <div className="flex min-h-11 items-center gap-3 border-b border-line px-3 py-2">
+                  <span className="text-[13px] text-ink">
+                    Paste this into your agent's MCP settings
+                  </span>
+                  <span className="ml-auto">
+                    <CopyButton
+                      label="Copy MCP config"
+                      size="button"
+                      testId="agent-add-config-copy"
+                      disabled={config === null}
+                      getText={() => config}
+                    />
+                  </span>
+                </div>
+                {config !== null ? (
+                  <pre className="m-0 overflow-x-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed text-ink">
+                    {config}
+                  </pre>
+                ) : props.mcpUnavailable ? (
+                  <p className="m-0 px-3 py-2.5 text-[12px] text-danger">{props.mcpUnavailable}</p>
+                ) : null}
+              </div>
+              {config !== null || link.status === "no-server" ? (
+                <p data-testid="agent-add-mcp-note" className="m-0 -mt-2 text-[12px] text-muted">
+                  {[
+                    config !== null
+                      ? "For local apps on this computer such as Claude Desktop or Cursor. Save the app's MCP config file, then restart the app."
+                      : null,
+                    link.status === "no-server"
+                      ? "To connect Claude, ChatGPT, or OpenClaw with a link instead, sign in to a server and sync this workspace."
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                </p>
+              ) : null}
+            </>
+          ) : choice === "t3-code" ? (
+            <T3CodeChoice
+              picked={thread?.id ?? null}
+              onPick={pickThread}
+              error={threadMissing ? "Choose a thread." : null}
+              searchId={THREAD_SEARCH_ID}
+              onReady={setT3CodeReady}
+            />
+          ) : choice !== null && choice !== "link" ? (
+            <div className="flex min-h-11 items-center gap-3 rounded-lg border border-line bg-bg px-3 py-2">
+              <span id="agent-add-run-label" className="text-[13px] text-ink">
+                Run on this computer
+              </span>
+              <span className="ml-auto">
+                <SwitchControl
+                  label="Run on this computer"
+                  labelledBy="agent-add-run-label"
+                  checked={enabled}
+                  onChange={setEnabled}
+                />
+              </span>
+            </div>
+          ) : null}
+          {props.addError ? (
+            <FieldError id="agent-add-error" testId="agent-add-error">
+              {props.addError}
+            </FieldError>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 items-center justify-end gap-2">
           <SecondaryButton type="button" disabled={props.adding} onClick={props.onCancel}>
             Cancel
           </SecondaryButton>
