@@ -137,9 +137,9 @@ function attrsFor(type: NodeType | MarkType, raw: unknown): SequenceAttrs {
   const attrs: SequenceAttrs = {};
   for (const key of Object.keys(type.spec.attrs ?? {})) {
     const held = whole(own(given, key));
-    const value = filled(held)?.map(whole) ?? held;
-    if (value !== undefined && (VALUE_RULES[`${type.name}.${key}`] ?? plain)(value))
-      attrs[key] = value;
+    const rule = VALUE_RULES[`${type.name}.${key}`] ?? plain;
+    const value = rule === widths ? (filled(held)?.map(whole) ?? held) : held;
+    if (value !== undefined && rule(value)) attrs[key] = value;
   }
   return attrs;
 }

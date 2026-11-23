@@ -372,21 +372,48 @@ describe("reading any sequence", () => {
   });
 
   it("checks a container's settings once in a read, however often the container is reopened", () => {
-    const title = `${"x".repeat(64)}${String.fromCharCode(0x2028)}`;
-    const records = new Map<string, unknown>([
-      ["c", "callout"],
-      ["c.title", title],
-    ]);
-    const pieces: SequencePiece[] = Array.from({ length: 200 }, (_, at) => ({
-      boundary: { type: "paragraph", path: at % 2 === 0 ? ["c"] : [] },
-    }));
-    const tested = vi.spyOn(RegExp.prototype, "test");
-    const doc = readBodyLeaves(schema, leavesOfSequence(schema, pieces, records));
-    const scans = tested.mock.calls.filter(([text]) => text === title).length;
-    tested.mockRestore();
-    expect(doc.childCount).toBe(200);
-    expect(doc.firstChild!.attrs.title).toBe("");
-    expect(scans).toBe(1);
+    const reopened = (title: string) => {
+      const records = new Map<string, unknown>([
+        ["c", "callout"],
+        ["c.title", title],
+      ]);
+      const pieces: SequencePiece[] = Array.from({ length: 200 }, (_, at) => ({
+        boundary: { type: "paragraph", path: at % 2 === 0 ? ["c"] : [] },
+      }));
+      const tested = vi.spyOn(RegExp.prototype, "test");
+      const doc = readBodyLeaves(schema, leavesOfSequence(schema, pieces, records));
+      const scans = tested.mock.calls.filter(([text]) => text === title).length;
+      tested.mockRestore();
+      const titles: unknown[] = [];
+      doc.forEach((node) => {
+        if (node.type.name === "callout") titles.push(node.attrs.title);
+      });
+      return { scans, titles };
+    };
+    const kept = "x".repeat(64);
+    expect(reopened(kept)).toEqual({ scans: 1, titles: Array<string>(100).fill(kept) });
+    expect(reopened(`${kept}${String.fromCharCode(0x2028)}`)).toEqual({
+      scans: 1,
+      titles: Array<string>(100).fill(""),
+    });
+  });
+
+  it("reads no position of an array stored where no array belongs", () => {
+    const href = new Proxy([1, 2, 3], {
+      getOwnPropertyDescriptor(target, key) {
+        if (key !== "length") throw new Error(`read position ${String(key)}`);
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    const marks = readBodyLeaves(schema, [
+      {
+        type: "paragraph",
+        attrs: {},
+        path: [],
+        inline: [{ text: "x", marks: { link: { href } } }],
+      },
+    ]).firstChild!.firstChild!.marks;
+    expect(marks.map((mark) => mark.attrs.href as unknown)).toEqual([null]);
   });
 
   it("turns a mark on only for an object, and reads code alone when code is on", () => {
