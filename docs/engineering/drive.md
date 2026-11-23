@@ -529,6 +529,7 @@ A copy rolls back the relay database and its continuity record together, and the
    Set the new Neon password in `POSTGRES_PASSWORD`. Keep every other value, including the origin and all keys.
    Then replace the password manager copy.
 6. **Operator:** Install the Neon CA file and the app certificate and key at the same paths, with the same owner and modes.
+   If `DOHC_RELAY_APNS_KEY_FILE` is set, restore the APNs auth key from the password manager to that path, as in [Phone alerts](#phone-alerts), with root as owner, group 1000, and mode 0640.
 7. **Operator:** Create the empty mount point, and add the same `/etc/fstab` line as in [Prepare a new volume](#prepare-a-new-volume):
 
    ```sh

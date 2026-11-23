@@ -543,6 +543,7 @@ APNs delivers alerts for the phone app only when they are signed with an APNs au
 
 With any APNs setting set, the setup and recovery commands add the APNs Compose overlay.
 They refuse to run unless all five are set in the formats above and the key file exists.
+They also refuse a key file inside `DOHC_DATA_DIRECTORY`, and an archive refuses a key file inside any deployment volume, because the archive copies those folders.
 The overlay binds the key file read-only into the relay at `/etc/dohc/apns-key.p8`.
 Docker refuses to start the relay when the file is missing, and never creates it.
 The relay refuses to start when the file is not a P-256 private key.

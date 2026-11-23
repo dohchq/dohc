@@ -5,9 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { parseEnv } from "node:util";
+import { initialSettings } from "../../tools/self-host/bootstrap.mjs";
 import { apnsKeyTarget } from "../../tools/self-host/config.mjs";
 import { archiveDeployment } from "./archive.mjs";
-import { parseRecoveryArguments, runRecovery } from "./recovery.mjs";
+import { parseRecoveryArguments, recoveryComposeArgs, runRecovery } from "./recovery.mjs";
 
 const config = {
   name: "recovery-test",
@@ -50,6 +53,7 @@ function runner({
   missingVolume = false,
   mounts = [{ Type: "volume", Name: "recovery_data", RW: true }],
   volumes = {},
+  served = config,
   running = "sync-relay\nshare-web\n",
 } = {}) {
   const calls = [];
@@ -58,7 +62,7 @@ function runner({
     calls,
     run(args) {
       calls.push(args);
-      if (args.includes("config")) return JSON.stringify(config);
+      if (args.includes("config")) return JSON.stringify(served);
       if (args[0] === "volume" && args[1] === "inspect") {
         if (missingVolume) throw new Error("missing deployment volume");
         return JSON.stringify(
@@ -541,4 +545,58 @@ test("an archive keeps bound configuration files but leaves out the APNs auth ke
       `Leaves out the APNs auth key ${key}. Keep your own copy: Apple lets you download it only once.`,
     ),
   );
+});
+
+test("an archive refuses an APNs auth key inside the deployment's storage before it stops anything", async (t) => {
+  const root = await fixture(t),
+    key = "/mnt/disk/dohc/sync-relay/apns-key.p8";
+  const mock = runner({
+    served: {
+      ...config,
+      services: {
+        "sync-relay": {
+          ...config.services["sync-relay"],
+          volumes: [{ type: "bind", source: key, target: apnsKeyTarget, read_only: true }],
+        },
+      },
+    },
+  });
+  await assert.rejects(
+    runRecovery(parseRecoveryArguments(["archive", join(root, "archive")]), mock.run, () => {}, [
+      "compose",
+    ]),
+    new RegExp(`The APNs auth key ${key} is inside the deployment's storage`),
+  );
+  assert.equal(
+    mock.calls.some((args) => args.includes("stop")),
+    false,
+  );
+});
+
+test("offline verify needs no APNs auth key, and every other command does", async (t) => {
+  const root = await fixture(t),
+    envFile = join(root, "drive.env");
+  const settings = {
+    ...parseEnv(readFileSync(".env.self-host.example", "utf8")),
+    ...initialSettings({ origin: "https://dohc.team.invalid", image: "dohc-self-host:v1" }),
+    DOHC_SMTP_HOST: "mail.team.invalid",
+    DOHC_SMTP_FROM: "dohc@team.invalid",
+    DOHC_RELAY_APNS_TOPIC: "app.dohc.mobile",
+    DOHC_RELAY_APNS_ENVIRONMENTS: "production",
+    DOHC_RELAY_APNS_KEY_FILE: "/etc/dohc/missing-apns-key.p8",
+    DOHC_RELAY_APNS_KEY_ID: "KEY1234567",
+    DOHC_RELAY_APNS_TEAM_ID: "TEAM123456",
+  };
+  await writeFile(
+    envFile,
+    Object.entries(settings)
+      .map(([name, value]) => `${name}='${value}'\n`)
+      .join(""),
+  );
+  const options = (action, ...args) =>
+    parseRecoveryArguments([action, join(root, "out"), ...args, "--env-path", envFile]);
+  const verify = recoveryComposeArgs(options("verify", "--snapshot", join(root, "taken")));
+  assert.ok(!verify.includes("tools/self-host/compose.apns.yml"));
+  for (const action of ["backup", "archive", "snapshot"])
+    assert.throws(() => recoveryComposeArgs(options(action)), /DOHC_RELAY_APNS_KEY_FILE/, action);
 });

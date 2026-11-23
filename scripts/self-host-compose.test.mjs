@@ -9,7 +9,7 @@ import fs, {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parseEnv } from "node:util";
 import test from "node:test";
 import { defineMappingTag, defineScalarTag, defineSequenceTag, load, YAML11_SCHEMA } from "js-yaml";
@@ -1376,6 +1376,18 @@ test("a server without APNs settings starts as before, and the APNs overlay give
 
 test("APNs settings are all or none, in the formats the relay accepts, with the key file on this server", (t) => {
   const values = apns(t);
+  assert.deepEqual(
+    validateSettings({
+      ...values,
+      DOHC_RELAY_APNS_KEY_FILE: "",
+      DOHC_RELAY_APNS_TEAM_ID: undefined,
+    }),
+    [
+      "Set DOHC_RELAY_APNS_KEY_FILE, or clear every DOHC_RELAY_APNS_ value to turn off iPhone alerts.",
+      "Set DOHC_RELAY_APNS_TEAM_ID, or clear every DOHC_RELAY_APNS_ value to turn off iPhone alerts.",
+    ],
+  );
+  if (process.platform === "win32") return t.skip("The key path is a path on the Linux server.");
   assert.deepEqual(validateSettings(values), []);
   for (const environments of ["production", "sandbox", "production, sandbox"])
     assert.deepEqual(
@@ -1383,15 +1395,6 @@ test("APNs settings are all or none, in the formats the relay accepts, with the 
       [],
       environments,
     );
-  const partial = validateSettings({
-    ...values,
-    DOHC_RELAY_APNS_KEY_FILE: "",
-    DOHC_RELAY_APNS_TEAM_ID: undefined,
-  });
-  assert.deepEqual(partial, [
-    "Set DOHC_RELAY_APNS_KEY_FILE, or clear every DOHC_RELAY_APNS_ value to turn off iPhone alerts.",
-    "Set DOHC_RELAY_APNS_TEAM_ID, or clear every DOHC_RELAY_APNS_ value to turn off iPhone alerts.",
-  ]);
   const refusals = {
     DOHC_RELAY_APNS_TOPIC: ["mobile", "app..dohc", "app.dohc.mobile/", "a.".repeat(128) + "b"],
     DOHC_RELAY_APNS_ENVIRONMENTS: [
@@ -1416,4 +1419,13 @@ test("APNs settings are all or none, in the formats the relay accepts, with the 
       assert.ok(errors[0].includes(name), `${name}=${value}`);
     }
   }
+  assert.deepEqual(
+    validateSettings({
+      ...values,
+      DOHC_DATA_DIRECTORY: dirname(values.DOHC_RELAY_APNS_KEY_FILE),
+    }),
+    [
+      "Keep DOHC_RELAY_APNS_KEY_FILE outside DOHC_DATA_DIRECTORY. A deployment archive copies the deployment's folders.",
+    ],
+  );
 });

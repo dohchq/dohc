@@ -240,6 +240,10 @@ export function validateSettings(settings) {
       errors.push(
         "Set DOHC_RELAY_APNS_KEY_FILE to the absolute path of the APNs auth key (.p8) on this server.",
       );
+    if (key && settings.DOHC_DATA_DIRECTORY && inside(key, settings.DOHC_DATA_DIRECTORY))
+      errors.push(
+        "Keep DOHC_RELAY_APNS_KEY_FILE outside DOHC_DATA_DIRECTORY. A deployment archive copies the deployment's folders.",
+      );
   }
   if (
     settings.DOHC_DATA_DIRECTORY &&
@@ -268,14 +272,13 @@ const apnsSettings = [
   "DOHC_RELAY_APNS_TEAM_ID",
 ];
 /** iPhone alerts need every APNs setting. With none of them set, the server sends no alerts. */
-export const apnsAlerts = (settings) => apnsSettings.some((name) => settings[name]);
+const apnsAlerts = (settings) => apnsSettings.some((name) => settings[name]);
 /** Where the relay reads the APNs auth key. A deployment archive leaves the file bound here out. */
 export const apnsKeyTarget = "/etc/dohc/apns-key.p8";
 
 /** Refuses invalid settings, so a command stops before any Docker or database operation uses them. */
-export function readValidSettings(path) {
-  const settings = readSettings(path),
-    errors = validateSettings(settings);
+export function readValidSettings(path, settings = readSettings(path)) {
+  const errors = validateSettings(settings);
   if (errors.length) throw new Error(errors.join("\n"));
   return settings;
 }
@@ -523,6 +526,26 @@ const inside = (path, folder) =>
   path === folder || path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
 const overlapping = (a, b) => inside(a, b) || inside(b, a);
 
+// A bound volume that Docker has not created yet still names its folder.
+const storageFolders = (config, volumes) =>
+  [
+    ...volumes.flatMap((volume) => [
+      bindDirectory(volume.Options),
+      normalizeDirectory(volume.Mountpoint),
+    ]),
+    ...Object.values(config.volumes ?? {}).map((volume) => bindDirectory(volume.driver_opts)),
+  ].filter(Boolean);
+
+/** Returns each APNs auth key file inside the deployment's storage, where an archive would copy it. */
+export function apnsKeysInStorage(config, volumes) {
+  const storage = storageFolders(config, volumes);
+  return Object.values(config.services ?? {})
+    .flatMap((service) => service.volumes ?? [])
+    .filter((volume) => volume.type === "bind" && volume.target === apnsKeyTarget)
+    .map((volume) => volume.source)
+    .filter((source) => storage.some((folder) => inside(normalizeDirectory(source), folder)));
+}
+
 /**
  * Returns a function that lists each running container's writable mount that reaches the deployment's storage.
  * `volumes` are the deployment's existing volumes as Docker inspects them. `run(args)` returns Docker's output and throws when Docker fails.
@@ -530,14 +553,7 @@ const overlapping = (a, b) => inside(a, b) || inside(b, a);
 export function storageWriters(config, volumes, run) {
   const volumeNames = new Set(Object.values(config.volumes ?? {}).map((volume) => volume.name));
   // A writable mount of a deployment folder, or of a folder inside or above it, can change deployment data.
-  // A bound volume that Docker has not created yet still names its folder.
-  const storage = [
-    ...volumes.flatMap((volume) => [
-      bindDirectory(volume.Options),
-      normalizeDirectory(volume.Mountpoint),
-    ]),
-    ...Object.values(config.volumes ?? {}).map((volume) => bindDirectory(volume.driver_opts)),
-  ].filter(Boolean);
+  const storage = storageFolders(config, volumes);
   return () => {
     const ids = run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean);
     if (!ids.length) return [];
