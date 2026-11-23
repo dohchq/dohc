@@ -479,6 +479,83 @@ describe("workspace members actions", () => {
     ]);
   });
 
+  it("creates, changes and clears folder rules and removes markers through Members", async () => {
+    const h = harness();
+    const folder = "Work/Plans";
+    const ruleId = `fr_${"a".repeat(32)}`;
+    const access = { members: null, people: [{ email: "ana@test", level: "edit" as const }] };
+    const send = (request: Parameters<typeof h.bridge.workspaceMembers>[0]["request"]) =>
+      h.bridge.workspaceMembers({ workspaceId: "ws-1", request });
+    await send({ action: "folder", change: { folder, create: true, ...access } });
+    const held = {
+      ...access,
+      ruleId,
+      revision: 4,
+      folders: [{ path: folder, state: "marker-missing" }],
+    };
+    h.relay.mockResolvedValueOnce(json({ ...view(), folderRules: [held] }));
+    await send({
+      action: "folder",
+      change: { folder: "Work\\Plans", members: "view", people: [] },
+    });
+    h.relay.mockResolvedValueOnce(json({ ...view(), folderRules: [{ ...held, revision: 5 }] }));
+    await send({ action: "folder", change: { folder, clear: true } });
+    await send({ action: "folderMarker", folder });
+    expect(calls(h.relay)).toEqual([
+      'POST /sync/ws-1/members/folder-rules {"folder":"Work/Plans","members":null,"people":[{"email":"ana@test","level":"edit"}]}',
+      "GET /sync/ws-1/members",
+      `POST /sync/ws-1/members/folder-rules {"ruleId":"${ruleId}","revision":4,"members":"view","people":[]}`,
+      "GET /sync/ws-1/members",
+      `POST /sync/ws-1/members/folder-rules {"ruleId":"${ruleId}","revision":5,"clear":true}`,
+      'POST /sync/ws-1/members/folder-markers {"folder":"Work/Plans"}',
+    ]);
+  });
+
+  it("leaves a case twin for the relay to refuse and keeps a stale revision on settings saves", async () => {
+    const h = harness();
+    const ruleId = `fr_${"a".repeat(32)}`;
+    h.relay
+      .mockResolvedValueOnce(
+        json({
+          ...view(),
+          folderRules: [
+            {
+              ruleId,
+              revision: 3,
+              members: "edit",
+              people: [],
+              folders: [{ path: "Docs", state: "covered" }],
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(json({}, 409))
+      .mockResolvedValueOnce(json({}, 409));
+    await expect(
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: {
+          action: "folder",
+          change: { folder: "DOCS", members: null, people: [] },
+        },
+      }),
+    ).rejects.toThrow("That folder already has an access rule.");
+    await expect(
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: {
+          action: "folder",
+          change: { ruleId, revision: 2, members: null, people: [] },
+        },
+      }),
+    ).rejects.toThrow("check the rule, and save again");
+    expect(calls(h.relay)).toEqual([
+      "GET /sync/ws-1/members",
+      'POST /sync/ws-1/members/folder-rules {"folder":"DOCS","members":null,"people":[]}',
+      `POST /sync/ws-1/members/folder-rules {"ruleId":"${ruleId}","revision":2,"members":null,"people":[]}`,
+    ]);
+  });
+
   it("names what failed and what to do for a refused change", async () => {
     const h = harness();
     h.relay.mockResolvedValueOnce(json({ error: "forbidden" }, 403));

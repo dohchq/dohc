@@ -151,6 +151,8 @@ const MEMBERS_RESULTS: Record<string, CliSocketVerb> = {
   link: "members",
   end: "members",
   group: "members",
+  folder: "members",
+  "remove-folder-marker": "members",
 };
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {

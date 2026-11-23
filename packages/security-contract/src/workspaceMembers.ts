@@ -89,6 +89,9 @@ export interface WorkspaceGroupRule {
 export const FOLDER_RULE_STATES = ["covered", "marker-missing", "folder-missing"] as const;
 export type FolderRuleState = (typeof FOLDER_RULE_STATES)[number];
 
+export const FOLDER_RULE_CHANGED =
+  "Someone changed this folder's access. Reload Members, check the rule, and save again.";
+
 /** A folder access rule the relay keeps (ADR 0017). */
 export interface WorkspaceFolderRule {
   ruleId: string;

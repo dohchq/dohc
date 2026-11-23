@@ -2,18 +2,13 @@ import { jsonResponse } from "@dohc/service-http";
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import {
   ACCESS_RULE_MAX_PEOPLE,
-  FOLDER_MARKER_FILE,
-  accessRuleFolder,
   formatAccessRule,
   isFolderRuleId,
   normalizeRuleEmail,
+  prepareFolderRulePath,
   type AccessRule,
 } from "@dohc/security-contract/access-rules";
-import {
-  isShareAccessValue,
-  prepareSharePath,
-  type ShareAccess,
-} from "@dohc/security-contract/share-selector";
+import { isShareAccessValue, type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   isGroupRuleLevel,
   isInviteLinkAction,
@@ -389,13 +384,9 @@ export function createWorkspaceMemberRoutes(options: {
   // A workspace-relative folder, "" for the root, checked as the path its
   // marker takes.
   const parseFolder = (value: unknown): string => {
-    if (typeof value !== "string" || value.length > 4096) throw badRequest("folder is invalid");
-    const trimmed = value.replace(/^\/+|\/+$/gu, "");
-    const marker = prepareSharePath(
-      trimmed ? `${trimmed}/${FOLDER_MARKER_FILE}` : FOLDER_MARKER_FILE,
-    );
-    if (!marker) throw badRequest("folder is invalid");
-    return accessRuleFolder(marker.path);
+    const folder = typeof value === "string" ? prepareFolderRulePath(value) : null;
+    if (folder === null) throw badRequest("folder is invalid");
+    return folder;
   };
 
   const parseLevel = (value: unknown, name: string): ShareAccess => {
