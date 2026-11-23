@@ -44,6 +44,18 @@ function ownValue(
   return record && Object.hasOwn(record, column) ? record[column] : undefined;
 }
 
+function samePreviewValue(
+  a: MigrationPreviewValue | undefined,
+  b: MigrationPreviewValue | undefined,
+): boolean {
+  if (Object.is(a, b)) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (a.type !== b.type) return false;
+  return a.type === "integer"
+    ? a.value === (b as { type: "integer"; value: string }).value
+    : a.base64 === (b as { type: "blob"; base64: string }).base64;
+}
+
 function needsQuotes(value: string): boolean {
   if (value === "" || value !== value.trim()) return true;
   if (value.startsWith('"') || value.endsWith('"')) return true;
@@ -97,6 +109,12 @@ export interface MigrationClearedColumn {
   atLeast?: boolean;
 }
 
+export interface MigrationReplacedColumn {
+  table: string;
+  column: string;
+  count: number;
+}
+
 export interface MigrationUnmatchedTable {
   table: string;
   beforeRows: number;
@@ -117,8 +135,10 @@ export interface MigrationPreviewTotals {
   renamedNewSqlNames: Set<string>;
   clearedValues: number;
   clearedValuesAtLeast: boolean;
+  replacedValues: number;
   renamedColumnValues: number;
   clearedColumns: MigrationClearedColumn[];
+  replacedColumns: MigrationReplacedColumn[];
 }
 
 function renamedColumnOf(
@@ -146,12 +166,14 @@ export function summarizeMigrationPreview(
   let deletedRows = 0;
   let clearedValues = 0;
   let clearedValuesAtLeast = false;
+  let replacedValues = 0;
   let renamedColumnValues = 0;
   const unmatchedTables: MigrationUnmatchedTable[] = [];
   const unmatchedSqlNames = new Set<string>();
   const renamedOldSqlNames = new Set<string>();
   const renamedNewSqlNames = new Set<string>();
   const clearedColumns: MigrationClearedColumn[] = [];
+  const replacedColumns: MigrationReplacedColumn[] = [];
 
   const beforeTablesBySql = new Map(
     previousRevision.definition.tables.map((table) => [table.sqlName, table]),
@@ -263,6 +285,11 @@ export function summarizeMigrationPreview(
         renamedColumnValues += unverified;
       }
     }
+    for (const [column, count] of Object.entries(table.replacedValues ?? {})) {
+      if (count <= 0) continue;
+      replacedColumns.push({ table: table.table, column, count });
+      replacedValues += count;
+    }
   }
   return {
     beforeRows,
@@ -277,8 +304,10 @@ export function summarizeMigrationPreview(
     renamedNewSqlNames,
     clearedValues,
     clearedValuesAtLeast,
+    replacedValues,
     renamedColumnValues,
     clearedColumns,
+    replacedColumns,
   };
 }
 
@@ -442,10 +471,14 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
   const confirmedClearedLabels = totals.clearedColumns
     .filter((item) => item.renamedTo === null)
     .map((item) => formatClearedItem(item.table, item.column, item.count, item.atLeast));
+  const replacedLabels = totals.replacedColumns.map((item) =>
+    formatClearedItem(item.table, item.column, item.count),
+  );
   const renamedColumnItems = totals.clearedColumns.filter((item) => item.renamedTo !== null);
   const hasCaution =
     totals.deletedRows > 0 ||
     totals.clearedValues > 0 ||
+    totals.replacedValues > 0 ||
     totals.renamedColumnValues > 0 ||
     totals.unmatchedTables.length > 0;
   const showPaging = busy || history.length > 0 || page.nextCursor !== null;
@@ -473,6 +506,11 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
           {confirmedClearedLabels.length > 0 ? (
             <p className="m-0 text-muted">
               Clears existing values in {joinList(confirmedClearedLabels)}.
+            </p>
+          ) : null}
+          {replacedLabels.length > 0 ? (
+            <p className="m-0 text-muted">
+              Replaces existing values in {joinList(replacedLabels)}.
             </p>
           ) : null}
           {renamedColumnItems.map((item) => (
@@ -558,10 +596,8 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
           const columns = [
             ...new Set([...Object.keys(change.before ?? {}), ...Object.keys(change.after ?? {})]),
           ];
-          const unchanged = columns.filter(
-            (column) =>
-              JSON.stringify(ownValue(change.before, column)) ===
-              JSON.stringify(ownValue(change.after, column)),
+          const unchanged = columns.filter((column) =>
+            samePreviewValue(ownValue(change.before, column), ownValue(change.after, column)),
           );
           const unmatchedKey = totals.unmatchedSqlNames.has(change.table);
           const renamedTable =

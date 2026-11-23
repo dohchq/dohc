@@ -434,7 +434,36 @@ describe("CollectionMigrationReviewDialog", () => {
     expect(
       screen.getByText(/Existing shared apps keep working and access stays unchanged/),
     ).toBeTruthy();
-    expect(screen.getByText(/It cannot reverse field, type, or record changes/)).toBeTruthy();
+    expect(
+      screen.getByText(
+        /Collection History can reverse name, button, and action changes\. It cannot reverse record changes\./,
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve change" }).className).not.toContain(
+      "bg-danger-fill",
+    );
+    cleanup();
+
+    const schemaChanged = prep();
+    schemaChanged.previousRevision.definition.tables[0]!.fields[0]!.name = "Guest";
+    schemaChanged.revision.definition.tables[0]!.fields[0]!.name = "Guest Name";
+    schemaChanged.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 2,
+      afterRows: 2,
+      changedRows: 2,
+      deletedRows: 0,
+      beforeValues: { name: 2 },
+      afterValues: { name: 2, receipt: 0 },
+      clearedValues: { name: 0 },
+      replacedValues: { name: 0 },
+    };
+    setup({ initialPreparation: schemaChanged });
+    expect(screen.queryByTestId("migration-destructive-warning")).toBeNull();
+    expect(
+      screen.getByText(/Collection History cannot reverse field, constraint, or record changes\./),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Collection History can rename/i)).toBeNull();
     expect(screen.getByRole("button", { name: "Approve change" }).className).not.toContain(
       "bg-danger-fill",
     );
@@ -442,6 +471,7 @@ describe("CollectionMigrationReviewDialog", () => {
 
     const buttonRemoved = prep();
     buttonRemoved.revision.definition = structuredClone(buttonRemoved.previousRevision.definition);
+    buttonRemoved.revision.schemaSha256 = buttonRemoved.previousRevision.schemaSha256;
     buttonRemoved.previousRevision.definition.tables[0]!.fields.push({
       fieldId: id(5),
       name: "Send receipt",
@@ -501,6 +531,30 @@ describe("CollectionMigrationReviewDialog", () => {
     const warning = screen.getByTestId("migration-destructive-warning");
     expect(warning.textContent).toContain("renames a column holding 2 unverified values");
     expect(warning.textContent).not.toContain("moves 2");
+    expect(screen.getByRole("button", { name: "Approve change" }).className).toContain(
+      "bg-danger-fill",
+    );
+  });
+  it("warns, names Export recovery, and uses DangerButton when populated values are overwritten", () => {
+    const overwritten = prep();
+    overwritten.revision.definition = structuredClone(overwritten.previousRevision.definition);
+    overwritten.revision.schemaSha256 = overwritten.previousRevision.schemaSha256;
+    overwritten.revision.operationsSha256 = overwritten.previousRevision.operationsSha256;
+    overwritten.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 2,
+      afterRows: 2,
+      changedRows: 2,
+      deletedRows: 0,
+      beforeValues: { name: 2 },
+      afterValues: { name: 2 },
+      clearedValues: { name: 0 },
+      replacedValues: { name: 2 },
+    };
+    setup({ initialPreparation: overwritten });
+    const warning = screen.getByTestId("migration-destructive-warning");
+    expect(warning.textContent).toContain("This change replaces 2 existing values.");
+    expect(warning.textContent).toContain("Export recovery");
     expect(screen.getByRole("button", { name: "Approve change" }).className).toContain(
       "bg-danger-fill",
     );

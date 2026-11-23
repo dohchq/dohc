@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Minus, Pencil, Plus, TriangleAlert } from "lucide-react";
 import {
+  datasetColumnFields,
   datasetRevisionsPreserveAccess,
   type DatasetRevision,
   type DatasetField,
@@ -58,6 +59,16 @@ type Change = {
   after?: string;
   button?: boolean;
 };
+function columnShape(tables: DatasetRevision["definition"]["tables"]): string {
+  return JSON.stringify(
+    tables.map((table) => ({
+      ...table,
+      name: "",
+      fields: datasetColumnFields(table).map((field) => ({ ...field, name: "" })),
+    })),
+  );
+}
+
 function fieldSummary(field: DatasetField): string {
   if (field.type === "button") return [field.name, field.type].join(" · ");
   return [
@@ -271,6 +282,11 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
     preparation!.candidate.preview.tables.every(
       (table) => table.beforeRows === table.afterRows && table.changedRows === 0,
     );
+  const historyCanReverse =
+    !!preparation &&
+    preparation.previousRevision.schemaSha256 === preparation.revision.schemaSha256 &&
+    columnShape(preparation.previousRevision.definition.tables) ===
+      columnShape(preparation.revision.definition.tables);
   const namesOnly = !!props.generatedChange && preservesAccess && noRecordChanges;
   const previewTotals = useMemo(
     () =>
@@ -299,6 +315,11 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
         `clears ${prefix}${previewTotals.clearedValues} existing ${previewTotals.clearedValues === 1 ? "value" : "values"}`,
       );
     }
+    if (previewTotals && previewTotals.replacedValues > 0) {
+      lossParts.push(
+        `replaces ${previewTotals.replacedValues} existing ${previewTotals.replacedValues === 1 ? "value" : "values"}`,
+      );
+    }
     const removedTables = removedStructure.filter((change) => change.field === "").length;
     const removedFields = removedStructure.filter((change) => change.field !== "").length;
     if (removedTables > 0) {
@@ -324,9 +345,12 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
           `replaces ${recordCount(unmatched.beforeRows)} in ${name} with ${recordCount(unmatched.afterRows)} (${why})`,
         );
       }
+      const renamedColumnCount = previewTotals.clearedColumns.filter(
+        (item) => item.renamedTo !== null,
+      ).length;
       if (previewTotals.renamedColumnValues > 0) {
         unmatchedParts.push(
-          `renames a column holding ${previewTotals.renamedColumnValues} unverified ${previewTotals.renamedColumnValues === 1 ? "value" : "values"}`,
+          `renames ${renamedColumnCount === 1 ? "a column" : `${renamedColumnCount} columns`} holding ${previewTotals.renamedColumnValues} unverified ${previewTotals.renamedColumnValues === 1 ? "value" : "values"}`,
         );
       }
     }
@@ -668,7 +692,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                   <p className="m-0 font-medium text-ink">{warningHeadline}</p>
                   <p className="m-0 text-muted">
                     {hasConfirmedLoss
-                      ? "Collection History cannot restore removed records, dropped fields, or cleared values after approval. To keep a copy, choose Export recovery before you approve."
+                      ? "Collection History cannot restore removed records, dropped fields, or cleared or overwritten values after approval. To keep a copy, choose Export recovery before you approve."
                       : "Check the records above to confirm your values moved. Collection History cannot restore removed or overwritten values after approval. To keep a copy, choose Export recovery before you approve."}
                   </p>
                 </div>
@@ -695,9 +719,13 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                     ? "Review changed values before approval. Changed rules require renewed app and collaborator approval."
                     : "Changed rules require renewed app and collaborator approval."}
               {!warningHeadline
-                ? namesOnly
+                ? namesOnly && historyCanReverse
                   ? " Collection History can reverse name and button changes."
-                  : " Collection History can rename fields and actions back. It cannot reverse field, type, or record changes."
+                  : historyCanReverse
+                    ? noRecordChanges
+                      ? " Collection History can reverse name, button, and action changes."
+                      : " Collection History can reverse name, button, and action changes. It cannot reverse record changes."
+                    : " Collection History cannot reverse field, constraint, or record changes."
                 : ""}
             </p>
             {!namesOnly && (

@@ -517,6 +517,22 @@ it("puts changed values first and retains unchanged fields in a disclosure", () 
   expect(screen.getByText("New name").closest("details")).toBeNull();
   expect(screen.getByText("1 unchanged field")).toBeTruthy();
 });
+it("shows replaced values in the summary banner and treats -0 and 0 as changed", () => {
+  const props = fixture();
+  props.preview.tables[0] = {
+    ...props.preview.tables[0]!,
+    clearedValues: { id: 0, name: 0, amount: 0 },
+    replacedValues: { id: 0, name: 2, amount: 1 },
+  };
+  props.preview.firstPage.changes[0]!.before = { id: "same-id", name: "Alpha", amount: -0 };
+  props.preview.firstPage.changes[0]!.after = { id: "same-id", name: "Redacted", amount: 0 };
+  render(<CollectionMigrationDataPreview {...props} />);
+  expect(screen.getByTestId("migration-preview-summary").textContent).toContain(
+    "Replaces existing values in Name (2) and Amount (1).",
+  );
+  expect(screen.getByText("-0.0").closest("details")).toBeNull();
+  expect(screen.getByText("0.0").closest("details")).toBeNull();
+});
 it("rejects a cursor loop and reports through the shell without discarding the current page", async () => {
   const props = fixture();
   props.onLoad = vi.fn(async () => ({

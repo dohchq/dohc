@@ -182,6 +182,7 @@ describe("owner Collection migration", () => {
         beforeValues: { id: 1, name: 1 },
         afterValues: { id: 1, name: 1, note: 0 },
         clearedValues: { id: 0, name: 0 },
+        replacedValues: { id: 0, name: 1 },
       },
     ]);
     expect(review.candidate.preview.firstPage.changes).toMatchObject([
