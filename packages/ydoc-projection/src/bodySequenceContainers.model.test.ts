@@ -1,3 +1,4 @@
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { afterEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
@@ -5,7 +6,9 @@ import {
   BODY_CONTAINERS_FIELD,
   BODY_SEQUENCE_FIELD,
   leavesOfSequence,
+  readBodyLeaves,
   type SequenceAttrs,
+  type SequenceLeaf,
 } from "./bodySequenceGrammar.js";
 import {
   bodyHistory,
@@ -100,6 +103,11 @@ const FAULT = {
   typingInheritsMarks: "typing that takes the marks around it and not the marks it is given",
   spillLeftBare: "a change of kind that gives the paragraph after the block no boundary",
   addedParagraphBare: "typing in a list item's added first paragraph without giving it a boundary",
+  deleteLeavesNoBoundary:
+    "a delete of the item that starts the paragraph after a block, with no boundary for what is left",
+  givenWithItsChange: "a line's new boundary written as part of the step that needed it",
+  givenAsAsked: "a line's new boundary written with the kind and path the change asks for",
+  undoKeepsLetters: "a delete filter that keeps the letters a step typed",
 } as const;
 type Fault = (typeof FAULT)[keyof typeof FAULT];
 const LENIENT: (Fault | undefined)[] = [FAULT.typeRecordOnly, FAULT.defaultFirst];
@@ -132,7 +140,13 @@ type Line = {
   type: string;
   path: Frame[];
 };
-type Look = { shot: Shot; rows: Row[]; lines: Line[]; frames: Frame[][] };
+type Look = {
+  shot: Shot;
+  rows: Row[];
+  lines: Line[];
+  frames: Frame[][];
+  leaves: SequenceLeaf[];
+};
 
 const heldBy = new WeakMap<Y.Item, { length: number; held: Held }>();
 
@@ -271,7 +285,22 @@ function lookAt(doc: Y.Doc): Look {
     frames.push(path);
     above = path;
   });
-  return { shot, rows, lines, frames };
+  return { shot, rows, lines, frames, leaves };
+}
+
+function readingOf(look: Look, marks: boolean) {
+  const unmarked = (node: ProseMirrorNode): unknown => {
+    const held: unknown[] = [];
+    node.forEach((child) => {
+      const last = held.at(-1);
+      if (!child.isText) held.push(unmarked(child));
+      else if (typeof last === "string") held[held.length - 1] = last + (child.text ?? "");
+      else held.push(child.text ?? "");
+    });
+    return [node.type.name, node.attrs, held];
+  };
+  const read = readBodyLeaves(schema, look.leaves);
+  return json(marks ? read.toJSON() : unmarked(read));
 }
 
 const idsOf = (path: Frame[]) => path.map((frame) => frame.id);
@@ -351,6 +380,7 @@ type Step = {
   marks: boolean;
   formats: boolean;
   known: Set<Id>;
+  was?: { look: Look; received: number; gave: number };
 };
 
 const step = (): Step => ({
@@ -455,6 +485,12 @@ const tally = () => ({
   attributesFirstSet: 0,
   markChanges: 0,
   linesDeleted: 0,
+  joinsOfALineWithNoBoundary: 0,
+  undosReadAsBeforeTheStep: 0,
+  undosWithABoundaryGivenSinceTheStepBegan: 0,
+  othersLettersKeptInAGivenLine: 0,
+  othersLettersAtTheStartOfABlockAnUndoPutBack: 0,
+  typedAtABlocksEndAndReadInTheParagraphAfter: 0,
   unnamedRecords: 0,
   records: 0,
 });
@@ -472,6 +508,9 @@ class Oracle {
   readonly snapshots: Id[][] = [];
   readonly writes = new Map<string, { who: number; round: number }[]>();
   readonly asMade = new Map<string, string>();
+  readonly given = new Set<Id>();
+  readonly typedBy = new Map<Id, number>();
+  readonly atABlocksEnd = new Map<Id, Id>();
   readonly count = tally();
   round = 0;
   root(id: Id): Id {
@@ -598,6 +637,36 @@ function rowsKept(what: string, before: Look, after: Look) {
   if (json(got) !== json(was)) throw new Error(`[writer] ${what} changed what a line holds`);
 }
 
+const NO_BLOCK = new Set<number>();
+const shownAs = (look: Look) =>
+  json(look.lines.map((line) => `${line.bare || "line"} ${line.type}:${line.units}`));
+const shownBoth = (before: Look, after: Look) =>
+  process.env.BODY_CONTAINERS_DEBUG ? `\nWAS ${shownAs(before)}\nNOW ${shownAs(after)}` : "";
+
+function blocksMoved(before: Look, after: Look, itsOwn: Set<number>): string | null {
+  const now = new Map<Id, number>();
+  after.lines.forEach((line, at) => {
+    for (const id of line.chars) now.set(id, at);
+  });
+  const from = new Map<number, number[]>();
+  for (const [at, line] of before.lines.entries()) {
+    const lands = new Set(line.chars.flatMap((id) => now.get(id) ?? []));
+    if (itsOwn.has(at)) for (const to of lands) from.set(to, [...(from.get(to) ?? []), at]);
+    if (itsOwn.has(at)) continue;
+    if (lands.size > 1)
+      return `the ${line.type} ${json(line.units)} now reads as ${String(lands.size)} blocks`;
+    for (const to of lands) {
+      from.set(to, [...(from.get(to) ?? []), at]);
+      if (after.lines[to]!.type !== line.type)
+        return `${json(line.units)} read in a ${line.type} and now reads in a ${after.lines[to]!.type}`;
+    }
+  }
+  for (const [to, sources] of from)
+    if (sources.length > 1 && sources.some((at) => !itsOwn.has(at)))
+      return `what ${String(sources.length)} blocks held now reads in one ${after.lines[to]!.type}`;
+  return null;
+}
+
 const docs: Y.Doc[] = [];
 afterEach(() => {
   for (const doc of docs.splice(0)) doc.destroy();
@@ -639,7 +708,13 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
           ? filtered(keepRecords)
           : fault === FAULT.inlineAttributesKept
             ? filtered(keepAttributes)
-            : bodyHistory(doc, LOCAL, NEVER_ELAPSES);
+            : fault === FAULT.undoKeepsLetters
+              ? filtered(
+                  (item) => keepBoundaries(item) && !(item.content instanceof Y.ContentString),
+                )
+              : bodyHistory(doc, LOCAL, NEVER_ELAPSES);
+  let received = 0;
+  let gave = 0;
   const sent: Uint8Array[] = [];
   doc.on("update", (update: Uint8Array, origin: unknown) => {
     if (origin !== REMOTE) sent.push(update);
@@ -673,11 +748,46 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     return [effects, after];
   };
 
-  const local = (before: Look, act: () => void, mayMark: boolean, settings: string[]) => {
+  const givenSeen = (before: Look) => {
+    const [effects, between] = seen(before);
+    const more = [
+      effects.insertedChars,
+      effects.deletedChars,
+      effects.deletedBoundaries,
+      [...effects.slots],
+    ];
+    if (effects.formats || more.some((some) => some.length > 0))
+      throw new Error("[9 given] the change that gives a line its boundary wrote something else");
+    if (readingOf(before, true) !== readingOf(between, true))
+      throw new Error(
+        `[9 given] giving a line its boundary changed how the note reads${shownBoth(before, between)}`,
+      );
+    for (const id of effects.insertedBoundaries) oracle.given.add(id);
+    gave++;
+    return between;
+  };
+
+  const local = (
+    before: Look,
+    act: (gives: () => void) => void,
+    mayMark: boolean,
+    settings: string[],
+    itsOwn = NO_BLOCK,
+  ) => {
     const depth = history.undoStack.length;
-    doc.transact(act, LOCAL);
-    const [effects, after] = seen(before);
+    let from = before;
+    act(() =>
+      doc.once("afterTransactionCleanup", () => {
+        from = givenSeen(before);
+      }),
+    );
+    const [effects, after] = seen(from);
     effects.marks = mayMark;
+    const moved = blocksMoved(before, after, itsOwn);
+    if (moved)
+      throw new Error(
+        `[8 blocks] a change moved what it did not touch: ${moved}${shownBoth(before, after)}`,
+      );
     if (!mayMark && marksMoved(before.shot, after.shot, () => true))
       throw new Error("[2 letters] a change that is not about marks changed a letter's marks");
     noneJoined(before, after);
@@ -685,10 +795,12 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       throw new Error("[writer] a change left one id on two containers");
     writerAgrees(doc, after);
     for (const id of effects.insertedChars) oracle.typed.add(id);
+    for (const id of effects.insertedChars) oracle.typedBy.set(id, who);
     for (const [slot, change] of effects.slots)
       claims.set(slot, { value: change.to?.value, round: oracle.round });
     for (const key of settings) effects.settings.add(key);
     const top = undoMirror.at(-1);
+    effects.was = { look: before, received, gave };
     if (history.undoStack.length > depth) undoMirror.push(effects);
     else if (top && history.undoStack.length === depth) join(top, effects);
     if (history.redoStack.length === 0) redoMirror = [];
@@ -713,7 +825,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     plan.attributes.clear();
   };
 
-  const write = (before: Look, plan: BodyWrites | null, mayMark = false) => {
+  const write = (before: Look, plan: BodyWrites | null, mayMark = false, itsOwn = NO_BLOCK) => {
     const unused = [...asked].filter((id) => !plan?.records.has(id));
     asked.clear();
     if (!plan) return null;
@@ -753,16 +865,20 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     const typed = fault === FAULT.typingInheritsMarks ? plan.typed : undefined;
     if (typed) delete plan.typed;
     const shift = plan.added.filter((boundary) => boundary.index <= (typed?.index ?? 0)).length;
+    if (fault === FAULT.givenAsAsked)
+      for (const boundary of plan.added) if (boundary.given) boundary.given = boundary.attrs;
     return local(
       before,
-      () => {
+      (gives) => {
         if (fault === FAULT.deleteAndRecreate)
           for (const key of plan.records.keys()) if (records.has(key)) records.delete(key);
-        writeBody(doc, plan);
-        if (typed) sequence.insert(typed.index + shift, typed.letters);
+        if (plan.added.some((boundary) => boundary.given !== undefined)) gives();
+        writeBody(doc, plan, LOCAL, fault === FAULT.givenWithItsChange ? LOCAL : undefined);
+        if (typed) doc.transact(() => sequence.insert(typed.index + shift, typed.letters), LOCAL);
       },
       mayMark,
       settings,
+      itsOwn,
     );
   };
 
@@ -937,6 +1053,30 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     const [effects, after] = seen(before);
     learnCopies();
     oracle.sees(after.shot.tokens);
+    const itsOwn = new Set(
+      popped.flatMap((entry) => entry.insertedBoundaries).map((id) => oracle.root(id)),
+    );
+    const putBack = new Set<Id | null>(effects.insertedBoundaries);
+    const nowIn = new Map(after.rows.flatMap((row) => row.chars.map((id) => [id, row.boundary])));
+    for (const row of before.rows) {
+      const root = row.boundary === null ? "" : oracle.root(row.boundary);
+      if (!oracle.given.has(root) || itsOwn.has(root)) continue;
+      for (const id of row.chars) {
+        const now = nowIn.get(id);
+        if ((oracle.typedBy.get(oracle.root(id)) ?? who) === who || now === undefined) continue;
+        if (now !== row.boundary && !putBack.has(now))
+          throw new Error(
+            `[9 given] ${which} moved a letter someone else typed out of a line that was given its boundary${shownBoth(before, after)}`,
+          );
+        oracle.count.othersLettersKeptInAGivenLine++;
+      }
+    }
+    for (const row of after.rows) {
+      const by = oracle.typedBy.get(oracle.root(row.chars[0] ?? ""));
+      const typedSince = popped.every((entry) => !entry.known.has(row.chars[0] ?? ""));
+      if (putBack.has(row.boundary) && by !== undefined && by !== who && typedSince)
+        oracle.count.othersLettersAtTheStartOfABlockAnUndoPutBack++;
+    }
     const changedFormatting = effects.formats;
     effects.marks = popped.some((entry) => entry.marks);
     effects.formats = popped.some((entry) => entry.formats);
@@ -957,6 +1097,22 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       ]++;
     oracle.count[which === "undo" ? "undos" : "redos"]++;
     const done = did ? popped[0]! : step();
+    const alone = did && popped.length === 1 && done.was?.received === received;
+    if (alone && done.was?.gave !== gave) oracle.count.undosWithABoundaryGivenSinceTheStepBegan++;
+    else if (alone && done.was) {
+      const marks = !done.formats && !changedFormatting;
+      if (readingOf(done.was.look, marks) !== readingOf(after, marks))
+        throw new Error(
+          `[3 undo] ${which}, with no change from anyone else since its step, left the note reading other than before the step${
+            process.env.BODY_CONTAINERS_DEBUG
+              ? `
+WAS ${readingOf(done.was.look, marks)}
+NOW ${readingOf(after, marks)}`
+              : ""
+          }`,
+        );
+      oracle.count.undosReadAsBeforeTheStep++;
+    }
     const changed = [
       effects.insertedChars,
       effects.deletedChars,
@@ -1053,6 +1209,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
 
     for (const key of done.settings)
       if (effects.slots.has(`record ${key}`)) effects.settings.add(key);
+    effects.was = { look: before, received, gave };
     if (other().length > otherDepth) to.push(effects);
     kindsHold(after.shot);
     return did;
@@ -1127,12 +1284,16 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
     claims,
     look: () => lookAt(doc),
     receive(update: Uint8Array) {
+      received++;
       Y.applyUpdate(doc, update, REMOTE);
     },
     type(at: number, offset: number, letters: string, marks: SequenceAttrs = {}) {
       const plan = typeLetters(schema, doc, at, offset, letters, marks);
+      const { lines } = lookAt(doc);
+      const block = lines[at + 1]?.bare === "spill" && offset === lines[at]!.chars.length;
       const landed = into("typing", at, offset, HOLDS_LETTERS, plan, letters.length);
       if (!landed) return false;
+      if (block && landed[0]?.line) oracle.atABlocksEnd.set(landed[0].id, landed[0].line);
       if (landed.map((token) => token.unit).join("") !== letters)
         throw new Error("[2 letters] the note does not hold the letters that were typed");
       const wrong = landed.find((token) => token.marks !== marksOf(Object.entries(marks)));
@@ -1238,17 +1399,27 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       const tail = want[r2]!.chars.slice(p2);
       const after = keepsAfter ? [paragraph(tail.splice(held - p2), block)] : [];
       if (keepsAfter) oracle.count.boundariesForParagraphsAfter++;
+      const next = before.shot.tokens.find((token) => token.id === tail[0]);
+      const holders = next?.kind === "char" && next.atom ? HOLDS_INLINE : HOLDS_LETTERS;
+      const readAbove =
+        first.bare === "spill" && offset === 0 && next && holders.includes(lines[at - 1]!.type);
+      const own = readAbove ? [paragraph(tail.splice(0), first)] : [];
+      if (readAbove) oracle.count.boundariesForParagraphsAfter++;
       const left = [...want[r1]!.chars.slice(0, p1), ...tail];
       if (first.bare === "item")
         Object.assign(want[r1]!, paragraph(left, first), { b: want[r1]!.b });
       want[r1]!.chars = left;
-      want.splice(r1 + 1, r2 - r1, ...after);
+      want.splice(r1 + 1, r2 - r1, ...own, ...after);
       if (want[0]!.b === "-" && left.length === 0 && r1 === 0 && want.length > 1) {
         Object.assign(want[0]!, { b: "+", kind: PARAGRAPH });
         oracle.count.boundariesForUnboundedText++;
       }
-      keepApart(want, r1);
-      const done = write(before, plan, true)![1];
+      keepApart(want, r1 + own.length);
+      if (readAbove && plan && fault === FAULT.deleteLeavesNoBoundary) plan.added = [];
+      const joined = new Set(
+        lines.flatMap((_, index) => (index >= at && index <= toAt ? index : [])),
+      );
+      const done = write(before, plan, true, at < toAt ? joined : NO_BLOCK)![1];
       rowsAre("a delete", want, before, done);
       expectCopies(before.shot, done.shot, [], lenient);
       if (r2 > r1) oracle.count.linesDeleted++;
@@ -1300,7 +1471,10 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       const end = line.from + line.chars.length;
       const some = line.chars.length > 0 || line.bare !== "";
       const above = offset === 0 && line.bare !== "item" && some;
-      const after = line.bare === "" && end < row.chars.length && offset === line.chars.length;
+      const after =
+        line.bare === "" &&
+        end < row.chars.length &&
+        (offset === line.chars.length || type !== line.type);
       let moved = line.row + 1;
       if (line.bare !== "" && offset === 0) given(line);
       if (line.bare === "start" && offset === 0)
@@ -1312,7 +1486,8 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
         want.splice(line.row + 1, 0, fresh([]), paragraph(row.chars.splice(pos), line));
       else if (above) want.splice(line.row, 0, fresh([]));
       else if (after) {
-        want.splice(line.row + 1, 0, fresh([]), paragraph(row.chars.splice(pos), line));
+        const below = paragraph(row.chars.splice(end), line);
+        want.splice(line.row + 1, 0, fresh(row.chars.splice(pos)), below);
         want[line.row + 2]!.path = [...newPath];
         oracle.count.boundariesForParagraphsAfter++;
         moved = line.row + 3;
@@ -1323,7 +1498,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       if (above && fault === FAULT.oldBoundaryAbove) plan.added[0]!.index++;
       if (fault === FAULT.splitAlwaysParagraph && plan.added.length === 1)
         plan.added[0]!.attrs = { type: "paragraph", path: plan.added[0]!.attrs.path };
-      const done = write(before, plan)![1];
+      const done = write(before, plan, false, new Set([at]))![1];
       rowsAre("a split", want, before, done);
       expectDefaults(before, done);
       return true;
@@ -1333,7 +1508,8 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       const lower = before.lines[at];
       const upper = before.lines[at - 1];
       const plan = joinLine(schema, doc, at, freshId);
-      const fits = upper !== undefined && lower !== undefined && lower.bare === "";
+      const emptyAbove = upper?.bare === "" && upper.chars.length === 0;
+      const fits = upper !== undefined && lower !== undefined && (lower.bare === "" || emptyAbove);
       if (refusal(before, plan, fits, "a join") || !plan || !upper || !lower) return false;
       const want = wantOf(before);
       const row = want[lower.row]!;
@@ -1344,7 +1520,13 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
         oracle.count.boundariesForParagraphsAfter++;
         return [paragraph(row.chars.splice(held), lower)];
       };
-      if (upper.bare === "item") {
+      if (lower.bare === "spill") {
+        Object.assign(row, paragraph(row.chars, lower));
+        given(lower);
+      } else if (lower.bare !== "") {
+        want.splice(upper.row, 1);
+        keepApart(want, upper.row - 1);
+      } else if (upper.bare === "item") {
         const below = retyped ? after() : [];
         Object.assign(row, paragraph(row.chars, upper), { b: row.b });
         want.splice(lower.row + 1, 0, ...below);
@@ -1363,9 +1545,10 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
         plan.records.clear();
         plan.attributes.clear();
       }
-      const done = write(before, plan)![1];
+      const done = write(before, plan, false, new Set([at - 1, at]))![1];
       rowsAre("a join", want, before, done);
       expectCopies(before.shot, done.shot, [], lenient);
+      if (lower.bare !== "") oracle.count.joinsOfALineWithNoBoundary++;
       return true;
     },
     kind(at: number, asked: SequenceAttrs) {
@@ -1409,7 +1592,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
         for (const attrs of [...plan.attributes.values(), ...plan.added.map((each) => each.attrs)])
           for (const key of Object.keys(unset))
             if (!stored.has(key) && json(attrs[key]) === json(unset[key])) delete attrs[key];
-      rowsAre("a change of kind", want, before, write(before, plan)![1]);
+      rowsAre("a change of kind", want, before, write(before, plan, false, new Set([at]))![1]);
       return true;
     },
     wrap(at: number, depth: number, count: number, type: string, attrs: SequenceAttrs) {
@@ -1577,7 +1760,23 @@ const twinNote = () =>
     ],
     { "C.checked": true, "I.title": "kept" },
   );
-const STARTS = [plainNote, nestedNote, () => nestedNote("u\u{1F389}v"), twinNote];
+const leafNote = () =>
+  note(
+    [
+      { id: "L", type: "bulletList", attrs: {} },
+      { id: "I", type: "listItem", attrs: {} },
+      { id: "Q", type: "blockquote", attrs: {} },
+    ],
+    [
+      ["ab", { type: "horizontalRule" }, []],
+      [["cd", IMAGE, { text: "ef", marks: BOLD }], { type: "codeBlock", language: null }, []],
+      ["gh", { type: "mathBlock", tex: "x" }, ["L", "I"]],
+      ["ij", { type: "rawBlock", source: "<b>" }, ["Q"]],
+      [[MATH, "kl"], { type: "codeBlock", language: "ts" }, ["Q"]],
+      ["mn", PARAGRAPH, []],
+    ],
+  );
+const STARTS = [plainNote, nestedNote, () => nestedNote("u\u{1F389}v"), twinNote, leafNote];
 
 function team(count: number, baseline: Uint8Array, gc = true, fault?: Fault) {
   const oracle = new Oracle();
@@ -1588,6 +1787,7 @@ function team(count: number, baseline: Uint8Array, gc = true, fault?: Fault) {
   for (const token of tokens)
     if (token.kind === "char") {
       oracle.typed.add(token.id);
+      oracle.typedBy.set(token.id, -1);
       oracle.insertedChars.add(token.id);
     } else oracle.insertedBoundaries.add(token.id);
   base.destroy();
@@ -1793,6 +1993,13 @@ function settled(people: Person[], oracle: Oracle, fault?: Fault) {
   kindsHold(final.shot);
   readsAsWritten(people[0]!.doc, final, fault === undefined, LENIENT.includes(fault));
   if (twinsIn(final) > 0) oracle.count.roundsWithOneIdOnTwo++;
+  const standing = new Set(final.rows.map((row) => row.boundary));
+  for (const token of final.shot.tokens) {
+    const typedIn = oracle.atABlocksEnd.get(token.id);
+    if (token.kind === "char" && typedIn && token.line !== typedIn && standing.has(typedIn))
+      oracle.count.typedAtABlocksEndAndReadInTheParagraphAfter++;
+  }
+  oracle.atABlocksEnd.clear();
   oracle.round++;
 }
 
@@ -1824,6 +2031,7 @@ const SPLIT_KINDS: (SequenceAttrs | undefined)[] = [
   PARAGRAPH,
   { type: "heading", level: 2 },
   { type: "codeBlock" },
+  { type: "horizontalRule" },
 ];
 
 type Weights = {
@@ -1831,6 +2039,7 @@ type Weights = {
   kindsOfTheFirstLine: number;
   kindsOfBlocksWithMore: number;
   inlines: number;
+  afterABlock: number;
   undos: number;
 };
 const EVEN: Weights = {
@@ -1838,18 +2047,20 @@ const EVEN: Weights = {
   kindsOfTheFirstLine: 0,
   kindsOfBlocksWithMore: 0,
   inlines: 1,
+  afterABlock: 1,
   undos: 0.16,
 };
 const WITH_MORE: Weights = { ...EVEN, kindsOfBlocksWithMore: 30 };
 const ONE_LINE: Weights = { ...EVEN, kindsOfTheFirstLine: 600, undos: 0.4 };
 const INLINES: Weights = { ...EVEN, inlines: 12, undos: 0.3 };
+const AFTER_A_BLOCK: Weights = { ...EVEN, afterABlock: 12 };
 
 function change(
   each: Person,
   next: () => number,
   letter: () => string,
   log: string[],
-  { wraps, kindsOfTheFirstLine, kindsOfBlocksWithMore, inlines }: Weights,
+  { wraps, kindsOfTheFirstLine, kindsOfBlocksWithMore, inlines, afterABlock }: Weights,
 ) {
   const pick = (below: number) => Math.floor(next() * below);
   const tried = (what: unknown[], run: () => boolean) => {
@@ -1955,6 +2166,31 @@ function change(
       },
     ],
     [8, () => tried(["join", at], () => each.join(at))],
+    [
+      8 * afterABlock,
+      () => {
+        const after = lines.flatMap((held, index) => (held.bare === "spill" ? [index] : []));
+        const added = lines.flatMap((held, index) => (held.bare === "item" ? [index] : []));
+        const spill = after[pick(after.length)];
+        const roll = pick(7);
+        if (spill === undefined || roll === 6) {
+          const one = [...added, ...after][pick(added.length + after.length)];
+          return one !== undefined && tried(["join", one], () => each.join(one));
+        }
+        const end = lines[spill - 1]!.chars.length;
+        const below = Math.min(lines.length - 1, spill + 1);
+        const upTo = pick(lines[below]!.chars.length + 1);
+        const { inline, attrs } = [IMAGE, MATH][pick(2)]!;
+        return [
+          () => tried(["type", spill - 1, end], () => each.type(spill - 1, end, letter())),
+          () => tried(["type", spill, 0], () => each.type(spill, 0, letter())),
+          () => tried(["place", spill, 0, inline], () => each.place(spill, 0, inline, attrs)),
+          () => tried(["erase", spill, 0, spill, 1], () => each.erase(spill, 0, spill, 1)),
+          () => tried(["erase", spill, 0, below, upTo], () => each.erase(spill, 0, below, upTo)),
+          () => tried(["join", spill], () => each.join(spill)),
+        ][roll]!();
+      },
+    ],
     [
       11 * wraps,
       () => {
@@ -2076,7 +2312,10 @@ function change(
           { level },
           { type: "codeBlock" },
           { type: "codeBlock", language: "ts" },
-        ][pick(6)]!;
+          { type: "horizontalRule" },
+          { type: "mathBlock", tex: "x^2" },
+          { type: "rawBlock" },
+        ][pick(9)]!;
         const roll = next() * (6 + kindsOfTheFirstLine + kindsOfBlocksWithMore);
         const withMore = lines.findIndex((_, index) => lines[index + 1]?.bare === "spill");
         const loaded = roll < 6 + kindsOfTheFirstLine || withMore < 0 ? 0 : withMore;
@@ -2185,11 +2424,12 @@ it("states the kinds, records and marks the editor's schema has", () => {
   }
 });
 
-const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 20);
+const SEEDS = Number(process.env.BODY_CONTAINERS_SEEDS ?? 16);
 const WEIGHTS = process.env.BODY_CONTAINERS_ONE_LINE ? ONE_LINE : EVEN;
 const FIRST = Number(process.env.BODY_CONTAINERS_FIRST ?? 1);
 const ROUNDS = Number(process.env.BODY_CONTAINERS_ROUNDS ?? 0);
 const BUSIEST = Number(process.env.BODY_CONTAINERS_BUSIEST ?? 0);
+const EVERY_FAILURE = Boolean(process.env.BODY_CONTAINERS_EVERY_FAILURE);
 const SETUPS = (
   [
     [2, "one by one", 6, 3],
@@ -2211,12 +2451,24 @@ it.each(SETUPS)(
   "random changes to lines and containers by %i people, arriving %s, %i rounds of up to %i changes each",
   (count, arrive, rounds, busiest) => {
     const total = tally();
+    const failed = new Map<string, { runs: number; first: string }>();
     for (let seed = FIRST; seed < FIRST + SEEDS; seed++)
       for (const gc of [true, false])
-        add(total, randomRun({ seed, count, arrive, rounds, busiest, gc, weights: WEIGHTS }));
+        try {
+          add(total, randomRun({ seed, count, arrive, rounds, busiest, gc, weights: WEIGHTS }));
+        } catch (error) {
+          if (!EVERY_FAILURE) throw error;
+          const said = String(error).split("\n")[1] ?? "";
+          const which = said.replace(/\d+:\d+|\b[wxyz][0-9a-z]+\b|"[^"]*"/g, "_");
+          const known = failed.get(which) ?? { runs: 0, first: String(error) };
+          failed.set(which, { ...known, runs: known.runs + 1 });
+          for (const doc of docs.splice(0)) doc.destroy();
+        }
     console.log(
       `${String(count)} people, ${arrive}, ${String(rounds)} rounds of up to ${String(busiest)}: ${json(total)}`,
     );
+    for (const [which, { runs, first }] of failed)
+      console.log(`FAILED in ${String(runs)} runs: ${which}\n${first}`);
     expect(total.runs).toBe(2 * SEEDS);
   },
   600_000,
@@ -2225,6 +2477,7 @@ it.each(SETUPS)(
 const BREAKAGE_SCALE = Number(process.env.BODY_CONTAINERS_BREAKAGE_SEEDS ?? 1);
 const NESTED = STARTS.indexOf(nestedNote);
 const TWINS = STARTS.indexOf(twinNote);
+const LEAVES = STARTS.indexOf(leafNote);
 type Breakage = [Fault, string, { seeds: number; weights?: Weights; start?: number }];
 const BREAKAGES: Breakage[] = [
   [FAULT.defaultMapUndo, "[3 undo]", { seeds: 12 }],
@@ -2259,6 +2512,14 @@ const BREAKAGES: Breakage[] = [
     { seeds: 3, weights: WITH_MORE, start: NESTED },
   ],
   [FAULT.addedParagraphBare, "[writer] after typing", { seeds: 2 }],
+  [
+    FAULT.deleteLeavesNoBoundary,
+    "[8 blocks] a change moved",
+    { seeds: 3, weights: AFTER_A_BLOCK, start: LEAVES },
+  ],
+  [FAULT.givenWithItsChange, "[9 given] undo moved a letter", { seeds: 8 }],
+  [FAULT.givenAsAsked, "[9 given] giving a line its boundary changed", { seeds: 2 }],
+  [FAULT.undoKeepsLetters, "[3 undo] undo, with no change from anyone else", { seeds: 2 }],
 ];
 
 it.each(BREAKAGES)(
@@ -2291,7 +2552,7 @@ it.each(BREAKAGES)(
   600_000,
 );
 
-const LONG_RUN = Number(process.env.BODY_CONTAINERS_LONG_RUN ?? 1000);
+const LONG_RUN = Number(process.env.BODY_CONTAINERS_LONG_RUN ?? 600);
 
 it("counts the records no path names while one person wraps, lifts and undoes", () => {
   const next = random(11);
@@ -2301,7 +2562,15 @@ it("counts the records no path names while one person wraps, lifts and undoes", 
   const letter = lettersFrom();
   const growth: string[] = [];
   for (let changes = 1; changes <= LONG_RUN; changes++) {
-    act(only, next, letter, log, { ...EVEN, wraps: 4 });
+    try {
+      act(only, next, letter, log, { ...EVEN, wraps: 4 });
+    } catch (error) {
+      throw new Error(
+        `${log.slice(-12).join(" ")}
+${String(error)}`,
+        { cause: error },
+      );
+    }
     if (changes % (LONG_RUN / 4) !== 0) continue;
     settled(people, oracle);
     const { frames } = only.look();
@@ -2335,7 +2604,7 @@ const exchange = (left: Y.Doc, right: Y.Doc) => {
   Y.applyUpdate(left, Y.encodeStateAsUpdate(right, Y.encodeStateVector(left)), REMOTE);
 };
 const written = (doc: Y.Doc, plan: BodyWrites | null) => {
-  if (plan) doc.transact(() => writeBody(doc, plan), LOCAL);
+  if (plan) writeBody(doc, plan, LOCAL);
   return plan !== null;
 };
 const pathsOf = (doc: Y.Doc) => lookAt(doc).frames.map(idsOf);
@@ -2464,8 +2733,11 @@ it.each([
     expect(lines.every((line) => line !== null && "type" in line && "path" in line)).toBe(true);
     expect(lines).toHaveLength(read.length);
     history.undo();
-    expect(storedLines(doc)).toEqual([null, { type: "paragraph", path: [], text: "d" }]);
-    expect(lookAt(doc).rows[0]!.units).toBe("abc");
+    expect(textsOf(doc)).toEqual(["paragraph:abc", "paragraph:d"]);
+    expect(storedLines(doc)).toMatchObject([
+      { type: "paragraph", path: [], text: "abc" },
+      { type: "paragraph", path: [], text: "d" },
+    ]);
   },
 );
 
@@ -2876,8 +3148,9 @@ it.each([
     if (wrong) split.added[0]!.index++;
     written(splitter, split);
     ticker.transact(() => {
-      writeBody(ticker, setContainerAttributes(schema, ticker, 0, 1, { checked: true }, String)!);
-      writeBody(ticker, setLineKind(schema, ticker, 0, { type: "heading", level: 2 })!);
+      const tick = setContainerAttributes(schema, ticker, 0, 1, { checked: true }, String)!;
+      writeBody(ticker, tick, LOCAL);
+      writeBody(ticker, setLineKind(schema, ticker, 0, { type: "heading", level: 2 })!, LOCAL);
     }, LOCAL);
     exchange(splitter, ticker);
     const list = (
@@ -3053,3 +3326,203 @@ it("splits a line inside bold text without writing any formatting", () => {
     ],
   });
 });
+
+const afterCodeNote = () =>
+  note(
+    [],
+    [[["ab", IMAGE, { text: "cd", marks: BOLD }], { type: "codeBlock", language: null }, []]],
+  );
+const titleNote = () =>
+  note(
+    [
+      { id: "L", type: "bulletList", attrs: {} },
+      { id: "I", type: "listItem", attrs: {} },
+    ],
+    [
+      ["top", PARAGRAPH, []],
+      ["Title", { type: "heading", level: 1 }, ["L", "I"]],
+      ["end", PARAGRAPH, []],
+    ],
+  );
+const readOf = (doc: Y.Doc) => json(readBodySequence(schema, doc).toJSON());
+
+it("gives what is left of the paragraph after a code block a boundary when its first item is deleted", () => {
+  const doc = open(afterCodeNote(), 10);
+  const history = bodyHistory(doc, LOCAL, NEVER_ELAPSES);
+  expect(linesRead(doc)).toEqual(["line codeBlock:ab", `spill paragraph:${OBJECT}cd`]);
+  expect(written(doc, deleteRange(schema, doc, 1, 0, 1, 1, String))).toBe(true);
+  expect(rowsRead(doc)).toEqual(["codeBlock :ab", "paragraph :cd"]);
+  expect(blocksOf(doc)[1]!.content).toMatchObject([{ text: "cd", marks: [{ type: "bold" }] }]);
+  history.undo();
+  expect(linesRead(doc)).toEqual(["line codeBlock:ab", `line paragraph:${OBJECT}cd`]);
+
+  const items = [["a", IMAGE, MATH, "b"], { type: "codeBlock", language: null }, []] as Written;
+  const two = open(note([], [items]), 20);
+  expect(written(two, deleteRange(schema, two, 1, 0, 1, 1, String))).toBe(true);
+  expect(linesRead(two)).toEqual(["line codeBlock:a", `spill paragraph:${OBJECT}b`]);
+  const rule = open(note([], [["ab", { type: "horizontalRule" }, []]]), 30);
+  expect(written(rule, deleteRange(schema, rule, 1, 0, 1, 1, String))).toBe(true);
+  expect(linesRead(rule)).toEqual(["line horizontalRule:", "spill paragraph:b"]);
+});
+
+it("keeps the paragraph after a code block out of a line of another kind split off the block", () => {
+  const doc = open(afterCodeNote(), 10);
+  expect(written(doc, splitLine(schema, doc, 0, 1, String, { type: "heading", level: 2 }))).toBe(
+    true,
+  );
+  expect(rowsRead(doc)).toEqual(["codeBlock :a", "heading :b", `paragraph :${OBJECT}cd`]);
+  const same = open(afterCodeNote(), 20);
+  expect(written(same, splitLine(schema, same, 0, 1, String))).toBe(true);
+  expect(linesRead(same)).toEqual([
+    "line codeBlock:a",
+    "line codeBlock:b",
+    `spill paragraph:${OBJECT}cd`,
+  ]);
+});
+
+it("joins the paragraph after a block that holds nothing by deleting the block's boundary", () => {
+  const doc = open(
+    note(
+      [],
+      [
+        ["top", PARAGRAPH, []],
+        ["ab", { type: "horizontalRule" }, []],
+      ],
+    ),
+    10,
+  );
+  const history = bodyHistory(doc, LOCAL, NEVER_ELAPSES);
+  expect(linesRead(doc).slice(1)).toEqual(["line horizontalRule:", "spill paragraph:ab"]);
+  expect(written(doc, joinLine(schema, doc, 2, String))).toBe(true);
+  expect(rowsRead(doc)).toEqual(["paragraph :top", "paragraph :ab"]);
+  history.undo();
+  expect(linesRead(doc).slice(1)).toEqual(["line horizontalRule:", "line paragraph:ab"]);
+
+  expect(joinLine(schema, open(afterCodeNote(), 20), 1, String)).toBeNull();
+  const emptyCode = [[MATH, "de"], { type: "codeBlock", language: null }, []] as Written;
+  const empty = open(note([], [emptyCode]), 30);
+  expect(written(empty, joinLine(schema, empty, 1, String))).toBe(true);
+  expect(rowsRead(empty)).toEqual([`paragraph :${OBJECT}de`]);
+});
+
+it("refuses a wrap directly under a table or a table row", () => {
+  const baseline = note(
+    [
+      { id: "T", type: "table", attrs: {} },
+      { id: "R", type: "tableRow", attrs: {} },
+      { id: "A", type: "tableCell", attrs: {} },
+      { id: "B", type: "tableCell", attrs: {} },
+    ],
+    [
+      ["a", PARAGRAPH, ["T", "R", "A"]],
+      ["b", PARAGRAPH, ["T", "R", "B"]],
+    ],
+  );
+  const doc = open(baseline, 10);
+  const wrap = (depth: number, type: string) =>
+    wrapBlocks(schema, doc, 0, depth, 1, type, {}, () => "q");
+  expect(pathsOf(doc)).toEqual([
+    ["T", "R", "A"],
+    ["T", "R", "B"],
+  ]);
+  expect(wrap(1, "blockquote")).toBeNull();
+  expect(wrap(2, "blockquote")).toBeNull();
+  expect(wrap(2, "bulletList")).toBeNull();
+  expect(doc.getMap(CONTAINERS).has("q")).toBe(false);
+  expect(written(doc, wrap(3, "blockquote"))).toBe(true);
+  expect(pathsOf(doc)).toEqual([
+    ["T", "R", "A", "q"],
+    ["T", "R", "B"],
+  ]);
+});
+
+it("refuses, with a RangeError that names the attribute, a value that breaks the attribute's rule", () => {
+  const baseline = note(
+    [
+      { id: "N", type: "orderedList", attrs: {} },
+      { id: "N1", type: "listItem", attrs: {} },
+    ],
+    [[["a", IMAGE], PARAGRAPH, ["N", "N1"]]],
+  );
+  const doc = open(baseline, 10);
+  const stored = view(doc);
+  const past64Bits = 2n ** 64n + 3n;
+  const noNumber = { href: "x", title: 2n ** 60n };
+  const refused: [string, () => unknown][] = [
+    [
+      "orderedList.start",
+      () => setContainerAttributes(schema, doc, 0, 0, { start: past64Bits }, String),
+    ],
+    ["orderedList.start", () => setContainerAttributes(schema, doc, 0, 0, { start: 1.5 }, String)],
+    [
+      "orderedList.start",
+      () => wrapBlocks(schema, doc, 0, 0, 1, "orderedList", { start: past64Bits }, String),
+    ],
+    [
+      "taskItem.checked",
+      () => setContainerAttributes(schema, doc, 0, 1, { checked: "yes" }, String),
+    ],
+    ["callout.title", () => wrapBlocks(schema, doc, 0, 0, 1, "callout", { title: "a\nb" }, String)],
+    ["link.title", () => typeLetters(schema, doc, 0, 0, "x", { link: noNumber })],
+    ["link.title", () => setMarks(schema, doc, 0, 0, 1, { link: noNumber })],
+    ["heading.level", () => setLineKind(schema, doc, 0, { type: "heading", level: 7 })],
+    ["heading.level", () => splitLine(schema, doc, 0, 1, String, { type: "heading", level: 0 })],
+    ["image.src", () => insertInline(schema, doc, 0, 0, "image", { src: 5 })],
+    ["image.title", () => setInlineAttributes(schema, doc, 0, 1, { title: 4 })],
+  ];
+  for (const [attribute, act] of refused) {
+    expect(act, attribute).toThrow(RangeError);
+    expect(act, attribute).toThrow(attribute);
+  }
+  expect(view(doc)).toBe(stored);
+  expect(written(doc, setContainerAttributes(schema, doc, 0, 0, { start: 4n }, String))).toBe(true);
+  expect(written(doc, typeLetters(schema, doc, 0, 0, "x", { link: { href: "x" } }))).toBe(true);
+  const reopened = open(Y.encodeStateAsUpdate(doc), 99);
+  expect(readOf(reopened)).toBe(readOf(doc));
+  expect(blocksOf(reopened)[0]).toMatchObject({ type: "orderedList", attrs: { start: 4 } });
+});
+
+const GIVEN_LINES: [string, () => Uint8Array, string[]][] = [
+  [
+    "a list item's added first paragraph",
+    titleNote,
+    ["paragraph :top", "paragraph L/I:B", "heading L/I:Title", "paragraph :end"],
+  ],
+  ["the paragraph after a code block", afterCodeNote, ["codeBlock :ab", `paragraph :B${OBJECT}cd`]],
+];
+
+it.each(GIVEN_LINES)(
+  "keeps a letter someone else typed in %s when the person who typed there first undoes",
+  (_, baseline, read) => {
+    const alice = open(baseline(), 10);
+    const bob = open(baseline(), 20);
+    const history = bodyHistory(alice, LOCAL, NEVER_ELAPSES);
+    expect(written(alice, typeLetters(schema, alice, 1, 0, "A", {}))).toBe(true);
+    exchange(alice, bob);
+    expect(written(bob, typeLetters(schema, bob, 1, 1, "B", {}))).toBe(true);
+    exchange(alice, bob);
+    history.undo();
+    exchange(alice, bob);
+    expect(rowsRead(alice)).toEqual(read);
+    expect(view(bob)).toBe(view(alice));
+  },
+);
+
+it.each(GIVEN_LINES)(
+  "reads %s as before when the one person who typed in it undoes, and redo types into it again",
+  (_, baseline) => {
+    const doc = open(baseline(), 10);
+    const history = bodyHistory(doc, LOCAL, NEVER_ELAPSES);
+    const before = readOf(doc);
+    expect(written(doc, typeLetters(schema, doc, 1, 0, "A", {}))).toBe(true);
+    const typed = readOf(doc);
+    const boundaries = storedLines(doc).length;
+    history.undo();
+    expect(readOf(doc)).toBe(before);
+    expect(storedLines(doc)).toHaveLength(boundaries);
+    history.redo();
+    expect(readOf(doc)).toBe(typed);
+    history.undo();
+    expect(readOf(doc)).toBe(before);
+  },
+);

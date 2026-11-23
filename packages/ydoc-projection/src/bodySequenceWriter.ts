@@ -7,8 +7,10 @@ import {
   MAX_SEQUENCE_DEPTH,
   allowedChildren,
   leavesOfSequence,
+  readBodyLeaves,
   recordsOfContainer,
   type SequenceAttrs,
+  type SequenceLeaf,
 } from "./bodySequenceGrammar.js";
 
 /**
@@ -53,16 +55,20 @@ export type BodyLine = {
 };
 
 /**
- * What one change writes. `writeBody` writes it, inside one transaction. Every place in the
- * sequence is the place before any of the change is made.
+ * What one change writes. `writeBody` writes it. Every place in the sequence is the place before
+ * any of the change is made.
  */
 export type BodyWrites = {
   records: Map<string, unknown>;
   attributes: Map<Y.XmlElement, SequenceAttrs>;
   /** Ranges to delete. */
   erased: { index: number; length: number }[];
-  /** Boundaries to insert, in the order they stand in the note. */
-  added: { index: number; attrs: SequenceAttrs }[];
+  /**
+   * Boundaries to insert, in the order they stand in the note, with the attributes each ends
+   * with. `given` is on one for a line that is read with no boundary of its own, and holds the
+   * kind and path that line reads with.
+   */
+  added: { index: number; attrs: SequenceAttrs; given?: SequenceAttrs }[];
   /** Letters to insert, with their marks; no marks means plain. */
   typed?: { index: number; letters: string; marks: SequenceAttrs };
   /** An inline item to insert. */
@@ -158,6 +164,72 @@ function heldBy(schema: Schema, type: string): string[] {
 }
 
 const holdsIt = (schema: Schema, type: string, what: string) => heldBy(schema, type).includes(what);
+
+const isContainer = (schema: Schema, type: string) => {
+  const node = schema.nodes[type];
+  return node?.isBlock === true && !node.isTextblock && !node.isLeaf && node !== schema.topNodeType;
+};
+
+function wayTo(schema: Schema, from: string, to: string): string[] {
+  const ways = [[from]];
+  const seen = new Set([from]);
+  for (const way of ways)
+    for (const child of heldBy(schema, way.at(-1)!)) {
+      if (child === to) return [...way.slice(1), to];
+      if (seen.has(child) || !isContainer(schema, child)) continue;
+      seen.add(child);
+      ways.push([...way, child]);
+    }
+  return [];
+}
+
+function readsAs(schema: Schema, kind: string, key: string, value: unknown): unknown {
+  const held = { [key]: value };
+  const read = (leaf: Partial<SequenceLeaf>) =>
+    readBodyLeaves(schema, [{ type: "paragraph", attrs: {}, path: [], inline: [], ...leaf }]);
+  const node = schema.nodes[kind];
+  if (!node) {
+    const letter = read({ inline: [{ text: "a", marks: { [kind]: held } }] }).firstChild!;
+    return letter.firstChild!.marks[0]?.attrs[key];
+  }
+  if (node.isInline)
+    return read({ inline: [{ atom: kind, attrs: held }] }).firstChild!.firstChild!.attrs[key];
+  if (!isContainer(schema, kind)) return read({ type: kind, attrs: held }).firstChild!.attrs[key];
+  const above = wayTo(schema, schema.topNodeType.name, kind);
+  const below = wayTo(schema, kind, "paragraph");
+  const path = [...above, ...below.slice(0, -1)].map((type, depth) => ({
+    type,
+    id: String(depth),
+    attrs: depth === above.length - 1 ? held : {},
+  }));
+  let found = read({ path });
+  for (let depth = 0; depth < above.length; depth++) found = found.lastChild!;
+  return found.attrs[key];
+}
+
+function keepRules(schema: Schema, kinds: string[], attrs: SequenceAttrs): void {
+  for (const kind of kinds) {
+    const has = (schema.nodes[kind] ?? schema.marks[kind])?.spec.attrs ?? {};
+    for (const [key, value] of Object.entries(attrs)) {
+      if (!Object.hasOwn(has, key) || same(readsAs(schema, kind, key, value), value)) continue;
+      const given = typeof value === "object" && value !== null ? typeof value : String(value);
+      throw new RangeError(`${kind}.${key} cannot hold ${given}: it breaks the attribute's rule.`);
+    }
+  }
+}
+
+function keepMarkRules(schema: Schema, marks: SequenceAttrs): void {
+  for (const [name, value] of Object.entries(marks))
+    if (typeof value === "object" && value !== null)
+      keepRules(schema, [name], value as SequenceAttrs);
+}
+
+const keepRecordRules = (schema: Schema, attrs: SequenceAttrs) =>
+  keepRules(
+    schema,
+    Object.keys(schema.nodes).filter((type) => isContainer(schema, type)),
+    attrs,
+  );
 
 /**
  * The lines of a note's body, in order, for a writer to change: one for each boundary, and one
@@ -347,10 +419,13 @@ function writesOf(
       line.path.length === inherent.length &&
       line.path.every((container, depth) => container === inherent[depth]);
     if (ids.length > MAX_SEQUENCE_DEPTH || new Set(ids).size < ids.length) return null;
-    if (line.fresh === true || line.gives === true || (line.bare !== "" && !follows))
+    if (line.fresh === true)
+      writes.added.push({ index: line.start, attrs: { ...line.attrs, path: ids } });
+    else if (line.gives === true || (line.bare !== "" && !follows))
       writes.added.push({
         index: line.start,
-        attrs: { type: "paragraph", ...line.attrs, path: ids },
+        attrs: { type: "paragraph", path: ids },
+        given: { type: "paragraph", path: line.ids },
       });
     else if (line.boundary && !same(ids, line.ids))
       writes.attributes.set(line.boundary, { path: ids });
@@ -393,9 +468,10 @@ function landing(
   if (line.bare === "" && !holdsIt(schema, line.type, what)) return null;
   const readAbove =
     line.bare === "spill" && offset === 0 && holdsIt(schema, line.owner!.type, what);
+  const paragraph = { type: "paragraph", path: line.ids };
   const added =
     line.bare === "item" || readAbove
-      ? [{ index: line.start, attrs: { type: "paragraph", path: line.ids } }]
+      ? [{ index: line.start, attrs: paragraph, given: paragraph }]
       : [];
   return { index: line.start + offset, added };
 }
@@ -404,7 +480,8 @@ function landing(
  * Type letters into a line, with the marks they are to carry; no marks means plain. Refused
  * between the two units of a surrogate pair, for letters that hold half of one, and in a block
  * that holds no letters. A line read with no boundary gets one when the letters would otherwise
- * be read into another block.
+ * be read into another block. Like every change here that takes values, it throws a `RangeError`
+ * naming the attribute for a value that breaks the attribute's rule in section 2.3 of the format.
  */
 export function typeLetters(
   schema: Schema,
@@ -414,6 +491,7 @@ export function typeLetters(
   letters: string,
   marks: SequenceAttrs,
 ): BodyWrites | null {
+  keepMarkRules(schema, marks);
   const line = readBody(schema, doc)[at];
   if (!line || letters === "" || LONE_HALF.test(letters)) return null;
   const lands = landing(schema, line, offset, "text");
@@ -431,6 +509,7 @@ export function insertInline(
   name: string,
   attrs: SequenceAttrs,
 ): BodyWrites | null {
+  keepRules(schema, [name], attrs);
   const line = readBody(schema, doc)[at];
   if (!line || !isInlineItem(schema, name)) return null;
   const lands = landing(schema, line, offset, name);
@@ -463,6 +542,7 @@ export function setInlineAttributes(
   if (!line || offset < 0 || offset >= line.text.length) return null;
   const element = elementAt(doc.getText(BODY_SEQUENCE_FIELD), line.start + offset);
   if (!element) return null;
+  keepRules(schema, [element.nodeName], attrs);
   const stored = attributesOf(element);
   const changed = Object.entries(attrs).filter(
     ([key, value]) => !Object.hasOwn(stored, key) || !same(stored[key], value),
@@ -480,6 +560,7 @@ export function setMarks(
   length: number,
   marks: SequenceAttrs,
 ): BodyWrites | null {
+  keepMarkRules(schema, marks);
   const line = readBody(schema, doc)[at];
   if (!line || length <= 0 || offset < 0 || offset + length > line.text.length) return null;
   if (splitsALetter(line.text, offset) || splitsALetter(line.text, offset + length)) return null;
@@ -489,7 +570,9 @@ export function setMarks(
 /**
  * Delete from an offset of one line to an offset of the same or a later line: the letters and
  * inline items between, and the boundary of each line after the first, so what is left of the
- * last line joins the first. Refused where it would cut a surrogate pair.
+ * last line joins the first. When the delete takes the item that made the paragraph after a block
+ * a paragraph, what is left of it gets a boundary where the item stood. Refused where it would cut
+ * a surrogate pair.
  */
 export function deleteRange(
   schema: Schema,
@@ -521,6 +604,10 @@ export function deleteRange(
   }
   const emptied = first.bare === "start" && offset === 0 && toOffset === last.text.length;
   if (emptied && toAt < lines.length - 1) first.gives = true;
+  if (first.bare === "spill" && offset === 0 && toOffset < last.text.length) {
+    const next = elementAt(doc.getText(BODY_SEQUENCE_FIELD), to)?.nodeName ?? "text";
+    if (holdsIt(schema, first.owner!.type, next)) first.gives = true;
+  }
   const left = lines.filter(
     (line, index) =>
       !(kept && index >= at && line.owner === kept && line.bare === "item") &&
@@ -544,7 +631,9 @@ export function deleteRange(
  * Split a line at an offset, as section 4 of the format says. The new line gets `kind`, or the
  * line's own kind when none is given, and the line's path; a split of a list item's first block
  * starts a new item, and at offset 0 of a line that holds text the new boundary goes before the
- * line's own. Refused inside a surrogate pair.
+ * line's own. The paragraph after the line gets a boundary when the split is at the line's end or
+ * the new line is of another kind, so it does not read into the new line. Refused inside a
+ * surrogate pair.
  */
 export function splitLine(
   schema: Schema,
@@ -560,15 +649,18 @@ export function splitLine(
   if (splitsALetter(line.text, offset)) return null;
   const above = offset === 0 && line.bare !== "item" && (line.text !== "" || line.bare !== "");
   if (line.bare !== "" && offset === 0) line.gives = true;
+  const attrs = kind ? kindOf(schema, {}, kind) : kindOf(schema, line.attrs, {});
+  if (kind) keepRules(schema, [String(attrs.type)], kind);
   const spill = spillOf(lines, line);
-  if (spill && !above && offset === line.text.length) spill.gives = true;
+  if (spill && !above && (offset === line.text.length || attrs.type !== line.type))
+    spill.gives = true;
   const fresh: Planned = {
     boundary: null,
     bare: "",
     start: above && line.boundary ? line.start - 1 : line.start + offset,
     text: "",
     type: "",
-    attrs: kind ? kindOf(schema, {}, kind) : kindOf(schema, line.attrs, {}),
+    attrs,
     path: [...line.path],
     ids: [],
     fresh: true,
@@ -588,8 +680,10 @@ export function splitLine(
 /**
  * Join a line to the one above: delete the lower line's boundary, or the upper line's when the
  * upper line is empty. A line joined into a list item's added first paragraph keeps its boundary
- * and becomes that paragraph. Two containers that share an id and would then stand together are
- * kept apart by a fresh id for the later one.
+ * and becomes that paragraph. Below an empty block, the paragraph after it gets its own boundary
+ * as the block's is deleted. Refused for any other line with no boundary: it has none to delete,
+ * and deleting the upper line's would give that line's letters to the block above. Two containers
+ * that share an id and would then stand together are kept apart by a fresh id for the later one.
  */
 export function joinLine(
   schema: Schema,
@@ -600,9 +694,11 @@ export function joinLine(
   const lines: Planned[] = readBody(schema, doc);
   const lower = lines[at];
   const upper = lines[at - 1];
-  if (!lower?.boundary || !upper) return null;
+  if (!lower || !upper) return null;
+  const emptyAbove = upper.boundary !== null && upper.text === "";
+  if (!lower.boundary && !emptyAbove) return null;
   const spill = spillOf(lines, lower);
-  if (upper.bare === "item") {
+  if (upper.bare === "item" && lower.boundary) {
     const retyped = lower.attrs.type !== "paragraph";
     if (spill && retyped) spill.gives = true;
     lower.path = [...upper.path];
@@ -615,8 +711,9 @@ export function joinLine(
       });
     return writes;
   }
-  const gone = upper.boundary && upper.text === "" ? upper : lower;
+  const gone = emptyAbove ? upper : lower;
   if (gone === lower && spill) spill.gives = true;
+  if (lower.bare === "spill") lower.gives = true;
   lines.splice(lines.indexOf(gone), 1);
   const writes = writesOf(schema, doc, lines, freshId);
   writes?.erased.push({ index: gone.start - 1, length: 1 });
@@ -640,25 +737,32 @@ export function setLineKind(
   if (!line || line.bare === "item") return null;
   const stored = line.boundary ? line.attrs : { type: "paragraph" };
   const kind = kindOf(schema, stored, asked);
+  keepRules(schema, [String(kind.type)], asked);
   const changed = Object.entries(kind).filter(
     ([key, value]) => !Object.hasOwn(stored, key) || !same(stored[key], value),
   );
   if (changed.length === 0) return null;
   const writes = nothing();
+  const paragraph = (bare: BodyLine) => ({ type: "paragraph", path: bare.ids });
   if (!line.boundary) {
-    writes.added.push({ index: line.start, attrs: { ...kind, path: line.ids } });
+    writes.added.push({
+      index: line.start,
+      attrs: { ...kind, path: line.ids },
+      given: paragraph(line),
+    });
     return writes;
   }
   writes.attributes.set(line.boundary, Object.fromEntries(changed));
   const spill = spillOf(lines, line);
   if (spill && changed.some(([key]) => key === "type"))
-    writes.added.push({ index: spill.start, attrs: { type: "paragraph", path: spill.ids } });
+    writes.added.push({ index: spill.start, attrs: paragraph(spill), given: paragraph(spill) });
   return writes;
 }
 
 /**
  * Wrap `count` neighbouring blocks, starting with the one that holds line `at` at `depth`, in a
- * new quote, callout or list. In a list each block becomes one item.
+ * new quote, callout or list. In a list each block becomes one item. Refused where the container
+ * around the blocks cannot hold the new one: directly in a list, a table or a table row.
  */
 export function wrapBlocks(
   schema: Schema,
@@ -672,7 +776,9 @@ export function wrapBlocks(
 ): BodyWrites | null {
   const lines: Planned[] = readBody(schema, doc);
   const line = lines[at];
-  if (!line || depth > line.path.length || isList(line.path[depth - 1]?.type)) return null;
+  keepRecordRules(schema, attrs);
+  const around = line?.path[depth - 1]?.type ?? schema.topNodeType.name;
+  if (!line || depth > line.path.length || !holdsIt(schema, around, type)) return null;
   const make = (made: string, starts: SequenceAttrs): BodyContainer => ({
     id: freshId(),
     type: made,
@@ -806,6 +912,7 @@ export function setContainerAttributes(
   const lines: Planned[] = readBody(schema, doc);
   const stored = doc.getMap(BODY_CONTAINERS_FIELD);
   const container = lines[at]?.path[depth];
+  keepRecordRules(schema, attrs);
   if (!container) return null;
   for (const [name, value] of Object.entries(attrs))
     if (!same(stored.get(`${container.id}.${name}`), value)) container.changes.set(name, value);
@@ -826,56 +933,96 @@ function formattingAt(sequence: Y.Text, index: number): Record<string, unknown> 
   return Object.fromEntries(marks);
 }
 
+/** The origin `writeBody` gives the change that makes a line's boundary, unless told another. */
+export const GIVEN_BOUNDARY = Symbol("a boundary for a line that had none");
+
 /**
- * Write one change. Call it inside one transaction that has the writer's own origin. It stores
- * plain data: a BigInt it is given is stored as the number it reads as.
+ * Write one change as the writer whose origin is `origin`. A boundary for a line that is read
+ * with none of its own is written first, with the kind and path the line reads with, in a change
+ * of its own with the origin `given`; the rest follows in one change. No history may follow
+ * `given`: undo then leaves the boundary, and what someone else typed in that line stays in it.
+ * It stores plain data: a BigInt it is given is stored as the number it reads as.
  */
-export function writeBody(doc: Y.Doc, writes: BodyWrites): void {
+export function writeBody(
+  doc: Y.Doc,
+  writes: BodyWrites,
+  origin: unknown,
+  given: unknown = GIVEN_BOUNDARY,
+): void {
   const sequence = doc.getText(BODY_SEQUENCE_FIELD);
   const records = doc.getMap(BODY_CONTAINERS_FIELD);
-  for (const [key, value] of writes.records) records.set(key, plain(value));
-  for (const [element, attrs] of writes.attributes)
+  const set = (element: Y.XmlElement, attrs: SequenceAttrs) => {
     for (const [key, value] of Object.entries(attrs))
       element.setAttribute(key, plain(value) as string);
+  };
   const embed = (index: number, name: string, attrs: SequenceAttrs) => {
     const element = new Y.XmlElement(name);
-    for (const [key, value] of Object.entries(attrs))
-      element.setAttribute(key, plain(value) as string);
+    set(element, attrs);
     sequence.insertEmbed(index, element, formattingAt(sequence, index));
+    return element;
   };
-  const { marked, typed, placed } = writes;
-  if (marked) sequence.format(marked.index, marked.length, plain(marked.marks) as SequenceAttrs);
-  const edits: { index: number; rank: number; make: () => void }[] = [];
-  for (const { index, length } of writes.erased)
-    edits.push({ index, rank: 0, make: () => sequence.delete(index, length) });
-  if (typed)
-    edits.push({
-      index: typed.index,
-      rank: 1,
-      make: () => sequence.insert(typed.index, typed.letters, plain(typed.marks) as SequenceAttrs),
+  const first = writes.added.filter((boundary) => boundary.given !== undefined);
+  const made = new Map<BodyWrites["added"][number], Y.XmlElement>();
+  if (first.length > 0)
+    doc.transact(() => {
+      for (const boundary of [...first].reverse())
+        made.set(boundary, embed(boundary.index, BLOCK_ELEMENT, boundary.given!));
+    }, given);
+  const past = (index: number) =>
+    index + first.filter((boundary) => boundary.index <= index).length;
+  doc.transact(() => {
+    for (const [key, value] of writes.records) records.set(key, plain(value));
+    for (const [element, attrs] of writes.attributes) set(element, attrs);
+    for (const [boundary, element] of made)
+      set(
+        element,
+        Object.fromEntries(
+          Object.entries(boundary.attrs).filter(
+            ([key, value]) => !same(value, boundary.given![key]),
+          ),
+        ),
+      );
+    const { marked, typed, placed } = writes;
+    if (marked)
+      sequence.format(past(marked.index), marked.length, plain(marked.marks) as SequenceAttrs);
+    const edits: { index: number; rank: number; make: () => void }[] = [];
+    for (const { index, length } of writes.erased)
+      edits.push({ index, rank: 0, make: () => sequence.delete(past(index), length) });
+    if (typed)
+      edits.push({
+        index: typed.index,
+        rank: 1,
+        make: () =>
+          sequence.insert(past(typed.index), typed.letters, plain(typed.marks) as SequenceAttrs),
+      });
+    if (placed)
+      edits.push({
+        index: placed.index,
+        rank: 1,
+        make: () => embed(past(placed.index), placed.name, placed.attrs),
+      });
+    let before = 0;
+    writes.added.forEach((boundary, order) => {
+      const givenBefore = before;
+      if (boundary.given !== undefined) before++;
+      else
+        edits.push({
+          index: boundary.index,
+          rank: 2 + writes.added.length - order,
+          make: () => embed(boundary.index + givenBefore, BLOCK_ELEMENT, boundary.attrs),
+        });
     });
-  if (placed)
-    edits.push({
-      index: placed.index,
-      rank: 1,
-      make: () => embed(placed.index, placed.name, placed.attrs),
-    });
-  writes.added.forEach(({ index, attrs }, order) =>
-    edits.push({
-      index,
-      rank: 2 + writes.added.length - order,
-      make: () => embed(index, BLOCK_ELEMENT, attrs),
-    }),
-  );
-  edits.sort((one, other) => other.index - one.index || one.rank - other.rank);
-  for (const edit of edits) edit.make();
+    edits.sort((one, other) => other.index - one.index || one.rank - other.rank);
+    for (const edit of edits) edit.make();
+  }, origin);
 }
 
 /**
  * The undo history of one writer of a note's body. It follows `origin` only and puts an earlier
  * value back over someone else's later one. It never deletes a container record or an attribute of
  * a boundary that still stands. An inline item's attribute is not kept: it may have had no value
- * before the person set it.
+ * before the person set it. A boundary `writeBody` gives a line that had none is no part of a
+ * step, so undo leaves it.
  */
 export function bodyHistory(doc: Y.Doc, origin: unknown, captureTimeout?: number): Y.UndoManager {
   const records = doc.getMap(BODY_CONTAINERS_FIELD);
