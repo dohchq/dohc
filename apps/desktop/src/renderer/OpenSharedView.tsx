@@ -335,7 +335,7 @@ export function OpenSharedView(
   useEffect(() => {
     if (opening) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.key !== "Escape" || event.defaultPrevented || isComposingKey(event)) return;
       if (document.documentElement.dataset.menuOpen !== undefined) return;
       event.preventDefault();
       onBackRef.current();

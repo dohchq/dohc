@@ -119,7 +119,7 @@ export function JoinSyncedWorkspace(
   useEffect(() => {
     if (joining) return;
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.key !== "Escape" || event.defaultPrevented || isComposingKey(event)) return;
       if (document.documentElement.dataset.menuOpen !== undefined) return;
       event.preventDefault();
       onBackRef.current();
