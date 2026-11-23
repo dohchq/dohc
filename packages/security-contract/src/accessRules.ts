@@ -14,7 +14,7 @@ export {
 
 /**
  * A folder's access rule, which the relay keeps and the folder's marker names
- * (ADR 0017, docs/engineering/adr/0017-access-rules-live-in-the-folder.md).
+ * (ADR 0017, docs/engineering/adr/0017-folder-access-rules-live-on-the-server.md).
  * `members` is the level for anyone with the Member role whom no person
  * entry names; null leaves them out, which hides the folder from them.
  * `people` is keyed by normalized email.

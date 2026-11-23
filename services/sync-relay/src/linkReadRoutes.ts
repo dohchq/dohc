@@ -188,7 +188,7 @@ export function createLinkReadRoutes(
             observed.push({ recipient, workspaceId, objectId, objectToken, sourceHandle });
         },
       );
-      // The listing selects by path prefix; a rule file under it stays hidden.
+      // The listing selects by path prefix; a folder marker under it stays hidden.
       const files = snapshot.files
         .filter((file) => visibleSharePath(fresh.effectiveSelector, file.path) !== null)
         .map((file) => {
