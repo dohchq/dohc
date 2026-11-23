@@ -289,6 +289,10 @@ describe("reading any sequence", () => {
     expect(cell([["c.colwidth", [Infinity]]]).colwidth).toBeNull();
     expect(cell([["c.colwidth", [-1]]]).colwidth).toBeNull();
     expect(cell([["c.colwidth", Array(1)]]).colwidth).toBeNull();
+    const sparse: unknown[] = [];
+    sparse[1] = 20;
+    const overAPrototype = Object.setPrototypeOf(sparse, Object.assign([], { 0: 100 })) as unknown;
+    expect(cell([["c.colwidth", overAPrototype]]).colwidth).toBeNull();
     const start = (value: unknown) =>
       read([["l.start", value]], ["l", "i"]).firstChild!.attrs.start as unknown;
     expect(start(7)).toBe(7);
@@ -339,6 +343,8 @@ describe("reading any sequence", () => {
       readBodyLeaves(schema, [{ type: "codeBlock", attrs: { language }, path: [], inline: [] }])
         .firstChild!.attrs.language as unknown;
     expect(code("ts")).toBe("ts");
+    expect(code(`ts${String.fromCharCode(0x2028)}break`)).toBeNull();
+    expect(code(`ts${String.fromCharCode(0x2029)}break`)).toBeNull();
     expect(code("ts\nbreak")).toBeNull();
     expect(code("ts\rbreak")).toBeNull();
     const callout = (attrs: Record<string, unknown>) =>
@@ -369,6 +375,9 @@ describe("reading any sequence", () => {
     expect(marksOn({ bold: true, italic: false, strike: null, underline: 1 })).toEqual([]);
     expect(marksOn({ bold: {}, code: {}, italic: {} })).toEqual(["code"]);
     expect(marksOn({ "bold--abcdefgh": {} })).toEqual([]);
+    expect(marksOn({ bold: new Uint8Array([1]) })).toEqual([]);
+    expect(marksOn({ bold: [] })).toEqual([]);
+    expect(marksOn({ bold: new Map() })).toEqual([]);
   });
 
   it("ends a path at an id used twice, an id with no record, or one past 64 deep", () => {

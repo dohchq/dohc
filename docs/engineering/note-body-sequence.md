@@ -54,7 +54,7 @@ The reader is `packages/ydoc-projection/src/bodySequenceGrammar.ts`, read from Y
 | `orderedList.start` | whole number 0 to 999,999,999 | 1 |
 | `tableCell.colspan`, `tableCell.rowspan`, `tableHeader.colspan`, `tableHeader.rowspan` | whole number 1 to 1,000 | 1 |
 | `orderedList.type`, `wikilink.label`, `image.title` | string or null | null |
-| `codeBlock.language` | null, or a string with no line break (`\n` or `\r`) | null |
+| `codeBlock.language` | null, or a string with no line break (`\n`, `\r`, U+2028 or U+2029) | null |
 | `callout.fold` | `""`, `"+"` or `"-"` | `""` |
 | `callout.calloutType` | string with no line break | `"note"` |
 | `callout.title` | string with no line break | `""` |
@@ -70,8 +70,8 @@ The schema has no other attribute; a test pins the list and the defaults.
 
 - An attribute name that the item's own node or mark type does not have is ignored (a `language` left on a boundary whose type is now `heading` is not read).
 - An attribute, a mark and a mark's attribute are read by their own key only. A key named `__proto__` is a key like any other and names nothing here; what it holds is not read as the item's attributes.
-- An array holds a value at every position: one with a hole or `undefined` in it breaks the rule for `colwidth`.
-- A mark is ON for a letter when the nearest earlier `ContentFormat` with that key holds a plain object (the mark's attributes; `{}` for none), and OFF when it holds anything else, an array included, or there is none. Keys that are not exactly a mark name are ignored (no hashed names).
+- An array holds a value of its own at every position: one with a hole or `undefined` in it breaks the rule for `colwidth`, and a `path` with a hole is no path.
+- A mark is ON for a letter when the nearest earlier `ContentFormat` with that key holds a plain object (the mark's attributes; `{}` for none), and OFF when it holds anything else, an array or a binary value included, or there is none. Wherever these rules say object they mean a plain one. Keys that are not exactly a mark name are ignored (no hashed names).
 - When `code` is on, every other mark is ignored for that letter.
 - A letter's marks are listed in the schema's order: `link`, `highlight`, `bold`, `italic`, `strike`, `underline`; `code` stands alone. Neighbouring letters of one block with the same marks, attributes included after repair, are one text run, also when a skipped item or a formatting item stands between them.
 - A BigInt outside the safe integer range, `undefined`, and a shared type stored as a value (a Y.Map, Y.Text or Y.Array) break every rule. A container's type record that is a shared type is not a string.

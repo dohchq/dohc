@@ -32,10 +32,14 @@ export type SequencePiece = { boundary: SequenceAttrs } | SequenceInline;
  */
 export type ContainerRecords = { get(key: string): unknown };
 
-const record = (value: unknown): SequenceAttrs | null =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as SequenceAttrs)
-    : null;
+const record = (value: unknown): SequenceAttrs | null => {
+  if (typeof value !== "object" || value === null) return null;
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  return prototype === Object.prototype || prototype === null ? (value as SequenceAttrs) : null;
+};
+
+const filled = (value: unknown): unknown[] | null =>
+  Array.isArray(value) && Object.keys(value).length === value.length ? (value as unknown[]) : null;
 
 const own = (holder: SequenceAttrs, key: string): unknown =>
   Object.hasOwn(holder, key) ? holder[key] : undefined;
@@ -53,7 +57,7 @@ const MAX_ROW_HEIGHT = 1_000_000;
 
 const text = (value: unknown) => typeof value === "string";
 const textOrNone = (value: unknown) => value === null || typeof value === "string";
-const oneLine = (value: unknown) => typeof value === "string" && !/[\n\r]/.test(value);
+const oneLine = (value: unknown) => typeof value === "string" && !/[\n\r\u2028\u2029]/.test(value);
 const yesOrNo = (value: unknown) => typeof value === "boolean";
 const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value);
 const integerIn = (least: number, most: number) => (value: unknown) =>
@@ -61,9 +65,9 @@ const integerIn = (least: number, most: number) => (value: unknown) =>
 const span = integerIn(1, MAX_SPAN);
 const widths = (value: unknown) =>
   value === null ||
-  (Array.isArray(value) &&
-    value.length <= MAX_SPAN &&
-    Array.from(value as unknown[]).every((width) => finite(width) && (width as number) >= 0));
+  (filled(value) !== null &&
+    (value as unknown[]).length <= MAX_SPAN &&
+    (value as unknown[]).every((width) => finite(width) && (width as number) >= 0));
 const side = (value: unknown) =>
   value === null || value === "left" || value === "right" || value === "center";
 const plain = (value: unknown) =>
@@ -118,7 +122,7 @@ function attrsFor(type: NodeType | MarkType, raw: unknown): SequenceAttrs {
   const attrs: SequenceAttrs = {};
   for (const key of Object.keys(type.spec.attrs ?? {})) {
     const held = whole(own(given, key));
-    const value = Array.isArray(held) ? Array.from(held as unknown[], whole) : held;
+    const value = filled(held)?.map(whole) ?? held;
     if (value !== undefined && (VALUE_RULES[`${type.name}.${key}`] ?? plain)(value))
       attrs[key] = value;
   }
@@ -174,10 +178,11 @@ export function allowedChildren(schema: Schema): Record<string, string[]> {
 function pathOf(schema: Schema, value: unknown, containers: ContainerRecords): SequenceFrame[] {
   const shape = shapeOf(schema);
   const path: SequenceFrame[] = [];
-  if (!Array.isArray(value)) return path;
+  const ids = filled(value);
+  if (ids === null) return path;
   const seen = new Set<string>();
   let parent = schema.topNodeType;
-  for (const id of value.slice(0, MAX_SEQUENCE_DEPTH) as unknown[]) {
+  for (const id of ids.slice(0, MAX_SEQUENCE_DEPTH)) {
     if (typeof id !== "string" || !CONTAINER_ID.test(id) || seen.has(id)) break;
     const recorded = containers.get(id);
     if (typeof recorded !== "string") break;
