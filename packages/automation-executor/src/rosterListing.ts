@@ -345,7 +345,13 @@ function grantedListing(
     if (grant.data.status !== (revoked ? "revoked" : "active"))
       return { grants: null, problem: { kind: "unusable-listing" } };
     if (!revoked) grants.push(grant.data);
-    if (generation !== null && (revoked || rosterGrantOf(grant.data).files?.access !== "edit")) {
+    // A folder rule can lower a member's reach while the grant stays Edit, so
+    // every member who wrote automations is also checked as a former editor.
+    const files = rosterGrantOf(grant.data).files;
+    if (
+      generation !== null &&
+      (revoked || files?.access !== "edit" || files.memberReach !== undefined)
+    ) {
       formerGrants.push({ grant: grant.data, automationsGeneration: generation });
     }
   }
