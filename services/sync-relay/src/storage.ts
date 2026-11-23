@@ -2244,8 +2244,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return proposalsStorage.getShareProposal(this, proposalId);
   }
 
-  listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }> {
-    return proposalsStorage.listShareProposalsForShare(this, shareId);
+  listShareProposalsForShare(
+    shareId: string,
+    proposedByUserId: string,
+  ): Array<ShareProposalRow & { opCount: number }> {
+    return proposalsStorage.listShareProposalsForShare(this, shareId, proposedByUserId);
   }
 
   listShareProposalsForWorkspace(

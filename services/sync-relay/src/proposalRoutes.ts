@@ -271,13 +271,15 @@ export function createProposalRoutes(
       const share = authorized.share;
       return jsonResponse({
         ok: true,
-        proposals: storage.listShareProposalsForShare(share.shareId).map((proposal) => ({
-          proposalId: proposal.proposalId,
-          state: proposal.state,
-          createdAtMs: proposal.createdAtMs,
-          settledAtMs: proposal.settledAtMs,
-          ops: proposal.opCount,
-        })),
+        proposals: storage
+          .listShareProposalsForShare(share.shareId, actorUserId)
+          .map((proposal) => ({
+            proposalId: proposal.proposalId,
+            state: proposal.state,
+            createdAtMs: proposal.createdAtMs,
+            settledAtMs: proposal.settledAtMs,
+            ops: proposal.opCount,
+          })),
       });
     }
     if (route.route === "share-proposals") throw relayError("method_not_allowed");
@@ -287,11 +289,14 @@ export function createProposalRoutes(
       const authorized = requireShareAction(route.shareId, actorUserId, "withdraw-proposal");
       const share = authorized.share;
       const proposal = storage.getShareProposal(route.proposalId);
-      // A proposal of another share is the same generic 404 as one that
-      // never existed — and that is also what makes it this person's:
-      // `authorizeShareAction` proved the caller is this share's recipient, and
-      // a path share has exactly one.
-      if (!proposal || proposal.shareId !== share.shareId) throw notFound();
+      // A proposal of another share, or another person's on a workspace's one
+      // share, is the same generic 404 as one that never existed.
+      if (
+        !proposal ||
+        proposal.shareId !== share.shareId ||
+        proposal.proposedByUserId !== actorUserId
+      )
+        throw notFound();
       if (!storage.settleShareProposal(route.proposalId, "withdrawn", nowMs())) {
         throw relayError("conflict", "these changes were already accepted, declined, or withdrawn");
       }

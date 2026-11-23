@@ -1448,6 +1448,55 @@ describe("what a member reaches", () => {
     }
   });
 
+  it("lists and withdraws only a member's own proposals, though every member holds the same share", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    await invited(h, "ben");
+    const shareId = await shareIdOf(h, "ana");
+    expect(await shareIdOf(h, "ben")).toBe(shareId);
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
+    ).toBe(200);
+    expect((await uploadBlob(h, "ana", shareId, "ana's edit")).status).toBe(200);
+    const submit = (userId: string) =>
+      post(h, userId, `/sync/shares/${shareId}/proposals`, {
+        submitId: "submit-ana",
+        ops: [
+          {
+            basedOnPath: "docs/plan.md",
+            basedOnBlobSha256: sha256("the plan"),
+            operation: "write",
+            afterPath: "docs/plan.md",
+            afterBlobSha256: sha256("ana's edit"),
+            afterContentKind: "text",
+            afterByteLength: "ana's edit".length,
+            recordedAtMs: 9000,
+          },
+        ],
+      });
+    const submitted = await submit("ana");
+    expect(submitted.status, await submitted.clone().text()).toBe(200);
+    const { proposalId } = (await json(submitted)) as { proposalId: string };
+
+    const listed = async (userId: string) =>
+      (
+        (await json(await h(request(userId, `/sync/shares/${shareId}/proposals`))))
+          .proposals as Array<{
+          proposalId: string;
+        }>
+      ).map((proposal) => proposal.proposalId);
+    expect(await listed("ana")).toEqual([proposalId]);
+    expect(await listed("ben")).toEqual([]);
+    // Ana's submit id from Ben is not a resend of Ana's proposal.
+    expect((await submit("ben")).status).toBe(409);
+
+    const withdrawn = (userId: string) =>
+      post(h, userId, `/sync/shares/${shareId}/proposals/${proposalId}/withdraw`);
+    expect((await withdrawn("ben")).status).toBe(404);
+    expect(await listed("ana")).toEqual([proposalId]);
+    expect((await withdrawn("ana")).status).toBe(200);
+  });
+
   it("starts a thread with its first message in one batch, on a file or in a Group", async () => {
     const { h } = await seed();
     await invited(h, "ana");

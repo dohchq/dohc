@@ -575,6 +575,24 @@ describe("workspace members on the roster", () => {
       }),
     ).toEqual([{ allowed: true, formerStops: [{ evidence: "g-view#2", name: "view@dohc.test" }] }]);
   });
+
+  it("keeps a member who wrote automations and lost Edit on a folder through its rule as a former editor", async () => {
+    const budget = { path: "Budget", name: "Budget" };
+    const roster = await rosterOf([
+      membership("edit", {
+        automationsGeneration: 2,
+        memberReach: { role: "member", level: "edit", rules: [["Budget", "view"]] },
+      }),
+    ]);
+    expect(
+      checkAutomationReach(roster, {
+        id: "a",
+        collection: budget,
+        codeFiles: [],
+        steps: [actsAsOwner],
+      }),
+    ).toEqual([{ allowed: true, formerStops: [{ evidence: "g-edit#2", name: "edit@dohc.test" }] }]);
+  });
 });
 
 describe("Group scope on the saved roster", () => {
