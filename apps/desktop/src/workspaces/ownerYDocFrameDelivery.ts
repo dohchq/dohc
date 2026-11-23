@@ -55,7 +55,7 @@ export interface OwnerAcceptedState {
       binding: LiveObjectBinding;
       previousAcceptedCursor: number;
       journalCursor: number;
-      /** A room save: the last room position it holds. */
+      /** A room save: the position through which every room row is saved. */
       rowsThrough?: number;
       updateBytes: Uint8Array;
     },

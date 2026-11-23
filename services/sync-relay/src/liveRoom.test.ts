@@ -604,6 +604,49 @@ it("saves edits in the order they were taken when a save that left some out woul
   expect(saved.getXmlFragment("body").toString()).toBe("<paragraph>B</paragraph>");
 });
 
+it("ends a save at a deletion that would come ahead of someone's edit the save leaves out", async () => {
+  const f = note(Y.encodeStateAsUpdate(markdownToYDoc("One\r\n\r\nTwo\r\n")));
+  const room = rooms(f, {}, {});
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben);
+  await a.open();
+  await b.open();
+  // Each edit is sent as its own transaction's update, as an editing page sends it.
+  const change = async (page: typeof a, other: typeof a, edit: (body: Y.XmlFragment) => void) => {
+    let bytes: Uint8Array | undefined;
+    page.doc.once("update", (update: Uint8Array) => (bytes = update));
+    page.doc.transact(() => edit(page.doc.getXmlFragment("body")));
+    expect((await page.submit(bytes!)).result).toBe("success");
+    await other.next();
+  };
+  const text = (body: Y.XmlFragment, index: number) =>
+    (body.get(index) as Y.XmlElement).get(0) as Y.XmlText;
+  await change(a, b, (body) => text(body, 0).insert(1, "A"));
+  await change(b, a, (body) => {
+    body.delete(0, 1);
+    text(body, 0).insert(0, "B");
+  });
+  await change(a, b, (body) => {
+    text(body, 0).delete(0, 1);
+    const inner = new Y.XmlText();
+    inner.insert(0, "C");
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [inner]);
+    body.insert(1, [paragraph]);
+  });
+  // Saved ahead of Ben's edit, this deletion leaves Ben's save a note with no text.
+  await change(a, b, (body) => body.delete(0, 1));
+  a.session.close();
+  b.session.close();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(pauses(f)).toEqual([]);
+  expect(savedAuthors(f)).toEqual([ana, ben, ana]);
+  const saved = new Y.Doc();
+  Y.applyUpdate(saved, Y.encodeStateAsUpdate(f.doc));
+  for (const row of f.journalRows().journal) Y.applyUpdate(saved, rowBytes(row));
+  expect(saved.getXmlFragment("body").toString()).toBe("<paragraph>C</paragraph>");
+});
+
 it("counts a committed save whose engine answer never comes, and goes on saving", async () => {
   const f = note();
   const room = rooms(f, { saveTimeoutMs: 50 }, { silent: true });
