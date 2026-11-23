@@ -35,11 +35,12 @@ describe("levelAtPath", () => {
     expect(levelAtPath(reach, "Plans2/trip.md")).toBe("comment");
   });
 
-  it("gives no level at a hidden root or at a rule file", () => {
+  it("gives no level at a hidden root or at a folder marker", () => {
     expect(levelAtPath({ ...reach, rootLevel: null }, "notes.md")).toBeNull();
     expect(levelAtPath({ ...reach, rootLevel: null }, "Plans/trip.md")).toBe("edit");
-    expect(levelAtPath(reach, "Plans/access.yaml")).toBeNull();
-    expect(levelAtPath(reach, "Plans/access.yaml~")).toBeNull();
+    expect(levelAtPath(reach, "Plans/.dohc-access")).toBeNull();
+    expect(levelAtPath(reach, "Plans/.DOHC-ACCESS")).toBeNull();
+    expect(levelAtPath(reach, "Plans/access.yaml")).toBe("edit");
   });
 });
 

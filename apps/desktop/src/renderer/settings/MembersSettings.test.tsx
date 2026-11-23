@@ -51,6 +51,7 @@ function ownerView(overrides: Partial<WorkspaceMembersView> = {}): WorkspaceMemb
     viewer: { memberId: "owner", role: "owner" },
     memberLevel: "comment",
     inviteLink: { enabled: true, url: "https://share.test/join#secret" },
+    folderRules: [],
     people: [owner, ana, bo, cy, dee],
     ...overrides,
   };
@@ -62,6 +63,7 @@ const memberView = (): WorkspaceMembersView => ({
   viewer: { memberId: "m-bo", role: "member" },
   memberLevel: "edit",
   inviteLink: null,
+  folderRules: null,
   people: [owner, ana, bo].map((entry) => ({ ...entry, email: null })),
 });
 

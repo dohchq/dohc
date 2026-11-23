@@ -52,6 +52,26 @@ export interface WorkspacePerson {
   removedAtMs: number | null;
 }
 
+/**
+ * A folder a rule covers, as the relay sees the owner's files:
+ * - `covered`: the folder holds the rule's marker.
+ * - `marker-missing`: the folder has files but no marker naming the rule.
+ * - `folder-missing`: no file is left at that path.
+ */
+export const FOLDER_RULE_STATES = ["covered", "marker-missing", "folder-missing"] as const;
+export type FolderRuleState = (typeof FOLDER_RULE_STATES)[number];
+
+/** A folder access rule the relay keeps (ADR 0017). */
+export interface WorkspaceFolderRule {
+  ruleId: string;
+  /** Send it back with a change, so a change made from an older read is refused. */
+  revision: number;
+  /** The level for members no person entry names. Null hides the folder from them. */
+  members: ShareAccess | null;
+  people: Array<{ email: string; level: ShareAccess }>;
+  folders: Array<{ path: string; state: FolderRuleState }>;
+}
+
 export interface WorkspaceInviteLink {
   enabled: boolean;
   /** The link to copy. Null while the link is off. */
@@ -66,6 +86,8 @@ export interface WorkspaceMembersView {
   memberLevel: MemberLevel;
   /** Present only for the owner and admins. */
   inviteLink: WorkspaceInviteLink | null;
+  /** Present only for the owner and admins, since it names folders hidden from members. */
+  folderRules: WorkspaceFolderRule[] | null;
   /**
    * Everyone in the workspace, owner first. Members see only active entries
    * and no emails. The owner and admins also see invites and removed accounts.
@@ -120,6 +142,20 @@ export const WORKSPACE_MEMBER_ROUTES = {
    * Group into the owner's workspace.
    */
   groupCreate: "/sync/members/groups",
+  /**
+   * POST → WorkspaceMembersView. Owner or admin. One of:
+   * - {folder, members, people}: a new rule for a workspace-relative folder
+   *   ("" is the workspace root).
+   * - {ruleId, revision, members, people}: change a rule.
+   * - {ruleId, revision, clear: true}: clear a rule.
+   * `members` is a level or null; `people` is [{email, level}].
+   */
+  folderRules: "/sync/:workspaceId/members/folder-rules",
+  /**
+   * POST {folder} → WorkspaceMembersView. Owner or admin. Removes a marker
+   * that names no rule, so the folder it hides opens again.
+   */
+  folderMarkers: "/sync/:workspaceId/members/folder-markers",
   /** POST {token} → WorkspaceJoinPreview. Signed in. */
   joinPreview: "/sync/members/join-preview",
   /** POST {token} → WorkspaceJoinResult. Signed in. */

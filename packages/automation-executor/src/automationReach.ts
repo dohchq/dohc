@@ -1,4 +1,4 @@
-import { accessRuleSet, fileLevel } from "@dohc/security-contract/access-rules";
+import { accessRuleSet, fileLevel, isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import {
   isSharedWithMePath,
   stripWindowsAliasSuffix,
@@ -6,7 +6,7 @@ import {
 } from "@dohc/workspace-core";
 import { isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
-import { hidesRuleFile, type ShareAccess } from "@dohc/security-contract/share-selector";
+import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { datasetOperationLabel } from "./datasetOperationLabel";
 
 // The reach check (ADR 0012). An automation belongs to its Collection, and
@@ -277,7 +277,7 @@ function looseKey(path: string): string {
 
 function memberLevel(files: FileScope, path: string): ShareAccess | null {
   const reach = files.memberReach;
-  if (!reach || hidesRuleFile(files, path)) return null;
+  if (!reach) return null;
   const rules = accessRuleSet(
     reach.rules.map(
       ([folder, level]) =>
@@ -663,10 +663,7 @@ export function checkAutomationReach(
       (grant) => grant.files?.memberReach?.role === "member",
     )?.files;
     const rule =
-      memberFiles &&
-      [...sources, ...(target ? [target.path] : [])].find((path) =>
-        hidesRuleFile(memberFiles, path),
-      );
+      memberFiles && [...sources, ...(target ? [target.path] : [])].find(isFolderMarkerPath);
     if (member && rule) return stop(`${nameOf(member)} cannot edit ${rule}.`, nameOf(member));
     if (roster.kind === "owner") {
       const reach = checkOwnerStep(roster, collection, step, people, editors);

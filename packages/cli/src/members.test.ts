@@ -9,6 +9,7 @@ const view = {
   viewer: { memberId: "owner", role: "owner" },
   memberLevel: "comment",
   inviteLink: { enabled: true, url: "https://share.test/join#token" },
+  folderRules: [],
   people: [
     {
       memberId: "owner",
@@ -236,6 +237,7 @@ describe("dohc members", () => {
     viewer: { memberId: "m1", role: "member" },
     memberLevel: "comment",
     inviteLink: null,
+    folderRules: null,
   };
   const ready = (value: unknown) => () =>
     parseCliResult("members", { status: "ready", view: value });
@@ -256,6 +258,8 @@ describe("dohc members", () => {
 
   it("refuses a manager's view without the invite link", () => {
     expect(ready({ ...view, inviteLink: null })).toThrow();
+    expect(ready({ ...view, folderRules: null })).toThrow();
+    expect(ready({ ...memberView, people: [], folderRules: [] })).toThrow();
   });
 
   it("refuses an owner entry that is not the owner, an inactive owner, a link that disagrees with itself, an unreadable level, and a colour slot outside the hues", () => {

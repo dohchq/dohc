@@ -1,6 +1,19 @@
 import { jsonResponse } from "@dohc/service-http";
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
-import { isShareAccessValue } from "@dohc/security-contract/share-selector";
+import {
+  ACCESS_RULE_MAX_PEOPLE,
+  FOLDER_MARKER_FILE,
+  accessRuleFolder,
+  formatAccessRule,
+  isFolderRuleId,
+  normalizeRuleEmail,
+  type AccessRule,
+} from "@dohc/security-contract/access-rules";
+import {
+  isShareAccessValue,
+  prepareSharePath,
+  type ShareAccess,
+} from "@dohc/security-contract/share-selector";
 import {
   isInviteLinkAction,
   MAX_MEMBER_EMAIL_CHARS,
@@ -15,6 +28,7 @@ import { normalizeEmail } from "@dohc/workspace-auth/signUp";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
+import type { FolderRuleChange, FolderRuleResult } from "./storage/folderRules";
 import { hashLinkBearer, mintLinkBearer, sealLinkBearer, unsealLinkBearer } from "./linkSecurity";
 import { parseShareId, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
@@ -36,6 +50,8 @@ export type WorkspaceMemberRoute =
   | { route: "members-invite-link"; workspaceId: string }
   | { route: "members-leave"; workspaceId: string }
   | { route: "members-end"; workspaceId: string }
+  | { route: "members-folder-rules"; workspaceId: string }
+  | { route: "members-folder-markers"; workspaceId: string }
   | { route: "members-role"; workspaceId: string; memberId: string }
   | { route: "members-remove"; workspaceId: string; memberId: string }
   | { route: "members-let-back-in"; workspaceId: string; memberId: string }
@@ -50,6 +66,8 @@ export const WORKSPACE_MEMBER_ROUTE_PATTERNS = {
   "members-invite-link": "/sync/:workspaceId/members/invite-link",
   "members-leave": "/sync/:workspaceId/members/leave",
   "members-end": "/sync/:workspaceId/members/end",
+  "members-folder-rules": "/sync/:workspaceId/members/folder-rules",
+  "members-folder-markers": "/sync/:workspaceId/members/folder-markers",
   "members-role": "/sync/:workspaceId/members/:memberId/role",
   "members-remove": "/sync/:workspaceId/members/:memberId/remove",
   "members-let-back-in": "/sync/:workspaceId/members/:memberId/let-back-in",
@@ -68,6 +86,8 @@ const WORKSPACE_ACTIONS = {
   "invite-link": "members-invite-link",
   leave: "members-leave",
   end: "members-end",
+  "folder-rules": "members-folder-rules",
+  "folder-markers": "members-folder-markers",
 } as const;
 const MEMBER_ACTIONS = {
   role: "members-role",
@@ -105,6 +125,10 @@ const GROUP_PURPOSE_MAX_CHARS = 200;
 // agent chats, and the owner's computer refuses a Group that takes one.
 const AGENT_CHAT_SLUG = "my-agent";
 
+const FOLDER_RULE_TAKEN = "That folder already has an access rule. Change that rule instead.";
+const FOLDER_RULE_CHANGED =
+  "Someone changed this folder's access since you opened it. Open Members again.";
+
 const INVITE_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
 /** The invite link's token, as a URL fragment or a sign-up field. Anything else opens nothing. */
@@ -131,6 +155,9 @@ type MemberRouteStorage = Pick<
   | "previewWorkspaceJoin"
   | "joinWorkspace"
   | "createWorkspaceGroup"
+  | "changeFolderRule"
+  | "removeFolderMarkers"
+  | "readFolderRules"
 >;
 
 export function createWorkspaceMemberRoutes(options: {
@@ -213,6 +240,13 @@ export function createWorkspaceMemberRoutes(options: {
       viewer: snapshot.viewer,
       memberLevel: snapshot.membership?.memberLevel ?? "comment",
       inviteLink: manages ? { enabled: url !== null, url } : null,
+      folderRules: manages
+        ? storage.readFolderRules(snapshot.workspaceId).map(({ rule, ...entry }) => ({
+            ...entry,
+            members: rule.members,
+            people: [...rule.people].map(([email, level]) => ({ email, level })),
+          }))
+        : null,
       people: [owner, ...people],
     };
   };
@@ -304,6 +338,69 @@ export function createWorkspaceMemberRoutes(options: {
       type: input.type as "posts" | "chat" | "both" | undefined,
       purpose: input.purpose?.trim(),
     };
+  };
+
+  // A workspace-relative folder, "" for the root, checked as the path its
+  // marker takes.
+  const parseFolder = (value: unknown): string => {
+    if (typeof value !== "string" || value.length > 4096) throw badRequest("folder is invalid");
+    const trimmed = value.replace(/^\/+|\/+$/gu, "");
+    const marker = prepareSharePath(
+      trimmed ? `${trimmed}/${FOLDER_MARKER_FILE}` : FOLDER_MARKER_FILE,
+    );
+    if (!marker) throw badRequest("folder is invalid");
+    return accessRuleFolder(marker.path);
+  };
+
+  const parseLevel = (value: unknown, name: string): ShareAccess => {
+    if (!isShareAccessValue(value))
+      throw badRequest(`${name} must be "view", "comment", or "edit"`);
+    return value;
+  };
+
+  const parseRule = (input: Record<string, unknown>): AccessRule => {
+    const members = input.members === null ? null : parseLevel(input.members, "members");
+    if (!Array.isArray(input.people) || input.people.length > ACCESS_RULE_MAX_PEOPLE)
+      throw badRequest("people is invalid");
+    const people = new Map<string, ShareAccess>();
+    for (const entry of input.people as unknown[]) {
+      const { email, level } = (entry ?? {}) as Record<string, unknown>;
+      if (typeof email !== "string" || email.length > MAX_MEMBER_EMAIL_CHARS)
+        throw badRequest("people is invalid");
+      const key = normalizeRuleEmail(email);
+      if (!/^[^\s@]+@[^\s@]+$/u.test(key) || people.has(key)) throw badRequest("people is invalid");
+      people.set(key, parseLevel(level, "level"));
+    }
+    const rule = { members, people };
+    if (formatAccessRule(rule) === null) throw badRequest("people is invalid");
+    return rule;
+  };
+
+  const parseFolderRuleChange = (input: Record<string, unknown>): FolderRuleChange => {
+    if (input.ruleId === undefined) {
+      return { kind: "create", folder: parseFolder(input.folder), rule: parseRule(input) };
+    }
+    if (!isFolderRuleId(input.ruleId)) throw badRequest("ruleId is invalid");
+    if (!Number.isSafeInteger(input.revision) || (input.revision as number) < 1)
+      throw badRequest("revision is invalid");
+    const revision = input.revision as number;
+    if (input.clear === true) return { kind: "clear", ruleId: input.ruleId, revision };
+    return { kind: "change", ruleId: input.ruleId, revision, rule: parseRule(input) };
+  };
+
+  const settleFolderRule = (
+    result: FolderRuleResult | { ok: true } | { ok: false; reason: "not-found" | "forbidden" },
+    workspaceId: string,
+    conflict = FOLDER_RULE_CHANGED,
+  ) => {
+    if (result.ok) {
+      // Held reads re-check their grant when woken, as `settle` explains.
+      options.discussionActivity.wakeLog(workspaceId);
+      return;
+    }
+    if (result.reason === "forbidden") throw relayError("members_forbidden");
+    if (result.reason === "conflict") throw relayError("conflict", conflict);
+    throw notFound();
   };
 
   const parseToken = (value: unknown): string => {
@@ -515,6 +612,26 @@ export function createWorkspaceMemberRoutes(options: {
       case "members-end":
         settle(
           storage.endWorkspaceMembership({ workspaceId, actorUserId: userId, nowMs }),
+          workspaceId,
+        );
+        return respondWithView(workspaceId, userId);
+      case "members-folder-rules": {
+        const change = parseFolderRuleChange(input);
+        settleFolderRule(
+          storage.changeFolderRule({ workspaceId, actorUserId: userId, change, nowMs }),
+          workspaceId,
+          change.kind === "create" ? FOLDER_RULE_TAKEN : FOLDER_RULE_CHANGED,
+        );
+        return respondWithView(workspaceId, userId);
+      }
+      case "members-folder-markers":
+        settleFolderRule(
+          storage.removeFolderMarkers({
+            workspaceId,
+            actorUserId: userId,
+            folder: parseFolder(input.folder),
+            nowMs,
+          }),
           workspaceId,
         );
         return respondWithView(workspaceId, userId);
