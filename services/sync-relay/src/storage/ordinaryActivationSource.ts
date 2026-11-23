@@ -32,7 +32,7 @@ export class ServiceActivationStaleCut extends Error {
     super("Ordinary replication advanced before service activation.");
   }
 }
-/** The note's last lineage is still retiring, restoring or saving room edits. A later pass captures it again. */
+/** The note's last lineage is still retiring, restoring, saving room edits or paused. A later pass captures it again. */
 export class ServiceActivationLineageEnding extends ServiceActivationStaleCut {
   constructor() {
     super();

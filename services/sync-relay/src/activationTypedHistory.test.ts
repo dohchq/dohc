@@ -375,10 +375,6 @@ it("an activation refused for its baseline names why in the server log", async (
   );
 });
 
-/**
- * The note's text replaced while it was off, as accepting a sent change or a History restore does: the owner's engine
- * writes the new text, then seeds a new lineage from it, and captures that lineage.
- */
 function replacedLineage(note: TypedRelayNote) {
   const seed = markdownToYDoc("Accepted change\n", { clientID: 3 }),
     baseline = Y.encodeStateAsUpdate(seed);
