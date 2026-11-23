@@ -199,24 +199,6 @@ body {
   white-space: nowrap;
 }
 
-.kit-tone-success {
-  color: var(--kit-success);
-  border-color: color-mix(in srgb, var(--kit-success) 35%, var(--kit-line));
-  background: color-mix(in srgb, var(--kit-success) 10%, transparent);
-}
-
-.kit-tone-warning {
-  color: var(--kit-warning);
-  border-color: color-mix(in srgb, var(--kit-warning) 35%, var(--kit-line));
-  background: color-mix(in srgb, var(--kit-warning) 10%, transparent);
-}
-
-.kit-tone-danger {
-  color: var(--kit-danger);
-  border-color: color-mix(in srgb, var(--kit-danger) 35%, var(--kit-line));
-  background: color-mix(in srgb, var(--kit-danger) 10%, transparent);
-}
-
 .kit-tabs-list {
   display: inline-flex;
   align-self: flex-start;
@@ -445,6 +427,24 @@ body {
   border-radius: var(--kit-radius-sm);
   border: 1px solid var(--kit-line);
   background: var(--kit-panel-2);
+}
+
+.kit-tone-success {
+  color: var(--kit-success);
+  border-color: color-mix(in srgb, var(--kit-success) 35%, var(--kit-line));
+  background: color-mix(in srgb, var(--kit-success) 10%, transparent);
+}
+
+.kit-tone-warning {
+  color: var(--kit-warning);
+  border-color: color-mix(in srgb, var(--kit-warning) 35%, var(--kit-line));
+  background: color-mix(in srgb, var(--kit-warning) 10%, transparent);
+}
+
+.kit-tone-danger {
+  color: var(--kit-danger);
+  border-color: color-mix(in srgb, var(--kit-danger) 35%, var(--kit-line));
+  background: color-mix(in srgb, var(--kit-danger) 10%, transparent);
 }
 
 .kit-callout-title {

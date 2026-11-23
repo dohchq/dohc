@@ -84,7 +84,13 @@ describe("closed app compiler", () => {
       "trip.png",
     ]);
     expect(result.files.map((output) => output.path)).toEqual(["bundle.css", "bundle.js"]);
-    expect(new TextDecoder().decode(result.files[0]!.bytes)).toContain("--kit-bg");
+    const bundleCss = new TextDecoder().decode(result.files[0]!.bytes);
+    expect(bundleCss).toContain("--kit-bg");
+    const calloutAt = bundleCss.indexOf(".kit-callout");
+    expect(calloutAt).toBeGreaterThanOrEqual(0);
+    for (const tone of [".kit-tone-success", ".kit-tone-warning", ".kit-tone-danger"]) {
+      expect(bundleCss.indexOf(tone)).toBeGreaterThan(calloutAt);
+    }
     const { JSDOM } = require("jsdom") as {
       JSDOM: new (
         html: string,
