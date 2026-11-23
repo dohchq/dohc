@@ -550,7 +550,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
     accessEnded: props.accessEnded,
   });
   const [seenSharePull, setSeenSharePull] = useState(props.sharePullKey);
-  if (props.sharePullKey !== seenSharePull) {
+  if (props.sharePullKey !== seenSharePull && !engine.opening) {
     setSeenSharePull(props.sharePullKey);
     if (engine.documentUnavailable || engine.readOnlyWhileEditing) retryEngineOpen();
   }

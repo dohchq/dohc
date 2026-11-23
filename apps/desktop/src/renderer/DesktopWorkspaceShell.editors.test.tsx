@@ -613,6 +613,21 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
   });
 
+  it("opens a note again when its open misses the file while a pull runs", async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    const openEngineYDocSession = vi
+      .fn<() => Promise<unknown>>()
+      .mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)))
+      .mockImplementation(async () => boundNote());
+    const { pull } = liveShareBridge(openEngineYDocSession);
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
+
+    await pull();
+    answer({ available: false, documentUnavailable: true });
+
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+  });
+
   // A shared view has no recorder, so its refresh is what meets a store a
   // newer dohc migrated. Main records the refusal; the workspace stops with
   // the update actions, and the refresh adds no toast of its own.
