@@ -1150,8 +1150,9 @@ export function createOutbox(options: {
     signOut(leave, account) {
       epoch += 1;
       const at = epoch;
-      // After failed Sign outs, Try again deletes each of their accounts' rows, even if another has signed in since.
-      const accounts = owed.length > 0 ? owed : [account ?? lastAccount];
+      // After failed Sign outs, Try again deletes each of their accounts' rows, and those of any account signed in since.
+      const ending = account ?? lastAccount;
+      const accounts = owed.some((left) => sameAccount(left, ending)) ? owed : [...owed, ending];
       const damaged = status === "damaged";
       stopSending();
       held = true;
