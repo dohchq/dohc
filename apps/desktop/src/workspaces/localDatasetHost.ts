@@ -1159,6 +1159,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         assertCurrent();
         return host.keptDatasetIds(owner, { workspaceId });
       },
+      appHostKind(): "local" | "server" {
+        assertCurrent();
+        return options.collectionsServer?.() ? "server" : "local";
+      },
       list(input: { after?: string; limit?: number; includeArchived?: boolean } = {}) {
         assertCurrent();
         return host.list(owner, { workspaceId, ...input });

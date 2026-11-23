@@ -7,6 +7,8 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { compileClosedApp } from "./closedAppCompiler";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createLocalStagedApps } from "./localStagedApps";
+import { createDatasetAuthorityRouter } from "./remoteDataset";
+import { createLocalOwnerAppPublicationHandler } from "../ipc/localOwnerAppPublication";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
@@ -786,5 +788,214 @@ describe("localStagedApps", () => {
     expect(approvalSettledBeforeTransfer).toBe(false);
     expect(host.approvedArtifacts(expensesCol.datasetId).revision.revision).toBe(1);
     expect(host.approvedArtifacts(workoutsCol.datasetId).active).toBe(false);
+  }, 60_000);
+
+  it("preserves exclusive local migration access and rejects mixed-host bindings through production handler wiring", async () => {
+    const { workspaceRoot, host } = await openFixture();
+    const files = await loadControlTowerFiles();
+    const controller = new AbortController();
+    const signal = controller.signal;
+
+    const remoteMock = {
+      approvedArtifacts: async (datasetId: string) => ({
+        ...host.approvedArtifacts(datasetId),
+        active: true,
+      }),
+      prepareMigrationCandidate: (
+        input: Parameters<LocalDatasetHost["prepareMigrationCandidate"]>[0],
+      ) => host.prepareMigrationCandidate(input),
+      approveMigrationCandidate: (
+        input: Parameters<LocalDatasetHost["approveMigrationCandidate"]>[0],
+      ) => host.approveMigrationCandidate(input),
+      discardMigrationCandidate: (
+        input: Parameters<LocalDatasetHost["discardMigrationCandidate"]>[0],
+      ) => host.discardMigrationCandidate(input),
+    };
+    const routed = createDatasetAuthorityRouter(host, {
+      marker: (datasetId) => host.transferStatus(datasetId),
+      status: async (datasetId) => host.transferStatus(datasetId),
+      remote: async () => remoteMock as never,
+    });
+
+    let currentFiles = new Map(files);
+    const handler = createLocalOwnerAppPublicationHandler({
+      datasetForWorkspace: async () => host,
+      approvedArtifacts: async (_ws, datasetId) => routed.approvedArtifacts(datasetId),
+      migrationAuthority: async () => ({
+        approvedArtifacts: (datasetId) => Promise.resolve(routed.approvedArtifacts(datasetId)),
+        prepareMigrationCandidate: (input) => routed.prepareMigrationCandidate!(input),
+        approveMigrationCandidate: (input) => routed.approveMigrationCandidate!(input),
+        discardMigrationCandidate: (input) => routed.discardMigrationCandidate!(input),
+      }),
+      flushCapture: async () => ({ deferredWrites: [] }),
+      withAdapter: async (_ws, work) => work(sourceCaptureAdapter(currentFiles) as never),
+      compile: compileClosedApp,
+    });
+    const op = {
+      workspace: { workspaceId: "w", rootPath: workspaceRoot },
+      signal,
+      assertCurrent() {},
+    };
+
+    const firstStage = await handler(
+      { action: "stage", workspaceId: "w", appRoot: "personal-control-tower" },
+      "caller",
+      op,
+    );
+    if (!firstStage || firstStage.kind !== "staged") throw new Error("Expected staged result.");
+    const firstApprove = await handler(
+      {
+        action: "approveStaged",
+        workspaceId: "w",
+        stageId: firstStage.stage.stageId,
+        reviewDigest: firstStage.stage.reviewDigest,
+      },
+      "caller",
+      op,
+    );
+    expect(firstApprove?.kind).toBe("stagedApproved");
+
+    currentFiles = new Map(files);
+    currentFiles.set(
+      "personal-control-tower/expenses/operations.js",
+      `${files.get("personal-control-tower/expenses/operations.js")!}\n// handler local migration v2\n`,
+    );
+    const secondStage = await handler(
+      { action: "stage", workspaceId: "w", appRoot: "personal-control-tower" },
+      "caller",
+      op,
+    );
+    if (!secondStage || secondStage.kind !== "staged") throw new Error("Expected second stage.");
+    const secondApprove = await handler(
+      {
+        action: "approveStaged",
+        workspaceId: "w",
+        stageId: secondStage.stage.stageId,
+        reviewDigest: secondStage.stage.reviewDigest,
+      },
+      "caller",
+      op,
+    );
+    expect(secondApprove?.kind).toBe("stagedApproved");
+    const expensesCol = firstStage.stage.collections.find((c) => c.alias === "expenses")!;
+    const workoutsCol = firstStage.stage.collections.find((c) => c.alias === "workouts")!;
+    expect(host.approvedArtifacts(expensesCol.datasetId).revision.revision).toBe(2);
+
+    await host.transferToShared({
+      datasetId: workoutsCol.datasetId,
+      targetOrigin: "https://relay.example",
+      target: {
+        importRecovery: async (input) => ({
+          transferId: input.transferId,
+          manifestSha256: input.manifestSha256,
+          sourceCursor: input.sourceCursor,
+          targetCursor: {
+            ...input.sourceCursor,
+            hostEpoch: `${input.sourceCursor.hostEpoch}-remote`,
+            revision: input.sourceCursor.revision + 1,
+          },
+        }),
+      },
+      signal,
+    });
+
+    const newDatasetId = "00000000-0000-4000-8000-000000000099";
+    const mixedFiles = new Map(files);
+    mixedFiles.set(
+      "personal-control-tower/expenses/dataset.json",
+      files
+        .get("personal-control-tower/expenses/dataset.json")!
+        .replace(expensesCol.datasetId, newDatasetId),
+    );
+    currentFiles = mixedFiles;
+    await expect(
+      handler(
+        { action: "stage", workspaceId: "w", appRoot: "personal-control-tower" },
+        "caller",
+        op,
+      ),
+    ).rejects.toThrow(/unavailable|inactive/i);
+    expect(
+      host.list({ includeArchived: true }).datasets.some((d) => d.datasetId === newDatasetId),
+    ).toBe(false);
+  }, 60_000);
+
+  it("refuses a staged SQL backfill migration when a standalone migration already reached the same rules hash", async () => {
+    const { host, staged } = await openFixture();
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    const initialStage = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+    const initialApproved = await staged.approve({
+      stageId: initialStage.stageId,
+      reviewDigest: initialStage.reviewDigest,
+      signal,
+    });
+    await host.apps.request(initialApproved.publicationId, "invoke", {
+      authorityRevision: initialApproved.authorityRevision,
+      dataset: "workouts",
+      operation: "logWorkout",
+      idempotencyKey: "wrk-backfill-seed",
+      input: {
+        date: "2026-11-23",
+        activity: "Row",
+        minutes: 25,
+        effort: "Moderate",
+        notes: "before",
+      },
+    });
+    const workoutsCol = initialStage.collections.find((c) => c.alias === "workouts")!;
+
+    const updatedFiles = new Map(files);
+    const updatedOps = `${files.get("personal-control-tower/workouts/operations.js")!}\n// backfill v2\n`;
+    updatedFiles.set("personal-control-tower/workouts/operations.js", updatedOps);
+    updatedFiles.set(
+      "personal-control-tower/workouts/backfill.sql",
+      "UPDATE workouts SET notes = 'backfilled';",
+    );
+    const backfillStage = await staged.stage({
+      appRoot: "personal-control-tower",
+      migrations: { workouts: "personal-control-tower/workouts/backfill.sql" },
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(updatedFiles),
+      signal,
+    });
+
+    const workoutsApproved = host.approvedArtifacts(workoutsCol.datasetId);
+    const sameRulesRevision = describeDatasetRevision({
+      definition: workoutsApproved.revision.definition,
+      revision: 2,
+      schemaSql: workoutsApproved.schemaSql,
+      operationSource: updatedOps,
+    });
+    const standalone = await host.prepareMigrationCandidate({
+      workspaceId: "w",
+      revision: sameRulesRevision,
+      expected: workoutsApproved.cursor,
+      schemaSql: workoutsApproved.schemaSql,
+      operationSource: updatedOps,
+      migrationSql: "SELECT 1;",
+      signal,
+    });
+    await host.approveMigrationCandidate({
+      workspaceId: "w",
+      datasetId: workoutsCol.datasetId,
+      candidateId: standalone.candidateId,
+      checkpointSha256: standalone.checkpointSha256,
+      signal,
+    });
+
+    await expect(
+      staged.approve({
+        stageId: backfillStage.stageId,
+        reviewDigest: backfillStage.reviewDigest,
+        signal,
+      }),
+    ).rejects.toThrow(/changed after staging/i);
   }, 60_000);
 });

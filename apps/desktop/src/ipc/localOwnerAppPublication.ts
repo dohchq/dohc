@@ -132,6 +132,9 @@ export function createLocalOwnerAppPublicationHandler<
           ? await deps.migrationAuthority(operation.workspace, operation.signal)
           : null;
         current();
+        const useServerAuthority = local.appHostKind
+          ? local.appHostKind() === "server" && !!migration
+          : !!migration;
         return createLocalStagedApps({
           workspaceId: operation.workspace.workspaceId,
           workspaceRoot: rootPath,
@@ -145,7 +148,13 @@ export function createLocalOwnerAppPublicationHandler<
           },
           tryApprovedArtifacts: async (datasetId) => {
             try {
-              if (migration) return await migration.approvedArtifacts(datasetId);
+              if (useServerAuthority && migration) {
+                if (local.keptDatasetIds?.().includes(datasetId))
+                  throw new Error(
+                    "All Collections used by this app must be active on the same host.",
+                  );
+                return await migration.approvedArtifacts(datasetId);
+              }
               if (!local.approvedArtifacts) return null;
               return local.approvedArtifacts(datasetId);
             } catch (error) {
@@ -173,19 +182,22 @@ export function createLocalOwnerAppPublicationHandler<
             local.discard?.(preparationId);
           },
           prepareMigrationCandidate: async (migrationInput) => {
-            if (migration) return migration.prepareMigrationCandidate(migrationInput);
+            if (useServerAuthority && migration)
+              return migration.prepareMigrationCandidate(migrationInput);
             if (!local.prepareMigrationCandidate)
               throw new Error("Collection updates are unavailable on this device.");
             return local.prepareMigrationCandidate(migrationInput);
           },
           approveMigrationCandidate: async (migrationInput) => {
-            if (migration) return migration.approveMigrationCandidate(migrationInput);
+            if (useServerAuthority && migration)
+              return migration.approveMigrationCandidate(migrationInput);
             if (!local.approveMigrationCandidate)
               throw new Error("Collection updates are unavailable on this device.");
             return local.approveMigrationCandidate(migrationInput);
           },
           discardMigrationCandidate: async (migrationInput) => {
-            if (migration) return migration.discardMigrationCandidate(migrationInput);
+            if (useServerAuthority && migration)
+              return migration.discardMigrationCandidate(migrationInput);
             if (local.discardMigrationCandidate)
               return local.discardMigrationCandidate(migrationInput);
           },
@@ -196,7 +208,7 @@ export function createLocalOwnerAppPublicationHandler<
                 local.withExclusiveDatasets!(datasetIds, signal, (exclusive) =>
                   work({
                     approveCreate: (approveInput) => exclusive.approve(approveInput),
-                    ...(migration
+                    ...(useServerAuthority
                       ? {}
                       : {
                           approveMigrationCandidate: (migrationInput) =>
