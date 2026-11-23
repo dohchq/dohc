@@ -60,11 +60,14 @@ function heldMarkerPath(statements: AccessRuleStatements, workspaceId: string, f
 function heldFolderPath(statements: AccessRuleStatements, workspaceId: string, folder: string) {
   if (folderHasFiles(statements, workspaceId, folder)) return folder;
   const key = pathCollisionKey(folder);
-  const held = statements.keyUnder.get(workspaceId, `${key}/`, `${key}0`);
-  if (held === undefined) return folder;
-  // A name can fold to more than one segment, so check the folder matches.
-  const path = String(held.path).split("/").slice(0, folder.split("/").length).join("/");
-  return pathCollisionKey(path) === key ? path : folder;
+  // A name can fold to more than one segment, so match name by name.
+  const wanted = folder.split("/").map(pathCollisionKey);
+  for (const row of statements.keyUnder.iterate(workspaceId, `${key}/`, `${key}0`)) {
+    const names = String(row.path).split("/").slice(0, wanted.length);
+    if (names.every((name, index) => pathCollisionKey(name) === wanted[index]))
+      return names.join("/");
+  }
+  return folder;
 }
 
 export function changeFolderRule(

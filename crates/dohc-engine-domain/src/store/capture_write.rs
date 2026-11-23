@@ -1419,8 +1419,8 @@ pub fn capture_manifest_seed(
         // heads. A placed one still belongs here: a folder renamed while dohc
         // was closed must retire its old marker. A pulled marker has no job,
         // so one the desktop had yet to place counts as placed and is retired
-        // too; the relay keeps its folder ruled while it has files. LIKE only
-        // narrows the rows.
+        // too; the relay keeps its folder ruled while it has files. SQL LIKE
+        // folds ASCII only, so is_access_marker picks the markers.
         let mut markers = conn
             .prepare(
                 "SELECT a.path, s.blob_sha256, tb.byte_length FROM path_aliases a \
@@ -1428,7 +1428,6 @@ pub fn capture_manifest_seed(
                    AND s.version_id = a.version_id AND s.object_id = a.object_id \
                  JOIN blobs tb ON tb.sha256 = s.blob_sha256 \
                  WHERE a.workspace_id = ?1 AND a.version_id = ?2 \
-                   AND a.path LIKE '%access%' \
                    AND COALESCE(s.content_kind, 'text') = 'text' \
                    AND s.metadata_origin NOT IN ('capture', 'ydoc') \
                    AND NOT EXISTS ( \
