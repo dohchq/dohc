@@ -366,10 +366,37 @@ const paragraphFor = (line: BodyLine) => ({
   index: line.start,
   attrs: { type: "paragraph", path: line.ids },
 });
-const afterIt = (lines: BodyLine[], line: BodyLine | undefined) =>
-  lines.find((each) => line !== undefined && each.bare === "spill" && each.owner === line);
-const addedAbove = (lines: BodyLine[], line: BodyLine | undefined) =>
-  lines.filter((each) => line !== undefined && each.bare === "item" && each.owner === line);
+/** What a change touches, by line. A line is one leaf block of the note, with or without a boundary. */
+export type TouchedLines<Line> = {
+  /** Lines the change edits: it puts in or takes out a letter, an inline item, a mark or a kind. */
+  edits?: readonly (Line | undefined)[];
+  /** Lines the change deletes, ends, splits, moves or changes the kind of, when that can alter the paragraph read after one from its boundary. */
+  after?: readonly (Line | undefined)[];
+  /** Lines the change deletes, splits at their start, moves or changes the kind of, when that can alter the first paragraph a list item adds above one. */
+  above?: readonly (Line | undefined)[];
+};
+
+/**
+ * The lines read with no boundary of their own that get one before a change is written, as
+ * section 4 of the format says: each such line the change edits, the paragraph after each line
+ * in `after`, and each list item's added first paragraph above a line in `above`. The one rule
+ * for every writer: `changeOf` here and the editor adapter both ask it.
+ */
+export function linesGiven<Line extends { bare: string; owner?: Line | undefined }>(
+  lines: readonly Line[],
+  touched: TouchedLines<Line>,
+): Line[] {
+  const edits = new Set(touched.edits);
+  const after = new Set(touched.after);
+  const above = new Set(touched.above);
+  return lines.filter(
+    (line) =>
+      line.bare !== "" &&
+      (edits.has(line) ||
+        (line.bare === "spill" && after.has(line.owner)) ||
+        (line.bare === "item" && above.has(line.owner))),
+  );
+}
 const bareIn = (lines: BodyLine[]) =>
   lines.flatMap((line) =>
     line.bare === ""
@@ -405,28 +432,25 @@ function changeOf(
   schema: Schema,
   doc: Y.Doc,
   freshId: () => string,
-  edited: (lines: BodyLine[]) => (BodyLine | undefined)[] | null,
+  touches: (lines: BodyLine[]) => TouchedLines<BodyLine> | null,
   plan: (lines: Planned[], freshId: () => string) => BodyWrites | null,
 ): BodyChange | null {
   let tried = 0;
   const idToTry = () => `?${String(tried++)}`;
   let lines = readBody(schema, doc);
-  const operands = edited(lines);
-  if (!operands) return null;
+  const touched = touches(lines);
+  if (!touched) return null;
   const given = new Set<number>();
-  lines.forEach((line, at) => {
-    if (line.bare !== "" && operands.includes(line)) given.add(at);
-  });
+  for (const line of linesGiven(lines, touched)) given.add(lines.indexOf(line));
   for (;;) {
     const all = [...asGiven(lines, given)];
     const tryout = plan(lines, idToTry);
     if (!tryout) return null;
     const known = given.size;
     const left = new Set(lines);
-    all.forEach((line, at) => {
-      const itMoved = moved(line) || (line.owner !== undefined && moved(line.owner));
-      if (line.bare !== "" && left.has(line) && itMoved) given.add(at);
-    });
+    const went = all.filter(moved);
+    for (const line of linesGiven(all, { edits: went, after: went, above: went }))
+      if (left.has(line)) given.add(all.indexOf(line));
     if (given.size > known) {
       lines = readBody(schema, doc);
       continue;
@@ -602,7 +626,7 @@ export function typeLetters(
     schema,
     doc,
     noId,
-    (lines) => [lines[at]],
+    (lines) => ({ edits: [lines[at]] }),
     (lines) => {
       const index = landing(schema, lines[at], offset, "text");
       return index === null ? null : { ...nothing(), typed: { index, letters, marks } };
@@ -625,7 +649,7 @@ export function insertInline(
     schema,
     doc,
     noId,
-    (lines) => [lines[at]],
+    (lines) => ({ edits: [lines[at]] }),
     (lines) => {
       const index = landing(schema, lines[at], offset, name);
       return index === null ? null : { ...nothing(), placed: { index, name, attrs } };
@@ -672,7 +696,7 @@ export function setInlineAttributes(
     schema,
     doc,
     noId,
-    (lines) => [lines[at]],
+    (lines) => ({ edits: [lines[at]] }),
     () => ({ ...nothing(), attributes: new Map([[element, Object.fromEntries(changed)]]) }),
   );
 }
@@ -718,7 +742,7 @@ export function setMarks(
     schema,
     doc,
     noId,
-    (lines) => [lines[at]],
+    (lines) => ({ edits: [lines[at]] }),
     (lines) => ({ ...nothing(), marked: { index: lines[at]!.start + offset, length, marks } }),
   );
 }
@@ -756,7 +780,7 @@ export function deleteRange(
       const held =
         !isLeft || !first || holdsIt(schema, first.type, unitAt(doc, last.start + toOffset));
       joins = !stays && held;
-      return [first, apart && joins ? afterIt(lines, last) : undefined];
+      return { edits: [first], after: apart && joins ? [last] : [] };
     },
     (lines, freshId) => {
       const first = lines[at];
@@ -812,11 +836,11 @@ export function splitLine(
     schema,
     doc,
     freshId,
-    (lines) => [
-      lines[at],
-      afterIt(lines, lines[at]),
-      ...(offset === 0 ? addedAbove(lines, lines[at]) : []),
-    ],
+    (lines) => ({
+      edits: [lines[at]],
+      after: [lines[at]],
+      above: offset === 0 ? [lines[at]] : [],
+    }),
     (lines, freshId) => {
       const line = lines[at];
       if (!line || offset < 0 || offset > line.text.length) return null;
@@ -899,7 +923,11 @@ export function joinLine(
       const joins = lower.text === "" || holdsIt(schema, upper.type, unitAt(doc, lower.start));
       if (lowerGoes && !joins) return null;
       if (lowerGoes && lower.text === "" && isNeededFirst(lines, at)) return null;
-      return [upper, lower, ...(lowerGoes ? [afterIt(lines, lower)] : addedAbove(lines, upper))];
+      return {
+        edits: [upper, lower],
+        after: lowerGoes ? [lower] : [],
+        above: lowerGoes ? [] : [upper],
+      };
     },
     (lines, freshId) => {
       const gone = goneInJoin(lines, at)!;
@@ -931,7 +959,7 @@ export function setLineKind(
       if (!line || line.bare === "item") return null;
       if (typeof asked.type === "string" && !isLeafKind(schema, asked.type)) return null;
       const retyped = typeof asked.type === "string" && asked.type !== line.type;
-      return retyped ? [line, afterIt(lines, line), ...addedAbove(lines, line)] : [line];
+      return { edits: [line], after: retyped ? [line] : [], above: retyped ? [line] : [] };
     },
     (lines) => {
       const line = lines[at]!;
@@ -971,7 +999,7 @@ export function wrapBlocks(
       const line = lines[at];
       const around = line?.path[depth - 1]?.type ?? schema.topNodeType.name;
       if (!line || depth > line.path.length || !holdsIt(schema, around, type)) return null;
-      return blocksAround(lines, at, depth).addedOnly(count) ? null : [];
+      return blocksAround(lines, at, depth).addedOnly(count) ? null : {};
     },
     (lines, freshId) => {
       const make = (made: string, starts: SequenceAttrs): BodyContainer => ({
@@ -1010,7 +1038,7 @@ export function liftBlocks(
     schema,
     doc,
     freshId,
-    (lines) => (lines[at] && blocksAround(lines, at, depth).addedOnly(count) ? null : []),
+    (lines) => (lines[at] && blocksAround(lines, at, depth).addedOnly(count) ? null : {}),
     (lines, freshId) => {
       const line = lines[at];
       const around = line?.path[depth - 1];
@@ -1041,7 +1069,7 @@ export function indentItem(
     schema,
     doc,
     freshId,
-    () => [],
+    () => ({}),
     (lines, freshId) => {
       const list = lines[at]?.path[depth - 1];
       if (!list || !isList(list.type) || !lines[at]!.path[depth]) return null;
@@ -1073,7 +1101,7 @@ export function outdentItem(
     schema,
     doc,
     freshId,
-    () => [],
+    () => ({}),
     (lines, freshId) => {
       const path = lines[at]?.path ?? [];
       const item = path[depth];
@@ -1105,7 +1133,7 @@ export function setContainerKind(
     schema,
     doc,
     freshId,
-    () => [],
+    () => ({}),
     (lines, freshId) => {
       const stored = doc.getMap(BODY_CONTAINERS_FIELD);
       const container = lines[at]?.path[depth];
@@ -1143,7 +1171,7 @@ export function setContainerAttributes(
     schema,
     doc,
     freshId,
-    () => [],
+    () => ({}),
     (lines, freshId) => {
       const stored = doc.getMap(BODY_CONTAINERS_FIELD);
       const container = lines[at]?.path[depth];
