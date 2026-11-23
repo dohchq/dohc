@@ -237,7 +237,7 @@ describe("DocumentMenu", () => {
           expect(writeText).not.toHaveBeenCalled();
           expect(report).not.toHaveBeenCalled();
           expect(screen.queryByText("Copied")).toBeNull();
-          expect(screen.queryByText("Couldn't copy")).toBeNull();
+          expect(screen.queryByText("Could not copy")).toBeNull();
         } finally {
           logged.mockRestore();
         }
@@ -303,7 +303,7 @@ describe("DocumentMenu", () => {
       await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
       await act(async () => {});
       expect(screen.getByTestId("document-menu-item-copy-markdown").textContent).toBe(
-        "Couldn't copy",
+        "Could not copy",
       );
       expect(report).toHaveBeenCalledExactlyOnceWith({
         message: "dohc could not copy Plan as Markdown.",
@@ -803,14 +803,14 @@ describe("DocumentMenu", () => {
       expect(
         screen.getByTestId("document-menu-item-copy-markdown").textContent,
         "call `getMarkdown()` outside the boundary -> an unhandled rejection, and the user sees the menu sit there.",
-      ).toBe("Couldn't copy");
+      ).toBe("Could not copy");
       expect(logged).toHaveBeenCalledWith("Copy as Markdown failed", failure);
       expect(writeText).not.toHaveBeenCalled();
 
       await user.click(screen.getByTestId("document-menu-item-export-markdown"));
       await act(async () => {});
       expect(screen.getByTestId("document-menu-item-export-markdown").textContent).toBe(
-        "Couldn't export",
+        "Could not export",
       );
       expect(logged).toHaveBeenCalledWith("Export as MARKDOWN failed", failure);
       expect(exportDocumentFile).not.toHaveBeenCalled();
@@ -858,7 +858,7 @@ describe("DocumentMenu", () => {
         }),
       );
       await user.click(screen.getByTestId("document-menu-trigger"));
-      expect(screen.queryByText("Couldn't copy")).toBeNull();
+      expect(screen.queryByText("Could not copy")).toBeNull();
     });
 
     it("offers a retry that copies the document as it is now and reports only a failure", async () => {
@@ -911,7 +911,7 @@ describe("DocumentMenu", () => {
       expect(report).toHaveBeenCalledTimes(3);
       expect(report).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          message: "dohc could not copy Plan as Markdown, because Plan is not open.",
+          message: "dohc could not copy Plan as Markdown because it is not open.",
           identity,
         }),
       );
@@ -948,7 +948,7 @@ describe("DocumentMenu", () => {
       const notOpen = report.mock.calls[1]![0];
       expect(notOpen).toEqual(
         expect.objectContaining({
-          message: "dohc could not copy Plan as Markdown, because Plan is not open.",
+          message: "dohc could not copy Plan as Markdown because it is not open.",
           identity: first.identity,
           target: { to: "file", path: "a/Plan.md" },
           action: expect.objectContaining({ label: "Open note" }),
@@ -1002,7 +1002,7 @@ describe("DocumentMenu", () => {
         "know a note by its name -> Try again copies the other folder's Plan.",
       ).not.toHaveBeenCalled();
       expect(report.mock.calls[1]![0].message).toBe(
-        "dohc could not copy Plan as Markdown, because Plan is not open.",
+        "dohc could not copy Plan as Markdown because it is not open.",
       );
     });
 
@@ -1235,7 +1235,7 @@ describe("DocumentMenu", () => {
         await pending.catch(() => {});
       });
       expect(screen.queryByText("Document not open")).toBeNull();
-      expect(screen.queryByText("Couldn't copy")).toBeNull();
+      expect(screen.queryByText("Could not copy")).toBeNull();
     },
   );
 

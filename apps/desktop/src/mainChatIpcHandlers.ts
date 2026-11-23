@@ -36,6 +36,8 @@ export function reactionsForViewer<
     messageId: string;
     emoji: string;
     authorId: string;
+    authorKind: string;
+    authorAgentId?: string;
   },
 >(
   reactions: readonly Reaction[],
@@ -50,7 +52,14 @@ export function reactionsForViewer<
       reaction.authorId === input.localFallbackAuthorId
         ? { ...reaction, authorId: input.viewerAuthorId }
         : reaction;
-    const key = [mapped.threadId, mapped.messageId, mapped.emoji, mapped.authorId].join("\u0000");
+    const key = [
+      mapped.threadId,
+      mapped.messageId,
+      mapped.emoji,
+      mapped.authorId,
+      mapped.authorKind,
+      mapped.authorAgentId ?? "",
+    ].join("\u0000");
     const current = byCell.get(key);
     if (!current || (isCurrentIdentity && !current.isCurrentIdentity)) {
       byCell.set(key, { reaction: mapped, isCurrentIdentity });

@@ -48,8 +48,10 @@ interface CliExecutionOptions {
   writeStdout?: (text: string) => void;
 }
 
+type ResolvedCliCommand = Exclude<ParsedCliCommand, { stdinJson: unknown }>;
+
 async function bodyForCommand(
-  command: ParsedCliCommand,
+  command: ResolvedCliCommand,
   readStdin: () => Promise<string>,
 ): Promise<string | undefined> {
   if (command.verb === "documentEdit" || command.verb === "documentCreate") {
@@ -83,19 +85,19 @@ async function bodyForCommand(
 }
 
 function isDeclaredCommand(
-  command: ParsedCliCommand,
-): command is Extract<ParsedCliCommand, { verb: DeclaredVerb }> {
+  command: ResolvedCliCommand,
+): command is Extract<ResolvedCliCommand, { verb: DeclaredVerb }> {
   return isDeclaredVerb(command.verb);
 }
 
 function isDeclaredWriteCommand(
-  command: ParsedCliCommand,
-): command is Extract<ParsedCliCommand, { verb: DeclaredWriteVerb }> {
+  command: ResolvedCliCommand,
+): command is Extract<ResolvedCliCommand, { verb: DeclaredWriteVerb }> {
   return isDeclaredWriteVerb(command.verb);
 }
 
 function buildCliRequest(
-  command: ParsedCliCommand,
+  command: ResolvedCliCommand,
   cwdInput: string,
   stdinBody?: string,
   runId?: string,
@@ -731,7 +733,8 @@ function refusal(verb: string, result: CliResultByVerb[keyof CliResultByVerb]): 
   if (result !== null && "kind" in result && result.kind === "collections-refused") {
     return result.refusal.words;
   }
-  if (result === null || !("ok" in result) || result.ok !== false) return null;
+  if (result === null || !("ok" in result) || result.ok !== false || !("reason" in result))
+    return null;
   return "notice" in result && result.notice
     ? `${result.reason} ${result.notice.title}: ${result.notice.body}`
     : result.reason;
@@ -787,19 +790,31 @@ function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
 export async function executeCli(options: CliExecutionOptions): Promise<CliExecutionResult> {
   try {
     const env = options.env ?? process.env;
-    const command = parseCliArguments(options.argv, env);
-    if ("help" in command) return { exitCode: 0, stdout: renderCliHelp(command), stderr: "" };
-    const stdinBody = await bodyForCommand(
-      command,
+    const parsedCommand = parseCliArguments(options.argv, env);
+    if ("help" in parsedCommand)
+      return { exitCode: 0, stdout: renderCliHelp(parsedCommand), stderr: "" };
+    const readStdin =
       options.readStdin ??
-        (() =>
-          readStdinText(
-            process.stdin,
-            command.verb === "fileChatStart"
-              ? { bytes: MAX_CHAT_MESSAGE_BODY_BYTES, message: CHAT_MESSAGE_TOO_LONG }
-              : undefined,
-          )),
-    );
+      (() =>
+        readStdinText(
+          process.stdin,
+          parsedCommand.verb === "fileChatStart"
+            ? { bytes: MAX_CHAT_MESSAGE_BODY_BYTES, message: CHAT_MESSAGE_TOO_LONG }
+            : undefined,
+        ));
+    const command: ResolvedCliCommand =
+      "stdinJson" in parsedCommand
+        ? {
+            actor: parsedCommand.actor,
+            ...(parsedCommand.agentId === undefined ? {} : { agentId: parsedCommand.agentId }),
+            ...(parsedCommand.workspaceId === undefined
+              ? {}
+              : { workspaceId: parsedCommand.workspaceId }),
+            json: parsedCommand.json,
+            ...parsedCommand.stdinJson((await readStdin()).replace(/^\uFEFF/u, "")),
+          }
+        : parsedCommand;
+    const stdinBody = await bodyForCommand(command, readStdin);
     const password =
       command.verb === "accountDelete"
         ? await (options.readPassword ?? (() => readPassword(process.stdin, process.stderr)))()
@@ -842,6 +857,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
                 : // A paced Access refresh waits up to a minute for the next roster check.
                   command.verb === "historyUndo" ||
                     command.verb === "accessRefresh" ||
+                    command.verb === "undoAgentRun" ||
                     command.verb === "dataset" ||
                     command.verb === "appPublication" ||
                     command.verb === "ownerAppResponses" ||
@@ -880,6 +896,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
           result !== null &&
           (("remaining" in result && result.remaining.length > 0) ||
             ("kind" in result && result.kind === "partial") ||
+            ("kind" in result && result.kind === "frontendVerified" && !result.ok) ||
             ("disconnectError" in result && result.disconnectError !== null))
             ? 1
             : 0,

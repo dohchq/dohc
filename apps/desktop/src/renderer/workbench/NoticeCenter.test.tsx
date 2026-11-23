@@ -666,43 +666,43 @@ describe("notice center", () => {
     {
       reason: "session-host-refused" as const,
       title: "Live editing stopped",
-      body: "The server stopped live editing for a document in this workspace. Your copy and its history are unchanged. People you shared it with can't edit it live for now. Open Live documents to try again.",
+      body: "The server stopped live editing for a document in this workspace. Your copy and its History are unchanged. Others cannot edit it live. Open Live documents to try again.",
     },
     {
       reason: "live-document-without-lineage" as const,
-      title: "Live editing can't start",
-      body: "The server can't start live editing for a document in this workspace until you open it once in dohc. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it. Open Live documents to see which document. After you open it, resume live editing there.",
+      title: "Live editing cannot start",
+      body: "The server cannot start live editing for a document until you open it once in dohc. Notes larger than 256 KB do not open as live documents. Open Live documents to see which document it is, make it smaller or split it if needed, open it in dohc, and then resume live editing.",
     },
     // A diverged server copy offers no Resume: only the server's operator can continue it.
     {
       reason: "session-host-diverged" as const,
       title: "Live editing stopped",
-      body: "The server stopped live editing because its copy of this workspace no longer matches the synced one. Edits people made live may not have reached your files. People you shared its documents with can't edit them live. Contact the server's operator.",
+      body: "The server stopped live editing because its copy of this workspace no longer matches the synced one. Live edits may not have reached your files, and others cannot edit them live. Contact the server's operator.",
     },
     // A document whose server copy is missing an owner edit resumes there too:
     // its Resume tries that edit again.
     {
       reason: "live-edit-unadmitted" as const,
       title: "Live editing stopped",
-      body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
+      body: "The server has not applied an edit to a document in this workspace. You can keep editing it in dohc, but others cannot edit it live. Open Live documents to resume live editing.",
     },
     // Its Resume in Live documents tries again now.
     {
       reason: "live-history-over-budget" as const,
-      title: "Live editing can't start",
-      body: "A document in this workspace has too much edit history for the server to check, so live editing can't start for it. Your edits are saved and keep syncing. Open Live documents to resume live editing for it.",
+      title: "Live editing cannot start",
+      body: "A document in this workspace has too much edit history for the server to check, so live editing cannot start. Your edits are saved and keep syncing. Open Live documents to try again.",
     },
     // The server keeps trying it, so it keeps the retry mark.
     {
       reason: "live-start-failing" as const,
-      title: "Live editing can't start",
-      body: "The server can't start live editing for a document in this workspace. It keeps trying. Open Live documents to see which one.",
+      title: "Live editing cannot start",
+      body: "The server cannot start live editing for a document in this workspace and keeps trying. Open Live documents to see which one.",
       icon: "refresh-cw",
     },
     {
       reason: "conflict-parent-withheld" as const,
-      title: "Live editing can't resume",
-      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. A copy of it can go live. Open Live documents to see which document and make a copy.",
+      title: "Live editing cannot resume",
+      body: "A conflict was resolved in a document, so live editing cannot resume for it. People with the link can still read the last shared version, but your edits may not reach them. Open Live documents to make a copy that can go live.",
     },
   ] as {
     reason: SyncStatusResult["ownerLiveDeliveryReason"];

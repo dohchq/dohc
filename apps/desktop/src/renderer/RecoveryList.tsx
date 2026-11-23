@@ -41,7 +41,7 @@ export function DismissDraftControls(props: { onDismiss: () => void | Promise<vo
       .catch((cause) => {
         if (mounted.current)
           report?.({
-            message: "dohc could not dismiss this draft. Your saved copy remains available.",
+            message: "dohc could not dismiss this draft. Your saved copy is still here.",
             cause,
             retry: dismiss,
           });
@@ -80,7 +80,7 @@ export function DismissConfirm(props: {
 }) {
   return (
     <span className="flex items-center gap-2">
-      <span className="text-[11px] text-danger">Deletes the only copy.</span>
+      <span className="text-[12px] text-danger">Deletes the only copy.</span>
       <DangerButton
         size="row"
         data-testid="recovery-dismiss-confirm"
@@ -107,10 +107,10 @@ export function RecoveryList(props: {
         <li
           key={`${row.workspaceId}:${row.path}:${row.draft.id}`}
           data-testid="recovery-list-row"
-          className="flex items-center justify-between gap-2 border-b border-line py-1.5 text-[11px] last:border-b-0"
+          className="flex items-center justify-between gap-2 border-b border-line py-1.5 text-[12px] last:border-b-0"
         >
           <span className="min-w-0 flex-1 truncate">
-            <span className="font-mono text-muted">{row.path}</span>
+            <span className="text-muted">{row.path}</span>
             {/* Most rows survive a quit, and one kind does not: a
                 secret-classified path never enters plaintext storage,
                 and a refused write leaves the text in memory. The lifetime
@@ -123,7 +123,7 @@ export function RecoveryList(props: {
             {row.persisted ? null : (
               <span
                 data-testid="recovery-list-window-only"
-                className="ml-2 text-[11px] text-warning"
+                className="ml-2 text-[12px] text-warning"
               >
                 <TriangleAlert size={12} aria-hidden className="mr-1 inline-block align-[-2px]" />
                 Only in this window
@@ -135,10 +135,7 @@ export function RecoveryList(props: {
                 the UI shows elsewhere (the shell registers it); scoped lists
                 need none. */}
             {props.showWorkspace === true ? (
-              <span
-                data-testid="recovery-list-workspace"
-                className="ml-2 font-mono text-[10px] text-subtle"
-              >
+              <span data-testid="recovery-list-workspace" className="ml-2 text-[12px] text-subtle">
                 {row.workspaceLabel}
               </span>
             ) : null}

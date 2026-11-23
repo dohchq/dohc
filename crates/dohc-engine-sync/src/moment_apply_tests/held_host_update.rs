@@ -381,6 +381,7 @@ fn stop(owner: &mut RestoreOwner, cut: i64) {
                         &binding,
                         Some(cut),
                         None,
+                        "person",
                         22,
                         |_, _, _, _, _| Ok(()),
                     )
@@ -435,6 +436,7 @@ fn deferred_stop(owner: &mut RestoreOwner) {
                         &observed.binding,
                         Some(cursor + 1),
                         None,
+                        "person",
                         22,
                         |_, _, _, _, _| Ok(()),
                     )

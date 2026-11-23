@@ -105,7 +105,7 @@ describe.each(operations)("$name key custody", ({ run }) => {
           name: "SecretFileStoreError",
           code: "key-corrupt",
           message:
-            "dohc didn't use .dohc/engine/secret.key because its folder resolves through a link. Move the folder the link points to into this workspace in place of the link.",
+            "dohc did not use .dohc/engine/secret.key because its folder resolves through a link. Move the folder the link points to into this workspace in place of the link.",
         });
 
         expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
@@ -149,7 +149,7 @@ describe.each(operations)("$name key custody", ({ run }) => {
       name: "SecretFileStoreError",
       code: "key-corrupt",
       message:
-        "dohc couldn't verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
+        "dohc could not verify .dohc/engine. Restore this workspace's .dohc/engine folder, then try again.",
     });
     expect(open).not.toHaveBeenCalled();
     expect(link).not.toHaveBeenCalled();

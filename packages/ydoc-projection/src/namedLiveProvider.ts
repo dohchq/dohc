@@ -49,7 +49,7 @@ export interface NamedLiveProviderState {
   readonly lastApplied: LiveUpdateHostApplicationAck | null;
   /** A bounded current subset. An overflowed snapshot cannot establish departures by omission. */
   readonly membership: LiveMembershipFrame | null;
-  /** The page holds the host's early state and takes edits, which wait until it is live. */
+  /** The page isn't live but holds the note, from the host's early state or from being live, and takes edits that wait until it is. */
   readonly typingAhead: boolean;
 }
 
@@ -167,7 +167,8 @@ export function createNamedLiveProvider(
   let seeded = false,
     synced = false,
     vectorAsked = false;
-  const typingAhead = () => seeded && !synced && status !== "quarantined" && status !== "closed";
+  const typingAhead = () =>
+    (seeded || synced) && status !== "live" && status !== "quarantined" && status !== "closed";
   const contextNow = () =>
     parseLiveAuthorContext(
       typeof recordingContext === "function" ? recordingContext() : recordingContext,

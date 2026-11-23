@@ -125,9 +125,7 @@ describe("a record's properties", () => {
     const input = within(openEditor("estimate")).getByRole<HTMLInputElement>("textbox");
     fireEvent.change(input, { target: { value: "many" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(within(editor("estimate")!).getByRole("alert").textContent).toBe(
-      "This value is not a number. Enter a number.",
-    );
+    expect(within(editor("estimate")!).getByRole("alert").textContent).toBe("Enter a number.");
     expect(changes).toEqual([]);
     fireEvent.click(value("title"));
     expect(editor("title")).toBeNull();
@@ -281,6 +279,21 @@ describe("a record's properties", () => {
     expect(row("estimate").textContent).toContain("Enter a value estimate can take.");
     fireEvent.click(refused.getByRole("button", { name: "Dismiss" }));
     expect(dismiss).toHaveBeenCalledOnce();
+  });
+
+  it("shows the stored value on a change the Collection refused, and starts the next edit from what was typed", () => {
+    const { store } = statusStore({
+      "rec-a:title": {
+        state: "refused",
+        value: "Typed",
+        reason: "Enter a shorter name.",
+        dismiss: vi.fn(),
+        stored: true,
+      },
+    });
+    renderProperties({ cellStatuses: store });
+    expect(value("title").textContent).toBe("Task a");
+    expect(within(openEditor("title")).getByRole<HTMLInputElement>("textbox").value).toBe("Typed");
   });
 
   it("draws a host's cell and editor, and never opens the shared text editor on one", () => {

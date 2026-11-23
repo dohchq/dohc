@@ -3,11 +3,22 @@
 #[cfg(windows)]
 mod dacl;
 #[cfg(windows)]
+pub mod in_place;
+#[cfg(windows)]
 mod private_dir;
 #[cfg(windows)]
-pub use dacl::{Dacl, create_new_with_dacl};
+mod staged;
 #[cfg(windows)]
-pub use private_dir::{NotPrivate, NotPrivateReason, ensure_private_dir, not_private};
+pub use dacl::{Dacl, change_time_at, create_new_with_dacl};
+#[cfg(windows)]
+pub use private_dir::{
+    NotPrivate, NotPrivateReason, ensure_private_dir, ensure_private_dir_leaving,
+    ensure_private_staging_dir, hold_staging_dir, not_private,
+};
+#[cfg(windows)]
+pub use staged::{
+    LeftReason, Restricted, StagedFile, make_staged_private, read_staged, restore_dacl,
+};
 
 #[cfg(windows)]
 /// Move a file without replacing the destination or copying across volumes.

@@ -4,6 +4,7 @@ import {
   ChatWakeView,
   PhoneChatContext,
   PhoneChatWake,
+  PhoneMentionCandidate,
   PhoneWakeChanges,
 } from "@dohc/workspace-contracts/chat-wakes";
 import {
@@ -11,6 +12,7 @@ import {
   earlierWakeCursor,
   phoneChatContext,
   phoneChatWake,
+  phoneMentionCandidate,
   phoneWakeChanges,
   readChatContext,
   readConversationWakes,
@@ -80,7 +82,13 @@ describe("readChatContext", () => {
     server.on("POST", CONTEXT, answered(context(stream, wakes)));
     const page = await readChatContext(client, "w1", { kind: "stream", groupId: "g-1" }, signal);
     expect(server.calls[0]?.body).toEqual({ group: "g-1" });
-    expect(page).toEqual({ kind: "context", wakes, wakeCursor: "7", nextBefore: null });
+    expect(page).toEqual({
+      kind: "context",
+      mentions: [],
+      wakes,
+      wakeCursor: "7",
+      nextBefore: null,
+    });
   });
 
   it("answers a chat or thread the server doesn't have as missing", async () => {
@@ -162,6 +170,7 @@ describe("readConversationWakes", () => {
       { threadId: "thread-1", before: 50 },
     ]);
     expect(read).toEqual({
+      mentions: [],
       wakes: [wake(1), wake(2, { messageId: "m-0" }), wake(3, { messageId: "m-a" })],
       wakeCursor: "9",
     });
@@ -172,8 +181,51 @@ describe("readConversationWakes", () => {
     server.on("POST", CONTEXT, answered(context(stream, [wake(1)], "4")));
     await expect(
       readConversationWakes(client, "w1", { kind: "stream", groupId: "g-1" }, signal),
-    ).resolves.toEqual({ wakes: [wake(1)], wakeCursor: "4" });
+    ).resolves.toEqual({ mentions: [], wakes: [wake(1)], wakeCursor: "4" });
     expect(server.calls).toHaveLength(1);
+  });
+
+  it("keeps each page's candidates, newest page first, without repeats", async () => {
+    const { server, client } = serve();
+    const maya = { kind: "person", handle: "maya", label: "Maya" };
+    const ben = { kind: "person", handle: "ben", label: "Ben" };
+    const nova = { kind: "agent", handle: "nova", label: "Nova", computers: ["Ice's Mac"] };
+    server.on("POST", CONTEXT, (call) =>
+      (call.body as { before?: number }).before === undefined
+        ? answered({ ...context(thread(10)), mentions: [maya, nova] })
+        : answered({ ...context(thread(null)), mentions: [ben, maya, nova] }),
+    );
+    const read = await readConversationWakes(
+      client,
+      "w1",
+      { kind: "thread", threadId: "thread-1" },
+      signal,
+    );
+    expect("mentions" in read && read.mentions).toEqual([maya, nova, ben]);
+  });
+
+  it("keeps at most 256 candidates across pages", async () => {
+    const { server, client } = serve();
+    const people = (from: number) =>
+      Array.from({ length: 200 }, (_, index) => ({
+        kind: "person",
+        handle: `p${from + index}`,
+        label: `P ${from + index}`,
+      }));
+    server.on("POST", CONTEXT, (call) =>
+      (call.body as { before?: number }).before === undefined
+        ? answered({ ...context(thread(10)), mentions: people(0) })
+        : answered({ ...context(thread(null)), mentions: people(200) }),
+    );
+    const read = await readConversationWakes(
+      client,
+      "w1",
+      { kind: "thread", threadId: "thread-1" },
+      signal,
+    );
+    expect("mentions" in read && read.mentions.map((row) => row.handle)).toEqual(
+      Array.from({ length: 256 }, (_, index) => `p${index}`),
+    );
   });
 });
 
@@ -325,7 +377,51 @@ describe("the hand checks agree with the contract", () => {
       expect(phoneChatWake(item) !== null).toBe(PhoneChatWake.safeParse(item).success);
     });
 
+  const candidates: unknown[] = [
+    { kind: "person", handle: "maya", label: "Maya" },
+    { kind: "personalAgent", handle: "claude", label: "Claude" },
+    { kind: "agent", handle: "nova", label: "Nova", computers: ["Ice's Mac", "Studio"] },
+    { kind: "agent", handle: "nova", label: "Nova", computers: [] },
+    { kind: "agent", handle: "nova", label: "Nova", computers: [" Mac"] },
+    { kind: "agent", handle: "nova", label: "Nova", computers: ["m".repeat(65)] },
+    { kind: "agent", handle: "nova", label: "Nova", computers: ["m".repeat(64)] },
+    { kind: "agent", handle: "nova", label: "Nova" },
+    { kind: "agent", handle: "nova", label: "Nova", computers: "Ice's Mac" },
+    { kind: "person", handle: "maya", label: "Maya", computers: ["Ice's Mac"] },
+    { kind: "personalAgent", handle: "claude", label: "Claude", owner: "Ice" },
+    { kind: "person", handle: "maya" },
+    { kind: "person", label: "Maya" },
+    { kind: "person", handle: "", label: "Maya" },
+    { kind: "person", handle: "maya", label: "" },
+    { kind: "person", handle: "h".repeat(200), label: "n".repeat(256) },
+    { kind: "person", handle: "h".repeat(201), label: "Maya" },
+    { kind: "person", handle: "maya", label: "n".repeat(257) },
+    { kind: "person", handle: 7, label: "Maya" },
+    { kind: "user", handle: "maya", label: "Maya" },
+    { handle: "maya", label: "Maya" },
+    null,
+    "maya",
+  ];
+  for (const [index, item] of candidates.entries())
+    it(`agrees on candidate ${index + 1}`, () => {
+      expect(phoneMentionCandidate(item) !== null).toBe(
+        PhoneMentionCandidate.safeParse(item).success,
+      );
+    });
+
+  it("keeps a candidate's fields as the server gave them", () => {
+    const nova = { kind: "agent", handle: "Nova", label: "Nova", computers: ["Ice's Mac"] };
+    expect(phoneMentionCandidate(nova)).toEqual(nova);
+  });
+
+  const maya = { kind: "person", handle: "maya", label: "Maya" };
+  const many = (count: number) => Array.from({ length: count }, () => maya);
   const contexts: unknown[] = [
+    { ...context(stream), mentions: [maya] },
+    { ...context(stream), mentions: many(256) },
+    { ...context(stream), mentions: many(257) },
+    { ...context(stream), mentions: [maya, { kind: "person", handle: "" }] },
+    { ...context(stream), mentions: "maya" },
     context(stream, [wake(1)]),
     context(thread(4), [wake(1)]),
     context(thread(null)),

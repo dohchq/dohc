@@ -27,7 +27,7 @@ describe("a live note's first open", () => {
           collab={{ ydoc, status: "connected", peerCount: 0, synced: true }}
         />,
       );
-      expect(screen.queryByText("Loading editor...")).toBeNull();
+      expect(screen.queryByText("Loading editor…")).toBeNull();
       expect(await screen.findByTestId("markdown-editor")).toBeTruthy();
     } finally {
       ydoc.destroy();

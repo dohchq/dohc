@@ -95,6 +95,9 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
             ...storedGroupLevels(raw),
           }
         : {}),
+      ...(!damaged && level !== "edit" && raw.editingNotReady === true
+        ? { editingNotReady: true as const }
+        : {}),
       ...(raw.ended === true ? { ended: true } : {}),
       ...(isRecord(raw.rebuild) && boundedString(raw.rebuild.rebuildId, 1, 200) !== null
         ? { updatingAccess: true as const, ...rebuildStop(raw.rebuild.stopped) }

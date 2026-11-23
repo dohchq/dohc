@@ -13,10 +13,10 @@ export function scheduleHostNoticeText(
     return { message: state.message, failed: true, ...(state.cause ? { cause: state.cause } : {}) };
   if (state.kind !== "another-computer" || !state.waits) return null;
   const where = state.sameName
-    ? `This workspace's schedules and Group messages run on ${state.label}, which has this computer's name. It may be an earlier installation of dohc here.`
+    ? `This workspace's schedules and Group messages run on ${state.label}, which has this computer's name. It could be an earlier dohc installation here.`
     : `This workspace's schedules and Group messages run on ${state.label}, not this computer.`;
   return {
-    message: `${where} If you take over while ${state.label} is on, a run can repeat.`,
+    message: `${where} If you take over while ${state.label} is on, a scheduled run could repeat.`,
     failed: false,
   };
 }

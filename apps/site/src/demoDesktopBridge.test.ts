@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   answerDemoJoinedLane,
+  demoLinkEdges,
   searchDemoDocuments,
   type DemoBridgeDocument,
 } from "./demoDesktopBridge";
@@ -17,6 +18,25 @@ const documents: DemoBridgeDocument[] = [
     body: "## Findings\nwork",
   },
 ];
+
+describe("demoLinkEdges", () => {
+  it("links each page to the pages its [[links]] name, in order, skipping links to no page", () => {
+    const pages: DemoBridgeDocument[] = [
+      {
+        path: "Trip plan.md",
+        title: "Trip plan",
+        body: "Type **[[** to link.\n## Days\n[[Day 1]], [[Budget|money]], [[Nowhere]]",
+      },
+      { path: "Days/Day 1.md", title: "Day 1", body: "Back to [[Trip plan#Days]]" },
+      { path: "Budget.md", title: "Budget", body: "" },
+    ];
+    expect(demoLinkEdges(pages)).toEqual([
+      { source: "Trip plan.md", target: "Days/Day 1.md", kind: "wikilink", ordinal: 0 },
+      { source: "Trip plan.md", target: "Budget.md", kind: "wikilink", ordinal: 1 },
+      { source: "Days/Day 1.md", target: "Trip plan.md", kind: "wikilink", ordinal: 0 },
+    ]);
+  });
+});
 
 describe("searchDemoDocuments", () => {
   it("honors regex and case sensitivity", () => {

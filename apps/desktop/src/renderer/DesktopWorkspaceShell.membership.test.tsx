@@ -684,7 +684,7 @@ describe("a joined workspace", () => {
         await bridge.cloudStatus.mock.results[0]!.value;
       });
       await waitFor(() =>
-        expect(screen.queryAllByText(/Could not read Collections/)).toHaveLength(toasts),
+        expect(screen.queryAllByText(/dohc could not read Collections/)).toHaveLength(toasts),
       );
     },
   );

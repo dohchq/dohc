@@ -7,9 +7,9 @@ import { useRadioGroup } from "../ui/SegmentedControl";
 type AttachmentLocation = WorkspaceSettings["files"]["attachmentLocation"];
 
 const OPTIONS = [
-  { value: "per-document", label: "In a folder beside the document" },
+  { value: "per-document", label: "In a folder beside the page" },
   { value: "global-folder", label: "In one folder for the whole workspace" },
-  { value: "same-folder", label: "Beside the document" },
+  { value: "same-folder", label: "Beside the page" },
 ] as const satisfies ReadonlyArray<{ value: AttachmentLocation; label: string }>;
 
 const EXAMPLE_DOCUMENT = "Trips/Lisbon/itinerary.md";

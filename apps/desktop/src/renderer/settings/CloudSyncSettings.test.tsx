@@ -437,7 +437,7 @@ describe("CloudSyncSettings", () => {
     fireEvent.click(screen.getByTestId("cloud-sync-passphrase-submit"));
 
     expect((await screen.findByTestId("cloud-sync-error")).textContent).toBe(
-      "That passphrase couldn't unlock synced secrets.",
+      "That passphrase could not unlock synced secrets.",
     );
     expect(screen.getByTestId("cloud-sync-passphrase")).toBeTruthy();
     expect(screen.queryByTestId("cloud-protect-secrets")).toBeNull();

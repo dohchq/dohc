@@ -84,7 +84,7 @@ export function shareViewWriterOf(
 }
 
 export const SHARE_VIEW_EMPTY_FOLDER_REFUSAL =
-  "A shared view can't hold an empty folder. Make a file in the folder you want.";
+  "A shared view cannot hold an empty folder. Make a file in the folder you want.";
 
 /**
  * Where a write lands:
@@ -242,5 +242,5 @@ export function workspaceWriteRefusal(shareView: unknown): string | null {
   // workspace; anything else stays refused, readable marker or not.
   if (!shareViewIsPresent(shareView)) return null;
   const granter = shareViewGranterEmail(shareView) ?? "the person who shared it";
-  return `This is a shared view — ask ${granter} for changes.`;
+  return `This is a shared view. Ask ${granter} for changes.`;
 }

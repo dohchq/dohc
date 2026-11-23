@@ -166,6 +166,21 @@ describe("callout header title staleness", () => {
     expect(input.value).toBe("First commit");
     expect(liveTitle(editor)).toBe("First commit");
   });
+
+  it("Enter commits title, expands a folded callout, and moves caret into the first body paragraph", () => {
+    const editor = makeEditor("> [!note]- Toggle\n> body text");
+    const input = titleInput(editor);
+
+    input.focus();
+    input.value = "Updated toggle";
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+    );
+
+    expect(liveTitle(editor)).toBe("Updated toggle");
+    expect(liveFold(editor)).toBe("");
+    expect(editor.state.selection.$from.parent.textContent).toBe("body text");
+  });
 });
 
 describe("callout header fold control", () => {

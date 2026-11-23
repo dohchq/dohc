@@ -94,10 +94,10 @@ export function appTeardown(...runners: readonly Ends[]) {
   return {
     /** Sign out's hook, after ending them: before the outbox deletes anything. */
     signOut:
-      <T>(hook: (leave: () => Promise<void>) => Promise<T>) =>
-      (leave: () => Promise<void>) => {
+      <A extends unknown[], T>(hook: (...args: A) => Promise<T>) =>
+      (...args: A) => {
         end();
-        return hook(leave);
+        return hook(...args);
       },
     /** A 401 or another sign-in ends every one but the current sign-in's. Returns the unsubscribe. */
     follow: (account: Pick<Account, "subscribe" | "state">) =>

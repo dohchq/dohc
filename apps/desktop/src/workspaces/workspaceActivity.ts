@@ -1,7 +1,7 @@
 import { isWorkspaceVisibilityPolicyPath } from "../ipc/bridgeContract";
 import { workspaceRootsMatch } from "./workspaceRootsMatch";
 import { deriveSyncStatus, type WatcherEvent } from "@dohc/workspace-core";
-import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
+import { engineStoreRefusalOf, type EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import type { AgentRunStateEvent, SyncStatusResult } from "../ipc/bridgeContract";
 import type { CloudSyncEngine } from "./relaySyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -57,6 +57,8 @@ interface WatchedWorkspace {
   atomicPlacementUnavailable: boolean;
   // True once the check finds the root on a network share.
   onNetworkShare: boolean;
+  // Set once the check finds a Windows root inside a cloud-synced folder.
+  cloudSyncFolder: NonNullable<SyncStatusResult["cloudSyncFolder"]> | null;
   recoveryUnavailable: boolean;
   // Why protected files wait on the workspace secret key, or null.
   secretKeyUnavailable: string | null;
@@ -131,6 +133,11 @@ export interface WorkspaceActivityOptions {
   // Whether the root is on a network share. Asked once per open, without
   // holding up the open.
   onNetworkShare?: (rootPath: string) => Promise<boolean>;
+  // Whether a Windows root sits inside a cloud-synced folder. Asked once per
+  // open, without holding up the open.
+  cloudSyncFolder?: (
+    rootPath: string,
+  ) => Promise<NonNullable<SyncStatusResult["cloudSyncFolder"]> | null>;
   // Builds the watcher->engine capture for a workspace; a null capture
   // leaves the workspace with NO history recorder. Called once per open. The
   // hooks are
@@ -334,6 +341,7 @@ export function createWorkspaceActivity(
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       ...(w?.onNetworkShare ? { onNetworkShare: true } : {}),
+      ...(w?.cloudSyncFolder ? { cloudSyncFolder: w.cloudSyncFolder } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
       ...(w?.secretKeyUnavailable ? { secretKeyUnavailable: w.secretKeyUnavailable } : {}),
       ...(w && w.outsideWriteCopies !== null
@@ -456,6 +464,7 @@ export function createWorkspaceActivity(
         historyCaptureDetail: null,
         atomicPlacementUnavailable: false,
         onNetworkShare: false,
+        cloudSyncFolder: null,
         recoveryUnavailable: false,
         secretKeyUnavailable: null,
         outsideWriteCopies: null,
@@ -480,6 +489,18 @@ export function createWorkspaceActivity(
         (error) =>
           console.error(
             `[desktop] could not check whether ${workspace.rootPath} is on a network share:`,
+            error,
+          ),
+      );
+      void options.cloudSyncFolder?.(workspace.rootPath).then(
+        (found) => {
+          if (!found || state.entry !== entry) return;
+          entry.cloudSyncFolder = found;
+          notify({ workspaceId: workspace.workspaceId });
+        },
+        (error) =>
+          console.error(
+            `[desktop] could not check whether ${workspace.rootPath} is in a cloud-synced folder:`,
             error,
           ),
       );
@@ -842,6 +863,7 @@ export function createWorkspaceActivity(
       Promise.resolve()
         .then(() => entry.handle.stop())
         .catch(async (error) => {
+          if (engineStoreRefusalOf(error) !== null) return;
           entry.capture?.observationDrainFailed();
           await entry.capture?.resyncFileObservation();
           throw error;

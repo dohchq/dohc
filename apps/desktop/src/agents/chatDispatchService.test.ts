@@ -333,10 +333,12 @@ async function fakeDispatchDaemon(
 
     switch (request.method) {
       case CHATS_METHOD.channelCreate:
-      case CHATS_METHOD.channelEnsureAgent:
-      case CHATS_METHOD.channelEnsureGeneral:
         chatIds.channel += 1;
         params.channelId = `channel-${chatIds.channel}`;
+        params.nowMs = takeChatTimestamp();
+        break;
+      case CHATS_METHOD.channelEnsureAgent:
+      case CHATS_METHOD.channelEnsureGeneral:
         params.nowMs = takeChatTimestamp();
         break;
       case CHATS_METHOD.threadStart:
@@ -570,17 +572,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       storeResolves.chat += 1;
       return chat;
     },
-    startSelfTestThread: async (place, input) =>
-      (
-        await chat.startChannelThread({
-          workspaceId: place.workspaceId,
-          ...input,
-          ownThread: true,
-          authorActorKey: null,
-          author: { kind: "human", displayName: "Sam" },
-          origin: "cli",
-        })
-      ).thread.id,
     dispatchStoreFor: () => {
       storeResolves.dispatch += 1;
       return serviceDispatch;
@@ -866,7 +857,7 @@ describe("chatDispatchService", () => {
         notice: {
           reason: "no-runner",
           threadId: asked.thread.id,
-          message: "Scout's chat runner is off. Turn it on in Settings → Agents.",
+          message: "Scout is off. Turn it on in Settings › Agents.",
         },
       },
     ]);
@@ -1210,7 +1201,7 @@ describe("chatDispatchService", () => {
       failureReason: expect.stringContaining("runner failed to start"),
     });
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      'Nova didn\'t reply in "Fail during runner setup while the daemon is unavailable."',
+      'Nova did not reply in "Fail during runner setup while the daemon is unavailable."',
     ]);
     expect(fixture.runActivity).toEqual({ acquires: 2, releases: 1 });
     expect(fixture.spawnCalls).toHaveLength(1);
@@ -1675,7 +1666,7 @@ describe("chatDispatchService", () => {
     await fixture.service.betweenScans(WORKSPACE_ID, async () => {});
     expect(fixture.dispatchNotices).toEqual([]);
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      'Nova didn\'t reply in "Wait for my CLI reply provenance."',
+      'Nova did not reply in "Wait for my CLI reply provenance."',
     ]);
     expect(await owedRuns(fixture)).toEqual([]);
   });
@@ -1788,7 +1779,7 @@ describe("chatDispatchService", () => {
     expect(fixture.notices).toEqual([
       expect.objectContaining({
         noticeId: `agent-run:${WORKSPACE_ID}:${interrupted.run.runId}`,
-        title: 'Nova didn\'t reply in "Resume this after restart."',
+        title: 'Nova did not reply in "Resume this after restart."',
       }),
     ]);
   });
@@ -1955,7 +1946,7 @@ describe("chatDispatchService", () => {
     const stateOf = async (fixture: Fixture, threadId: string) =>
       (await fixture.service.dispatchStateForThread(WORKSPACE_ID, threadId)).failedRun;
     const wordsFor = (ending: "restarted" | "quit") =>
-      `Nova didn't reply. dohc ${ending} during its run.`;
+      `Nova did not reply. dohc ${ending} during its run.`;
 
     it.each(["quit"] as const)(
       "runs the request of a run stopped when dohc %s once more",
@@ -2271,7 +2262,7 @@ describe("chatDispatchService", () => {
     expect(messages.filter((message) => message.author.kind === "agent")).toEqual([]);
     expect(fixture.dispatchNotices).toEqual([]);
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
-      'Nova didn\'t reply in "This harness will hang."',
+      'Nova did not reply in "This harness will hang."',
     ]);
 
     await vi.advanceTimersByTimeAsync(RUNNER_KILL_GRACE_MS);
@@ -2643,11 +2634,6 @@ describe("chatDispatchService", () => {
         expect(call.options.cwd).toBe(fixture.workspace.rootPath);
       }
       const marker = `dohc-runner-self-test:${runId}`;
-      const agentChannel = await fixture.chat.ensureAgentChannel({
-        workspaceId: WORKSPACE_ID,
-        agentId: "default",
-        name: "Nova",
-      });
       expect(call.process.stdinText).toContain(expectedReply(form, threadId, runId, marker));
       if (form === "mcp") expect(call.process.stdinText).toContain(`\`body\` \`${marker}\``);
       expect(runId).toBe("run_self_test_self_test_id_1");
@@ -2659,26 +2645,18 @@ describe("chatDispatchService", () => {
         secret,
       });
 
-      expect(await fixture.chat.listMessages({ workspaceId: WORKSPACE_ID, threadId })).toEqual([
-        expect.objectContaining({
-          author: expect.objectContaining({ kind: "human" }),
-          body: "Reply here to check the agent connection.",
+      expect(
+        fixture.service.selfTestReply(WORKSPACE_ID, {
+          threadId,
+          body: `${marker}\n`,
+          runAgentId: "default",
         }),
-      ]);
-      await fixture.chat.sendMessage({
-        authorActorKey: null,
-        workspaceId: WORKSPACE_ID,
-        threadId,
-        author: { kind: "agent", displayName: "Sam" },
-        origin: "cli",
-        authorAgentId: "default",
-        body: marker,
-      });
+      ).toBe(`${threadId}_reply`);
       call.process.emitExit(0);
 
       await expect(resultPromise).resolves.toEqual({
         ok: true,
-        detail: "Runner self-test passed. The harness reported through dohc chat.",
+        detail: "Test passed. The agent replied through dohc.",
       });
       expect(fixture.attributions.at(-1)).toEqual({
         workspaceId: WORKSPACE_ID,
@@ -2692,35 +2670,75 @@ describe("chatDispatchService", () => {
       });
       const retryCall = fixture.spawnCalls[1];
       if (!retryCall) throw new Error("Expected a self-test retry.");
-      expect(retryCall.options.env.DOHC_CHAT_THREAD).toBe(threadId);
+      const retryThreadId = retryCall.options.env.DOHC_CHAT_THREAD!;
+      expect(retryThreadId).not.toBe(threadId);
       const retryRunId = retryCall.options.env.DOHC_RUN_ID;
       if (!retryRunId) throw new Error("Expected retry attribution.");
       const retryMarker = `dohc-runner-self-test:${retryRunId}`;
       expect(retryMarker).not.toBe(marker);
-      await fixture.chat.sendMessage({
-        authorActorKey: null,
-        workspaceId: WORKSPACE_ID,
-        threadId,
-        author: { kind: "agent", displayName: "Sam" },
-        origin: "cli",
-        authorAgentId: "default",
-        body: retryMarker,
-      });
+      expect(
+        fixture.service.selfTestReply(WORKSPACE_ID, {
+          threadId,
+          body: retryMarker,
+          runAgentId: "default",
+        }),
+      ).toBeNull();
+      expect(
+        fixture.service.selfTestReply(WORKSPACE_ID, {
+          threadId: retryThreadId,
+          body: marker,
+          runAgentId: "default",
+        }),
+      ).toBeNull();
+      expect(
+        fixture.service.selfTestReply(WORKSPACE_ID, {
+          threadId: retryThreadId,
+          body: retryMarker,
+          runAgentId: "default",
+        }),
+      ).toEqual(expect.any(String));
       retryCall.process.emitExit(0);
       await expect(retryPromise).resolves.toMatchObject({ ok: true });
-
-      const scratchThreads = await fixture.chat.listChannelThreads({
-        workspaceId: WORKSPACE_ID,
-        channelId: agentChannel.id,
-      });
-      expect(
-        scratchThreads.filter((summary) => summary.thread.title === "dohc runner self-test"),
-      ).toHaveLength(1);
-      expect(
-        (await fixture.chat.getThread({ workspaceId: WORKSPACE_ID, threadId })).thread.lane,
-      ).toBe("posts");
     },
   );
+
+  it("checks a runner without writing to chat", async () => {
+    const fixture = await createFixture({ runner: { command: "claude -p" } });
+    const chatThreads = async () => {
+      const channels = await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID });
+      const threads = await Promise.all(
+        channels.map((channel) =>
+          fixture.chat.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: channel.id }),
+        ),
+      );
+      return { channels, threads: threads.flat() };
+    };
+
+    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
+    await vi.waitFor(() => {
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.spawnCalls[0]!.process.stdinText).toEqual(expect.any(String));
+    });
+    const call = fixture.spawnCalls[0]!;
+    const threadId = call.options.env.DOHC_CHAT_THREAD!;
+    const marker = `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`;
+    expect(call.process.stdinText).toContain(`dohc chat reply ${threadId} --as-agent "${marker}"`);
+    expect(await chatThreads()).toEqual({ channels: [], threads: [] });
+
+    expect(
+      fixture.service.selfTestReply(WORKSPACE_ID, {
+        threadId,
+        body: marker,
+        runAgentId: "default",
+      }),
+    ).toEqual(expect.any(String));
+    await expect(resultPromise).resolves.toEqual({
+      ok: true,
+      detail: "Test passed. The agent replied through dohc.",
+    });
+    call.process.emitExit(0);
+    expect(await chatThreads()).toEqual({ channels: [], threads: [] });
+  });
 
   it("ends a runner self-test as unconfirmed when its reply did not come from the run", async () => {
     const fixture = await createFixture({ runner: { command: "claude -p" } });
@@ -2731,14 +2749,24 @@ describe("chatDispatchService", () => {
       expect(fixture.spawnCalls[0]!.process.stdinText).toEqual(expect.any(String));
     });
     const call = fixture.spawnCalls[0]!;
-    await fixture.chat.sendMessage({
-      authorActorKey: null,
-      workspaceId: WORKSPACE_ID,
-      threadId: call.options.env.DOHC_CHAT_THREAD!,
-      author: { kind: "agent", displayName: "Sam" },
-      origin: "cli",
-      body: `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`,
-    });
+    const threadId = call.options.env.DOHC_CHAT_THREAD!;
+    const body = `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`;
+    const unanswered = Symbol("unanswered");
+    const answer = () => Promise.race([resultPromise, Promise.resolve(unanswered)]);
+    for (const [workspaceId, reply] of [
+      ["workspace-other", { threadId, body, runAgentId: "default" }],
+      [WORKSPACE_ID, { threadId: "thread-1", body, runAgentId: "default" }],
+      [WORKSPACE_ID, { threadId, body: "done", runAgentId: "default" }],
+    ] as const) {
+      expect(fixture.service.selfTestReply(workspaceId, reply)).toBeNull();
+    }
+    expect(await answer()).toBe(unanswered);
+    expect(
+      fixture.service.selfTestReply(WORKSPACE_ID, { threadId, body, runAgentId: null }),
+    ).toEqual(expect.any(String));
+    expect(
+      fixture.service.selfTestReply(WORKSPACE_ID, { threadId, body, runAgentId: "default" }),
+    ).toBeNull();
 
     // The check ends on that reply, without waiting for the runner to exit.
     await expect(resultPromise).resolves.toEqual({
@@ -2750,6 +2778,12 @@ describe("chatDispatchService", () => {
     });
     expect(fixture.killCalls).toContainEqual({ pid: -call.process.pid!, signal: "SIGTERM" });
     call.process.emitExit(null, "SIGTERM");
+
+    // A quit right after the runner exits still records the run's end.
+    await fixture.service.stop();
+    expect(await readdir(join(fixture.stateRoot, "run-logs"))).toContain(
+      `${call.options.env.DOHC_RUN_ID}.log.ended`,
+    );
   });
 
   describe("in a workspace in Restricted Mode", () => {

@@ -235,10 +235,10 @@ fn agent_chats(chats: &mut LinkedChatStore<'_>) {
         )
         .expect("channel");
     chats
-        .ensure_agent_channel(WS, "t", "terminal", "Terminal", 3, &NO_FAULTS)
+        .ensure_agent_channel(WS, "terminal", "Terminal", 3, &NO_FAULTS)
         .expect("terminal's chat");
     chats
-        .ensure_agent_channel(WS, "r", "research", "Research", 4, &NO_FAULTS)
+        .ensure_agent_channel(WS, "research", "Research", 4, &NO_FAULTS)
         .expect("research's chat");
 }
 
@@ -247,18 +247,43 @@ fn connected_reader_reads_its_chat_its_mentions_and_threads_it_posted_in() {
     let (_scratch, mut store) = open_store();
     let mut chats = LinkedChatStore::new(&mut store);
     agent_chats(&mut chats);
-    ask(&mut chats, "t", "dm", "dm-ask", 10);
+    ask(&mut chats, "channel-agent-terminal", "dm", "dm-ask", 10);
     ask(&mut chats, "channel", "group", "ask @terminal", 20);
     ask(&mut chats, "channel", "posted", "opening", 25);
     answer(&mut chats, "channel", "posted", "terminal-post", 30);
     ask(&mut chats, "channel", "posted", "reply", 40);
-    ask(&mut chats, "r", "other", "other-ask", 50);
-    ask(&mut chats, "r", "other", "other @terminal", 55);
-    answer(&mut chats, "t", "dm", "terminal-reply", 60);
+    ask(
+        &mut chats,
+        "channel-agent-research",
+        "other",
+        "other-ask",
+        50,
+    );
+    ask(
+        &mut chats,
+        "channel-agent-research",
+        "other",
+        "other @terminal",
+        55,
+    );
+    answer(
+        &mut chats,
+        "channel-agent-terminal",
+        "dm",
+        "terminal-reply",
+        60,
+    );
     let mut cli = send_input("dm", "from-cli", ChatActorKind::Human, 70);
     cli.origin = Some("cli".to_owned());
     chats.send_message(&cli, &NO_FAULTS).expect("cli post");
-    ask_by(&mut chats, Some("bob"), "t", "dm", "bob-ask", 80);
+    ask_by(
+        &mut chats,
+        Some("bob"),
+        "channel-agent-terminal",
+        "dm",
+        "bob-ask",
+        80,
+    );
     ask(&mut chats, "channel", "group", "plain", 90);
 
     let reader = terminal(&["ada"], false);
@@ -355,9 +380,30 @@ fn only_its_persons_posts_ask_an_agent_you_run() {
     let (_scratch, mut store) = open_store();
     let mut chats = LinkedChatStore::new(&mut store);
     agent_chats(&mut chats);
-    ask_by(&mut chats, Some("me"), "t", "dm", "mine", 10);
-    ask_by(&mut chats, Some("owner"), "t", "dm", "owners", 20);
-    ask_by(&mut chats, None, "t", "dm", "no-account", 30);
+    ask_by(
+        &mut chats,
+        Some("me"),
+        "channel-agent-terminal",
+        "dm",
+        "mine",
+        10,
+    );
+    ask_by(
+        &mut chats,
+        Some("owner"),
+        "channel-agent-terminal",
+        "dm",
+        "owners",
+        20,
+    );
+    ask_by(
+        &mut chats,
+        None,
+        "channel-agent-terminal",
+        "dm",
+        "no-account",
+        30,
+    );
 
     assert_eq!(
         requests_for(&chats, &terminal(&["me"], false)),

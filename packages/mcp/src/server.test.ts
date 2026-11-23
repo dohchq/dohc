@@ -551,9 +551,17 @@ describe("parseArgs", () => {
     });
   });
 
-  it("rejects blank explicit path arguments", () => {
+  it("rejects blank or flag-like explicit path arguments", () => {
     expect(() => parseArgs(["--workspace", " "])).toThrow(/--workspace requires/);
     expect(() => parseArgs(["--home", " "])).toThrow(/--home requires/);
+    expect(() => parseArgs(["--workspace"])).toThrow(/--workspace requires/);
+    expect(() => parseArgs(["--workspace", "--tool"])).toThrow(/--workspace requires/);
+    expect(() => parseArgs(["--home", "--unknown"])).toThrow(/--home requires/);
+    expect(parseArgs(["--workspace", "./-dash-dir", "--home", "/tmp/home"])).toMatchObject({
+      root: "./-dash-dir",
+      home: "/tmp/home",
+    });
+    expect(() => parseArgs(["--unknown"])).toThrow(/Unknown argument "--unknown"/);
   });
 });
 
@@ -1580,4 +1588,30 @@ it("keeps an absent incoming subject as JSON null", async () => {
   expect(result.content).toEqual([{ type: "text", text: "null" }]);
   expect(result.structuredContent).toBeUndefined();
   expect(result.isError).not.toBe(true);
+});
+
+it("adds allowLossySourceSha256 guidance when dohc_edit_document refuses a lossy note", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-mcp-lossy-"));
+  try {
+    const { client } = await connectedToolNames({
+      root,
+      home: root,
+      request: async () => ({
+        ok: false,
+        reason:
+          "dohc can't change lossy.md without also changing parts it can't show. Edit the file directly instead.",
+      }),
+    });
+    const result = await client.callTool({
+      name: "dohc_edit_document",
+      arguments: { path: "lossy.md", replacement: "updated" },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("allowLossySourceSha256"),
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

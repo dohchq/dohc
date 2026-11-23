@@ -37,7 +37,7 @@ const ROW: Record<UnfinishedRestoreStage, { title: string; message: (path: strin
   },
   finishing: {
     title: "Finishing restore",
-    message: (path) => `The restore of ${path} has not finished. Try again to finish it.`,
+    message: (path) => `The restore of ${path} has not finished.`,
   },
 };
 

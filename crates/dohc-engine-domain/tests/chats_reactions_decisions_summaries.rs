@@ -153,6 +153,7 @@ fn set_reaction(
             author_id: author_id.to_owned(),
             replication_author_id: Some(author_id.to_owned()),
             author_kind: ChatActorKind::Human,
+            author_agent_id: None,
             author_display_name: author_id.to_owned(),
             state,
             now_ms,
@@ -217,6 +218,145 @@ fn reaction_local_toggle_bumps_past_prior_cell() {
     );
     assert_eq!(added.at_ms, 101);
     assert_eq!(added.state, ChatReactionState::Added);
+}
+
+fn react_as(
+    store: &mut EngineStore,
+    request_id: &str,
+    author_kind: ChatActorKind,
+    agent_id: Option<&str>,
+    state: ChatReactionState,
+    now_ms: i64,
+) -> Result<dohc_engine_domain::ChatReaction, dohc_engine_domain::DomainError> {
+    LinkedChatStore::new(store).set_reaction(
+        &SetReaction {
+            workspace_id: WS.to_owned(),
+            thread_id: "thread".to_owned(),
+            message_id: "message".to_owned(),
+            emoji: "👍".to_owned(),
+            author_id: "ada".to_owned(),
+            replication_author_id: Some("ada".to_owned()),
+            author_kind,
+            author_agent_id: agent_id.map(str::to_owned),
+            author_display_name: "Ada".to_owned(),
+            state,
+            now_ms,
+            request_id: request_id.to_owned(),
+        },
+        &NO_FAULTS,
+    )
+}
+
+#[test]
+fn reaction_cells_keep_a_person_and_each_of_their_agents_apart() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    let reactors = [
+        (ChatActorKind::Human, None),
+        (ChatActorKind::Agent, None),
+        (ChatActorKind::Agent, Some("codex")),
+        (ChatActorKind::Agent, Some("terminal")),
+    ];
+    for (index, (kind, agent)) in reactors.into_iter().enumerate() {
+        let request = format!("add-{index}");
+        react_as(
+            &mut store,
+            &request,
+            kind,
+            agent,
+            ChatReactionState::Added,
+            30,
+        )
+        .expect("add");
+    }
+    react_as(
+        &mut store,
+        "remove-codex",
+        ChatActorKind::Agent,
+        Some("codex"),
+        ChatReactionState::Removed,
+        40,
+    )
+    .expect("remove");
+
+    let mut visible: Vec<(ChatActorKind, Option<String>)> = LinkedChatStore::new(&mut store)
+        .list_reactions(WS, "thread", None, 10)
+        .expect("list")
+        .into_iter()
+        .map(|reaction| (reaction.author_kind, reaction.author_agent_id))
+        .collect();
+    visible.sort_by_key(|(kind, agent)| (format!("{kind:?}"), agent.clone()));
+    assert_eq!(
+        visible,
+        vec![
+            (ChatActorKind::Agent, None),
+            (ChatActorKind::Agent, Some("terminal".to_owned())),
+            (ChatActorKind::Human, None),
+        ],
+        "keying the cell by author id alone -> one agent's remove takes away the person's and the other agents' reactions."
+    );
+
+    let agents: Vec<Option<String>> = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT payload_json FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.reaction.set' \
+                 ORDER BY origin_seq",
+            )?;
+            let payloads = statement
+                .query_map([WS], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(
+                payloads
+                    .iter()
+                    .map(|payload| {
+                        serde_json::from_str::<serde_json::Value>(payload)
+                            .expect("payload")
+                            .get("authorAgentId")
+                            .and_then(|agent| agent.as_str().map(str::to_owned))
+                    })
+                    .collect(),
+            )
+        })
+        .expect("replicated reactions");
+    assert_eq!(
+        agents,
+        vec![
+            None,
+            None,
+            Some("codex".to_owned()),
+            Some("terminal".to_owned()),
+            Some("codex".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn reaction_set_refuses_an_agent_id_without_an_agent() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    for (kind, agent) in [
+        (ChatActorKind::Human, "codex"),
+        (ChatActorKind::Agent, "Not An Id"),
+    ] {
+        let refused = react_as(
+            &mut store,
+            "refused",
+            kind,
+            Some(agent),
+            ChatReactionState::Added,
+            30,
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(dohc_engine_domain::DomainError::InvalidInput { .. })
+            ),
+            "{kind:?} {agent}"
+        );
+    }
 }
 
 #[test]
@@ -286,6 +426,7 @@ fn reaction_without_verified_relay_author_stays_out_of_replication_log() {
         author_id: "local-user".to_owned(),
         replication_author_id: None,
         author_kind: ChatActorKind::Human,
+        author_agent_id: None,
         author_display_name: "Local user".to_owned(),
         state: ChatReactionState::Added,
         now_ms: 30,
@@ -338,6 +479,7 @@ fn reaction_rejects_mismatched_relay_author_before_writing() {
             author_id: "local-user".to_owned(),
             replication_author_id: Some("other-user".to_owned()),
             author_kind: ChatActorKind::Human,
+            author_agent_id: None,
             author_display_name: "Local user".to_owned(),
             state: ChatReactionState::Added,
             now_ms: 30,
@@ -404,7 +546,10 @@ fn reaction_read_hides_tombstones_and_orphans() {
                  (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,\
                   author_display_name,state,at_ms,origin_id,origin_seq) \
                  VALUES (?1,?2,'thread','orphan','🎉','Bob','human','Bob','added',31,'peer',0)",
-                params![WS, reaction_id_for("orphan", "🎉", "Bob")],
+                params![
+                    WS,
+                    reaction_id_for("orphan", "🎉", "Bob", ChatActorKind::Human, "")
+                ],
             )
             .map_err(StorageError::persist_public)?;
             Ok::<_, StorageError>(())
@@ -848,6 +993,7 @@ fn keyed_reaction(key: &str, author: &str, state: ChatReactionState, at_ms: i64)
         author_id: author.to_owned(),
         replication_author_id: Some(author.to_owned()),
         author_kind: ChatActorKind::Human,
+        author_agent_id: None,
         author_display_name: author.to_owned(),
         state,
         now_ms: at_ms,

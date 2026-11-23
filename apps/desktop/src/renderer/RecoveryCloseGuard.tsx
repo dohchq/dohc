@@ -241,7 +241,7 @@ async function settleWritesForExit(): Promise<boolean> {
   });
   if (settled.stalled) {
     abandonPendingCollectionFieldWrites(
-      "dohc could not finish saving this change. Retry it before closing, or discard the unsaved change.",
+      "dohc could not finish saving this change. Try again before closing, or discard the unsaved change.",
     );
   }
   return !settled.stalled && settled.failed === 0;
@@ -632,8 +632,8 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
             >
               <p>
                 {`${liveCount} set-aside ${
-                  liveCount === 1 ? "edit is" : "edits are"
-                } lost when dohc ${UNLOAD_COPY[closeWarning.kind].verb}.`}{" "}
+                  liveCount === 1 ? "edit" : "edits"
+                } will be lost when dohc ${UNLOAD_COPY[closeWarning.kind].verb}.`}{" "}
                 Copy {liveCount === 1 ? "it" : "them"} here to keep the text.
               </p>
             </ConfirmationHead>

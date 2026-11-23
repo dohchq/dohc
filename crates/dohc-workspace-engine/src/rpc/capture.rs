@@ -1,5 +1,6 @@
 use crate::EngineService;
 use crate::capture_driver;
+use crate::capture_driver::SecretKeyStatus;
 use crate::lock;
 use crate::rpc::dispatch::initial_capture_phase_requires_fence;
 use crate::rpc::error::map_runtime;
@@ -574,8 +575,9 @@ impl EngineService {
                     "recoveryUnavailable": recovery_unavailable,
                     "retainedCopies": retained_copies,
                 });
-                // Present only while protected files wait on the key.
-                if let Some(code) = driver.status().secret_key_unavailable() {
+                let key = driver.status().secret_key();
+                status["secretKeyChecked"] = json!(key != SecretKeyStatus::Unchecked);
+                if let SecretKeyStatus::Unavailable(code) = key {
                     status["secretKeyUnavailable"] = json!(code);
                 }
                 status
@@ -596,6 +598,7 @@ impl EngineService {
                 "deferredWrites": [],
                 "recoveryUnavailable": recovery_unavailable,
                 "retainedCopies": retained_copies,
+                "secretKeyChecked": false,
             }),
         })
     }

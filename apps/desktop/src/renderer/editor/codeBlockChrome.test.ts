@@ -1,8 +1,11 @@
+// @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
+import { Editor, Extension } from "@tiptap/core";
+import { StarterKit } from "@tiptap/starter-kit";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { EditorState, type Plugin } from "@tiptap/pm/state";
 import { Decoration, type DecorationSet } from "@tiptap/pm/view";
-import { makeCodeBlockChromePlugin } from "./codeBlockChrome";
+import { makeCodeBlockChromePlugin, makeCodeBlockContinuationPlugin } from "./codeBlockChrome";
 import { codeBlock, doc, paragraph, randomEdit, schema, seededRandom } from "./testDocs";
 
 function toolbars(state: EditorState, plugin: Plugin) {
@@ -122,5 +125,106 @@ describe("makeCodeBlockChromePlugin — edits", () => {
       widget.mockRestore();
     }
     expect(toolbars(state, plugin).map(({ owner }) => owner)).toEqual(owners);
+  });
+});
+
+describe("codeBlockChrome — Tab indent/outdent and word wrap", () => {
+  function makeCodeEditor(content: string): Editor {
+    const ext = Extension.create({
+      name: "testCodeChrome",
+      addProseMirrorPlugins() {
+        return [makeCodeBlockChromePlugin(), makeCodeBlockContinuationPlugin()];
+      },
+    });
+    return new Editor({
+      extensions: [StarterKit, ext],
+      content,
+    });
+  }
+
+  it("indents with Tab and outdents with Shift+Tab inside a code block", () => {
+    const editor = makeCodeEditor("<pre><code>alpha\nbeta</code></pre>");
+    try {
+      // Caret at start of "alpha" (pos 1)
+      editor.commands.setTextSelection(1);
+      const tabEvent = new KeyboardEvent("keydown", {
+        key: "Tab",
+        cancelable: true,
+        bubbles: true,
+      });
+      editor.view.dom.dispatchEvent(tabEvent);
+      expect(tabEvent.defaultPrevented).toBe(true);
+      expect(editor.state.doc.child(0).textContent).toBe("  alpha\nbeta");
+
+      // Shift+Tab outdents the two spaces
+      const shiftTab = new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        cancelable: true,
+        bubbles: true,
+      });
+      editor.view.dom.dispatchEvent(shiftTab);
+      expect(shiftTab.defaultPrevented).toBe(true);
+      expect(editor.state.doc.child(0).textContent).toBe("alpha\nbeta");
+
+      // Multi-line selection indents and outdents every selected line
+      editor.commands.setTextSelection({ from: 2, to: 10 });
+      const multiTab = new KeyboardEvent("keydown", {
+        key: "Tab",
+        cancelable: true,
+        bubbles: true,
+      });
+      editor.view.dom.dispatchEvent(multiTab);
+      expect(editor.state.doc.child(0).textContent).toBe("  alpha\n  beta");
+
+      const multiShiftTab = new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        cancelable: true,
+        bubbles: true,
+      });
+      editor.view.dom.dispatchEvent(multiShiftTab);
+      expect(editor.state.doc.child(0).textContent).toBe("alpha\nbeta");
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  it("toggles word wrap on the code block toolbar and preserves it across language change", () => {
+    const editor = makeCodeEditor('<pre><code class="language-ts">const x = 1;</code></pre>');
+    try {
+      const toolbar = editor.view.dom.querySelector(
+        ".dohc-code-block-toolbar",
+      ) as HTMLElement | null;
+      expect(toolbar).not.toBeNull();
+      const wrapBtn = toolbar!.querySelector(
+        'button[aria-label="Wrap lines"]',
+      ) as HTMLButtonElement | null;
+      expect(wrapBtn).not.toBeNull();
+      expect(wrapBtn!.getAttribute("aria-pressed")).toBe("false");
+      expect(toolbar!.classList.contains("is-wrapped")).toBe(false);
+
+      wrapBtn!.click();
+      expect(wrapBtn!.getAttribute("aria-pressed")).toBe("true");
+      expect(toolbar!.classList.contains("is-wrapped")).toBe(true);
+
+      // Change language -> toolbar rebuilds for same owner and restores wrapped state
+      const select = toolbar!.querySelector(
+        'select[aria-label="Code language"]',
+      ) as HTMLSelectElement;
+      select.value = "python";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+
+      const rebuiltToolbar = editor.view.dom.querySelector(
+        ".dohc-code-block-toolbar",
+      ) as HTMLElement;
+      const rebuiltWrapBtn = rebuiltToolbar.querySelector(
+        'button[aria-label="Wrap lines"]',
+      ) as HTMLButtonElement;
+      expect(rebuiltWrapBtn.getAttribute("aria-pressed")).toBe("true");
+      expect(rebuiltToolbar.classList.contains("is-wrapped")).toBe(true);
+    } finally {
+      editor.destroy();
+    }
   });
 });

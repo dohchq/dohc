@@ -90,7 +90,7 @@ describe("StateMark", () => {
     const chip = screen.getByTestId("mark");
     expect(chip.getAttribute("data-state")).toBe("unknown");
     expect(chip.textContent).toBe("Unknown");
-    expect(chip.getAttribute("title")).toContain("This does not mean that no one has access.");
+    expect(chip.getAttribute("title")).toContain("This does not mean no one has access.");
   });
 
   it("renders every state with its mark, its label, and the stored state", () => {
@@ -212,9 +212,9 @@ describe("StateMark", () => {
       await userEvent.setup().tab();
       expect(document.activeElement).toBe(chip);
       expect(screen.getByRole("tooltip").textContent).toBe(
-        "Saved locally · Pending shareYour edits are saved on this device. The shared file update is pending.",
+        "Saved locally · pending shareYour edits are saved on this device. The shared file update is pending.",
       );
-      expect(chip.textContent).toBe("Saved locally · Pending share");
+      expect(chip.textContent).toBe("Saved locally · pending share");
       expect(description(chip)).toBe(SAVE_STATE["pending-share"].title);
       expect(description(chip), "the label is read twice").not.toContain("Saved locally");
 

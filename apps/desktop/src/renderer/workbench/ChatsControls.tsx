@@ -1,4 +1,4 @@
-import { Archive, ArrowLeft, Eye, EyeOff, Lock, PowerOff, TriangleAlert } from "lucide-react";
+import { Archive, ArrowLeft, Eye, EyeOff, Lock, PowerOff, TriangleAlert, X } from "lucide-react";
 import type * as React from "react";
 import type { JoinedSharedChannelRow } from "../../ipc/bridgeContract";
 import type { AgentPresenceActivity } from "../../collab/agentPresence";
@@ -26,14 +26,14 @@ export function AgentPresenceHint(props: {
 }) {
   if (props.activity === null) return null;
   const working = props.activity === "working";
-  const text = working ? (props.program ? `Running ${props.program}` : "working") : null;
+  const text = working ? (props.program ? `Running ${props.program}` : "Working") : null;
   return (
     <span
       data-testid={props.testId}
       role="status"
       aria-label={`Agent is ${props.activity}`}
       title={`Agent is ${props.activity}`}
-      className="inline-flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-muted"
+      className="inline-flex shrink-0 items-center gap-1 text-[12px] tabular-nums text-muted"
     >
       <span
         aria-hidden
@@ -84,7 +84,7 @@ function overLimitSentences(failure: {
 }): string[] {
   return failure.lanes.map(({ lane, rows }) =>
     lane === "granted"
-      ? `You have ${rows} shares of your groups; the limit is ${failure.limit}.`
+      ? `You have ${rows} shares of your Groups; the limit is ${failure.limit}.`
       : `You have ${rows} shares from other people; the limit is ${failure.limit}.`,
   );
 }
@@ -113,7 +113,7 @@ export function ShareReadFailureNotice(props: {
       data-failure={props.failure.kind}
       className={`flex items-start gap-1.5 ${props.className ?? "border-b border-line px-3 py-2"}`}
     >
-      <span className="min-w-0 flex-1 text-[11px] leading-4 text-muted">
+      <span className="min-w-0 flex-1 text-[12px] leading-4 text-muted">
         {props.failure.kind === "unreachable"
           ? `dohc could not read your shares.${staleLine}`
           : `dohc cannot list this many shares. ${overLimitSentences(props.failure).join(
@@ -125,7 +125,7 @@ export function ShareReadFailureNotice(props: {
           type="button"
           data-testid={`${props.testId}-retry`}
           onClick={props.onRetry}
-          className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
+          className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[12px] text-muted hover:bg-hover hover:text-ink"
         >
           Try again
         </button>
@@ -190,10 +190,10 @@ export function joinedChannelLabel(joined: JoinedSharedChannelRow, ownerRemoved 
   const from = joined.granterEmail ?? "someone else";
   const suffix = joined.ended
     ? ownerRemoved
-      ? " — the owner removed your access"
-      : " — no longer shared"
+      ? " · The owner removed your access"
+      : " · No longer shared"
     : joined.access === "read-only"
-      ? " — read-only"
+      ? " · Read-only"
       : "";
   return `Shared by ${from}${suffix}`;
 }
@@ -210,17 +210,18 @@ export function ComposerModeBar(props: {
   return (
     <div
       data-testid={props.testId}
-      className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 text-[10px] tabular-nums text-muted"
+      className="flex items-center gap-1.5 border-b border-line bg-panel-2 px-3 py-1.5 text-[12px] tabular-nums text-muted"
     >
       <span className="min-w-0 flex-1 truncate">{props.children}</span>
       <button
         type="button"
         data-testid={props.cancelTestId}
         aria-label={props.cancelLabel}
+        title={props.cancelLabel}
         onClick={props.onCancel}
-        className="rounded px-1 text-subtle hover:text-ink"
+        className="grid size-5 shrink-0 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink"
       >
-        ×
+        <X size={13} aria-hidden />
       </button>
     </div>
   );
@@ -292,12 +293,12 @@ export function ArchivedLine(props: { onUnarchive: () => void }) {
       className="flex shrink-0 items-center gap-1.5 border-b border-line bg-panel-2/40 px-3 py-1.5"
     >
       <Archive size={12} aria-hidden className="shrink-0 text-subtle" />
-      <span className="min-w-0 flex-1 truncate text-[11px] text-muted">Archived</span>
+      <span className="min-w-0 flex-1 truncate text-[12px] text-muted">Archived</span>
       <button
         type="button"
         data-testid="chats-unarchive"
         onClick={props.onUnarchive}
-        className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
+        className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[12px] text-muted hover:bg-hover hover:text-ink"
       >
         Unarchive
       </button>

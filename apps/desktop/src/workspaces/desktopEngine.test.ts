@@ -192,6 +192,7 @@ function fixture(options: { ownerLiveReleases?: UnwrittenReleases } = {}) {
   const unwritten: UnwrittenRelease[] = [];
   const recoveries = new Map<string, string>();
   const dependencies: Dependencies = {
+    localPersonId: () => "person",
     ownerLiveReleases: options.ownerLiveReleases ?? {
       list: async (id) => unwritten.filter((row) => row.workspaceId === id),
       put: async (release, recovery) => {
@@ -331,6 +332,15 @@ beforeEach(() => {
 });
 
 type ServerSession = NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>;
+// A server with no paused notes.
+const noLivePauses = {
+  livePauses: async () => [],
+  livePauseCopy: async (): Promise<Uint8Array> => {
+    throw new Error("Unexpected paused note copy request.");
+  },
+  livePauseCopyWritten: async () => {},
+  resumeLivePause: async () => {},
+};
 const unexpectedKeptEdits = async (): Promise<unknown> => {
   throw new Error("Unexpected kept edits request.");
 };
@@ -408,6 +418,7 @@ async function quarantinedOwner(
         refusals: async () => {},
         keptEdits: server.keptEdits ?? unexpectedKeptEdits,
         keptEditsPage: server.keptEditsPage ?? unexpectedKeptEdits,
+        ...noLivePauses,
         open: server.open ?? unexpectedOpen,
         documents: async (_signal, fresh) => {
           const answer = {
@@ -1053,6 +1064,51 @@ describe("desktop engine restart coordination", () => {
       await f.close();
     }
   });
+
+  it("passes captured notes to the background live start, and pauses it while the engine restarts", async () => {
+    const f = fixture();
+    const order: string[] = [];
+    // Pause stays pending: a start in flight may wait for the engine the restart holds back.
+    const paused = deferred();
+    const backgroundLiveStart = {
+      note: vi.fn(),
+      pause: vi.fn(async () => {
+        order.push("pause");
+        await paused.promise;
+      }),
+      resume: vi.fn(() => void order.push("resume")),
+    };
+    f.dependencies.backgroundLiveStart = backgroundLiveStart;
+    const relaunched = deferred();
+    try {
+      await f.engine.start();
+      f.engine.launchSettled();
+      await f.client.smokeClosed.promise;
+      const moment = {
+        workspaceId: "workspace",
+        paths: ["a.md"],
+        appliedCount: 1,
+        notOwnedCount: 0,
+      };
+      f.client.emit("capture.momentRecorded", moment);
+      // An announcement that left paths out is a reconcile, not notes to start.
+      f.client.emit("capture.momentRecorded", { ...moment, appliedCount: 3 });
+      expect(backgroundLiveStart.note.mock.calls).toEqual([["workspace", ["a.md"]]]);
+
+      const replacement = new Client();
+      f.setLaunch(async () => replacement);
+      vi.mocked(f.dependencies.notifyRenderer).mockImplementation(() => relaunched.resolve());
+      f.spawns[0]!.onExit!(1, null);
+      await relaunched.promise;
+      // Once before each daemon was published, at the first start and at the restart.
+      expect(order).toEqual(["pause", "resume", "pause", "resume"]);
+      replacement.emit("capture.momentRecorded", { ...moment, paths: ["b.md"] });
+      expect(backgroundLiveStart.note).toHaveBeenLastCalledWith("workspace", ["b.md"]);
+    } finally {
+      paused.resolve();
+      await f.close();
+    }
+  });
 });
 
 describe("desktop engine composed sessions and events", () => {
@@ -1092,6 +1148,49 @@ describe("desktop engine composed sessions and events", () => {
           relay: { baseUrl: "https://other.test", token: "token" },
         }),
       ).not.toThrow();
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("reads waiting notes and refused edits when a workspace this computer owns opens, and neither for a received share", async () => {
+    const f = fixture();
+    Object.setPrototypeOf(
+      f.client,
+      Object.defineProperties(
+        Object.create(EngineClient.prototype),
+        Object.getOwnPropertyDescriptors(Client.prototype),
+      ),
+    );
+    f.client.respond = async (request) => ({
+      id: request.id,
+      result:
+        request.method === "workspace.open"
+          ? { workspace: `${String(workspaceIdOf(request))}-handle`, localStateReady: true }
+          : request.method === "workspace.close"
+            ? { closed: true }
+            : { ok: true },
+    });
+    const opened = vi.fn(),
+      waitingNotesMayDiffer = vi.fn();
+    f.dependencies.onWorkspaceOpened = opened;
+    f.dependencies.notifyOwnerDraftsChanged = waitingNotesMayDiffer;
+    const received = {
+      workspaceId: "received",
+      rootPath: await createTestScratch("dohc-open-received-"),
+    };
+    const owner = { workspaceId: "owner", rootPath: await createTestScratch("dohc-open-owner-") };
+    try {
+      await f.engine.start();
+      f.engine.sessions!.rememberShareMount({ ...received, shareMount: true });
+      await f.engine.sessions!.run(received, async () => undefined);
+      await f.engine.sessions!.run(owner, async () => undefined);
+      await vi.waitFor(() => expect(quarantineMock.read).toHaveBeenCalled());
+      expect(opened.mock.calls).toEqual([["received"], ["owner"]]);
+      expect(waitingNotesMayDiffer.mock.calls).toEqual([["owner"]]);
+      expect(quarantineMock.read.mock.calls.map(([, workspace]) => workspace)).toEqual([
+        "owner-handle",
+      ]);
     } finally {
       await f.close();
     }
@@ -1278,6 +1377,7 @@ describe("server owner peer lifecycle", () => {
         refusals: async () => {},
         keptEdits: unexpectedKeptEdits,
         keptEditsPage: unexpectedKeptEdits,
+        ...noLivePauses,
         open: unexpectedOpen,
         documents: async () => ({
           ok: true,
@@ -1503,6 +1603,113 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
       expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
       expect(f.engine.ownerLivePausedPaths("owner")).toEqual([]);
+    } finally {
+      credentials.abort();
+      await f.close();
+      ownerDeliveryMock.pass.mockReset();
+      quarantineMock.read.mockReset();
+    }
+  });
+
+  it("keeps one connection for a shared note its owner has open, and passes wake it instead of delivering", async () => {
+    const { f, credentials } = await quarantinedOwner([
+      { path: "notes/plan.md", objectId: "object" },
+      { path: "notes/other.md", objectId: "other" },
+    ]);
+    quarantineMock.read.mockResolvedValue([]);
+    f.dependencies.ownerHasOpen = (_workspaceId, path) => path === "notes/plan.md";
+    let wakes = 0;
+    // While set, a woken room is still sending what its queue holds.
+    let sending: Promise<void> | undefined;
+    ownerDeliveryMock.pass.mockImplementation(async (options) => {
+      if (!options.lasting) return "empty";
+      // The room waits for an edit until something ends it.
+      for (;;) {
+        await options.lasting.landed(options.lasting.count(), options.signal);
+        wakes += 1;
+        await sending;
+      }
+    });
+    const calls = (path: string) =>
+      ownerDeliveryMock.pass.mock.calls
+        .map(([options]) => options)
+        .filter((options) => options.document.binding.currentPath === path);
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(calls("notes/plan.md")).toHaveLength(1));
+      for (let pass = 0; pass < 2; pass++) {
+        const before = calls("notes/other.md").length;
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() => expect(calls("notes/other.md").length).toBeGreaterThan(before));
+      }
+      // The note's turns wake its room, so an entry the engine queued without an edit goes.
+      await vi.waitFor(() => expect(wakes).toBeGreaterThan(0));
+      expect(calls("notes/plan.md")).toHaveLength(1);
+      expect(calls("notes/plan.md")[0].lasting).toBeDefined();
+      expect(calls("notes/other.md").every((options) => !options.lasting)).toBe(true);
+
+      // The engine refused an edit to the room's note: its queue is full, so another note's
+      // pass does not lift the pause until the room has sent it and waits again.
+      let sent!: () => void;
+      sending = new Promise((resolve) => (sent = resolve));
+      const woken = wakes;
+      f.engine.noteOwnerLiveEditsPaused("owner", "notes/plan.md");
+      await vi.waitFor(() => expect(wakes).toBe(woken + 1));
+      const before = calls("notes/other.md").length;
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(calls("notes/other.md").length).toBeGreaterThan(before));
+      expect(f.engine.ownerLivePausedPaths("owner")).toEqual(["notes/plan.md"]);
+      sending = undefined;
+      sent();
+      await vi.waitFor(() => {
+        f.engine.retryOwnerDelivery("owner");
+        expect(f.engine.ownerLivePausedPaths("owner")).toEqual([]);
+      });
+    } finally {
+      credentials.abort();
+      await f.close();
+      ownerDeliveryMock.pass.mockReset();
+      quarantineMock.read.mockReset();
+    }
+  });
+
+  // Each pass wakes the room before it looks for idle rooms, so with no other note no pass sees it wait.
+  it("lifts the pause once the room of a workspace's only note has sent its full queue", async () => {
+    const { f, credentials } = await quarantinedOwner([
+      { path: "notes/plan.md", objectId: "object" },
+    ]);
+    quarantineMock.read.mockResolvedValue([]);
+    f.dependencies.ownerHasOpen = () => true;
+    let wakes = 0;
+    let sending: Promise<void> | undefined;
+    ownerDeliveryMock.pass.mockImplementation(async (options) => {
+      if (!options.lasting) return "empty";
+      for (;;) {
+        await options.lasting.landed(options.lasting.count(), options.signal);
+        wakes += 1;
+        await sending;
+      }
+    });
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() =>
+        expect(ownerDeliveryMock.pass.mock.calls.some(([options]) => options.lasting)).toBe(true),
+      );
+      let sent!: () => void;
+      sending = new Promise((resolve) => (sent = resolve));
+      const woken = wakes;
+      f.engine.noteOwnerLiveEditsPaused("owner", "notes/plan.md");
+      await vi.waitFor(() => expect(wakes).toBe(woken + 1));
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("unsent-edits-limit");
+      sending = undefined;
+      sent();
+      // Passes keep coming and keep waking the room.
+      await vi.waitFor(() => {
+        f.engine.retryOwnerDelivery("owner");
+        expect(f.engine.ownerLivePausedPaths("owner")).toEqual([]);
+      });
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
     } finally {
       credentials.abort();
       await f.close();
@@ -2195,6 +2402,7 @@ describe("server owner peer lifecycle", () => {
           refusals: async () => {},
           keptEdits: unexpectedKeptEdits,
           keptEditsPage: unexpectedKeptEdits,
+          ...noLivePauses,
           open: unexpectedOpen,
           documents: async () => ({ ok: true, documents: rows() }),
         }),
@@ -2317,6 +2525,7 @@ describe("server owner peer lifecycle", () => {
         refusals: async () => {},
         keptEdits: unexpectedKeptEdits,
         keptEditsPage: unexpectedKeptEdits,
+        ...noLivePauses,
         open: unexpectedOpen,
         documents: async () => ({ ok: true, diverged, documents: rows }),
       }),

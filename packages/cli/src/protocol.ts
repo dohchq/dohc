@@ -671,7 +671,9 @@ export const LIVE_DOCUMENT_REASON_STEPS = {
   "session-host-diverged":
     "The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator.",
   "live-document-without-lineage":
-    "Live editing can't start until the document is opened once in dohc. Open it, then Resume. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.",
+    "Live editing can't start until the document is opened once in dohc. Open it, then Resume.",
+  "live-document-too-large":
+    "The note is larger than 256 KB, so it can't be edited live, and Resume can't start it. Make it smaller or split it, then open it in dohc and Resume.",
   "live-edit-unadmitted": "The server hasn't applied an edit. Resume tries again.",
   "conflict-parent-withheld":
     "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. A copy can go live, but it leaves out the row's kept edits. Save a recovery copy to keep them. Then duplicate the file and open the copy in dohc. If only this file was shared, share the copy too.",
@@ -1254,10 +1256,15 @@ export type CliRequest = z.infer<typeof cliRequestSchema>;
 export type CliVerb = CliRequest["verb"];
 
 export const APP_PUBLICATION_CAPABILITIES = {
+  verifyFrontend: "app.frontend.verify",
   createLink: "app.link.create",
   listLocal: "app.local.list",
   checkLocal: "app.local.check",
   prepareLocal: "app.local.prepare",
+  stage: "app.local.stage",
+  listStaged: "app.local.staged.list",
+  approveStaged: "app.local.staged.approve",
+  discardStaged: "app.local.staged.discard",
   launchLocal: "app.local.launch",
   list: "app.publication.list",
   prepare: "app.publication.prepare",
@@ -2444,7 +2451,12 @@ const liveStopResultSchema = z.discriminatedUnion("ok", [
 ]);
 const liveResumeResultSchema = z.discriminatedUnion("ok", [
   z
-    .object({ ok: z.literal(true), path: z.string().min(1), already: z.literal(true).optional() })
+    .object({
+      ok: z.literal(true),
+      path: z.string().min(1),
+      already: z.literal(true).optional(),
+      ended: z.literal(true).optional(),
+    })
     .strict(),
   rawFailureSchema,
 ]);

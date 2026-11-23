@@ -51,7 +51,7 @@ function tableFromRows(
   let bytes = encoder.encode(JSON.stringify(headers)).byteLength;
   for (const row of rows) {
     if (cells.length >= SOURCE_IMPORT_MAX_ROWS)
-      throw Error("Import at most 10,000 rows at a time.");
+      throw Error("This source has more than 10,000 rows. Import at most 10,000 rows at a time.");
     const literals: Array<AppBackendJson | undefined> = [];
     const values = headers.map((header, column) => {
       const raw = row[header];
@@ -89,14 +89,13 @@ export function collectionRecordsToCsv(
   const errors: string[] = [];
   const cellErrors: string[][] = [];
   const rows = records.map((record, index) => {
-    if (record.conflicted)
-      errors[index] = "This document has a conflict. Resolve it before importing.";
+    if (record.conflicted) errors[index] = "This page has a conflict. Resolve it before importing.";
     cellErrors[index] = fields.map((field) => {
       const value = record.values.find((value) => value.field === field.name);
       if (value?.validation.status === "flagged")
-        return `Correct ${field.name} in the source document first.`;
+        return `Fix ${field.name} in the source page first.`;
       if (field.type === "relation" && value?.value != null)
-        return `Skip ${field.name}. Document relations need new target record keys.`;
+        return `Skip ${field.name}. Page relations need new target record IDs.`;
       return "";
     });
     const values = Object.fromEntries(record.values.map((value) => [value.field, value.value]));

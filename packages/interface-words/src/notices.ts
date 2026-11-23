@@ -106,6 +106,11 @@ export const chatWords = {
   title: "Title",
   /** The composer's placeholder, and the name of its field. */
   messageTo: (name: string) => `Message ${name}`,
+  /** The @name menu above the composer when nobody the chat knows matches what follows the @. */
+  noMentionMatch: "No matching people or agents",
+  /** A row of that menu, for VoiceOver: the name, then what they are. */
+  mentionPerson: (name: string) => `${name}, person`,
+  mentionAgent: (name: string) => `${name}, agent`,
   /** A message's author while only this phone has it. */
   you: "You",
   /** A message on its way: a request may have reached the server. */
@@ -138,7 +143,7 @@ export const chatWords = {
   /** The damaged file's delete failed: it stays, still damaged, with Try again. */
   deleteDamagedFailed: "dohc could not delete the damaged file.",
   /** A record in the outbox that can't be read: nothing of its text, chat or workspace is known. */
-  unreadableMessage: "This message could not be read",
+  unreadableMessage: "dohc could not read this message.",
   copyMessage: "Copy message",
   discard: "Discard",
   discardTitle: "Discard this message?",

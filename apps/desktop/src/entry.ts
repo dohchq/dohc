@@ -33,7 +33,7 @@ await runLaunchEntry({
     }
     const message = error instanceof Error ? error.message : "Unknown desktop startup error.";
     dialog.showErrorBox(
-      "dohc failed to start",
+      "dohc could not start",
       `${message}\n\nRestart dohc. If it fails again, review the desktop logs.`,
     );
   },

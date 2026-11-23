@@ -112,7 +112,7 @@ describe("Explorer, in a version, for files it does not track", () => {
     const dialog = await screen.findByTestId("not-versioned-confirm");
     expect(dialog.textContent).toContain("Rename clip.mp4 in Main too?");
     expect(dialog.textContent).toContain(
-      "It isn't versioned, so Main and every version have the same copy.",
+      "It is not versioned, so Main and every version have the same copy.",
     );
     fireEvent.click(screen.getByTestId("cancel-not-versioned"));
     await waitFor(() => expect(screen.queryByTestId("not-versioned-confirm")).toBeNull());

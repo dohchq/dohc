@@ -31,6 +31,7 @@ export const credentials: CloudCredentials = {
 };
 export const info: ShareViewInfo = {
   shareId: "share",
+  statedShareId: "share",
   granterUserId: "granter",
   granterEmail: "granter@example.test",
   genericChatWritable: true,
@@ -54,6 +55,7 @@ export const ready: WatcherStatusResult = {
   degraded: false,
   noAtomicPlacement: false,
   recoveryUnavailable: false,
+  secretKeyChecked: true,
   deferredWrites: [],
   keptFiles: [],
   captureRecoveries: [],
@@ -208,6 +210,7 @@ export async function createSharedViewsIpcHarness(
       surfaces();
       notify();
     },
+    lostDrawings: () => [],
     logError: vi.fn(),
   });
   const setView = vi.fn<Dependencies["setWorkspaceShareView"]>(async (id, shareView) => {

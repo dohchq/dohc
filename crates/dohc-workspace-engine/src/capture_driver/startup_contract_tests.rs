@@ -8,6 +8,7 @@ fn plan_with_ops(ops: Vec<CaptureOp>) -> ReconcileRun {
         retained_unread: Vec::new(),
         unconfirmed_removed: Vec::new(),
         respelled_retires: Default::default(),
+        removed_sha256: Default::default(),
         degraded: false,
         degraded_paths: Vec::new(),
         prepared_from_dirty: true,

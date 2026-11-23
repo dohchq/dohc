@@ -52,10 +52,12 @@ pub fn project_ydoc_updates<'a>(
                 "the projection exceeds MAX_PROJECTION_BYTES ({max} bytes)"
             )),
             CollabError::ProjectionTooComplex {
+                depth,
+                nodes_left,
                 max_depth,
                 max_nodes,
             } => TooLarge(format!(
-                "the document nests deeper than MAX_PROJECTION_DEPTH ({max_depth}) or holds more than MAX_PROJECTION_NODES ({max_nodes}) nodes"
+                "the document nests deeper than MAX_PROJECTION_DEPTH ({max_depth}) or holds more than MAX_PROJECTION_NODES ({max_nodes}) nodes: reading stopped {depth} deep with {nodes_left} nodes left"
             )),
             _ => Invalid("the ydoc projection is invalid"),
         })?;

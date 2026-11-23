@@ -36,10 +36,8 @@ function switchProblem(result: SwitchCollectionAutomationResult, words: string):
       return `dohc could not tell whether it switched ${words}.`;
     case "unreadable":
       return `dohc cannot read every automation in ${AUTOMATIONS_FILE}, so it saved nothing. Fix the file, then try again.`;
-    case "refused": {
-      const [first] = result.diagnostics;
-      return `dohc could not switch ${words}.${first ? ` ${first.code} at ${first.path}.` : ""}`;
-    }
+    case "refused":
+      return `dohc could not switch ${words}. Check ${AUTOMATIONS_FILE} for errors.`;
     case "unavailable":
     case "refused-write":
       return result.reason;
@@ -87,7 +85,7 @@ async function switchAgain(
     });
     const problem =
       result.status === "reformats"
-        ? `${AUTOMATIONS_FILE} has hand formatting, so dohc did not switch ${words}. Switch it in the panel to save the file in dohc's layout.`
+        ? `${AUTOMATIONS_FILE} has custom formatting, so dohc did not switch ${words}. Switch it in the panel to save the file in dohc's layout.`
         : switchProblem(result, words);
     if (problem !== null)
       onError(
@@ -443,7 +441,7 @@ export function SharedAutomationsPanel(props: {
           }}
         >
           <p>
-            dohc rewrites the whole file when it saves, so you lose its comments and hand
+            dohc rewrites the whole file when it saves, so you lose its comments and custom
             formatting.
           </p>
         </ConfirmDialog>

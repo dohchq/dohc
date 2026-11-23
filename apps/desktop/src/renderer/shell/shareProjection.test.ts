@@ -82,7 +82,7 @@ describe("share refresh summary", () => {
     ]);
     expect(summary).toContain("Refreshed 1 of 2 shares. 2 files updated.");
     expect(summary, "the summary replaces the damage notice and the fix is lost").toContain(
-      "dohc can't read what alex grants. Remove it and add the share again.",
+      "dohc cannot read what alex grants. Remove it and add the share again.",
     );
     expect(summary).not.toContain("grant.");
   });
@@ -114,14 +114,14 @@ describe("share refresh summary", () => {
         row({ label: "alex", status: "damaged" }),
       ]),
     ).toBe(
-      "dohc could not refresh 3 shares. dohc can't read what alex grants. Remove it and add the share again.",
+      "dohc could not refresh 3 shares. dohc cannot read what alex grants. Remove it and add the share again.",
     );
   });
 
   it("says nothing about damage when every mount is healthy", () => {
     const summary = shareRefreshSummary([row({ changedPaths: 1 })]);
-    expect(summary).toBe("Shares refreshed — 1 file updated.");
-    expect(summary).not.toContain("can't read");
+    expect(summary).toBe("Shares refreshed. 1 file updated.");
+    expect(summary).not.toContain("cannot read");
   });
 
   it("keeps the ended report when damage is present too", () => {

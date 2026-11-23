@@ -5,7 +5,7 @@ import {
 } from "../chatMessageInterest";
 import type { StorageContext } from "./context";
 import { noticeChatMessage } from "./notices";
-import { recordPushDeliveries } from "./pushDeliveries";
+import { recordPushArrival, recordPushDeliveries } from "./pushDeliveries";
 
 /**
  * Alerts the people a new message is for: a push to their devices when the
@@ -27,12 +27,15 @@ export function recordChatMessageAlerts(
     AND relay_admission IS NULL ORDER BY relay_seq LIMIT 1`)
     .get(message.workspaceId, message.threadId, message.messageId);
   if (Number(first?.relay_seq) !== relaySeq) return;
+  recordPushArrival(storage, message, nowMs);
+  const { pushConfigured, apnsConfigured } = storage.options;
   for (const candidate of chatMessageCandidates(storage, message)) {
     const interest = chatMessageInterest(storage, message, candidate);
     if (!interest) continue;
-    if (storage.options.pushConfigured)
+    if (pushConfigured || apnsConfigured)
       recordPushDeliveries(storage, message, candidate.userId, interest.reason, nowMs);
-    if (interest.reason !== "dm") {
+    // An agent's message to its owner reaches only the owner's phone.
+    if (interest.reason !== "dm" && interest.reason !== "agent") {
       noticeChatMessage(storage, {
         message,
         recipientUserId: candidate.userId,

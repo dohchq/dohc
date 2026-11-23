@@ -1,5 +1,8 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
+import { createDohcMcpServer } from "./server";
 import { dataset, type ToolContext } from "./tools";
 const request = {
   action: "invoke",
@@ -147,5 +150,102 @@ describe("dataset MCP transport", () => {
       ok: false,
     });
     expect(send).not.toHaveBeenCalled();
+  });
+  it("returns self-remedying errors for wrong actions, unrecognized keys, and broken definitions", async () => {
+    const send = vi.fn(),
+      context: ToolContext = { root: "/workspace", home: "/home", request: send };
+
+    const badAction = await dataset(context, { action: "help" });
+    expect(badAction).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("Valid actions:"),
+    });
+
+    const wrongKey = await dataset(context, {
+      action: "prepare",
+      workspaceId: "workspace",
+      datasetPath: "equipment/dataset.json",
+    });
+    expect(wrongKey).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('Unrecognized key "datasetPath" for action "prepare"'),
+    });
+    expect((wrongKey as { reason: string }).reason).toContain("descriptorPath");
+
+    const folderPath = await dataset(context, {
+      action: "describe",
+      workspaceId: "workspace",
+      datasetPath: "equipment",
+    });
+    expect(folderPath).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("equipment/dataset.json"),
+    });
+
+    const missingPath = await dataset(context, {
+      action: "describe",
+      workspaceId: "workspace",
+    });
+    expect(missingPath).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("datasetPath"),
+    });
+
+    const badCreate = await dataset(context, {
+      action: "create",
+      workspaceId: "workspace",
+      definition: { formatVersion: 2 },
+    });
+    expect(badCreate).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("missing required field(s)"),
+    });
+
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("delivers self-remedying validation messages through the MCP server", async () => {
+    const server = createDohcMcpServer({
+      root: "/workspace",
+      home: "/home",
+      request: async () => {
+        throw new Error("should not reach desktop");
+      },
+    });
+    const client = new Client({ name: "dataset-validation-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const badPrepare = await client.callTool({
+        name: "dohc_dataset",
+        arguments: {
+          request: {
+            action: "prepare",
+            workspaceId: "workspace",
+            datasetPath: "equipment/dataset.json",
+          },
+        },
+      });
+      const prepareText = (badPrepare.content as Array<{ text?: string }>)
+        .map((c) => c.text ?? "")
+        .join("\n");
+      expect(badPrepare.isError).toBe(true);
+      expect(prepareText).toContain("descriptorPath");
+
+      const badApp = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: { action: "deploy", workspaceId: "workspace" },
+        },
+      });
+      const appText = (badApp.content as Array<{ text?: string }>)
+        .map((c) => c.text ?? "")
+        .join("\n");
+      expect(badApp.isError).toBe(true);
+      expect(appText).toContain("Valid actions:");
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });

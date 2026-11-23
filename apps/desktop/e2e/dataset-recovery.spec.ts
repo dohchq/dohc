@@ -135,7 +135,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     }, archivePath);
     await (await collectionCommand(collection, "Export recovery")).click();
     const exportDialog = page.getByRole("dialog", { name: "Export Recovery proof?", exact: true });
-    await expect(exportDialog).toContainText("private records");
+    await expect(exportDialog).toContainText("private record");
     await exportDialog.getByRole("button", { name: "Save recovery file", exact: true }).click();
     await expect(exportDialog).toBeHidden();
     expect((await readFile(archivePath)).byteLength).toBeGreaterThan(4096);
@@ -153,7 +153,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     // The copied manifest names no computer for the Collections, so this computer neither opens nor creates a store until the person keeps them here.
     const collections = restored.getByRole("region", { name: "Collections", exact: true });
     await expect(collections.getByTestId("collections-refusal")).toHaveText(
-      "Which computer keeps these Collections?Use this computer",
+      "Choose which computer keeps these CollectionsUse this computer",
     );
     await expect(
       collections.getByRole("button", { name: "Collections actions", exact: true }),
@@ -186,7 +186,7 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     ).toBeDisabled();
     await recovery
       .getByRole("checkbox", {
-        name: "I stopped the old host and will not restart it for this Collection.",
+        name: "I stopped the previous host and will not restart it for this Collection.",
       })
       .check();
     await recovery.getByRole("button", { name: "Restore Collection", exact: true }).click();

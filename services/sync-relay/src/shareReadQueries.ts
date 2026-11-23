@@ -35,8 +35,8 @@ import { LINK_REVISION_SCAN_LIMIT } from "./storage/limits";
 import { MAX_LOG_PAGE_SIZE } from "./wireLimits";
 import { sharedMomentAuthors } from "./sharedMomentAuthors";
 
-// One accountless response may scan this many raw log rows for admitted ops.
-export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
+// One share log response may scan this many raw log rows for admitted ops.
+export const MAX_RAW_ROWS_PER_SHARE_PAGE = 10_000;
 // Freshness reads inspect at most 20 pages, or 10,000 rows at the default page size.
 export const LINK_FRESHNESS_PAGE_BUDGET = 20;
 const ACCOUNTLESS_FILE_REPLAY_OP_KINDS = new Set([
@@ -246,6 +246,7 @@ export function createShareReadQueries(
     recipient?: ReceivedRecipient,
     currentOnly = false,
     epochLogFloor = 0,
+    maxRawRows = MAX_RAW_ROWS_PER_SHARE_PAGE,
   ): {
     ops: Array<Record<string, unknown>>;
     nextCursor: number;
@@ -291,7 +292,7 @@ export function createShareReadQueries(
           workspaceId,
           since,
           limit,
-          maxRawRows: audience === "accountless" ? MAX_RAW_ROWS_PER_LINK_PAGE : limit,
+          maxRawRows,
         },
         (row) => {
           // A departed publication names a path its document no longer holds.

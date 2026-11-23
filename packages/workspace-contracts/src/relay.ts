@@ -754,20 +754,28 @@ export interface RelayNoticePage {
 // and `restore`, with `?scope=phone` and its account session.
 export type NoticeMark = "read" | "dismissed" | "unread" | "restore";
 export type ComputerNoticeMark = Extract<NoticeMark, "read" | "dismissed">;
-// A phone's request body is exactly `{ marks: [{ noticeId, mark }] }`, at most
-// this many bytes. A computer's may add `installId` and, on a dismissal,
+// A phone's request body is exactly `{ marks: [{ noticeId, mark, key? }] }`, at
+// most this many bytes. A computer's may add `installId` and, on a dismissal,
 // `withdraw: true`.
 export const NOTICE_MARKS_MAX_BODY_BYTES = 512 * 1024;
+// A phone makes a key with each mark and sends that key with every try of the
+// mark. The relay applies a key once for each account and notice: a mark sent
+// again with a key it applied changes nothing, and answers as a success that
+// names the key in `repeated`.
+export const NOTICE_MARK_KEY_MAX_CHARS = 64;
 
 // The answer to POST /sync/notices/marks. `dismissed` lists the notices this
 // request dismissed first, so of all the computers that dismiss one notice,
 // exactly one hears that it did, as Run now on a skipped schedule needs. A
 // request may carry `installId`: the first dismissal names that computer,
 // and a later request from it hears "first" again, after a lost answer or a
-// crash.
+// crash. `repeated`, present only when not empty, lists the keys of the
+// phone's marks the relay had applied before, which this request left as
+// they were.
 export interface NoticeMarksResponse {
   ok: true;
   dismissed: string[];
+  repeated?: string[];
 }
 
 // The computer that runs a workspace's schedules and Group-message

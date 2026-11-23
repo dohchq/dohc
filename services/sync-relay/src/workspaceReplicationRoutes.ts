@@ -82,7 +82,6 @@ export function createWorkspaceReplicationRoutes(
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
   replicaWatches: Pick<ReplicaWatches, "watched">,
   lookupUserDisplayName?: LogAuthorNameLookup,
-  onLogRead?: (request: Request, workspaceId: string, rows: readonly SyncRelayLogRow[]) => void,
 ) {
   const accountNames = lookupUserDisplayName && cacheLogAuthorNames(lookupUserDisplayName, nowMs);
   async function respondToWorkspaceRegistration(
@@ -312,7 +311,6 @@ export function createWorkspaceReplicationRoutes(
           nextCursor: page.rows.length === 0 ? requestedSince : page.nextCursor,
           hasMore: page.hasMore,
         });
-        onLogRead?.(request, route.workspaceId, page.rows);
         return response;
       };
       const response = (await buildAnswer()) ?? (await buildAnswer());
@@ -330,7 +328,6 @@ export function createWorkspaceReplicationRoutes(
         originSeq: route.originSeq,
       });
       const response = jsonResponse(logCoordinateAnswer(row, epochLogFloor));
-      if (row) onLogRead?.(request, route.workspaceId, [row]);
       return response;
     }
 

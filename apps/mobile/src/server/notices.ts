@@ -11,7 +11,7 @@ import {
   type NoticeSenderKind,
   type NoticeTarget,
 } from "@dohc/workspace-contracts/relay";
-import { isFields, okAnswer, text } from "./api";
+import { each, isFields, okAnswer, text } from "./api";
 import { REQUEST_TIMEOUT_MS, type ServerClient } from "./client";
 
 // The account's Notices as the phone reads and marks them (services/sync-relay/src/noticeRoutes.ts). Every request
@@ -172,17 +172,28 @@ export function readNotices(
   });
 }
 
-/** Sends marks, at most NOTICE_MARKS_PER_REQUEST. The answer's first-dismissal list starts nothing on the phone. */
+/**
+ * Sends marks, at most NOTICE_MARKS_PER_REQUEST, each with the key it was made with. Resolves with the keys the relay
+ * had applied before and left as they were. The answer's first-dismissal list starts nothing on the phone.
+ */
 export function sendNoticeMarks(
   client: ServerClient,
-  marks: readonly { readonly noticeId: string; readonly mark: NoticeMark }[],
+  marks: readonly { readonly key: string; readonly noticeId: string; readonly mark: NoticeMark }[],
   signal: AbortSignal,
-): Promise<true> {
+): Promise<ReadonlySet<string>> {
   return client.send(
     "POST",
     "/sync/notices/marks?scope=phone",
-    (body) => (Array.isArray(okAnswer(body)?.dismissed) ? true : null),
-    { marks: marks.map(({ noticeId, mark }) => ({ noticeId, mark })) },
+    marksAnswer,
+    { marks: marks.map(({ noticeId, mark, key }) => ({ noticeId, mark, key })) },
     { signal },
   );
+}
+
+function marksAnswer(body: unknown): ReadonlySet<string> | null {
+  const answer = okAnswer(body);
+  if (!answer || !Array.isArray(answer.dismissed)) return null;
+  if (answer.repeated === undefined) return new Set();
+  const repeated = each(answer.repeated, (key) => (typeof key === "string" ? key : null));
+  return repeated && new Set(repeated);
 }

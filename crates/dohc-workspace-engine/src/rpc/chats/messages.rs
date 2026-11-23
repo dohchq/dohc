@@ -108,6 +108,8 @@ struct ChatReactionAuthorParams {
     author_id: String,
     kind: String,
     display_name: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    agent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -327,6 +329,8 @@ struct ReactionAuthorWire<'a> {
     author_id: &'a str,
     kind: &'static str,
     display_name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_id: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -352,6 +356,7 @@ impl<'a> From<&'a ChatReaction> for ReactionWire<'a> {
                 author_id: &reaction.author_id,
                 kind: reaction.author_kind.as_str(),
                 display_name: &reaction.author_display_name,
+                agent_id: reaction.author_agent_id.as_deref(),
             },
             state: reaction.state.as_str(),
             at_ms: reaction.at_ms,
@@ -790,6 +795,7 @@ impl EngineService {
                     author_id: params.author.author_id,
                     replication_author_id: params.replication_author_id,
                     author_kind,
+                    author_agent_id: params.author.agent_id,
                     author_display_name: params.author.display_name,
                     state,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
@@ -1132,6 +1138,7 @@ mod tests {
             emoji: "+1".to_owned(),
             author_id: "user".to_owned(),
             author_kind: ChatActorKind::Human,
+            author_agent_id: None,
             author_display_name: "Ada".to_owned(),
             state: ChatReactionState::Removed,
             at_ms: 13,

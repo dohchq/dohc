@@ -140,7 +140,7 @@ it("shows a line for the chat thread on screen, and none for another chat thread
 });
 
 it.each([
-  ["in-line", "In line in T3 Code"],
+  ["in-line", "Waiting in line in T3 Code"],
   ["working", "Working"],
   ["waiting-in-tool", "Waiting for you in T3 Code"],
   ["silent", "Finished without replying here"],
@@ -177,12 +177,12 @@ it("says when a message is in line behind work that waits on the person, and off
   const words = () => within(screen.getByRole("status")).getByText(/line/i).textContent;
 
   push([line({ state: "in-line" })]);
-  expect(words()).toBe("In line in T3 Code");
+  expect(words()).toBe("Waiting in line in T3 Code");
   expect(buttons()).toEqual(["Open in T3 Code"]);
 
   // Something in the thread waits on an approval.
   push([line({ state: "in-line", threadWaiting: true })]);
-  expect(words()).toBe("In line. The thread is waiting for you in T3 Code.");
+  expect(words()).toBe("Waiting in line. The thread is waiting for you in T3 Code.");
   expect(buttons()).toEqual(["Open in T3 Code"]);
 
   // It waits on a question, which the person can answer from here.

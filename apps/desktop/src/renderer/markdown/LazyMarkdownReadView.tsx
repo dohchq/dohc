@@ -38,7 +38,7 @@ export function LazyMarkdownReadView(
         fallback={
           <SkeletonRows
             testId="markdown-read-loading"
-            label="Loading document..."
+            label="Loading document…"
             className="min-h-48"
           />
         }

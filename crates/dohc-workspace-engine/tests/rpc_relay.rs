@@ -1083,23 +1083,6 @@ fn publish_pushed_ops(relay: &FakeRelay, workspace_id: &str, source: &ScratchDir
     }
 }
 
-// Ordinary editor settlements do not export a companion moment through this
-// uncaptured harness. Use the production exporter to exercise that wire pair.
-fn journal_editor_settlement(scratch: &ScratchDir, workspace: &str, moment: &str) {
-    let mut conn = Connection::open(engine_db_path(scratch).unwrap()).unwrap();
-    // The engine writes this store at the same time. Wait for its write lock
-    // as the engine's own connections do, rather than failing at once.
-    conn.busy_timeout(Duration::from_millis(u64::from(
-        ENGINE_SQLITE_BUSY_TIMEOUT_MS,
-    )))
-    .unwrap();
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .unwrap();
-    dohc_engine_sync::journal_moment_append_in_tx(&tx, workspace, moment).unwrap();
-    tx.commit().unwrap();
-}
-
 async fn pull_materialize_and_commit(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -1174,7 +1157,7 @@ async fn assert_open_document_artifact_recovery_inner(
     let session = opened_b["sessionId"].as_str().unwrap().to_owned();
     let doc = Ydoc::wire();
     let b_claim = call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": opened_b["lineageClaimId"], "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"Before"))})).await["lineageClaimId"].clone();
-    let settled = call(
+    call(
         &b_transport,
         &b,
         &mut b_id,
@@ -1182,7 +1165,6 @@ async fn assert_open_document_artifact_recovery_inner(
         json!({"sessionId":session}),
     )
     .await;
-    journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
     call(
         &b_transport,
         &b,
@@ -1239,7 +1221,7 @@ async fn assert_open_document_artifact_recovery_inner(
         call(&a_transport, &a, &mut a_id, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": resync.response.result["lineageClaimId"], "sessionId":session_a,"updateBase64":base64::engine::general_purpose::STANDARD.encode(local.plaintext_insert(0,"Local: "))})).await;
     }
     let b_claim = call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": b_claim, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(6," remote"))})).await["lineageClaimId"].clone();
-    let settled = call(
+    call(
         &b_transport,
         &b,
         &mut b_id,
@@ -1247,9 +1229,6 @@ async fn assert_open_document_artifact_recovery_inner(
         json!({"sessionId":session}),
     )
     .await;
-    if !integrated {
-        journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
-    }
     if tail {
         call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": b_claim, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(13," tail"))})).await;
     }
@@ -1299,7 +1278,6 @@ async fn assert_open_document_artifact_recovery_inner(
             )
             .unwrap()
         );
-        journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
         call(
             &b_transport,
             &b,
@@ -1664,7 +1642,7 @@ async fn assert_open_document_artifact_recovery_inner(
                 .unwrap(),
             0
         );
-        let settled = call(
+        call(
             &b_transport,
             &b,
             &mut b_id,
@@ -1672,7 +1650,6 @@ async fn assert_open_document_artifact_recovery_inner(
             json!({"sessionId":session}),
         )
         .await;
-        journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
         call(
             &b_transport,
             &b,

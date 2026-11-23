@@ -68,7 +68,7 @@ export interface RecordPropertiesProps extends Pick<
 }
 
 /** The room a field's name gets before its value. */
-const LABEL_WIDTH = 112;
+const LABEL_WIDTH = 136;
 const EMPTY = "Empty";
 const NOTE_BUTTON =
   "h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover";
@@ -248,6 +248,7 @@ function PropertyRow(props: RowProps) {
         tabStop
         alignStart
         emptyText={EMPTY}
+        wrap
       />
     );
   }
@@ -263,7 +264,7 @@ function PropertyRow(props: RowProps) {
       style={{ gridTemplateColumns: `${LABEL_WIDTH}px minmax(0, 1fr)` }}
     >
       <div
-        className="relative flex h-7 min-w-0 items-center gap-2 text-[12px] text-muted"
+        className="relative flex h-8 min-w-0 items-center gap-2 text-[12px] text-muted"
         {...(mark ? tooltip.hoverProps : {})}
       >
         <FieldTypeIcon type={field.type} className="shrink-0 text-subtle" />
@@ -291,7 +292,7 @@ function PropertyRow(props: RowProps) {
           ref={props.valueRef}
           data-property-value=""
           // A value that opens is one target: the control that edits it stretches over the box, which shows its focus.
-          className={`flex min-h-7 min-w-0 items-center gap-1 rounded-md px-2 text-ink transition-colors duration-75${editable ? " dohc-row-open" : ""}`}
+          className={`flex min-h-8 min-w-0 items-center gap-1 rounded-md px-2 text-ink transition-colors duration-75${editable ? " dohc-row-open" : ""}`}
           onClick={(event) => {
             // A dialog the host's button opens is the value's child in React, not on the page.
             if (editable && event.currentTarget.contains(event.target as Node)) props.onStartEdit();
@@ -328,6 +329,7 @@ function PropertyRow(props: RowProps) {
             key={record.id}
             ref={props.editorRef}
             data-cell-editor=""
+            data-grid-cell={popover === null ? "" : undefined}
             disabled={editingDisabled}
             onBlurCapture={(event) => {
               if (editingDisabled) event.stopPropagation();
@@ -338,13 +340,13 @@ function PropertyRow(props: RowProps) {
             }}
             className={
               popover === null
-                ? "dohc-popover absolute right-0 top-0 z-10 m-0 w-full min-w-0 rounded-md border border-line bg-bg p-1 font-normal"
-                : "dohc-popover dohc-pop-in absolute right-0 top-0 z-10 m-0 min-w-full rounded-lg border border-line bg-bg p-0 font-normal"
+                ? "absolute right-0 top-0 z-20 m-0 w-full min-w-0 rounded-md border-0 bg-bg p-0 font-normal ring-2 ring-inset ring-accent"
+                : "dohc-popover dohc-pop-in absolute right-0 top-0 z-20 m-0 min-w-full rounded-lg border border-line bg-bg p-0 font-normal"
             }
             style={
               popover === null
-                ? { minHeight: 28 }
-                : { width: popover, maxWidth: `calc(100% + ${LABEL_WIDTH}px)`, minHeight: 28 }
+                ? { minHeight: 32 }
+                : { width: popover, maxWidth: `calc(100% + ${LABEL_WIDTH}px)`, minHeight: 32 }
             }
           >
             {host ? (
@@ -357,8 +359,8 @@ function PropertyRow(props: RowProps) {
                 acknowledgedWriteId={props.acknowledgedWriteId?.(record, field.name) ?? 0}
                 subscribeToDiscardedWrites={props.subscribeToDiscardedWrites}
                 carried={props.carried}
-                // The edit starts from what the value shows, so a refused value is not typed twice.
-                indexed={indexed}
+                // The edit starts from what was typed, so a refused value is not typed twice.
+                indexed={shownValue(field.name, stored, status, true)}
                 emit={(value, previousValues) =>
                   onCellChange({
                     ...cell,

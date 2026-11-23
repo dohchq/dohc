@@ -2,7 +2,12 @@ import { desktopPins } from "../../testPins";
 import { useRef, type ReactNode } from "react";
 import { useFocusReturn } from "../ui/focusReturn";
 import { useCommitOnRelease } from "./useCommitOnRelease";
-import { ABOUT_MAX_WIDTH, ABOUT_MIN_WIDTH, clampAboutWidth } from "./workbenchState";
+import {
+  ABOUT_DEFAULT_WIDTH,
+  ABOUT_MAX_WIDTH,
+  ABOUT_MIN_WIDTH,
+  clampAboutWidth,
+} from "./workbenchState";
 
 const ABOUT_KEYBOARD_RESIZE_STEP = 16;
 const ABOUT_KEYBOARD_RESIZE_PAGE_STEP = ABOUT_KEYBOARD_RESIZE_STEP * 8;
@@ -76,6 +81,7 @@ export function AboutRail(props: {
         onPointerUp={(event) => resize.commit(event.pointerId)}
         onPointerCancel={(event) => resize.commit(event.pointerId)}
         onLostPointerCapture={(event) => resize.commit(event.pointerId)}
+        onDoubleClick={() => props.onWidthChange(ABOUT_DEFAULT_WIDTH)}
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 keyboard:focus-visible:bg-focus"
       />
       {props.children}

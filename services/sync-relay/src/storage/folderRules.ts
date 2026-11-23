@@ -11,7 +11,6 @@ import { stableJsonStringify } from "../canonicalJson";
 import { pathCollisionKey } from "../pathCollisionKey";
 import { proposalBase, proposalMomentPayload } from "../recipientMoments";
 import { FOLDER_ACCESS_ORIGIN } from "../relayLogInputs";
-import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 import {
   accessRuleStatements,
   folderHasFiles,
@@ -258,7 +257,6 @@ function writeMarkers(
       .get(workspaceId)?.head ?? 0,
   );
   for (const folder of input.folders) refreshFolderAccess(statements, workspaceId, folder, head);
-  forgetReplicaCurrentViewCaches(storage, workspaceId);
 }
 
 export type FolderState = "covered" | "marker-missing" | "folder-missing";

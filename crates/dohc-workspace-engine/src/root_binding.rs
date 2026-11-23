@@ -250,13 +250,18 @@ fn create_binding_dir(root: &Path) -> Result<BindingDir, RootBindingError> {
     // Windows opens a file for anyone its own DACL admits, even in a folder
     // they can't list, so each open there gives the folder, and what is in
     // it, the DACL of a user's profile folder, and refuses a link and what
-    // another account owns.
+    // another account owns. Files staged in `displaced` keep their DACLs
+    // until materialization saves each one to give it back.
     #[cfg(windows)]
     {
         // Only `.dohc/local` stays held, for the desktop's readers.
         drop(
-            dohc_windows_files::ensure_private_dir(root, relative)
-                .map_err(io_failure(&parent, RootBindingError::Unwritable))?,
+            dohc_windows_files::ensure_private_dir_leaving(
+                root,
+                relative,
+                std::ffi::OsStr::new("displaced"),
+            )
+            .map_err(io_failure(&parent, RootBindingError::Unwritable))?,
         );
         Ok(BindingDir {
             marker: parent.join(name),

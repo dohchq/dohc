@@ -80,7 +80,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     await screen.findByTestId("command-palette");
     act(() => bridge.emitMenuCommand("command-palette"));
     expect(screen.getByTestId("command-palette")).toBeTruthy();
-    fireEvent(screen.getByRole("textbox", { name: "Command" }), keyEvent(binding, platform));
+    fireEvent(screen.getByRole("combobox", { name: "Command" }), keyEvent(binding, platform));
     expect(screen.queryByTestId("command-palette")).toBeNull();
   });
 

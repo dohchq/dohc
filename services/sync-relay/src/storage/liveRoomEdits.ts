@@ -6,8 +6,8 @@ import {
 } from "@dohc/live-session-contract/live-authorship";
 import type { StorageContext } from "./context";
 import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
-import { documentParams } from "./liveUpdateJournal";
-import type { SqliteDb } from "./types";
+import { documentParams, parseLiveRoomAuthority } from "./liveUpdateJournal";
+import type { LiveRoomAuthority, SqliteDb } from "./types";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { assertWorkspaceQuota } from "./workspaces";
 
@@ -65,8 +65,8 @@ export function initializeRoomMigration(
     Date.now(),
   );
 }
-// Each room save's journal row, with the last room position it holds. An owner who catches up on
-// the journal after its room closed reads it, to let go of the room edits the save holds.
+// Each room save's journal row, with the room position through which every edit is saved. An owner
+// who catches up on the journal after its room closed reads it, to let go of those room edits.
 export const LIVE_ROOM_SAVES = "sync_relay_live_room_saves";
 const saves = {
   [LIVE_ROOM_SAVES]: `CREATE TABLE ${LIVE_ROOM_SAVES} (
@@ -76,14 +76,24 @@ const saves = {
   FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
 ) STRICT`,
 } as const;
+const LIVE_ROOM_EDIT_AUTHORITIES = "sync_relay_live_room_edit_authorities";
+const authorities = {
+  [LIVE_ROOM_EDIT_AUTHORITIES]: `CREATE TABLE ${LIVE_ROOM_EDIT_AUTHORITIES} (
+  position INTEGER PRIMARY KEY REFERENCES ${LIVE_ROOM_EDITS}(position) ON DELETE CASCADE,
+  authority_json TEXT NOT NULL CHECK (json_valid(authority_json))
+) STRICT`,
+} as const;
 export function initializeLiveRoomSchema(db: SqliteDb): void {
   initializeRoomMigration(db, MIGRATION, objects);
   initializeRoomMigration(db, "live-room-saves-v1", saves);
+  initializeRoomMigration(db, "live-room-edit-authorities-v1", authorities);
 }
 
 export interface LiveRoomEdit {
   readonly position: number;
   readonly sender: LiveAuthorSnapshot;
+  /** Null for an edit taken before the room kept the access each edit came in under. */
+  readonly authority: LiveRoomAuthority | null;
   readonly updateBytes: Uint8Array;
 }
 
@@ -128,6 +138,7 @@ export function appendLiveRoomEdit(
   input: {
     document: LiveDocumentKey;
     sender: LiveAuthorSnapshot;
+    authority: LiveRoomAuthority;
     /** Each editor id the edit adds content under, and whether the note already has content under it. */
     clients: readonly { clientId: number; inNote: boolean }[];
     updateBytes: Uint8Array;
@@ -136,6 +147,7 @@ export function appendLiveRoomEdit(
 ): { kind: "written"; position: number } | { kind: "refused" } {
   const params = documentParams(input.document);
   const sender = JSON.stringify(input.sender);
+  const authority = JSON.stringify(parseLiveRoomAuthority(input.authority));
   const identities = input.sender.map(liveAuthorIdentity);
   // Nothing outside the room reads its edits before a save, which wakes everyone, so taking one
   // wakes no live host. A wake on every edit had each capture read its access again.
@@ -169,7 +181,8 @@ export function appendLiveRoomEdit(
         )
         .run(...params, clientId, sender, storageBytes);
     }
-    const storageBytes = input.updateBytes.byteLength + Buffer.byteLength(sender) + 96;
+    const storageBytes =
+      input.updateBytes.byteLength + Buffer.byteLength(sender) + Buffer.byteLength(authority) + 112;
     assertWorkspaceQuota(storage, input.document.workspaceId, storageBytes);
     const position = highestPosition(storage) + 1;
     storage.db
@@ -177,6 +190,9 @@ export function appendLiveRoomEdit(
         `INSERT INTO ${LIVE_ROOM_EDITS}(position,workspace_id,main_version_id,object_id,lineage_claim_id,sender_snapshot_json,update_bytes,received_at_ms,storage_bytes) VALUES (?,?,?,?,?,?,?,?,?)`,
       )
       .run(position, ...params, sender, input.updateBytes, input.receivedAtMs, storageBytes);
+    storage.db
+      .prepare(`INSERT INTO ${LIVE_ROOM_EDIT_AUTHORITIES}(position,authority_json) VALUES (?,?)`)
+      .run(position, authority);
     return { kind: "written" as const, position };
   });
 }
@@ -187,26 +203,41 @@ export function liveRoomEdits(storage: StorageContext, document: LiveDocumentKey
     .readTx(() =>
       storage.db
         .prepare(
-          `SELECT position,sender_snapshot_json,update_bytes FROM ${LIVE_ROOM_EDITS} WHERE ${DOCUMENT} ORDER BY position`,
+          `SELECT e.position,e.sender_snapshot_json,e.update_bytes,a.authority_json FROM ${LIVE_ROOM_EDITS} e
+            LEFT JOIN ${LIVE_ROOM_EDIT_AUTHORITIES} a ON a.position=e.position
+            WHERE ${DOCUMENT} ORDER BY e.position`,
         )
         .all(...documentParams(document)),
     )
     .map((row) => ({
       position: Number(row.position),
       sender: parseLiveAuthorSnapshot(JSON.parse(String(row.sender_snapshot_json))),
+      authority:
+        row.authority_json === null
+          ? null
+          : parseLiveRoomAuthority(JSON.parse(String(row.authority_json))),
       updateBytes: new Uint8Array(row.update_bytes as Uint8Array),
     }));
+}
+
+/** Deletes every edit a note's room took. Runs inside the transaction that pauses the note. */
+export function deleteLiveRoomEdits(storage: StorageContext, document: LiveDocumentKey): void {
+  storage.db
+    .prepare(`DELETE FROM ${LIVE_ROOM_EDITS} WHERE ${DOCUMENT}`)
+    .run(...documentParams(document));
 }
 
 /** Deletes a note's saved edits. Runs inside the journal transaction that commits their save. */
 export function deleteSavedLiveRoomEdits(
   storage: StorageContext,
   document: LiveDocumentKey,
-  throughPosition: number,
+  positions: readonly number[],
 ): void {
   storage.db
-    .prepare(`DELETE FROM ${LIVE_ROOM_EDITS} WHERE ${DOCUMENT} AND position<=?`)
-    .run(...documentParams(document), throughPosition);
+    .prepare(
+      `DELETE FROM ${LIVE_ROOM_EDITS} WHERE ${DOCUMENT} AND position IN (SELECT value FROM json_each(?))`,
+    )
+    .run(...documentParams(document), JSON.stringify(positions));
 }
 
 /** Records a room save's journal row. Runs inside the journal transaction that commits it. */

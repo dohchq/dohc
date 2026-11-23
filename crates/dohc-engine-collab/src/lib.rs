@@ -60,7 +60,7 @@ pub use durable::{
     BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CloseProjection,
     CompactOutcome, FileExportLane, LineageClaimStatus, LineageGuard, LocalAppend,
     LoggedBaseOrigin, LoggedUpdate, Marker, MarkerCreation, OriginationBase, PersistedDoc, Regime,
-    SettleOutcome, SuccessorInstallOutcome, SuccessorReplacement,
+    SettleOutcome, SuccessorAuthor, SuccessorInstallOutcome, SuccessorReplacement,
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};

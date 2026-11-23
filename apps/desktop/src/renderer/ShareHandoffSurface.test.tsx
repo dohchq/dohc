@@ -7,13 +7,12 @@ import { deferred } from "../testing/deferred";
 
 const REFUSED_COPY =
   "dohc could not open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
-const NETWORK_COPY =
-  "dohc could not reach the server. Check your connection, then choose Try again.";
-const BUSY_COPY = "The server is busy right now. Wait a moment, then choose Try again.";
+const NETWORK_COPY = "dohc could not reach the server. Check your connection.";
+const BUSY_COPY = "The server is busy. Wait a few seconds.";
 const MISSING_COPY =
   "dohc could not find this share in your account. The person who shared it may have ended it.";
 const WRONG_SERVER_COPY =
-  "This share link belongs to a different server (https://relay-a.example) than the one you're signed in to. Sign in to that server, then choose Open in dohc again.";
+  "This share link belongs to https://relay-a.example, not the server you are signed in to. Sign in to that server, then choose Open in dohc again.";
 
 const bridgeMock = {
   cloudStatus: vi.fn(),
@@ -87,9 +86,9 @@ it("opens an Edit handoff as a standalone live view while mounts remain read-onl
   );
   const user = userEvent.setup();
   expect(await screen.findByTestId("open-share-choose-folder")).toBeTruthy();
-  expect(screen.getByTestId("open-share-summary").textContent).toContain(
-    "Trip plans · Ana (granter@dohc.test) · Edit access",
-  );
+  expect(
+    [...screen.getByTestId("open-share-summary").children].map((line) => line.textContent),
+  ).toEqual(["Trip plans", "Can edit · From Ana (granter@dohc.test)"]);
   expect(screen.getByTestId("open-share-mode-separate").getAttribute("aria-checked")).toBe("true");
   await user.click(screen.getByTestId("open-share-choose-folder"));
   await user.click(screen.getByTestId("open-share-start"));
@@ -101,6 +100,33 @@ it("opens an Edit handoff as a standalone live view while mounts remain read-onl
   );
   expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   expect(onWorkspaceReady).toHaveBeenCalled();
+});
+
+it("defaults an Edit handoff of a pinned version, which cannot be edited live, to Open separately", async () => {
+  bridgeMock.getRelayReceivedShare.mockResolvedValue({
+    found: true,
+    share: {
+      ...receivedShare("share-edit", "edit-code"),
+      access: "edit",
+      selector: { paths: ["notes"], versionId: "version-7" },
+    },
+  });
+  render(
+    <ShareHandoffSurface
+      status={{ status: "done", statusId: "edit-status", shareId: "share-edit" }}
+      onWorkspaceReady={() => {}}
+      onBack={() => {}}
+      onOpened={() => {}}
+      mountInto={{ workspaceId: "host", onMounted: vi.fn() }}
+    />,
+  );
+
+  expect((await screen.findByTestId("open-share-mode-separate")).getAttribute("aria-checked")).toBe(
+    "true",
+  );
+  expect(screen.getByTestId("open-share-mode-help").textContent).toBe(
+    "Opens as its own editable workspace.",
+  );
 });
 
 type ExactReceivedShareResult =
@@ -168,16 +194,16 @@ describe("ShareHandoffSurface", () => {
       );
 
       expect(screen.getByRole("heading", { name: "Open a share" })).toBeTruthy();
-      expect(screen.getByText("You're signed in as current-account@dohc.test.")).toBeTruthy();
+      expect(screen.getByText("Signed in as current-account@dohc.test.")).toBeTruthy();
       expect(
-        screen.getByText("If you open this share, the person who shared it will see that email."),
+        screen.getByText("Opening this share shows that email to the person who shared it."),
       ).toBeTruthy();
       expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
-        "Agree and open",
         "Cancel",
+        "Open share",
       ]);
 
-      await user.click(screen.getByRole("button", { name: "Agree and open" }));
+      await user.click(screen.getByRole("button", { name: "Open share" }));
       expect(bridgeMock.acceptShareHandoff).toHaveBeenCalledOnce();
       expect(bridgeMock.acceptShareHandoff).toHaveBeenCalledWith({
         statusId: "accept-current",
@@ -204,8 +230,8 @@ describe("ShareHandoffSurface", () => {
     );
 
     expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
-      "Agree and open",
       "Cancel",
+      "Open share",
     ]);
 
     fireEvent.mouseUp(window, { button: 0 });
@@ -486,7 +512,15 @@ describe("ShareHandoffSurface", () => {
       }),
     );
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
-    expect(onMounted).toHaveBeenCalledWith("granter", null);
+    expect(onMounted).toHaveBeenCalledWith({
+      shareId: "share-exact",
+      label: "granter",
+      name: "Trip plans",
+      files: 3,
+      access: null,
+      alreadyAdded: false,
+      left: false,
+    });
     expect(onOpened).toHaveBeenCalledOnce();
   });
 
@@ -566,10 +600,10 @@ describe("ShareHandoffSurface", () => {
   });
 
   it.each([
-    [true, "Find it in Chats, in a workspace of your own."],
+    [true, "Open Chats in one of your own workspaces to find it."],
     [
       false,
-      "Find it in Chats, in a workspace of your own. Create one from Manage workspaces first.",
+      "Open Chats in one of your own workspaces to find it. Create a workspace from Manage workspaces first.",
     ],
   ])(
     "says where a Group invitation or message request waits, with a workspace of their own: %s, and opens nothing",

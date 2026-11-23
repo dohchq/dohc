@@ -67,6 +67,22 @@ pub fn blocked_in(conn: &Connection, key: &DocKey) -> Result<bool, OwnerOutboxEr
     conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)", params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0)).map_err(read_sql)
 }
 
+pub fn owner_saves_publish_in(conn: &Connection, key: &DocKey) -> Result<bool, OwnerOutboxError> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND state='released' AND json_extract(binding_json,'$.deferred') IS NULL AND json_extract(binding_json,'$.paused') IS NULL)", params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0)).map_err(read_sql)
+}
+
+pub fn claimed_note_off_in(conn: &Connection, key: &DocKey) -> Result<bool, OwnerOutboxError> {
+    let claimed: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 AND d.lineage_claim_status='exact'
+               AND NOT EXISTS(SELECT 1 FROM owner_live_stops s WHERE s.workspace_id=d.workspace_id AND s.main_version_id=d.version_id AND s.object_id=d.object_id))",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
+    Ok(claimed && !owner_holds_live_in(conn, key).map_err(collab)?)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OwnerStopDocument {
@@ -294,11 +310,13 @@ pub fn list_requested_in(
 /// `kept_snapshot` names the refused edits the desktop recorded before this
 /// release; a released Stop answers again only for the same one. Without
 /// `accepted_cursor` it is a Try again, which never starts a release.
+/// `person_id` is who this computer credits with its person's edits.
 pub fn release_in_tx(
     tx: &rusqlite::Transaction<'_>,
     binding: &LiveObjectBinding,
     accepted_cursor: Option<i64>,
     kept_snapshot: Option<&str>,
+    person_id: &str,
     now_ms: i64,
     mut post_append: impl FnMut(
         &rusqlite::Transaction<'_>,
@@ -415,7 +433,8 @@ pub fn release_in_tx(
                     },
                 )
                 .transpose()?;
-            let credit = super::entry_credit(source.as_ref(), agent, run, automation, person)?;
+            let credit =
+                super::entry_credit(source.as_ref(), agent, run, automation, person, person_id)?;
             credited.push((credit, digest, bytes));
         }
     }
@@ -436,6 +455,12 @@ pub fn release_in_tx(
     if held {
         return Err(OwnerOutboxError::StopConflict);
     }
+    // The relay saves every edit it took before it answers a Stop, so the
+    // accepted state holds them by now. One it does not hold keeps the Stop.
+    if !super::taken::read_in(tx, binding)?.is_empty() {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    super::taken::clear_in(tx, binding)?;
     tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     tx.execute("DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     let credited = credited_runs(tx, &key, credited)?;
@@ -504,6 +529,10 @@ pub struct OwnerPauseInput {
     pub copy_path: String,
     /// The refused edits the desktop recorded as kept edits before the pause.
     pub kept_snapshot: Option<String>,
+    /// The relay's copy of the paused room: its whole state as one update,
+    /// holding the rows it took and no save holds, which this computer may
+    /// never have received.
+    pub room_copy: Option<Vec<u8>>,
     pub now_ms: i64,
 }
 
@@ -572,12 +601,13 @@ fn pause_in_tx(
     crate::live_update_application::require_restore_open(tx, &key)
         .map_err(|_| OwnerOutboxError::Corrupt)?;
     // The route reconnects and sends again until the note holds A and the
-    // rows through N are here.
+    // rows through N are here. The note can hold more than A: the relay goes
+    // on taking the owner's own rows after it pauses.
     // Rows and saves share one count, so N == A means no row was sent. A row
     // below A may not be in that save; only the layer shows it is here.
     let rows_through_n = input.row_cursor == input.applied_cursor
         || layer.is_some_and(|layer| layer.holds_row(binding, input.row_cursor));
-    if observed.accepted_cursor != input.applied_cursor || !rows_through_n {
+    if observed.accepted_cursor < input.applied_cursor || !rows_through_n {
         return Err(OwnerOutboxError::AcceptedStateIncomplete);
     }
     // Unbinding would strand a ready settlement; let the delivery pass apply
@@ -616,7 +646,10 @@ fn pause_in_tx(
     if refused && input.kept_snapshot.is_none() {
         return Err(OwnerOutboxError::StopConflict);
     }
-    let parts = super::draft::layered_parts_in(tx, binding, observed.revision, layer)?;
+    let mut parts = super::draft::layered_parts_in(tx, binding, observed.revision, layer)?;
+    // After the rows held here, so a room copy that cannot render leaves
+    // out only what this computer never received.
+    parts.rows.extend(input.room_copy.clone());
     let (markdown, left_out) = copy_text(parts)?;
     // A blob holds at least one byte; an empty note's copy is an empty file.
     let copy_digest = if markdown.is_empty() {
@@ -644,6 +677,7 @@ fn pause_in_tx(
             .map_err(read_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
     };
+    super::taken::clear_in(tx, binding)?;
     tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     tx.execute("DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     let mut blobs = BTreeSet::from([observed.checkpoint_digest.clone()]);

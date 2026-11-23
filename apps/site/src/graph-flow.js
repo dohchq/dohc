@@ -41,13 +41,13 @@ export function createGraphFlow(graph) {
   canvas.append(badge);
   const events = [
     { label: "Link shared", kind: "sharing" },
-    { label: "Version saved", kind: "history" },
+    { label: "Change saved", kind: "history" },
     { label: "Can edit", kind: "sharing" },
-    { label: "Version saved", kind: "history" },
+    { label: "Change saved", kind: "history" },
     { label: "Can view", kind: "sharing" },
-    { label: "Version saved", kind: "history" },
+    { label: "Change saved", kind: "history" },
     { label: "Access updated", kind: "sharing" },
-    { label: "Earlier version restored", kind: "history", restored: true },
+    { label: "Earlier state restored", kind: "history", restored: true },
   ].map((event) => ({
     ...event,
     routes: routes.filter((route) => route.edge.dataset.connectionKind === event.kind),

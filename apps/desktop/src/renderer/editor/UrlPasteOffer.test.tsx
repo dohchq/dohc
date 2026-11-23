@@ -131,4 +131,24 @@ describe("URL paste offer row", () => {
     fireEvent.click(screen.getByTestId("url-paste-undo"));
     expect(onUndo).toHaveBeenCalledOnce();
   });
+
+  it("uses bottom anchoring when placed above the cursor", () => {
+    const view = {
+      coordsAtPos: () => ({ left: 40, top: 740, bottom: 758 }),
+      focus: vi.fn(),
+    } as unknown as EditorView;
+    render(
+      <UrlPasteOffer
+        offer={OFFER}
+        view={view}
+        rowRef={createRef<HTMLDivElement>()}
+        onChoose={vi.fn()}
+        onUndo={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+    const row = screen.getByTestId("url-paste-offer");
+    expect(row.style.bottom).not.toBe("");
+    expect(row.style.top).toBe("");
+  });
 });

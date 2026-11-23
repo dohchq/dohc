@@ -29,6 +29,39 @@ import {
 } from "./markdown/frontmatter";
 import { lexesAsH1, opensWithH1 } from "./markdown/firstBlock";
 import { type OpenExternallyTarget, ReadOnlyPropertiesFlag } from "./fileInspectorUi";
+import { EMOJI_DATA } from "./editor/emojiData";
+
+const HAS_EMOJI = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20E3)/u;
+
+function isEmojiText(value: string): boolean {
+  return HAS_EMOJI.test(value);
+}
+
+function searchIconChoices(query: string): readonly string[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return EMOJI_CHOICES;
+  const seen = new Set<string>();
+  const matches: Array<{ emoji: string; score: number; shortcode: string }> = [];
+  for (const entry of EMOJI_DATA) {
+    const shortcode = entry.shortcode.toLowerCase();
+    let score = -1;
+    if (shortcode === q) score = 0;
+    else if (shortcode.startsWith(q)) score = 1;
+    else if (shortcode.includes(q)) score = 2;
+    else if (entry.keywords.some((k) => k.toLowerCase().startsWith(q))) score = 3;
+    else if (entry.keywords.some((k) => k.toLowerCase().includes(q))) score = 4;
+    if (score >= 0) matches.push({ emoji: entry.emoji, score, shortcode });
+  }
+  matches.sort((a, b) => a.score - b.score || a.shortcode.localeCompare(b.shortcode));
+  const result: string[] = [];
+  for (const match of matches) {
+    if (seen.has(match.emoji)) continue;
+    seen.add(match.emoji);
+    result.push(match.emoji);
+    if (result.length >= 60) break;
+  }
+  return result;
+}
 
 // The frontmatter Y.Map field name shared with PropertiesPanel. Title + icon
 // are reserved keys the document system owns — this
@@ -132,7 +165,7 @@ const TITLE_FIELD =
   "block resize-none overflow-hidden border-0 bg-transparent field-sizing-content read-only:cursor-default";
 // Its own line under the icon, as large as the drawing's title. Like the
 // body, it shows focus by its caret alone, so it draws no field edge.
-const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-muted focus:shadow-none!`;
+const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-semibold leading-[1.15] tracking-[-0.022em] text-ink placeholder:text-muted focus:shadow-none!`;
 // Folded beside "Add icon", and shown with it while the pointer is over the
 // page's identity or the field has focus. A read-only page has nothing to
 // add, so it stays hidden. Square corners keep its focus underline straight,
@@ -510,6 +543,8 @@ export function PageIdentity(props: PageIdentityProps) {
     setEmojiInput("");
   }
 
+  const iconChoices = useMemo(() => searchIconChoices(emojiInput), [emojiInput]);
+
   return (
     <div className="dohc-page-identity group" data-testid="page-identity">
       {/* The icon's line, then the title on its own line. Folded, the title
@@ -565,48 +600,61 @@ export function PageIdentity(props: PageIdentityProps) {
             <div
               ref={pickerRef}
               data-testid="page-icon-picker"
-              className="dohc-page-identity__picker"
+              className="dohc-page-identity__picker dohc-pop-in"
               role="dialog"
               aria-modal="true"
               aria-label="Choose an icon"
             >
               <div className="dohc-page-identity__picker-grid">
-                {EMOJI_CHOICES.map((choice) => (
-                  <button
-                    key={choice}
-                    type="button"
-                    aria-label={`Use ${choice}`}
-                    onClick={() => chooseIcon(choice)}
-                    className="dohc-page-identity__picker-emoji"
-                  >
-                    <span aria-hidden>{choice}</span>
-                  </button>
-                ))}
+                {iconChoices.length > 0 ? (
+                  iconChoices.map((choice) => (
+                    <button
+                      key={choice}
+                      type="button"
+                      aria-label={`Use ${choice}`}
+                      onClick={() => chooseIcon(choice)}
+                      className="dohc-page-identity__picker-emoji"
+                    >
+                      <span aria-hidden>{choice}</span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="col-span-full px-2 py-2 text-center text-[12px] text-muted">
+                    No matching emoji
+                  </div>
+                )}
               </div>
               <div className="dohc-page-identity__picker-actions">
                 <input
                   data-testid="page-icon-input"
-                  aria-label="Paste an emoji"
-                  placeholder="Paste emoji"
+                  aria-label="Search or paste an emoji"
+                  placeholder="Search or paste emoji"
                   value={emojiInput}
                   spellCheck={false}
                   onChange={(event) => setEmojiInput(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && !isComposingKey(event) && emojiInput.trim()) {
+                    const trimmed = emojiInput.trim();
+                    if (event.key === "Enter" && !isComposingKey(event) && trimmed) {
                       event.preventDefault();
-                      chooseIcon(emojiInput);
+                      if (isEmojiText(trimmed)) {
+                        chooseIcon(trimmed);
+                      } else if (iconChoices[0]) {
+                        chooseIcon(iconChoices[0]);
+                      }
                     }
                   }}
                   className="dohc-page-identity__picker-field"
                 />
-                <button
-                  type="button"
-                  data-testid="page-icon-remove"
-                  onClick={removeIcon}
-                  className="dohc-page-identity__picker-remove"
-                >
-                  Remove
-                </button>
+                {icon ? (
+                  <button
+                    type="button"
+                    data-testid="page-icon-remove"
+                    onClick={removeIcon}
+                    className="dohc-page-identity__picker-remove"
+                  >
+                    Remove
+                  </button>
+                ) : null}
               </div>
             </div>
           ) : null}

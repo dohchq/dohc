@@ -101,7 +101,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
           name: source.path,
           table,
           notice:
-            "This copies document properties. Documents stay unchanged; their bodies and relations are not imported. Pause source edits while reading.",
+            "Copies page fields only. Pages stay unchanged, and their bodies and relations are not imported. Pause source edits while reading.",
         });
     } else {
       const result = await bridge().readWorkspaceDatabase({
@@ -147,7 +147,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
         name: `${source.path} · ${selectedTable.name}`,
         table,
         notice:
-          "This copies one table. The source stays unchanged. Pause source edits while reading. Binary and truncated values require a lossless export.",
+          "Copies one table without changing the source. Pause source edits while reading. Binary and truncated values need a lossless export.",
       });
   }
 
@@ -245,7 +245,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
         </>
       )}
       <p className="m-0 text-[12px] text-muted">
-        Choose fields in the preview before importing. Each row saves through the Collection’s
+        Choose fields in the preview before importing. Each row saves through the Collection's
         create action.
       </p>
     </Overlay>

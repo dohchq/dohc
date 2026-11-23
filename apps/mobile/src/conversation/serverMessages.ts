@@ -28,17 +28,19 @@ const timeOf = (ms: number) =>
 function author(entry: ChatMessage, fills: readonly string[]): Author {
   const id = `${entry.authorKind}:${entry.authorName}`;
   if (entry.authorKind === "agent") return { id, name: entry.authorName, kind: "agent" };
-  const hash = [...entry.authorName].reduce(
-    (sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0,
-    0,
-  );
-  const initials = entry.authorName
+  return personAuthor(id, entry.authorName, fills);
+}
+
+/** A person by name, with their initials and the fill their name takes in every chat. */
+export function personAuthor(id: string, name: string, fills: readonly string[]): Author {
+  const hash = [...name].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 0);
+  const initials = name
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
     .map((word) => [...word][0]?.toUpperCase() ?? "")
     .join("");
-  return { id, name: entry.authorName, kind: "person", initials, hue: fills[hash % fills.length] };
+  return { id, name, kind: "person", initials, hue: fills[hash % fills.length] };
 }
 
 /** A message from the server, with its question or poll as the server has it. */

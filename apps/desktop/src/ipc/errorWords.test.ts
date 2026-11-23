@@ -97,7 +97,7 @@ it("explains the held-file live-open refusal after Electron serializes it", () =
     "Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md",
   );
   expect(readError(error).words).toBe(
-    "dohc cannot open \"notes/held.md\" for live editing. dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
+    "dohc cannot open \"notes/held.md\" for live editing. dohc cannot read this file's Markdown. Common causes are nested lists in a synced workspace or deeply nested quotes. Your outside edit is still in the file on disk. Copy it first, then restore the file's earlier contents. If dohc still cannot read the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
   );
 });
 
@@ -181,6 +181,18 @@ it.each([
   expect(ipcErrorMessage(received, "dohc could not read the held change.")).toContain(words);
 });
 
+it.each([
+  ["disk-full: need 4096 bytes, 512 available", "The disk is full. Free up space, then try again."],
+  [
+    "state-corrupt",
+    "This workspace's data store is damaged. Open Notices and choose Rebuild to review recovery options.",
+  ],
+])("names the engine's %s refusal across Electron", (message, words) => {
+  const received = acrossIpc(refusal("INTERNAL", message), "desktop:engine-ydoc-open");
+  expect(readError(received).words).toBe(words);
+  expect(ipcErrorMessage(received, "dohc could not save this note.")).toContain(words);
+});
+
 it("keeps the taken group name signal across IPC without matching its words", () => {
   const error = new Error("A group with that name already exists.");
   error.name = GROUP_NAME_TAKEN_ERROR;
@@ -197,7 +209,7 @@ it("keeps the taken group name signal across IPC without matching its words", ()
 it("keeps the synced deletion refusal words across Electron for History and conflict choices", () => {
   const received = acrossIpc(refusal("INVALID_PARAMS", "synced-deletion-revival-refused"));
   expect(readError(received).title).toBe(
-    "dohc can't bring back this file, because that could stop sync",
+    "dohc cannot bring back this file, because that could stop sync",
   );
   expect(ipcErrorMessage(received, "Could not restore this file.")).toContain(
     "Choose Keep this machine's copy, then copy its text from its History into a file with a new name.",
@@ -211,11 +223,11 @@ it("keeps the synced deletion refusal words across Electron for History and conf
 
 it("uses History instructions for restore refusals without changing conflict instructions", () => {
   const restore = readError(new SyncedDeletionRevivalError("tasks/trip.txt", undefined, true));
-  expect(restore.title).toBe("dohc can't bring back trip.txt, because that could stop sync");
+  expect(restore.title).toBe("dohc cannot bring back trip.txt, because that could stop sync");
   expect(restore.words).toBe("Copy its text from its History into a file with a new name.");
   expect(restore.canRetry).toBe(false);
   expect(readError(new SyncedDeletionRevivalError("tasks/trip.txt")).words).toBe(
-    "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for trip.txt, keep the removal there.",
+    "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other computer shows a conflict for trip.txt, keep the removal there.",
   );
 });
 
@@ -395,7 +407,7 @@ describe("error words", () => {
       "this folder has an invalid .dohc/manifest.json: manifest kind is invalid",
     );
     expect(readError(acrossIpc(unreadable, "desktop:attach-workspace-folder"))).toEqual({
-      words: "dohc can't read its .dohc/manifest.json. Fix the file, then try again.",
+      words: "dohc cannot read its .dohc/manifest.json. Fix the file, then try again.",
       mapped: true,
       cause:
         "WorkspaceManifestError [unreadable]: this folder has an invalid .dohc/manifest.json: manifest kind is invalid",
@@ -448,7 +460,7 @@ describe("error words", () => {
       cause: "DaemonRefusalError [INTERNAL]: volume-shares-new-files",
     });
     expect(withErrorWords("Couldn't save .env.", engine)).toBe(
-      "Couldn't save .env. The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.",
+      "Couldn't save .env. The disk this workspace is on adds sharing permissions to new files, so dohc cannot keep this file private. Move the workspace to a disk on this Mac.",
     );
   });
 
@@ -464,99 +476,99 @@ describe("error words", () => {
   it.each([
     [
       "link .dohc",
-      `This workspace's .dohc is a link, so dohc can't keep its History private. ${LINK}`,
+      `This workspace's .dohc is a link, so dohc cannot keep its History private. ${LINK}`,
     ],
     [
       "link .dohc/engine/engine.db-journal",
-      `This workspace's .dohc/engine/engine.db-journal is a link, so dohc can't keep its History private. ${LINK}`,
+      `This workspace's .dohc/engine/engine.db-journal is a link, so dohc cannot keep its History private. ${LINK}`,
     ],
     [
       "not-folder .dohc/engine",
-      `This workspace's .dohc/engine is not a folder, so dohc can't keep its History private. ${MOVE_ASIDE}`,
+      `This workspace's .dohc/engine is not a folder, so dohc cannot keep its History private. ${MOVE_ASIDE}`,
     ],
     [
       "not-file .dohc/engine/engine.db-wal",
-      `This workspace's .dohc/engine/engine.db-wal is not a file, so dohc can't keep its History private. ${MOVE_ASIDE}`,
+      `This workspace's .dohc/engine/engine.db-wal is not a file, so dohc cannot keep its History private. ${MOVE_ASIDE}`,
     ],
     [
       "other-owner .dohc",
-      `This workspace's .dohc belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`,
+      `This workspace's .dohc belongs to another user, so dohc cannot keep its History private. ${OTHER_OWNER_FOLDER}`,
     ],
     [
       "other-owner .dohc/engine",
-      `This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`,
+      `This workspace's .dohc/engine belongs to another user, so dohc cannot keep its History private. ${OTHER_OWNER_FOLDER}`,
     ],
     [
       "other-owner .dohc/engine/engine.db",
-      `This workspace's .dohc/engine/engine.db belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER}`,
+      `This workspace's .dohc/engine/engine.db belongs to another user, so dohc cannot keep its History private. ${OTHER_OWNER}`,
     ],
     [
       "unchecked-volume .dohc/engine",
-      "This workspace's .dohc/engine is on a disk dohc can't check, so dohc can't keep its History private. Move the workspace to a disk formatted as APFS, then try again.",
+      "This workspace's .dohc/engine is on a disk dohc cannot check, so dohc cannot keep its History private. Move the workspace to a disk formatted as APFS, then try again.",
     ],
     [
       "unchecked-system .dohc/engine",
-      "This workspace's .dohc/engine is on a system where dohc can't check it, so dohc can't keep its History private. Run dohc where it can read its own /proc/self/fd, then try again.",
+      "This workspace's .dohc/engine is on a system where dohc cannot check it, so dohc cannot keep its History private. Run dohc where it can read its own /proc/self/fd, then try again.",
     ],
     [
       "link .dohc/engine/engine.db-shm",
-      `This workspace's .dohc/engine/engine.db-shm is a link, so dohc can't keep its History private. ${LINK}`,
+      `This workspace's .dohc/engine/engine.db-shm is a link, so dohc cannot keep its History private. ${LINK}`,
     ],
     [
       "link .dohc/local",
-      `This workspace's .dohc/local is a link, so dohc can't keep this computer's own data private. ${LINK}`,
+      `This workspace's .dohc/local is a link, so dohc cannot keep this computer's own data private. ${LINK}`,
     ],
     [
       "not-folder .dohc/local",
-      `This workspace's .dohc/local is not a folder, so dohc can't keep this computer's own data private. ${MOVE_ASIDE}`,
+      `This workspace's .dohc/local is not a folder, so dohc cannot keep this computer's own data private. ${MOVE_ASIDE}`,
     ],
     [
       "other-owner .dohc/local",
-      `This workspace's .dohc/local belongs to another user, so dohc can't keep this computer's own data private. ${OTHER_OWNER_FOLDER}`,
+      `This workspace's .dohc/local belongs to another user, so dohc cannot keep this computer's own data private. ${OTHER_OWNER_FOLDER}`,
     ],
     [
       "not-changeable .dohc",
-      `This workspace's .dohc has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`,
+      `This workspace's .dohc has permissions dohc cannot use, so dohc cannot keep its History private. ${NOT_CHANGEABLE}`,
     ],
     [
       "not-changeable .dohc/local",
-      `This workspace's .dohc/local has permissions dohc can't use, so dohc can't keep this computer's own data private. ${NOT_CHANGEABLE}`,
+      `This workspace's .dohc/local has permissions dohc cannot use, so dohc cannot keep this computer's own data private. ${NOT_CHANGEABLE}`,
     ],
     [
       "not-changeable .dohc/engine",
-      `This workspace's .dohc/engine has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`,
+      `This workspace's .dohc/engine has permissions dohc cannot use, so dohc cannot keep its History private. ${NOT_CHANGEABLE}`,
     ],
     [
       "other-owner .dohc/engine/ROOT_BINDING",
-      `This workspace's .dohc/engine/ROOT_BINDING belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`,
+      `This workspace's .dohc/engine/ROOT_BINDING belongs to another user, so dohc cannot keep its History private. ${ITEM_OTHER_OWNER}`,
     ],
     [
       "other-owner .dohc/engine/displaced/worker-0",
-      `This workspace's .dohc/engine/displaced/worker-0 belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`,
+      `This workspace's .dohc/engine/displaced/worker-0 belongs to another user, so dohc cannot keep its History private. ${ITEM_OTHER_OWNER}`,
     ],
     [
       "not-changeable .dohc/engine/secret.key",
-      `This workspace's .dohc/engine/secret.key has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`,
+      `This workspace's .dohc/engine/secret.key has permissions dohc cannot use, so dohc cannot keep its History private. ${ITEM_NOT_CHANGEABLE}`,
     ],
     [
       "not-changeable .dohc/engine/engine.db",
-      `This workspace's .dohc/engine/engine.db has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`,
+      `This workspace's .dohc/engine/engine.db has permissions dohc cannot use, so dohc cannot keep its History private. ${ITEM_NOT_CHANGEABLE}`,
     ],
     [
       "not-changeable .dohc/engine/displaced/worker-0/6a6f62.0",
-      `This workspace's .dohc/engine/displaced/worker-0/6a6f62.0 has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`,
+      `This workspace's .dohc/engine/displaced/worker-0/6a6f62.0 has permissions dohc cannot use, so dohc cannot keep its History private. ${ITEM_NOT_CHANGEABLE}`,
     ],
     [
       "other-owner .dohc/local/ui-state.json",
-      `This workspace's .dohc/local/ui-state.json belongs to another user, so dohc can't keep this computer's own data private. ${ITEM_OTHER_OWNER}`,
+      `This workspace's .dohc/local/ui-state.json belongs to another user, so dohc cannot keep this computer's own data private. ${ITEM_OTHER_OWNER}`,
     ],
     [
       "other-owner .dohc/engine/Café notes/año 2026.txt",
-      `This workspace's .dohc/engine/Café notes/año 2026.txt belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`,
+      `This workspace's .dohc/engine/Café notes/año 2026.txt belongs to another user, so dohc cannot keep its History private. ${ITEM_OTHER_OWNER}`,
     ],
     [
       "not-changeable .dohc/engine/copy [1] of 日誌.db",
-      `This workspace's .dohc/engine/copy [1] of 日誌.db has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`,
+      `This workspace's .dohc/engine/copy [1] of 日誌.db has permissions dohc cannot use, so dohc cannot keep its History private. ${ITEM_NOT_CHANGEABLE}`,
     ],
   ])(
     "names what keeps a workspace's History from being private, where, and the fix that keeps it: %s",
@@ -695,13 +707,15 @@ describe("error words", () => {
 
   it("keeps a shared live file's restore words within 500 characters, with what to do", () => {
     expect(sharedLiveRestoreDetail("notes/plan.md").split("\n")).toEqual([
-      'dohc can\'t restore "notes/plan.md" because it has been shared live',
+      'dohc cannot restore "notes/plan.md" because it has been shared live',
       SHARED_LIVE_RESTORE_BODY,
     ]);
     const detail = sharedLiveRestoreDetail(`${`${"a".repeat(199)}/`.repeat(10)}a.md`);
     expect(detail).toHaveLength(500);
     expect(detail.split("\n")).toEqual([
-      expect.stringMatching(/^dohc can't restore "…[a/]+\/a\.md" because it has been shared live$/),
+      expect.stringMatching(
+        /^dohc cannot restore "…[a/]+\/a\.md" because it has been shared live$/,
+      ),
       SHARED_LIVE_RESTORE_BODY,
     ]);
   });
@@ -714,7 +728,7 @@ describe("error words", () => {
     );
     expect(isLiveFolderRefusal(received)).toBe(true);
     expect(readError(received)).toMatchObject({
-      title: `dohc can't move "notes/box" while a page in it has live editing on`,
+      title: `dohc cannot move "notes/box" while a page in it has live editing on`,
       words: liveFolderBody("move"),
     });
     expect(isSharedLiveFileRefusal(received)).toBe(false);
@@ -729,24 +743,24 @@ describe("error words", () => {
     );
     expect(isLivePageOwnedRefusal(received)).toBe(true);
     expect(readError(received)).toMatchObject({
-      title: `dohc can't move "docs/a.md" while it has live editing on`,
+      title: `dohc cannot move "docs/a.md" while it has live editing on`,
       words: "In Live documents, stop live editing for this page, then move it again.",
       cause: null,
     });
     expect(isLiveFolderRefusal(received)).toBe(false);
     expect(isSharedLiveFileRefusal(received)).toBe(false);
     expect([livePageTitle("docs/a.md", "rename"), livePageBody("rename")]).toEqual([
-      `dohc can't rename "docs/a.md" while it has live editing on`,
+      `dohc cannot rename "docs/a.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then rename it again.",
     ]);
     expect([livePagesTitle(["a.md", "b.md"], "delete"), livePagesBody("delete")]).toEqual([
-      `dohc can't delete "a.md" and "b.md" while they have live editing on`,
+      `dohc cannot delete "a.md" and "b.md" while they have live editing on`,
       "In Live documents, stop live editing for these pages, then delete them again.",
     ]);
     expect(namedList(["a", "b", "c"])).toBe(`"a", "b" and "c"`);
     expect(namedList(["a", "b", "c", "d", "e"])).toBe(`"a", "b", "c" and 2 more`);
     expect([livePageTitle("docs/a.md", "replace"), livePageBody("replace")]).toEqual([
-      `dohc can't replace "docs/a.md" while it has live editing on`,
+      `dohc cannot replace "docs/a.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then try again.",
     ]);
     const archive = acrossIpc(
@@ -758,7 +772,7 @@ describe("error words", () => {
       "desktop:archive-chat-bookmark",
     );
     expect(readError(archive)).toMatchObject({
-      title: `dohc can't archive "Bookmarks/Chats/a.md" while it has live editing on`,
+      title: `dohc cannot archive "Bookmarks/Chats/a.md" while it has live editing on`,
       words: "In Live documents, stop live editing for this page, then archive it again.",
     });
     expect(isLivePageOwnedRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-page-owned")))).toBe(
@@ -822,7 +836,7 @@ describe("error words", () => {
     expect(
       readError(acrossIpc(refusal("RELAY_HTTPS_REQUIRED", "workspace operation failed"))).words,
     ).toBe(
-      "Your server's address does not use https. Disconnect, then connect your server again with its https address.",
+      "Your server's address does not use HTTPS. Disconnect, then connect your server again with its HTTPS address.",
     );
   });
 
@@ -1116,23 +1130,23 @@ describe("error words", () => {
         "desktop:restore-engine-moment-file",
       );
     expect(readError(refused([".dohc/visibility.toml"]))).toEqual({
-      words: "It can't read .dohc/visibility.toml. Fix the file, then try again.",
+      words: "dohc cannot read .dohc/visibility.toml. Fix the file, then try again.",
       mapped: true,
       cause: `RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: ${parser}`,
     });
     expect(
       withErrorWords("dohc could not restore notes/plan.md.", refused([".dohc/visibility.toml"])),
     ).toBe(
-      "dohc could not restore notes/plan.md. It can't read .dohc/visibility.toml. Fix the file, then try again.",
+      "dohc could not restore notes/plan.md. dohc cannot read .dohc/visibility.toml. Fix the file, then try again.",
     );
     expect(readError(refused([".dohc/files.toml"])).words).toBe(
-      "It can't read .dohc/files.toml. Fix the file, then try again.",
+      "dohc cannot read .dohc/files.toml. Fix the file, then try again.",
     );
     expect(readError(refused([".dohc/files.toml", ".dohc/visibility.toml"])).words).toBe(
-      "It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
+      "dohc cannot read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
     );
     expect(readError(refused([".dohc"])).words).toBe(
-      "It can't read this workspace's .dohc folder. Fix the folder, then try again.",
+      "dohc cannot read this workspace's .dohc folder. Fix the folder, then try again.",
     );
     // Main reads the class itself for Stop and restore's review rows.
     expect(readError(new RestorePolicyRefusalError({ reason: "path-not-admitted" })).words).toBe(
@@ -1207,11 +1221,11 @@ it("names the Collection in a stopped move's words, as written, and leaves any o
     "dohc:dataset",
   );
   expect(readError(namingCollectionMove(stopped, "Q&A $& notes")).words).toBe(
-    '"Q&A $& notes" didn\'t finish moving to sync.example.test. Its records are kept on this computer.',
+    '"Q&A $& notes" did not finish moving to sync.example.test. Its records are kept on this computer.',
   );
   const named = readError(namingCollectionMove(stopped, "CRM: Accounts")).words;
   expect(named).toBe(
-    '"CRM: Accounts" didn\'t finish moving to sync.example.test. Its records are kept on this computer.',
+    '"CRM: Accounts" did not finish moving to sync.example.test. Its records are kept on this computer.',
   );
   expect(readError(named).words).toBe(named);
   expect(waitedForCollectionMove(namingCollectionMove(stopped, "Orders"))).toBe(true);

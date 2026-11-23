@@ -175,7 +175,12 @@ function fixture() {
     }),
     setReaction: vi.fn<ChatWriteStore["setReaction"]>(async (input) => {
       events.push(`react:${input.author.authorId}:${input.state}`);
-      const reaction = { ...input, reactionId: `${input.author.authorId}:${input.emoji}`, atMs: 4 };
+      const { authorId, kind, agentId = "" } = input.author;
+      const reaction = {
+        ...input,
+        reactionId: `${authorId}:${kind}:${agentId}:${input.emoji}`,
+        atMs: 4,
+      };
       const index = reactions.findIndex((entry) => entry.reactionId === reaction.reactionId);
       if (index >= 0) reactions.splice(index, 1);
       if (input.state === "added") reactions.push(reaction);
@@ -1746,6 +1751,36 @@ describe("chat writes", () => {
       author: { authorId: "user-1", kind: "agent", displayName: "Agent" },
       replicationAuthorId: "user-1",
     });
+  });
+
+  it("gives the person and each of their agents a reaction of their own", async () => {
+    const test = fixture();
+    const toggle = (writer: PersonWriter) =>
+      test.writes.setReaction(test.place, {
+        writer,
+        threadId: "thread",
+        messageId: "message",
+        emoji: "👍",
+        state: "toggle",
+      });
+    const codex: PersonWriter = { via: "cli", actor: "agent", agentId: "codex" };
+    const terminal: PersonWriter = { via: "cli", actor: "agent", agentId: "terminal" };
+    const reactors = () =>
+      test.reactions.map(({ author }) => `${author.kind}:${author.agentId ?? ""}`).sort();
+    expect(await toggle(codex)).toMatchObject({
+      state: "added",
+      author: { authorId: "user-1", kind: "agent", agentId: "codex", displayName: "Codex" },
+    });
+    expect(await toggle(terminal)).toMatchObject({ state: "added" });
+    expect(await toggle(PERSON)).toMatchObject({ state: "added" });
+    expect(await toggle(AGENT)).toMatchObject({ state: "added" });
+    expect(reactors()).toEqual(["agent:", "agent:codex", "agent:terminal", "human:"]);
+    expect(await toggle(codex)).toMatchObject({ state: "removed" });
+    expect(reactors()).toEqual(["agent:", "agent:terminal", "human:"]);
+    expect(await toggle(PERSON)).toMatchObject({ state: "removed" });
+    expect(reactors()).toEqual(["agent:", "agent:terminal"]);
+    expect(await toggle(terminal)).toMatchObject({ state: "removed" });
+    expect(reactors()).toEqual(["agent:"]);
   });
 
   it("passes a shared reaction's key to its row, and a key of its own to the alias row", async () => {

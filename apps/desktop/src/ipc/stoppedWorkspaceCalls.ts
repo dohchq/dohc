@@ -1,4 +1,5 @@
 import { accessOperations } from "./accessOperations";
+import { agentRunHistoryOperations } from "./agentRunHistoryOperations";
 import {
   agentRunStateOperations,
   captureRecoveryOperations,
@@ -58,6 +59,7 @@ const READ_CHANNELS: ReadonlySet<string> = new Set([
     workspaceVersionOperations.listNotVersionedFiles,
     historyOperations.listHistory,
     historyOperations.listVersionLastChanges,
+    agentRunHistoryOperations.planUndoAgentRun,
     captureRecoveryOperations.getCaptureRecoveryStatus,
     liveDraftRecoveryOperations.listLiveDraftRecovery,
     agentRunStateOperations.readAgentRunState,

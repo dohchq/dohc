@@ -18,7 +18,7 @@ export async function relayRequest(input: {
   init?: RequestInit;
   // Status to the error it means here. Read after 401, which is answered
   // first and the same way everywhere.
-  errors?: Record<number, () => Error>;
+  errors?: Record<number, (response: Response) => Error | Promise<Error>>;
   // Names the request in the fallback: `${label} failed (503)`.
   label: string;
 }): Promise<Response> {
@@ -34,7 +34,7 @@ export async function relayRequest(input: {
     response.status === 401
       ? new RelayUnauthorizedError()
       : mapped
-        ? mapped()
+        ? await mapped(response)
         : response.ok
           ? undefined
           : new Error(`${input.label} failed (${response.status})`);

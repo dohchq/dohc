@@ -68,7 +68,7 @@ describe("a window Forget left showing its workspace", () => {
     show({ openElsewhere: false });
     const stopped = screen.getByTestId("workspace-old-window");
     expect(within(stopped).getByRole("heading").textContent).toBe(
-      "This window can't edit this workspace anymore.",
+      "This window cannot edit this workspace anymore.",
     );
     expect(
       within(stopped)

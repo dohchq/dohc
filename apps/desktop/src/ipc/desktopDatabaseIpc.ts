@@ -115,7 +115,7 @@ export function registerDesktopDatabaseIpcHandlers<
   const imports = new Map<string, DatabaseImportRecord>();
   // The Undo is a row in this workspace's Notices, and a switch clears them, so no retry is offered.
   const inactiveMessage =
-    "Cannot undo this import. This window changed workspaces. Delete the database yourself if you don't want it.";
+    "dohc could not undo this import. This window changed workspaces. Delete the database yourself if you do not want it.";
   registerOperations(
     {
       handle: registerHandler,
@@ -165,11 +165,11 @@ export function registerDesktopDatabaseIpcHandlers<
                 const record = imports.get(input.operationId);
                 if (!record)
                   throw new Error(
-                    "Cannot undo this import. Undo is no longer available. Delete the database yourself if you don't want it.",
+                    "dohc could not undo this import. Undo is no longer available. Delete the database yourself if you do not want it.",
                   );
                 if (record.workspaceId !== operation.workspace.workspaceId) {
                   throw new Error(
-                    "Cannot undo this import in another workspace. Open the workspace where you imported it.",
+                    "dohc could not undo this import in another workspace. Open the workspace where you imported it.",
                   );
                 }
                 const admit = async () => {

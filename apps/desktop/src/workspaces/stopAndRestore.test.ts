@@ -538,9 +538,9 @@ describe("recipient record restoration", () => {
       {
         answer: "waiting",
         detail:
-          'dohc can\'t restore "trip/One.md" while it has live editing on\ndohc is waiting for the server to stop live editing for this page and will keep trying. When it stops, restore it again.',
+          'dohc cannot restore "trip/One.md" while it has live editing on\ndohc is waiting for the server to stop live editing for this page and will keep trying. When it stops, restore it again.',
       },
-      { answer: new Error("Live editing didn't stop."), detail: LIVE },
+      { answer: new Error("Live editing did not stop."), detail: LIVE },
     ] as const)("keeps it for review when the Stop answers $answer", async ({ answer, detail }) => {
       const { e, stopLiveEditing, files } = livePage(async () => {
         if (answer instanceof Error) throw answer;
