@@ -865,3 +865,187 @@ export const HOSTILE_STRINGS: readonly string[] = [
   "😀",
   "x".repeat(50_000),
 ];
+
+const deepValue = (levels: number): unknown => (levels === 0 ? null : [deepValue(levels - 1)]);
+
+/** Single changes two reviews measured: each is under 2 MiB and cost the room's check seconds. */
+export const COSTLY_CHANGES: readonly (readonly [name: string, change: (page: Page) => void])[] = [
+  [
+    "1,900,000 nulls in one record",
+    ({ records }) =>
+      records.set(
+        "X.title",
+        Array.from({ length: 1_900_000 }, () => null),
+      ),
+  ],
+  [
+    "1,300,000 nulls in one record",
+    ({ records }) =>
+      records.set(
+        "X.title",
+        Array.from({ length: 1_300_000 }, () => null),
+      ),
+  ],
+  [
+    "400,000 nulls in one record",
+    ({ records }) =>
+      records.set(
+        "X.title",
+        Array.from({ length: 400_000 }, () => null),
+      ),
+  ],
+  [
+    "7,000 values, each nested 127 deep, in one record",
+    ({ records }) =>
+      records.set(
+        "X.title",
+        Array.from({ length: 7_000 }, () => deepValue(127)),
+      ),
+  ],
+  [
+    "one record with 200,000 keys",
+    ({ records }) =>
+      records.set(
+        "X.title",
+        Object.fromEntries(
+          Array.from({ length: 200_000 }, (_, index) => [`k${String(index)}`, null]),
+        ),
+      ),
+  ],
+  [
+    "60,000 maps, each inside the one before, under frontmatter",
+    ({ doc }) => {
+      let map = new Y.Map<unknown>();
+      doc.getMap("frontmatter").set("deep", map);
+      for (let level = 1; level < 60_000; level++) {
+        const inner = new Y.Map<unknown>();
+        map.set("in", inner);
+        map = inner;
+      }
+    },
+  ],
+];
+
+const todosWithLinks =
+  (count: number) =>
+  ({ sequence, records }: Page) => {
+    for (const [key, value] of recordsOfContainer(schema, {
+      id: "sl",
+      type: "taskList",
+      attrs: {},
+    }))
+      records.set(key, value);
+    for (let line = 0; line < count; line++) {
+      const item = `si${String(line)}`;
+      for (const [key, value] of recordsOfContainer(schema, {
+        id: item,
+        type: "taskItem",
+        attrs: {},
+      }))
+        records.set(key, value);
+      sequence.insertEmbed(
+        sequence.length,
+        element(BLOCK_ELEMENT, { type: "paragraph", path: ["sl", item] }),
+        {},
+      );
+      sequence.insert(sequence.length, "see ", {});
+      sequence.insert(sequence.length, `page ${String(line)}`, {
+        link: {
+          href: `https://example.com/pages/${String(line)}`,
+          target: "_blank",
+          rel: "noopener noreferrer nofollow",
+          class: null,
+          title: null,
+        },
+      });
+      sequence.insert(sequence.length, " today", { link: null });
+    }
+  };
+
+/**
+ * Single changes a person's editor can honestly send, each as large as that kind gets, with what
+ * each was measured to hold. The last is larger than the 2 MiB a relay takes as one change.
+ */
+export const LARGE_HONEST_CHANGES: readonly (readonly [
+  name: string,
+  change: (page: Page) => void,
+  holds: { readonly bytes: number; readonly values: number; readonly structs: number },
+])[] = [
+  [
+    "a pasted table of 1,000 cells",
+    ({ sequence, records }) => {
+      const write = (id: string, type: string) => {
+        for (const [key, value] of recordsOfContainer(schema, { id, type, attrs: {} }))
+          records.set(key, value);
+      };
+      write("pt", "table");
+      for (let row = 0; row < 100; row++) {
+        write(`pr${String(row)}`, "tableRow");
+        for (let column = 0; column < 10; column++) {
+          const cell = `pc${String(row)}x${String(column)}`;
+          write(cell, row === 0 ? "tableHeader" : "tableCell");
+          sequence.insertEmbed(
+            sequence.length,
+            element(BLOCK_ELEMENT, { type: "paragraph", path: ["pt", `pr${String(row)}`, cell] }),
+            {},
+          );
+          sequence.insert(sequence.length, `cell ${String(row)}.${String(column)}`, {});
+        }
+      }
+    },
+    { bytes: 235_965, values: 10_201, structs: 9_201 },
+  ],
+  [
+    "10,000 plain lines seeded at once",
+    ({ sequence }) => {
+      for (let line = 0; line < 10_000; line++) {
+        sequence.insertEmbed(
+          sequence.length,
+          element(BLOCK_ELEMENT, { type: "paragraph", path: [] }),
+          {},
+        );
+        sequence.insert(sequence.length, `line ${String(line)}`, {});
+      }
+    },
+    { bytes: 633_009, values: 20_000, structs: 40_000 },
+  ],
+  [
+    "6,800 to-dos seeded at once, each with a link",
+    todosWithLinks(6_800),
+    { bytes: 2_076_833, values: 88_404, structs: 68_004 },
+  ],
+  [
+    "one line 64 containers deep",
+    ({ sequence, records }) => {
+      const path = Array.from({ length: 64 }, (_, depth) => `d${String(depth)}`);
+      for (const id of path)
+        for (const [key, value] of recordsOfContainer(schema, {
+          id,
+          type: "blockquote",
+          attrs: {},
+        }))
+          records.set(key, value);
+      sequence.insertEmbed(
+        sequence.length,
+        element(BLOCK_ELEMENT, { type: "paragraph", path }),
+        {},
+      );
+      sequence.insert(sequence.length, "deep", {});
+    },
+    { bytes: 7_818, values: 322, structs: 260 },
+  ],
+  [
+    "a cell with 1,000 column widths",
+    ({ records }) =>
+      records.set(
+        "wide.colwidth",
+        Array.from({ length: 1_000 }, (_, index) => 80 + index),
+      ),
+    { bytes: 3_036, values: 1_001, structs: 1 },
+  ],
+  [
+    "10,000 to-dos seeded at once, each with a link",
+    todosWithLinks(10_000),
+    { bytes: 3_059_233, values: 130_004, structs: 100_004 },
+  ],
+];

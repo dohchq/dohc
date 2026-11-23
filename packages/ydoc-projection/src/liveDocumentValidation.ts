@@ -16,9 +16,12 @@ import {
 } from "./artifact-markdown.js";
 import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
 import {
+  bodySequenceChangeLimit,
   bodySequenceChangeRefusal,
+  bodySequenceRoomPolicy,
   bodySequenceStateRefusal,
   type BodySequenceIntakeRules,
+  type BodySequenceIntakeWork,
 } from "./bodySequenceIntake.js";
 import { holdsBodySequence } from "./bodySequenceYjs.js";
 import {
@@ -931,35 +934,59 @@ type Shared = ReturnType<Y.Doc["get"]>;
  * the full check at save does that. False when the edit can't be applied whole. After false,
  * `copy` may hold part of the edit, so the caller builds it again.
  *
- * A note whose body is one sequence gets that format's intake instead, when the relay admits
- * such notes, and takes no edit at all when it does not. The copy says which the note is. In
- * either format an edit may give a note that has no `meta.schemaVersion` the number 1, and no
- * edit may replace or delete the one a note has: the engine writes it once, and a page that
- * changed it would change what every reader takes the note to be before the save refused it.
+ * The copy's `meta.schemaVersion` says which format the note is: 2 for a note whose body is one
+ * sequence, and 1 or none for the first format, which the rules above are for. A note whose body
+ * is one sequence gets that format's intake instead, when the relay admits such notes, and takes
+ * no edit at all when it does not. An edit may give a first-format note that has no
+ * `meta.schemaVersion` the number 1 and no other value, so no edit makes a note the other format.
+ * No edit may replace or delete the one a note of either format has: the engine writes it once,
+ * and a page that changed it would change what every reader takes the note to be before the save
+ * refused it.
  */
 export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
   return liveEditRefusal(copy, update) === undefined;
 }
 
 /**
- * Why `liveEditFitsCopy` is false: the edit does not fit, or reading it is more work than
- * `policy` allows. Without a policy it reads the edit under the validation worker's default.
+ * Why a room does not take an edit. `limit` is there for an edit past a limit of its own: a
+ * sentence that names the limit, its unit and what the edit holds.
+ */
+export interface LiveEditRefusal {
+  readonly reason: "invalid-update" | "capacity-refused";
+  readonly limit?: string;
+}
+
+/**
+ * Why `liveEditFitsCopy` is false. An edit to a note whose body is one sequence that is large
+ * enough to be past a limit is counted first, and refused for capacity when it alone holds more
+ * than the save could take: more values than `BODY_SEQUENCE_CHANGE_MAX_VALUES`, or more items or
+ * weight than a note may have. Then it is read once under the save's `policy` divided by how
+ * often the save reads each thing, hashing nothing, so an edit a room takes is one whose counts
+ * the save has room for. Without a policy it uses the validation worker's.
  */
 export function liveEditRefusal(
   copy: Y.Doc,
   update: Uint8Array,
   policy: OrderedLiveUpdateCutPolicy = WORKER_LIVE_VALIDATION_POLICY,
-): "invalid-update" | "capacity-refused" | undefined {
-  if (!holdsBodySequence(copy)) return editFitsFormat1(copy, update) ? undefined : "invalid-update";
-  if (!bodySequenceNotesAdmitted) return "invalid-update";
+  work?: BodySequenceIntakeWork,
+): LiveEditRefusal | undefined {
+  const invalid: LiveEditRefusal = { reason: "invalid-update" };
+  if (!holdsBodySequence(copy)) return editFitsFormat1(copy, update) ? undefined : invalid;
+  if (!bodySequenceNotesAdmitted) return invalid;
   try {
-    const refusal = bodySequenceChangeRefusal(copy, update, () => Y.applyUpdate(copy, update), {
-      policy,
-      metadata: ROOM_METADATA,
-    });
-    return refusal === "invalid-schema" ? "invalid-update" : refusal;
+    const limit = bodySequenceChangeLimit(update, policy, work);
+    if (limit !== undefined) return { reason: "capacity-refused", limit };
+    const refusal = bodySequenceChangeRefusal(
+      copy,
+      update,
+      () => Y.applyUpdate(copy, update),
+      { policy: bodySequenceRoomPolicy(policy), metadata: ROOM_METADATA },
+      work,
+    );
+    if (refusal === undefined) return undefined;
+    return refusal === "capacity-refused" ? { reason: refusal } : invalid;
   } catch {
-    return "invalid-update";
+    return invalid;
   }
 }
 

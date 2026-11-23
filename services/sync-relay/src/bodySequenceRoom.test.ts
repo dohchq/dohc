@@ -181,7 +181,7 @@ it("a room takes what three people do to a format-2 note, and every save passes 
   saved.destroy();
 });
 
-it("saves two changes of 150,000 values each as one batch, and the note is not paused", async () => {
+it("saves two changes of 90,000 values each as one batch, and the note is not paused", async () => {
   const { baseline, f, room } = noteInARoom();
   const session = join(f, room, [{ kind: "human", humanId: "ana", humanName: "Ana" }]);
   await session.openSync(Y.encodeStateVector(new Y.Doc()), signal);
@@ -190,7 +190,7 @@ it("saves two changes of 150,000 values each as one batch, and the note is not p
     const change = changeMadeBy(note, 77, ({ records }) =>
       records.set(
         key,
-        Array.from({ length: 150_000 }, () => null),
+        Array.from({ length: 90_000 }, () => null),
       ),
     )!;
     expect(await submitted(session, change)).toMatchObject({ result: "success" });
@@ -204,7 +204,32 @@ it("saves two changes of 150,000 values each as one batch, and the note is not p
   const saved = new Y.Doc({ gc: false });
   for (const bytes of [baseline, ...saves]) Y.applyUpdate(saved, bytes);
   for (const key of ["X.title", "Y.title"])
-    expect(saved.getMap("containers").get(key)).toHaveLength(150_000);
+    expect(saved.getMap("containers").get(key)).toHaveLength(90_000);
+  saved.destroy();
+});
+
+it("a room refuses one change of 400,000 values at once, keeps taking others, and saves without a pause", async () => {
+  const { baseline, f, room } = noteInARoom();
+  const session = join(f, room, [{ kind: "human", humanId: "ana", humanName: "Ana" }]);
+  await session.openSync(Y.encodeStateVector(new Y.Doc()), signal);
+  const large = changeMadeBy(baseline, 77, ({ records }) =>
+    records.set(
+      "X.title",
+      Array.from({ length: 400_000 }, () => null),
+    ),
+  )!;
+  expect(large.length).toBeLessThan(1 << 20);
+  expect(await submitted(session, large)).toEqual({ result: "refused", reason: "invalid-update" });
+  const typed = changeMadeBy(baseline, 78, ({ sequence }) => sequence.insert(2, "kept"))!;
+  expect(await submitted(session, typed)).toMatchObject({ result: "success" });
+  session.close();
+  await room.close();
+  expect(paused(f)).toBe(false);
+  const saves = f.journalRows().journal.map(rowBytes);
+  expect(saves).toHaveLength(1);
+  const saved = new Y.Doc({ gc: false });
+  for (const bytes of [baseline, ...saves]) Y.applyUpdate(saved, bytes);
+  expect(saved.getMap("containers").has("X.title")).toBe(false);
   saved.destroy();
 });
 

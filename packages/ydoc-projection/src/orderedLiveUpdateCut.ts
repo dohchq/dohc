@@ -169,8 +169,12 @@ export type LiveUpdateAsRead =
       readonly structs: readonly (Y.Item | Y.GC | Y.Skip)[];
       /** Sorted by client and clock, and joined where they touch. */
       readonly deletes: readonly LiveUpdateStructRange[];
+      /** Per client, each clock a delete range starts or ends at, as the update wrote them. */
+      readonly deleteEndpoints: ReadonlyMap<number, readonly number[]>;
       /** Per client, the sorted clocks between the two units of a surrogate pair it sends. */
       readonly insidePairs: ReadonlyMap<number, readonly number[]>;
+      /** What reading it took, in the cut's own counters. */
+      readonly usage: OrderedLiveUpdateCutUsage;
     }
   | { readonly kind: "refused"; readonly reason: OrderedLiveUpdateCutRefusalReason };
 
@@ -1719,16 +1723,21 @@ function parentIdentity(
   return { kind: "item", client: parent.client, clock: parent.clock };
 }
 
-function itemPlacement(item: Y.Item, stage: OrderedLiveUpdateCutFailureStage): Placement {
+function placementParent(item: Y.Item, stage: OrderedLiveUpdateCutFailureStage): ParentIdentity {
   validateId(item.origin, stage);
   validateId(item.rightOrigin, stage);
   if (item.parentSub !== null && typeof item.parentSub !== "string") {
     fail("invalid-update", stage);
   }
+  return parentIdentity(item.parent, stage);
+}
+
+function itemPlacement(item: Y.Item, stage: OrderedLiveUpdateCutFailureStage): Placement {
+  const parent = placementParent(item, stage);
   return {
     origin: idIdentity(item.origin),
     rightOrigin: idIdentity(item.rightOrigin),
-    parent: parentIdentity(item.parent, stage),
+    parent,
     parentSub: item.parentSub,
   };
 }
@@ -1923,6 +1932,33 @@ function normalizedEvidenceRanges(
   );
 }
 
+function deleteRangesAsSent(
+  decoded: ReturnType<typeof Y.decodeUpdateV2>,
+  stage: OrderedLiveUpdateCutFailureStage,
+): NumericRange[] {
+  const ranges: NumericRange[] = [];
+  for (const [clientId, intervals] of decoded.ds.clients) {
+    if (!portableInteger(clientId, 0, LIVE_UPDATE_YJS_CLIENT_ID_MAX)) {
+      fail("invalid-update", stage);
+    }
+    for (const interval of intervals) {
+      if (
+        !portableInteger(interval.clock, 0, LIVE_UPDATE_YJS_START_CLOCK_MAX) ||
+        !portableInteger(interval.len, 1, LIVE_UPDATE_YJS_END_CLOCK_MAX) ||
+        interval.len > LIVE_UPDATE_YJS_END_CLOCK_MAX - interval.clock
+      ) {
+        fail("invalid-update", stage);
+      }
+      ranges.push({
+        clientId,
+        startClock: interval.clock,
+        endClock: interval.clock + interval.len,
+      });
+    }
+  }
+  return ranges;
+}
+
 function normalizeDecodedInput(
   decoded: ReturnType<typeof Y.decodeUpdateV2>,
   sink: DecoderEvidenceSink,
@@ -1982,28 +2018,11 @@ function normalizeDecodedInput(
     fail("invalid-update", stage);
   }
 
-  const deleteRanges: NumericRange[] = [];
+  const deleteRanges = deleteRangesAsSent(decoded, stage);
   const deleteEndpoints: { clientId: number; clock: number }[] = [];
-  for (const [clientId, intervals] of decoded.ds.clients) {
-    if (!portableInteger(clientId, 0, LIVE_UPDATE_YJS_CLIENT_ID_MAX)) {
-      fail("invalid-update", stage);
-    }
-    for (const interval of intervals) {
-      if (
-        !portableInteger(interval.clock, 0, LIVE_UPDATE_YJS_START_CLOCK_MAX) ||
-        !portableInteger(interval.len, 1, LIVE_UPDATE_YJS_END_CLOCK_MAX) ||
-        interval.len > LIVE_UPDATE_YJS_END_CLOCK_MAX - interval.clock
-      ) {
-        fail("invalid-update", stage);
-      }
-      deleteRanges.push({
-        clientId,
-        startClock: interval.clock,
-        endClock: interval.clock + interval.len,
-      });
-      deleteEndpoints.push({ clientId, clock: interval.clock });
-      deleteEndpoints.push({ clientId, clock: interval.clock + interval.len });
-    }
+  for (const range of deleteRanges) {
+    deleteEndpoints.push({ clientId: range.clientId, clock: range.startClock });
+    deleteEndpoints.push({ clientId: range.clientId, clock: range.endClock });
   }
 
   return {
@@ -3886,8 +3905,9 @@ export function validateJournalCutForProjection(
 }
 
 /**
- * One update read from the wire as the cut reads it. The cut refuses its bytes, or what it holds,
- * before any earlier update is looked at for: bytes that don't decode, a value the decoder
+ * One update read from the wire as the cut reads it, for a check that needs what the update holds
+ * and not the cut's evidence of it: it hashes nothing. The cut refuses its bytes, or what it
+ * holds, before any earlier update is looked at for: bytes that don't decode, a value the decoder
  * refuses, work past the policy, and a struct or a delete that starts or ends inside a surrogate
  * pair the update itself sends.
  */
@@ -3908,28 +3928,57 @@ export function readLiveUpdateAsTheCutDoes(
       jsonFingerprints: [],
       fingerprintOnlyUsage: zeroDecoderUsage(),
     };
-    const decoded = Y.decodeUpdateV2(view, strictDecoderConstructor(budget, stage, true, sink));
+    const decoded = Y.decodeUpdateV2(view, strictDecoderConstructor(budget, stage, false, sink));
     if (sink.decoder === undefined || decoding.hasContent(sink.decoder))
       return refused("invalid-update");
-    const normalized = normalizeDecodedInput(
-      decoded,
-      sink,
-      zeroDecoderUsage(),
-      budget,
-      stage,
-      false,
-    );
-    for (const points of [normalized.structBoundaries, normalized.rawDeleteEndpoints])
-      for (const [clientId, clocks] of points) {
-        const inside = normalized.unsafePoints.get(clientId) ?? [];
-        if (clocks.some((clock) => pointPresent(inside, clock, budget, stage)))
-          return refused("invalid-update");
+    const structs = decoded.structs as (Y.Item | Y.GC | Y.Skip)[];
+    // The decoder gives each client's structs once, in clock order, so each list here is sorted.
+    const insidePairs = new Map<number, number[]>();
+    for (const struct of structs) {
+      const range = rangeForStruct(struct, stage);
+      if (!(struct instanceof Y.Item)) continue;
+      placementParent(struct, stage);
+      const content = struct.content;
+      if (content instanceof Y.ContentType) typeToken(content.type, stage);
+      if (!(content instanceof Y.ContentString)) continue;
+      const text = content.str;
+      for (let index = 1; index < text.length; index += 1) {
+        const previous = text.charCodeAt(index - 1);
+        const current = text.charCodeAt(index);
+        if (previous < 0xd800 || previous > 0xdbff || current < 0xdc00 || current > 0xdfff)
+          continue;
+        const held = insidePairs.get(range.clientId);
+        if (held) held.push(range.startClock + index);
+        else insidePairs.set(range.clientId, [range.startClock + index]);
       }
+    }
+    const inside = (clientId: number, clock: number) => {
+      const points = insidePairs.get(clientId);
+      return points !== undefined && pointPresent(points, clock, budget, stage);
+    };
+    if (insidePairs.size > 0)
+      for (const struct of structs)
+        if (
+          inside(struct.id.client, struct.id.clock) ||
+          inside(struct.id.client, struct.id.clock + struct.length)
+        )
+          return refused("invalid-update");
+    const sent = deleteRangesAsSent(decoded, stage);
+    const deleteEndpoints = new Map<number, number[]>();
+    for (const range of sent) {
+      if (inside(range.clientId, range.startClock) || inside(range.clientId, range.endClock))
+        return refused("invalid-update");
+      const held = deleteEndpoints.get(range.clientId);
+      if (held) held.push(range.startClock, range.endClock);
+      else deleteEndpoints.set(range.clientId, [range.startClock, range.endClock]);
+    }
     return {
       kind: "read",
-      structs: decoded.structs,
-      deletes: normalized.deleteRanges,
-      insidePairs: normalized.unsafePoints,
+      structs,
+      deletes: normalizeRanges(sent, budget, stage),
+      deleteEndpoints,
+      insidePairs,
+      usage: budget.snapshot(),
     };
   } catch (error) {
     return refused(error instanceof CutFailure ? error.reason : "invalid-update");
@@ -4042,11 +4091,10 @@ function validateCut(
       const apply = () =>
         applyOwnedInput(entry, applyForecasts[index] as DecoderUsage, document, replayBudget);
       // A journal's first entry was registered, and the entries before its candidate were each a
-      // candidate once. A history's entries are all new to this relay.
+      // candidate once. A history's entries are all new to this relay, its first one too.
       const unchecked =
-        index === 0
-          ? snapshot.mode === "registration"
-          : prefixes !== undefined || index === snapshot.entries.length - 1;
+        prefixes !== undefined ||
+        (index === 0 ? snapshot.mode === "registration" : index === snapshot.entries.length - 1);
       if (bodySequence === undefined || !unchecked) apply();
       else {
         const reason = bodySequence.entry(

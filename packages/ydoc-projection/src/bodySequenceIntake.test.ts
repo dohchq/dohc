@@ -1,18 +1,28 @@
 import { createHash } from "node:crypto";
+import * as encoding from "lib0/encoding";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prosemirrorJSONToYXmlFragment } from "y-prosemirror";
 import * as Y from "yjs";
 import { BODY_CONTAINERS_FIELD, BODY_SEQUENCE_FIELD } from "./bodySequenceGrammar.js";
-import { bodySequenceChangeRefusal, bodySequenceNames } from "./bodySequenceIntake.js";
+import {
+  BODY_SEQUENCE_CHANGE_MAX_VALUES,
+  bodySequenceChangeRefusal,
+  bodySequenceChangeSize,
+  bodySequenceNames,
+  bodySequenceRoomPolicy,
+  type BodySequenceIntakeWork,
+} from "./bodySequenceIntake.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import {
   anyAsWritten,
   ARRIVALS,
   changeMadeBy,
   contentAsWritten,
+  COSTLY_CHANGES,
   deliver,
   element,
   HOSTILE_STRINGS,
+  LARGE_HONEST_CHANGES,
   markAsWritten,
   noteWithEveryNode,
   openPerson,
@@ -23,9 +33,13 @@ import {
   storedReading,
   updateOf,
   type Change,
-  type Place,
 } from "./bodySequenceChecksTestSupport.js";
-import { getDohcProseMirrorSchema, markdownToYDoc, yDocToMarkdown } from "./import-export.js";
+import {
+  getDohcProseMirrorSchema,
+  getDohcYDocFrontmatter,
+  markdownToYDoc,
+  yDocToMarkdown,
+} from "./import-export.js";
 import {
   admitBodySequenceNotes,
   createLiveMarkdownHistoryValidator,
@@ -35,6 +49,11 @@ import {
   liveEditRefusal,
 } from "./liveDocumentValidation.js";
 import { WORKER_LIVE_VALIDATION_POLICY } from "./liveValidationPolicy.js";
+import {
+  readLiveUpdateAsTheCutDoes,
+  validateOrderedLiveUpdateCut,
+  type OrderedLiveUpdateCutPolicy,
+} from "./orderedLiveUpdateCut.js";
 
 const schema = getDohcProseMirrorSchema();
 const PATH = "notes/shared.md";
@@ -690,6 +709,22 @@ const REFUSED: readonly Case[] = [
     },
   },
   {
+    name: "two deletes that meet between the two units of an emoji and together cover it",
+    change: (note) => {
+      const inside = idsIn(note).insideAPair;
+      return (
+        inside &&
+        updateOf(
+          [],
+          [
+            [inside.client, inside.clock - 1, 1],
+            [inside.client, inside.clock, 1],
+          ],
+        )
+      );
+    },
+  },
+  {
     name: "an emoji and a delete of half of it in one change",
     change: (note, client) =>
       updateOf(
@@ -972,11 +1007,11 @@ const firstLine = (sequence: Y.Text) => firstOf(sequence, "block")!;
 
 const TAKEN: readonly Case[] = [
   {
-    name: "a path of 300,000 ids",
+    name: "a path of 90,000 ids",
     change: made(({ sequence }) =>
       firstLine(sequence).setAttribute(
         "path",
-        Array.from({ length: 300_000 }, () => "L") as unknown as string,
+        Array.from({ length: 90_000 }, () => "L") as unknown as string,
       ),
     ),
   },
@@ -1247,6 +1282,24 @@ describe("what a format-2 note's body holds never decides a save", () => {
     expect(held.laterChecks(kept!)).toEqual(ACCEPTED);
   });
 
+  it("a raw inline at the top that reads as a properties block is taken too, and the saved file then reads with properties the note does not have", () => {
+    const note = inBothFormats([[{ type: "paragraph" }, "text"]]).second;
+    const held = room(note);
+    const kept = held.offer(
+      changeMadeBy(note, 77, ({ sequence }) =>
+        sequence.insertEmbed(1, element("rawInline", { source: "---\na: b\n---\n\n" }), {}),
+      )!,
+    );
+    expect(kept, "the room's check").toBeDefined();
+    expect(held.laterChecks(kept!)).toEqual(ACCEPTED);
+    expect(getDohcYDocFrontmatter(held.note)).toEqual({});
+    const file = yDocToMarkdown(held.note);
+    expect(file).toBe("---\na: b\n---\n\ntext\n");
+    const read = markdownToYDoc(file);
+    expect(getDohcYDocFrontmatter(read)).toEqual({ a: "b" });
+    read.destroy();
+  });
+
   it("a note marked as using CRLF line ends may be emptied, where a format-1 note is refused", () => {
     const { first, second } = inBothFormats([], { dohcMarkdownCrlf: true });
     expect(registered(second)).toBe("accepted");
@@ -1262,13 +1315,6 @@ describe("what a format-2 note's body holds never decides a save", () => {
   });
 
   const every = noteWithEveryNode();
-  const LINE_SEPARATORS = [String.fromCharCode(0x2028), String.fromCharCode(0x2029)];
-  // Writing a code block whose language holds one of these two throws today. The smallest repair
-  // is to count them as line breaks in the rule the format has for that attribute.
-  const cannotBeWritten = (place: Place, value: string) =>
-    place.name === "codeBlock.language" &&
-    LINE_SEPARATORS.some((separator) => value.includes(separator));
-
   it.each([
     ["each attribute of each node and mark, and the letters of each kind of line", false],
     ["each container's kind, and a line's kind and path", true],
@@ -1279,8 +1325,7 @@ describe("what a format-2 note's body holds never decides a save", () => {
         const held = room(every.note);
         const change = changeMadeBy(every.note, 77, (page) => {
           for (const place of every.places)
-            if (place.changesKinds === changesKinds && !cannotBeWritten(place, value))
-              place.put(page, value);
+            if (place.changesKinds === changesKinds) place.put(page, value);
         });
         const kept = held.offer(change!);
         expect(kept, `the room's check, for ${shown(value)}`).toBeDefined();
@@ -1291,20 +1336,6 @@ describe("what a format-2 note's body holds never decides a save", () => {
     },
     120_000,
   );
-
-  it("a code block's language that holds U+2028 or U+2029 is the one value that cannot be written", () => {
-    const language = every.places.find((place) => place.name === "codeBlock.language")!;
-    for (const value of LINE_SEPARATORS) {
-      const after = new Y.Doc({ gc: false });
-      Y.applyUpdate(after, every.note);
-      Y.applyUpdate(
-        after,
-        changeMadeBy(every.note, 77, (page) => language.put(page, value))!,
-      );
-      expect(() => yDocToMarkdown(after)).toThrow(/fenced code block/);
-      after.destroy();
-    }
-  });
 });
 
 describe("what a later check still refuses of a note whose every change intake took: capacity, and the rules for properties and metadata", () => {
@@ -1354,16 +1385,57 @@ describe("what a later check still refuses of a note whose every change intake t
           Array.from({ length: 300_000 }, () => null),
         ),
     ],
-  ] as const)("%s, in one change: capacity, as for a format-1 note", (_name, write) => {
+  ] as const)(
+    "%s, in one change: the room refuses it, where a format-1 note takes it and its save refuses it for capacity",
+    (_name, write) => {
+      const note = seededNote();
+      const change = changeMadeBy(note, 77, ({ doc }) => write(doc))!;
+      const copy = new Y.Doc({ gc: false });
+      Y.applyUpdate(copy, note);
+      expect(liveEditRefusal(copy, change)?.reason).toBe("capacity-refused");
+      copy.destroy();
+      const first = offeredToAFormat1Note(write);
+      expect(first.room).toBe(true);
+      expect(first.journal()).toBe("refused: capacity-refused (final)");
+    },
+  );
+
+  it("more values in the whole note's properties than the save reads, each change within the limit: capacity", () => {
     const note = seededNote();
     const held = room(note);
-    const kept = held.offer(changeMadeBy(note, 77, ({ doc }) => write(doc))!);
-    expect(kept, "the room's check").toBeDefined();
-    expect(held.journal(kept!)).toBe("refused: capacity-refused (final)");
-    const first = offeredToAFormat1Note(write);
-    expect(first.room).toBe(true);
-    expect(first.journal()).toBe("refused: capacity-refused (final)");
-  });
+    const verdicts = ["one", "two", "three"].map((key) => {
+      const kept = held.offer(
+        changeMadeBy(Y.encodeStateAsUpdate(held.note), 77, ({ doc }) =>
+          doc.getMap("frontmatter").set(
+            key,
+            Array.from({ length: 90_000 }, () => null),
+          ),
+        )!,
+      );
+      expect(kept, "the room's check").toBeDefined();
+      const verdict = held.journal(kept!);
+      Y.applyUpdate(held.note, kept!);
+      held.taken.push(kept!);
+      return verdict;
+    });
+    expect(verdicts).toEqual(["accepted", "accepted", "refused: capacity-refused (final)"]);
+  }, 120_000);
+
+  it("a line that makes the saved file larger than 2 MiB, in one change of under 2 MiB: capacity", () => {
+    const note = seededNote();
+    const held = room(note);
+    const line = (letters: number) =>
+      held.offer(
+        changeMadeBy(note, 77, ({ sequence }) => sequence.insert(2, "a".repeat(letters)))!,
+      );
+    const fits = line(2_000_000);
+    expect(fits, "the room's check").toBeDefined();
+    expect(held.journal(fits!)).toBe("accepted");
+    const over = line(2_097_000);
+    expect(over, "the room's check").toBeDefined();
+    expect(over!.length).toBeLessThan(2 * 1024 * 1024);
+    expect(held.journal(over!)).toBe("refused: capacity-refused (final)");
+  }, 120_000);
 
   it("more lines in the whole note than a check will weigh, each change within the limit: capacity", () => {
     const note = seededNote();
@@ -1391,7 +1463,7 @@ describe("what a later check still refuses of a note whose every change intake t
 });
 
 describe("several changes the room took, saved as one", () => {
-  it("two changes that each hold 150,000 values pass the journal check together", () => {
+  it("two changes that each hold 90,000 values pass the journal check together", () => {
     const note = seededNote();
     const held = room(note);
     const kept = ["X.title", "Y.title"].map((key) => {
@@ -1399,7 +1471,7 @@ describe("several changes the room took, saved as one", () => {
         changeMadeBy(Y.encodeStateAsUpdate(held.note), 77, ({ records }) =>
           records.set(
             key,
-            Array.from({ length: 150_000 }, () => null),
+            Array.from({ length: 90_000 }, () => null),
           ),
         )!,
       );
@@ -1409,6 +1481,37 @@ describe("several changes the room took, saved as one", () => {
     });
     expect(held.journal(Y.mergeUpdates(kept))).toBe("accepted");
   });
+
+  it("the room's limit is for each change: three it took can together be more values than the save counts", () => {
+    const policy = { ...POLICY, maxValueNodeVisits: 500_000 };
+    const save = createLiveMarkdownJournalValidator(policy);
+    const note = seededNote();
+    const saved = (candidate: Uint8Array) =>
+      said(
+        save({
+          document: documentFor(note),
+          currentPath: PATH,
+          checkpoint: note,
+          suffix: [],
+          candidate,
+        }),
+      );
+    const copy = new Y.Doc({ gc: false });
+    Y.applyUpdate(copy, note);
+    const taken = ["X.title", "Y.title", "Z.title"].map((key, index) => {
+      const change = changeMadeBy(Y.encodeStateAsUpdate(copy), 77 + index, ({ records }) =>
+        records.set(
+          key,
+          Array.from({ length: 60_000 }, () => null),
+        ),
+      )!;
+      expect(saved(change)).toBe("accepted");
+      expect(liveEditRefusal(copy, change, policy)).toBeUndefined();
+      return change;
+    });
+    copy.destroy();
+    expect(saved(Y.mergeUpdates(taken))).toBe("refused: capacity-refused (final)");
+  }, 120_000);
 });
 
 describe("what the room keeps of a value no encoder writes", () => {
@@ -1582,14 +1685,316 @@ describe("the work intake does for one change", () => {
     ).toMatch(/^refused: capacity-refused/);
     const fresh = new Y.Doc({ gc: false });
     Y.applyUpdate(fresh, note);
-    expect(liveEditRefusal(fresh, change, tight)).toBe("capacity-refused");
-    expect(liveEditRefusal(fresh, new Uint8Array([1, 2, 3]))).toBe("invalid-update");
+    expect(liveEditRefusal(fresh, change, tight)).toEqual({ reason: "capacity-refused" });
+    expect(liveEditRefusal(fresh, new Uint8Array([1, 2, 3]))).toEqual({
+      reason: "invalid-update",
+    });
     fresh.destroy();
     const again = new Y.Doc({ gc: false });
     Y.applyUpdate(again, note);
     expect(liveEditRefusal(again, change)).toBeUndefined();
     again.destroy();
   });
+});
+
+describe("the room's check of one change, by itself", () => {
+  const note = seededNote();
+  const past = (unit: string, most: number, held: number) =>
+    `One change to a note holds at most ${most.toLocaleString("en-US")} ${unit}. This one holds ${held.toLocaleString("en-US")}.`;
+  const checked = (change: Uint8Array, policy: OrderedLiveUpdateCutPolicy = POLICY) => {
+    const copy = new Y.Doc({ gc: false });
+    Y.applyUpdate(copy, note);
+    const work: BodySequenceIntakeWork = { steps: 0 };
+    const refusal = liveEditRefusal(copy, change, policy, work);
+    copy.destroy();
+    return { refusal, work };
+  };
+  const saved = (change: Uint8Array) => room(note).journal(change);
+  const nested = (levels: number, innermost?: unknown) => (doc: Y.Doc) => {
+    let map = new Y.Map<unknown>();
+    doc.getMap("frontmatter").set("deep", map);
+    for (let level = 1; level < levels; level++) {
+      const inner = new Y.Map<unknown>();
+      map.set("in", inner);
+      map = inner;
+    }
+    if (innermost !== undefined) map.set("value", innermost);
+  };
+
+  it.each(LARGE_HONEST_CHANGES)(
+    "%s: it is at each value and each struct a fixed number of times and hashes nothing, and what it takes the save takes",
+    (_name, change, holds) => {
+      const bytes = changeMadeBy(note, 77, change)!;
+      expect({ bytes: bytes.length, ...bodySequenceChangeSize(bytes) }).toMatchObject(holds);
+      const { refusal, work } = checked(bytes);
+      const counted = holds.structs + holds.values;
+      if (holds.values > BODY_SEQUENCE_CHANGE_MAX_VALUES) {
+        expect(refusal).toEqual({
+          reason: "capacity-refused",
+          limit: past("values", BODY_SEQUENCE_CHANGE_MAX_VALUES, holds.values),
+        });
+        expect(work).toEqual({ steps: counted });
+        return;
+      }
+      expect(refusal).toBeUndefined();
+      expect(work.read).toMatchObject({
+        structVisits: holds.structs,
+        valueNodeVisits: holds.values,
+        hashedBytes: 0,
+      });
+      expect(work.steps).toBe(
+        (bytes.length > BODY_SEQUENCE_CHANGE_MAX_VALUES ? counted : 0) +
+          holds.values +
+          3 * holds.structs,
+      );
+      expect(saved(bytes)).toBe("accepted");
+    },
+    120_000,
+  );
+
+  it.each(
+    [1_900_001, 1_300_001, 400_001, 896_001, 200_001].map(
+      (values, index) => [COSTLY_CHANGES[index]![0], COSTLY_CHANGES[index]![1], values] as const,
+    ),
+  )(
+    "%s: refused for capacity by its count of values, which names the limit, before it is read",
+    (_name, change, values) => {
+      const { refusal, work } = checked(changeMadeBy(note, 77, change)!);
+      expect(refusal).toEqual({
+        reason: "capacity-refused",
+        limit: past("values", 100_000, values),
+      });
+      expect(work).toEqual({ steps: 1 + values });
+    },
+    120_000,
+  );
+
+  it("60,000 maps, each inside the one before, under frontmatter: refused for capacity, as the save refuses it", () => {
+    const bytes = changeMadeBy(note, 77, COSTLY_CHANGES[5]![1])!;
+    expect(checked(bytes).refusal).toEqual({ reason: "capacity-refused" });
+    expect(saved(bytes)).toBe("refused: capacity-refused (candidate)");
+  }, 120_000);
+
+  const letters = (count: number) =>
+    updateOf(
+      Array.from({ length: count }, (_, clock) => ({
+        client: 77,
+        clock,
+        origin: clock === 0 ? idsIn(note).last : Y.createID(77, clock - 1),
+        content: new Y.ContentString("x"),
+      })),
+    );
+
+  it.each([
+    [
+      "100,000 values in one record",
+      changeMadeBy(note, 77, ({ records }) =>
+        records.set(
+          "X.title",
+          Array.from({ length: 99_999 }, () => null),
+        ),
+      )!,
+    ],
+    [
+      "one record with 99,999 keys",
+      changeMadeBy(note, 77, ({ records }) =>
+        records.set(
+          "X.title",
+          Object.fromEntries(
+            Array.from({ length: 99_999 }, (_, index) => [`k${String(index)}`, null]),
+          ),
+        ),
+      )!,
+    ],
+    [
+      "one mark whose value holds 99,998 keys",
+      changeMadeBy(note, 77, ({ sequence }) =>
+        sequence.format(1, 2, {
+          link: Object.fromEntries(
+            Array.from({ length: 99_998 }, (_, index) => [`k${String(index)}`, null]),
+          ),
+        }),
+      )!,
+    ],
+    ["100,000 letters, each its own item", letters(100_000)],
+  ] as const)(
+    "%s is at a limit and not past it: the room takes it, and the save takes it",
+    (name, bytes) => {
+      expect(bodySequenceChangeSize(bytes)).toMatchObject(
+        name.includes("letters") ? { structs: 100_000 } : { values: 100_000 },
+      );
+      expect(checked(bytes).refusal).toBeUndefined();
+      expect(saved(bytes)).toBe("accepted");
+    },
+    120_000,
+  );
+
+  it("a change of 100,001 values is refused for capacity with a sentence that names the limit, which is the room's own and under what the save counts", () => {
+    const bytes = changeMadeBy(note, 77, ({ records }) =>
+      records.set(
+        "X.title",
+        Array.from({ length: 100_000 }, () => null),
+      ),
+    )!;
+    const { refusal, work } = checked(bytes);
+    expect(refusal).toEqual({
+      reason: "capacity-refused",
+      limit: past("values", 100_000, 100_001),
+    });
+    expect(work.read).toBeUndefined();
+    expect(saved(bytes)).toBe("accepted");
+  }, 120_000);
+
+  it.each([
+    [
+      "100,001 items that do not join",
+      updateOf(
+        Array.from({ length: 100_001 }, (_, clock) => ({
+          client: 77,
+          clock,
+          parent: "frontmatter",
+          key: `k${String(clock)}`,
+          content: new Y.ContentType(new Y.Map()),
+        })),
+      ),
+      past("items", 100_000, 100_001),
+    ],
+    [
+      "40,001 lines, which weigh more than a note may",
+      updateOf(
+        Array.from({ length: 40_001 }, (_, clock) => ({
+          client: 77,
+          clock,
+          origin: clock === 0 ? idsIn(note).last : Y.createID(77, clock - 1),
+          content: new Y.ContentType(new Y.XmlElement("block")),
+        })),
+      ),
+      past("units of weight, one for each item and 6 more for each element", 280_000, 280_007),
+    ],
+  ] as const)(
+    "a change of %s is refused for capacity with a sentence that names the limit, and the save refuses it for capacity too",
+    (_name, bytes, limit) => {
+      const { refusal, work } = checked(bytes);
+      expect(refusal).toEqual({ reason: "capacity-refused", limit });
+      expect(work.read).toBeUndefined();
+      expect(saved(bytes)).toMatch(/^refused: capacity-refused/);
+    },
+    120_000,
+  );
+
+  it.each([
+    ["129 maps, each inside the one before", nested(129), undefined],
+    ["130 maps, each inside the one before", nested(130), "capacity-refused"],
+    ["a value 127 levels deep inside one map", nested(1, deep(127)), undefined],
+    ["a value 128 levels deep inside one map", nested(1, deep(128)), "capacity-refused"],
+    [
+      "130 maps, each inside the one before, deleted by the same change",
+      (doc: Y.Doc) => {
+        nested(130)(doc);
+        doc.getMap("frontmatter").delete("deep");
+      },
+      undefined,
+    ],
+  ] as const)(
+    "properties of %s: the room and the save agree on capacity",
+    (_name, write, reason) => {
+      const bytes = changeMadeBy(note, 77, ({ doc }) => write(doc))!;
+      expect(checked(bytes).refusal?.reason).toBe(reason);
+      const save = saved(bytes);
+      if (reason) expect(save).toBe("refused: capacity-refused (candidate)");
+      else expect(save).not.toMatch(/capacity/);
+    },
+  );
+
+  it("a small change is not counted, and is read once", () => {
+    const bytes = changeMadeBy(note, 77, ({ sequence }) => sequence.insert(2, "x"))!;
+    const { refusal, work } = checked(bytes);
+    expect(refusal).toBeUndefined();
+    expect(work).toMatchObject({ steps: 3, read: { structVisits: 1, hashedBytes: 0 } });
+  });
+
+  it("the save's check is at what one read of a change is at no more often than the room's policy divides by", () => {
+    const wide = Object.fromEntries(
+      Object.keys(POLICY).map((field) => [field, 1e12]),
+    ) as unknown as OrderedLiveUpdateCutPolicy;
+    const each = Object.fromEntries(
+      Object.keys(POLICY).map((field) => [field, 840]),
+    ) as unknown as OrderedLiveUpdateCutPolicy;
+    const room = bodySequenceRoomPolicy(each);
+    const counted = (candidate: Uint8Array) => {
+      const cut = validateOrderedLiveUpdateCut(
+        { mode: "journal-candidate", checkpoint: note, suffix: [], candidate },
+        wide,
+      );
+      if (cut.kind !== "accepted") throw new Error(`The cut refused it: ${cut.reason}`);
+      return cut.cut.finishAfterProjection().usage;
+    };
+    const letter = counted(changeMadeBy(note, 9, ({ sequence }) => sequence.insert(2, "x"))!);
+    const at = idsIn(note).letters!;
+    const emptyDeleteGroups = encoding.createEncoder();
+    encoding.writeVarUint(emptyDeleteGroups, 0);
+    encoding.writeVarUint(emptyDeleteGroups, 2_000);
+    for (let client = 0; client < 2_000; client++) {
+      encoding.writeVarUint(emptyDeleteGroups, 5_000 + client);
+      encoding.writeVarUint(emptyDeleteGroups, 0);
+    }
+    const inputs: [string, Uint8Array][] = [
+      ...LARGE_HONEST_CHANGES.slice(0, 1).map(
+        ([name, change]) => [name, changeMadeBy(note, 77, change)!] as [string, Uint8Array],
+      ),
+      ["one line 64 containers deep", changeMadeBy(note, 77, LARGE_HONEST_CHANGES[3]![1])!],
+      ["1,000 column widths", changeMadeBy(note, 77, LARGE_HONEST_CHANGES[4]![1])!],
+      [
+        "a mark whose value holds 2,000 keys",
+        changeMadeBy(note, 77, ({ sequence }) =>
+          sequence.format(1, 2, {
+            link: Object.fromEntries(
+              Array.from({ length: 2_000 }, (_, index) => [`k${String(index)}`, "v"]),
+            ),
+          }),
+        )!,
+      ],
+      [
+        "a line of 100,000 letters",
+        changeMadeBy(note, 77, ({ sequence }) => sequence.insert(2, "a".repeat(100_000)))!,
+      ],
+      [
+        "500 letters from 500 editors",
+        Y.mergeUpdates(
+          Array.from({ length: 500 }, (_, index) =>
+            changeMadeBy(note, 1_000 + index, ({ sequence }) => sequence.insert(2, "a"))!,
+          ),
+        ),
+      ],
+      [
+        "5,000 copies of one delete",
+        updateOf(
+          [],
+          Array.from({ length: 5_000 }, () => [at.client, at.clock, 1] as const),
+        ),
+      ],
+      ["2,000 delete groups that delete nothing", encoding.toUint8Array(emptyDeleteGroups)],
+    ];
+    const COUNTS = [
+      ["maxStructVisits", "structVisits"],
+      ["maxValueNodeVisits", "valueNodeVisits"],
+      ["maxDecodedPayloadByteVisits", "decodedPayloadByteVisits"],
+      ["maxStructClientGroupVisits", "structClientGroupVisits"],
+      ["maxDeleteClientGroupVisits", "deleteClientGroupVisits"],
+      ["maxDeleteIntervalVisits", "deleteIntervalVisits"],
+    ] as const;
+    for (const [name, bytes] of inputs) {
+      const read = readLiveUpdateAsTheCutDoes(bytes, wide);
+      if (read.kind !== "read") throw new Error(`${name} was not read: ${read.reason}`);
+      const save = counted(bytes);
+      expect(read.usage.hashedBytes, name).toBe(0);
+      expect(save.hashedBytes, name).toBeGreaterThan(bytes.length - 100);
+      for (const [limit, count] of COUNTS)
+        expect(save[count] - letter[count], `${name}: ${count}`).toBeLessThanOrEqual(
+          (each[limit] / room[limit]) * read.usage[count],
+        );
+    }
+  }, 120_000);
 });
 
 describe("a whole history, checked at activation", () => {
@@ -1686,6 +2091,26 @@ describe("the items a format-2 note is registered with", () => {
   it.each(HELD)("registration refuses a note that holds %s", (_name, write) => {
     expect(registered(withWritten(() => {}))).toBe("accepted");
     expect(registered(withWritten(write))).toBe(REFUSED_AT_REGISTRATION);
+  });
+
+  it.each(HELD)("activation refuses a history whose first entry holds %s", (_name, write) => {
+    const history = (checkpoint: Uint8Array) =>
+      said(
+        activate(
+          {
+            document: documentFor(checkpoint),
+            currentPath: PATH,
+            checkpoint,
+            suffix: [],
+            candidate: changeMadeBy(checkpoint, 77, ({ doc }) =>
+              doc.getMap("frontmatter").set("status", "later"),
+            )!,
+          },
+          { from: 0, visit: () => {} },
+        ),
+      );
+    expect(history(withWritten(() => {}))).toBe("accepted");
+    expect(history(withWritten(write))).toBe("refused: invalid-schema (admitted-cut)");
   });
 
   it("intake takes no write into a map or a list that hangs under containers", () => {
@@ -1787,7 +2212,7 @@ describe("the relay's setting", () => {
         Y.applyUpdate(copy, note);
         const refusal = liveEditRefusal(copy, change);
         copy.destroy();
-        return refusal ?? "taken";
+        return refusal?.reason ?? "taken";
       }),
       journal: changes.map((change) => room(note).journal(change)),
     });
@@ -1860,5 +2285,14 @@ describe("the relay's setting", () => {
       room: false,
       journal: "refused: invalid-schema (final)",
     });
+  });
+});
+
+describe("a copy that says its body is one sequence and holds its text under body, as a first-format note a change marked would", () => {
+  it("is written as a file with that text, not with a blank body", () => {
+    const doc = markdownToYDoc("---\nstatus: draft\n---\n\nKept line\n");
+    doc.getMap("meta").set("schemaVersion", 2);
+    expect(yDocToMarkdown(doc)).toBe("---\nstatus: draft\n---\n\nKept line\n");
+    doc.destroy();
   });
 });
