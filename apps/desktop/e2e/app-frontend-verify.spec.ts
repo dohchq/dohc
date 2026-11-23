@@ -337,7 +337,39 @@ send({ op: "backend.invoke", operation: "listBookings", input: {}, idempotencyKe
       "app.js": `fetch(${JSON.stringify(externalUrl)}).then(() => { document.getElementById("out").textContent = "leaked"; }).catch(() => { document.getElementById("out").textContent = "blocked"; });`,
     });
 
-    await waitForWorkspaceFile(desktop.page, workspaceId, "apps/external-fetch/app.js");
+    await writeApp("apps/disabled-click", {
+      "app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "index.html",
+        inputs: ["index.html"],
+        packageMap: {},
+      }),
+      "index.html":
+        '<!doctype html><body><button id="disabled-btn" disabled>Disabled</button></body>',
+    });
+
+    await writeApp("apps/prefill-click", {
+      "app.publish.json": bookingManifest([WORKSHOP_BOOK_OP_ID], ["app.js"]),
+      "index.html":
+        '<!doctype html><body><input id="q" /><button id="noop" type="button">Noop</button><script type="module" src="./app.js"></script></body>',
+      "app.js": `${CHANNEL_HELPER}
+document.getElementById("q").addEventListener("input", () => {
+  send({ op: "backend.invoke", operation: "bookSeat", idempotencyKey: "fill-1", input: { name: "Pre", seats: 1 } }).catch(() => {});
+});`,
+    });
+
+    await writeApp("apps/stalled-startup", {
+      "app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "index.html",
+        inputs: ["index.html", "app.js"],
+        packageMap: {},
+      }),
+      "index.html": '<!doctype html><body><script type="module" src="./app.js"></script></body>',
+      "app.js": "const end = Date.now() + 4000; while (Date.now() < end) {}",
+    });
+
+    await waitForWorkspaceFile(desktop.page, workspaceId, "apps/stalled-startup/app.js");
 
     // Verify working booking app (5 seats -> 200, then 4 seats -> 409 workshop_full)
     const bookingVerify = await publish(desktop.page, {
@@ -454,7 +486,10 @@ send({ op: "backend.invoke", operation: "listBookings", input: {}, idempotencyKe
       expectStartupBackend: [{ op: "backend.invoke", operation: "listBookings", status: 200 }],
       steps: [{ kind: "waitFor", selector: "#summary", textIncludes: "Rows: 0" }],
     });
-    expect(controlTowerVerify).toMatchObject({ kind: "frontendVerified", ok: true });
+    expect(controlTowerVerify, JSON.stringify(controlTowerVerify)).toMatchObject({
+      kind: "frontendVerified",
+      ok: true,
+    });
 
     // Broken apps must all fail with actionable diagnostics and zero secret/path leaks
     const missingInput = await publish(desktop.page, {
@@ -555,6 +590,70 @@ send({ op: "backend.invoke", operation: "listBookings", input: {}, idempotencyKe
       ).toBe(true);
     }
 
+    // Disabled button click must fail with step_not_clickable
+    const disabledClick = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/disabled-click",
+      steps: [{ kind: "click", selector: "#disabled-btn" }],
+    });
+    expect(disabledClick).toMatchObject({ kind: "frontendVerified", ok: false, stage: "steps" });
+    if (disabledClick.kind === "frontendVerified") {
+      expect(disabledClick.diagnostics.some((d) => d.code === "step_not_clickable")).toBe(true);
+    }
+
+    // Earlier-step in-flight backend call must not satisfy a later no-op click's expectBackend
+    const prefillClick = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/prefill-click",
+      steps: [
+        { kind: "fill", selector: "#q", value: "hi" },
+        {
+          kind: "click",
+          selector: "#noop",
+          expectBackend: { op: "backend.invoke", operation: "bookSeat", status: 200 },
+        },
+      ],
+    });
+    expect(prefillClick).toMatchObject({ kind: "frontendVerified", ok: false, stage: "steps" });
+    if (prefillClick.kind === "frontendVerified") {
+      expect(prefillClick.diagnostics.some((d) => d.code === "expected_backend_missing")).toBe(
+        true,
+      );
+    }
+
+    // Long valid selector + textIncludes must not exceed result schema remedy max length
+    const longSelector = `#status, .${"a".repeat(185)}`;
+    const longText = "x".repeat(200);
+    const longWaitFor = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/booking",
+      timeoutMs: 1200,
+      steps: [{ kind: "waitFor", selector: longSelector, textIncludes: longText }],
+    });
+    expect(longWaitFor).toMatchObject({ kind: "frontendVerified", ok: false, stage: "steps" });
+    if (longWaitFor.kind === "frontendVerified") {
+      expect(longWaitFor.diagnostics[0]?.code).toBe("step_text_mismatch");
+      expect((longWaitFor.diagnostics[0]?.remedy.length ?? 0) <= 320).toBe(true);
+    }
+
+    // Stalled startup must time out within budget and release the verification queue for the next run
+    const stalled = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/stalled-startup",
+      timeoutMs: 1000,
+    });
+    expect(stalled).toMatchObject({ kind: "frontendVerified", ok: false, stage: "runtime" });
+    const afterStall = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/booking",
+    });
+    expect(afterStall).toMatchObject({ kind: "frontendVerified", ok: true, stage: "complete" });
+
     // No result leaks workspace host path, loopback URLs, or proof tokens
     const allSerialized = JSON.stringify([
       bookingVerify,
@@ -568,6 +667,11 @@ send({ op: "backend.invoke", operation: "listBookings", input: {}, idempotencyKe
       badKeys,
       unapprovedOp,
       extVerify,
+      disabledClick,
+      prefillClick,
+      longWaitFor,
+      stalled,
+      afterStall,
     ]);
     expect(allSerialized).not.toContain(workspace.rootPath);
     expect(allSerialized).not.toContain("127.0.0.1");

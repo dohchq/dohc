@@ -75,5 +75,5 @@ Cases are in `cases.ts`. `case.ts` describes every field.
 
 ## Limits
 
-- The stand-in for `tool-use` cases models document and file writes on plain files and has no live editing, sync, permissions, or History. The stand-in for `everyday` cases executes real Collection contracts, SQLite schemas, and sandboxed operations, but still omits real desktop sync, relay, and OS UI flows.
+- The stand-in for `tool-use` cases models document and file writes on plain files and has no live editing, sync, permissions, or History. The stand-in for `everyday` cases executes real Collection contracts, SQLite schemas, and sandboxed operations, but still omits real desktop sync, relay, and OS UI flows (and `verifyFrontend` checks manifests, listed inputs, and dataset bindings unless a real desktop verifier is injected via `options.verifyFrontend`).
 - The eval measures how an agent chooses tools, writes valid workspace files, and recovers from refusals. It does not replace desktop QA.

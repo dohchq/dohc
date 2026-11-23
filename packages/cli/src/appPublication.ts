@@ -284,6 +284,7 @@ export const AppFrontendDiagnostic = z
       "expected_backend_missing",
       "step_selector_not_found",
       "step_not_fillable",
+      "step_not_clickable",
       "step_text_mismatch",
       "external_network_blocked",
       "verification_timeout",

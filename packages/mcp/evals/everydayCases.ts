@@ -18,10 +18,12 @@ import {
 } from "@dohc/security-contract/dataset";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import type { Check, EvalCase, RunRecord } from "./case";
-import { createEverydayDesktop } from "./everydayDesktop";
+import { computeEvalAppSourceRevision, createEverydayDesktop } from "./everydayDesktop";
 
 const WS = "ws-everyday";
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+const stripJsComments = (source: string) =>
+  source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 const uuid = (prefix: string, n: number) =>
   `${prefix}-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
@@ -293,24 +295,6 @@ function checkCollectionYamlValid(run: RunRecord, path: string, expectedFields: 
   };
 }
 
-function computeEvalAppSourceRevision(run: RunRecord, appRoot: string): string | null {
-  const raw = run.files[`${appRoot}/app.publish.json`];
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as { inputs?: unknown };
-    if (!Array.isArray(parsed.inputs) || parsed.inputs.length === 0) return null;
-    const parts = parsed.inputs.map((entry) => {
-      if (typeof entry !== "string") throw new Error("invalid input");
-      const rel = `${appRoot}/${entry.replace(/^\.\//, "")}`;
-      if (run.files[rel] === undefined) throw new Error("missing input");
-      return `${rel}:${run.files[rel]}`;
-    });
-    return sha256(parts.join("\n"));
-  } catch {
-    return null;
-  }
-}
-
 function checkFrontendVerifiedForFinalSource(
   run: RunRecord,
   appRoot: string,
@@ -320,7 +304,7 @@ function checkFrontendVerifiedForFinalSource(
   const record = run.frontendVerifications?.[appRoot];
   if (!record) return { name, pass: false, detail: "verifyFrontend was not run" };
   if (!record.ok) return { name, pass: false, detail: `verifyFrontend failed at ${record.stage}` };
-  const expectedRev = computeEvalAppSourceRevision(run, appRoot);
+  const expectedRev = computeEvalAppSourceRevision(run.files, appRoot);
   if (!expectedRev || record.sourceRevision !== expectedRev) {
     return { name, pass: false, detail: "app source changed after verifyFrontend" };
   }
@@ -803,12 +787,15 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         checkDatasetJsonValid(run, "tracker/dataset.json"),
         checkAppPublishDataset(run, "apps/control-tower/app.publish.json", "tracker/dataset.json"),
       ];
-      const appText = Object.entries(run.files)
-        .filter(
-          ([path]) => path.startsWith("apps/control-tower/") && !path.endsWith("app.publish.json"),
-        )
-        .map(([, text]) => text)
-        .join("\n");
+      const appText = stripJsComments(
+        Object.entries(run.files)
+          .filter(
+            ([path]) =>
+              path.startsWith("apps/control-tower/") && !path.endsWith("app.publish.json"),
+          )
+          .map(([, text]) => text)
+          .join("\n"),
+      );
       const handlesPortResponses = /\.onmessage\b|addEventListener\s*\(\s*["']message["']/i.test(
         appText.replace(/window\.addEventListener\s*\(\s*["']message["']/gi, ""),
       );
@@ -822,13 +809,19 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       });
       checks.push(
         checkFrontendVerifiedForFinalSource(run, "apps/control-tower", (record) => {
-          const hasBackendCheck =
-            record.brokerCalls.some((c) => c.op === "backend.invoke" && c.ok) ||
-            (record.expectStartupBackend?.length ?? 0) > 0;
-          const hasUiCheck = (record.steps ?? []).some(
-            (s) =>
-              typeof s === "object" && s !== null && (s as { kind?: string }).kind === "waitFor",
-          );
+          if (record.observed) {
+            const observedBackend = record.brokerCalls.some(
+              (c) => c.op === "backend.invoke" && c.ok,
+            );
+            const observedUi = (record.steps ?? []).some((s) => s.kind === "waitFor" && s.ok);
+            if (!observedBackend || !observedUi) {
+              return "observed verifyFrontend must record a passing backend.invoke call and waitFor step";
+            }
+            return null;
+          }
+          const requestedSteps = (record.requestedSteps ?? []) as Array<{ kind?: string }>;
+          const hasBackendCheck = (record.expectStartupBackend?.length ?? 0) > 0;
+          const hasUiCheck = requestedSteps.some((s) => s.kind === "waitFor");
           if (!hasBackendCheck || !hasUiCheck) {
             return "verifyFrontend must check both a backend.invoke call and rendered UI";
           }
@@ -1405,7 +1398,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
               if (content && !scriptParts.includes(content)) scriptParts.push(content);
             }
           }
-          const scriptText = scriptParts.join("\n");
+          const scriptText = stripJsComments(scriptParts.join("\n"));
           if (!scriptText.trim()) {
             problems.push("no published frontend script found");
           } else {
@@ -1444,7 +1437,17 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       );
       checks.push(
         checkFrontendVerifiedForFinalSource(run, "apps/booking", (record) => {
-          const steps = (record.steps ?? []) as Array<{
+          if (record.observed) {
+            const observedBook = record.brokerCalls.some(
+              (c) => c.op === "backend.invoke" && c.operation === "bookSeat" && c.ok,
+            );
+            const observedUi = (record.steps ?? []).some((s) => s.kind === "waitFor" && s.ok);
+            if (!observedBook || !observedUi) {
+              return "observed verifyFrontend must record a passing bookSeat call and waitFor step";
+            }
+            return null;
+          }
+          const steps = (record.requestedSteps ?? []) as Array<{
             kind?: string;
             expectBackend?: { operation?: string };
           }>;

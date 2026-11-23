@@ -10,7 +10,7 @@ import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { createDohcMcpServer } from "../src/server";
 import type { DatasetSnapshot, EvalCase, FrontendVerificationRecord, RunRecord } from "./case";
 import { CASES } from "./cases";
-import { seedWorkspace, workspaceFiles } from "./claude";
+import { evalServerArgs, readEvalJsonRecord, seedWorkspace, workspaceFiles } from "./claude";
 import { fakeDesktop } from "./desktop";
 import { EVERYDAY_CASES } from "./everydayCases";
 import { createEverydayDesktop } from "./everydayDesktop";
@@ -663,7 +663,7 @@ describe("eval cases", () => {
       frontendVerifications: {
         "apps/booking": {
           ...bookingSolved.run.frontendVerifications!["apps/booking"]!,
-          steps: [],
+          requestedSteps: [],
         },
       },
     };
@@ -671,6 +671,59 @@ describe("eval cases", () => {
     expect(noStepsChecks.some((c) => !c.pass && c.detail?.includes("click.expectBackend"))).toBe(
       true,
     );
+
+    const manifestOnlyEditBooking: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/broken.html": "<!doctype html><p>Broken</p>\n",
+        "apps/booking/app.publish.json": JSON.stringify({
+          ...JSON.parse(bookingSolved.run.files["apps/booking/app.publish.json"]!),
+          entryPath: "broken.html",
+        }),
+      },
+    };
+    const manifestOnlyChecks = await grade(
+      booking.expect,
+      manifestOnlyEditBooking,
+      booking.gradeRun,
+    );
+    expect(
+      manifestOnlyChecks.some((c) => !c.pass && c.detail?.includes("source changed after")),
+    ).toBe(true);
+
+    const commentOnlyBooking: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/app.js":
+          "// dohc-app-channel ports .onmessage backend.invoke bookSeat idempotencyKey addEventListener name seats\n",
+      },
+    };
+    const commentOnlyChecks = await grade(booking.expect, commentOnlyBooking, booking.gradeRun);
+    expect(commentOnlyChecks.some((c) => !c.pass)).toBe(true);
+
+    const observedWithoutBookSeat: RunRecord = {
+      ...bookingSolved.run,
+      frontendVerifications: {
+        "apps/booking": {
+          ...bookingSolved.run.frontendVerifications!["apps/booking"]!,
+          observed: true,
+          brokerCalls: [],
+          steps: [{ index: 0, kind: "waitFor", ok: true }],
+        },
+      },
+    };
+    const observedWithoutBookChecks = await grade(
+      booking.expect,
+      observedWithoutBookSeat,
+      booking.gradeRun,
+    );
+    expect(
+      observedWithoutBookChecks.some(
+        (c) => !c.pass && c.detail?.includes("observed verifyFrontend"),
+      ),
+    ).toBe(true);
 
     const fireAndForgetFinance: RunRecord = {
       ...financeSolved.run,
@@ -686,22 +739,26 @@ describe("eval cases", () => {
     ).toBe(true);
   });
 
-  it("everydayDesktop verifyFrontend rejects missing inputs, inline CSP scripts, and unapproved operations", async () => {
+  it("everydayDesktop verifyFrontend validates manifests/inputs without fabricating broker success and supports injected observed verifiers", async () => {
     const dir = await mkdtemp(join(tmpdir(), "dohc-eval-verify-"));
     const root = join(dir, "workspace");
     const home = join(dir, "home");
     const unansweredLog = join(dir, "unanswered.log");
+    const recorded: Record<string, FrontendVerificationRecord> = {};
     try {
       await seedWorkspace(
         root,
         {
           ...EVERYDAY_CASES[0]!,
           files: {
-            "csp-app/index.html": '<!doctype html><button onclick="alert(1)">Run</button>\n',
-            "csp-app/app.publish.json": JSON.stringify({
+            "comment-app/index.html":
+              '<!doctype html><form><button type="submit">Go</button></form><div id="status">Booked</div>\n',
+            "comment-app/app.js":
+              "// dohc-app-channel ports .onmessage backend.invoke bookSeat preventDefault\n",
+            "comment-app/app.publish.json": JSON.stringify({
               version: 1,
               entryPath: "index.html",
-              inputs: ["index.html"],
+              inputs: ["index.html", "app.js"],
               packageMap: {},
             }),
             "missing-input-app/index.html":
@@ -709,14 +766,22 @@ describe("eval cases", () => {
             "missing-input-app/app.publish.json": JSON.stringify({
               version: 1,
               entryPath: "index.html",
-              inputs: ["index.html"],
+              inputs: ["index.html", "missing.js"],
               packageMap: {},
             }),
           },
         },
         home,
       );
-      const answers = await createEverydayDesktop(root, { workspaceId: "ws-everyday" });
+      const answers = await createEverydayDesktop(
+        root,
+        { workspaceId: "ws-everyday" },
+        {
+          onFrontendVerified: (appRoot, record) => {
+            recorded[appRoot] = record;
+          },
+        },
+      );
       const desktop = fakeDesktop({ root, answers, unansweredLog });
       const server = createDohcMcpServer({
         root,
@@ -731,14 +796,32 @@ describe("eval cases", () => {
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-      const cspRes = await client.callTool({
+      const commentRes = await client.callTool({
         name: "dohc_publish_app",
         arguments: {
-          request: { action: "verifyFrontend", workspaceId: "ws-everyday", appRoot: "csp-app" },
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "comment-app",
+            steps: [
+              {
+                kind: "click",
+                selector: "button",
+                expectBackend: { op: "backend.invoke", operation: "bookSeat", status: 200 },
+              },
+              { kind: "waitFor", selector: "#status", textIncludes: "Booked" },
+            ],
+          },
         },
       });
-      expect(cspRes.isError).toBe(true);
-      expect(JSON.stringify(cspRes.structuredContent)).toContain("csp_violation");
+      expect(commentRes.structuredContent).toMatchObject({
+        kind: "frontendVerified",
+        handshake: { delivered: false, messageCount: 0 },
+        brokerCalls: [],
+        steps: [],
+      });
+      expect(recorded["comment-app"]?.observed).toBe(false);
+      expect(recorded["comment-app"]?.brokerCalls).toEqual([]);
 
       const missingRes = await client.callTool({
         name: "dohc_publish_app",
@@ -752,6 +835,21 @@ describe("eval cases", () => {
       });
       expect(missingRes.isError).toBe(true);
       expect(JSON.stringify(missingRes.structuredContent)).toContain("missing_input");
+
+      const argv = evalServerArgs({
+        caseId: "everyday-booking-capacity-app",
+        root,
+        unansweredLog,
+        home,
+        writesLog: join(dir, "writes.log"),
+        snapshotsFile: join(dir, "datasets.json"),
+        verificationsFile: join(dir, "verifications.json"),
+      });
+      expect(argv[argv.length - 1]).toBe(join(dir, "verifications.json"));
+      await writeFile(join(dir, "verifications.json"), JSON.stringify(recorded), "utf8");
+      expect(
+        await readEvalJsonRecord<FrontendVerificationRecord>(join(dir, "verifications.json")),
+      ).toEqual(recorded);
 
       await client.close();
       await server.close();

@@ -15,11 +15,13 @@ export interface DatasetSnapshot {
 }
 
 export interface FrontendVerificationRecord {
+  observed: boolean;
   sourceRevision?: string;
   ok: boolean;
   stage: "compile" | "runtime" | "steps" | "complete";
   expectStartupBackend?: unknown[];
-  steps?: unknown[];
+  requestedSteps?: unknown[];
+  steps?: Array<{ index: number; kind: string; ok: boolean }>;
   brokerCalls: Array<{
     op: string;
     operation?: string;

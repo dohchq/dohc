@@ -38,6 +38,8 @@ export interface AppFrontendBrowserVerifyOutput {
   externalRequestsBlocked: number;
 }
 
+class DeadlineExceededError extends Error {}
+
 const VERIFY_PARTITION = "dohc-app-verify";
 const IDLE_SETTLE_MS = 150;
 const EXPECT_QUIET_MS = 1500;
@@ -62,6 +64,15 @@ const LOCAL_REMEDY: Record<AppBrokerLocalRejectionReason, string> = {
   rate_limited:
     "Reduce concurrent or rapid broker calls so requests stay within the broker rate limit.",
 };
+
+const STEP_REMEDY = {
+  step_text_mismatch: "Update the UI so the target element renders the expected text.",
+  step_not_fillable: "Target an enabled input, textarea, or select element.",
+  step_not_clickable: "Target an enabled clickable element in the rendered DOM.",
+  step_selector_not_found: "Ensure the selector matches an element in the rendered DOM.",
+  expected_backend_missing: "Trigger the expected broker request on click and handle its response.",
+  verification_timeout: "Fix slow or stalled app startup/requests, or raise timeoutMs.",
+} as const;
 
 let queue: Promise<void> = Promise.resolve();
 let sessionConfigured = false;
@@ -148,7 +159,7 @@ const stepExpression = (step: AppFrontendStep): string => {
     return `(()=>{try{const el=document.querySelector(${sel});if(!el)return "missing";${textCheck}return "ok";}catch{return "invalid";}})()`;
   }
   if (step.kind === "click") {
-    return `(()=>{try{const el=document.querySelector(${sel});if(!el)return "missing";if(el instanceof HTMLElement){el.focus();el.click();return "ok";}return "not_clickable";}catch{return "invalid";}})()`;
+    return `(()=>{try{const el=document.querySelector(${sel});if(!el)return "missing";if(el instanceof HTMLElement){if(("disabled" in el&&Boolean(el.disabled))||el.matches(":disabled")||el.getAttribute("aria-disabled")==="true")return "disabled";el.focus();el.click();return "ok";}return "not_clickable";}catch{return "invalid";}})()`;
   }
   return `(()=>{try{const el=document.querySelector(${sel});if(!el)return "missing";const val=${JSON.stringify(step.value)};const fire=(t)=>{t.focus();t.dispatchEvent(new Event("input",{bubbles:true}));t.dispatchEvent(new Event("change",{bubbles:true}));};if(el instanceof HTMLInputElement){if(el.disabled)return "disabled";const k=el.type==="checkbox"||el.type==="radio"?"checked":"value";Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,k)?.set?.call(el,k==="checked"?val==="true"||val==="1":val);fire(el);return "ok";}if(el instanceof HTMLTextAreaElement){if(el.disabled)return "disabled";Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value")?.set?.call(el,val);fire(el);return "ok";}if(el instanceof HTMLSelectElement){if(el.disabled)return "disabled";Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,"value")?.set?.call(el,val);fire(el);return el.value===val?"ok":"not_fillable";}return "not_fillable";}catch{return "invalid";}})()`;
 };
@@ -181,7 +192,9 @@ async function executeVerification(
   const deadlineAt = Date.now() + input.timeoutMs;
   const remainingMs = () => Math.max(0, deadlineAt - Date.now());
   const handshake = { delivered: false, messageCount: 0 };
-  const allCalls: AppFrontendBrokerCall[] = [];
+  const recordedCalls: Array<{ startSeq: number; call: AppFrontendBrokerCall }> = [];
+  const startedSeqById = new Map<string, number>();
+  let callSeq = 0;
   const diagnostics: AppFrontendDiagnostic[] = [];
   const stepResults: AppFrontendStepResult[] = [];
   const iframeSessions = new Set<string>();
@@ -190,6 +203,7 @@ async function executeVerification(
   let externalRequestsBlocked = 0;
   let inFlight = 0;
   let lastBrokerChangeAt = Date.now();
+  let closingView = false;
 
   const notify = () => {
     for (const wake of waiters) wake();
@@ -214,7 +228,7 @@ async function executeVerification(
     startupOk,
     stepsOk,
     handshake,
-    brokerCalls: allCalls.slice(0, MAX_ITEMS),
+    brokerCalls: recordedCalls.slice(0, MAX_ITEMS).map((entry) => entry.call),
     steps: stepResults,
     diagnostics,
     externalRequestsBlocked,
@@ -240,6 +254,54 @@ async function executeVerification(
   wc.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
   wc.setWindowOpenHandler(() => ({ action: "deny" }));
 
+  const closeViewNow = () => {
+    if (closingView || wc.isDestroyed()) return;
+    closingView = true;
+    try {
+      if (wc.debugger.isAttached()) wc.debugger.detach();
+    } catch {}
+    try {
+      wc.close({ waitForBeforeUnload: false });
+    } catch {}
+  };
+
+  const raceDeadline = async <T>(promise: Promise<T>): Promise<T> => {
+    input.signal.throwIfAborted();
+    const left = remainingMs();
+    if (left <= 0) {
+      closeViewNow();
+      throw new DeadlineExceededError();
+    }
+    promise.catch(() => {});
+    return await new Promise<T>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        input.signal.removeEventListener("abort", onAbort);
+      };
+      const onAbort = () => {
+        cleanup();
+        closeViewNow();
+        reject(input.signal.reason ?? new DOMException("Aborted", "AbortError"));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        closeViewNow();
+        reject(new DeadlineExceededError());
+      }, left);
+      input.signal.addEventListener("abort", onAbort, { once: true });
+      promise.then(
+        (value) => {
+          cleanup();
+          resolve(value);
+        },
+        (error) => {
+          cleanup();
+          reject(error);
+        },
+      );
+    });
+  };
+
   activeRun = {
     origin,
     webContentsId: wc.id,
@@ -255,13 +317,15 @@ async function executeVerification(
     },
   };
 
-  const cdp = (method: string, params: Record<string, unknown> = {}, sessionId?: string) => {
+  const cdpRaw = (method: string, params: Record<string, unknown> = {}, sessionId?: string) => {
     if (wc.isDestroyed() || !wc.debugger.isAttached())
       return Promise.reject(new Error("Verifier debugger is closed."));
     return sessionId
       ? wc.debugger.sendCommand(method, params, sessionId)
       : wc.debugger.sendCommand(method, params);
   };
+  const cdp = (method: string, params: Record<string, unknown> = {}, sessionId?: string) =>
+    raceDeadline(cdpRaw(method, params, sessionId));
 
   const waitUntil = async (predicate: () => boolean, maxMs: number): Promise<boolean> => {
     const end = Math.min(deadlineAt, Date.now() + Math.max(0, maxMs));
@@ -283,22 +347,42 @@ async function executeVerification(
     }
     return true;
   };
-  const waitBrokerIdle = () =>
-    waitUntil(
+  const waitBrokerIdle = async (): Promise<boolean> => {
+    const settled = await waitUntil(
       () => inFlight === 0 && Date.now() - lastBrokerChangeAt >= IDLE_SETTLE_MS,
       remainingMs(),
     );
+    if (!settled) {
+      pushDiag({
+        code: "verification_timeout",
+        severity: "error",
+        detail: "In-flight broker requests did not settle before timeout.",
+        remedy: STEP_REMEDY.verification_timeout,
+      });
+    }
+    return settled;
+  };
 
   const waitExpectations = async (
-    startIndex: number,
+    afterStartSeq: number,
     expected: readonly AppFrontendBackendExpectation[],
   ) => {
-    const missing = () => unmatchedExpectations(allCalls.slice(startIndex), expected);
-    if (missing().length) {
-      await waitUntil(
-        () => missing().length === 0 && inFlight === 0,
-        Math.min(remainingMs(), EXPECT_QUIET_MS),
+    const missing = () =>
+      unmatchedExpectations(
+        recordedCalls.filter((entry) => entry.startSeq > afterStartSeq).map((entry) => entry.call),
+        expected,
       );
+    if (missing().length) {
+      let quietSince = inFlight === 0 ? Date.now() : null;
+      await waitUntil(() => {
+        if (missing().length === 0 && inFlight === 0) return true;
+        if (inFlight > 0) {
+          quietSince = null;
+          return false;
+        }
+        if (quietSince === null) quietSince = Date.now();
+        return Date.now() - quietSince >= EXPECT_QUIET_MS;
+      }, remainingMs());
       await waitBrokerIdle();
     }
     return missing();
@@ -319,22 +403,27 @@ async function executeVerification(
     if (event.kind === "started") {
       handshake.messageCount++;
       inFlight++;
+      startedSeqById.set(event.id, ++callSeq);
       return notify();
     }
     if (event.kind === "aborted") {
       inFlight = Math.max(0, inFlight - 1);
+      startedSeqById.delete(event.id);
       return notify();
     }
     const opMeta = event.operation ? { operation: event.operation } : {};
     if (event.kind === "rejected") {
       handshake.messageCount++;
-      allCalls.push({
-        op: event.op,
-        ...opMeta,
-        status: event.status,
-        ok: false,
-        rejectedBy: "broker",
-        reasonCode: event.reason,
+      recordedCalls.push({
+        startSeq: ++callSeq,
+        call: {
+          op: event.op,
+          ...opMeta,
+          status: event.status,
+          ok: false,
+          rejectedBy: "broker",
+          reasonCode: event.reason,
+        },
       });
       return pushDiag({
         code: `broker_${event.reason}`,
@@ -346,30 +435,41 @@ async function executeVerification(
       });
     }
     inFlight = Math.max(0, inFlight - 1);
+    const startSeq = startedSeqById.get(event.id) ?? ++callSeq;
+    startedSeqById.delete(event.id);
     if (event.ok) {
-      allCalls.push({ op: event.op, ...opMeta, status: event.status, ok: true });
+      recordedCalls.push({
+        startSeq,
+        call: { op: event.op, ...opMeta, status: event.status, ok: true },
+      });
       return notify();
     }
     if (event.status === 409 && event.refusalCode) {
-      allCalls.push({
-        op: event.op,
-        ...opMeta,
-        status: 409,
-        ok: false,
-        rejectedBy: "backend",
-        reasonCode: "refused",
-        refusalCode: event.refusalCode,
+      recordedCalls.push({
+        startSeq,
+        call: {
+          op: event.op,
+          ...opMeta,
+          status: 409,
+          ok: false,
+          rejectedBy: "backend",
+          reasonCode: "refused",
+          refusalCode: event.refusalCode,
+        },
       });
       return notify();
     }
     const hint = input.consumeBackendHint(event.op, event.operation);
-    allCalls.push({
-      op: event.op,
-      ...opMeta,
-      status: event.status,
-      ok: false,
-      rejectedBy: "backend",
-      reasonCode: hint?.reasonCode ?? "runtime_error",
+    recordedCalls.push({
+      startSeq,
+      call: {
+        op: event.op,
+        ...opMeta,
+        status: event.status,
+        ok: false,
+        rejectedBy: "backend",
+        reasonCode: hint?.reasonCode ?? "runtime_error",
+      },
     });
     pushDiag({
       code: hint?.diagnosticCode ?? "broker_runtime_error",
@@ -420,12 +520,12 @@ async function executeVerification(
       if ((params.targetInfo as { type?: string } | undefined)?.type === "iframe")
         iframeSessions.add(childId);
       void Promise.allSettled([
-        cdp("Runtime.enable", {}, childId),
-        cdp("Log.enable", {}, childId),
-        cdp("Audits.enable", {}, childId),
-        cdp("Page.enable", {}, childId),
+        cdpRaw("Runtime.enable", {}, childId),
+        cdpRaw("Log.enable", {}, childId),
+        cdpRaw("Audits.enable", {}, childId),
+        cdpRaw("Page.enable", {}, childId),
       ]).finally(() => {
-        void cdp("Runtime.runIfWaitingForDebugger", {}, childId).catch(() => {});
+        void cdpRaw("Runtime.runIfWaitingForDebugger", {}, childId).catch(() => {});
       });
       return;
     }
@@ -529,7 +629,7 @@ async function executeVerification(
 
   try {
     // Electron 43 creates the initial RenderFrameHost on the first navigation; CDP commands time out before it.
-    await wc.loadURL("about:blank");
+    await raceDeadline(wc.loadURL("about:blank"));
     const gateNav = (details: { url: string; isMainFrame: boolean; preventDefault(): void }) => {
       if (!appViewNavigationAllowed(details.url, details.isMainFrame, origin))
         details.preventDefault();
@@ -550,7 +650,7 @@ async function executeVerification(
       waitForDebuggerOnStart: true,
       flatten: true,
     });
-    await wc.loadURL(input.url);
+    await raceDeadline(wc.loadURL(input.url));
 
     if (!(await waitUntil(() => handshake.delivered, remainingMs()))) {
       pushDiag({
@@ -559,8 +659,7 @@ async function executeVerification(
         detail: "The app iframe did not complete initial load and broker handoff before timeout.",
         remedy: "Check that index.html loads cleanly and listens for the dohc-app-channel message.",
       });
-    } else {
-      await waitBrokerIdle();
+    } else if (await waitBrokerIdle()) {
       const missingStartup = await waitExpectations(0, input.expectStartupBackend ?? []);
       for (const expected of missingStartup) {
         pushDiag({
@@ -569,8 +668,7 @@ async function executeVerification(
           ...(expected.op ? { op: expected.op } : {}),
           ...(expected.operation ? { operation: expected.operation } : {}),
           detail: clean(`Expected startup ${describeExpectation(expected)} did not complete.`),
-          remedy:
-            "Ensure the frontend listens for the dohc-app-channel port and sends the expected startup request.",
+          remedy: "Listen for the dohc-app-channel port and send the expected startup request.",
         });
       }
     }
@@ -592,12 +690,12 @@ async function executeVerification(
               "Page.createIsolatedWorld",
               { frameId, worldName: "dohc-app-verify" },
               childId,
-            )) as {
-              executionContextId: number;
-            };
+            )) as { executionContextId: number };
             return { sessionId: childId, contextId: world.executionContextId };
           }
-        } catch {}
+        } catch (error) {
+          if (error instanceof DeadlineExceededError || input.signal.aborted) throw error;
+        }
       }
       const tree = (await cdp("Page.getFrameTree")) as {
         frameTree?: { childFrames?: Array<{ frame?: { id?: string; url?: string } }> };
@@ -610,9 +708,7 @@ async function executeVerification(
       const world = (await cdp("Page.createIsolatedWorld", {
         frameId,
         worldName: "dohc-app-verify",
-      })) as {
-        executionContextId: number;
-      };
+      })) as { executionContextId: number };
       return { contextId: world.executionContextId };
     };
 
@@ -633,23 +729,35 @@ async function executeVerification(
       maxMs: number,
     ): Promise<string> => {
       const end = Math.min(deadlineAt, Date.now() + maxMs);
+      let last = "invalid";
+      let evaluated = false;
       while (true) {
         input.signal.throwIfAborted();
-        const res = (await cdp(
-          "Runtime.evaluate",
-          {
-            expression: expr,
-            contextId: appWorld.contextId,
-            returnByValue: true,
-            awaitPromise: false,
-          },
-          appWorld.sessionId,
-        )) as { result?: { value?: string }; exceptionDetails?: { text?: string } };
+        if (evaluated && Date.now() >= end) return last;
+        let res: { result?: { value?: string }; exceptionDetails?: { text?: string } };
+        try {
+          res = (await cdp(
+            "Runtime.evaluate",
+            {
+              expression: expr,
+              contextId: appWorld.contextId,
+              returnByValue: true,
+              awaitPromise: false,
+            },
+            appWorld.sessionId,
+          )) as { result?: { value?: string }; exceptionDetails?: { text?: string } };
+        } catch (error) {
+          if (error instanceof DeadlineExceededError && evaluated) return last;
+          throw error;
+        }
         if (res.exceptionDetails)
           throw new Error(res.exceptionDetails.text ?? "Step evaluation failed.");
-        const value = res.result?.value ?? "invalid";
-        if (stopWhen(value) || Date.now() >= end) return value;
-        await new Promise<void>((r) => setTimeout(r, Math.min(50, Math.max(0, end - Date.now()))));
+        last = res.result?.value ?? "invalid";
+        evaluated = true;
+        if (stopWhen(last) || Date.now() >= end) return last;
+        const pause = Math.min(50, Math.max(0, end - Date.now()));
+        if (pause <= 0) return last;
+        await new Promise<void>((r) => setTimeout(r, pause));
       }
     };
 
@@ -676,42 +784,46 @@ async function executeVerification(
           });
       };
 
-      const beforeCalls = allCalls.length;
+      const clickStartSeq = callSeq;
       const status = await pollEval(
         stepExpression(step),
         step.kind === "waitFor" ? (v) => v === "ok" || v === "invalid" : (v) => v !== "missing",
         step.kind === "waitFor" ? remainingMs() : 3000,
       );
       if (status !== "ok") {
-        const code: AppFrontendDiagnostic["code"] =
+        const code: keyof typeof STEP_REMEDY =
           step.kind === "waitFor" && status === "text"
             ? "step_text_mismatch"
             : step.kind === "fill" && status !== "missing" && status !== "invalid"
               ? "step_not_fillable"
-              : "step_selector_not_found";
-        const remedy =
-          code === "step_text_mismatch"
-            ? `Ensure "${step.selector}" renders text containing "${step.kind === "waitFor" ? step.textIncludes : ""}".`
-            : code === "step_not_fillable"
-              ? `Target an enabled input, textarea, or select element for "${step.selector}".`
-              : `Ensure selector "${step.selector}" exists in the rendered DOM.`;
-        failStep(code, remedy, `Step ${index} ${step.kind} failed (${status}).`);
+              : step.kind === "click" && (status === "disabled" || status === "not_clickable")
+                ? "step_not_clickable"
+                : "step_selector_not_found";
+        const context =
+          step.kind === "waitFor" && status === "text"
+            ? `selector ${step.selector} missing text ${step.textIncludes ?? ""}`
+            : `selector ${step.selector} (${status})`;
+        failStep(code, STEP_REMEDY[code], `Step ${index} ${step.kind} failed: ${context}.`);
         break;
       }
 
-      if (step.kind === "click") {
+      if (step.kind === "fill") {
         lastBrokerChangeAt = Date.now();
         await waitBrokerIdle();
-        if (
-          step.expectBackend &&
-          (await waitExpectations(beforeCalls, [step.expectBackend])).length
-        ) {
-          failStep(
-            "expected_backend_missing",
-            `Ensure clicking "${step.selector}" triggers ${describeExpectation(step.expectBackend)} and handles the response.`,
-            `Clicking "${step.selector}" did not produce ${describeExpectation(step.expectBackend)}.`,
-          );
-          break;
+      } else if (step.kind === "click") {
+        lastBrokerChangeAt = Date.now();
+        if (await waitBrokerIdle()) {
+          if (
+            step.expectBackend &&
+            (await waitExpectations(clickStartSeq, [step.expectBackend])).length
+          ) {
+            failStep(
+              "expected_backend_missing",
+              STEP_REMEDY.expected_backend_missing,
+              `Clicking ${step.selector} did not start and complete ${describeExpectation(step.expectBackend)}.`,
+            );
+            break;
+          }
         }
       }
 
@@ -728,13 +840,21 @@ async function executeVerification(
 
     const ok = startupOk && stepsOk && errorCount() === 0;
     return buildOutput(ok, ok ? "complete" : "steps", startupOk, stepsOk);
+  } catch (error) {
+    if (error instanceof DeadlineExceededError) {
+      pushDiag({
+        code: "verification_timeout",
+        severity: "error",
+        detail: "Verification exceeded timeoutMs before completing.",
+        remedy: STEP_REMEDY.verification_timeout,
+      });
+      return buildOutput(false, handshake.delivered ? "steps" : "runtime", false, false);
+    }
+    throw error;
   } finally {
     void view;
     activeRun = null;
     if (!wc.isDestroyed()) {
-      try {
-        if (wc.debugger.isAttached()) wc.debugger.detach();
-      } catch {}
       const closed = new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 500);
         wc.once("destroyed", () => {
@@ -742,7 +862,7 @@ async function executeVerification(
           resolve();
         });
       });
-      wc.close({ waitForBeforeUnload: false });
+      closeViewNow();
       await closed;
     }
     await clearSession();

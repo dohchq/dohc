@@ -92,7 +92,7 @@ Before publishing or handing an app to a user, verify its compiled frontend insi
   - `expectStartupBackend`: array of `{ op?, operation?, status?, refusalCode? }` expected during startup.
   - `steps`: ordered UI checks (`{ kind: "waitFor", selector, textIncludes? }`, `{ kind: "fill", selector, value }`, `{ kind: "click", selector, expectBackend? }`).
   - `timeoutMs`: `1000`–`30000` (default `10000`).
-- Use `dohc_test_app` to test a Collection's SQL schema and backend operations in isolation; use `verifyFrontend` to verify the compiled browser frontend end to end against those operations.
+- Use `dohc_test_app` for quick folder detection and entry presence checks; use `verifyFrontend` to compile and run the frontend end to end against an empty ephemeral Collection.
 
 ```json
 {

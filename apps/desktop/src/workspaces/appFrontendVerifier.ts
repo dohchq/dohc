@@ -138,13 +138,13 @@ function classifyCompileDiagnostic(
     [
       /does not exist|not among its inputs|cannot include live documents/i,
       "missing_input",
-      `List every imported file relative to ${appRoot} in ${manifestPath} inputs.`,
+      "List every imported file relative to the app root in app.publish.json inputs.",
       locFields,
     ],
     [
       /app\.publish\.json/i,
       "manifest_error",
-      `Fix ${manifestPath} (version, entryPath, inputs, packageMap, and dataset/collection fields).`,
+      "Fix app.publish.json (version, entryPath, inputs, packageMap, and binding fields).",
       isShareablePath(manifestPath) ? { path: manifestPath } : {},
     ],
     [
@@ -427,7 +427,7 @@ export async function verifyLocalAppFrontend(
             parsed.operation,
             "operation_not_approved",
             `Operation "${parsed.operation}" is not in app.publish.json dataset.operationIds.`,
-            `Add "${parsed.operation}"'s operationId to dataset.operationIds in app.publish.json, or remove the call.`,
+            "Add the operation's operationId to dataset.operationIds in app.publish.json, or remove the call.",
             "This action is not approved for the app.",
           );
         }

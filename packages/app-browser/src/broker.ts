@@ -24,16 +24,17 @@ export type AppBrokerObservation =
       op: AppBrokerOp;
       operation?: string;
     }
-  | { kind: "started"; op: AppBrokerOp; operation?: string }
+  | { kind: "started"; id: string; op: AppBrokerOp; operation?: string }
   | {
       kind: "completed";
+      id: string;
       op: AppBrokerOp;
       operation?: string;
       status: number;
       ok: boolean;
       refusalCode?: string;
     }
-  | { kind: "aborted"; op: AppBrokerOp; operation?: string };
+  | { kind: "aborted"; id: string; op: AppBrokerOp; operation?: string };
 
 /**
  * Runs only in the trusted bootstrap. The app receives this one frame-bound port.
@@ -190,12 +191,13 @@ export function attachAppCollectionBroker(
     else collectionTokens--;
     pending++;
     ids.add(id);
-    emit({ kind: "started", op, ...opMeta });
+    emit({ kind: "started", id, op, ...opMeta });
     let finished = false;
     const finish = (status: number, ok: boolean, refusalCode?: string) => {
       finished = true;
       emit({
         kind: "completed",
+        id,
         op,
         ...opMeta,
         status,
@@ -278,7 +280,7 @@ export function attachAppCollectionBroker(
       reject(503);
       finish(503, false);
     } finally {
-      if (!finished) emit({ kind: "aborted", op, ...opMeta });
+      if (!finished) emit({ kind: "aborted", id, op, ...opMeta });
       pending--;
       ids.delete(id);
     }
