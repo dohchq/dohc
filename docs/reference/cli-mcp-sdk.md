@@ -202,7 +202,7 @@ Create a share link, prepare an immutable app revision, and approve publication 
 
 Changes the workspace, so a shared view does not offer it.
 
-- `request`: `{ action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
+- `request`: `{ action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "stage", workspaceId: string, appRoot: string, migrations?: { [key: string]: string }, agentLabel?: string } | { action: "listStaged", workspaceId: string, appRoot?: string } | { action: "approveStaged", workspaceId: string, stageId: UUID, reviewDigest: SHA-256 hex, agentLabel?: string } | { action: "discardStaged", workspaceId: string, stageId: UUID } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
 
 Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
 
@@ -1987,7 +1987,7 @@ Read more changed records with migrationPreviewPage. Review the result, then app
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
 - `expectedDatasetId`: `UUID`
-- `migrationPath`: `string`. Required.
+- `migrationPath`: `string | null`
 
 Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 
@@ -2000,7 +2000,7 @@ Edit the Collection's source files and write the migration SQL first. askToApply
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
 - `expectedDatasetId`: `UUID`
-- `migrationPath`: `string`. Required.
+- `migrationPath`: `string | null`
 - `note`: `string`
 
 Returns `{ kind: "change-asked", path, changeSha256 }`.
@@ -2128,6 +2128,54 @@ Review the source and any Collection access it asks for, then approve. The app f
 - `appRoot`: `string`. Required.
 
 Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access }, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+
+#### `dohc app stage`
+
+Stage an app and its new or updated Collections for one review on this computer.
+
+Reads app.publish.json and each bound Collection without writing workspace files. Preflights every Collection and compiles the app before saving the staged review under .dohc/local/. Optional migrations maps a Collection alias or datasetPath to a migration SQL file when a Collection's schema changed. Operations-only updates need no migration file. agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.
+
+- `workspaceId`: `string`. Required.
+- `appRoot`: `string`. Required.
+- `migrations`: `{ [key: string]: string }`
+- `agentLabel`: `string`
+
+Returns `{ kind: "staged", stage: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, collections, capabilities, externalNetwork: true } }`.
+
+#### `dohc app listStaged`
+
+List staged app reviews waiting on this computer.
+
+Pass optional appRoot to filter to one app folder.
+
+- `workspaceId`: `string`. Required.
+- `appRoot`: `string`
+
+Returns `{ kind: "stagedListed", stages: { stageId, appRoot, reviewDigest, createdAtMs, sourceRevision, sourcePaths, collections, capabilities, externalNetwork: true }[] }`.
+
+#### `dohc app approveStaged`
+
+Approve a staged review, applying its Collections and approving the app.
+
+Set `stageId` to `stage.stageId` from `stage`. Set `reviewDigest` to `stage.reviewDigest` from `stage`. Applies each staged Collection change with durable receipts so interrupted runs resume cleanly, then activates the reviewed app bundle. agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.
+
+- `workspaceId`: `string`. Required.
+- `stageId`: `UUID`. Required.
+- `reviewDigest`: `SHA-256 hex`. Required.
+- `agentLabel`: `string`
+
+Returns `{ kind: "stagedApproved", stageId, publicationId, authorityRevision, collectionsApplied: { action, datasetId, revision, revisionSha256 }[] }`.
+
+#### `dohc app discardStaged`
+
+Discard a staged app review on this computer.
+
+Set `stageId` to `stage.stageId` from `stage`. Removes only the local staged review under .dohc/local/. Workspace source files stay untouched.
+
+- `workspaceId`: `string`. Required.
+- `stageId`: `UUID`. Required.
+
+Returns `{ kind: "stagedDiscarded", stageId }`.
 
 #### `dohc app launchLocal`
 

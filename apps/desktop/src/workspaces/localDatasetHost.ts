@@ -33,14 +33,22 @@ import {
   DatasetHostError,
   type DatasetHostOptions,
 } from "@dohc/app-backend-runtime/dataset-host";
-import { createDatasetJournal, type JournalDb } from "@dohc/app-backend-runtime/journal";
+import {
+  createDatasetJournal,
+  JournalError,
+  type JournalDb,
+} from "@dohc/app-backend-runtime/journal";
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
 import {
   createDatasetSupervisor,
   type DatasetInvocationResult,
   type DatasetSupervisorOptions,
 } from "@dohc/app-backend-runtime/supervisor";
-import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
+import {
+  initializeAppDatabase,
+  type AppBackendRuntimeOptions,
+  type JsonValue,
+} from "@dohc/app-backend-runtime";
 import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
@@ -828,12 +836,45 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         throw new Error("Collection file integrity check failed.");
       return { file, bytesBase64: Buffer.from(row.content).toString("base64") };
     }
+    const exclusiveDatasets = new Map<string, symbol>();
+    const activeDatasetOperations = new Map<string, Set<Promise<void>>>();
+    const assertDatasetWritable = (datasetId: string, token?: symbol) => {
+      const holder = exclusiveDatasets.get(datasetId);
+      if (holder !== undefined && holder !== token)
+        throw new JournalError("conflict", "This Collection is being updated. Try again.");
+    };
+    const trackDatasetOperation = <T>(
+      datasetId: string,
+      work: () => Promise<T>,
+      token?: symbol,
+    ): Promise<T> => {
+      assertDatasetWritable(datasetId, token);
+      if (token !== undefined) return Promise.resolve().then(work);
+      let set = activeDatasetOperations.get(datasetId);
+      if (!set) {
+        set = new Set();
+        activeDatasetOperations.set(datasetId, set);
+      }
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      set.add(done);
+      return Promise.resolve()
+        .then(work)
+        .finally(() => {
+          set.delete(done);
+          if (set.size === 0) activeDatasetOperations.delete(datasetId);
+          release();
+        });
+    };
     const migrations = createLocalDatasetMigrations({
       workspaceId,
       assertCurrent,
       approvedArtifacts: (datasetId) => host.approvedArtifacts(owner, { workspaceId, datasetId }),
       prepareMigrationCandidate: (input) => host.prepareMigration(owner, input),
-      approveMigrationCandidate: (input) => host.approveMigration(owner, input),
+      approveMigrationCandidate: (input) =>
+        trackDatasetOperation(input.datasetId, () => host.approveMigration(owner, input)),
       discardMigrationCandidate: (input) => host.discardMigration(owner, input),
     });
     const transfers = createLocalDatasetTransfers({
@@ -954,20 +995,22 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       input: LocalDatasetInvocation,
       readOnly?: boolean,
     ): Promise<DatasetInvocationResult> {
-      return tracked(async () => {
-        checkInvocation(input, readOnly);
-        const context = input.agent === undefined ? owner : agentContext(input.agent);
-        return host.invoke(context, {
-          workspaceId,
-          datasetId: input.datasetId,
-          revision: input.revision,
-          revisionSha256: input.revisionSha256,
-          operationId: input.operationId,
-          input: input.input,
-          idempotencyKey: input.idempotencyKey,
-          signal: signal(input.signal),
-        });
-      });
+      return tracked(() =>
+        trackDatasetOperation(input.datasetId, async () => {
+          checkInvocation(input, readOnly);
+          const context = input.agent === undefined ? owner : agentContext(input.agent);
+          return host.invoke(context, {
+            workspaceId,
+            datasetId: input.datasetId,
+            revision: input.revision,
+            revisionSha256: input.revisionSha256,
+            operationId: input.operationId,
+            input: input.input,
+            idempotencyKey: input.idempotencyKey,
+            signal: signal(input.signal),
+          });
+        }),
+      );
     }
     function agentContext(agent: LocalDatasetAgent): AgentContext {
       const context = Object.freeze({ agent: Object.freeze(datasetAuthorityAgent(agent)) });
@@ -996,6 +1039,63 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           });
       },
     });
+    const runApprove = (
+      input: {
+        preparationId: string;
+        revisionSha256: string;
+        approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null;
+        signal?: AbortSignal;
+      },
+      token?: symbol,
+    ) =>
+      tracked(() => {
+        const captured = pending.get(input.preparationId);
+        if (
+          !captured ||
+          captured.expires < Date.now() ||
+          captured.preparation.revision.revisionSha256 !== input.revisionSha256
+        )
+          throw new Error("This Collection approval expired or changed. Prepare it again.");
+        return trackDatasetOperation(
+          captured.preparation.revision.datasetId,
+          async () => {
+            const artifacts = {
+              revision: captured.preparation.revision,
+              schemaSql: captured.schemaSql,
+              operationSource: captured.operationSource,
+              approvalAgent: input.approvalAgent,
+            };
+            const server = options.collectionsServer?.();
+            const approved = server
+              ? await server.activate(artifacts, signal(input.signal))
+              : await host.activate(owner, {
+                  workspaceId,
+                  ...artifacts,
+                  capacityBytes: options.capacityBytes,
+                  signal: signal(input.signal),
+                });
+            pending.delete(input.preparationId);
+            if (!server && options.collectionsServer?.()) options.keptAfterSyncStarted?.();
+            return changed(approved);
+          },
+          token,
+        );
+      });
+    const runApproveMigrationCandidate = (
+      input: Parameters<typeof host.approveMigration>[1],
+      token?: symbol,
+    ) => {
+      assertCurrent();
+      if (input.workspaceId !== workspaceId)
+        throw new Error("This Collection belongs to another workspace.");
+      return tracked(() =>
+        trackDatasetOperation(
+          input.datasetId,
+          () => host.approveMigration(owner, { ...input, signal: signal(input.signal) }),
+          token,
+        ),
+      ).then(changed);
+    };
     // After a change to which rules a dataset runs, or whether it runs.
     const changed = <T>(value: T): T => {
       if (!closed) options.onDatasetsChanged?.();
@@ -1008,6 +1108,29 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
        */
       held(): void {
         assertCurrent();
+      },
+      preflightCreate(input: {
+        revision: DatasetRevision;
+        schemaSql: string;
+        operationSource: string;
+        signal?: AbortSignal;
+      }) {
+        return tracked(async () => {
+          const abort = signal(input.signal);
+          await compile(input.operationSource, input.revision.definition.operationsPath, abort);
+          assertCurrent();
+          abort.throwIfAborted();
+          await initializeAppDatabase(
+            {
+              schemaSql: input.schemaSql,
+              tables: input.revision.definition.tables.map((table) => table.sqlName),
+              journaled: true,
+              signal: abort,
+            },
+            options.runtime,
+          );
+          assertCurrent();
+        });
       },
       prepare,
       prepareMigration(input: PrepareLocalDatasetMigration) {
@@ -1026,44 +1149,16 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         assertCurrent();
         pending.delete(preparationId);
       },
-      approve(input: {
-        preparationId: string;
-        revisionSha256: string;
-        approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null;
-        signal?: AbortSignal;
-      }) {
-        return tracked(async () => {
-          const captured = pending.get(input.preparationId);
-          if (
-            !captured ||
-            captured.expires < Date.now() ||
-            captured.preparation.revision.revisionSha256 !== input.revisionSha256
-          )
-            throw new Error("This Collection approval expired or changed. Prepare it again.");
-          const artifacts = {
-            revision: captured.preparation.revision,
-            schemaSql: captured.schemaSql,
-            operationSource: captured.operationSource,
-            approvalAgent: input.approvalAgent,
-          };
-          // A syncing workspace's Collection is created on its server, and lives there.
-          const server = options.collectionsServer?.();
-          const approved = server
-            ? await server.activate(artifacts, signal(input.signal))
-            : await host.activate(owner, {
-                workspaceId,
-                ...artifacts,
-                capacityBytes: options.capacityBytes,
-                signal: signal(input.signal),
-              });
-          pending.delete(input.preparationId);
-          if (!server && options.collectionsServer?.()) options.keptAfterSyncStarted?.();
-          return changed(approved);
-        });
+      approve(input: Parameters<typeof runApprove>[0]) {
+        return runApprove(input);
       },
       keptDatasetIds() {
         assertCurrent();
         return host.keptDatasetIds(owner, { workspaceId });
+      },
+      appHostKind(): "local" | "server" {
+        assertCurrent();
+        return options.collectionsServer?.() ? "server" : "local";
       },
       list(input: { after?: string; limit?: number; includeArchived?: boolean } = {}) {
         assertCurrent();
@@ -1079,10 +1174,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
       archive(input: { datasetId: string }) {
         assertCurrent();
+        assertDatasetWritable(input.datasetId);
         return changed(host.archiveDataset(owner, { workspaceId, datasetId: input.datasetId }));
       },
       restore(input: { datasetId: string }) {
         assertCurrent();
+        assertDatasetWritable(input.datasetId);
         return changed(host.restoreDataset(owner, { workspaceId, datasetId: input.datasetId }));
       },
       deletePreview(input: { datasetId: string; after?: string; limit?: number }) {
@@ -1099,7 +1196,11 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         reviewToken: string;
         acknowledge: true;
       }) {
-        return tracked(() => host.deleteDataset(owner, { workspaceId, ...input })).then(changed);
+        return tracked(() =>
+          trackDatasetOperation(input.datasetId, () =>
+            host.deleteDataset(owner, { workspaceId, ...input }),
+          ),
+        ).then(changed);
       },
       pendingAttempts(input: { datasetId: string; after?: number; limit?: number }) {
         assertCurrent();
@@ -1162,10 +1263,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
       claimRecovery(input: Parameters<typeof recovery.claim>[0]) {
-        return tracked(async () => {
-          assertRestoresHere();
-          return recovery.claim(input);
-        }).then(changed);
+        return tracked(() =>
+          trackDatasetOperation(input.sourceCursor.datasetId, async () => {
+            assertRestoresHere();
+            return recovery.claim(input);
+          }),
+        ).then(changed);
       },
       discardRecovery(transferId: string) {
         return tracked(() => recovery.discard(transferId));
@@ -1179,12 +1282,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         );
       },
       approveMigrationCandidate(input: Parameters<typeof host.approveMigration>[1]) {
-        assertCurrent();
-        if (input.workspaceId !== workspaceId)
-          throw new Error("This Collection belongs to another workspace.");
-        return tracked(() =>
-          host.approveMigration(owner, { ...input, signal: signal(input.signal) }),
-        ).then(changed);
+        return runApproveMigrationCandidate(input);
       },
       migrationPreviewPage(input: Parameters<typeof host.migrationPreviewPage>[1]) {
         assertCurrent();
@@ -1228,115 +1326,171 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         target: DatasetTransferTarget;
         signal?: AbortSignal;
       }) {
-        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) })).then(
-          changed,
-        );
+        return tracked(() =>
+          trackDatasetOperation(input.datasetId, () =>
+            transfers.transfer({ ...input, signal: signal(input.signal) }),
+          ),
+        ).then(changed);
+      },
+      withExclusiveDatasets<T>(
+        datasetIds: readonly string[],
+        callerSignal: AbortSignal | undefined,
+        work: (exclusive: {
+          approve: (input: Parameters<typeof runApprove>[0]) => ReturnType<typeof runApprove>;
+          approveMigrationCandidate: (
+            input: Parameters<typeof runApproveMigrationCandidate>[0],
+          ) => ReturnType<typeof runApproveMigrationCandidate>;
+        }) => Promise<T>,
+      ): Promise<T> {
+        return tracked(async () => {
+          const unique = [...new Set(datasetIds)].sort();
+          for (const datasetId of unique) {
+            assertDatasetWritable(datasetId);
+          }
+          const token = Symbol("exclusive-dataset");
+          for (const datasetId of unique) {
+            exclusiveDatasets.set(datasetId, token);
+          }
+          try {
+            const activeSignal = signal(callerSignal);
+            while (true) {
+              activeSignal.throwIfAborted();
+              const pendingOps = unique.flatMap((datasetId) => [
+                ...(activeDatasetOperations.get(datasetId) ?? []),
+              ]);
+              if (pendingOps.length === 0) break;
+              let stopWait: (() => void) | undefined;
+              const aborted = new Promise<void>((resolve) => {
+                const onAbort = () => resolve();
+                stopWait = onAbort;
+                activeSignal.addEventListener("abort", onAbort, { once: true });
+              });
+              try {
+                await Promise.race([Promise.allSettled(pendingOps), aborted]);
+              } finally {
+                if (stopWait) activeSignal.removeEventListener("abort", stopWait);
+              }
+            }
+            assertCurrent();
+            activeSignal.throwIfAborted();
+            return await work({
+              approve: (input) => runApprove(input, token),
+              approveMigrationCandidate: (input) => runApproveMigrationCandidate(input, token),
+            });
+          } finally {
+            for (const datasetId of unique) {
+              if (exclusiveDatasets.get(datasetId) === token) exclusiveDatasets.delete(datasetId);
+            }
+          }
+        });
       },
       upload(input: LocalDatasetUpload, appContext?: LocalDatasetAppContext) {
-        return tracked(async () => {
-          signal(input.signal).throwIfAborted();
-          checkRevision(input);
-          const authorize = () => {
-            assertCurrent();
+        return tracked(() =>
+          trackDatasetOperation(input.datasetId, async () => {
             signal(input.signal).throwIfAborted();
-            return appContext
-              ? apps.resolveAuthority(appContext, {
-                  workspaceId,
-                  datasetId: input.datasetId,
-                  access: { kind: "app", appId: appContext.publicationId },
-                }).principalKey
-              : ownerId;
-          };
-          const principal = authorize();
-          const parsed = parseAppBackendUploadRequest({
-            authorityRevision: input.revision,
-            idempotencyKey: input.idempotencyKey,
-            name: input.name,
-            contentType: input.contentType,
-            bytesBase64: input.bytesBase64,
-          });
-          const bytes = Buffer.from(parsed.bytesBase64, "base64"),
-            sha256 = digest(bytes);
-          if (!appBackendFileSignatureMatches(parsed.contentType, bytes))
-            throw new Error("File content does not match its type.");
-          const now = Date.now();
-          return transaction(() => {
-            const head = journal.head({ workspaceId, datasetId: input.datasetId }, () => {
-              authorize();
-            });
-            if (
-              !head.active ||
-              head.cursor.approvedRevisionHash !== checkRevision(input).revisionSha256
-            )
-              throw new Error("This Collection changed. Reload the Collection.");
-            const stale = db
-              .prepare(
-                "SELECT file_id, storage_bytes FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NULL AND expires_at_ms<=?",
-              )
-              .all(workspaceId, input.datasetId, now);
-            for (const row of stale) {
-              db.prepare(
-                "DELETE FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND attached_revision IS NULL",
-              ).run(workspaceId, input.datasetId, String(row.file_id));
-              charge(input.datasetId, -Number(row.storage_bytes));
-            }
-            const key = JSON.stringify([
-              workspaceId,
-              input.datasetId,
-              principal,
-              parsed.idempotencyKey,
-            ]);
-            const existing = db
-              .prepare(
-                "SELECT metadata FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND key=?",
-              )
-              .get(workspaceId, input.datasetId, key) as { metadata: string } | undefined;
-            if (existing) {
-              const file = parseAppBackendFile(JSON.parse(existing.metadata));
-              if (
-                file.sha256 !== sha256 ||
-                file.name !== parsed.name ||
-                file.contentType !== parsed.contentType
-              )
-                throw new Error("This retry key was already used for another upload.");
-              authorize();
-              return { file, replayed: true };
-            }
-            const staged = Number(
-              db
-                .prepare(
-                  "SELECT count(*) AS count FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NULL",
-                )
-                .get(workspaceId, input.datasetId)!.count,
-            );
-            if (staged >= APP_BACKEND_OPERATION_FILES)
-              throw new Error("Attach or wait for existing uploads before uploading more files.");
-            const file: AppBackendFile = {
-              fileId: randomBytes(24).toString("base64url"),
-              name: parsed.name,
-              contentType: parsed.contentType,
-              byteLength: bytes.byteLength,
-              sha256,
+            checkRevision(input);
+            const authorize = () => {
+              assertCurrent();
+              signal(input.signal).throwIfAborted();
+              return appContext
+                ? apps.resolveAuthority(appContext, {
+                    workspaceId,
+                    datasetId: input.datasetId,
+                    access: { kind: "app", appId: appContext.publicationId },
+                  }).principalKey
+                : ownerId;
             };
-            const metadata = JSON.stringify(file),
-              storageBytes =
-                bytes.byteLength + Buffer.byteLength(metadata) + Buffer.byteLength(key) + 384;
-            db.prepare("INSERT INTO local_dataset_files VALUES(?,?,?,?,?,?,?,?,NULL,?)").run(
-              workspaceId,
-              input.datasetId,
-              file.fileId,
-              key,
-              metadata,
-              bytes,
-              now,
-              now + 86_400_000,
-              storageBytes,
-            );
-            charge(input.datasetId, storageBytes);
-            authorize();
-            return { file, replayed: false };
-          });
-        });
+            const principal = authorize();
+            const parsed = parseAppBackendUploadRequest({
+              authorityRevision: input.revision,
+              idempotencyKey: input.idempotencyKey,
+              name: input.name,
+              contentType: input.contentType,
+              bytesBase64: input.bytesBase64,
+            });
+            const bytes = Buffer.from(parsed.bytesBase64, "base64"),
+              sha256 = digest(bytes);
+            if (!appBackendFileSignatureMatches(parsed.contentType, bytes))
+              throw new Error("File content does not match its type.");
+            const now = Date.now();
+            return transaction(() => {
+              const head = journal.head({ workspaceId, datasetId: input.datasetId }, () => {
+                authorize();
+              });
+              if (
+                !head.active ||
+                head.cursor.approvedRevisionHash !== checkRevision(input).revisionSha256
+              )
+                throw new Error("This Collection changed. Reload the Collection.");
+              const stale = db
+                .prepare(
+                  "SELECT file_id, storage_bytes FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NULL AND expires_at_ms<=?",
+                )
+                .all(workspaceId, input.datasetId, now);
+              for (const row of stale) {
+                db.prepare(
+                  "DELETE FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND attached_revision IS NULL",
+                ).run(workspaceId, input.datasetId, String(row.file_id));
+                charge(input.datasetId, -Number(row.storage_bytes));
+              }
+              const key = JSON.stringify([
+                workspaceId,
+                input.datasetId,
+                principal,
+                parsed.idempotencyKey,
+              ]);
+              const existing = db
+                .prepare(
+                  "SELECT metadata FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND key=?",
+                )
+                .get(workspaceId, input.datasetId, key) as { metadata: string } | undefined;
+              if (existing) {
+                const file = parseAppBackendFile(JSON.parse(existing.metadata));
+                if (
+                  file.sha256 !== sha256 ||
+                  file.name !== parsed.name ||
+                  file.contentType !== parsed.contentType
+                )
+                  throw new Error("This retry key was already used for another upload.");
+                authorize();
+                return { file, replayed: true };
+              }
+              const staged = Number(
+                db
+                  .prepare(
+                    "SELECT count(*) AS count FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NULL",
+                  )
+                  .get(workspaceId, input.datasetId)!.count,
+              );
+              if (staged >= APP_BACKEND_OPERATION_FILES)
+                throw new Error("Attach or wait for existing uploads before uploading more files.");
+              const file: AppBackendFile = {
+                fileId: randomBytes(24).toString("base64url"),
+                name: parsed.name,
+                contentType: parsed.contentType,
+                byteLength: bytes.byteLength,
+                sha256,
+              };
+              const metadata = JSON.stringify(file),
+                storageBytes =
+                  bytes.byteLength + Buffer.byteLength(metadata) + Buffer.byteLength(key) + 384;
+              db.prepare("INSERT INTO local_dataset_files VALUES(?,?,?,?,?,?,?,?,NULL,?)").run(
+                workspaceId,
+                input.datasetId,
+                file.fileId,
+                key,
+                metadata,
+                bytes,
+                now,
+                now + 86_400_000,
+                storageBytes,
+              );
+              charge(input.datasetId, storageBytes);
+              authorize();
+              return { file, replayed: false };
+            });
+          }),
+        );
       },
       file(input: LocalDatasetFileRequest) {
         return tracked(async () => {
@@ -1366,19 +1520,21 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           context: LocalDatasetAutomationContext,
           input: LocalDatasetInvocation,
         ): Promise<DatasetInvocationResult> {
-          return tracked(async () => {
-            checkInvocation(input);
-            return host.invoke(context, {
-              workspaceId,
-              datasetId: input.datasetId,
-              revision: input.revision,
-              revisionSha256: input.revisionSha256,
-              operationId: input.operationId,
-              input: input.input,
-              idempotencyKey: input.idempotencyKey,
-              signal: signal(input.signal),
-            });
-          });
+          return tracked(() =>
+            trackDatasetOperation(input.datasetId, async () => {
+              checkInvocation(input);
+              return host.invoke(context, {
+                workspaceId,
+                datasetId: input.datasetId,
+                revision: input.revision,
+                revisionSha256: input.revisionSha256,
+                operationId: input.operationId,
+                input: input.input,
+                idempotencyKey: input.idempotencyKey,
+                signal: signal(input.signal),
+              });
+            }),
+          );
         },
         /**
          * Each approved, unarchived dataset's definition, and each dataset whose rules cannot be read.
@@ -1614,7 +1770,11 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       approved: (datasetId) => host.approvedArtifacts(owner, { workspaceId, datasetId }),
       bind: (operations, commit) => host.setBindings(owner, { workspaceId, operations }, commit),
       invoke: (context, input) =>
-        tracked(() => host.invoke(context, { ...input, signal: signal(input.signal) })),
+        tracked(() =>
+          trackDatasetOperation(input.datasetId, () =>
+            host.invoke(context, { ...input, signal: signal(input.signal) }),
+          ),
+        ),
       upload: (context, input) => local.upload(input, context),
       readFile: (context, input, fileId) =>
         tracked(() =>

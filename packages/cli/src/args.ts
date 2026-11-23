@@ -1832,6 +1832,36 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
       "Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link.",
     ],
   },
+  stage: {
+    summary: "Stage an app and its new or updated Collections for one review on this computer.",
+    notes: [
+      "Reads app.publish.json and each bound Collection without writing workspace files. Preflights every Collection and compiles the app before saving the staged review under .dohc/local/.",
+      "Optional migrations maps a Collection alias or datasetPath to a migration SQL file when a Collection's schema changed. Operations-only updates need no migration file.",
+      agentLabelNote,
+    ],
+  },
+  listStaged: {
+    summary: "List staged app reviews waiting on this computer.",
+    notes: ["Pass optional appRoot to filter to one app folder."],
+  },
+  approveStaged: {
+    summary: "Approve a staged review, applying its Collections and approving the app.",
+    take: [
+      { field: "stageId", from: "stage", path: "stage.stageId" },
+      { field: "reviewDigest", from: "stage", path: "stage.reviewDigest" },
+    ],
+    notes: [
+      "Applies each staged Collection change with durable receipts so interrupted runs resume cleanly, then activates the reviewed app bundle.",
+      agentLabelNote,
+    ],
+  },
+  discardStaged: {
+    summary: "Discard a staged app review on this computer.",
+    take: [{ field: "stageId", from: "stage", path: "stage.stageId" }],
+    notes: [
+      "Removes only the local staged review under .dohc/local/. Workspace source files stay untouched.",
+    ],
+  },
   launchLocal: {
     summary: "Get a local URL for an approved app.",
     notes: ["The URL works on this computer while dohc is open. It is not a share link."],

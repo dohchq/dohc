@@ -153,7 +153,11 @@ export function createOwnerAppPublicationHandler<
         input.action === "prepareLocal" ||
         input.action === "listLocal" ||
         input.action === "checkLocal" ||
-        input.action === "launchLocal"
+        input.action === "launchLocal" ||
+        input.action === "stage" ||
+        input.action === "listStaged" ||
+        input.action === "approveStaged" ||
+        input.action === "discardStaged"
       )
         throw new Error("Local apps are unavailable. Restart dohc and try again.");
       const remote = await dependencies.remoteForWorkspace(

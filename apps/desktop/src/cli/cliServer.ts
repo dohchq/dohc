@@ -2499,7 +2499,15 @@ const HAND_WRITTEN_SHARE_RULES: {
   automationButtons: "anywhere",
   dataset: (request) =>
     DATASET_PATH_FIELDS.some((field) => field in request.args.request) ? "anywhere" : "owner",
-  appPublication: (request) => ("appRoot" in request.args.request ? "anywhere" : "owner"),
+  appPublication: (request) =>
+    request.args.request.action === "stage" ||
+    request.args.request.action === "listStaged" ||
+    request.args.request.action === "approveStaged" ||
+    request.args.request.action === "discardStaged"
+      ? "owner"
+      : "appRoot" in request.args.request
+        ? "anywhere"
+        : "owner",
   stopSync: "owner",
   shareCopy: "owner",
   shareAgents: "owner",
@@ -2703,12 +2711,24 @@ async function dispatch(
           args: {
             ...request.args,
             request:
-              "appRoot" in input
+              "appRoot" in input && input.appRoot !== undefined
                 ? {
                     ...input,
                     appRoot: paths.rebase(input.appRoot, "read"),
                     ...(input.action === "createLink" && input.paths
                       ? { paths: input.paths.map((path) => paths.rebase(path, "read")) }
+                      : {}),
+                    ...(input.action === "stage" && input.migrations
+                      ? {
+                          migrations: Object.fromEntries(
+                            Object.entries(input.migrations).map(([key, filePath]) => [
+                              key.includes("/") || key.endsWith(".json")
+                                ? paths.rebase(key, "read")
+                                : key,
+                              paths.rebase(filePath, "read"),
+                            ]),
+                          ),
+                        }
                       : {}),
                   }
                 : input,
@@ -2893,7 +2913,11 @@ async function dispatch(
           translated.datasetPath = paths.rebase(translated.datasetPath, "read");
         if ("descriptorPath" in translated)
           translated.descriptorPath = paths.rebase(translated.descriptorPath, "read");
-        if ("migrationPath" in translated)
+        if (
+          "migrationPath" in translated &&
+          translated.migrationPath !== null &&
+          translated.migrationPath !== undefined
+        )
           translated.migrationPath = paths.rebase(translated.migrationPath, "read");
         if ("sourcePath" in translated && translated.sourcePath !== undefined)
           translated.sourcePath = paths.recoveryPath(translated.sourcePath, "read");

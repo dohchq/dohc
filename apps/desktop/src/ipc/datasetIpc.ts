@@ -628,7 +628,7 @@ export function createDatasetHandler<
           const prepareMigration = async (selection: {
             datasetId: string;
             descriptorPath: string;
-            migrationPath: string;
+            migrationPath: string | null;
           }) => {
             if (migrations.size + preparingMigrations >= 8)
               throw new Error(
@@ -1053,6 +1053,7 @@ export function createDatasetHandler<
             const prepared = await prepareMigration({
               ...input,
               descriptorPath: request.datasetPath,
+              migrationPath: input.migrationPath ?? null,
             });
             current();
             return {
@@ -1063,17 +1064,18 @@ export function createDatasetHandler<
           if (input.action === "askToApply") {
             if (request.action !== "askToApply")
               throw new Error("This Collection request changed. Ask again.");
+            const migrationPath = input.migrationPath ?? null;
             const prepared = await prepareMigration({
               datasetId: input.datasetId,
               descriptorPath: request.datasetPath,
-              migrationPath: input.migrationPath,
+              migrationPath,
             });
             let proposal: ReturnType<typeof collectionChangeProposal>;
             // The file records the change; the person who applies it prepares it again.
             try {
               proposal = collectionChangeProposal(prepared, {
                 datasetPath: request.datasetPath,
-                migrationPath: input.migrationPath,
+                migrationPath,
                 note: input.note ?? null,
               });
             } finally {

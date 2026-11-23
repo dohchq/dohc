@@ -290,6 +290,7 @@ function withDataset(h: ReturnType<typeof harness>, includeRead = false, customS
       revision: 0,
       digest: "0".repeat(64),
     },
+    checkpointSha256: "2".repeat(64),
   };
   h.source.set("private/dataset.json", Buffer.from(JSON.stringify(definition)));
   h.source.set(

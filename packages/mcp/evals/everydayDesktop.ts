@@ -1052,15 +1052,20 @@ export async function createEverydayDesktop(
       }
       case "prepareMigration": {
         const datasetPath = (await resolveWorkspacePath(root, req.datasetPath, "read")).normalized;
-        const migrationPath = (await resolveWorkspacePath(root, req.migrationPath, "read"))
-          .normalized;
+        const migrationPath = req.migrationPath
+          ? (await resolveWorkspacePath(root, req.migrationPath, "read")).normalized
+          : null;
         const stored = datasetsByPath.get(datasetPath);
         if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
         const rawDef = await readWorkspaceText(root, datasetPath);
-        const migrationSql = await readWorkspaceText(root, migrationPath);
         if (rawDef === null) throw new Error(`Descriptor missing: ${datasetPath}.`);
-        if (migrationSql === null || !migrationSql.trim()) {
-          throw new Error(`Migration SQL file missing or empty: ${migrationPath}.`);
+        let migrationSql = "";
+        if (migrationPath !== null) {
+          const text = await readWorkspaceText(root, migrationPath);
+          if (text === null || !text.trim()) {
+            throw new Error(`Migration SQL file missing or empty: ${migrationPath}.`);
+          }
+          migrationSql = text;
         }
         let parsedDef: unknown;
         try {

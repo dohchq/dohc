@@ -53,6 +53,8 @@ const RESULTS: Record<string, Record<string, z.ZodType>> = {
       resultOf(OwnerAppPublicationResult, "urlUnavailable"),
     ]),
     prepare: resultOf(OwnerAppPublicationResult, "prepared"),
+    stage: resultOf(OwnerAppPublicationResult, "staged"),
+    listStaged: resultOf(OwnerAppPublicationResult, "stagedListed"),
     list: resultOf(OwnerAppPublicationResult, "listed"),
   },
 };

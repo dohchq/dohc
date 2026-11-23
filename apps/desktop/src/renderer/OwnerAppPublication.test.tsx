@@ -1668,3 +1668,205 @@ it("shows every bound Collection and its alias in the local review dialog for a 
     api.publishOwnerApp.mockImplementation(answer);
   }
 });
+
+it("renders a single plain-English staged review card for new/updated Collections and approves or discards it", async () => {
+  vi.stubGlobal("dohcDesktop", api);
+  const stageId = "00000000-0000-4000-8000-000000000099";
+  const reviewDigest = "c".repeat(64);
+  const expensesCap = {
+    kind: "dataset" as const,
+    name: "Expenses",
+    alias: "expenses",
+    datasetId: "00000000-0000-4000-8000-000000000001",
+    revision: 1,
+    revisionSha256: "a".repeat(64),
+    operationIds: ["00000000-0000-4000-8000-000000000002"],
+    operations: [
+      {
+        operationId: "00000000-0000-4000-8000-000000000002",
+        name: "listExpenses",
+        access: "owner" as const,
+        readOnly: true,
+        display: { kind: "read" as const, label: "List", fields: ["Merchant", "Amount"] },
+      },
+    ],
+  };
+  const workoutsCap = {
+    kind: "dataset" as const,
+    name: "Workouts",
+    alias: "workouts",
+    datasetId: "00000000-0000-4000-8000-000000000011",
+    revision: 2,
+    revisionSha256: "b".repeat(64),
+    operationIds: ["00000000-0000-4000-8000-000000000012"],
+    operations: [
+      {
+        operationId: "00000000-0000-4000-8000-000000000012",
+        name: "logWorkout",
+        access: "owner" as const,
+        readOnly: false,
+        display: { kind: "create" as const, label: "Log", fields: ["Activity", "Minutes"] },
+      },
+    ],
+  };
+  let stagedVisible = true;
+  const approvedCalls: OwnerAppPublicationRequest[] = [];
+  const discardedCalls: OwnerAppPublicationRequest[] = [];
+  api.publishOwnerApp.mockImplementation(async (request) => {
+    if (request.action === "listLocal") return { kind: "localListed", publications: [] };
+    if (request.action === "checkLocal")
+      return {
+        kind: "localChecked",
+        appRoot: "control-tower",
+        sourceRevision: prepared.sourceRevision,
+        sourcePaths: ["control-tower/index.tsx"],
+      };
+    if (request.action === "listStaged") {
+      return {
+        kind: "stagedListed",
+        stages: stagedVisible
+          ? [
+              {
+                stageId,
+                appRoot: "control-tower",
+                reviewDigest,
+                createdAtMs: 1_790_000_000_000,
+                sourceRevision: prepared.sourceRevision,
+                sourcePaths: ["control-tower/index.tsx"],
+                collections: [
+                  {
+                    alias: "expenses",
+                    datasetId: expensesCap.datasetId,
+                    name: "Expenses",
+                    datasetPath: "control-tower/expenses/dataset.json",
+                    action: "create",
+                    targetRevision: 1,
+                    targetRevisionSha256: expensesCap.revisionSha256,
+                    applied: false,
+                    tables: [{ name: "Expenses", fields: ["Date", "Merchant", "Amount"] }],
+                  },
+                  {
+                    alias: "workouts",
+                    datasetId: workoutsCap.datasetId,
+                    name: "Workouts",
+                    datasetPath: "control-tower/workouts/dataset.json",
+                    action: "migrate",
+                    previousRevision: 1,
+                    targetRevision: 2,
+                    targetRevisionSha256: workoutsCap.revisionSha256,
+                    migrationPath: null,
+                    applied: false,
+                    changes: [
+                      { kind: "code-changed", summary: "Changes the code for the actions" },
+                    ],
+                  },
+                ],
+                capabilities: [expensesCap, workoutsCap],
+                externalNetwork: true,
+              },
+            ]
+          : [],
+      };
+    }
+    if (request.action === "approveStaged") {
+      approvedCalls.push(request);
+      stagedVisible = false;
+      return {
+        kind: "stagedApproved",
+        stageId,
+        publicationId: "d".repeat(64),
+        authorityRevision: 1,
+        collectionsApplied: [
+          {
+            datasetId: expensesCap.datasetId,
+            action: "create",
+            revision: 1,
+            revisionSha256: expensesCap.revisionSha256,
+          },
+        ],
+      };
+    }
+    if (request.action === "discardStaged") {
+      discardedCalls.push(request);
+      stagedVisible = false;
+      return { kind: "stagedDiscarded", stageId };
+    }
+    return answer(request);
+  });
+  try {
+    const user = userEvent.setup();
+    const collectionsChanged = vi.fn();
+    render(
+      <OwnerAppPublication
+        workspaceId="ws-trip"
+        appRoot="control-tower"
+        localApproval="tab"
+        onCollectionsChange={collectionsChanged}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Review app" }));
+    const card = await screen.findByTestId("staged-app-review-card");
+    expect(card.textContent).toContain("1 new Collection and 1 updated Collection");
+    expect(card.textContent).toContain("Expenses");
+    expect(card.textContent).toContain("Date, Merchant, Amount");
+    expect(card.textContent).toContain("Workouts");
+    expect(card.textContent).toContain("Changes the code for the actions");
+
+    await user.click(screen.getByTestId("staged-app-approve"));
+    await waitFor(() =>
+      expect(approvedCalls).toEqual([
+        { action: "approveStaged", workspaceId: "ws-trip", stageId, reviewDigest },
+      ]),
+    );
+    expect(collectionsChanged).toHaveBeenCalledTimes(1);
+
+    stagedVisible = true;
+    await user.click(screen.getByRole("button", { name: "Review app" }));
+    await screen.findByTestId("staged-app-review-card");
+    await user.click(screen.getByTestId("staged-app-discard"));
+    await waitFor(() =>
+      expect(discardedCalls).toEqual([
+        { action: "discardStaged", workspaceId: "ws-trip", stageId },
+      ]),
+    );
+  } finally {
+    cleanup();
+    vi.unstubAllGlobals();
+    api.publishOwnerApp.mockImplementation(answer);
+  }
+});
+
+it("shows the failed review state instead of falling back when loading staged proposals fails", async () => {
+  const user = userEvent.setup();
+  const prepareLocalCalls: OwnerAppPublicationRequest[] = [];
+  api.publishOwnerApp.mockImplementation(async (request) => {
+    if (request.action === "listLocal") return { kind: "localListed", publications: [] };
+    if (request.action === "checkLocal")
+      return {
+        kind: "localChecked",
+        appRoot: "control-tower",
+        sourceRevision: prepared.sourceRevision,
+        sourcePaths: ["control-tower/index.tsx"],
+      };
+    if (request.action === "listStaged") throw new Error("staged store unavailable");
+    if (request.action === "prepareLocal") {
+      prepareLocalCalls.push(request);
+      return { ...prepared, local: true };
+    }
+    return answer(request);
+  });
+  vi.stubGlobal("dohcDesktop", api);
+  try {
+    render(
+      <OwnerAppPublication workspaceId="ws-trip" appRoot="control-tower" localApproval="tab" />,
+    );
+    await user.click(screen.getByRole("button", { name: "Review app" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("staged store unavailable");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeDefined();
+    expect(prepareLocalCalls).toEqual([]);
+  } finally {
+    cleanup();
+    vi.unstubAllGlobals();
+    api.publishOwnerApp.mockImplementation(answer);
+  }
+});

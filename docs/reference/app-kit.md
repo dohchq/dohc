@@ -148,3 +148,17 @@ Collection definitions can use `formatVersion: 2` to declare tables, fields, and
   ]
 }
 ```
+
+## Staging an app and its Collections together
+
+To create or update bound Collections and approve an app in one owner review, run `dohc app stage`:
+
+```bash
+dohc app stage '{"workspaceId":"<workspaceId>","appRoot":"personal-control-tower"}'
+```
+
+- Staging is read-only on workspace files and stores the staged review locally under `.dohc/local/staged-apps/`.
+- Every new or updated Collection is preflighted and the app is compiled before anything is saved.
+- Operations-only updates to an existing Collection need no migration file (`migrationPath` defaults to `null`, running an in-memory `SELECT 1;` no-op migration). Pass `"migrations": { "<alias-or-datasetPath>": "<migration.sql>" }` when a Collection's schema changed.
+- Open the app in dohc and click **Review app** to inspect every new/updated Collection and app capability in one card, then click **Approve and open** (or **Discard**). Interrupted approvals resume cleanly from per-step receipts without repeating already-applied Collections.
+- See `examples/personal-control-tower` for a complete two-Collection example (`expenses` and `workouts`).
