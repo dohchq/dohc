@@ -97,6 +97,7 @@ export interface AccessRuleStatements {
   ruleFolders: ReturnType<SqliteDb["prepare"]>;
   boundAbove: ReturnType<SqliteDb["prepare"]>;
   fileUnder: ReturnType<SqliteDb["prepare"]>;
+  keyUnder: ReturnType<SqliteDb["prepare"]>;
   open: ReturnType<SqliteDb["prepare"]>;
   close: ReturnType<SqliteDb["prepare"]>;
   drop: ReturnType<SqliteDb["prepare"]>;
@@ -140,6 +141,11 @@ export function accessRuleStatements(db: SqliteDb): AccessRuleStatements {
     fileUnder: db.prepare(
       `SELECT 1 FROM sync_relay_current_files
        WHERE workspace_id = ? AND version_id = 'main' AND path >= ? AND path < ? LIMIT 1`,
+    ),
+    keyUnder: db.prepare(
+      `SELECT path FROM sync_relay_current_file_keys
+       WHERE workspace_id = ? AND version_id = 'main' AND collision_key >= ? AND collision_key < ?
+       LIMIT 1`,
     ),
     open: db.prepare(
       `SELECT rule_text, from_seq FROM sync_relay_access_rules

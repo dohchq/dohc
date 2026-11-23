@@ -24,8 +24,18 @@ export function assertMemberChanges(
       after = change.afterPath;
     if ([before, after].some((path) => typeof path === "string" && isFolderMarkerPath(path)))
       throw relayError("share_op_rejected");
-    if (selector.role !== "member") continue;
     const reach = selector.reach;
+    // A move leaves the folder's marker, and so its rule, behind. The owner
+    // moves ruled folders on their own computer, where the marker moves too.
+    if (
+      selector.role !== "member" &&
+      reach &&
+      typeof before === "string" &&
+      typeof after === "string" &&
+      reach.nearestRule(before) !== reach.nearestRule(after)
+    )
+      throw relayError("share_op_rejected", "Ask the owner to move this.");
+    if (selector.role !== "member") continue;
     const refuse = (message?: string): never => {
       // Only refusals cost a token: they are what a member could probe with.
       if (charge && !limiter(owner).allow(userId, nowMs))
