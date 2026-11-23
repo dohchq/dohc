@@ -12,7 +12,13 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { DatasetSnapshot, EvalCase, RecordedCall, RunRecord } from "./case";
+import type {
+  DatasetSnapshot,
+  EvalCase,
+  FrontendVerificationRecord,
+  RecordedCall,
+  RunRecord,
+} from "./case";
 
 const BUILT_IN_TOOLS = "Read,Glob,Grep,Edit,Write";
 const MCP_PREFIX = "mcp__dohc__";
@@ -273,6 +279,7 @@ export async function runClaudeSample(input: {
   const home = join(sampleDir, "home");
   const unansweredLog = join(sampleDir, "unanswered.log");
   const snapshotsFile = join(sampleDir, "datasets.json");
+  const verificationsFile = join(sampleDir, "verifications.json");
   const mcpConfigPath = join(sampleDir, "mcp.json");
   try {
     await seedWorkspace(root, input.evalCase, home);
@@ -292,6 +299,7 @@ export async function runClaudeSample(input: {
               home,
               "",
               snapshotsFile,
+              verificationsFile,
             ],
           },
         },
@@ -357,6 +365,18 @@ export async function runClaudeSample(input: {
         datasetSnapshots = undefined;
       }
     }
+    const verificationsRaw = await readFile(verificationsFile, "utf8").catch(() => "");
+    let frontendVerifications: Record<string, FrontendVerificationRecord> | undefined;
+    if (verificationsRaw.trim()) {
+      try {
+        frontendVerifications = JSON.parse(verificationsRaw) as Record<
+          string,
+          FrontendVerificationRecord
+        >;
+      } catch {
+        frontendVerifications = undefined;
+      }
+    }
     return {
       ...harness,
       run: {
@@ -364,6 +384,7 @@ export async function runClaudeSample(input: {
         text: transcript.text,
         files: await workspaceFiles(root),
         ...(datasetSnapshots ? { datasetSnapshots } : {}),
+        ...(frontendVerifications ? { frontendVerifications } : {}),
       },
       usage: transcript.usage,
     };

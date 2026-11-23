@@ -1831,6 +1831,16 @@ const publicationFromList: readonly CliFieldSource[] = [
 ];
 
 const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
+  verifyFrontend: {
+    summary:
+      "Verify a candidate or approved local app frontend in dohc's sandbox against an empty ephemeral Collection.",
+    notes: [
+      "Pass exactly one of appRoot (compile candidate without preparing an approval) or publicationId (verify an active local publication's pinned bundle).",
+      "Runs in an isolated offline sandbox against a fresh empty ephemeral database; live Collection records and workspace files are never read or mutated.",
+      "Optional expectStartupBackend checks calls fired on load. Optional steps run waitFor (selector, optional textIncludes), fill (selector, value), and click (selector, optional expectBackend matched against calls triggered by that click).",
+      "dohc_test_app only checks folder detection; verifyFrontend compiles and executes the app under dohc's real CSP and dohc-app-channel broker.",
+    ],
+  },
   createLink: {
     summary: "Create a scoped app link at View access by default.",
     notes: [

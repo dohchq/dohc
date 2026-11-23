@@ -1244,6 +1244,7 @@ export type CliRequest = z.infer<typeof cliRequestSchema>;
 export type CliVerb = CliRequest["verb"];
 
 export const APP_PUBLICATION_CAPABILITIES = {
+  verifyFrontend: "app.frontend.verify",
   createLink: "app.link.create",
   listLocal: "app.local.list",
   checkLocal: "app.local.check",

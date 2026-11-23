@@ -65,6 +65,10 @@ export function createLocalApps(
       return collection.activate(prepared, signal, agent, displace);
     },
     has: (publicationId: string) => store.has(publicationId),
+    verificationPublication(publicationId: string) {
+      kind(publicationId);
+      return store.verificationPublication(publicationId);
+    },
     list: (appRoot: string) =>
       store
         .list(appRoot)

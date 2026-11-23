@@ -1,0 +1,496 @@
+import { createHash } from "node:crypto";
+import { describe, expect, it, vi } from "vitest";
+import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
+import {
+  datasetDefinitionDigestContent,
+  datasetRevisionDigestContent,
+  type DatasetDefinition,
+  type DatasetRevision,
+} from "@dohc/security-contract/dataset";
+import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import type { AppFrontendBrowserVerifyInput } from "../window/appFrontendVerifyBrowser";
+import { createDiagnosticScrubber, verifyLocalAppFrontend } from "./appFrontendVerifier";
+import { compileClosedApp } from "./closedAppCompiler";
+
+const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+const uuid = (prefix: string, n: number) =>
+  `${prefix}-0000-4000-8000-${String(n).padStart(12, "0")}`;
+
+const BOOK_OP_ID = uuid("b9000000", 6);
+const LIST_OP_ID = uuid("b9000000", 7);
+
+const WORKSHOP_DEF: DatasetDefinition = {
+  formatVersion: 1,
+  datasetId: uuid("b9000000", 1),
+  name: "Workshop",
+  schemaPath: "workshop/schema.sql",
+  operationsPath: "workshop/backend.ts",
+  tables: [
+    {
+      tableId: uuid("b9000000", 2),
+      name: "Bookings",
+      sqlName: "bookings",
+      primaryKey: "id",
+      fields: [
+        {
+          fieldId: uuid("b9000000", 3),
+          name: "ID",
+          sqlColumn: "id",
+          type: "text",
+          required: true,
+          unique: true,
+        },
+        {
+          fieldId: uuid("b9000000", 4),
+          name: "Name",
+          sqlColumn: "name",
+          type: "text",
+          required: true,
+          unique: false,
+        },
+        {
+          fieldId: uuid("b9000000", 5),
+          name: "Seats",
+          sqlColumn: "seats",
+          type: "number",
+          required: true,
+          unique: false,
+        },
+      ],
+    },
+  ],
+  operations: [
+    {
+      operationId: BOOK_OP_ID,
+      name: "bookSeat",
+      label: "Book a seat",
+      tableId: uuid("b9000000", 2),
+      kind: "action",
+      access: "link",
+      readOnly: false,
+      fieldIds: [],
+    },
+    {
+      operationId: LIST_OP_ID,
+      name: "listBookings",
+      label: "List bookings",
+      tableId: uuid("b9000000", 2),
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [uuid("b9000000", 3), uuid("b9000000", 4), uuid("b9000000", 5)],
+    },
+  ],
+};
+
+const WORKSHOP_SCHEMA = `CREATE TABLE "bookings" ("id" TEXT PRIMARY KEY NOT NULL, "name" TEXT NOT NULL, "seats" INTEGER NOT NULL);`;
+const WORKSHOP_BACKEND = `globalThis.operations = {
+  bookSeat(ctx, input) {
+    const seats = Number(input?.seats ?? 1);
+    const taken = Number(ctx.db.query("SELECT COALESCE(SUM(seats), 0) AS t FROM bookings")[0].t);
+    if (taken + seats > 8) ctx.refuse("workshop_full", "All 8 seats are booked.");
+    ctx.db.execute("INSERT INTO bookings(id, name, seats) VALUES(?, ?, ?)", [ctx.requestId, String(input?.name ?? ""), seats]);
+    return { id: ctx.requestId, seats };
+  },
+  listBookings(ctx) {
+    return { rows: ctx.db.query("SELECT id, name, seats FROM bookings ORDER BY id") };
+  },
+};`;
+
+const WORKSHOP_REVISION: DatasetRevision = (() => {
+  const draft: DatasetRevision = {
+    datasetId: WORKSHOP_DEF.datasetId,
+    revision: 1,
+    revisionSha256: "0".repeat(64),
+    definitionSha256: sha(datasetDefinitionDigestContent(WORKSHOP_DEF)),
+    schemaSha256: sha(WORKSHOP_SCHEMA),
+    operationsSha256: sha(WORKSHOP_BACKEND),
+    definition: WORKSHOP_DEF,
+  };
+  draft.revisionSha256 = sha(datasetRevisionDigestContent(draft));
+  return draft;
+})();
+
+function makeMemoryAdapter(files: Record<string, string>): VersionedLiveAdapter {
+  const encode = (text: string) => new TextEncoder().encode(text);
+  const workspaceRef = `mem-${Math.random()}`;
+  return {
+    workspace: workspaceRef,
+    async listTextFileMetadata(input: { under?: string }) {
+      return Object.entries(files)
+        .filter(
+          ([path]) => !input.under || path === input.under || path.startsWith(`${input.under}/`),
+        )
+        .map(([path, text]) => {
+          const bytes = encode(text);
+          return {
+            path,
+            sha256: sha(bytes),
+            byteLength: bytes.byteLength,
+            hasYdocMarker: false,
+          };
+        });
+    },
+    async captureSourceMetadata(input: {
+      workspaceId: string;
+      versionId: string;
+      paths: string[];
+    }) {
+      const captured = input.paths.map((path) => {
+        const text = files[path];
+        if (text === undefined) throw new Error(`${path} does not exist`);
+        const bytes = encode(text);
+        return { path, sha256: sha(bytes), byteLength: bytes.byteLength };
+      });
+      return {
+        workspaceId: input.workspaceId,
+        versionId: input.versionId,
+        sourceDigest: sha(JSON.stringify(captured)),
+        files: captured,
+      };
+    },
+    async hydrateCapturedSources(metadata: {
+      files: Array<{ path: string; sha256: string; byteLength: number }>;
+    }) {
+      return metadata.files.map((item) => ({
+        ...item,
+        bytes: encode(files[item.path]!),
+      }));
+    },
+  } as unknown as VersionedLiveAdapter;
+}
+
+async function exchangeLaunchProof(url: string) {
+  const parsed = new URL(url);
+  const origin = parsed.origin;
+  const handoff = parsed.hash.slice(1);
+  const boot = await fetch(`${origin}/bootstrap`);
+  expect(boot.status).toBe(200);
+  const bootHtml = await boot.text();
+  expect(bootHtml).toContain("__dohcVerifyObserve");
+  const sessionRes = await fetch(`${origin}/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin },
+    body: JSON.stringify({ handoff }),
+  });
+  expect(sessionRes.status).toBe(200);
+  const { proof, html } = (await sessionRes.json()) as { proof: string; html: string };
+  const backend = (body: unknown) =>
+    fetch(`${origin}/backend`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin,
+        "x-dohc-app-proof": proof,
+      },
+      body: JSON.stringify(body),
+    });
+  return { origin, proof, html, backend };
+}
+
+describe("verifyLocalAppFrontend", () => {
+  it("scrubs host paths, loopback origins, tokens, and control characters from diagnostics", () => {
+    const scrub = createDiagnosticScrubber(
+      "C:\\Users\\alice\\my-workspace",
+      "http://127.0.0.1:54321",
+    );
+    const cleaned = scrub(
+      "Error at C:\\Users\\alice\\my-workspace\\apps\\a.js\nfrom http://127.0.0.1:54321/bootstrap#abc123 Bearer secret-tok token=xyz /Users/bob/private.txt",
+    );
+    expect(cleaned).not.toContain("alice");
+    expect(cleaned).not.toContain("127.0.0.1");
+    expect(cleaned).not.toContain("secret-tok");
+    expect(cleaned).not.toContain("abc123");
+    expect(cleaned).not.toContain("/Users/bob");
+    expect(cleaned).toContain("<workspace>");
+    expect(cleaned).toContain("<local-app>");
+    expect(cleaned).toContain("<redacted>");
+    expect(cleaned).toContain("<path>");
+  });
+
+  it("classifies missing manifest, missing input, and JS syntax errors as compile diagnostics", async () => {
+    const controller = new AbortController();
+    const runBrowser = vi.fn();
+    const baseDeps = (files: Record<string, string>) => ({
+      workspaceId: "ws-1",
+      workspaceRoot: "C:\\workspace",
+      signal: controller.signal,
+      assertCurrent: () => {},
+      flushCapture: async () => ({ deferredWrites: [] }),
+      withAdapter: async <T>(work: (adapter: VersionedLiveAdapter) => Promise<T>) =>
+        work(makeMemoryAdapter(files)),
+      compile: (req: Parameters<typeof compileClosedApp>[0]) => compileClosedApp(req),
+      compileDataset: (src: string, path: string) => compileDatasetOperations(src, path),
+      datasetRuntime: {},
+      approvedArtifacts: async () => ({
+        revision: WORKSHOP_REVISION,
+        schemaSql: WORKSHOP_SCHEMA,
+        operationSource: WORKSHOP_BACKEND,
+        active: true,
+      }),
+      verificationPublication: vi.fn(),
+      runBrowser,
+    });
+
+    const noManifest = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/empty" },
+      baseDeps({ "apps/empty/index.html": "<!doctype html><h1>Hi</h1>" }),
+    );
+    expect(noManifest.ok).toBe(false);
+    expect(noManifest.stage).toBe("compile");
+    expect(noManifest.diagnostics[0]?.code).toBe("manifest_error");
+
+    const syntaxErr = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/bad" },
+      baseDeps({
+        "apps/bad/app.publish.json": JSON.stringify({
+          version: 1,
+          entryPath: "index.html",
+          inputs: ["index.html", "app.js"],
+          packageMap: {},
+        }),
+        "apps/bad/index.html": '<!doctype html><script type="module" src="./app.js"></script>',
+        "apps/bad/app.js": "const x = ;\n",
+      }),
+    );
+    expect(syntaxErr.ok).toBe(false);
+    expect(syntaxErr.stage).toBe("compile");
+    expect(syntaxErr.diagnostics[0]?.code).toBe("compile_error");
+    expect(syntaxErr.diagnostics[0]?.path).toBe("apps/bad/app.js");
+    expect(syntaxErr.diagnostics[0]?.line).toBe(1);
+    expect(runBrowser).not.toHaveBeenCalled();
+  });
+
+  it("runs ephemeral dataset dry-run against real launch host with capacity refusal and unapproved op rejection", async () => {
+    const controller = new AbortController();
+    const files: Record<string, string> = {
+      "workshop/dataset.json": JSON.stringify(WORKSHOP_DEF),
+      "apps/booking/app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "index.html",
+        inputs: ["index.html", "app.js"],
+        packageMap: {},
+        dataset: {
+          kind: "dataset",
+          datasetPath: "workshop/dataset.json",
+          revision: 1,
+          revisionSha256: WORKSHOP_REVISION.revisionSha256,
+          operationIds: [BOOK_OP_ID],
+        },
+      }),
+      "apps/booking/index.html": '<!doctype html><script type="module" src="./app.js"></script>',
+      "apps/booking/app.js": "console.log('ready');",
+    };
+
+    const result = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/booking" },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: async (work) => work(makeMemoryAdapter(files)),
+        compile: (req) => compileClosedApp(req),
+        compileDataset: (src, path) => compileDatasetOperations(src, path),
+        datasetRuntime: {},
+        approvedArtifacts: async () => ({
+          revision: WORKSHOP_REVISION,
+          schemaSql: WORKSHOP_SCHEMA,
+          operationSource: WORKSHOP_BACKEND,
+          active: true,
+        }),
+        verificationPublication: vi.fn(),
+        runBrowser: async (browserInput: AppFrontendBrowserVerifyInput) => {
+          const { backend } = await exchangeLaunchProof(browserInput.url);
+
+          const okRes = await backend({
+            id: "r1",
+            op: "backend.invoke",
+            operation: "bookSeat",
+            idempotencyKey: "k1",
+            input: { name: "Ada", seats: 5 },
+          });
+          expect(okRes.status).toBe(200);
+          expect(await okRes.json()).toMatchObject({ result: { seats: 5 }, replayed: false });
+
+          const replayRes = await backend({
+            id: "r2",
+            op: "backend.invoke",
+            operation: "bookSeat",
+            idempotencyKey: "k1",
+            input: { name: "Ada", seats: 5 },
+          });
+          expect(replayRes.status).toBe(200);
+          expect(await replayRes.json()).toMatchObject({ replayed: true });
+
+          const fullRes = await backend({
+            id: "r3",
+            op: "backend.invoke",
+            operation: "bookSeat",
+            idempotencyKey: "k2",
+            input: { name: "Bob", seats: 4 },
+          });
+          expect(fullRes.status).toBe(409);
+          expect(await fullRes.json()).toEqual({
+            code: "workshop_full",
+            message: "All 8 seats are booked.",
+          });
+
+          const unapprovedRes = await backend({
+            id: "r4",
+            op: "backend.invoke",
+            operation: "listBookings",
+            idempotencyKey: "k3",
+            input: {},
+          });
+          expect(unapprovedRes.status).toBe(404);
+          expect(browserInput.consumeBackendHint("backend.invoke", "listBookings")).toMatchObject({
+            reasonCode: "operation_not_approved",
+            diagnosticCode: "broker_operation_not_approved",
+          });
+
+          const uploadRes = await backend({
+            id: "r5",
+            op: "backend.upload",
+            idempotencyKey: "k4",
+            name: "a.txt",
+            contentType: "text/plain",
+            bytesBase64: "YQ==",
+          });
+          expect(uploadRes.status).toBe(404);
+          expect(browserInput.consumeBackendHint("backend.upload", undefined)).toMatchObject({
+            reasonCode: "unsupported_in_dry_run",
+            diagnosticCode: "broker_unsupported_in_dry_run",
+          });
+
+          return {
+            ok: true,
+            stage: "complete",
+            startupOk: true,
+            stepsOk: true,
+            handshake: { delivered: true, messageCount: 5 },
+            brokerCalls: [],
+            steps: [],
+            diagnostics: [],
+            externalRequestsBlocked: 0,
+          };
+        },
+      },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.target).toMatchObject({ kind: "candidate", appRoot: "apps/booking" });
+  });
+
+  it("supports in-memory document Collection dry-run and unconnected refusal", async () => {
+    const controller = new AbortController();
+    const collectionYaml = "version: 1\nname: Signups\nfields:\n  Name:\n    type: text\n";
+    const files: Record<string, string> = {
+      "signups/collection.yaml": collectionYaml,
+      "apps/form/app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "index.html",
+        inputs: ["index.html"],
+        packageMap: {},
+        collection: {
+          kind: "collection-create",
+          collectionPath: "../../signups",
+          allowedFields: ["Name"],
+          requiredFields: ["Name"],
+          readFields: ["Name"],
+        },
+      }),
+      "apps/form/index.html": "<!doctype html><h1>Form</h1>",
+      "apps/static/app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "index.html",
+        inputs: ["index.html"],
+        packageMap: {},
+      }),
+      "apps/static/index.html": "<!doctype html><h1>Static</h1>",
+    };
+
+    const collectionResult = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/form" },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: async (work) => work(makeMemoryAdapter(files)),
+        compile: (req) => compileClosedApp(req),
+        compileDataset: (src, path) => compileDatasetOperations(src, path),
+        datasetRuntime: {},
+        approvedArtifacts: vi.fn(),
+        verificationPublication: vi.fn(),
+        runBrowser: async (browserInput) => {
+          const { backend } = await exchangeLaunchProof(browserInput.url);
+          const created = await backend({
+            id: "c1",
+            op: "collection.create",
+            idempotencyKey: "k1",
+            fields: { Name: "Ada" },
+          });
+          expect(created.status).toBe(200);
+          const listed = await backend({ id: "l1", op: "collection.list", limit: 10 });
+          expect(listed.status).toBe(200);
+          expect(await listed.json()).toMatchObject({
+            records: [{ fields: { Name: "Ada" } }],
+            nextPath: null,
+          });
+          return {
+            ok: true,
+            stage: "complete",
+            startupOk: true,
+            stepsOk: true,
+            handshake: { delivered: true, messageCount: 2 },
+            brokerCalls: [],
+            steps: [],
+            diagnostics: [],
+            externalRequestsBlocked: 0,
+          };
+        },
+      },
+    );
+    expect(collectionResult.ok).toBe(true);
+
+    const unconnectedResult = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/static" },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: async (work) => work(makeMemoryAdapter(files)),
+        compile: (req) => compileClosedApp(req),
+        compileDataset: (src, path) => compileDatasetOperations(src, path),
+        datasetRuntime: {},
+        approvedArtifacts: vi.fn(),
+        verificationPublication: vi.fn(),
+        runBrowser: async (browserInput) => {
+          const { backend } = await exchangeLaunchProof(browserInput.url);
+          const denied = await backend({ id: "u1", op: "collection.list", limit: 10 });
+          expect(denied.status).toBe(404);
+          expect(browserInput.consumeBackendHint("collection.list", undefined)).toMatchObject({
+            reasonCode: "unconnected",
+            diagnosticCode: "broker_unconnected",
+          });
+          return {
+            ok: false,
+            stage: "runtime",
+            startupOk: false,
+            stepsOk: true,
+            handshake: { delivered: true, messageCount: 1 },
+            brokerCalls: [],
+            steps: [],
+            diagnostics: [],
+            externalRequestsBlocked: 0,
+          };
+        },
+      },
+    );
+    expect(unconnectedResult.ok).toBe(false);
+  });
+});

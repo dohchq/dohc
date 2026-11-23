@@ -178,4 +178,5 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
         ]),
     ),
   ),
+  "app verifyFrontend": [JSON.stringify({ workspaceId: "workspace", appRoot: "app" })],
 };

@@ -30,8 +30,14 @@ import { WorkspaceSearchInput, WorkspaceSearchResult } from "@dohc/workspace-con
 import { validateUserMaterializePath, validateUserReadPath } from "@dohc/workspace-core/paths";
 import { realRelativeInRoot, resolvedAreaRefusal } from "@dohc/workspace-core/realPath";
 import type { DatasetRequest, DatasetSchemaChange } from "@dohc/cli/dataset";
-import type { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
-import type { DatasetSnapshot, DesktopAnswer } from "./case";
+import type {
+  AppFrontendBrokerCall,
+  AppFrontendDiagnostic,
+  AppFrontendStepResult,
+  OwnerAppPublicationRequest,
+  OwnerAppPublicationResult,
+} from "@dohc/cli/app-publication";
+import type { DatasetSnapshot, DesktopAnswer, FrontendVerificationRecord } from "./case";
 import { workspaceVerbs } from "./desktop";
 
 type Args = Record<string, unknown>;
@@ -449,11 +455,16 @@ export async function createEverydayDesktop(
   options: {
     onWrite?: (path: string, contentSha256: string) => void;
     onDatasetSnapshot?: (datasetPath: string, snapshot: DatasetSnapshot) => void;
+    onFrontendVerified?: (appRoot: string, record: FrontendVerificationRecord) => void;
+    verifyFrontend?: (
+      req: Extract<OwnerAppPublicationRequest, { action: "verifyFrontend" }>,
+    ) => Promise<Extract<OwnerAppPublicationResult, { kind: "frontendVerified" }>>;
   } = {},
 ): Promise<Record<string, DesktopAnswer>> {
   const workspaceId = seed.workspaceId ?? "ws-everyday";
   const onWrite = options.onWrite;
   const onDatasetSnapshot = options.onDatasetSnapshot;
+  const onFrontendVerified = options.onFrontendVerified;
   function reportSnapshot(stored: StoredDataset): void {
     onDatasetSnapshot?.(stored.datasetPath, {
       revision: stored.revision.revision,
@@ -1329,6 +1340,382 @@ export async function createEverydayDesktop(
   async function handleAppPublication(req: OwnerAppPublicationRequest): Promise<unknown> {
     assertWorkspace(req.workspaceId);
     switch (req.action) {
+      case "verifyFrontend": {
+        if (options.verifyFrontend) {
+          const result = await options.verifyFrontend(req);
+          onFrontendVerified?.(result.target.appRoot, {
+            ...(result.target.kind === "candidate" && result.target.sourceRevision
+              ? { sourceRevision: result.target.sourceRevision }
+              : {}),
+            ok: result.ok,
+            stage: result.stage,
+            ...(req.expectStartupBackend ? { expectStartupBackend: req.expectStartupBackend } : {}),
+            ...(req.steps ? { steps: req.steps } : {}),
+            brokerCalls: result.brokerCalls.map((call) => ({
+              op: call.op,
+              ...(call.operation ? { operation: call.operation } : {}),
+              status: call.status,
+              ok: call.ok,
+              ...(call.refusalCode ? { refusalCode: call.refusalCode } : {}),
+            })),
+          });
+          return result;
+        }
+        let targetAppRoot: string;
+        let pubMeta: StoredAppPublication | undefined;
+        if (req.publicationId !== undefined) {
+          pubMeta = appPublications.get(req.publicationId);
+          if (!pubMeta || !pubMeta.local) {
+            throw new Error("This app approval changed. Prepare the app again.");
+          }
+          targetAppRoot = pubMeta.appRoot;
+        } else {
+          targetAppRoot = (await resolveWorkspacePath(root, req.appRoot!, "read")).normalized;
+        }
+        let manifest: Awaited<ReturnType<typeof parseAppManifestForEval>>;
+        try {
+          manifest = await parseAppManifestForEval(root, targetAppRoot);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          const code: AppFrontendDiagnostic["code"] = /does not exist|not among its inputs/i.test(
+            detail,
+          )
+            ? "missing_input"
+            : "manifest_error";
+          const failed = {
+            kind: "frontendVerified" as const,
+            ok: false,
+            stage: "compile" as const,
+            target: pubMeta
+              ? {
+                  kind: "publication" as const,
+                  publicationId: pubMeta.publicationId,
+                  appRoot: pubMeta.appRoot,
+                  authorityRevision: pubMeta.authorityRevision,
+                }
+              : { kind: "candidate" as const, appRoot: targetAppRoot },
+            startupOk: false,
+            stepsOk: false,
+            handshake: { delivered: false, messageCount: 0 },
+            brokerCalls: [] as AppFrontendBrokerCall[],
+            steps: [] as AppFrontendStepResult[],
+            diagnostics: [
+              {
+                code,
+                severity: "error" as const,
+                detail: detail.slice(0, 200),
+                remedy: "Fix app.publish.json and ensure all listed inputs exist.",
+              },
+            ],
+            externalRequestsBlocked: 0,
+          };
+          onFrontendVerified?.(targetAppRoot, {
+            ok: false,
+            stage: "compile",
+            brokerCalls: [],
+          });
+          return failed;
+        }
+        const contents = await Promise.all(
+          manifest.inputs.map(async (p) => `${p}:${(await readWorkspaceText(root, p)) ?? ""}`),
+        );
+        const sourceRevision = sha256(contents.join("\n"));
+        const target = pubMeta
+          ? {
+              kind: "publication" as const,
+              publicationId: pubMeta.publicationId,
+              appRoot: pubMeta.appRoot,
+              authorityRevision: pubMeta.authorityRevision,
+            }
+          : { kind: "candidate" as const, appRoot: manifest.appRoot, sourceRevision };
+        let approvedOpNames: Set<string> | undefined;
+        if (manifest.dataset) {
+          try {
+            const datasetPath = (
+              await resolveWorkspacePath(root, manifest.dataset.datasetPath, "read")
+            ).normalized;
+            const stored = datasetsByPath.get(datasetPath);
+            if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
+            const cap = resolveAppDatasetCapability(
+              {
+                kind: "dataset",
+                datasetId: stored.revision.datasetId,
+                revision: manifest.dataset.revision,
+                revisionSha256: manifest.dataset.revisionSha256,
+                operationIds: manifest.dataset.operationIds,
+              },
+              stored.revision,
+              () => stored.generated,
+            );
+            approvedOpNames = new Set(cap.operations.map((op) => op.name));
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            onFrontendVerified?.(manifest.appRoot, {
+              sourceRevision,
+              ok: false,
+              stage: "compile",
+              brokerCalls: [],
+            });
+            return {
+              kind: "frontendVerified" as const,
+              ok: false,
+              stage: "compile" as const,
+              target,
+              startupOk: false,
+              stepsOk: false,
+              handshake: { delivered: false, messageCount: 0 },
+              brokerCalls: [],
+              steps: [],
+              diagnostics: [
+                {
+                  code: "dataset_binding_error" as const,
+                  severity: "error" as const,
+                  detail: detail.slice(0, 200),
+                  remedy: "Verify datasetPath, revision, revisionSha256, and operationIds.",
+                },
+              ],
+              externalRequestsBlocked: 0,
+            };
+          }
+        }
+        const entryHtml = (await readWorkspaceText(root, manifest.entryPath)) ?? "";
+        const diagnostics: AppFrontendDiagnostic[] = [];
+        const brokerCalls: AppFrontendBrokerCall[] = [];
+        const stepResults: AppFrontendStepResult[] = [];
+        const scriptParts: string[] = [];
+        const normalizedInputs = new Set(manifest.inputs);
+        if (/\bon(?:click|submit|change|input|load|error)\s*=/i.test(entryHtml)) {
+          diagnostics.push({
+            code: "csp_violation",
+            severity: "error",
+            directive: "script-src-attr",
+            detail:
+              "Inline event handler attribute violates the sandboxed app Content Security Policy.",
+            remedy: "Attach event listeners with addEventListener in a listed module script.",
+          });
+        }
+        for (const match of entryHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+          const attrs = match[1] ?? "";
+          const body = match[2] ?? "";
+          const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
+          if (srcMatch?.[1]) {
+            const rawSrc = srcMatch[1].trim();
+            if (!/^(?:https?:|data:|blob:)/i.test(rawSrc)) {
+              const resolved = posix.normalize(
+                posix.join(manifest.appRoot, rawSrc.replace(/[?#].*$/, "")),
+              );
+              if (!normalizedInputs.has(resolved)) {
+                diagnostics.push({
+                  code: "missing_input",
+                  severity: "error",
+                  detail: `Script src "${rawSrc}" is not listed in app.publish.json inputs.`,
+                  remedy: "Add the referenced script path to inputs in app.publish.json.",
+                });
+              }
+            }
+          } else if (body.trim()) {
+            scriptParts.push(body);
+          }
+        }
+        for (const file of manifest.inputs) {
+          if (/\.(?:c|m)?[jt]sx?$/i.test(file)) {
+            const text = await readWorkspaceText(root, file);
+            if (text) scriptParts.push(text);
+          }
+        }
+        const scriptText = scriptParts.join("\n");
+        const hasHandshake =
+          scriptText.includes("dohc-app-channel") && /\bports\b/.test(scriptText);
+        const handlesResponses = /\.onmessage\b|addEventListener\s*\(\s*["']message["']/i.test(
+          scriptText.replace(/window\.addEventListener\s*\(\s*["']message["']/gi, ""),
+        );
+        if (approvedOpNames) {
+          for (const opMatch of scriptText.matchAll(
+            /\boperation\s*:\s*["']([A-Za-z][A-Za-z0-9_.-]{0,63})["']/g,
+          )) {
+            const opName = opMatch[1]!;
+            if (!approvedOpNames.has(opName)) {
+              brokerCalls.push({
+                op: "backend.invoke",
+                operation: opName,
+                status: 404,
+                ok: false,
+                rejectedBy: "backend",
+                reasonCode: "operation_not_approved",
+              });
+              diagnostics.push({
+                code: "broker_operation_not_approved",
+                severity: "error",
+                op: "backend.invoke",
+                operation: opName,
+                detail: `Operation "${opName}" is not in app.publish.json dataset.operationIds.`,
+                remedy: "Remove the unapproved operation call or add its operationId.",
+              });
+            }
+          }
+        }
+        const checkBackendExpectation = (
+          expected: NonNullable<typeof req.expectStartupBackend>[number],
+          stepIndex?: number,
+        ): boolean => {
+          const opName = expected.operation;
+          if (
+            !hasHandshake ||
+            !handlesResponses ||
+            !scriptText.includes("backend.invoke") ||
+            (opName && !scriptText.includes(opName)) ||
+            (opName && approvedOpNames && !approvedOpNames.has(opName))
+          ) {
+            diagnostics.push({
+              code: !hasHandshake ? "handshake_not_delivered" : "expected_backend_missing",
+              severity: "error",
+              ...(expected.op ? { op: expected.op } : {}),
+              ...(opName ? { operation: opName } : {}),
+              ...(stepIndex !== undefined ? { stepIndex } : {}),
+              detail: !handlesResponses
+                ? "Frontend sends backend.invoke without handling port responses."
+                : `Expected backend call ${opName ?? expected.op ?? ""} did not match frontend code.`,
+              remedy: "Wire dohc-app-channel port.onmessage and handle backend.invoke responses.",
+            });
+            return false;
+          }
+          const status = expected.status ?? 200;
+          brokerCalls.push({
+            op: expected.op ?? "backend.invoke",
+            ...(opName ? { operation: opName } : {}),
+            status,
+            ok: status >= 200 && status < 300,
+            ...(status === 409
+              ? {
+                  rejectedBy: "backend" as const,
+                  reasonCode: "refused" as const,
+                  ...(expected.refusalCode ? { refusalCode: expected.refusalCode } : {}),
+                }
+              : {}),
+          });
+          return true;
+        };
+        for (const expected of req.expectStartupBackend ?? []) {
+          checkBackendExpectation(expected);
+        }
+        const startupOk = diagnostics.every((item) => item.severity !== "error");
+        let stepsOk = true;
+        const selectorMatches = (selector: string): boolean => {
+          const idMatch = /#([A-Za-z0-9_-]+)/.exec(selector);
+          if (idMatch?.[1]) {
+            const id = idMatch[1];
+            return (
+              new RegExp(`id\\s*=\\s*["']${id}["']`).test(entryHtml) ||
+              scriptText.includes(`"${id}"`) ||
+              scriptText.includes(`'${id}'`)
+            );
+          }
+          const nameMatch = /\[name\s*=\s*["']?([^"'\]]+)["']?\]/.exec(selector);
+          if (nameMatch?.[1]) {
+            return new RegExp(`name\\s*=\\s*["']${nameMatch[1]}["']`).test(entryHtml);
+          }
+          const tagMatch = /^([a-z][a-z0-9-]*)/i.exec(selector.trim());
+          if (tagMatch?.[1]) {
+            return new RegExp(`<${tagMatch[1]}\\b`, "i").test(entryHtml);
+          }
+          return true;
+        };
+        if (startupOk) {
+          for (let index = 0; index < (req.steps ?? []).length; index++) {
+            const step = req.steps![index]!;
+            if (!selectorMatches(step.selector)) {
+              stepsOk = false;
+              const remedy = `Ensure selector "${step.selector}" exists in the app DOM.`;
+              stepResults.push({
+                index,
+                kind: step.kind,
+                ok: false,
+                code: "step_selector_not_found",
+                remedy,
+              });
+              diagnostics.push({
+                code: "step_selector_not_found",
+                severity: "error",
+                stepIndex: index,
+                detail: `Selector "${step.selector}" not found in app markup.`,
+                remedy,
+              });
+              break;
+            }
+            if (
+              step.kind === "click" &&
+              /<form\b/i.test(entryHtml) &&
+              /submit|button/i.test(step.selector) &&
+              !scriptText.includes("preventDefault")
+            ) {
+              stepsOk = false;
+              const remedy = "Call event.preventDefault() in the form submit handler.";
+              stepResults.push({
+                index,
+                kind: step.kind,
+                ok: false,
+                code: "csp_violation",
+                remedy,
+              });
+              diagnostics.push({
+                code: "csp_violation",
+                severity: "error",
+                directive: "form-action",
+                stepIndex: index,
+                detail: "Form submission without preventDefault() violates form-action 'none'.",
+                remedy,
+              });
+              break;
+            }
+            if (step.kind === "click" && step.expectBackend) {
+              if (!checkBackendExpectation(step.expectBackend, index)) {
+                stepsOk = false;
+                const last = diagnostics[diagnostics.length - 1]!;
+                stepResults.push({
+                  index,
+                  kind: step.kind,
+                  ok: false,
+                  code: last.code,
+                  remedy: last.remedy,
+                });
+                break;
+              }
+            }
+            stepResults.push({ index, kind: step.kind, ok: true });
+          }
+        } else {
+          stepsOk = (req.steps ?? []).length === 0;
+        }
+        const ok = startupOk && stepsOk && diagnostics.every((item) => item.severity !== "error");
+        const stage = !startupOk ? "runtime" : !stepsOk ? "steps" : "complete";
+        onFrontendVerified?.(manifest.appRoot, {
+          sourceRevision,
+          ok,
+          stage,
+          ...(req.expectStartupBackend ? { expectStartupBackend: req.expectStartupBackend } : {}),
+          ...(req.steps ? { steps: req.steps } : {}),
+          brokerCalls: brokerCalls.map((call) => ({
+            op: call.op,
+            ...(call.operation ? { operation: call.operation } : {}),
+            status: call.status,
+            ok: call.ok,
+            ...(call.refusalCode ? { refusalCode: call.refusalCode } : {}),
+          })),
+        });
+        return {
+          kind: "frontendVerified" as const,
+          ok,
+          stage,
+          target,
+          startupOk,
+          stepsOk,
+          handshake: { delivered: true, messageCount: brokerCalls.length },
+          brokerCalls,
+          steps: stepResults,
+          diagnostics,
+          externalRequestsBlocked: 0,
+        };
+      }
       case "createLink": {
         const appRoot = (await resolveWorkspacePath(root, req.appRoot, "read")).normalized;
         const existing = [...links.values()].find((l) => l.operationId === req.operationId);

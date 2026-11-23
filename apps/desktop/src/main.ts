@@ -157,6 +157,8 @@ import {
   publicationListUnavailable,
 } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
+import { verifyLocalAppFrontend } from "./workspaces/appFrontendVerifier";
+import { runAppFrontendBrowserVerification } from "./window/appFrontendVerifyBrowser";
 import {
   adoptLocalDatasetStore,
   createLocalDatasetHost,
@@ -10249,6 +10251,33 @@ function registerIpcHandlers(): void {
     },
     launchLocalDataset: async (workspace, publicationId, signal) =>
       (await localAppLauncher(workspace, signal)).launch(publicationId, signal),
+    verifyFrontend: async (workspace, input, operation) =>
+      verifyLocalAppFrontend(input, {
+        workspaceId: workspace.workspaceId,
+        workspaceRoot: workspace.rootPath,
+        signal: operation.signal,
+        assertCurrent: () => operation.assertCurrent(),
+        flushCapture: () => ownerPublicationDependencies.flushCapture(workspace),
+        withAdapter: (work) => ownerPublicationDependencies.withAdapter(workspace, work),
+        compile: ownerPublicationDependencies.compile,
+        compileDataset: async (source, path, signal) => {
+          installedDatasetCompiler ??= createInstalledDatasetCompiler(resourcesBasePath());
+          return (await installedDatasetCompiler)(source, path, signal);
+        },
+        datasetRuntime: {
+          launch: createDesktopAppRuntimeLauncher(utilityProcess, true),
+          entryPath: join(datasetRuntimePath(), "child.mjs"),
+        },
+        approvedArtifacts: async (datasetId) =>
+          (
+            await datasetDependencies.dataForWorkspace(workspace, operation.signal)
+          ).approvedArtifacts(datasetId),
+        verificationPublication: async (publicationId) =>
+          (await localDatasetHostFor(workspace, operation.signal)).apps.verificationPublication(
+            publicationId,
+          ),
+        runBrowser: runAppFrontendBrowserVerification,
+      }),
   });
   appViews = registerAppViews<DesktopRendererWorkspaceOperation["workspace"]>({
     activePublication: async (operation, appRoot) => {

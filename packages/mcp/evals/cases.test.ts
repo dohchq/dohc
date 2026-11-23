@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { cliResultSchemas } from "@dohc/cli/protocol";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { createDohcMcpServer } from "../src/server";
-import type { DatasetSnapshot, EvalCase, RunRecord } from "./case";
+import type { DatasetSnapshot, EvalCase, FrontendVerificationRecord, RunRecord } from "./case";
 import { CASES } from "./cases";
 import { seedWorkspace, workspaceFiles } from "./claude";
 import { fakeDesktop } from "./desktop";
@@ -36,6 +36,7 @@ async function replay(
   const unansweredLog = join(dir, "unanswered.log");
   const misshapen: string[] = [];
   const datasetSnapshots: Record<string, DatasetSnapshot> = {};
+  const frontendVerifications: Record<string, FrontendVerificationRecord> = {};
   try {
     await seedWorkspace(root, evalCase, home);
     const answers = {
@@ -43,6 +44,9 @@ async function replay(
         ? await evalCase.setupDesktop(root, {
             onDatasetSnapshot: (datasetPath, snapshot) => {
               datasetSnapshots[datasetPath] = snapshot;
+            },
+            onFrontendVerified: (appRoot, record) => {
+              frontendVerifications[appRoot] = record;
             },
           })
         : {}),
@@ -97,6 +101,7 @@ async function replay(
         text,
         files: await workspaceFiles(root),
         ...(Object.keys(datasetSnapshots).length > 0 ? { datasetSnapshots } : {}),
+        ...(Object.keys(frontendVerifications).length > 0 ? { frontendVerifications } : {}),
       },
       unanswered: await readFile(unansweredLog, "utf8").catch(() => ""),
       misshapen,
@@ -611,6 +616,148 @@ describe("eval cases", () => {
     };
     const staleChecks = await grade(form.expect, staleFormRun, form.gradeRun);
     expect(staleChecks.some((c) => !c.pass && c.detail?.includes("stale revision"))).toBe(true);
+
+    // Negative counterexamples for frontend verification binding and response handling.
+    const skippedVerifyBooking: RunRecord = {
+      ...bookingSolved.run,
+      frontendVerifications: undefined,
+    };
+    const skippedVerifyChecks = await grade(booking.expect, skippedVerifyBooking, booking.gradeRun);
+    expect(
+      skippedVerifyChecks.some((c) => !c.pass && c.detail?.includes("verifyFrontend was not run")),
+    ).toBe(true);
+
+    const editedAfterVerifyBooking: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/app.js": `${bookingSolved.run.files["apps/booking/app.js"]}\n// edited after verify\n`,
+      },
+    };
+    const editedAfterChecks = await grade(
+      booking.expect,
+      editedAfterVerifyBooking,
+      booking.gradeRun,
+    );
+    expect(
+      editedAfterChecks.some((c) => !c.pass && c.detail?.includes("source changed after")),
+    ).toBe(true);
+
+    const failedVerifyFinance: RunRecord = {
+      ...financeSolved.run,
+      frontendVerifications: {
+        "apps/control-tower": {
+          ...financeSolved.run.frontendVerifications!["apps/control-tower"]!,
+          ok: false,
+          stage: "runtime",
+        },
+      },
+    };
+    const failedVerifyChecks = await grade(finance.expect, failedVerifyFinance, finance.gradeRun);
+    expect(
+      failedVerifyChecks.some((c) => !c.pass && c.detail?.includes("verifyFrontend failed")),
+    ).toBe(true);
+
+    const noStepsBookingVerify: RunRecord = {
+      ...bookingSolved.run,
+      frontendVerifications: {
+        "apps/booking": {
+          ...bookingSolved.run.frontendVerifications!["apps/booking"]!,
+          steps: [],
+        },
+      },
+    };
+    const noStepsChecks = await grade(booking.expect, noStepsBookingVerify, booking.gradeRun);
+    expect(noStepsChecks.some((c) => !c.pass && c.detail?.includes("click.expectBackend"))).toBe(
+      true,
+    );
+
+    const fireAndForgetFinance: RunRecord = {
+      ...financeSolved.run,
+      files: {
+        ...financeSolved.run.files,
+        "apps/control-tower/app.js":
+          'window.addEventListener("message", (e) => { if (e.data?.kind === "dohc-app-channel") e.ports[0]?.postMessage({ id: "r1", op: "backend.invoke", operation: "listExpenses", input: {}, idempotencyKey: "r1" }); });\n',
+      },
+    };
+    const fireAndForgetChecks = await grade(finance.expect, fireAndForgetFinance, finance.gradeRun);
+    expect(
+      fireAndForgetChecks.some((c) => !c.pass && c.detail?.includes("port response handler")),
+    ).toBe(true);
+  });
+
+  it("everydayDesktop verifyFrontend rejects missing inputs, inline CSP scripts, and unapproved operations", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dohc-eval-verify-"));
+    const root = join(dir, "workspace");
+    const home = join(dir, "home");
+    const unansweredLog = join(dir, "unanswered.log");
+    try {
+      await seedWorkspace(
+        root,
+        {
+          ...EVERYDAY_CASES[0]!,
+          files: {
+            "csp-app/index.html": '<!doctype html><button onclick="alert(1)">Run</button>\n',
+            "csp-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html"],
+              packageMap: {},
+            }),
+            "missing-input-app/index.html":
+              '<!doctype html><script type="module" src="./missing.js"></script>\n',
+            "missing-input-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html"],
+              packageMap: {},
+            }),
+          },
+        },
+        home,
+      );
+      const answers = await createEverydayDesktop(root, { workspaceId: "ws-everyday" });
+      const desktop = fakeDesktop({ root, answers, unansweredLog });
+      const server = createDohcMcpServer({
+        root,
+        home,
+        request: async (request) => {
+          const answer = await desktop(request);
+          expect(cliResultSchemas[request.verb].safeParse(answer).success).toBe(true);
+          return answer;
+        },
+      });
+      const client = new Client({ name: "eval-verify", version: "1" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+      const cspRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: { action: "verifyFrontend", workspaceId: "ws-everyday", appRoot: "csp-app" },
+        },
+      });
+      expect(cspRes.isError).toBe(true);
+      expect(JSON.stringify(cspRes.structuredContent)).toContain("csp_violation");
+
+      const missingRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "missing-input-app",
+          },
+        },
+      });
+      expect(missingRes.isError).toBe(true);
+      expect(JSON.stringify(missingRes.structuredContent)).toContain("missing_input");
+
+      await client.close();
+      await server.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("keeps public skill automations.yaml examples valid under parseAutomationsFile", async () => {

@@ -138,17 +138,23 @@ function assertStaticModuleSyntax(source: string): ReturnType<typeof parse> {
 async function assertScript(
   source: string,
   loader: esbuild.Loader,
+  sourcefile: string,
   pageLabel?: string,
 ): Promise<void> {
-  const transformed = await esbuild.transform(source, {
-    loader,
-    target: "es2022",
-    tsconfigRaw,
-    ...scriptOptions,
-    sourcemap: false,
-    legalComments: "none",
-    logLevel: "silent",
-  });
+  const transformed = await esbuild
+    .transform(source, {
+      loader,
+      sourcefile,
+      target: "es2022",
+      tsconfigRaw,
+      ...scriptOptions,
+      sourcemap: false,
+      legalComments: "none",
+      logLevel: "silent",
+    })
+    .catch((error) => {
+      throw buildFailure(error, sourcefile);
+    });
   const ast = assertStaticModuleSyntax(transformed.code);
   const write = pageLabel && documentWrite(ast);
   if (write)
@@ -508,14 +514,19 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
                 if (!file) return { errors: [{ text: "App source is unavailable." }] };
                 const loader = loaderFor(file.path);
                 if (scriptLoaders.has(extension(file.path)))
-                  await assertScript(text(file.bytes), loader, page ? file.path : undefined);
+                  await assertScript(
+                    text(file.bytes),
+                    loader,
+                    file.path,
+                    page ? file.path : undefined,
+                  );
                 return { contents: file.bytes, loader };
               });
               build.onLoad({ filter: /.*/, namespace: pageNamespace }, async (args) => {
                 const inline = page?.inline.get(args.path);
                 if (!inline) return { errors: [{ text: "App source is unavailable." }] };
                 if (inline.loader === "js")
-                  await assertScript(inline.contents, "js", `A module script in ${entry}`);
+                  await assertScript(inline.contents, "js", entry, `A module script in ${entry}`);
                 return inline;
               });
               build.onLoad({ filter: /.*/, namespace: BUILTIN_NAMESPACE }, (args) => {
