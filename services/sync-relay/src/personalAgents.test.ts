@@ -2764,6 +2764,47 @@ describe("a personal agent in a workspace its person joined", () => {
     expect(ids((await ok(await answered)) as WaitAnswer)).toEqual(["in-news"]);
   });
 
+  it("answers a held wait with a Comment's file where it is now, not a folder hidden since", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    await communityWrite(f, "plans/a.md", "plan");
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    fromComputer(f, COMMUNITY, [
+      fileThread("thread-plan", { linkedObjectId: "object-plans/a.md" }),
+      ownerSays("on-plan", "thread-plan", "@Helper on the plan"),
+    ]);
+    const fresh = f.h.linkAuthority.freshPersonal.bind(f.h.linkAuthority);
+    let entered!: () => void;
+    let release!: () => void;
+    const holding = new Promise<void>((resolve) => (entered = resolve));
+    const released = new Promise<void>((resolve) => (release = resolve));
+    vi.spyOn(f.h.linkAuthority, "freshPersonal").mockImplementationOnce(async (authority) => {
+      entered();
+      await released;
+      return await fresh(authority);
+    });
+    const answered = tool(f, agent, "wait", { timeoutMs: 0 });
+    await holding;
+    // The file moves out of plans, then a rule hides plans.
+    const originSeq = communitySeqs.get(f.storage) ?? 0;
+    communitySeqs.set(f.storage, originSeq + 1);
+    await appendLog(f.h, OTHER, COMMUNITY, [
+      moment("open/a.md", "plan", {
+        originSeq,
+        objectId: "object-plans/a.md",
+        operation: "rename",
+        beforePath: "plans/a.md",
+        beforeContent: "plan",
+      }),
+    ]);
+    await communityWrite(f, "plans/access.yaml", HIDING_RULE);
+    release();
+    const { messages } = (await ok(await answered)) as WaitAnswer;
+    expect(messages.map((message) => [message.messageId, message.filePath])).toEqual([
+      ["on-plan", "open/a.md"],
+    ]);
+  });
+
   it("answers a parked wait once a rule hides a Group it reads", async () => {
     const f = await fixture();
     joinCommunity(f);

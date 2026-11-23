@@ -861,7 +861,16 @@ export function createPersonalAgentToolRoutes(input: {
           if (entry === undefined || !reaches(entry, agentId, message)) return [];
           if (storage.messageDeleted(message.workspaceId, message.threadId, message.messageId))
             return [];
-          const read = served(entry, message);
+          // A Comment names its file where it is now, never where the scan found it.
+          const placed =
+            message.channelWireId === null
+              ? {
+                  ...message,
+                  filePath:
+                    commentFileOf(storage, message.workspaceId, message.threadId)?.filePath ?? null,
+                }
+              : message;
+          const read = served(entry, placed);
           const grown = size(read) - size(message);
           if (grown <= room) {
             room -= grown;
