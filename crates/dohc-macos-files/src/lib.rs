@@ -750,12 +750,14 @@ pub fn exclude_from_sync(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// `AT_NODELETEBUSY` in `<sys/fcntl.h>`.
-const AT_NODELETEBUSY: u32 = 0x4000;
+/// `SYS_delete` in `<sys/syscall.h>`: an unlink that fails with `EBUSY` while
+/// any process has the file open. macOS 15 rejects the same check asked of
+/// `unlinkat` as `AT_NODELETEBUSY` with `EINVAL`, so it is asked this way.
+const SYS_DELETE: c_int = 226;
 
-/// The file systems known to refuse `AT_NODELETEBUSY` on a busy file: APFS,
+/// The file systems known to refuse a busy file's [`SYS_DELETE`]: APFS,
 /// HFS+, ExFAT and FAT, tested on disk images, and the SMB and NFS clients,
-/// whose remove calls `vnode_isinuse` for the flag.
+/// whose remove calls `vnode_isinuse` for it.
 const BUSY_CHECKED: [&[u8]; 6] = [b"apfs", b"hfs", b"exfat", b"msdos", b"smbfs", b"nfs"];
 
 /// Close `file` and unlink `path`, its name, unless any process of any user
@@ -770,14 +772,16 @@ pub fn remove_unless_open(file: std::fs::File, path: &std::path::Path) -> io::Re
         return Ok(false);
     }
     drop(file);
-    match rustix::fs::unlinkat(
-        rustix::fs::CWD,
-        path,
-        rustix::fs::AtFlags::from_bits_retain(AT_NODELETEBUSY),
-    ) {
-        Ok(()) => Ok(true),
-        Err(rustix::io::Errno::BUSY) => Ok(false),
-        Err(e) => Err(e.into()),
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    #[allow(unsafe_code)]
+    let result = unsafe { libc::syscall(SYS_DELETE, path.as_ptr()) };
+    if result == 0 {
+        return Ok(true);
+    }
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::EBUSY) => Ok(false),
+        _ => Err(err),
     }
 }
 

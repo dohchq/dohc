@@ -76,8 +76,7 @@ export function ExternalLinkConfirm(props: { workspaceId: string }) {
         {url}
       </p>
       <p className="text-xs leading-5">
-        dohc opens this link in another app. Turn off Confirm external links in Settings to open
-        links without asking.
+        dohc opens this link in another app. You can turn this prompt off in Settings.
       </p>
     </ConfirmDialog>
   );

@@ -537,7 +537,7 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
       });
     }, guestId);
     await shown(page.getByTestId("quick-open"));
-    await page.getByTestId("quick-open").getByRole("textbox").press("Escape");
+    await page.getByTestId("quick-open").getByRole("combobox").press("Escape");
     await hidden(page.getByTestId("quick-open"));
     // Reload reloads the same guest, so the app starts over in a new frame, which main gives dohc's dark scheme. Until
     // then, a read through main can reach the old frame and wait for its renderer to exit. Playwright's frame fails at once.
@@ -695,6 +695,7 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     await sidebarEnd.focus();
     for (const control of [
       leftGroup.getByTestId(appTab),
+      leftGroup.getByTestId("editor-tabs-new-page"),
       allTabs,
       page.getByTestId("app-view-reload"),
       page.getByTestId("site-preview-show-source"),

@@ -430,7 +430,16 @@ it("approves an app on the owner's computer whose candidate is up to the publica
   };
   const approve = async (bytes: number) =>
     (await f.http(`${f.path}/binding`, { localApp: sized(bytes) })).status;
+  const usage = () =>
+    Number(
+      f.storage.db
+        .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'")
+        .get()!.usage_bytes,
+    );
+  const before = usage();
   expect(await approve(200 * 1024)).toBe(200);
+  // The server keeps the candidate, so the workspace's quota counts it.
+  expect(usage() - before).toBeGreaterThanOrEqual(200 * 1024);
   expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES)).toBe(200);
   // Over the bound the candidate is refused, by its parser and then by the body limit.
   expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES + 1)).toBe(400);
@@ -508,6 +517,98 @@ it("runs an app on the owner's computer as that app, within its approval, for th
   // Approved again after its withdrawal, it runs again.
   const again = (await (await register()).json()) as { authorityRevision: number };
   expect((await call("read", "owner", again.authorityRevision)).status).toBe(200);
+  // A change sent under the approval it withdrew does not run under the new one.
+  expect((await call("read", "owner", 1)).status).toBe(404);
+});
+
+it("counts an app approved on the owner's computer toward the workspace's storage, gives its bytes back when it is withdrawn, and counts apps approved before once", async () => {
+  const f = await httpFixture();
+  await f.activate();
+  const { candidate: published } = f.storage.readAppPublication({
+    workspaceId: "w",
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const capability = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      datasetId: id(1),
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(5), id(6)],
+    },
+    revision,
+  );
+  const candidate = { ...published, capabilities: [capability] };
+  const appId = createHash("sha256")
+    .update(JSON.stringify(["dohc-local-dataset-app-v1", "w", candidate]))
+    .digest("hex");
+  const usage = () => ({
+    workspace: Number(
+      f.storage.db
+        .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'")
+        .get()!.usage_bytes,
+    ),
+    collection: Number(
+      f.storage.db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage").get()!
+        .storage_bytes,
+    ),
+  });
+  const approve = () => f.http(`${f.path}/binding`, { localApp: candidate });
+  const withdraw = () => f.http(`${f.path}/binding`, { publicationId: appId, enabled: false });
+  const app = Buffer.byteLength(JSON.stringify(candidate));
+  // The app's row stays after a withdrawal, so it counts from the first approval on.
+  const row = Buffer.byteLength(appId) + 256;
+  const plus = (bytes: number) => ({
+    workspace: before.workspace + bytes,
+    collection: before.collection + bytes,
+  });
+  const before = usage();
+  expect((await approve()).status).toBe(200);
+  const approved = usage();
+  expect(approved.workspace - before.workspace).toBeGreaterThan(app + row);
+  // Withdrawn, it gives back the app and its binding, and approved again, it takes them again.
+  expect((await withdraw()).status).toBe(200);
+  expect(usage()).toEqual(plus(row));
+  expect((await approve()).status).toBe(200);
+  expect(usage()).toEqual(approved);
+
+  // A server from before apps were counted held this app without counting it. Started again,
+  // it counts it once.
+  const uncount = (bytes: number) => {
+    f.storage.db
+      .prepare("UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes-?")
+      .run(bytes);
+    f.storage.db
+      .prepare(
+        "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id='w'",
+      )
+      .run(bytes);
+  };
+  uncount(app + row);
+  f.storage.db
+    .prepare("DELETE FROM sync_relay_migrations WHERE migration_id='local-dataset-app-storage-v1'")
+    .run();
+  const start = async () => {
+    const directory = await mkdtemp(join(tmpdir(), "relay-dataset-restart-"));
+    const host = await f.storage.createDatasetHost({
+      publicEditRelease: undefined,
+      directory,
+      limits,
+      onShutdownError(error) {
+        throw error;
+      },
+    });
+    await host.close();
+    await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+  };
+  await start();
+  expect(usage()).toEqual(approved);
+  await start();
+  expect(usage()).toEqual(approved);
+  expect((await withdraw()).status).toBe(200);
+  expect(usage()).toEqual(plus(row));
 });
 
 it("runs an app on the owner's computer on a server that publishes no apps", async () => {
@@ -1368,4 +1469,453 @@ it("admits a Collection request only once its body has arrived", async () => {
       expect((await request.response).status).toBe(400);
     }
   }
+});
+
+it("supports multi-Collection local apps on the relay, enforces isolation and deletion cleanup, and refuses >1 Collection on shared links", async () => {
+  const f = await httpFixture();
+  expect((await f.activate()).status).toBe(200);
+
+  const secondDef: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: id(101),
+    name: "Workouts",
+    schemaPath: "workouts/schema.sql",
+    operationsPath: "workouts/operations.js",
+    tables: [
+      {
+        tableId: id(102),
+        name: "Workouts",
+        sqlName: "workouts",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: id(103),
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: id(104),
+            name: "Title",
+            sqlColumn: "title",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+          {
+            fieldId: id(107),
+            name: "Proof",
+            sqlColumn: "proof",
+            type: "attachment",
+            required: false,
+            unique: false,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: id(105),
+        name: "submit",
+        label: "Log",
+        tableId: id(102),
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [id(104)],
+      },
+      {
+        operationId: id(106),
+        name: "read",
+        label: "Read",
+        tableId: id(102),
+        kind: "read",
+        access: "owner",
+        readOnly: true,
+        fieldIds: [id(103), id(104)],
+      },
+      {
+        operationId: id(108),
+        name: "receipt",
+        label: "Proof",
+        tableId: id(102),
+        kind: "read",
+        access: "owner",
+        readOnly: true,
+        fieldIds: [id(107)],
+      },
+    ],
+  };
+  const secondSchema =
+    "CREATE TABLE workouts(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL,proof TEXT);";
+  const secondSource = `globalThis.operations={submit(ctx,input){ctx.db.execute('INSERT INTO workouts VALUES(?,?,?)',[ctx.requestId,input.title,null]);return {ok:true};},read(ctx){return ctx.db.query('SELECT * FROM workouts ORDER BY id');},receipt(ctx,input){return {fileId:input.fileId};}};`;
+  const secondRevision = describeDatasetRevision({
+    definition: secondDef,
+    revision: 1,
+    schemaSql: secondSchema,
+    operationSource: secondSource,
+  });
+  pushFile(f.storage, "dataset-file-2", null, {
+    path: "workouts/dataset.json",
+    text: JSON.stringify({ datasetId: id(101) }),
+  });
+  expect(
+    (
+      await f.http(`w/datasets/${id(101)}/activate`, {
+        revision: secondRevision,
+        schemaSql: secondSchema,
+        operationSource: secondSource,
+        capacityBytes: 1024 * 1024,
+      })
+    ).status,
+  ).toBe(200);
+
+  const basePub = f.storage.readAppPublication({
+    workspaceId: "w",
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const cap1 = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      alias: "expenses",
+      datasetId: id(1),
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(5), id(6), id(8)],
+    },
+    revision,
+  );
+  const cap2 = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      alias: "workouts",
+      datasetId: id(101),
+      revision: 1,
+      revisionSha256: secondRevision.revisionSha256,
+      operationIds: [id(105), id(106), id(108)],
+    },
+    secondRevision,
+  );
+  const digest = (domain: string, value: unknown) =>
+    createHash("sha256")
+      .update(JSON.stringify([domain, value]))
+      .digest("hex");
+  const files = basePub.candidate.files.filter((file) => file.path === "bundle.js");
+  const bundleDigest = digest("dohc-app-bundle-v1", files);
+  const buildDigest = digest("dohc-app-build-v1", {
+    sourceDigest: basePub.candidate.sourceDigest,
+    dependencyLockDigest: basePub.candidate.dependencyLockDigest,
+    compiler: basePub.candidate.compilerIdentity,
+    bundleDigest,
+  });
+  const multiCandidate = {
+    ...basePub.candidate,
+    files,
+    bundleDigest,
+    buildDigest,
+    capabilities: [cap1, cap2],
+  };
+
+  expect(
+    (
+      await f.http("w/app-publications", {
+        shareId: basePub.owner.shareId,
+        grantId: basePub.owner.grantId,
+        expectedGrantGeneration: basePub.owner.generation,
+        candidate: multiCandidate,
+      })
+    ).status,
+  ).toBe(400);
+
+  const readWorkspaceUsage = () =>
+    Number(
+      f.storage.db
+        .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'")
+        .get()!.usage_bytes,
+    );
+  const readDatasetUsage = (datasetId: string) =>
+    Number(
+      f.storage.db
+        .prepare(
+          "SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id='w' AND dataset_id=?",
+        )
+        .get(datasetId)!.storage_bytes,
+    );
+  const workspaceUsageBeforeApprove = readWorkspaceUsage();
+  const dataset1UsageBeforeApprove = readDatasetUsage(id(1));
+  const dataset2UsageBeforeApprove = readDatasetUsage(id(101));
+
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare("UPDATE dohc_dataset_journals SET active=0 WHERE workspace_id='w' AND dataset_id=?")
+      .run(id(101)),
+  );
+  expect((await f.http("w/local-apps", { localApp: multiCandidate })).status).toBe(409);
+  expect(
+    f.storage.db
+      .prepare("SELECT count(*) AS n FROM sync_relay_local_dataset_apps WHERE workspace_id='w'")
+      .get()!.n,
+  ).toBe(0);
+  expect(
+    f.storage.db
+      .prepare(
+        "SELECT count(*) AS n FROM dohc_dataset_bindings WHERE workspace_id='w' AND dataset_id IN (?,?)",
+      )
+      .get(id(1), id(101))!.n,
+  ).toBe(0);
+  expect(readWorkspaceUsage()).toBe(workspaceUsageBeforeApprove);
+  expect(readDatasetUsage(id(1))).toBe(dataset1UsageBeforeApprove);
+  expect(readDatasetUsage(id(101))).toBe(dataset2UsageBeforeApprove);
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare("UPDATE dohc_dataset_journals SET active=1 WHERE workspace_id='w' AND dataset_id=?")
+      .run(id(101)),
+  );
+
+  const approvedRes = await f.http("w/local-apps", { localApp: multiCandidate });
+  expect(approvedRes.status).toBe(200);
+  const approved = (await approvedRes.json()) as {
+    publicationId: string;
+    authorityRevision: number;
+  };
+  const backendBase = `w/app-publications/${approved.publicationId}/backend`;
+
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare("UPDATE dohc_dataset_journals SET active=0 WHERE workspace_id='w' AND dataset_id=?")
+      .run(id(101)),
+  );
+  expect((await f.http("w/local-apps", { localApp: multiCandidate })).status).toBe(409);
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare("UPDATE dohc_dataset_journals SET active=1 WHERE workspace_id='w' AND dataset_id=?")
+      .run(id(101)),
+  );
+  const idempotentRes = await f.http("w/local-apps", { localApp: multiCandidate });
+  expect(idempotentRes.status).toBe(200);
+  expect(await idempotentRes.json()).toEqual(approved);
+
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        operation: "read",
+        input: {},
+        idempotencyKey: "no-alias",
+      })
+    ).status,
+  ).toBe(400);
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "other",
+        operation: "read",
+        input: {},
+        idempotencyKey: "bad-alias",
+      })
+    ).status,
+  ).toBe(404);
+
+  const upRes = await f.http(`${backendBase}/upload`, {
+    authorityRevision: approved.authorityRevision,
+    dataset: "expenses",
+    idempotencyKey: "up-1",
+    name: "receipt.pdf",
+    contentType: "application/pdf",
+    bytesBase64: "JVBERi0=",
+  });
+  expect(upRes.status).toBe(200);
+  const uploaded = (await upRes.json()) as { file: { fileId: string } };
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "expenses",
+        operation: "submit",
+        input: { name: "Coffee", fileId: uploaded.file.fileId },
+        idempotencyKey: "sub-1",
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "workouts",
+        operation: "submit",
+        input: { title: "Run 5k" },
+        idempotencyKey: "wrk-1",
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await f.http(`${backendBase}/file`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "expenses",
+        fileId: uploaded.file.fileId,
+        operation: "receipt",
+        input: { fileId: uploaded.file.fileId },
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await f.http(`${backendBase}/file`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "workouts",
+        fileId: uploaded.file.fileId,
+        operation: "receipt",
+        input: { fileId: uploaded.file.fileId },
+      })
+    ).status,
+  ).toBe(404);
+
+  expect((await f.http(`w/datasets/${id(101)}/archive`, {})).status).toBe(200);
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "expenses",
+        operation: "read",
+        input: {},
+        idempotencyKey: "after-archive",
+      })
+    ).status,
+  ).toBe(404);
+
+  expect((await f.http(`w/datasets/${id(101)}/restore`, {})).status).toBe(200);
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "expenses",
+        operation: "read",
+        input: {},
+        idempotencyKey: "after-restore",
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await f.http("w/local-apps", {
+        publicationId: approved.publicationId,
+        enabled: false,
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    f.storage.db
+      .prepare("SELECT count(*) AS n FROM dohc_dataset_bindings WHERE workspace_id=? AND app_id=?")
+      .get("w", approved.publicationId)!.n,
+  ).toBe(0);
+
+  const reapprovedRes = await f.http("w/local-apps", { localApp: multiCandidate });
+  expect(reapprovedRes.status).toBe(200);
+  const reapproved = (await reapprovedRes.json()) as {
+    publicationId: string;
+    authorityRevision: number;
+  };
+  expect(reapproved.authorityRevision).toBe(approved.authorityRevision + 1);
+  expect(
+    (
+      await f.http(`w/datasets/${id(1)}/binding`, {
+        publicationId: reapproved.publicationId,
+        enabled: false,
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    f.storage.db
+      .prepare("SELECT count(*) AS n FROM dohc_dataset_bindings WHERE workspace_id=? AND app_id=?")
+      .get("w", reapproved.publicationId)!.n,
+  ).toBe(0);
+  expect(
+    f.storage.db
+      .prepare(
+        "SELECT candidate FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?",
+      )
+      .get(reapproved.publicationId)!.candidate,
+  ).toBe("");
+
+  const dataset1UsageBeforeFinalApprove = readDatasetUsage(id(1));
+  const dataset2UsageBeforeFinalApprove = readDatasetUsage(id(101));
+  const workspaceUsageBeforeWithdrawn = readWorkspaceUsage();
+  const withdrawnCandidate = { ...multiCandidate, appRoot: "apps/withdrawn-tower" };
+  const withdrawnApproveRes = await f.http("w/local-apps", { localApp: withdrawnCandidate });
+  expect(withdrawnApproveRes.status).toBe(200);
+  const withdrawnApp = (await withdrawnApproveRes.json()) as {
+    publicationId: string;
+    authorityRevision: number;
+  };
+  expect(
+    (
+      await f.http("w/local-apps", {
+        publicationId: withdrawnApp.publicationId,
+        enabled: false,
+      })
+    ).status,
+  ).toBe(200);
+  const expectedWithdrawnRowBytes = Buffer.byteLength(withdrawnApp.publicationId) + 256;
+  expect(readWorkspaceUsage()).toBe(workspaceUsageBeforeWithdrawn + expectedWithdrawnRowBytes);
+  expect(
+    f.storage.db
+      .prepare("SELECT count(*) AS n FROM dohc_dataset_bindings WHERE workspace_id=? AND app_id=?")
+      .get("w", withdrawnApp.publicationId)!.n,
+  ).toBe(0);
+  const finalApprovedRes = await f.http("w/local-apps", { localApp: multiCandidate });
+  expect(finalApprovedRes.status).toBe(200);
+  const finalApproved = (await finalApprovedRes.json()) as {
+    publicationId: string;
+    authorityRevision: number;
+  };
+  expect(finalApproved.authorityRevision).toBe(reapproved.authorityRevision + 1);
+  expect((await f.http(`w/datasets/${id(101)}/archive`, {})).status).toBe(200);
+  const delPreview = (await (await f.http(`w/datasets/${id(101)}/delete-preview`)).json()) as {
+    cursor: unknown;
+    reviewToken: string;
+  };
+  expect(
+    (
+      await f.http(`w/datasets/${id(101)}/delete`, {
+        expected: delPreview.cursor,
+        reviewToken: delPreview.reviewToken,
+        acknowledge: true,
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    f.storage.db
+      .prepare(
+        "SELECT 1 FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+      )
+      .get("w", id(1), finalApproved.publicationId),
+  ).toBeUndefined();
+  expect(
+    f.storage.db
+      .prepare("SELECT 1 FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?")
+      .get(finalApproved.publicationId),
+  ).toBeUndefined();
+  expect(
+    f.storage.db
+      .prepare("SELECT 1 FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?")
+      .get(withdrawnApp.publicationId),
+  ).toBeUndefined();
+  expect(
+    f.storage.db
+      .prepare(
+        "SELECT count(*) AS n FROM sync_relay_local_dataset_app_datasets WHERE workspace_id='w'",
+      )
+      .get()!.n,
+  ).toBe(0);
+  expect(readDatasetUsage(id(1))).toBe(dataset1UsageBeforeFinalApprove);
+  const expectedLocalAppRowBytes = Buffer.byteLength(finalApproved.publicationId) + 256;
+  expect(readWorkspaceUsage()).toBe(
+    workspaceUsageBeforeWithdrawn - expectedLocalAppRowBytes - dataset2UsageBeforeFinalApprove,
+  );
 });

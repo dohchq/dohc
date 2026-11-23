@@ -10,8 +10,8 @@ export const COLLECTIONS_WAITING_TITLE = "Collection updates are waiting";
 
 export function collectionsWaitingMessage(waiting: Waiting): string {
   return waiting === "sync"
-    ? "They continue once sync finishes. To work offline, pause sync in Settings."
-    : "dohc paused sync but could not reopen this workspace. They continue once it reopens.";
+    ? "Collection updates will continue once sync finishes. To work offline, pause sync in Settings."
+    : "dohc paused sync but could not reopen this workspace. Updates will continue once it reopens.";
 }
 
 // What one wait has shown, per workspace. Module state, because the shell

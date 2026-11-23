@@ -60,6 +60,54 @@ const WATCH_REATTACH_BACKOFF: Duration = Duration::from_millis(200);
 /// [`WatchedRoot`] -- and is cheap (one `stat`, once per interval, only while
 /// otherwise idle).
 const WATCH_ROOT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const OTHER_COMPUTERS_READ_INTERVAL: Duration = Duration::from_secs(10);
+
+#[cfg(windows)]
+fn other_computers_write_to(root: &Path) -> bool {
+    use std::path::Prefix;
+    let network = |path: &Path| {
+        matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::VerbatimUNC(..) | Prefix::UNC(..))
+        )
+    };
+    std::fs::canonicalize(root).is_ok_and(|path| network(&path))
+}
+
+#[cfg(target_os = "linux")]
+fn other_computers_write_to(root: &Path) -> bool {
+    const SHARED_FILESYSTEMS: [u32; 12] = [
+        0x6969,
+        0x517b,
+        0xff53_4d42,
+        0xfe53_4d42,
+        0x0102_1997,
+        0x6573_5546,
+        0x00c3_6400,
+        0x5346_414f,
+        0x6b41_4653,
+        0x786f_4256,
+        0x7c7c_6673,
+        0x0bd0_0bd0,
+    ];
+    rustix::fs::statfs(root).is_ok_and(|stat| SHARED_FILESYSTEMS.contains(&(stat.f_type as u32)))
+}
+
+#[cfg(target_os = "macos")]
+fn other_computers_write_to(root: &Path) -> bool {
+    const MNT_LOCAL: u32 = 0x1000;
+    rustix::fs::statfs(root).is_ok_and(|stat| stat.f_flags & MNT_LOCAL == 0)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn other_computers_write_to(_root: &Path) -> bool {
+    false
+}
+
+fn timed_read_interval(root: &Path) -> Option<Duration> {
+    other_computers_write_to(root).then_some(OTHER_COMPUTERS_READ_INTERVAL)
+}
 
 /// A watcher event. Both kinds mark the generation dirty (a full
 /// rescan supersedes any per-path delta), so the modeled property is
@@ -149,6 +197,7 @@ struct WatchState {
     unavailable: AtomicBool,
     hard_deadline_flushes: AtomicU64,
     settle_flushes: AtomicU64,
+    timed_reads: AtomicU64,
 }
 
 impl WatchState {
@@ -262,6 +311,23 @@ impl NativeWatcher {
         root: PathBuf,
         dirty: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<NativeWatcher, FilesError> {
+        Self::start_thread(WATCH_STARTUP_DEADLINE, move |rx, tx, state, ready| {
+            let timed_read = timed_read_interval(&root);
+            watcher_thread(root, dirty, rx, tx, state, ready, timed_read);
+        })
+        .await
+    }
+
+    async fn start_thread(
+        startup_deadline: Duration,
+        run: impl FnOnce(
+            Receiver<ThreadMessage>,
+            SyncSender<ThreadMessage>,
+            Arc<WatchState>,
+            tokio::sync::oneshot::Sender<Result<(), FilesError>>,
+        ) + Send
+        + 'static,
+    ) -> Result<NativeWatcher, FilesError> {
         let (message_tx, message_rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
         let stop_tx = message_tx.clone();
         let state = Arc::new(WatchState::default());
@@ -269,33 +335,23 @@ impl NativeWatcher {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let worker = std::thread::Builder::new()
             .name("dohc-native-watcher".to_owned())
-            .spawn(move || {
-                watcher_thread(root, dirty, message_rx, message_tx, thread_state, ready_tx)
-            })
+            .spawn(move || run(message_rx, message_tx, thread_state, ready_tx))
             .map_err(|_| FilesError::WatcherUnavailable {
                 reason: "could not spawn watcher thread",
             })?;
-        let watcher = Self {
+        let mut watcher = Self {
             stop_tx,
             state,
             worker: Some(worker),
         };
-        // The metadata owner runs on a dedicated thread and retains the native
-        // join handle even on startup failure. Its Drop must release the root.
-        match tokio::time::timeout(WATCH_STARTUP_DEADLINE, ready_rx).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(error))) => return Err(error),
-            Ok(Err(_)) => {
-                return Err(FilesError::WatcherUnavailable {
-                    reason: "watcher thread ended during startup",
-                });
-            }
-            Err(_) => {
-                return Err(FilesError::WatcherUnavailable {
-                    reason: "native watcher startup timed out",
-                });
-            }
-        }
+        await_ready_with_deadline(
+            startup_deadline,
+            ready_rx,
+            &mut watcher.worker,
+            &watcher.stop_tx,
+            &watcher.state.unavailable,
+        )
+        .await?;
         Ok(watcher)
     }
 
@@ -309,48 +365,20 @@ impl NativeWatcher {
         token: CancellationToken,
         startup_deadline: Duration,
     ) -> Result<WatchStart, FilesError> {
-        let (message_tx, message_rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
-        let stop_tx = message_tx.clone();
-        let state = Arc::new(WatchState::default());
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let thread_handle = handle.clone();
-        let thread_state = Arc::clone(&state);
-        let worker = std::thread::Builder::new()
-            .name("dohc-native-watcher".to_owned())
-            .spawn(move || {
-                watcher_thread(
-                    root,
-                    Arc::new(move || thread_handle.notify_overflow()),
-                    message_rx,
-                    message_tx,
-                    thread_state,
-                    ready_tx,
-                );
-            })
-            .map_err(|_| FilesError::WatcherUnavailable {
-                reason: "could not spawn watcher thread",
-            })?;
-        let mut watcher = NativeWatcher {
-            stop_tx,
-            state,
-            worker: Some(worker),
-        };
-        if let Err(err) = await_ready_with_deadline(
-            startup_deadline,
-            ready_rx,
-            &mut watcher.worker,
-            &watcher.stop_tx,
-            &watcher.state.unavailable,
-        )
-        .await
-        {
-            // Safe and fast on every branch: the two "thread already ended"
-            // cases join a thread that is already finishing, and the timeout
-            // case already detached `worker` (it is `None`), so `stop()` is a
-            // no-op there.
-            let _ = watcher.stop();
-            return Err(err);
-        }
+        let mut watcher = Self::start_thread(startup_deadline, move |rx, tx, state, ready| {
+            let timed_read = timed_read_interval(&root);
+            watcher_thread(
+                root,
+                Arc::new(move || thread_handle.notify_overflow()),
+                rx,
+                tx,
+                state,
+                ready,
+                timed_read,
+            );
+        })
+        .await?;
         let initial = handle.reconcile_if_dirty(token).await;
         let initial_reconcile = match initial {
             Ok(run) => run,
@@ -399,6 +427,12 @@ impl NativeWatcher {
         self.state.settle_flushes.load(Ordering::Relaxed)
     }
 
+    /// Number of times the folder was read again on the timer, with no
+    /// event, because other computers write to it.
+    pub fn timed_read_count(&self) -> u64 {
+        self.state.timed_reads.load(Ordering::Relaxed)
+    }
+
     /// Whether the OS watch is genuinely, permanently lost: either the
     /// watcher's bounded re-attach retries were exhausted after a backend
     /// error, or startup itself timed out. A caller observing this should
@@ -428,29 +462,36 @@ impl Drop for NativeWatcher {
 /// a fake worker, without a real `notify` backend.
 async fn await_ready_with_deadline(
     deadline: Duration,
-    ready_rx: tokio::sync::oneshot::Receiver<Result<(), FilesError>>,
+    mut ready_rx: tokio::sync::oneshot::Receiver<Result<(), FilesError>>,
     worker: &mut Option<JoinHandle<()>>,
     stop_tx: &SyncSender<ThreadMessage>,
     unavailable: &AtomicBool,
 ) -> Result<(), FilesError> {
-    match tokio::time::timeout(deadline, ready_rx).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(err))) => Err(err),
-        Ok(Err(_)) => Err(FilesError::WatcherUnavailable {
+    let answer = match tokio::time::timeout(deadline, &mut ready_rx).await {
+        Ok(answer) => Some(answer),
+        Err(_) => {
+            ready_rx.close();
+            ready_rx.try_recv().ok().map(Ok)
+        }
+    };
+    match answer {
+        Some(Ok(Ok(()))) => Ok(()),
+        Some(Ok(Err(err))) => Err(err),
+        Some(Err(_)) => Err(FilesError::WatcherUnavailable {
             reason: "watcher thread ended during startup",
         }),
-        Err(_) => {
+        None => {
             // The worker has not signaled readiness within the deadline.
             // `notify`'s attach call is not cancellable, so it may genuinely
             // be stuck in a native OS call; synchronously joining it here
             // would risk hanging this caller too. Signal Stop (so if/when the
             // thread does reach its command loop it exits immediately -- it
-            // also self-exits via the dropped `ready` receiver before the
+            // also self-exits via the closed `ready` receiver before the
             // loop), then detach the join onto a background reaper: this
             // caller gets a bounded, observable failure now, and the worker is
             // still eventually reclaimed, rather than a synchronous hang OR a
             // silently forgotten thread that keeps running.
-            let _ = stop_tx.send(ThreadMessage::Stop);
+            let _ = stop_tx.try_send(ThreadMessage::Stop);
             if let Some(worker) = worker.take() {
                 let _ = std::thread::Builder::new()
                     .name("dohc-native-watcher-startup-reaper".to_owned())
@@ -543,6 +584,24 @@ fn reads_only(event: &notify::Event) -> bool {
         )
 }
 
+/// Whether an error may mean the watch on the root is gone.
+///
+/// A folder below the root that the backend cannot read is reported with its
+/// own path while the watch on everything else keeps working. Attaching again
+/// would meet the same folder and report it again, without end. Reaching the
+/// limit on watches names a folder too, but the rest of the tree goes unwatched.
+/// The callback remembers each unreadable folder and attaches again once a
+/// change names it or a folder above it, because only a new watch reaches
+/// inside it.
+fn watch_lost(root: &Path, error: &notify::Error) -> bool {
+    matches!(error.kind, notify::ErrorKind::MaxFilesWatch)
+        || error.paths.is_empty()
+        || error
+            .paths
+            .iter()
+            .any(|path| path == root || !path.starts_with(root))
+}
+
 fn event_callback(
     root: PathBuf,
     dirty: Arc<dyn Fn() + Send + Sync>,
@@ -550,6 +609,7 @@ fn event_callback(
     state: Arc<WatchState>,
     backend_error: Arc<AtomicBool>,
 ) -> impl FnMut(Result<notify::Event, notify::Error>) + Send {
+    let mut unreadable: Vec<PathBuf> = Vec::new();
     move |event| {
         if event
             .as_ref()
@@ -557,7 +617,23 @@ fn event_callback(
         {
             return;
         }
-        if event.is_err() {
+        let attach_again = match &event {
+            Err(error) if watch_lost(&root, error) => true,
+            Err(error) => {
+                for path in &error.paths {
+                    if !unreadable.contains(path) {
+                        unreadable.push(path.clone());
+                    }
+                }
+                false
+            }
+            Ok(event) => event
+                .paths
+                .iter()
+                .any(|path| unreadable.iter().any(|folder| folder.starts_with(path))),
+        };
+        if attach_again {
+            unreadable.clear();
             state.disruptions.fetch_add(1, Ordering::AcqRel);
             backend_error.store(true, Ordering::Release);
             dirty();
@@ -604,6 +680,7 @@ fn watcher_thread(
     callback_tx: SyncSender<ThreadMessage>,
     state: Arc<WatchState>,
     ready: tokio::sync::oneshot::Sender<Result<(), FilesError>>,
+    timed_read: Option<Duration>,
 ) {
     let config = notify::Config::default().with_follow_symlinks(false);
     let unavailable = &state.unavailable;
@@ -651,6 +728,7 @@ fn watcher_thread(
     }
 
     let mut debounce = Debounce::default();
+    let mut next_timed_read = timed_read.map(|interval| Instant::now() + interval);
     loop {
         // Consume the non-droppable backend-error signal first, so a re-attach
         // request set by the callback is never lost to a full event queue.
@@ -679,9 +757,22 @@ fn watcher_thread(
             // blocking on `rx.recv()` forever) to independently verify the
             // watched root is still the same directory object the watch was
             // bound to -- see `WATCH_ROOT_HEALTH_POLL_INTERVAL`.
-            None => match rx.recv_timeout(WATCH_ROOT_HEALTH_POLL_INTERVAL) {
+            None => match rx.recv_timeout(next_timed_read.map_or(
+                WATCH_ROOT_HEALTH_POLL_INTERVAL,
+                |at| {
+                    at.saturating_duration_since(Instant::now())
+                        .min(WATCH_ROOT_HEALTH_POLL_INTERVAL)
+                },
+            )) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => {
+                    if let (Some(interval), Some(at)) = (timed_read, next_timed_read)
+                        && Instant::now() >= at
+                    {
+                        state.timed_reads.fetch_add(1, Ordering::Relaxed);
+                        dirty();
+                        next_timed_read = Some(Instant::now() + interval);
+                    }
                     if !unavailable.load(Ordering::Acquire) && !watched_root.still_bound(&root) {
                         state.disruptions.fetch_add(1, Ordering::AcqRel);
                         dirty();
@@ -998,7 +1089,7 @@ mod callback_tests {
             notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join("a.md"))
         ));
         (callback.send)(Err(
-            notify::Error::generic("backend error").add_path(root.join(".dohc/engine/engine.db"))
+            notify::Error::generic("backend error").add_path(root.path().to_path_buf())
         ));
         assert_eq!(callback.dirty_calls.load(Ordering::Acquire), 1);
         assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
@@ -1011,6 +1102,60 @@ mod callback_tests {
             callback.messages.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn an_error_for_a_folder_below_the_root_is_a_change_not_a_lost_watch() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        (callback.send)(Err(notify::Error::io(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ))
+        .add_path(root.join("locked"))));
+        assert!(matches!(
+            callback.messages.try_recv(),
+            Ok(ThreadMessage::Event)
+        ));
+        callback.expect_quiet();
+    }
+
+    #[test]
+    fn a_change_above_an_unreadable_folder_attaches_the_watch_again_once() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 4);
+        (callback.send)(Err(notify::Error::io(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ))
+        .add_path(root.join("parent").join("locked"))));
+        let _ = callback.messages.try_recv();
+        callback.expect_queued(
+            notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(root.join("open").join("note.md")),
+        );
+        let unlocked = notify::Event::new(EventKind::Modify(ModifyKind::Metadata(
+            notify::event::MetadataKind::Permissions,
+        )))
+        .add_path(root.join("parent"));
+        (callback.send)(Ok(unlocked.clone()));
+        assert!(callback.backend_error.swap(false, Ordering::AcqRel));
+        assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
+        (callback.send)(Ok(unlocked));
+        assert!(!callback.backend_error.load(Ordering::Acquire));
+        assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn errors_without_a_path_or_at_the_watch_limit_are_lost_watches() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        for error in [
+            notify::Error::generic("backend error"),
+            notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path(root.join("deep")),
+        ] {
+            let mut callback = Callback::new(root.path(), 1);
+            (callback.send)(Err(error));
+            assert!(callback.backend_error.load(Ordering::Acquire));
+            assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
+        }
     }
 }
 
@@ -1105,6 +1250,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_start_returns_on_time_while_the_watcher_thread_stays_stuck() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let started = Instant::now();
+        let result = NativeWatcher::start_thread(
+            Duration::from_millis(500),
+            move |_rx, tx, _state, _ready| {
+                while tx.try_send(ThreadMessage::Event).is_ok() {}
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            },
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let _ = release_tx.send(());
+        assert!(
+            matches!(
+                result,
+                Err(FilesError::WatcherUnavailable {
+                    reason: "native watcher startup timed out"
+                })
+            ),
+            "a stuck start must fail with its timeout"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the start must not wait for the stuck watcher thread: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn startup_timeout_detaches_the_worker_instead_of_blocking_on_it() {
         // The sender is deliberately leaked (never sent, never dropped) to
         // simulate a worker thread stuck inside a native OS call that never
@@ -1146,5 +1320,57 @@ mod tests {
             elapsed < Duration::from_millis(400),
             "the startup deadline must not block on the slow worker thread: {elapsed:?}"
         );
+    }
+
+    fn start_counting(
+        root: PathBuf,
+        timed_read: Option<Duration>,
+    ) -> (
+        impl std::future::Future<Output = Result<NativeWatcher, FilesError>>,
+        mpsc::Receiver<()>,
+    ) {
+        let (reads_tx, reads_rx) = mpsc::channel();
+        let reads_tx = std::sync::Mutex::new(reads_tx);
+        let dirty: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = reads_tx.lock().map(|tx| tx.send(()));
+        });
+        let started =
+            NativeWatcher::start_thread(WATCH_STARTUP_DEADLINE, move |rx, tx, state, ready| {
+                watcher_thread(root, dirty, rx, tx, state, ready, timed_read);
+            });
+        (started, reads_rx)
+    }
+
+    #[tokio::test]
+    async fn a_folder_other_computers_write_is_read_again_with_no_event() {
+        let root = dohc_test_scratch::ScratchDir::new().unwrap();
+        let (started, reads) =
+            start_counting(root.path().to_owned(), Some(Duration::from_millis(50)));
+        let mut watcher = started.await.unwrap();
+        while watcher.timed_read_count() < 3 {
+            reads
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the folder is read again on the timer");
+        }
+        watcher.stop().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_folder_only_this_computer_writes_is_never_read_on_a_timer() {
+        let root = dohc_test_scratch::ScratchDir::new().unwrap();
+        assert_eq!(timed_read_interval(root.path()), None);
+        let (started, reads) = start_counting(root.path().to_owned(), None);
+        let mut watcher = started.await.unwrap();
+        std::fs::write(root.path().join("notes.md"), b"notes").unwrap();
+        reads
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the change is read");
+        let quiet_until = Instant::now() + WATCH_ROOT_HEALTH_POLL_INTERVAL * 2;
+        while reads
+            .recv_timeout(quiet_until.saturating_duration_since(Instant::now()))
+            .is_ok()
+        {}
+        watcher.stop().unwrap();
+        assert_eq!(watcher.timed_read_count(), 0);
     }
 }

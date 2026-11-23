@@ -63,7 +63,7 @@ it.skipIf(engine.missing)(
             finish,
           ),
         ).rejects.toThrow(
-          "dohc cannot use \"sources/note.md\" for this change. dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
+          "dohc cannot use \"sources/note.md\" for this change. dohc cannot read this file's Markdown. Common causes are nested lists in a synced workspace or deeply nested quotes. Your outside edit is still in the file on disk. Copy it first, then restore the file's earlier contents. If dohc still cannot read the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
         );
         expect(verify).not.toHaveBeenCalled();
         expect(await readFile(join(root, "sources/note.md"), "utf8")).toBe(unsupported);

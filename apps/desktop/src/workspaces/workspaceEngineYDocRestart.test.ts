@@ -21,6 +21,7 @@ import {
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   YdocReleasedWithSettleFailureError,
+  YdocUpdateNotRecordedError,
   type EngineTransport,
   type JsonValue,
   type Request,
@@ -316,14 +317,14 @@ it("refuses deleting an owned page, or a folder that holds one, before anything 
   await expect(capture.settleAndCloseLiveSessionsForPath("notes")).rejects.toMatchObject({
     name: "LiveFolderError",
     message: [
-      `dohc can't delete "notes" while a page in it has live editing on`,
+      `dohc cannot delete "notes" while a page in it has live editing on`,
       "In Live documents, stop live editing for every page in this folder, then delete the folder again.",
     ].join(String.fromCharCode(10)),
   });
   await expect(capture.settleAndCloseLiveSessionsForPath("notes/page.md")).rejects.toMatchObject({
     name: "LivePageOwnedError",
     message: [
-      `dohc can't delete "notes/page.md" while it has live editing on`,
+      `dohc cannot delete "notes/page.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then delete it again.",
     ].join(String.fromCharCode(10)),
   });
@@ -359,14 +360,14 @@ it("refuses a move that would replace an owned page or a folder that holds one, 
   expect(await replace("notes/target.md")).toMatchObject({
     name: "LivePageOwnedError",
     message: [
-      `dohc can't replace "notes/target.md" while it has live editing on`,
+      `dohc cannot replace "notes/target.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then try again.",
     ].join(String.fromCharCode(10)),
   });
   expect(await replace("box")).toMatchObject({
     name: "LiveFolderError",
     message: [
-      `dohc can't replace "box" while a page in it has live editing on`,
+      `dohc cannot replace "box" while a page in it has live editing on`,
       "In Live documents, stop live editing for every page in this folder, then try again.",
     ].join(String.fromCharCode(10)),
   });
@@ -1394,6 +1395,7 @@ async function daemonDeathCapture(
       | "commit-then-internal"
     >;
     applyRefusals: unknown[];
+    dropWhenUnrecorded: Array<boolean | undefined>;
     diskMarkdown: string;
     settled: string[];
     seedRequests: boolean[];
@@ -1428,6 +1430,7 @@ async function daemonDeathCapture(
       | "commit-then-internal"
     >,
     applyRefusals: [] as unknown[],
+    dropWhenUnrecorded: [] as Array<boolean | undefined>,
     diskMarkdown: "",
     settled: [] as string[],
     seedRequests: [] as boolean[],
@@ -1555,12 +1558,20 @@ async function daemonDeathCapture(
         Y.applyUpdate(doc, update);
       },
       async applyLocalUpdate(update, applyOptions) {
-        if (!state.daemonAlive) throw transportDeath();
+        const key = applyOptions?.idempotencyKey;
+        const uncertain = (): void => {
+          if (key !== undefined) options.onLocalUpdateUncertain?.(key);
+        };
+        if (!state.daemonAlive) {
+          uncertain();
+          throw transportDeath();
+        }
+        state.dropWhenUnrecorded.push(applyOptions?.dropWhenUnrecorded);
         if (state.applyRefusals.length > 0) throw state.applyRefusals.shift();
         const fault = state.applyFaults.shift();
+        if (fault !== undefined) uncertain();
         if (fault === "drop") throw transportDeath();
         if (state.refuseApply) throw new Error("record-update-refused");
-        const key = applyOptions?.idempotencyKey;
         const bytes = Buffer.from(update).toString("base64");
         if (key !== undefined && keyLedger.has(key)) {
           if (keyLedger.get(key) !== bytes) {
@@ -2003,6 +2014,28 @@ it("says a keyed write may have been recorded when its retry's answer is lost wi
   state.daemonAlive = true;
   expect((await session.settleNow())?.content).toBe("KEYED");
   expect(state.journalKeys).toEqual(["claim/1/0"]);
+  expect(state.dropWhenUnrecorded[0]).toBe(true);
+  expect(state.dropWhenUnrecorded.slice(1)).not.toContain(true);
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("says a keyed write the engine recorded none of was not recorded, and never replays it", async () => {
+  const { capture, session, state } = await keyedFaultCapture("dohc-ydoc-keyed-busy-");
+  state.applyRefusals.push(new YdocUpdateNotRecordedError());
+  await expect(
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("did not record this write to note.md, and nothing of it was kept");
+  expect((await session.settleNow())?.content).toBe("");
+
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+    idempotencyKey: "claim/1/1",
+  });
+  expect((await session.settleNow())?.content).toBe("KEYED");
+  expect(state.journalKeys).toEqual(["claim/1/1"]);
+  expect(state.dropWhenUnrecorded).toEqual([true, true]);
   await session.close({ settle: false });
   await capture.stop();
 });

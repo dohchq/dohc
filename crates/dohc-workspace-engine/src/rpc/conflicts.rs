@@ -375,7 +375,11 @@ fn parse_resolution(raw: &str) -> Result<ConflictResolution, WireError> {
 /// The conflict listing shares the withholding, not the trigger: it carries
 /// bodies in band up to `CONFLICT_ROW_HARD_CAP_BYTES` per row, and degrades
 /// only a row past that (`conflicts_list`).
-fn resolve_answer_json(result: &ResolveTextConflictResult, withhold_all: bool) -> Value {
+fn resolve_answer_json(
+    result: &ResolveTextConflictResult,
+    placed: bool,
+    withhold_all: bool,
+) -> Value {
     let body = if withhold_all {
         TextBody::Withheld
     } else {
@@ -390,6 +394,7 @@ fn resolve_answer_json(result: &ResolveTextConflictResult, withhold_all: bool) -
     };
     json!({
         "conflict": conflict_json(&result.conflict, body),
+        "placed": placed,
         "write": result.write.as_ref().map(|write| json!({
             "object": file_object_json(&write.object),
             "snapshot": snapshot_json(&write.snapshot, body),
@@ -816,7 +821,7 @@ impl EngineService {
             }
         };
         let scoped_leases = self.leases.scoped(&open.root);
-        let result = open
+        let (result, placed) = open
             .actor
             .conflict_resolve_indexed(
                 ResolveTextConflict {
@@ -836,13 +841,21 @@ impl EngineService {
                 },
                 scoped_leases,
                 open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
             .await
             .map_err(map_runtime)?;
+        if let Some(write) = result.write.as_ref() {
+            crate::events::emit_automation_claimed(
+                &self.events,
+                &open.workspace_id,
+                &write.automation_claims,
+            );
+        }
         self.collections_changed(ctx, &open).await;
-        let mut answer = resolve_answer_json(&result, false);
+        let mut answer = resolve_answer_json(&result, placed, false);
         // One frame carries the whole answer, and this one reports a mutation
         // that already committed: an over-frame answer loses the caller's
         // acknowledgement for work the workspace kept. Each body is withheld
@@ -861,7 +874,7 @@ impl EngineService {
         // is not an option: the resolution has committed, and a refusal would
         // report a mutation that happened as one that did not.
         if response_encoded_bytes(id, &answer) > RESPONSE_FRAME_BYTES {
-            answer = resolve_answer_json(&result, true);
+            answer = resolve_answer_json(&result, placed, true);
         }
         Ok(answer)
     }

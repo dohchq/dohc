@@ -7,6 +7,7 @@ import { useTheme, type Theme } from "../theme";
 import { decisionWord } from "./decisionAnswers";
 import type { Decision, Message } from "./types";
 import type { AnswerActions } from "./useOutbox";
+import { symbolFallback } from "../symbolFallback";
 
 // Under a message that asks a question or a poll: whether it's answered, a poll's choices in its author's own words,
 // and Answer on a question without choices. A choice is the answer, sent at once; Answer starts a reply that answers
@@ -30,7 +31,12 @@ export function DecisionCard({
   return (
     <View style={styles.card}>
       <View style={styles.status} accessible accessibilityLabel={status.label}>
-        <SymbolView name={status.symbol} size={15} tintColor={status.color} fallback={null} />
+        <SymbolView
+          name={status.symbol}
+          size={15}
+          tintColor={status.color}
+          fallback={symbolFallback(status.symbol, 15, status.color)}
+        />
         <Text style={[styles.statusText, { color: status.color }]}>{status.label}</Text>
       </View>
       {options.length > 0 ? (
@@ -72,7 +78,7 @@ export function DecisionCard({
                     size={14}
                     weight="bold"
                     tintColor={theme.bg}
-                    fallback={null}
+                    fallback={symbolFallback("checkmark", 14, theme.bg)}
                   />
                 ) : null}
                 <Text

@@ -11,6 +11,7 @@ afterEach(cleanup);
 function pageEditor() {
   const editor: MarkdownEditorHandle = {
     focus: vi.fn(),
+    caret: vi.fn(() => null),
     getMarkdown: vi.fn(() => ""),
     replaceMarkdown: vi.fn(),
     insertTypedText: vi.fn(),

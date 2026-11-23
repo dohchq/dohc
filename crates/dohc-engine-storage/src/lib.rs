@@ -14,8 +14,9 @@
 //!   `quick_check`. A rejected store is left byte-unchanged.
 //! - **An actor's store serves before its pages are checked**
 //!   ([`EngineStore::open_serving_first`]). `quick_check` reads the whole
-//!   file, so it runs while the store serves. A store that fails it stops
-//!   serving and is refused at its next open.
+//!   file, so it runs while the store serves, after any pending migration has
+//!   committed. A store that fails it stops serving and is refused at its
+//!   next open.
 //! - **The v1-vs-v2 fence.** A database stamped with any schema version other
 //!   than `2` is rejected with [`StorageError::UnsupportedFingerprint`] — never
 //!   auto-migrated, never written over.
@@ -72,7 +73,7 @@ pub use blob::{
 };
 pub use checkpoint::{CheckpointWait, HeldReader, WalPressure};
 pub use diagnostics::{CorruptionKind, DiagnosticBundle, classify};
-pub use error::StorageError;
+pub use error::{SpaceShortfall, StorageError};
 pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
 #[cfg(all(
     feature = "fault-injection",
@@ -80,6 +81,7 @@ pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
     target_arch = "aarch64"
 ))]
 pub use flush::refuse_folder_flushes;
+pub use flush::{FileFlusher, Flushed};
 #[cfg(feature = "fault-injection")]
 pub use flush::{FlushEvent, FlushKind};
 pub use limits::{
@@ -90,9 +92,9 @@ pub use limits::{
 pub use materialize::{
     Displacement, DisplacementResolution, DisplacementSpec, DisplacementState, JobStatus,
     MaterializationJob, MaterializationJobSpec, MaterializationOperation, Preimage,
-    RetainedDisplacement, RetainedSummary, cancel_pending_jobs_for_path, enqueue_delete_job,
-    enqueue_job, pending_switch_jobs_in, record_completed_job, stamp_secret_capture_owned,
-    upsert_projection_job,
+    RetainedDisplacement, RetainedSummary, StagedDacl, cancel_pending_jobs_for_path,
+    enqueue_delete_job, enqueue_job, pending_switch_jobs_in, record_completed_job,
+    stamp_secret_capture_owned, upsert_projection_job,
 };
 pub use page_check::PagesDamaged;
 pub use recovery::{PreparedRecovery, RecoveryError, open_for_recovery};

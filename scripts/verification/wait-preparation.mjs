@@ -1,6 +1,7 @@
+import { appendFileSync } from "node:fs";
 import { setTimeout } from "node:timers/promises";
 import { resolve } from "node:path";
-import { cloudApi, QUEUED_STATUSES, WorkflowAllowanceError } from "./cloud-api.mjs";
+import { carriedOver, cloudApi, QUEUED_STATUSES, WorkflowAllowanceError } from "./cloud-api.mjs";
 
 export async function waitForPreparation(
   scope,
@@ -25,10 +26,25 @@ export async function waitForPreparation(
   }
   const startedAt = now(),
     deadline = startedAt + preparation.minutes * 60_000,
-    api = cloudApi({ env, request, pause, now, deadline });
-  const name = `${preparation.artifact}-${env.GITHUB_RUN_ATTEMPT}`;
-  let build,
+    api = cloudApi({ env, request, pause, now, deadline }),
+    attempt = Number(env.GITHUB_RUN_ATTEMPT);
+  const current = `${preparation.artifact}-${attempt}`;
+  let name = current,
+    build,
     checkAt = startedAt + 120_000;
+  const carriedArtifact = async () => {
+    for (let earlier = attempt - 1; earlier > 0; earlier--) {
+      const candidate = `${preparation.artifact}-${earlier}`;
+      const { artifacts } = await api.read(
+        `/artifacts?name=${encodeURIComponent(candidate)}&per_page=100`,
+      );
+      if (artifacts?.some((artifact) => artifact.name === candidate && !artifact.expired))
+        return candidate;
+    }
+    throw new Error(
+      `${preparation.job} passed in an earlier attempt, but no earlier ${preparation.artifact} artifact is available.`,
+    );
+  };
   const checkBuild = async () => {
     const { jobs } = await api.read(`/attempts/${env.GITHUB_RUN_ATTEMPT}/jobs?per_page=100`, {
       deadline: now() >= deadline ? now() + 10_000 : deadline,
@@ -41,9 +57,11 @@ export async function waitForPreparation(
     checkAt = now() + 120_000;
     if (build?.status === "completed" && build.conclusion !== "success")
       throw new Error(`${preparation.job} ended with ${build.conclusion}.`);
+    if (build && carriedOver(build) && name === current) name = await carriedArtifact();
   };
-  console.log(`Waiting for ${name}; dependency setup overlaps the shared build.`);
   try {
+    if (attempt > 1) await checkBuild();
+    console.log(`Waiting for ${name}; dependency setup overlaps the shared build.`);
     for (;;) {
       if (now() >= deadline) await checkBuild();
       const queued = build && QUEUED_STATUSES.includes(build.status);
@@ -151,8 +169,14 @@ export async function waitForPreparation(
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
-  waitForPreparation(process.argv[2]).catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
+  waitForPreparation(process.argv[2]).then(
+    ({ artifact }) => {
+      if (process.env.GITHUB_OUTPUT)
+        appendFileSync(process.env.GITHUB_OUTPUT, `name=${artifact.name}\n`);
+    },
+    (error) => {
+      console.error(error);
+      process.exitCode = 1;
+    },
+  );
 }

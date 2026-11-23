@@ -381,7 +381,7 @@ function AddPeople(props: {
     setText(member && rest === "" ? member : rest);
     setActive(0);
     setListShown(false);
-    setError(member ? `${member} is already a member.` : null);
+    setError(member ? `Already a member: ${member}.` : null);
     return member === null;
   }
 
@@ -459,7 +459,7 @@ function AddPeople(props: {
         return;
       }
       if (activeOption?.member) {
-        setError(`${activeOption.email} is already a member.`);
+        setError(`Already a member: ${activeOption.email}.`);
         return;
       }
       if (text.trim() !== "") {
@@ -592,8 +592,8 @@ function AddPeople(props: {
             {options.length === 0 ? (
               <li role="presentation" className={MENU_EMPTY}>
                 {text.trim() === ""
-                  ? "No suggestions yet. Enter a full email."
-                  : `No one matches "${text.trim()}". Enter their full email.`}
+                  ? "No suggestions yet. Enter an email address."
+                  : `No one matches "${text.trim()}". Enter their email address.`}
               </li>
             ) : (
               options.map((option, index) => (

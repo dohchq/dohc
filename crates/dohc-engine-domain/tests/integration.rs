@@ -42,6 +42,8 @@ mod identifier_bounds;
 mod merge_bases;
 #[path = "merge_conflicts.rs"]
 mod merge_conflicts;
+#[path = "merge_keeps_copies.rs"]
+mod merge_keeps_copies;
 #[path = "names.rs"]
 mod names;
 #[path = "secrets.rs"]

@@ -123,7 +123,7 @@ describe("an unreadable declarations ledger", () => {
     expect(deps.report).toHaveBeenCalledExactlyOnceWith("ws", {
       reason: "wake-runners-unreadable",
       message:
-        "Your phone cannot wake agents here until it can. dohc keeps trying. If this stays, restore or repair the file in Details.",
+        "Your phone cannot wake agents here until dohc can read this file. dohc keeps trying. If this stays, restore or repair the file in Details.",
       file: LEDGER,
     });
     workspaces = ["ws", "later"];

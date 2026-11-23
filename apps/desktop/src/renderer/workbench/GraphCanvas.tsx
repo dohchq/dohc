@@ -85,10 +85,13 @@ const LABEL_HEIGHT = 15;
 const CELL = 6;
 const FADE_MS = 140;
 
-function readPalette(surface: "bg" | "panel"): Palette {
-  const style = getComputedStyle(document.documentElement);
+// Reads the tokens where the canvas is, not at the document's root: the
+// website's demo sets them inside a shadow root.
+function readPalette(canvas: HTMLCanvasElement, surface: "bg" | "panel"): Palette {
+  const style = getComputedStyle(canvas);
   const token = (name: string) => style.getPropertyValue(`--dohc-${name}`).trim() || "#888";
-  const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  const themed = canvas.closest<HTMLElement>("[data-theme]") ?? document.documentElement;
+  const theme = themed.dataset.theme === "dark" ? "dark" : "light";
   return {
     bg: token(surface),
     ink: token("ink"),
@@ -209,7 +212,7 @@ export function createGraphRenderer(
   callbacks: Callbacks,
 ) {
   const ctx = canvas.getContext("2d");
-  let palette = readPalette(surface);
+  let palette = readPalette(canvas, surface);
   let model: Model = { nodes: [], links: [] };
   let active = -1;
   // Per node, an index into GROUP_HUES, or -1 when no group matches.
@@ -993,7 +996,7 @@ export function createGraphRenderer(
       wake();
     },
     retheme() {
-      palette = readPalette(surface);
+      palette = readPalette(canvas, surface);
       labelWidth.fill(0);
       const nextReduced = prefersReducedMotion();
       if (nextReduced !== reduced) send({ type: "reduced", reduced: nextReduced });
@@ -1070,10 +1073,13 @@ export function GraphCanvas(props: {
     viewObserver?.observe(canvas);
     document.addEventListener("visibilitychange", sync);
     const themeObserver = new MutationObserver(() => renderer.retheme());
-    themeObserver.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme", "data-system-reduced-motion"],
-    });
+    const themed = canvas.closest("[data-theme]") ?? document.documentElement;
+    for (const element of new Set([themed, document.documentElement])) {
+      themeObserver.observe(element, {
+        attributes: true,
+        attributeFilter: ["data-theme", "data-system-reduced-motion"],
+      });
+    }
     const motion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
     const retheme = () => renderer.retheme();
     motion?.addEventListener?.("change", retheme);

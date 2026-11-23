@@ -24,6 +24,7 @@ import {
   closeOwnedPackage,
   observeExit,
   benchmarkCancellation,
+  fileTextOrEmpty,
   verifyRestartInput,
 } from "./packaged-process.mjs";
 import { parseCpuTime, parseMacProcessSnapshot } from "./packaged-process-snapshot.mjs";
@@ -1122,6 +1123,15 @@ for (const selected of [true, false])
       /did not restore/,
     );
   });
+test("a file dohc is replacing reads as empty text, and other read failures still throw", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "dohc-saved-text-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "large.md");
+  assert.equal(await fileTextOrEmpty(path), "");
+  await writeFile(path, "xxxxx");
+  assert.equal(await fileTextOrEmpty(path), "xxxxx");
+  await assert.rejects(fileTextOrEmpty(dir), { code: "EISDIR" });
+});
 
 const fixture = (body) => `const readline=require('node:readline'); ${body}`;
 const protocol = `console.log(JSON.stringify({ready:true})); readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify({id:r.id,value:{ok:true}}));});`;

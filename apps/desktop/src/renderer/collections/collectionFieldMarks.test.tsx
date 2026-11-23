@@ -142,8 +142,8 @@ it("reads one dataset table's marks by the dataset's id and the table's name, ap
 });
 
 it("says what is true of the field: which automations set it", () => {
-  expect(automationFieldMarkLabel(["Stamp"])).toBe('"Stamp" sets this field');
+  expect(automationFieldMarkLabel(["Stamp"])).toBe('Set by "Stamp"');
   expect(automationFieldMarkLabel(["Stamp", "Tidy", "Bump"])).toBe(
-    '"Stamp", "Tidy", and "Bump" set this field',
+    'Set by "Stamp", "Tidy", and "Bump"',
   );
 });

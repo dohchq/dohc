@@ -76,18 +76,21 @@ import { projectArtifactSource } from "./editor/artifactSource";
 import { forgedSources } from "../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts";
 const LIVE_BODY = "# Live engine body\n";
 vi.mock("./editor/MarkdownEditor", () => ({
-  MarkdownEditor: forwardRef<{ focus: () => void; getMarkdown: () => string }>(
-    function MarkdownEditorStub(_props, ref) {
-      useImperativeHandle(ref, () => ({
-        focus: () => {},
-        getMarkdown: () => {
-          editorSerialize();
-          return LIVE_BODY;
-        },
-      }));
-      return <div data-testid="editor-stub" />;
-    },
-  ),
+  MarkdownEditor: forwardRef<{
+    focus: () => void;
+    caret: () => number | null;
+    getMarkdown: () => string;
+  }>(function MarkdownEditorStub(_props, ref) {
+    useImperativeHandle(ref, () => ({
+      focus: () => {},
+      caret: () => null,
+      getMarkdown: () => {
+        editorSerialize();
+        return LIVE_BODY;
+      },
+    }));
+    return <div data-testid="editor-stub" />;
+  }),
 }));
 
 vi.mock("./PropertiesPanel", () => ({

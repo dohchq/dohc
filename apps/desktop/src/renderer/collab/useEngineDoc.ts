@@ -101,6 +101,7 @@ export type UseEngineDoc = {
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: boolean;
   openRefusal?: string;
+  openRefusalDetail?: string;
   // The canonical drawing's image records conflict with authoritative
   // storage. Retrying cannot repair this state.
   artifactAssetsInvalid: boolean;
@@ -313,7 +314,9 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const notInVersion = outcome?.kind === "not-in-version";
   const documentUnavailable = outcome?.kind === "document-unavailable";
   const engineMayHoldDocument =
-    outcome?.kind === "engine-may-hold-document" || outcome?.kind === "capture-held";
+    outcome?.kind === "engine-may-hold-document" ||
+    outcome?.kind === "capture-held" ||
+    outcome?.kind === "engine-refused-open";
   const artifactAssetsInvalid = outcome?.kind === "artifact-assets-invalid";
   const artifactAssets = outcome?.kind === "bound" ? outcome.artifactAssets : [];
   const readArtifactAsset =
@@ -392,6 +395,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     sharedWaiting: outcome?.kind === "shared-waiting" ? outcome.waiting : null,
     engineMayHoldDocument,
     openRefusal: outcome?.kind === "capture-held" ? captureHeldLiveMessage(input.path) : undefined,
+    openRefusalDetail: outcome?.kind === "engine-refused-open" ? outcome.detail : undefined,
     artifactAssetsInvalid,
     deletedWhileEditing,
     goneCause,

@@ -105,7 +105,7 @@ describe("deleting the server account from Settings", () => {
     [true, DELETED],
     [
       false,
-      `${server} blocked me@dohc.test and will finish deleting its data. Workspaces on this computer stay.`,
+      `The server ${server} blocked me@dohc.test and will finish deleting its data. Workspaces on this computer stay.`,
     ],
   ])(
     "reports the answer after its disconnect removed the account row (finished: %s)",
@@ -386,7 +386,7 @@ describe("a workspace switch while a delete is pending", () => {
     [true, DELETED],
     [
       false,
-      `${server} blocked me@dohc.test and will finish deleting its data. Workspaces on this computer stay.`,
+      `The server ${server} blocked me@dohc.test and will finish deleting its data. Workspaces on this computer stay.`,
     ],
   ])("reports the answer in the workspace switched to (finished: %s)", async (finished, notice) => {
     const answer = deferred<DeleteResult>();

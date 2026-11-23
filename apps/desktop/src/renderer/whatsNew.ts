@@ -43,15 +43,15 @@ export const WHATS_NEW: readonly WhatsNewRelease[] = [
       {
         icon: ContactRound,
         title: "Group members",
-        body: "Add and manage a group's members in one dialog.",
+        body: "Add and manage a Group's members in one dialog.",
       },
     ],
     fixes: [
       "Unread chats now look the same on every row.",
       "A name inside a file link no longer counts as a mention.",
-      "Go to says no file matches, instead of no matching commands.",
+      "Go to says when no files match instead of no matching commands.",
       "An app that sets no colors now reads correctly in the dark theme.",
-      "The default accent color follows a switch of the system theme.",
+      "The default accent color updates when the system theme changes.",
       "Shared-file notices now say why they appeared.",
     ],
   },

@@ -158,7 +158,7 @@ describe("History timeline rows", () => {
     expect(calls.open).toHaveBeenCalledWith("m-1", "notes/plan.md");
     expect(rows[1]!.textContent).toContain("Created version Draft");
     expect(rows[1]!.querySelector("button")).toBeNull();
-    const collection = screen.getByRole("button", { name: "Open Collection history for Budget" });
+    const collection = screen.getByRole("button", { name: "Open Collection History for Budget" });
     expect(collection.textContent).toContain("Automation Stamp the date");
     fireEvent.click(collection);
     expect(calls.openHistory).toHaveBeenCalledOnce();
@@ -211,7 +211,7 @@ describe("History timeline rows", () => {
     await user.tab();
     await user.tab();
     expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "Open Collection history for Budget" }),
+      screen.getByRole("button", { name: "Open Collection History for Budget" }),
     );
     await user.keyboard("{Enter}");
     expect(calls.openHistory).toHaveBeenCalledOnce();
@@ -236,7 +236,7 @@ describe("History timeline rows", () => {
     ).toBe("addRow");
     // The title already names the Collection, so the line does not again.
     expect(unlabelled!.querySelector('[data-testid="history-collection-name"]')).toBeNull();
-    const button = screen.getByRole("button", { name: "Open Collection history for Budget" });
+    const button = screen.getByRole("button", { name: "Open Collection History for Budget" });
     const description = document.getElementById(button.getAttribute("aria-describedby")!);
     expect(description?.hidden).toBe(true);
     expect(description?.textContent).toBe(
@@ -344,7 +344,7 @@ describe("History timeline rows", () => {
     expect(guests.querySelector("time")).toBeNull();
     expect(guests.textContent).not.toContain("Date unknown");
     expect(guests.firstElementChild!.className.split(" ")).toContain("h-7");
-    expect(screen.queryByRole("button", { name: "Open Collection history for Guests" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Collection History for Guests" })).toBeNull();
   });
 
   it("keeps older dated days above the Date unknown group as earlier pages load", () => {
@@ -682,7 +682,7 @@ describe("History timeline sources", () => {
   it("shows a Collection that did not load as a warning row", () => {
     view({ entries: [file("m-1")], unavailableSources: [{ datasetId: GUESTS }] });
     const words = screen.getByTestId("history-sources-unavailable-words");
-    expect(words.textContent).toBe("dohc could not load Guests");
+    expect(words.textContent).toBe("dohc could not load Guests.");
     expect(words.className).not.toContain("truncate");
     const row = words.parentElement!;
     expect(row.className.split(" ")).toContain("text-ink");
@@ -694,7 +694,7 @@ describe("History timeline sources", () => {
     const retry = screen.getByRole("button", { name: "Try again" });
     expect(retry.dataset.testid).toBe("history-sources-retry");
     expect(retry.className.split(" ")).toEqual(
-      expect.arrayContaining(["border", "border-line", "h-6"]),
+      expect.arrayContaining(["border", "border-line", "min-h-6"]),
     );
     expect(screen.getByTestId("history-sources-unavailable").textContent).toBe(
       "dohc could not load changes from Guests.",
@@ -746,7 +746,7 @@ describe("History timeline sources", () => {
     expect(screen.queryByText("No changes yet.")).toBeNull();
     const retry = within(state).getByRole("button", { name: "Try again" });
     expect(retry.dataset.testid).toBe("history-sources-retry");
-    expect(retry.className.split(" ")).toContain("h-8");
+    expect(retry.className.split(" ")).toContain("min-h-8");
     fireEvent.click(retry);
     expect(calls.retry).toHaveBeenCalledOnce();
   });
@@ -787,5 +787,227 @@ describe("History timeline sources", () => {
     expect(line.parentElement!.textContent).toBe("No changes yet.");
     expect(line.previousElementSibling!.getAttribute("aria-hidden")).toBe("true");
     expect(screen.queryByTestId("history-sources-notice")).toBeNull();
+  });
+
+  it("groups consecutive multi-file edits from one agent run and offers Undo run when expanded", () => {
+    const onUndoAgentRun = vi.fn();
+    const runAuthor = (agentRunId: string) => ({
+      kind: "agent" as const,
+      agentId: "rover",
+      onBehalfOf: "user-1",
+      agentRunId,
+    });
+    view({
+      onUndoAgentRun,
+      entries: [
+        file("m-4", {
+          path: "notes/checklist.md",
+          recordedAtMs: DAY,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+        file("m-3", {
+          path: "notes/budget.md",
+          recordedAtMs: DAY - 60_000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+        file("m-2", {
+          path: "notes/plan.md",
+          recordedAtMs: DAY - 120_000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+        file("m-1", {
+          path: "notes/other.md",
+          recordedAtMs: DAY - 180_000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-0")],
+        }),
+      ],
+    });
+
+    const toggle = screen.getByTestId("engine-moment-group-toggle");
+    expect(toggle.textContent).toContain("Rover");
+    expect(toggle.textContent).toContain("Agent run");
+    expect(toggle.textContent).toContain("3 files");
+    expect(screen.queryByTestId("engine-moment-undo-run")).toBeNull();
+
+    fireEvent.click(toggle);
+    const undo = screen.getByTestId("engine-moment-undo-run");
+    expect(undo.textContent).toContain("Undo run…");
+    fireEvent.click(undo);
+    expect(onUndoAgentRun).toHaveBeenCalledWith("run-1", "Rover");
+  });
+
+  it("hides Undo run when onUndoAgentRun is omitted and labels correlated undo passes", () => {
+    view({
+      entries: [
+        file("r-2", {
+          path: "notes/plan.md",
+          origin: "restore",
+          correlationId: "restore-agent-run-batch-1",
+          summary: "Restored notes/plan.md",
+          recordedAtMs: DAY,
+        }),
+        file("r-1", {
+          path: "notes/checklist.md",
+          origin: "restore",
+          operation: "delete",
+          correlationId: "restore-agent-run-batch-1",
+          summary: "Restored notes/checklist.md",
+          recordedAtMs: DAY - 1000,
+        }),
+      ],
+    });
+    const toggle = screen.getByTestId("engine-moment-group-toggle");
+    expect(toggle.textContent).toContain("Undid agent run");
+    expect(toggle.textContent).toContain("2 files");
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId("engine-moment-undo-run")).toBeNull();
+  });
+
+  it("keeps distinct agent runs separate when a later run edits the same file", () => {
+    const onUndoAgentRun = vi.fn();
+    const runAuthor = (agentRunId: string) => ({
+      kind: "agent" as const,
+      agentId: "rover",
+      onBehalfOf: "user-1",
+      agentRunId,
+    });
+    view({
+      onUndoAgentRun,
+      entries: [
+        file("m-3", {
+          path: "notes/a.md",
+          recordedAtMs: DAY,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-2")],
+        }),
+        file("m-2", {
+          path: "notes/a.md",
+          recordedAtMs: DAY - 60_000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+        file("m-1", {
+          path: "notes/b.md",
+          recordedAtMs: DAY - 120_000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+      ],
+    });
+
+    expect(screen.queryByTestId("engine-moment-run")).toBeNull();
+    const toggle = screen.getByTestId("engine-moment-group-toggle");
+    expect(toggle.textContent).toContain("Rover");
+    expect(toggle.textContent).toContain("Agent run");
+    expect(toggle.textContent).toContain("2 files");
+
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByTestId("engine-moment-undo-run"));
+    expect(onUndoAgentRun).toHaveBeenCalledWith("run-1", "Rover");
+  });
+
+  it("shows Agent run and keeps Undo run on correlated multi-file captures from one run, and separates distinct runs sharing a correlationId", () => {
+    const onUndoAgentRun = vi.fn();
+    const runAuthor = (agentRunId: string) => ({
+      kind: "agent" as const,
+      agentId: "rover",
+      onBehalfOf: "user-1",
+      agentRunId,
+    });
+    view({
+      onUndoAgentRun,
+      entries: [
+        file("m-3", {
+          path: "notes/c.md",
+          correlationId: "corr-shared",
+          recordedAtMs: DAY,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-2")],
+        }),
+        file("m-2", {
+          path: "notes/b.md",
+          correlationId: "corr-shared",
+          recordedAtMs: DAY - 1000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+        file("m-1", {
+          path: "notes/a.md",
+          correlationId: "corr-shared",
+          recordedAtMs: DAY - 2000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+      ],
+    });
+
+    const toggle = screen.getByTestId("engine-moment-group-toggle");
+    expect(toggle.textContent).toContain("Agent run");
+    expect(toggle.textContent).toContain("2 files");
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByTestId("engine-moment-undo-run"));
+    expect(onUndoAgentRun).toHaveBeenCalledWith("run-1", "Rover");
+  });
+
+  it("labels a single-file agent-run undo as Undid agent run", () => {
+    view({
+      entries: [
+        file("r-1", {
+          path: "notes/plan.md",
+          origin: "restore",
+          correlationId: "restore-agent-run-single",
+          summary: "Restored notes/plan.md",
+          recordedAtMs: DAY,
+        }),
+      ],
+    });
+    expect(screen.getByText("Undid agent run")).toBeTruthy();
+  });
+
+  it("folds a 3-file agent run into one Agent run group even when files 2 and 3 share a correlationId", () => {
+    const onUndoAgentRun = vi.fn();
+    const runAuthor = (agentRunId: string) => ({
+      kind: "agent" as const,
+      agentId: "rover",
+      onBehalfOf: "user-1",
+      agentRunId,
+    });
+    view({
+      onUndoAgentRun,
+      entries: [
+        file("m-3", {
+          path: "notes/c.md",
+          correlationId: "corr-a",
+          recordedAtMs: DAY,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-mixed")],
+        }),
+        file("m-2", {
+          path: "notes/b.md",
+          correlationId: "corr-b",
+          recordedAtMs: DAY - 1000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-mixed")],
+        }),
+        file("m-1", {
+          path: "notes/a.md",
+          correlationId: "corr-b",
+          recordedAtMs: DAY - 2000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-mixed")],
+        }),
+      ],
+    });
+    const toggles = screen.getAllByTestId("engine-moment-group-toggle");
+    expect(toggles).toHaveLength(1);
+    expect(toggles[0]!.textContent).toContain("Agent run");
+    expect(toggles[0]!.textContent).toContain("3 files");
+    fireEvent.click(toggles[0]!);
+    fireEvent.click(screen.getByTestId("engine-moment-undo-run"));
+    expect(onUndoAgentRun).toHaveBeenCalledWith("run-mixed", "Rover");
   });
 });

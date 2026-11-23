@@ -20,7 +20,7 @@ export function RestrictedModeIndicator(props: { asking: boolean; onTrust: () =>
       title={RESTRICTED_WORKSPACE_WORDS}
       disabled={props.asking}
       onClick={props.onTrust}
-      className="titlebar-no-drag flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait"
+      className="titlebar-no-drag flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait"
     >
       <ShieldAlert size={12} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />
       <span className="whitespace-nowrap max-[1100px]:sr-only">Restricted Mode</span>

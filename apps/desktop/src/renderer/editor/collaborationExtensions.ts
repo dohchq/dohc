@@ -22,7 +22,7 @@ export type CollaborationExtensionsLoad =
 export function collaborationLoadError(error: unknown): Error {
   return error instanceof Error
     ? error
-    : new Error("Collaboration extensions failed to load", { cause: error });
+    : new Error("dohc could not load the live editor.", { cause: error });
 }
 
 let collaborationExtensionsPromise: Promise<CollaborationExtensions> | null = null;

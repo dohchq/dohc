@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, lstat, open as openFile, readFile, writeFile } from "node:fs/promises";
+import { access, lstat, open as openFile, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -8,6 +8,7 @@ import type { OwnerYDocOutboxEntry, OwnerYDocOutboxRecovery } from "@dohc/worksp
 import {
   existsInWorkspace,
   keepOnThisComputer,
+  listKeptRecoveryPackages,
   liveRecoveryPackage,
   parseLiveRecoveryPackage,
   saveLiveRecoveryCopy,
@@ -461,7 +462,7 @@ const body = (doc: Y.Doc) => doc.getXmlFragment("body");
 const paragraph = (doc: Y.Doc) => (body(doc).get(1) as Y.XmlElement).get(0) as Y.XmlText;
 const task = (doc: Y.Doc) => (body(doc).get(3) as Y.XmlElement).get(0) as Y.XmlElement;
 const LISTED =
-  "***\n\n## Kept edits that aren’t in this copy\n\nThese edits were kept on the computer that made them. A change saved at the same moment removed or replaced the place they were made, so the note above doesn’t have them.\n\n";
+  "***\n\n## Kept edits that aren't in this copy\n\nThese edits were kept on the computer that made them. A change saved at the same moment removed or replaced the place they were made, so the note above doesn't have them.\n\n";
 
 type Edit = (doc: Y.Doc) => void;
 
@@ -478,21 +479,21 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
     (doc: Y.Doc) => doc.getMap("frontmatter").set("status", "mine"),
     (doc: Y.Doc) => doc.getMap("frontmatter").set("status", "theirs"),
     "---\nstatus: theirs\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
-    "Set status to “mine”. The note has “theirs”.\n",
+    'Set status to "mine". The note has "theirs".\n',
   ],
   [
     "a whole number too large for a float, in a field someone else set at the same moment",
     (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740993n),
     (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740995n),
     "---\ncount: 9007199254740995\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
-    "Set count to “9007199254740993”. The note has “9007199254740995”.\n",
+    'Set count to "9007199254740993". The note has "9007199254740995".\n',
   ],
   [
     "a to-do someone else set at the same moment",
     (doc: Y.Doc) => task(doc).setAttribute("checked", true as never),
     (doc: Y.Doc) => task(doc).setAttribute("checked", false as never),
     "# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
-    "Ticked “tick me”. The note has it unticked.\n",
+    'Ticked "tick me". The note has it unticked.\n',
   ],
   [
     "the words a later kept edit left, of text typed into a paragraph someone else deleted",
@@ -530,7 +531,7 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
     },
     (doc: Y.Doc) => body(doc).delete(3, 1),
     "# Plan\n\nStart here.\n\nKeep this.\n",
-    "1 more kept edit, such as an image, can’t be shown as text.\n",
+    "1 more kept edit, such as an image, can't be shown as text.\n",
   ],
 ])("lists %s at the end of the readable copy", async (_case, mine, theirs, note, listed) => {
   const { root, writes } = await workspace();
@@ -657,4 +658,41 @@ it("checks the note's path before looking on disk or saving its package", async 
   ).rejects.toThrow("Invalid file path");
   expect(looked).toEqual([]);
   await expect(access(join(root, "notes"))).rejects.toThrow();
+});
+
+it("lists a package saved without a readable copy for as long as it is there, and no package with one", async () => {
+  const { root, writes } = await workspace();
+  const failing: DocumentProjection = {
+    run: async () => {
+      throw new Error("dohc could not prepare the document.");
+    },
+  };
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await saveLiveRecoveryCopy(liveRecoveryPackage(queue(2).recovery, source), writes, failing);
+  } finally {
+    vi.restoreAllMocks();
+  }
+  await saveLiveRecoveryCopy(
+    liveRecoveryPackage(queue(2).recovery, { ...source, path: "todo.md" }),
+    writes,
+    directDocumentProjection,
+  );
+  const kept = `${KEPT}/notes/plan (recovered).dohc-recovery.json`;
+  expect(await listKeptRecoveryPackages({ rootPath: root })).toEqual([
+    { path: "notes/plan.md", packagePath: kept },
+  ]);
+  await writeFile(join(root, KEPT, "broken (recovered).dohc-recovery.json"), "{");
+  expect(await listKeptRecoveryPackages({ rootPath: root })).toEqual([
+    { path: null, packagePath: `${KEPT}/broken (recovered).dohc-recovery.json` },
+    { path: "notes/plan.md", packagePath: kept },
+  ]);
+  await rm(join(root, kept));
+  await rm(join(root, KEPT, "broken (recovered).dohc-recovery.json"));
+  expect(await listKeptRecoveryPackages({ rootPath: root })).toEqual([]);
+});
+
+it("lists nothing when no package was ever kept", async () => {
+  const { root } = await workspace();
+  expect(await listKeptRecoveryPackages({ rootPath: root })).toEqual([]);
 });

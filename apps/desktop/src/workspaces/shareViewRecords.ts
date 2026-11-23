@@ -215,6 +215,23 @@ export function engineGrantedSelector(
   };
 }
 
+export function sharePinAtStatedLevel(pinned: unknown, stated: unknown): ShareViewSelector | null {
+  const pin = recordedShareSelector(pinned);
+  const statement = recordedShareSelector(stated);
+  if (
+    pin === null ||
+    statement === null ||
+    pin.access === statement.access ||
+    pin.versionId !== statement.versionId ||
+    pin.wholeWorkspace !== statement.wholeWorkspace ||
+    pin.paths.length !== statement.paths.length ||
+    pin.paths.some((path, index) => path !== statement.paths[index])
+  ) {
+    return null;
+  }
+  return { ...pin, access: statement.access };
+}
+
 export function shareViewIdentitySelector(input: {
   shareView:
     | {

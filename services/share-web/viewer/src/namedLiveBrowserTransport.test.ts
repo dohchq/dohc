@@ -409,23 +409,24 @@ describe("named browser transport", () => {
     await waitState(f.value, (state) => state.pendingUpdates === 0);
     expect(f.value.state().lastApplied).toMatchObject({ journalCursor: 1, localYDocSequence: 1 });
   });
-  it("blocks mutations before sync and after disconnect while retaining the draft for a fresh-ticket retry", async () => {
+  it("takes typing while it reconnects by itself, and sends it after the retried draft on a fresh ticket", async () => {
     const f = await live();
     edit(f.value, " draft");
     const first = await f.peer.submitted();
     Y.applyUpdate(f.doc, first.bytes);
     f.socket.close();
-    const before = f.value.body.toString(),
-      mutate = vi.fn();
-    expect(f.value.edit(mutate)).toBe(false);
-    expect(mutate).not.toHaveBeenCalled();
+    expect(f.value.state()).toMatchObject({
+      status: "disconnected",
+      reason: "transport-closed",
+      pendingUpdates: 1,
+    });
+    expect(edit(f.value, " offline")).toBe(true);
     const connecting = f.value.reconnect(),
       socket = await f.socketAt(1),
       peer = host(socket, f.value, 2);
-    expect(f.value.edit(mutate)).toBe(false);
+    expect(edit(f.value, " opening")).toBe(true);
     socket.open();
     await connecting;
-    expect(f.value.edit(mutate)).toBe(false);
     await peer.greet();
     await peer.initial(f.doc, binding, 1);
     const retry = await peer.submitted();
@@ -433,12 +434,45 @@ describe("named browser transport", () => {
     expect(retry.begin).toMatchObject(first.begin);
     expect(f.protocols[1]).not.toEqual(f.protocols[0]);
     expect(f.urls[1]).not.toEqual(f.urls[0]);
-    expect(f.value.body.toString()).toBe(before);
-    expect(f.value.state().pendingUpdates).toBe(1);
+    expect(f.value.state().pendingUpdates).toBe(2);
     peer.ack(retry, 1);
+    const later = await peer.submitted(2);
+    Y.applyUpdate(f.doc, later.bytes);
+    peer.ack(later);
     await waitState(f.value, (state) => state.pendingUpdates === 0);
-    expect(f.value.state().lastApplied?.applicationReplayed).toBe(true);
+    expect(getDohcYDocBodyFragment(f.doc).toString()).toBe(f.value.body.toString());
+    expect(f.value.body.toString()).toContain("base draft offline opening");
     expect(f.socket.listenerCount).toBe(0);
+  });
+  it("takes typing while it reconnects after it was live, even when its first open failed", async () => {
+    const f = fixture(),
+      failing = f.value.reconnect();
+    (await f.socketAt(0)).close();
+    await failing;
+    expect(f.value.state()).toMatchObject({ status: "disconnected", typingStopped: true });
+    const connecting = f.value.reconnect(),
+      socket = await f.socketAt(1),
+      peer = host(socket, f.value);
+    socket.open();
+    await connecting;
+    await peer.greet();
+    await peer.initial(document("base"));
+    socket.close();
+    expect(f.value.state()).toMatchObject({ status: "disconnected", typingStopped: false });
+    expect(edit(f.value, " offline")).toBe(true);
+    expect(f.value.body.toString()).toContain("base offline");
+  });
+  it("takes no typing once it stops reconnecting by itself, and keeps the waiting draft", async () => {
+    const f = await live();
+    edit(f.value, " draft");
+    await f.peer.submitted();
+    f.value.disconnect();
+    const mutate = vi.fn();
+    expect(f.value.edit(mutate)).toBe(false);
+    expect(mutate).not.toHaveBeenCalled();
+    expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "paused" });
+    expect(draftNeedsReview(f.value.state())).toBe(true);
+    expect(f.value.unsentText()).toMatchObject({ text: " draft" });
   });
   it.each(["account", "document"])(
     "retires a pending HTTP attempt on %s switch, including an abort-ignoring fetch",

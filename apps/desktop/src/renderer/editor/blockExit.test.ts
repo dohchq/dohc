@@ -437,3 +437,35 @@ describe("blockExit locked defaults", () => {
     expect(topLevelTypes(editor)).toEqual(["mathBlock", "paragraph"]);
   });
 });
+
+describe("blockExit click below last non-paragraph block", () => {
+  it("appends and focuses a trailing paragraph when clicking below a doc-terminal code block or folded callout", () => {
+    const editor = makeEditor("> [!note]- Folded\n> hidden");
+    const lastDom = editor.view.nodeDOM(0) as HTMLElement;
+    vi.spyOn(lastDom, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      bottom: 80,
+      left: 0,
+      right: 400,
+      width: 400,
+      height: 80,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+
+    // Click at y=50 (not below) does not mutate.
+    editor.view.dom.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, clientY: 50 }),
+    );
+    expect(topLevelTypes(editor)).toEqual(["callout"]);
+
+    // Click strictly below bottom (y=120) appends a trailing paragraph.
+    editor.view.dom.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, clientY: 120 }),
+    );
+    expect(topLevelTypes(editor)).toEqual(["callout", "paragraph"]);
+    expect(editor.state.selection.$from.parent.type.name).toBe("paragraph");
+    expect(editor.state.selection.$from.depth).toBe(1);
+  });
+});

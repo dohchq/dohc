@@ -4,7 +4,7 @@ export const CHECKPOINT_FAILURE_MESSAGE =
 export const IMPORT_FAILURE_MESSAGE =
   "dohc could not recover your typing. The kept copy stays on this computer.";
 export const AUTHOR_REFUSED_MESSAGE =
-  "Typing by another person cannot be recovered here. The kept copy stays on this computer.";
+  "dohc cannot recover typing by another person here. The kept copy stays on this computer.";
 export const INVALID_AUTHOR_MESSAGE =
   "dohc could not read who wrote this typing. The kept copy stays on this computer.";
 export const HISTORY_MISSING_MESSAGE =

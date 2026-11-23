@@ -124,18 +124,18 @@ describe("what a finished tree change says", () => {
         moved("docs/budget.md", "docs/costs.md").change,
         occupied("docs/budget.md"),
       ),
-    ).toBe("Cannot undo the rename. Move the new budget.md first.");
+    ).toBe("dohc could not undo the rename. Move the new budget.md first.");
     expect(
       undoRefusedNotice(
         moved("Trips/notes.md", "archive/notes.md").change,
         occupied("Trips/notes.md"),
       ),
-    ).toBe("Cannot move notes.md back. Move the notes.md in Trips first.");
+    ).toBe("dohc could not move notes.md back. Move the notes.md in Trips first.");
     expect(
       undoRefusedNotice(moved("notes.md", "archive/notes.md").change, occupied("notes.md")),
-    ).toBe("Cannot move notes.md back. Move the notes.md in Files first.");
+    ).toBe("dohc could not move notes.md back. Move the notes.md in Files first.");
     expect(undoRefusedNotice(deleted("docs/packing.md").change, occupied("docs/packing.md"))).toBe(
-      "Cannot restore packing.md. Move the new packing.md first.",
+      "dohc could not restore packing.md. Move the new packing.md first.",
     );
   });
 
@@ -143,25 +143,25 @@ describe("what a finished tree change says", () => {
     const live = (path: string) => ({ code: "live-page-owned", path }) as const;
     expect(
       undoRefusedNotice(moved("docs/budget.md", "docs/costs.md").change, live("docs/costs.md")),
-    ).toBe("Cannot undo the rename. Stop live editing for costs.md first.");
+    ).toBe("dohc could not undo the rename. Stop live editing for costs.md first.");
     expect(
       undoRefusedNotice(
         moved("Trips/notes.md", "archive/notes.md").change,
         live("archive/notes.md"),
       ),
-    ).toBe("Cannot move notes.md back. Stop live editing for notes.md first.");
+    ).toBe("dohc could not move notes.md back. Stop live editing for notes.md first.");
   });
 
   it("says only what cannot happen when main did not name the refusal", () => {
     const unexplained = { code: "unexplained" } as const;
     expect(undoRefusedNotice(moved("docs/budget.md", "docs/costs.md").change, unexplained)).toBe(
-      "Cannot undo the rename.",
+      "dohc could not undo the rename.",
     );
     expect(undoRefusedNotice(moved("Trips/notes.md", "archive/notes.md").change, unexplained)).toBe(
-      "Cannot move notes.md back.",
+      "dohc could not move notes.md back.",
     );
     expect(undoRefusedNotice(deleted("docs/packing.md").change, unexplained)).toBe(
-      "Cannot restore packing.md.",
+      "dohc could not restore packing.md.",
     );
   });
 });

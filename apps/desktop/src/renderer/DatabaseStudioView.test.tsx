@@ -302,7 +302,7 @@ describe("DatabaseStudioView", () => {
     await screen.findByTestId("db-cell-event-e1");
 
     expect(screen.getByTestId("db-read-only").getAttribute("title")).toBe(
-      "This table has no unique row key, so dohc can't change its rows.",
+      "This table has no unique row key, so dohc cannot change its rows.",
     );
     await user.click(cell("event", "e1"));
     await user.keyboard("{Enter}");

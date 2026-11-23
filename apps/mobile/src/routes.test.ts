@@ -9,7 +9,7 @@ const APP = join(ROOT, "app");
 /** The test that a production build folds to false, written out where a sample module is required (src/sampleBuild.ts). */
 const SAMPLE_TEST = '__DEV__ || process.env.EXPO_PUBLIC_DOHC_SAMPLE === "1"';
 const BOTH_BUILDS: Readonly<Record<string, string>> = {
-  "(tabs)/(chats)/index.tsx": `export default ${SAMPLE_TEST} ?`,
+  "(tabs)/(chats)/index.tsx": "export default demo ? ChatsFromSample : ServerChats;",
   "(tabs)/notices/index.tsx": `export default ${SAMPLE_TEST} ?`,
   "(tabs)/home/index.tsx": "sampleBuild ?",
   "chat/[id].tsx": `export default ${SAMPLE_TEST} ?`,
@@ -67,6 +67,13 @@ describe("routes opened from a link", () => {
     ])
       expect(wrapped(route), route).toBe("signedInOnly");
   });
+
+  it("give Chats one screen, which the sample feeds without bringing its sheets to a signed-in build", () => {
+    const route = readFileSync(join(APP, "(tabs)/(chats)/index.tsx"), "utf8");
+    expect(route).toContain("<ChatsScreen");
+    expect(readFileSync(join(ROOT, "src/chats/Chats.tsx"), "utf8")).toContain("<ChatsScreen");
+    expect(route).toContain(`${SAMPLE_TEST} ? { ...(require("../../../src/chats/demoSheets")`);
+  });
 });
 
 // Metro bundles every module a file imports, so only a require behind a test that folds to false keeps the sample's
@@ -90,7 +97,6 @@ describe("sample modules", () => {
         .sort(),
     ).toEqual([
       "src/chats/SampleAgentCard.tsx",
-      "src/chats/SampleChats.tsx",
       "src/chats/sample.ts",
       "src/conversation/SampleConversation.tsx",
       "src/conversation/sample.ts",

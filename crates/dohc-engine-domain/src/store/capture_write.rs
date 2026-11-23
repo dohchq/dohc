@@ -660,6 +660,44 @@ where
     Ok(result)
 }
 
+/// [`capture_retire_in_tx`] for a path whose file is confirmed gone and last
+/// held `seen_sha256`. A head another route wrote also retires when it holds
+/// exactly those bytes and no write there is waiting to reach disk: the person
+/// removed the file the head describes.
+pub fn capture_retire_absent_in_tx(
+    tx: &Transaction<'_>,
+    input: &CaptureRetire,
+    seen_sha256: &str,
+) -> Result<CaptureRetireResult, DomainError> {
+    let seen: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM path_aliases a \
+             JOIN snapshots s ON s.workspace_id = a.workspace_id \
+              AND s.version_id = a.version_id AND s.object_id = a.object_id \
+             WHERE a.workspace_id = ?1 AND a.version_id = ?2 AND a.path = ?3 \
+               AND CASE COALESCE(s.content_kind, 'text') \
+                   WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END = ?4 \
+               AND NOT EXISTS (SELECT 1 FROM materialization_jobs j \
+                   WHERE j.status = 'pending' AND j.operation = 'write' \
+                     AND (j.workspace_id = a.workspace_id OR j.workspace_id = '') \
+                     AND j.target_path = a.path))",
+            params![
+                input.workspace_id,
+                input.version_id,
+                input.path,
+                seen_sha256
+            ],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if !seen {
+        return capture_retire_in_tx(tx, input);
+    }
+    let mut input = input.clone();
+    input.only_if_capture_origin = false;
+    capture_retire_in_tx(tx, &input)
+}
+
 /// Record a path's absence in the caller's transaction, deriving a delete moment.
 ///
 /// Matching request replay returns the recorded deletion or recorded no-op.

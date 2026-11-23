@@ -1,4 +1,5 @@
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "./closedAppCompiler";
+import { loadClosedAppBuiltins } from "./closedAppBuiltins.ts";
 import { APP_BUNDLE_CONTENT_TYPES } from "@dohc/app-browser/document";
 import {
   CompilerProcessError,
@@ -89,9 +90,10 @@ export async function compileClosedAppInProcess(
   const binary = compilerRequire.resolve(
     `@esbuild/${process.platform}-${process.arch}/${process.platform === "win32" ? "esbuild.exe" : "bin/esbuild"}`,
   );
+  const builtins = await loadClosedAppBuiltins(import.meta.url);
   const compiler = {
-    recipe: "dohc-closed-app-v3" as const,
-    version,
+    recipe: "dohc-closed-app-v4" as const,
+    version: `${version}+kit-${builtins.digest}`,
     binarySha256: sha256(await readFile(binary)),
   };
   const result = await runOwnedCompilerProcess(capturedRuntime, {

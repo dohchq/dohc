@@ -15,10 +15,10 @@ export const CAPTURE_RECOVERY_TITLE = "Text kept in History";
 // History Restore would. The outside change stays in History either way.
 export function captureRecoveryMessage(path: string, shared: boolean, deleted = false): string {
   if (deleted)
-    return `The file "${path}" was deleted. Your text is in History. Open the recovery change and choose Restore to recreate the file.`;
+    return `The file "${path}" was deleted. Your text is saved in History. Open the recovery change and choose Restore to recreate it.`;
   return shared
-    ? `The file "${path}" changed outside dohc. Your text is in History. The file is shared live, so replace its text with your version from the recovery change.`
-    : `The file "${path}" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.`;
+    ? `The file "${path}" changed outside dohc. Your text is saved in History. Because this file is shared live, copy your text from the recovery change into the file.`
+    : `The file "${path}" changed outside dohc. Your text is saved in History. Open the recovery change and choose Restore.`;
 }
 
 /**
@@ -125,7 +125,7 @@ export function useCaptureRecoveryNotices(input: {
         .catch((error: unknown) => {
           if (!here()) return;
           latest.current.reportShellError(
-            `dohc could not remove the notice about "${recovery.path}".`,
+            `dohc could not dismiss the Notice for "${recovery.path}".`,
             error,
             () => clear(recovery),
           );

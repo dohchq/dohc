@@ -52,7 +52,7 @@ function SettingsLoading(props: { onClose: () => void }) {
       data-testid="settings-loading"
       className="dohc-elevated relative flex h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-bg p-2"
     >
-      <SkeletonRows layout="panel" label="Loading settings..." />
+      <SkeletonRows layout="panel" label="Loading settings…" />
       <CloseSettings onClose={props.onClose} />
     </div>
   );

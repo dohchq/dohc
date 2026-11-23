@@ -90,9 +90,18 @@ function keepFirst(list: FirstFiles, file: WorkspaceFileEntry): void {
   if (shown.length > FILES_SHOWN) shown.pop();
 }
 
+function inHiddenFolder(path: string): boolean {
+  const slash = path.lastIndexOf("/");
+  if (slash === -1) return false;
+  return path
+    .slice(0, slash)
+    .split("/")
+    .some((segment) => segment.startsWith("."));
+}
+
 // One pass over the listing. A dataset's folder holds its dataset.json, except
 // one in `unclaimed`, whose dataset.json names no Collection on this computer.
-// Sketches and other files are never sorted whole: Home shows only the first few.
+// Drawings and other files are never sorted whole: Home shows only the first few.
 export function classifyFiles(
   files: readonly WorkspaceFileEntry[],
   collectionFolders: ReadonlySet<string>,
@@ -108,7 +117,7 @@ export function classifyFiles(
   const sketches: FirstFiles = { shown: [], count: 0 };
   const others: FirstFiles = { shown: [], count: 0 };
   for (const file of files) {
-    if (ownedBy(file.path, owners)) continue;
+    if (ownedBy(file.path, owners) || inHiddenFolder(file.path)) continue;
     const kind = file.kind === "file" ? fileKindForPath(file.path).displayKind : null;
     if (kind === "markdown") pages.push(file);
     else keepFirst(kind === "drawing" ? sketches : others, file);
@@ -344,16 +353,16 @@ function unavailableWords(
   }
   if (entry.datasetAddressStatus === "unreadable") {
     return {
-      detail: "Can't read dataset.json",
+      detail: "Cannot read dataset.json",
       unavailable:
-        "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History.",
+        "dohc cannot read this Collection's dataset.json. Fix the file, or restore it from History.",
       fix,
     };
   }
   return {
     detail: "Not in this share",
     unavailable:
-      "This share doesn't include the Collection's dataset.json. Ask the owner to include it.",
+      "This share does not include the Collection's dataset.json. Ask the owner to include it.",
   };
 }
 

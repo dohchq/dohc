@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 /** True when this process is genuinely running from inside an AppImage's
@@ -23,43 +24,64 @@ export function isTemporaryMacAppPath(path: string): boolean {
   return volumes === "Volumes" && volume !== undefined && volume !== "" && top !== "Applications";
 }
 
+export interface DohcMcpLaunch {
+  command: string;
+  args: string[];
+}
+
 /**
- * The dohc-mcp command a chat session config points the user's AI tool at.
+ * The command and leading arguments an external MCP client uses to spawn
+ * dohc's stdio MCP server.
  *
- * A packaged install ships the launcher in its cli-bin extraResource
- * (build-cli-bin.mjs stages it; scripts/package-smoke.mjs asserts it), so
- * the resolved command is that file's absolute path -- a bare `dohc-mcp`
- * exists on no user's PATH. Dev keeps the bare name: the workspace's
- * node_modules/.bin provides it. DOHC_MCP_COMMAND stays the explicit
- * override either way.
+ * On Windows, Node.js refuses to spawn `.cmd` batch wrappers when `shell` is
+ * false (the default in MCP SDK StdioClientTransport, Claude Desktop, Cursor,
+ * and Claude Code), so Windows resolves directly to dohc's bundled `node.exe`
+ * plus `cli-bin/dohc-mcp.mjs`.
  *
- * A packaged Linux AppImage returns null when its persistent cli-bin copy
- * is unavailable. The caller must not write a command in that case: the
- * fallback resources path is inside the AppImage's temporary FUSE mount and
- * must never reach a config file or a spawned process's environment. A
+ * A packaged Linux AppImage returns null when its persistent cli-bin copy is
+ * unavailable so a temporary FUSE mount path never reaches a config file. A
  * packaged macOS app on a temporary path returns null for the same reason.
  */
-export function resolveDohcMcpCommand(input: {
+export function resolveDohcMcpLaunch(input: {
   isPackaged: boolean;
   resourcesPath?: string;
+  devResourcesPath?: string;
   platform?: NodeJS.Platform;
   env?: Record<string, string | undefined>;
   linuxStableCliBinDir?: string;
-}): string | null {
+  fileExists?: (path: string) => boolean;
+}): DohcMcpLaunch | null {
   const env = input.env ?? process.env;
   const override = env.DOHC_MCP_COMMAND?.trim();
-  if (override) return override;
-  if (!input.isPackaged) return "dohc-mcp";
+  if (override) return { command: override, args: [] };
   const platform = input.platform ?? process.platform;
+  const fileExists = input.fileExists ?? existsSync;
+  if (!input.isPackaged) {
+    if (platform === "win32" && input.devResourcesPath) {
+      const devResources = resolve(input.devResourcesPath);
+      const nodeExe = join(devResources, "app-compiler", "node.exe");
+      const mcpEntry = join(devResources, "cli-bin", "dohc-mcp.mjs");
+      if (fileExists(nodeExe) && fileExists(mcpEntry)) {
+        return { command: nodeExe, args: [mcpEntry] };
+      }
+    }
+    return { command: "dohc-mcp", args: [] };
+  }
   let cliBinDir: string;
-  const resourcesPath = input.resourcesPath ?? dirname(process.execPath);
+  const resourcesPath = resolve(input.resourcesPath ?? dirname(process.execPath));
   if (platform === "linux" && isAppImageBoot(env)) {
     if (!input.linuxStableCliBinDir) return null;
     cliBinDir = input.linuxStableCliBinDir;
-  } else if (platform === "darwin" && isTemporaryMacAppPath(resourcesPath)) {
+  } else if (platform === "darwin" && isTemporaryMacAppPath(input.resourcesPath ?? resourcesPath)) {
     return null;
   } else {
-    cliBinDir = resolve(resourcesPath, "cli-bin");
+    cliBinDir = join(resourcesPath, "cli-bin");
   }
-  return join(cliBinDir, platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp");
+  if (platform === "win32") {
+    return {
+      command: join(resourcesPath, "app-compiler", "node.exe"),
+      args: [join(cliBinDir, "dohc-mcp.mjs")],
+    };
+  }
+  return { command: join(cliBinDir, "dohc-mcp"), args: [] };
 }

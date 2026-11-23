@@ -70,46 +70,78 @@ pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
     WireError::new(ErrorCode::InvalidParams, message)
 }
 
+/// The storage failure under `error`, through every wrapper that carries one
+/// to this seam.
+fn storage_failure(error: &RuntimeError) -> Option<&dohc_engine_storage::StorageError> {
+    match error {
+        RuntimeError::Storage(storage)
+        | RuntimeError::Materialize(dohc_engine_files::MaterializeError::Storage(storage))
+        | RuntimeError::Domain(DomainError::Storage(storage))
+        | RuntimeError::Collab(CollabError::Storage(storage))
+        | RuntimeError::LiveApplication(ApplicationError::Storage(storage))
+        | RuntimeError::Search(SearchError::Store(storage)) => Some(storage),
+        RuntimeError::Sync(sync) => match sync.original() {
+            SyncError::Storage(storage) => Some(storage),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn named_storage_failure(error: &RuntimeError) -> Option<&dohc_engine_storage::StorageError> {
+    use dohc_engine_storage::StorageError;
+    storage_failure(error).filter(|refused| {
+        matches!(
+            refused,
+            StorageError::UnsupportedFingerprint { .. }
+                | StorageError::ForeignDatabase
+                | StorageError::MigrationFailed { .. }
+                | StorageError::MigratedByNewerBuild { .. }
+                | StorageError::StateCorrupt { .. }
+                | StorageError::DiskFull { .. }
+                | StorageError::PermissionDenied { .. }
+        )
+    })
+}
+
 /// The transient store lock, through every wrapper that carries it to this
-/// seam.
-///
-/// One condition, so one answer. Reading it as retryable under materialization
-/// and terminal under collaboration would make the same busy database mean two
-/// different things to the same caller, which is the defect this recognizer
-/// exists to remove.
-///
-/// Matched on the variant for the reason the artifact lock above is: `code()`
-/// delegates through each wrapper, so "file-locked" alone cannot tell a busy
-/// database apart from a busy file.
+/// seam. Matched on the variant: `code()` delegates through each wrapper, so
+/// "file-locked" alone cannot tell a busy database apart from a busy file.
 pub(crate) fn store_busy(error: &RuntimeError) -> bool {
     use dohc_engine_storage::StorageError;
-    // The search index keeps the raw rusqlite failure instead of wrapping it
-    // in the storage taxonomy, so it carries no `FileLocked` to match on and
-    // has to be asked directly.
-    if let RuntimeError::Search(SearchError::Storage(sqlite)) = error {
-        return StorageError::is_transient_lock(sqlite);
+    match error {
+        RuntimeError::Search(SearchError::Storage(sqlite)) => {
+            matches!(
+                StorageError::named_cause(sqlite),
+                Some(StorageError::FileLocked)
+            )
+        }
+        RuntimeError::Relay(RelayError::StoreBusy) => true,
+        error => matches!(storage_failure(error), Some(StorageError::FileLocked)),
     }
-    // A shared sync failure is busy when its original is.
-    if let RuntimeError::Sync(sync) = error {
-        return matches!(
-            sync.original(),
-            SyncError::Storage(StorageError::FileLocked)
-        );
-    }
-    matches!(
-        error,
-        RuntimeError::Storage(StorageError::FileLocked)
-            | RuntimeError::Materialize(dohc_engine_files::MaterializeError::Storage(
-                StorageError::FileLocked
-            ))
-            | RuntimeError::Domain(DomainError::Storage(StorageError::FileLocked))
-            | RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked))
-            | RuntimeError::Search(SearchError::Store(StorageError::FileLocked))
-            // The relay route carries it under its own type rather than a
-            // storage error, because `RelayError` is where a relay operation's
-            // local failures land. Same condition, same answer.
-            | RuntimeError::Relay(RelayError::StoreBusy)
-    )
+}
+
+/// A storage failure leaves as its code word, so the desktop can name a
+/// damaged store or a full disk and a server's log shows which one it was.
+/// A migration refusal names its cause after the code, the way other
+/// refusals carry a detail: the desktop matches the code prefix and shows the
+/// rest. The cause is the storage crate's constant text plus a migration id,
+/// never a path or content.
+fn storage_refusal(refused: &dohc_engine_storage::StorageError) -> WireError {
+    use dohc_engine_storage::{SpaceShortfall, StorageError};
+    let message = match refused {
+        StorageError::MigrationFailed { .. } | StorageError::MigratedByNewerBuild { .. } => {
+            format!("{}: {}", refused.code(), error_chain(refused))
+        }
+        StorageError::DiskFull {
+            shortfall: Some(SpaceShortfall { needed, available }),
+        } => format!(
+            "{}: need {needed} bytes, {available} available",
+            refused.code()
+        ),
+        _ => refused.code().to_owned(),
+    };
+    WireError::new(ErrorCode::Internal, message)
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
@@ -301,27 +333,13 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
             "Open the workspace in dohc first, then try again.",
         );
     }
-    // Keep the storage refusal code so the desktop can offer move-aside
-    // recovery instead of reporting a generic workspace failure.
-    if let RuntimeError::Storage(
-        refused @ (dohc_engine_storage::StorageError::UnsupportedFingerprint { .. }
-        | dohc_engine_storage::StorageError::ForeignDatabase
-        | dohc_engine_storage::StorageError::MigrationFailed { .. }
-        | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. }),
-    ) = error
+    if let Some(refused) = named_storage_failure(error) {
+        return storage_refusal(refused);
+    }
+    if let RuntimeError::Search(SearchError::Storage(sqlite)) = error
+        && let Some(named) = dohc_engine_storage::StorageError::named_cause(sqlite)
     {
-        // A migration refusal names its cause after the code, the way other
-        // refusals carry a detail: the desktop matches the code prefix and
-        // shows the rest. The cause is the storage crate's constant text
-        // plus a migration id, never a path or content.
-        let message = match refused {
-            dohc_engine_storage::StorageError::MigrationFailed { .. }
-            | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. } => {
-                format!("{}: {}", refused.code(), error_chain(refused))
-            }
-            _ => refused.code().to_string(),
-        };
-        return WireError::new(ErrorCode::Internal, message);
+        return storage_refusal(&named);
     }
     match error {
         RuntimeError::RecoveryImportRefused { reason } => {
@@ -384,11 +402,6 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         // The caller matches the code prefix and shows the reason.
         RuntimeError::Relay(RelayError::HostedRefusal(reason)) => {
             return WireError::new(ErrorCode::InvalidParams, format!("invalid-input: {reason}"));
-        }
-        // The desktop matches the code prefix and names the file. The engine
-        // still logs it as an internal refusal, and that line names no path.
-        RuntimeError::Relay(RelayError::PathOccupied { path, .. }) => {
-            return WireError::new(ErrorCode::Internal, format!("sync-path-occupied: {path}"));
         }
         // Changes waiting on an open conflict reached their limit. The desktop
         // shows its sentences and keeps the counts after them for a report.
@@ -507,7 +520,14 @@ fn internal_refusal(code: ErrorCode, error: &RuntimeError) -> Option<String> {
     (code == ErrorCode::Internal).then(|| {
         let word = match error {
             RuntimeError::Relay(relay) => relay_refusal_word(relay),
-            other => other.code().into(),
+            RuntimeError::Search(SearchError::Storage(sqlite)) => {
+                dohc_engine_storage::StorageError::named_cause(sqlite)
+                    .map_or("search-storage", |named| named.code())
+                    .into()
+            }
+            other => named_storage_failure(other)
+                .map_or_else(|| other.code(), dohc_engine_storage::StorageError::code)
+                .into(),
         };
         format!("engine: internal refusal: {} {word}", code.as_str())
     })
@@ -524,7 +544,6 @@ fn relay_refusal_word(error: &RelayError) -> std::borrow::Cow<'static, str> {
         RelayError::HttpStatus(status) => format!("relay-http-status-{status}").into(),
         RelayError::ValidationPending(_) => "relay-validation-pending".into(),
         RelayError::RepairPending => "relay-repair-pending".into(),
-        RelayError::PathOccupied { .. } => "sync-path-occupied".into(),
         RelayError::ClaimRefused(reason) => relay_refusal_word(reason),
         RelayError::Local(detail) => {
             let head = detail.split(": ").next().unwrap_or_default();
@@ -644,8 +663,7 @@ fn map_relay_code(error: &RelayError) -> ErrorCode {
         | RelayError::HttpStatus(_)
         | RelayError::ValidationPending(_)
         | RelayError::Local(_)
-        | RelayError::RepairPending
-        | RelayError::PathOccupied { .. } => ErrorCode::Internal,
+        | RelayError::RepairPending => ErrorCode::Internal,
         RelayError::BadRequest | RelayError::HostedRefusal(_) => ErrorCode::InvalidParams,
     }
 }
@@ -707,7 +725,9 @@ fn map_domain(error: &DomainError) -> WireError {
                 | "held-change-missing"
                 | "held-change-conflict"
                 | "held-change-undo-stale"
-                | "held-change-shared-owner"),
+                | "held-change-shared-owner"
+                | "restore-path-collision"
+                | "restore-head-changed"),
         } => (InvalidParams, *reason),
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
         DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),
@@ -984,8 +1004,32 @@ mod tests {
                 RuntimeError::Search(SearchError::Store(StorageError::corrupt_public(
                     std::io::Error::other("missing search table"),
                 ))),
+                "state-corrupt",
+                "engine: internal refusal: INTERNAL state-corrupt",
+            ),
+            (
+                RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+                    None,
+                ))),
+                "disk-full",
+                "engine: internal refusal: INTERNAL disk-full",
+            ),
+            (
+                RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+                    None,
+                ))),
+                "state-corrupt",
+                "engine: internal refusal: INTERNAL state-corrupt",
+            ),
+            (
+                RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    None,
+                ))),
                 "workspace operation failed",
-                "engine: internal refusal: INTERNAL search-storage-core",
+                "engine: internal refusal: INTERNAL search-storage",
             ),
             (
                 RuntimeError::Domain(DomainError::CaptureNotOwned),
@@ -1010,6 +1054,13 @@ mod tests {
                 }),
                 "migration-failed: engine migration failed to apply: missing table",
                 "engine: internal refusal: INTERNAL migration-failed",
+            ),
+            (
+                RuntimeError::Storage(StorageError::InvalidInput {
+                    reason: "engine store role mismatch",
+                }),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL invalid-input",
             ),
         ] {
             let (wire, logged) = map_runtime_logged(error);

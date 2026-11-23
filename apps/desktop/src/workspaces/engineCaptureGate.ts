@@ -70,7 +70,7 @@ export type EngineFeature =
   | "Versions"
   | "Chats"
   | "Collections"
-  | "Engine history"
+  | "History"
   | "Chat mentions"
   | "Automations";
 

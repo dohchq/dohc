@@ -29,13 +29,13 @@ function unreadableWords(unreadable: readonly WorkspacePolicyPath[]): {
 
 export function historyHiddenWords(unreadable: readonly WorkspacePolicyPath[]): string {
   const { what, fix } = unreadableWords(unreadable);
-  return `dohc can't read ${what}, so History is hidden. ${fix}, then try again.`;
+  return `dohc cannot read ${what}, so History is hidden. ${fix}.`;
 }
 
 // A Stop and restore row, which already names the file it is about.
 export function restoreRulesUnreadableWords(unreadable: readonly WorkspacePolicyPath[]): string {
   const { what, fix } = unreadableWords(unreadable);
-  return `dohc could not restore this file because it can't read ${what}. ${fix}, then try again.`;
+  return `dohc could not restore this file because it cannot read ${what}. ${fix}.`;
 }
 
 // The first step on each panel: the rules file to fix, named on its button.

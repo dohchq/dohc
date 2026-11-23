@@ -48,6 +48,7 @@ it("reports inserted, updated, deleted, and unchanged rows without exposing othe
       beforeValues: { id: 3, value: 3 },
       afterValues: { id: 3, value: 3 },
       clearedValues: { id: 0, value: 0 },
+      replacedValues: { id: 0, value: 1 },
     },
   ]);
   expect(report.bytes).toBe(readFileSync(input.path).length);
@@ -94,6 +95,27 @@ it("counts each column's values and the values kept records lose, leaving out em
       beforeValues: { id: 3, due: 2, note: 2, zero: 2 },
       afterValues: { id: 3, note: 1, zero: 2 },
       clearedValues: { id: 0, due: 2, note: 1, zero: 0 },
+      replacedValues: { id: 0, due: 0, note: 0, zero: 0 },
+    },
+  ]);
+});
+
+it("counts replacedValues only when a populated cell changes to another populated value", () => {
+  const input = fixture(
+    "CREATE TABLE notes(id INTEGER PRIMARY KEY,body TEXT,tag TEXT); INSERT INTO notes VALUES(1,'secret','keep'),(2,'old',NULL),(3,'cleared','');",
+    "CREATE TABLE notes(id INTEGER PRIMARY KEY,body TEXT,tag TEXT,extra TEXT); INSERT INTO notes VALUES(1,'redacted','keep','added'),(2,'new','filled',NULL),(3,NULL,'filled',NULL);",
+  );
+  const report = createMigrationPreviewReport({
+    ...input,
+    beforeTables: ["notes"],
+    afterTables: ["notes"],
+  });
+  expect(report.tables).toMatchObject([
+    {
+      beforeValues: { id: 3, body: 3, tag: 1 },
+      afterValues: { id: 3, body: 2, tag: 3, extra: 1 },
+      clearedValues: { id: 0, body: 1, tag: 0 },
+      replacedValues: { id: 0, body: 2, tag: 0 },
     },
   ]);
 });
@@ -118,6 +140,7 @@ it("includes added and dropped tables and every value of added and dropped colum
       beforeValues: { id: 1, removed: 1 },
       afterValues: { id: 1, added: 1 },
       clearedValues: { id: 0, removed: 1 },
+      replacedValues: { id: 0, removed: 0 },
     },
     {
       table: "removed",
@@ -128,6 +151,7 @@ it("includes added and dropped tables and every value of added and dropped colum
       beforeValues: { id: 1 },
       afterValues: {},
       clearedValues: {},
+      replacedValues: {},
     },
     {
       table: "empty_removed",
@@ -138,6 +162,7 @@ it("includes added and dropped tables and every value of added and dropped colum
       beforeValues: { id: 0 },
       afterValues: {},
       clearedValues: {},
+      replacedValues: {},
     },
     {
       table: "added",
@@ -148,6 +173,7 @@ it("includes added and dropped tables and every value of added and dropped colum
       beforeValues: {},
       afterValues: { id: 1 },
       clearedValues: {},
+      replacedValues: {},
     },
     {
       table: "empty_added",
@@ -158,6 +184,7 @@ it("includes added and dropped tables and every value of added and dropped colum
       beforeValues: {},
       afterValues: { id: 0 },
       clearedValues: {},
+      replacedValues: {},
     },
   ]);
   expect(readMigrationPreviewReportPage({ path: input.path }).changes).toMatchObject([

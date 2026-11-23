@@ -836,7 +836,12 @@ describe("agent run IPC registrations", () => {
       paused: true,
     });
     expect(h.requireCapture).toHaveBeenCalledWith("workspace-a", "Chats");
-    expect(h.dispatch.dispatchStateForThread).toHaveBeenCalledWith("workspace-a", "thread-1", []);
+    expect(h.dispatch.dispatchStateForThread).toHaveBeenCalledWith(
+      "workspace-a",
+      "thread-1",
+      [],
+      [],
+    );
     h.events.length = 0;
     h.writable.mockImplementationOnce(() => {
       throw new Error("read-only");

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef } from "react";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import type { PrivacySettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 /** The notice's words for the reports it names. */
 export function reportsNoticeText(reports: ReportKinds): string {
@@ -38,19 +40,14 @@ export function useReportsNotice(input: {
   const notice = useRef(input.notice);
   notice.current = input.notice;
 
+  const { value: due } = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([workspaceId, usageReports, errorReports]),
+    manual: !usageReports && !errorReports,
+    load: () => bridge().readReportsNotice({}),
+  });
   useEffect(() => {
-    if (!usageReports && !errorReports) return;
-    let current = true;
-    void bridge()
-      .readReportsNotice({})
-      .then((due) => {
-        if (current && (due.usage || due.errors)) show.current(due);
-      })
-      .catch(() => undefined);
-    return () => {
-      current = false;
-    };
-  }, [workspaceId, usageReports, errorReports]);
+    if (due && (due.usage || due.errors)) show.current(due);
+  }, [due]);
 
   return useCallback((toastId: string) => {
     const shown = notice.current;

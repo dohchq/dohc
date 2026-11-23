@@ -52,32 +52,32 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
     title: "The server accepted your edits. The local file may still be updating.",
   },
   "pending-share": {
-    label: "Saved locally · Pending share",
+    label: "Saved locally · pending share",
     mark: "working",
     title: "Your edits are saved on this device. The shared file update is pending.",
   },
   saving: { label: "Saving…", mark: "working" },
   error: {
-    label: "Couldn't save",
+    label: "Could not save",
     mark: "attention",
     title:
-      "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit.",
+      "Your edits are still here, but dohc cannot confirm the file on disk matches them. Keep this file open and try another edit.",
   },
   "file-locked": {
     label: "File in use",
     mark: "held",
     title:
-      "Another program has this file open, so dohc can't update it on disk. dohc has your edits saved and retries until the file is free.",
+      "Another program has this file open, so dohc cannot update it on disk. dohc has your edits saved and retries until the file is free.",
   },
   "read-only": {
     label: "Read-only",
     mark: "held",
-    title: "This document is shared with you to read.",
+    title: "This file is shared with you to read.",
   },
   "read-only-transition": {
     label: "Read-only",
     mark: "attention",
-    title: "This document became read-only. Your edit was set aside in the notice below.",
+    title: "This file became read-only. Your edit was set aside in the notice below.",
   },
   // No title: the cause (still opening, deleted, the engine may hold it,
   // invalid assets, a removal in progress) is stated by its own notice.
@@ -133,7 +133,7 @@ export const ACCESS_STATE: Record<AccessStateKey, StatePresentation> = {
     label: "Unknown",
     mark: "attention",
     title:
-      "Access information is unavailable for this file. This does not mean that no one has access.",
+      "dohc could not check who has access to this file. This does not mean no one has access.",
   },
 };
 
@@ -314,7 +314,7 @@ export function StateMark(props: {
       }}
       // A 16px line box: the 11px face's default is 16.5px, and a half-pixel
       // chip moves everything under it by half a pixel.
-      className={`inline-flex items-center gap-1.5 text-[11px] leading-4 ${MARK_TONE[presentation.mark]} ${props.truncate ? "min-w-0 rounded @max-[480px]/file-row:gap-0" : ""} ${props.className ?? ""}`}
+      className={`inline-flex items-center gap-1.5 text-[12px] leading-4 ${MARK_TONE[presentation.mark]} ${props.truncate ? "min-w-0 rounded @max-[480px]/file-row:gap-0" : ""} ${props.className ?? ""}`}
     >
       <Mark kind={presentation.mark} />
       {props.truncate ? (

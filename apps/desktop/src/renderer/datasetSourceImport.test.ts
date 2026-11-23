@@ -57,7 +57,7 @@ describe("dataset source imports", () => {
     const preview = previewDatasetCsv(table, fields, operation, ["name", "amount"]);
     expect(preview.rows[0]?.values).toEqual({ name: "Ada", amount: 3 });
     expect(preview.rows[1]?.errors).toContain(
-      "This document has a conflict. Resolve it before importing.",
+      "This page has a conflict. Resolve it before importing.",
     );
   });
 
@@ -161,8 +161,8 @@ describe("dataset source imports", () => {
         },
       ],
     );
-    expect(table.cellErrors?.[0]?.[1]).toContain("Correct Amount");
-    expect(table.cellErrors?.[0]?.[2]).toContain("new target record keys");
+    expect(table.cellErrors?.[0]?.[1]).toContain("Fix Amount");
+    expect(table.cellErrors?.[0]?.[2]).toContain("new target record IDs");
     expect(
       previewDatasetCsv(table, fields, operation, ["name", null, null]).rows[0]?.values,
     ).toEqual({ name: "Ada" });

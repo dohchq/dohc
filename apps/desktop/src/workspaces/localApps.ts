@@ -65,6 +65,14 @@ export function createLocalApps(
       return collection.activate(prepared, signal, agent, displace);
     },
     has: (publicationId: string) => store.has(publicationId),
+    verificationPublication(publicationId: string) {
+      kind(publicationId);
+      return store.verificationPublication(publicationId);
+    },
+    heldDatasetApp: (publicationId: string) => {
+      const value = store.heldRow(publicationId);
+      return value?.kind === "dataset" ? value : null;
+    },
     list: (appRoot: string) =>
       store
         .list(appRoot)

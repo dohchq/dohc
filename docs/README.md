@@ -5,8 +5,10 @@
 - [See what usage and error reports send](reference/usage-and-error-reports.md).
 - [Set up your own sync and sharing server](how-to/self-host.md).
 - [Back up and recover your server](how-to/self-host-recovery.md).
+- [Build with Claude Code, Codex, or another agent](how-to/build-with-agents.md) (and the [public dohc Agent Skill](../skills/dohc/SKILL.md)).
 - [Create app data and connected forms](how-to/app-backend.md).
 - [Use dohc through the CLI, MCP, and app channel](reference/cli-mcp-sdk.md).
+- [Use the built-in app kit](reference/app-kit.md).
 - [Edit versioned workspace files](reference/workspace-file-versions.md).
 
 For development and verification, see [Contributing](../CONTRIBUTING.md).

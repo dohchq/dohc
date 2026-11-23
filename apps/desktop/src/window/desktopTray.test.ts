@@ -42,9 +42,6 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     chatStoreFor: () => {
       throw new Error("No workspace should be opened");
     },
-    startSelfTestThread: async () => {
-      throw new Error("No self-test should start");
-    },
     dispatchStoreFor: () => {
       throw new Error("No dispatch store should be opened");
     },

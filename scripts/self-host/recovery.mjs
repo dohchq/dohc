@@ -4,6 +4,7 @@ import { mkdir, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  apnsKeysInStorage,
   composeArgs,
   describeWriters,
   readSettings,
@@ -21,9 +22,9 @@ Snapshot saves an encrypted relay snapshot of the running deployment in the dire
 Verify decrypts a snapshot with DOHC_SNAPSHOT_KEY and checks it. The new directory receives unencrypted relay data.
 The other commands stop this Compose project. Backup, check-backup, and archive restart its previously running services after success.
 Restore leaves services stopped for inspection. Replaced relay files remain in the relay volume.
-Backup, check-backup, and restore affect only relay data. Archive preserves deployment data and configuration, excluding disposable replicas.
+Backup, check-backup, and restore affect only relay data. Archive preserves deployment data and configuration.
 The snapshot must match current continuity on the original host. Old snapshots and host loss are not supported.
-Archive saves stopped deployment volumes and configuration, including private credentials. It skips replicas and provides no full-deployment restore.`;
+Archive saves stopped deployment volumes and configuration, including private credentials. It provides no full-deployment restore.`;
 
 const snapshotCommand = "/app/services/sync-relay/dist/relay-snapshot.js";
 
@@ -82,9 +83,13 @@ export function parseRecoveryArguments(args) {
 }
 
 export function recoveryComposeArgs(options) {
+  const settings = readSettings(options.envFile);
+  if (options.action === "verify")
+    for (const name of Object.keys(settings))
+      if (name.startsWith("DOHC_RELAY_APNS_")) delete settings[name];
   return composeArgs(
     options.envFile,
-    readValidSettings(options.envFile),
+    readValidSettings(options.envFile, settings),
     ...options.composeFiles.flatMap((path) => ["-f", path]),
     ...(options.project ? ["--project-name", options.project] : []),
   );
@@ -181,6 +186,12 @@ export async function runRecovery(options, run = docker, log = console.log, comp
   // Every deployment volume must exist; a missing one fails here before anything stops.
   const volumeNames = Object.values(config.volumes ?? {}).map((volume) => volume.name);
   const volumes = volumeNames.length ? JSON.parse(run(["volume", "inspect", ...volumeNames])) : [];
+  const keys = options.action === "archive" ? apnsKeysInStorage(config, volumes) : [];
+  if (keys.length)
+    throw new Error(
+      `The APNs auth key ${keys.join(", ")} is inside the deployment's storage, which an archive copies. ` +
+        "Move it out and update DOHC_RELAY_APNS_KEY_FILE, then try again.",
+    );
   if (options.action === "snapshot") {
     // Online: the snapshot container reads the relay database read-only while services keep running.
     log(

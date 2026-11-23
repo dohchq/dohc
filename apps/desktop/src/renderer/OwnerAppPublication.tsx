@@ -5,12 +5,9 @@ import {
   ChevronRight,
   CircleCheck,
   CircleDashed,
-  Eye,
   EyeOff,
-  Globe,
   Link as LinkIcon,
   LogIn,
-  Pencil,
   Table2,
   TriangleAlert,
   Unlink,
@@ -18,24 +15,31 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
-import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import type { RelayShareLinkRow, SyncStatusResult } from "../ipc/bridgeContract";
 import {
   OwnerAppPublicationResult,
   type OwnerAppPublicationRequest,
 } from "../ipc/ownerAppPublicationContract";
-import { collectionsRefusalError } from "../ipc/errorWords";
+import {
+  AppAccessSummary,
+  CollectionPermissionCard,
+  DatasetPermissionCard,
+  ExternalNetworkCard,
+  type AppCapability,
+  type ReportPermissionError,
+} from "./AppPermissionsCard";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
 import { OwnerAppResponses } from "./OwnerAppResponses";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
-import { IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton } from "./ui/controls";
+import { IconButton, Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { syncNamesServer } from "./workbench/WorkspaceSyncStatus";
 import { accessReasonForLane, serverName, type AccessContext } from "./workbench/accessReason";
 
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
+type StagedProposal = Extract<OwnerAppPublicationResult, { kind: "staged" }>["stage"];
 const collectionKey = (approvalId: string, datasetId: string) => `${approvalId}\0${datasetId}`;
 type Publication = Extract<OwnerAppPublicationResult, { kind: "listed" }>["publications"][number];
 type LocalPublication = Extract<
@@ -43,209 +47,11 @@ type LocalPublication = Extract<
   { kind: "localListed" }
 >["publications"][number];
 type ActiveLink = RelayShareLinkRow & { selector: NonNullable<RelayShareLinkRow["selector"]> };
-type ReportError = (fallback: string, error: unknown, retry: (() => void) | null) => void;
-
-function OperationNames({ operations }: { operations: AppDatasetCapability["operations"] }) {
-  if (operations.length === 0) return <>None</>;
-  return (
-    <>
-      {operations.map((operation, index) => (
-        <span key={operation.name}>
-          {index ? ", " : ""}
-          <span className="font-mono">{operation.name}</span> (
-          {operation.readOnly ? "reads only" : "changes data"})
-        </span>
-      ))}
-    </>
-  );
-}
-
-function DatasetApproval({
-  capability,
-  workspaceId,
-  reportError,
-}: {
-  capability: AppDatasetCapability;
-  workspaceId: string;
-  reportError: ReportError;
-}) {
-  const [address, setAddress] = useState<{
-    workspaceId: string;
-    datasetId: string;
-    path: string | null;
-    status: "missing" | "ambiguous" | "unreadable" | "failed" | "available";
-  } | null>(null);
-  const [reload, setReload] = useState(0);
-  const report = useRef(reportError);
-  report.current = reportError;
-  useEffect(() => {
-    let current = true;
-    setAddress(null);
-    void (async () => {
-      let after: string | undefined;
-      const seen = new Set<string>();
-      do {
-        const page = await bridge().dataset({
-          action: "list",
-          workspaceId,
-          after,
-          includeArchived: true,
-        });
-        if (!current) return;
-        if (page.kind === "collections-refused") throw collectionsRefusalError(page.refusal);
-        if (page.kind !== "list") throw Error("dohc could not find this Collection.");
-        const dataset = page.datasets.find((value) => value.datasetId === capability.datasetId);
-        if (dataset) {
-          setAddress({
-            workspaceId,
-            datasetId: capability.datasetId,
-            path: dataset.datasetPath,
-            status: dataset.datasetAddressStatus ?? (dataset.datasetPath ? "available" : "missing"),
-          });
-          return;
-        }
-        after = page.nextCursor ?? undefined;
-        if (after && seen.has(after)) throw Error("The Collection list changed. Try again.");
-        if (after) seen.add(after);
-      } while (after);
-      if (!current) return;
-      setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "missing" });
-    })().catch((error) => {
-      if (!current) return;
-      setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "failed" });
-      report.current("dohc could not find this Collection.", error, () => {
-        if (current) setReload((value) => value + 1);
-      });
-    });
-    return () => {
-      current = false;
-    };
-  }, [workspaceId, capability.datasetId, reload]);
-  const found =
-    address?.workspaceId === workspaceId && address.datasetId === capability.datasetId
-      ? address
-      : null;
-  return (
-    <div data-testid="app-publication-capability" className="space-y-2">
-      <p className="m-0 font-medium">{capability.name}</p>
-      <p className="m-0 break-all font-mono text-[12px]">
-        {!found
-          ? "Finding Collection…"
-          : (found.path ??
-            (found.status === "ambiguous"
-              ? "Multiple dataset.json files name this Collection. Remove the duplicate file."
-              : found.status === "unreadable"
-                ? "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History."
-                : found.status === "missing"
-                  ? "Collection source missing. Restore its dataset.json file."
-                  : "Collection path unavailable"))}
-      </p>
-      <p className="m-0">
-        This app uses the Collection's approved actions. Its responses appear in the same
-        Collection.
-      </p>
-      <dl className="m-0 space-y-1 text-[12px]">
-        <div>
-          <dt className="inline font-medium text-ink">Link actions: </dt>
-          <dd className="m-0 inline">
-            <OperationNames
-              operations={capability.operations.filter(
-                (operation) =>
-                  operation.access === "link" ||
-                  capability.linkReads?.some((read) => read.operationId === operation.operationId),
-              )}
-            />
-          </dd>
-        </div>
-        <div>
-          <dt className="inline font-medium text-ink">Helper actions: </dt>
-          <dd className="m-0 inline">
-            <OperationNames
-              operations={capability.operations.filter(
-                (operation) => operation.access === "helper",
-              )}
-            />
-          </dd>
-        </div>
-        <div>
-          <dt className="inline font-medium text-ink">Owner actions: </dt>
-          <dd className="m-0 inline">
-            <OperationNames
-              operations={capability.operations.filter((operation) => operation.access === "owner")}
-            />
-          </dd>
-        </div>
-      </dl>
-      {capability.linkReads?.length ? (
-        <p className="m-0 text-[12px]">
-          Approved link reads:{" "}
-          {capability.operations
-            .filter((operation) =>
-              capability.linkReads!.some((read) => read.operationId === operation.operationId),
-            )
-            .map(
-              (operation) =>
-                `${operation.name} (${operation.fields?.map((field) => field.name).join(", ")})`,
-            )
-            .join("; ")}
-          . Unpublish to withdraw access.
-        </p>
-      ) : null}
-      <p className="m-0 text-[12px]">
-        Approving this app grants these actions. It does not change the Collection's rules.
-      </p>
-      <details className="text-[12px]">
-        <summary className="cursor-pointer">Collection revision</summary>
-        <p className="break-all font-mono">Revision {capability.revision}</p>
-        <p className="break-all font-mono">{capability.revisionSha256}</p>
-      </details>
-    </div>
-  );
-}
 
 const responses = (count: number) => `${count} ${count === 1 ? "response" : "responses"}`;
 const unconfirmedResponses = (count: number) => `${responses(count)} not yet confirmed`;
 const unconfirmedRemoval = (count: number) =>
   `dohc removed this app's approval but has not confirmed whether ${responses(count)} ${count === 1 ? "was" : "were"} saved.`;
-
-function CollectionApproval({ capability }: { capability: AppCollectionCapability }) {
-  return (
-    <div data-testid="app-publication-capability" className="space-y-2">
-      <p className="m-0">
-        Create records only in{" "}
-        <span className="break-all font-mono">{capability.collectionPath}</span>.
-      </p>
-      <dl className="m-0 space-y-1 text-[12px]">
-        <div>
-          <dt className="inline font-medium text-ink">Fields it can create: </dt>
-          <dd className="m-0 inline break-words font-mono">
-            {capability.allowedFields.join(", ")}
-          </dd>
-        </div>
-        <div>
-          <dt className="inline font-medium text-ink">Required fields: </dt>
-          <dd className="m-0 inline break-words font-mono">
-            {capability.requiredFields.join(", ") || "None"}
-          </dd>
-        </div>
-        <div>
-          <dt className="inline font-medium text-ink">Fields shown in the app: </dt>
-          <dd className="m-0 inline break-words font-mono">
-            {capability.readFields.join(", ") || "None"}
-          </dd>
-        </div>
-      </dl>
-      <p className="m-0 text-[12px]">
-        People with this share can read every response file and all its fields.
-      </p>
-      <p className="m-0 text-[12px]">The app cannot change or delete existing records.</p>
-      <details className="text-[12px]">
-        <summary className="cursor-pointer">Collection schema revision</summary>
-        <p className="break-all font-mono">{capability.schemaSha256}</p>
-      </details>
-    </div>
-  );
-}
 
 /** The local launcher answers with a loopback address only. Anything else never reaches the browser. */
 export function localLaunchUrl(raw: string): string | null {
@@ -274,7 +80,7 @@ export async function openLocalApp(
   const result = await api.publishOwnerApp({ action: "launchLocal", workspaceId, publicationId });
   if (!current()) return false;
   if (result.kind !== "localLaunched" || result.publicationId !== publicationId)
-    throw new Error("dohc could not confirm which app started. Try again.");
+    throw new Error("dohc could not confirm which app started.");
   const url = localLaunchUrl(result.url);
   if (!url) throw new Error("The app address is not on this device. dohc did not open it.");
   await api.openExternalUrl({ url });
@@ -288,206 +94,20 @@ function verifiedPrepared(result: OwnerAppPublicationResult): Prepared {
   return checked.data;
 }
 
-type Capability = AppDatasetCapability | AppCollectionCapability;
 type Checked = Extract<OwnerAppPublicationResult, { kind: "localChecked" }>;
 const checkFailed = "dohc could not check whether this app is approved on this device.";
 const sourceCheckFailed =
   "dohc could not check whether this app's source changed since you approved it.";
 
-/** What a capability lets the app do, each item marked when the approval did not already allow it. */
-type Reach = { text: string; added: boolean };
-/** One line under Reads or Changes. A document Collection's fields share one line. Each Collection operation has its own. */
-type Line = { key: string; prefix?: string; items: Reach[] };
-type Access = { key: string; name: string; path?: string; reads: Line[]; changes: Line[] };
-
 /** An approval of an app that reaches no workspace data has no capability. */
-const approvedCapabilities = (row: LocalPublication): Capability[] =>
-  "datasetCapability" in row
-    ? [row.datasetCapability]
-    : "collectionCapability" in row
-      ? [row.collectionCapability]
-      : [];
-
-const addsRecords = "Adds records with ";
-
-/** dohc's words for an operation, from the kind it enforces. Only an action uses the app's words, its label. */
-function operationWords({ display }: AppDatasetCapability["operations"][number]): string {
-  // This device no longer has the revision the approval names.
-  if (!display) return "Records";
-  const fields = display.fields.join(", ");
-  switch (display.kind) {
-    case "read":
-      return fields || "Records";
-    case "create":
-      return fields ? `${addsRecords}${fields}` : "Adds records";
-    case "edit":
-      return fields ? `Edits ${fields}` : "Edits records";
-    case "delete":
-      return "Deletes records";
-    case "action":
-      return `Runs "${display.label}"`;
-  }
-}
-
-/** `approved` is what the person approved earlier, or null on a first review, which marks nothing new. */
-function accessOf(capability: Capability, approved: readonly Capability[] | null): Access {
-  if (capability.kind === "dataset") {
-    const same = approved?.find(
-      (value): value is AppDatasetCapability =>
-        value.kind === "dataset" && value.datasetId === capability.datasetId,
-    );
-    // Operations with the same words share one line, marked New if any of them is new.
-    // An action's words are only its label, and two actions with one label can do different things, so each keeps its own line.
-    const lines = (operations: AppDatasetCapability["operations"]) => {
-      const byWords = new Map<string, Reach & { key: string }>();
-      for (const operation of operations) {
-        const text = operationWords(operation),
-          added = approved !== null && !same?.operationIds.includes(operation.operationId);
-        const group =
-          operation.display?.kind === "action"
-            ? `action ${operation.operationId}`
-            : `words ${text}`;
-        const seen = byWords.get(group);
-        if (seen) seen.added ||= added;
-        else byWords.set(group, { key: operation.operationId, text, added });
-      }
-      return [...byWords.values()].map(({ key, ...item }): Line => ({ key, items: [item] }));
-    };
-    return {
-      key: capability.datasetId,
-      name: capability.name,
-      reads: lines(capability.operations.filter((operation) => operation.readOnly)),
-      changes: lines(capability.operations.filter((operation) => !operation.readOnly)),
-    };
-  }
-  const same = approved?.find(
-    (value): value is AppCollectionCapability =>
-      value.kind !== "dataset" && value.collectionPath === capability.collectionPath,
-  );
-  const items = (fields: readonly string[], allowed: readonly string[] | undefined) =>
-    fields.map((field) => ({ text: field, added: approved !== null && !allowed?.includes(field) }));
-  return {
-    key: capability.collectionPath,
-    name: capability.collectionPath.split("/").pop() || capability.collectionPath,
-    path: capability.collectionPath,
-    reads: capability.readFields.length
-      ? [{ key: "fields", items: items(capability.readFields, same?.readFields) }]
-      : [],
-    changes: capability.allowedFields.length
-      ? [
-          {
-            key: "fields",
-            prefix: addsRecords,
-            items: items(capability.allowedFields, same?.allowedFields),
-          },
-        ]
-      : [],
-  };
-}
-
-function Reaches({ lines }: { lines: Line[] }) {
-  return (
-    <dd className="m-0 min-w-0 break-words text-ink">
-      {lines.map((line) => (
-        <div key={line.key}>
-          {line.prefix}
-          {line.items.map((item, index) => (
-            <span key={item.text}>
-              {index ? ", " : ""}
-              {item.text}
-              {item.added ? (
-                <span className="ml-1 inline-block">
-                  <Pill tone="warning">New</Pill>
-                </span>
-              ) : null}
-            </span>
-          ))}
-        </div>
-      ))}
-    </dd>
-  );
-}
-
-function AccessRows({ access }: { access: Access }) {
-  return (
-    <div className="grid grid-cols-[14px_minmax(0,1fr)] items-center gap-x-2 px-3">
-      <Table2 size={14} aria-hidden className="text-muted" />
-      <span className="truncate text-[13px] font-medium text-ink" title={access.path}>
-        {access.name}
-      </span>
-      <dl className="col-start-2 m-0 mt-2 grid grid-cols-[88px_minmax(0,1fr)] gap-x-2 gap-y-1 text-[13px]">
-        {access.reads.length ? (
-          <>
-            <dt className="flex items-center gap-2 self-start text-muted">
-              <Eye size={12} aria-hidden />
-              Reads
-            </dt>
-            <Reaches lines={access.reads} />
-          </>
-        ) : null}
-        {access.changes.length ? (
-          <>
-            <dt className="flex items-center gap-2 self-start text-muted">
-              <Pencil size={12} aria-hidden />
-              Changes
-            </dt>
-            <Reaches lines={access.changes} />
-          </>
-        ) : null}
-      </dl>
-    </div>
-  );
-}
-
-/** What the app can reach: the approved capabilities, or the candidate's with what the approval lacks marked New. */
-function AccessBox({
-  capabilities,
-  approved,
-  failed,
-  onRetry,
-}: {
-  capabilities: readonly Capability[] | null;
-  approved: readonly Capability[] | null;
-  failed: boolean;
-  onRetry(): void;
-}) {
-  const id = useId();
-  return (
-    <section aria-labelledby={id}>
-      <h3 id={id} className="m-0 mb-2 text-[13px] font-medium text-ink">
-        What it can reach
-      </h3>
-      <div data-testid="app-access" className="rounded-lg border border-line bg-bg">
-        {capabilities ? (
-          <>
-            <div className="flex flex-col gap-3 py-3">
-              {capabilities.length ? (
-                capabilities.map((capability) => {
-                  const access = accessOf(capability, approved);
-                  return <AccessRows key={access.key} access={access} />;
-                })
-              ) : (
-                <div className="grid grid-cols-[14px_minmax(0,1fr)] items-center gap-x-2 px-3">
-                  <Table2 size={14} aria-hidden className="text-muted" />
-                  <span className="text-[13px] text-muted">No workspace data</span>
-                </div>
-              )}
-            </div>
-            <p className="m-0 flex items-start gap-2 border-t border-line px-3 py-2 text-[12px] text-muted">
-              <Globe size={12} aria-hidden className="mt-0.5 shrink-0" />
-              It can send what it receives to other websites.
-            </p>
-          </>
-        ) : failed ? (
-          <RetryRow testId="app-access-retry" onRetry={onRetry} />
-        ) : (
-          <SkeletonRows rows={3} label="Loading what this app can reach…" className="p-3" />
-        )}
-      </div>
-    </section>
-  );
-}
-
+const approvedCapabilities = (row: LocalPublication): AppCapability[] =>
+  "datasetCapabilities" in row
+    ? row.datasetCapabilities
+    : "datasetCapability" in row
+      ? [row.datasetCapability]
+      : "collectionCapability" in row
+        ? [row.collectionCapability]
+        : [];
 function StateLine({
   icon: Icon,
   tone,
@@ -522,8 +142,9 @@ type PublicationProps = {
   title?: string;
   localApproval?: "tab" | "browser" | null;
   onShareSource?: () => void;
-  reportError?: ReportError;
+  reportError?: ReportPermissionError;
   onLocalChange?: () => void;
+  onCollectionsChange?: () => void;
   access?: { context: AccessContext; server: string | null };
 };
 
@@ -559,10 +180,107 @@ function PublicationControl(props: ControlProps) {
   );
 }
 
+function PublishedDatasetDetails({
+  capability,
+  workspaceId,
+  reportError,
+}: {
+  capability: AppDatasetCapability;
+  workspaceId: string;
+  reportError: ReportPermissionError;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="mt-1" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="cursor-pointer">Approved Collection access</summary>
+      {open ? (
+        <div className="mt-2 space-y-2">
+          <DatasetPermissionCard
+            reportError={reportError}
+            workspaceId={workspaceId}
+            capability={capability}
+            loadDisplay
+          />
+          <p className="m-0">Open the Collection to view and manage its records.</p>
+        </div>
+      ) : null}
+    </details>
+  );
+}
+
 function linkLabel(link: ActiveLink) {
   const paths = link.selector.paths.join(", ") || "Workspace";
   const version = link.selector.versionId ? ` · Version ${link.selector.versionId}` : "";
   return `${paths}${version} · ${link.access} · ${link.grantId.slice(0, 8)}`;
+}
+
+function stagedStateHeading(staged: StagedProposal): string {
+  const created = staged.collections.filter((entry) => entry.action === "create").length;
+  const updated = staged.collections.filter((entry) => entry.action === "migrate").length;
+  const parts: string[] = [];
+  if (created > 0) parts.push(`${created} new ${created === 1 ? "Collection" : "Collections"}`);
+  if (updated > 0) parts.push(`${updated} updated ${updated === 1 ? "Collection" : "Collections"}`);
+  if (parts.length === 0) return "Approve this staged version on this device.";
+  return `Review ${parts.join(" and ")} and approve this app.`;
+}
+
+function StagedCollectionsBox({ collections }: { collections: StagedProposal["collections"] }) {
+  const id = useId();
+  if (collections.length === 0) return null;
+  return (
+    <section aria-labelledby={id} data-testid="staged-app-collections">
+      <h3 id={id} className="m-0 mb-2 text-[13px] font-medium text-ink">
+        Collections
+      </h3>
+      <div className="divide-y divide-line rounded-lg border border-line bg-bg">
+        {collections.map((collection) => (
+          <div key={collection.datasetId} className="flex flex-col gap-1.5 px-3 py-3">
+            <div className="flex items-center gap-2">
+              <Table2 size={14} aria-hidden className="shrink-0 text-muted" />
+              <span className="min-w-0 truncate text-[13px] font-medium text-ink">
+                {collection.name}
+              </span>
+              {collection.alias ? (
+                <span className="shrink-0 font-mono text-[11px] text-muted">
+                  {collection.alias}
+                </span>
+              ) : null}
+              <span className="flex-1" />
+              {collection.action === "create" ? (
+                <Pill tone={collection.applied ? "success" : "warning"}>
+                  {collection.applied ? "Created" : "New"}
+                </Pill>
+              ) : collection.action === "migrate" ? (
+                <Pill tone={collection.applied ? "success" : "warning"}>
+                  {collection.applied ? "Updated" : "Update"}
+                </Pill>
+              ) : (
+                <Pill>Existing</Pill>
+              )}
+            </div>
+            {collection.action === "create" && collection.tables?.length ? (
+              <ul className="m-0 list-none space-y-1 pl-5 text-[12px] text-muted">
+                {collection.tables.map((table) => (
+                  <li key={table.name}>
+                    <span className="font-medium text-ink">{table.name}</span>
+                    {table.fields.length ? `: ${table.fields.join(", ")}` : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : collection.action === "migrate" && collection.changes?.length ? (
+              <ul className="m-0 list-none space-y-1 pl-5 text-[12px] text-muted">
+                {collection.changes.map((change, index) => (
+                  <li key={`${change.kind}-${index}`}>{change.summary}</li>
+                ))}
+              </ul>
+            ) : collection.action === "unchanged" ? (
+              <p className="m-0 pl-5 text-[12px] text-muted">No rule changes.</p>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 type LocalReview =
@@ -573,6 +291,7 @@ type LocalReview =
       rows: LocalPublication[];
       approval: LocalPublication | null;
       source: Checked | null;
+      staged: StagedProposal | null;
     };
 
 function PublicationDialog(
@@ -642,7 +361,7 @@ function PublicationDialog(
   const committing =
     busy === "approve" || busy === "withdraw" || busy === "revokeCollection" || responsesBusy;
   // Backend data errors go to the shell's Notices when root passes reportShellError; otherwise this dialog's own alert line.
-  const reportError: ReportError =
+  const reportError: ReportPermissionError =
     props.reportError ?? ((fallback, cause) => setError(ipcErrorMessage(cause, fallback)));
   const report = useRef(reportError);
   report.current = reportError;
@@ -716,8 +435,7 @@ function PublicationDialog(
       }
     })()
       .catch((error) => {
-        if (current)
-          setLoadError(ipcErrorMessage(error, "dohc could not load the links. Try again."));
+        if (current) setLoadError(ipcErrorMessage(error, "dohc could not load the links."));
       })
       .finally(() => {
         if (current) setLoading(false);
@@ -762,8 +480,7 @@ function PublicationDialog(
           setLinksFailed(false);
           return;
         }
-        if (page.kind !== "listed")
-          throw new Error("dohc could not load app publications. Reload the publications.");
+        if (page.kind !== "listed") throw new Error("dohc could not load app publications.");
         for (const row of page.publications) {
           if (
             (row.manifestUnavailable || row.appRoot === props.appRoot) &&
@@ -772,8 +489,7 @@ function PublicationDialog(
             rows.push(row);
         }
         cursor = page.nextCursor ?? undefined;
-        if (cursor && seen.has(cursor))
-          throw new Error("The publication list changed. Reload the publications.");
+        if (cursor && seen.has(cursor)) throw new Error("The publication list changed. Try again.");
         if (cursor) seen.add(cursor);
       } while (cursor);
       if (current) {
@@ -792,9 +508,7 @@ function PublicationDialog(
           /* Without a status, the line shows. */
         }
         if (!current) return;
-        setPublicationsError(
-          ipcErrorMessage(error, "dohc could not load app publications. Reload the publications."),
-        );
+        setPublicationsError(ipcErrorMessage(error, "dohc could not load app publications."));
         const offline = syncNamesServer(status) || status?.updateRequired !== undefined;
         setLinksHidden(offline);
         setLinksFailed(!offline);
@@ -856,8 +570,17 @@ function PublicationDialog(
             else props.onReopen();
           });
       }
+      const listed = await api.publishOwnerApp({
+        action: "listStaged",
+        workspaceId: props.workspaceId,
+        appRoot: props.appRoot,
+      });
+      const staged: StagedProposal | null =
+        listed && listed.kind === "stagedListed"
+          ? (listed.stages.find((entry) => entry.appRoot === props.appRoot) ?? null)
+          : null;
       if (!current) return;
-      setLocalReview({ status: "ready", rows, approval, source });
+      setLocalReview({ status: "ready", rows, approval, source, staged });
     })().catch((error) => {
       if (!current) return;
       setLocalReview({ status: "failed" });
@@ -873,9 +596,10 @@ function PublicationDialog(
 
   const review = localReview.status === "ready" ? localReview : null;
   const approval = review?.approval ?? null;
+  const staged = review?.staged ?? null;
   const changed =
     !!approval && !!review?.source && review.source.sourceRevision !== approval.sourceRevision;
-  const needsCandidate = !!review && (!approval || changed);
+  const needsCandidate = !!review && !staged && (!approval || changed);
 
   // A first review or changed source shows the exact candidate, so approval binds what the person read.
   const prepareLocalCandidate = async () => {
@@ -897,7 +621,7 @@ function PublicationDialog(
       ) {
         if (result.kind === "prepared") cancel(result);
         if (!fresh) return;
-        throw new Error("dohc could not prepare this app. Try again.");
+        throw new Error("dohc could not prepare this app.");
       }
       let verified: Prepared;
       try {
@@ -975,6 +699,60 @@ function PublicationDialog(
     }
   };
 
+  const approveStaged = async (proposal: StagedProposal) => {
+    if (busy || responsesBusy) return;
+    const mine = ++request.current;
+    setBusy("approve");
+    setApproveFailed(null);
+    setError(null);
+    try {
+      const result = await api.publishOwnerApp({
+        action: "approveStaged",
+        workspaceId: props.workspaceId,
+        stageId: proposal.stageId,
+        reviewDigest: proposal.reviewDigest,
+      });
+      if (!alive.current || mine !== request.current) return;
+      if (result.kind !== "stagedApproved")
+        throw new Error("dohc could not confirm this approval.");
+      localChanged();
+      if (result.collectionsApplied.length > 0) props.onCollectionsChange?.();
+      if (props.localApproval === "browser") await openApproved(result.publicationId);
+      if (alive.current && mine === request.current) props.onClose();
+    } catch (cause) {
+      if (!alive.current || mine !== request.current) return;
+      setApproveFailed(ipcErrorMessage(cause, "dohc could not approve this staged review."));
+      setLocalReload((value) => value + 1);
+      props.onCollectionsChange?.();
+    } finally {
+      if (alive.current && mine === request.current) setBusy(null);
+    }
+  };
+
+  const discardStaged = async (proposal: StagedProposal) => {
+    if (busy || responsesBusy) return;
+    const mine = ++request.current;
+    setBusy("withdraw");
+    setApproveFailed(null);
+    setError(null);
+    try {
+      const result = await api.publishOwnerApp({
+        action: "discardStaged",
+        workspaceId: props.workspaceId,
+        stageId: proposal.stageId,
+      });
+      if (!alive.current || mine !== request.current) return;
+      if (result.kind !== "stagedDiscarded")
+        throw new Error("dohc could not discard this staged review.");
+      localChanged();
+    } catch (cause) {
+      if (!alive.current || mine !== request.current) return;
+      setError(ipcErrorMessage(cause, "dohc could not discard this staged review."));
+    } finally {
+      if (alive.current && mine === request.current) setBusy(null);
+    }
+  };
+
   const approveLocal = async () => {
     const value = localCandidate;
     if (!value || busy || responsesBusy || candidateState !== "idle") return;
@@ -1027,7 +805,7 @@ function PublicationDialog(
       }
       if (result.kind !== "prepared" || result.appRoot !== props.appRoot || result.local === true) {
         if (result.kind === "prepared") cancel(result);
-        throw new Error("dohc could not prepare this app. Try again.");
+        throw new Error("dohc could not prepare this app.");
       }
       candidate.current = result;
       const verified = verifiedPrepared(result);
@@ -1093,7 +871,7 @@ function PublicationDialog(
       }
       if (result.kind !== "prepared" || result.appRoot !== props.appRoot) {
         if (result.kind === "prepared") cancel(result);
-        throw new Error("dohc could not load this publication. Reload the publications.");
+        throw new Error("dohc could not load this publication.");
       }
       candidate.current = result;
       const verified = verifiedPrepared(result);
@@ -1104,9 +882,7 @@ function PublicationDialog(
       if (alive.current && mine === request.current) {
         cancel(candidate.current);
         candidate.current = null;
-        setError(
-          ipcErrorMessage(cause, "dohc could not load this publication. Reload the publications."),
-        );
+        setError(ipcErrorMessage(cause, "dohc could not load this publication."));
         setPublicationsReload((value) => value + 1);
       }
     } finally {
@@ -1134,7 +910,7 @@ function PublicationDialog(
       });
       if (!alive.current || mine !== request.current) return;
       if (result.kind !== "published" || result.local === true)
-        throw new Error("dohc could not confirm publication. Reload the app publications.");
+        throw new Error("dohc could not confirm this publication.");
       candidate.current = null;
       localChanged();
       setPublicationsReload((value) => value + 1);
@@ -1147,12 +923,7 @@ function PublicationDialog(
         setPrepared(null);
         localChanged();
         setPublicationsReload((value) => value + 1);
-        setError(
-          ipcErrorMessage(
-            cause,
-            "dohc could not confirm publication. Reload the app publications.",
-          ),
-        );
+        setError(ipcErrorMessage(cause, "dohc could not confirm this publication."));
       }
     } finally {
       if (alive.current && mine === request.current) setBusy(null);
@@ -1229,20 +1000,15 @@ function PublicationDialog(
         result.publicationId !== publication.publicationId ||
         result.authorityRevision !== publication.authorityRevision + 1
       )
-        throw new Error(
-          "dohc could not confirm collection access was revoked. Reload the publications.",
-        );
+        throw new Error("dohc could not confirm Collection access was revoked.");
       setPublicationsReload((value) => value + 1);
       setNotice(
-        "App collection access revoked. Prepare the app again to review and restore access.",
+        "App Collection access revoked. Prepare the app again to review and restore access.",
       );
     } catch (cause) {
       if (alive.current && mine === request.current) {
         setError(
-          ipcErrorMessage(
-            cause,
-            "dohc could not confirm revocation. Reload the publications to check current access.",
-          ),
+          ipcErrorMessage(cause, "dohc could not confirm that Collection access was revoked."),
         );
         setPublicationsReload((value) => value + 1);
       }
@@ -1272,15 +1038,19 @@ function PublicationDialog(
   const localView = view === "local" && !prepared;
   // A candidate under review lists the files Approve changes binds; the source check's list is the fallback.
   const paths = localView
-    ? ((needsCandidate ? localCandidate?.sourcePaths : undefined) ?? review?.source?.sourcePaths)
+    ? (staged?.sourcePaths ??
+      (needsCandidate ? localCandidate?.sourcePaths : undefined) ??
+      review?.source?.sourcePaths)
     : undefined;
   const shown = (path: string) =>
     path.startsWith(`${props.appRoot}/`) ? path.slice(props.appRoot.length + 1) : path;
   const boxCapabilities = !review
     ? null
-    : !needsCandidate && approval
-      ? approvedCapabilities(approval)
-      : (localCandidate?.capabilities ?? null);
+    : staged
+      ? staged.capabilities
+      : !needsCandidate && approval
+        ? approvedCapabilities(approval)
+        : (localCandidate?.capabilities ?? null);
   const approving = busy === "approve" || candidateState === "loading";
   const canApprove = !!localCandidate && candidateState === "idle" && !busy && !responsesBusy;
   // Share links show once the server returns this app's publications. It stays hidden when the workspace is not synced,
@@ -1378,7 +1148,54 @@ function PublicationDialog(
               </ul>
             ) : null}
           </header>
-          {localView ? (
+          {localView && staged ? (
+            <div data-testid="staged-app-review-card" className="flex flex-col gap-4">
+              <StateLine icon={CircleDashed} tone="text-muted" text={stagedStateHeading(staged)}>
+                <More>Approving applies these Collection rules and approves this app.</More>
+              </StateLine>
+              <StagedCollectionsBox collections={staged.collections} />
+              <AppAccessSummary
+                capabilities={staged.capabilities}
+                approved={approval ? approvedCapabilities(approval) : null}
+                failed={false}
+                onRetry={() => setLocalReload((value) => value + 1)}
+              />
+              {status}
+              <div className="sticky -bottom-6 -mx-6 -mb-6 flex flex-col gap-2 border-t border-line bg-panel px-6 py-4">
+                {approveFailed !== null ? (
+                  <p
+                    role="alert"
+                    title={approveFailed}
+                    className="m-0 text-right text-[13px] text-danger"
+                  >
+                    {approveFailed}
+                  </p>
+                ) : null}
+                <footer className="flex items-center gap-2">
+                  <SecondaryButton
+                    data-testid="staged-app-discard"
+                    disabled={!!busy || responsesBusy}
+                    aria-busy={busy === "withdraw"}
+                    onClick={() => void discardStaged(staged)}
+                  >
+                    {busy === "withdraw" ? "Discarding…" : "Discard"}
+                  </SecondaryButton>
+                  <span className="flex-1" />
+                  <SecondaryButton disabled={committing} onClick={props.onClose}>
+                    Cancel
+                  </SecondaryButton>
+                  <PrimaryButton
+                    data-testid="staged-app-approve"
+                    aria-busy={busy === "approve"}
+                    disabled={!!busy || responsesBusy}
+                    onClick={() => void approveStaged(staged)}
+                  >
+                    {busy === "approve" ? "Approving…" : "Approve and open"}
+                  </PrimaryButton>
+                </footer>
+              </div>
+            </div>
+          ) : localView ? (
             <>
               {!review ? (
                 <div aria-hidden className="invisible text-[13px]">
@@ -1396,7 +1213,7 @@ function PublicationDialog(
                 <StateLine
                   icon={TriangleAlert}
                   tone="text-warning"
-                  text="Its source changed since you approved it."
+                  text="The app's source changed since you approved it."
                 >
                   <More>The app runs the approved version until you approve the changes.</More>
                 </StateLine>
@@ -1404,9 +1221,9 @@ function PublicationDialog(
                 <StateLine
                   icon={CircleDashed}
                   tone="text-muted"
-                  text="Approve it to run this version on this device."
+                  text="Approve this app to run it on this device."
                 >
-                  <More>Later edits to its source wait for your approval.</More>
+                  <More>Later source edits wait for your approval.</More>
                 </StateLine>
               )}
               {review?.rows
@@ -1428,14 +1245,14 @@ function PublicationDialog(
                         </SecondaryButton>
                       </div>
                     ) : null
-                  ) : "datasetCapability" in row ? (
+                  ) : "datasetCapability" in row || "datasetCapabilities" in row ? (
                     <p key={row.publicationId} className="m-0 text-[12px] text-warning">
-                      Its data is not active here. If you moved it to a share link, open that
+                      This app's data is not active here. If you moved it to a share link, open that
                       publication.
                     </p>
                   ) : null,
                 )}
-              <AccessBox
+              <AppAccessSummary
                 capabilities={boxCapabilities}
                 approved={changed && approval ? approvedCapabilities(approval) : null}
                 failed={localReview.status === "failed" || candidateState === "failed"}
@@ -1489,7 +1306,7 @@ function PublicationDialog(
                         className="m-0 min-w-0 flex-1 text-ink"
                         title={publicationsError ?? undefined}
                       >
-                        The server didn't return this app's links.
+                        The server did not return this app's links.
                       </p>
                       <SecondaryButton
                         size="row"
@@ -1652,7 +1469,7 @@ function PublicationDialog(
                 <h3 className="m-0 text-[13px] font-medium text-ink">Files included</h3>
                 <ul
                   data-testid="app-publication-source-paths"
-                  className="mb-0 mt-2 max-h-40 list-none overflow-y-auto rounded-md border border-line bg-bg p-2 font-mono text-[12px] text-muted"
+                  className="mb-0 mt-2 max-h-40 list-none overflow-y-auto rounded-md border border-line bg-bg p-2 text-[12px] text-muted"
                 >
                   {prepared.sourcePaths.map((path) => (
                     <li key={path} className="break-all">
@@ -1661,16 +1478,19 @@ function PublicationDialog(
                   ))}
                 </ul>
               </div>
-              <div className="space-y-2 text-[13px] text-muted">
+              <div className="space-y-3 text-[13px] text-muted">
                 <h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
                 {prepared.capabilities.length === 0 ? (
-                  <p className="m-0">None</p>
+                  <p className="m-0 rounded-lg border border-line bg-bg px-3 py-2 text-[13px] text-muted">
+                    No workspace data
+                  </p>
                 ) : (
                   prepared.capabilities.map((capability) =>
                     capability.kind === "dataset" ? (
-                      <DatasetApproval
+                      <DatasetPermissionCard
                         reportError={reportError}
                         workspaceId={props.workspaceId}
+                        draftLinkReads={!reactivating}
                         key={collectionKey(prepared.approvalId, capability.datasetId)}
                         capability={
                           !reactivating
@@ -1679,7 +1499,10 @@ function PublicationDialog(
                         }
                       />
                     ) : (
-                      <CollectionApproval key={capability.collectionPath} capability={capability} />
+                      <CollectionPermissionCard
+                        key={capability.collectionPath}
+                        capability={capability}
+                      />
                     ),
                   )
                 )}
@@ -1698,9 +1521,9 @@ function PublicationDialog(
                           <fieldset
                             key={capability.datasetId}
                             disabled={!!busy}
-                            className="space-y-2 border-0 p-0"
+                            className="space-y-2 rounded-lg border border-line bg-bg p-3"
                           >
-                            <legend className="text-[13px] font-medium text-ink">
+                            <legend className="px-1 text-[13px] font-medium text-ink">
                               Allow people with the link to read
                             </legend>
                             {capability.operations
@@ -1745,20 +1568,18 @@ function PublicationDialog(
                                 </label>
                               ))}
                             <p className="m-0 text-[12px] text-muted">
-                              Approved reads show current records and later changes. People with the
-                              link can use only the selected reads. Unpublish to withdraw access.
+                              Selected reads are added to this app's link access and show current
+                              records and later changes. Unpublish to withdraw access.
                             </p>
                           </fieldset>
                         ) : null,
                       )
                   : null}
-                <p className="m-0">
-                  The app can use external services and send them data it receives.
-                </p>
-                <p className="m-0">
-                  Unpublishing stops new access through dohc. It cannot remove copies sent
-                  elsewhere.
-                </p>
+                <ExternalNetworkCard
+                  sharedCollectionFiles={prepared.capabilities.some(
+                    (capability) => capability.kind === "collection-create",
+                  )}
+                />
               </div>
               <details className="text-[12px] text-muted">
                 <summary className="cursor-pointer">Publication revision</summary>
@@ -1877,63 +1698,41 @@ function PublicationDialog(
                             ) : publication.collectionCapability ? (
                               <details className="mt-1">
                                 <summary className="cursor-pointer">
-                                  Approved collection access
+                                  Approved Collection access
                                 </summary>
-                                <p className="mb-0 break-all font-mono">
-                                  {publication.collectionCapability.collectionPath}
-                                </p>
-                                <p className="mb-0 break-words">
-                                  Create:{" "}
-                                  {publication.collectionCapability.allowedFields.join(", ")}
-                                </p>
-                                <p className="mb-0 break-words">
-                                  Required:{" "}
-                                  {publication.collectionCapability.requiredFields.join(", ") ||
-                                    "None"}
-                                </p>
-                                <p className="mb-0 break-words">
-                                  Shown in the app:{" "}
-                                  {publication.collectionCapability.readFields.join(", ") || "None"}
-                                </p>
-                                <p className="mb-0">
-                                  People with this share can read every response file and all its
-                                  fields.
-                                </p>
+                                <div className="mt-2">
+                                  <CollectionPermissionCard
+                                    capability={publication.collectionCapability}
+                                    compact
+                                  />
+                                </div>
                               </details>
                             ) : publication.datasetCapability ? null : (
-                              <p className="mb-0 mt-1">No collection access</p>
+                              <p className="mb-0 mt-1">No Collection access</p>
                             )}
                             {publication.datasetCapability === "unavailable" ? (
                               <p className="mb-0 mt-1 text-warning">
                                 Collection access details unavailable.
                               </p>
                             ) : publication.datasetCapability ? (
-                              <details className="mt-1">
-                                <summary className="cursor-pointer">
-                                  Approved Collection access
-                                </summary>
-                                <DatasetApproval
-                                  reportError={reportError}
-                                  workspaceId={props.workspaceId}
-                                  capability={publication.datasetCapability}
-                                />
-                                <p className="mb-0">
-                                  Open the Collection to view and manage its records.
-                                </p>
-                              </details>
+                              <PublishedDatasetDetails
+                                reportError={reportError}
+                                workspaceId={props.workspaceId}
+                                capability={publication.datasetCapability}
+                              />
                             ) : null}
                           </div>
                           <div className="flex shrink-0 flex-col items-end gap-2">
                             {publication.collectionCapability ? (
                               <SecondaryButton
                                 disabled={!!busy || responsesBusy}
-                                aria-label={`Revoke collection access ${publication.publicationId}`}
+                                aria-label={`Revoke Collection access ${publication.publicationId}`}
                                 onClick={() => setPendingRevoke(publication)}
                               >
                                 {busy === "revokeCollection" &&
                                 busyPublicationId === publication.publicationId
                                   ? "Revoking…"
-                                  : "Revoke collection access"}
+                                  : "Revoke Collection access"}
                               </SecondaryButton>
                             ) : null}
                             {publication.active ? (
@@ -1997,7 +1796,7 @@ function PublicationDialog(
                 <p className="mb-0 mt-1 text-[12px] text-muted">
                   {synced === false
                     ? "Sync this workspace to publish on a share link. Opening on this device does not need sync."
-                    : "Publishing on a link needs a connection to your dohc host. Approval for this device does not."}
+                    : "Publishing on a link needs a connection to your dohc server. Approval for this device does not."}
                 </p>
               </div>
               {synced === false ? null : (
@@ -2055,7 +1854,7 @@ function PublicationDialog(
               ) : null}
               {synced === false ? null : (
                 <p className="m-0 text-[13px] text-muted">
-                  Prepare the app to review its source and data access before publishing.
+                  Review this app's source and data access before publishing.
                 </p>
               )}
               <footer className="flex justify-end gap-2">
@@ -2095,7 +1894,7 @@ function PublicationDialog(
           testId="app-collection-revoke-confirm"
           cancelTestId="app-collection-revoke-cancel"
           confirmTestId="app-collection-revoke-action"
-          title="Revoke collection access?"
+          title="Revoke Collection access?"
           confirmLabel="Revoke access"
           onCancel={closeRevocation}
           onConfirm={() => {
@@ -2105,14 +1904,9 @@ function PublicationDialog(
           }}
         >
           <p>
-            The app stays published. It can no longer read the collection or accept responses
-            through dohc.
-          </p>
-          <p>Saved responses stay in your workspace. Copies already received cannot be removed.</p>
-          <p>Prepare the app again to review and restore access.</p>
-          <p>
-            To reduce access, revoke it first. Change the app's data request, then prepare and
-            review a new publication.
+            The app stays published, but it can no longer read the Collection or accept responses
+            through dohc. Saved responses stay in your workspace, and copies already received cannot
+            be removed.
           </p>
           {pendingRevoke.manifestUnavailable ? (
             <p className="text-warning">
@@ -2143,10 +1937,12 @@ function PublicationDialog(
             {!pendingWithdraw.linkCurrent
               ? "This publication belongs to a changed link. Choose a current link to publish the app again."
               : pendingWithdraw.manifestUnavailable
-                ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished."
+                ? "Source details are unavailable. This publication may belong to another app and cannot be republished."
                 : "You can review this stored revision and publish it again."}
           </p>
-          <p className="break-all font-mono text-[12px]">
+          <p
+            className={`break-all text-[12px] ${pendingWithdraw.manifestUnavailable ? "font-mono" : ""}`}
+          >
             {pendingWithdraw.manifestUnavailable
               ? pendingWithdraw.publicationId
               : pendingWithdraw.appRoot}

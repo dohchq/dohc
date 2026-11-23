@@ -31,6 +31,7 @@ import type { Author, LocalMark, Message, Reaction, ReactionMark, Segment } from
 import type { AnswerActions, LocalActions, ReactActions } from "./useOutbox";
 import type { WakeRetry } from "./chatWakeState";
 import { WakeState } from "./WakeState";
+import { symbolFallback } from "../symbolFallback";
 
 // One message, as in Slack: an author line starts a group; follow-ups from the same author within a few minutes don't repeat it.
 // Where writes are on, a message the server has offers its reactions, Add reaction and Reply; one only this phone has
@@ -174,7 +175,7 @@ export const MessageRow = memo(function MessageRow({
               size={11}
               weight="semibold"
               tintColor={theme.subtle}
-              fallback={null}
+              fallback={symbolFallback("chevron.right", 11, theme.subtle)}
             />
           </Pressable>
         ) : null}

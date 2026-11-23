@@ -133,7 +133,7 @@ describe("a workspace's Collections holder", () => {
         expect(refused.refusal).toEqual({ kind: "unclaimed" });
         expect(refused.code).toBe("collections-unclaimed");
         expect(refused.message).toBe(
-          "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.",
+          "dohc does not know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.",
         );
         expect(refused.computerLabel).toBeNull();
       }
@@ -290,7 +290,7 @@ describe("a workspace's Collections holder", () => {
     const refused = await refusal(admitCollectionsStore(root, workspaceId, required));
     expect(refused.code).toBe("collections-unreadable");
     expect(refused.message).toBe(
-      "dohc could not read which computer keeps this workspace's Collections. Restore .dohc/collections.json, or update dohc. Then retry.",
+      "dohc could not read which computer keeps this workspace's Collections. Restore .dohc/collections.json, or update dohc, then try again.",
     );
     const kept = steps();
     await refusal(keepCollectionsHere(root, workspaceId, here, kept));
@@ -588,7 +588,7 @@ describe("keeping the Collections of an earlier installation of dohc on this com
     expect(keepQuestionWords({ kind: "earlier-installation", computer: laptop })).toEqual({
       message: "Use this computer for these Collections?",
       detail:
-        "Laptop keeps these Collections. If Laptop was this computer before dohc was set up again, keep them here. If Laptop is another computer that still uses them, don't, or its changes can be lost.",
+        "Laptop keeps these Collections. If Laptop was this computer before dohc was set up again, keep them here. If Laptop is another computer that still uses them, cancel, or its changes can be lost.",
     });
   });
 
@@ -597,7 +597,7 @@ describe("keeping the Collections of an earlier installation of dohc on this com
     for (const id of [null, "0b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f"]) {
       await expect(
         keepCollectionsHere(root, workspaceId, here, steps({ storeIdHere: async () => id })),
-      ).rejects.toThrow("This computer doesn't have Laptop's copy of the Collections.");
+      ).rejects.toThrow("This computer does not have Laptop's copy of the Collections.");
       expect(await recordNow()).toMatchObject({ installId: "install-laptop", storeId });
     }
   });

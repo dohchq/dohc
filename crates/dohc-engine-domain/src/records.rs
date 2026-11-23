@@ -420,7 +420,8 @@ pub struct CaptureRetire {
     /// capture sink sets this so a head that arrived by another route (an
     /// RPC versionedText.write, a replication apply) — which may legitimately
     /// have no disk counterpart — can never be deleted by a disk-driven
-    /// retire. A foreign-origin head is a no-op, not an error.
+    /// retire. A foreign-origin head is a no-op, not an error, unless
+    /// `capture_retire_absent_in_tx` proves the missing file held its bytes.
     pub only_if_capture_origin: bool,
     /// May this retire destroy a materialized Y.DOC head?
     ///

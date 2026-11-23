@@ -53,7 +53,7 @@ export function createShareInventoryRoutes(
     | "listSharesGrantedPage"
     | "listSharesReceivedBy"
     | "listReceivedShareIdsPage"
-    | "listRemovedSharesForRecipient"
+    | "listRemovedSharesInRecipientList"
     | "getShare"
     | "setShareLabels"
     | "shareHasActiveGrants"
@@ -101,7 +101,7 @@ export function createShareInventoryRoutes(
   // account got no ended row (`fenceAccount`), since its share row is gone.
   function removedReceivedShares(userId: string, pageIds?: ReadonlySet<string>) {
     return storage
-      .listRemovedSharesForRecipient(userId)
+      .listRemovedSharesInRecipientList(userId)
       .filter((row) => !pageIds || pageIds.has(row.shareId))
       .filter((row) => {
         const share = storage.getShare(row.shareId);

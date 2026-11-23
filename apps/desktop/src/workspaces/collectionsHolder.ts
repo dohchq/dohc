@@ -87,12 +87,12 @@ export type CollectionsRefusal =
 
 const RECORD = "collections.json";
 const STORE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const UNREADABLE = `${DOHC_COLLECTIONS_GUARD.lead} Restore ${DOHC_COLLECTIONS_GUARD.path}, or update dohc. Then retry.`;
+const UNREADABLE = `${DOHC_COLLECTIONS_GUARD.lead} Restore ${DOHC_COLLECTIONS_GUARD.path}, or update dohc, then try again.`;
 
 function collectionsRefusalMessage(refusal: CollectionsRefusal): string {
   switch (refusal.kind) {
     case "unclaimed":
-      return `dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose ${USE_THIS_COMPUTER} in dohc.`;
+      return `dohc does not know which computer keeps this workspace's Collections. To keep them on this computer, choose ${USE_THIS_COMPUTER} in dohc.`;
     case "elsewhere":
       return collectionsElsewhereWords({
         label: refusal.computer.label,
@@ -414,7 +414,7 @@ export function keepQuestionWords(question: KeepQuestion): { message: string; de
       }
     : {
         message,
-        detail: `${label} keeps these Collections. If ${label} was this computer before dohc was set up again, keep them here. If ${label} is another computer that still uses them, don't, or its changes can be lost.`,
+        detail: `${label} keeps these Collections. If ${label} was this computer before dohc was set up again, keep them here. If ${label} is another computer that still uses them, cancel, or its changes can be lost.`,
       };
 }
 
@@ -482,7 +482,7 @@ export async function keepCollectionsHere(
       }
       if ((await steps.storeIdHere()) !== elsewhere.storeId)
         throw new Error(
-          `This computer doesn't have ${elsewhere.computer.label}'s copy of the Collections.`,
+          `This computer does not have ${elsewhere.computer.label}'s copy of the Collections.`,
         );
       await replaceRecord(rootPath, workspaceId, seen, {
         computer: here,

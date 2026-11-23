@@ -173,6 +173,7 @@ async function pendingBurst(rootPath?: string) {
       admission,
       enabled: true,
       onVerified() {},
+      followStatedLevel: async () => undefined,
       onPersistentFailure(error) {
         throw error;
       },

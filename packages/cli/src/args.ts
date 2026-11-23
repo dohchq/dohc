@@ -1,8 +1,10 @@
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
+import { PlanUndoAgentRunInput } from "@dohc/workspace-contracts/agent-run-undo";
 import { OutsideChangesInput } from "@dohc/workspace-contracts/outside-changes";
+import { RetrievalKind, WorkspaceSearchInput } from "@dohc/workspace-contracts/retrieval";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
-import type { z } from "zod";
+import { z } from "zod";
 import {
   CHAT_WATCH_TIMEOUT_MS,
   CHAT_WATCH_MAX_TIMEOUT_MS,
@@ -51,6 +53,18 @@ type ExportScope =
   | { kind: "group"; group: string }
   | { kind: "thread"; thread: string };
 
+type JsonRequestCommand =
+  | { verb: "dataset"; request: DatasetRequest }
+  | { verb: "appPublication"; request: OwnerAppPublicationRequest }
+  | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest };
+
+type StdinJsonCommand = {
+  [Verb in JsonRequestCommand["verb"]]: {
+    verb: Verb;
+    stdinJson: (raw: string) => Extract<JsonRequestCommand, { verb: Verb }>;
+  };
+}[JsonRequestCommand["verb"]];
+
 type CliCommandBody =
   | { verb: "link"; target: CliLinkTarget }
   | { [Verb in DeclaredVerb]: { verb: Verb } & DeclaredRequestInput<Verb> }[DeclaredVerb]
@@ -98,9 +112,8 @@ type CliCommandBody =
       agent?: string;
       requestId?: string;
     }
-  | { verb: "dataset"; request: DatasetRequest }
-  | { verb: "appPublication"; request: OwnerAppPublicationRequest }
-  | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
+  | JsonRequestCommand
+  | StdinJsonCommand
   | { verb: "groups" }
   | { verb: "groupCreate"; name: string; purpose?: string; type?: "posts" | "chat" | "both" }
   | { verb: "threads"; group: string }
@@ -1331,6 +1344,14 @@ const HISTORY_VERBS = {
       return { verb: "moment", id, side: input.flags.has("--before") ? "before" : "after" };
     },
   },
+  "undo-agent-run": declaredWrite("undoAgentRun", ({ operands }) => {
+    const [agentRunId, planToken, ...extra] = operands;
+    if (!agentRunId) fail("history undo-agent-run requires an agent run id");
+    if (!planToken)
+      fail("history undo-agent-run requires a plan token from history agent-run-plan");
+    noExtraArgs(extra, "history undo-agent-run");
+    return { agentRunId, planToken };
+  }),
 } satisfies Record<string, CliVerbSpec>;
 
 /** The Collection and automation every automation verb starts with, and one run when the verb takes one. */
@@ -1589,17 +1610,66 @@ interface JsonVerbHelp {
   take?: readonly CliFieldSource[];
 }
 
-function jsonVerb(
+function formatJsonVerbError(error: unknown, help: JsonVerbHelp): string | undefined {
+  if (!(error instanceof z.ZodError) || error.issues.length === 0) return undefined;
+  const takeByField = new Map((help.take ?? []).map((source) => [source.field, source]));
+  return error.issues
+    .slice(0, 2)
+    .map((issue) => {
+      const path = issue.path.map(String).join(".");
+      const field = issue.path[0] === undefined ? undefined : String(issue.path[0]);
+      const source = field ? takeByField.get(field) : undefined;
+      const hint = source ? ` (set ${source.field} to ${source.path} from ${source.from})` : "";
+      return path ? `${path}: ${issue.message}${hint}` : `${issue.message}${hint}`;
+    })
+    .join("; ");
+}
+
+function describeJsonSyntaxLocation(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const posLineCol = / at position \d+ \(line (\d+) column (\d+)\)$/.exec(error.message);
+  if (posLineCol) return `at line ${posLineCol[1]}, column ${posLineCol[2]}`;
+  const posOnly = / at position (\d+)$/.exec(error.message);
+  if (posOnly) return `at position ${posOnly[1]}`;
+  return undefined;
+}
+
+function jsonVerb<Verb extends JsonRequestCommand["verb"]>(
   capabilityId: CapabilityId,
   command: string,
   name: string,
   action: string,
+  verb: Verb,
   fields: Readonly<Record<string, z.ZodType>>,
   help: JsonVerbHelp,
-  build: (value: object) => CliCommandBody,
+  build: (value: object) => Extract<JsonRequestCommand, { verb: Verb }>,
 ): CliVerbSpec {
   const label = `${command} ${name}`;
   const invalid = `invalid ${label} arguments; run dohc ${label} --help`;
+  const parseJson = (json: string): Extract<JsonRequestCommand, { verb: Verb }> => {
+    let value: unknown;
+    try {
+      value = JSON.parse(json);
+    } catch (error) {
+      const location = describeJsonSyntaxLocation(error);
+      fail(
+        `invalid ${label} JSON${location ? ` (${location})` : ""}; pass one JSON object or run dohc ${label} --help`,
+      );
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      fail(`${label} requires one JSON object`);
+    if ("action" in value && value.action !== action && value.action !== name) {
+      fail(`${label} arguments must not name another action`);
+    }
+    const missing = help.required?.find((field) => !(field in value));
+    if (missing) fail(`${label} requires ${missing}`);
+    try {
+      return build({ ...value, action });
+    } catch (error) {
+      const detail = formatJsonVerbError(error, help);
+      fail(detail ? `invalid ${label} arguments: ${detail}; run dohc ${label} --help` : invalid);
+    }
+  };
   return {
     capabilityId,
     ...help,
@@ -1609,30 +1679,14 @@ function jsonVerb(
       const [json, ...extra] = operands;
       if (!json) fail(`${label} requires one JSON object; run dohc ${label} --help`);
       noExtraArgs(extra, label);
-      let value: unknown;
-      try {
-        value = JSON.parse(json);
-      } catch {
-        fail(invalid);
-      }
-      if (!value || typeof value !== "object" || Array.isArray(value))
-        fail(`${label} requires one JSON object`);
-      if ("action" in value && value.action !== action && value.action !== name) {
-        fail(`${label} arguments must not name another action`);
-      }
-      const missing = help.required?.find((field) => !(field in value));
-      if (missing) fail(`${label} requires ${missing}`);
-      try {
-        return build({ ...value, action });
-      } catch {
-        fail(invalid);
-      }
+      if (json === "-") return { verb, stdinJson: parseJson } as StdinJsonCommand;
+      return parseJson(json);
     },
   };
 }
 
 const workspaceNote =
-  "Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root.";
+  "Each verb takes one JSON object that names workspaceId (or - to read the JSON from stdin, recommended in PowerShell on Windows). Find workspaceId in .dohc/manifest.json at the workspace root.";
 const migrationApproval = "Review the result, then approve it with approveMigration.";
 const agentLabelNote =
   "agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.";
@@ -1744,7 +1798,12 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Prepare public choices for a relation field.",
     notes: [migrationApproval],
   },
-  create: { summary: "Write source for a new Collection, ready to approve." },
+  create: {
+    summary: "Write source for a new Collection, ready to approve.",
+    notes: [
+      "definition is a dataset.json descriptor: formatVersion (1 or 2), name, schemaPath, operationsPath, tables, and operations (plus datasetId for formatVersion 1).",
+    ],
+  },
   prepare: { summary: "Capture existing Collection source for review." },
   approve: {
     summary: "Approve prepared source.",
@@ -1782,7 +1841,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   invoke: {
     summary: "Run an approved operation.",
     notes: [
-      "Use describe to find approved operation IDs.",
+      'Use describe to find approved operation IDs. Generated create operations take input: { values: { "<fieldId>": value } }; generated edit operations take input: { id, expectedVersion, values: { "<fieldId>": value } } (keyed by field UUIDs).',
       "Retry an uncertain write with the same input and idempotencyKey.",
       "Send a fresh invocationId to allow cancelInvoke to stop this running request. Cancellation cannot undo committed changes.",
     ],
@@ -1795,6 +1854,16 @@ const publicationFromList: readonly CliFieldSource[] = [
 ];
 
 const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
+  verifyFrontend: {
+    summary:
+      "Verify a candidate or approved local app frontend in dohc's sandbox against an empty ephemeral Collection.",
+    notes: [
+      "Pass exactly one of appRoot (compile candidate without preparing an approval) or publicationId (verify an active local publication's pinned bundle).",
+      "Runs in an isolated offline sandbox against a fresh empty ephemeral database; live Collection records and workspace files are never read or mutated.",
+      "Optional expectStartupBackend checks calls fired on load. Optional steps run waitFor (selector, optional textIncludes), fill (selector, value), and click (selector, optional expectBackend matched against calls triggered by that click).",
+      "dohc_test_app only checks folder detection; verifyFrontend compiles and executes the app under dohc's real CSP and dohc-app-channel broker.",
+    ],
+  },
   createLink: {
     summary: "Create a scoped app link at View access by default.",
     notes: [
@@ -1815,6 +1884,36 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
     summary: "Prepare an app to open on this computer.",
     notes: [
       "Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link.",
+    ],
+  },
+  stage: {
+    summary: "Stage an app and its new or updated Collections for one review on this computer.",
+    notes: [
+      "Reads app.publish.json and each bound Collection without writing workspace files. Preflights every Collection and compiles the app before saving the staged review under .dohc/local/.",
+      "Optional migrations maps a Collection alias or datasetPath to a migration SQL file when a Collection's schema changed. Operations-only updates need no migration file.",
+      agentLabelNote,
+    ],
+  },
+  listStaged: {
+    summary: "List staged app reviews waiting on this computer.",
+    notes: ["Pass optional appRoot to filter to one app folder."],
+  },
+  approveStaged: {
+    summary: "Approve a staged review, applying its Collections and approving the app.",
+    take: [
+      { field: "stageId", from: "stage", path: "stage.stageId" },
+      { field: "reviewDigest", from: "stage", path: "stage.reviewDigest" },
+    ],
+    notes: [
+      "Applies each staged Collection change with durable receipts so interrupted runs resume cleanly, then activates the reviewed app bundle.",
+      agentLabelNote,
+    ],
+  },
+  discardStaged: {
+    summary: "Discard a staged app review on this computer.",
+    take: [{ field: "stageId", from: "stage", path: "stage.stageId" }],
+    notes: [
+      "Removes only the local staged review under .dohc/local/. Workspace source files stay untouched.",
     ],
   },
   launchLocal: {
@@ -1895,6 +1994,7 @@ const DATASET_VERBS: Record<string, CliVerbSpec> = Object.fromEntries(
           "dataset",
           action,
           action,
+          "dataset",
           option.shape,
           DATASET_HELP[action],
           (value) => ({
@@ -1917,6 +2017,7 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
         "app",
         action,
         action,
+        "appPublication",
         option.shape,
         APP_HELP[action],
         (value) => ({
@@ -1936,6 +2037,7 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
         "app",
         name,
         action,
+        "ownerAppResponses",
         option.shape,
         help,
         (value) => ({
@@ -1995,9 +2097,48 @@ const DECLARED_PARSERS: {
       cursor: lastValue(input, "--cursor"),
     });
   },
+  planUndoAgentRun: (input, command) => {
+    const [agentRunId, ...extra] = input.operands;
+    if (!agentRunId) fail(`${command} requires an agent run id`);
+    noExtraArgs(extra, command);
+    return PlanUndoAgentRunInput.parse({ agentRunId });
+  },
   outsideChanges: (input, command) => {
     noExtraArgs(input.operands, command);
     return OutsideChangesInput.parse({});
+  },
+  workspaceSearch: (input, command) => {
+    const [query, ...extra] = input.operands;
+    if (!query || !query.trim()) fail(`${command} requires a query`);
+    noExtraArgs(extra, command);
+    const rawSurfaces = allValues(input, "--surface");
+    const surfaces: RetrievalKind[] = [];
+    for (const raw of rawSurfaces) {
+      const parsed = RetrievalKind.safeParse(raw);
+      if (!parsed.success) fail("--surface must be page, collection, record, or chat");
+      if (!surfaces.includes(parsed.data)) surfaces.push(parsed.data);
+    }
+    const pathPrefix = lastValue(input, "--path-prefix");
+    const collectionPath = lastValue(input, "--collection");
+    const rawLimit = lastValue(input, "--limit");
+    let limit: number | undefined;
+    if (rawLimit !== undefined) {
+      limit = integerFlag(rawLimit, "--limit", { allowZero: false });
+      if (limit > 50) fail("--limit must be between 1 and 50");
+    }
+    const includeNeighbors = input.flags.has("--no-neighbors") ? false : undefined;
+    const result = WorkspaceSearchInput.safeParse({
+      query,
+      ...(surfaces.length > 0 ? { surfaces } : {}),
+      ...(pathPrefix !== undefined ? { pathPrefix } : {}),
+      ...(collectionPath !== undefined ? { collectionPath } : {}),
+      ...(includeNeighbors !== undefined ? { includeNeighbors } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    if (!result.success) {
+      fail(result.error.issues[0]?.message ?? "invalid workspace search input");
+    }
+    return result.data;
   },
 };
 
@@ -2493,6 +2634,14 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
     notes: ["Unlike other commands, account verbs also work outside a workspace folder."],
     verbs: ACCOUNT_VERBS,
   },
+  workspace: {
+    summary: "Search pages, Collections, records, and chats across this workspace.",
+    notes: [
+      "Requires the original workspace; received shares and mounted folders are refused.",
+      "Paths in --path-prefix and --collection are relative to the workspace root.",
+    ],
+    verbs: {},
+  },
 });
 
 export const GLOBAL_FLAGS: readonly CliFlag[] = [
@@ -2608,7 +2757,7 @@ export function parseCliArguments(
     );
   if (help) return { help: [commandName, verbName] };
   const agent =
-    (commandName === "history" && verbName === "undo") ||
+    (commandName === "history" && (verbName === "undo" || verbName === "undo-agent-run")) ||
     commandName === "document" ||
     commandName === "file" ||
     global.actorFlag ||

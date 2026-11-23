@@ -1214,9 +1214,15 @@ fn retained_authors(
     automation: Option<String>,
     person: Option<i64>,
 ) -> Result<RetainedAuthors, ApplicationError> {
-    let (actor, attribution) =
-        crate::owner_outbox::entry_credit(native, agent, agent_run_id, automation, person)
-            .map_err(outbox_error)?;
+    let (actor, attribution) = crate::owner_outbox::entry_credit(
+        native,
+        agent,
+        agent_run_id,
+        automation,
+        person,
+        "local-person",
+    )
+    .map_err(outbox_error)?;
     RetainedAuthors::credited(actor.as_deref(), attribution.as_ref())
         .ok_or(ApplicationError::Corrupt)
 }

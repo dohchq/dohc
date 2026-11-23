@@ -94,7 +94,7 @@ it("shows a change whose journal the copy did not apply, in the read just after 
     await go();
     throw new TypeError("fetch failed");
   });
-  await expect(rename("c")).rejects.toThrow("can't reach");
+  await expect(rename("c")).rejects.toThrow("could not reach");
   await shows("c");
 
   // An earlier change's journal arrives after a later change went out.

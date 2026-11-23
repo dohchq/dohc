@@ -41,8 +41,8 @@ export function agentThreadLineWords(
     case "in-line":
       // In line while something in the thread waits on the person. Two sentences, so the second ends.
       return threadWaiting
-        ? `In line. The thread is waiting for you in ${tool}.`
-        : `In line in ${tool}`;
+        ? `Waiting in line. The thread is waiting for you in ${tool}.`
+        : `Waiting in line in ${tool}`;
     case "working":
       return "Working";
     case "waiting-in-tool":

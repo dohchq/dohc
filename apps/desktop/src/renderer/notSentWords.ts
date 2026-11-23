@@ -13,12 +13,12 @@ export function notSentWords(
     return {
       state:
         shared.length === 1 && shared[0] === notes[0]
-          ? "This note hasn't been sent yet."
-          : "1 open note here hasn't been sent yet.",
-      next: "Leave the note or close its tab to send it.",
+          ? "This note has not been sent yet."
+          : "1 open note has not been sent yet.",
+      next: "Leave it or close its tab to send it.",
     };
   return {
-    state: `${notes.length} open notes here haven't been sent yet.`,
+    state: `${notes.length} open notes have not been sent yet.`,
     next: "Leave them or close their tabs to send them.",
   };
 }

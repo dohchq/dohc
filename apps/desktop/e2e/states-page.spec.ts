@@ -539,7 +539,52 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         "This file changed outside dohc.",
       );
     }
-    // At the sidebar's default width, a Collection change cuts who made it
+    for (const theme of THEMES) {
+      const spilled = await page
+        .getByTestId(`states-${theme}`)
+        .locator("button")
+        .evaluateAll((buttons) =>
+          buttons.flatMap((button) => {
+            const box = button.getBoundingClientRect();
+            const walker = document.createTreeWalker(button, NodeFilter.SHOW_TEXT);
+            let spills = false;
+            for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+              const parent = text.parentElement;
+              if (!parent || ["absolute", "fixed"].includes(getComputedStyle(parent).position))
+                continue;
+              let clipTop = -Infinity;
+              let clipBottom = Infinity;
+              for (
+                let el: HTMLElement | null = parent;
+                el && el !== button;
+                el = el.parentElement
+              ) {
+                const style = getComputedStyle(el);
+                if (style.overflowY === "visible" || style.display === "contents") continue;
+                const clip = el.getBoundingClientRect();
+                clipTop = Math.max(clipTop, clip.top);
+                clipBottom = Math.min(clipBottom, clip.bottom);
+              }
+              const range = document.createRange();
+              range.selectNodeContents(text);
+              for (const line of range.getClientRects()) {
+                const top = Math.max(line.top, clipTop);
+                const bottom = Math.min(line.bottom, clipBottom);
+                if (bottom <= top) continue;
+                if (top < box.top - 0.5 || bottom > box.bottom + 0.5) spills = true;
+              }
+            }
+            return spills
+              ? [
+                  `${button.closest("[data-part]")?.getAttribute("data-part")}: "${button.textContent}"`,
+                ]
+              : [];
+          }),
+        );
+      for (const button of spilled)
+        failures.push(`a button's label (${theme}) runs past its border in ${button}`);
+    }
+    // In a narrow sidebar, a Collection change cuts who made it
     // and what changed before its Collection's name, even a long name, and
     // no part runs past its line. A part counts as cut when its words are
     // wider than its box by any fraction of a pixel, since that draws an
@@ -599,7 +644,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
           };
         });
       if (shown.names > 0)
-        failures.push(`a Collection's name (${theme}) is cut at the sidebar's default width`);
+        failures.push(`a Collection's name (${theme}) is cut in a narrow sidebar`);
       if (shown.lines > 0)
         failures.push(`a Collection change's parts (${theme}) run past their line`);
       if (shown.parts === 0)

@@ -276,7 +276,8 @@ export function RecordButton(props: {
               className="dohc-popover dohc-pop-in z-50 flex w-max max-w-64 flex-col gap-2 rounded-lg border border-line bg-panel p-2 text-left text-[12px] font-normal text-ink"
             >
               <span id={warningId}>
-                {list.format(asking.map((action) => action.label))} can't be undone.
+                {asking.length === 1 ? "The action" : "The actions"}{" "}
+                {list.format(asking.map((action) => action.label))} cannot be undone.
               </span>
               <span className="flex justify-end gap-1.5">
                 <SecondaryButton size="compact" onClick={stopAsking}>

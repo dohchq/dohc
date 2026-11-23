@@ -2,25 +2,17 @@ import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import {
   datasetBaseFolder,
-  datasetColumnFields,
   parseDatasetDefinition,
-  type DatasetDefinition,
   type DatasetField,
 } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetHistoryRevision } from "@dohc/cli/dataset";
+import {
+  datasetColumnShape,
+  datasetOperationsMatchForHistoryRestore,
+} from "./datasetHistoryReversibility";
 
 const fieldShape = ({ name: _name, ...field }: DatasetField) => JSON.stringify(field);
-// Tables without their names or buttons. A button has no column, so a change
-// that only adds or removes buttons reverses without SQL.
-const columnShape = (tables: DatasetDefinition["tables"]) =>
-  JSON.stringify(
-    tables.map((table) => ({
-      ...table,
-      name: "",
-      fields: datasetColumnFields(table).map((field) => ({ ...field, name: "" })),
-    })),
-  );
 
 /** A compensating change starts from today's schema. It never copies yesterday's records or permissions. */
 export function generateDatasetHistoryRestore(
@@ -51,7 +43,7 @@ export function generateDatasetHistoryRestore(
   // Arbitrary SQL has no reliable automatic inverse. Preserve later fields; stop rather than discard their values.
   if (
     saved.revision.schemaSha256 !== changed.revision.schemaSha256 ||
-    columnShape(old.tables) !== columnShape(after.tables)
+    datasetColumnShape(old.tables) !== datasetColumnShape(after.tables)
   ) {
     throw new Error(
       "This change altered fields or constraints. Use Fields and names to review a conversion, or review a source migration that preserves current records.",
@@ -108,17 +100,7 @@ export function generateDatasetHistoryRestore(
     now.fields = now.fields.filter((field) => !added.has(field.fieldId));
     now.name = restoreLabel(table.name, selected.name, now.name, table.name);
   }
-  const operationShape = (operation: (typeof old.operations)[number]) => {
-    const { label: _label, access: _access, ...rest } = operation;
-    return JSON.stringify(rest);
-  };
-  if (
-    old.operations.length !== after.operations.length ||
-    old.operations.some((operation) => {
-      const selected = after.operations.find((item) => item.operationId === operation.operationId);
-      return !selected || operationShape(operation) !== operationShape(selected);
-    })
-  )
+  if (!datasetOperationsMatchForHistoryRestore(old.operations, after.operations))
     throw new Error(
       "This change altered Collection actions. Review a source migration that preserves current access.",
     );
@@ -138,13 +120,10 @@ export function generateDatasetHistoryRestore(
     (current.revision.operationsSha256 !== changed.revision.operationsSha256 ||
       saved.revision.schemaSha256 !== changed.revision.schemaSha256 ||
       current.revision.schemaSha256 !== changed.revision.schemaSha256 ||
-      current.revision.definition.operations.some((operation) => {
-        const selected = after.operations.find(
-          (item) => item.operationId === operation.operationId,
-        );
-        return !selected || operationShape(operation) !== operationShape(selected);
-      }) ||
-      current.revision.definition.operations.length !== after.operations.length)
+      !datasetOperationsMatchForHistoryRestore(
+        current.revision.definition.operations,
+        after.operations,
+      ))
   ) {
     throw new Error(
       "The schema or rules changed again. Review a source migration against the current records before reversing this change.",

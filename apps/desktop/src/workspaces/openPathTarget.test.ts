@@ -411,4 +411,42 @@ describe("confirmOpenPathWorkspace", () => {
       }),
     );
   });
+
+  it("warns with Cancel as the default when the folder is inside a cloud-synced folder", async () => {
+    const showMessageBox = vi.fn(async () => ({ response: 1 }));
+    await expect(
+      confirmOpenPathWorkspace(
+        { showMessageBox },
+        {
+          rootPath: "/Users/sam/OneDrive/Notes",
+          hasManifest: false,
+          file: "plan.md",
+        },
+        { service: "OneDrive" },
+      ),
+    ).resolves.toBe(false);
+    expect(showMessageBox).toHaveBeenCalledWith({
+      type: "warning",
+      message: 'Open "Notes" as a workspace?',
+      detail:
+        "OneDrive can corrupt your workspace data when syncing across computers. " +
+        "Move this folder outside OneDrive first, or open it here. Then dohc opens plan.md.",
+      buttons: ["Open anyway", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    showMessageBox.mockResolvedValueOnce({ response: 0 });
+    await expect(
+      confirmOpenPathWorkspace(
+        { showMessageBox },
+        {
+          rootPath: "/Users/sam/CloudVault/Notes",
+          hasManifest: false,
+          file: null,
+        },
+        { service: null },
+      ),
+    ).resolves.toBe(true);
+  });
 });

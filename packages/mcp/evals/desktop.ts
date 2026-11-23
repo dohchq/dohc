@@ -4,6 +4,7 @@
 // request gets the answer the case lists, and an unlisted one is recorded so the sample ends
 // as an error instead of grading an agent against an app that does not answer.
 
+import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ToolContext } from "../src/tools";
@@ -16,12 +17,28 @@ async function readText(root: string, path: string): Promise<string | undefined>
   return readFile(join(root, path), "utf8").catch(() => undefined);
 }
 
-async function writeText(root: string, path: string, content: string | Buffer): Promise<void> {
+async function writeText(
+  root: string,
+  path: string,
+  content: string | Buffer,
+  onWrite?: (path: string, contentSha256: string) => void,
+): Promise<void> {
   await mkdir(dirname(join(root, path)), { recursive: true });
   await writeFile(join(root, path), content);
+  if (onWrite) {
+    const hash = createHash("sha256").update(content).digest("hex");
+    onWrite(path.replaceAll("\\", "/"), hash);
+  }
 }
 
-export const workspaceVerbs: Record<string, (root: string, args: Args) => Promise<unknown>> = {
+export const workspaceVerbs: Record<
+  string,
+  (
+    root: string,
+    args: Args,
+    onWrite?: (path: string, contentSha256: string) => void,
+  ) => Promise<unknown>
+> = {
   async documentRead(root, args) {
     const path = String(args.path);
     const markdown = await readText(root, path);
@@ -29,13 +46,13 @@ export const workspaceVerbs: Record<string, (root: string, args: Args) => Promis
       ? { ok: false, reason: `${path} does not exist.` }
       : { ok: true, path, markdown };
   },
-  async documentEdit(root, args) {
+  async documentEdit(root, args, onWrite) {
     const path = String(args.path);
     const markdown = await readText(root, path);
     if (markdown === undefined) return { ok: false, reason: `${path} does not exist.` };
     const replacement = String(args.replacement);
     if (args.find === undefined) {
-      await writeText(root, path, `${markdown.replace(/\n*$/, "")}\n\n${replacement}\n`);
+      await writeText(root, path, `${markdown.replace(/\n*$/, "")}\n\n${replacement}\n`, onWrite);
       return { ok: true, path, changed: true };
     }
     const find = String(args.find);
@@ -55,20 +72,21 @@ export const workspaceVerbs: Record<string, (root: string, args: Args) => Promis
       root,
       path,
       markdown.replace(find, () => replacement),
+      onWrite,
     );
     return { ok: true, path, changed: find !== replacement };
   },
-  async documentCreate(root, args) {
+  async documentCreate(root, args, onWrite) {
     const path = String(args.path);
     if ((await readText(root, path)) !== undefined)
       return { ok: false, reason: `${path} already exists. Edit it instead.` };
-    await writeText(root, path, String(args.markdown ?? ""));
+    await writeText(root, path, String(args.markdown ?? ""), onWrite);
     return { ok: true, path };
   },
-  async fileWrite(root, args) {
+  async fileWrite(root, args, onWrite) {
     const files = args.files as { path: string; contentBase64: string }[];
     for (const file of files)
-      await writeText(root, file.path, Buffer.from(file.contentBase64, "base64"));
+      await writeText(root, file.path, Buffer.from(file.contentBase64, "base64"), onWrite);
     return { ok: true, written: files.map((file) => file.path) };
   },
 };
@@ -78,6 +96,7 @@ export function fakeDesktop(input: {
   answers: Readonly<Record<string, DesktopAnswer>>;
   /** Receives one line per request the case does not answer. */
   unansweredLog: string;
+  onWrite?: (path: string, contentSha256: string) => void;
 }): DesktopRequest {
   return async (request) => {
     const args = request.args as Args;
@@ -88,7 +107,7 @@ export function fakeDesktop(input: {
         : answer;
     }
     const workspaceVerb = workspaceVerbs[request.verb];
-    if (workspaceVerb) return workspaceVerb(input.root, args);
+    if (workspaceVerb) return workspaceVerb(input.root, args, input.onWrite);
     await appendFile(input.unansweredLog, `${request.verb}\n`);
     throw new Error(`eval: the case lists no answer for the ${request.verb} request`);
   };

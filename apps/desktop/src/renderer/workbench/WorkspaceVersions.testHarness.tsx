@@ -4,6 +4,7 @@ import {
   type WorkspaceVersionsOptions,
   useWorkspaceVersions,
 } from "./WorkspaceVersions";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 
 // The titlebar menu as the shell mounts it: one versions controller, the menu
 // while capture is on, and the controller's dialogs. Capture is on unless a
@@ -15,7 +16,7 @@ export function VersionMenuHarness(
   const enabled = props.enabled ?? true;
   const versions = useWorkspaceVersions({ ...props, enabled });
   return (
-    <>
+    <WorkspaceSessionProvider workspaceId={props.workspaceId}>
       {enabled ? (
         <VersionMenu
           versions={versions}
@@ -26,6 +27,6 @@ export function VersionMenuHarness(
         />
       ) : null}
       {versions.dialogs}
-    </>
+    </WorkspaceSessionProvider>
   );
 }

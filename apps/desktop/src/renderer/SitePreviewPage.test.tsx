@@ -190,7 +190,8 @@ describe("SitePreviewPage", () => {
 
     replace({ ...next(5, 49190), preview: null });
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
-    expect(screen.getByText("Preview stopped. Use Preview options to run it again.")).toBeTruthy();
+    expect(screen.getByText("Preview stopped.")).toBeTruthy();
+    expect(screen.getByTestId("site-preview-restart")).toBeTruthy();
   });
 
   it("starts the best available preview automatically and embeds the local URL", async () => {
@@ -218,6 +219,7 @@ describe("SitePreviewPage", () => {
       holderId: expect.any(String),
       restart: false,
     });
+    await userEvent.click(screen.getByTestId("site-preview-options"));
     expect(screen.getByTestId("site-preview-static")).toBeTruthy();
   });
 
@@ -447,6 +449,7 @@ describe("SitePreviewPage", () => {
       holderId: expect.any(String),
       restart: false,
     });
+    await userEvent.click(screen.getByTestId("site-preview-options"));
     expect(screen.getByTestId("site-preview-static")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-dev")).toBeNull();
     expect(screen.queryByTestId("site-preview-build")).toBeNull();
@@ -830,7 +833,7 @@ describe("SitePreviewPage", () => {
 
     expect(
       await screen.findByText(
-        "This app tried to preview from an address dohc does not trust. Reload the preview.",
+        "dohc blocked a preview from an untrusted address. Reload the preview.",
       ),
     ).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
@@ -857,7 +860,7 @@ describe("SitePreviewPage", () => {
 
     expect(
       await screen.findByText(
-        "This app tried to preview from an address dohc does not trust. Reload the preview.",
+        "dohc blocked a preview from an untrusted address. Reload the preview.",
       ),
     ).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
@@ -878,7 +881,7 @@ describe("SitePreviewPage", () => {
 
     expect(
       await screen.findByText(
-        "This app tried to preview from an address dohc does not trust. Reload the preview.",
+        "dohc blocked a preview from an untrusted address. Reload the preview.",
       ),
     ).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();

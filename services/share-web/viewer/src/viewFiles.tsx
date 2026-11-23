@@ -783,7 +783,7 @@ export function FileView(props: {
     if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
-    if (previewText === null) return <p className="muted">Loading file</p>;
+    if (previewText === null) return <FileLoading />;
     return (
       <MarkdownContent
         markdown={previewText}
@@ -798,7 +798,7 @@ export function FileView(props: {
     if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
-    if (previewText === null) return <p className="muted">Loading file</p>;
+    if (previewText === null) return <FileLoading />;
     const scene = parsePublicExcalidrawScene(previewText);
     if (!scene) return <DownloadCard file={props.file} session={props.session} />;
     return (
@@ -806,7 +806,7 @@ export function FileView(props: {
         key={props.file.blobSha256}
         fallback={<DownloadCard file={props.file} session={props.session} />}
       >
-        <Suspense fallback={<p className="muted">Loading file</p>}>
+        <Suspense fallback={<FileLoading />}>
           <ExcalidrawView scene={scene} />
         </Suspense>
       </ExcalidrawRenderBoundary>
@@ -816,7 +816,7 @@ export function FileView(props: {
     if (previewIsDownload) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
-    if (previewText === null) return <p className="muted">Loading file</p>;
+    if (previewText === null) return <FileLoading />;
     return (
       <pre className="source-text">
         <code>{previewText}</code>
@@ -943,6 +943,20 @@ export function StatePage(props: {
   );
 }
 
+function FileLoading() {
+  return (
+    <div className="file-loading" aria-busy="true">
+      <p className="sr-only">Loading file</p>
+      <div className="skeleton" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+        <i />
+      </div>
+    </div>
+  );
+}
+
 // The page's shape while it loads. It stays blank for its first 150 ms, so a fast link never flashes it.
 export function Opening() {
   return (
@@ -982,13 +996,13 @@ export const EMPTY_PICTURE = (
   </svg>
 );
 
-// Narrow windows show the file list and the panels over the page, not beside it.
+const NARROW_MEDIA = "(max-width: 720px), (pointer: coarse) and (max-height: 500px)";
+
+// Narrow windows and landscape phones show the file list and panels over the page, not beside it.
 export function useNarrow(): boolean {
-  const [narrow, setNarrow] = useState(
-    () => window.matchMedia?.("(max-width: 720px)").matches ?? false,
-  );
+  const [narrow, setNarrow] = useState(() => window.matchMedia?.(NARROW_MEDIA).matches ?? false);
   useEffect(() => {
-    const query = window.matchMedia?.("(max-width: 720px)");
+    const query = window.matchMedia?.(NARROW_MEDIA);
     if (!query) return;
     const update = () => setNarrow(query.matches);
     query.addEventListener("change", update);

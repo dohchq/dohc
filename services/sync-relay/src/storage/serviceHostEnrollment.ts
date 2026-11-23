@@ -3,7 +3,11 @@ import type { StorageContext } from "./context";
 import type { SqliteDb, SyncRelayShareRow } from "./types";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
-import { validateUserWritePath } from "@dohc/workspace-core";
+import { asRecord, validateUserWritePath } from "@dohc/workspace-core";
+import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
+import * as Y from "yjs";
+import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
+import { documentParams, liveJournalSeedClientId } from "./liveUpdateJournal";
 import {
   effectiveShareSelector,
   isLiveEditShareSelector,
@@ -17,14 +21,17 @@ import { workspaceFileReach } from "../workspaceReach";
 import { readCurrentShareGrant } from "./currentShareGrant";
 import { getWorkspaceMembership, workspaceMemberGrantId } from "./workspaceMembers";
 import { parseWorkspaceId } from "../requestInputs";
+import { SERVICE_HOST_ORIGIN_PREFIX, isOwnerLogOrigin } from "../relayLogInputs";
 import { canonicalLiveSelector, currentLiveDocumentMoment } from "./liveDocumentAuthority";
 import { LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
 import { attachedLiveJournalHistoryNamespace } from "./liveJournalHistory";
 import { assertWorkspaceQuota } from "./workspaces";
+import { SyncRelayQuotaExceededError } from "./errors";
 import { forgetServiceHostUploads } from "./serviceHostUploads";
 import {
   listServiceActivationRetirements,
   OPEN_RETIREMENT,
+  currentIdentity,
   openServiceActivationRetirement,
   retirableServiceActivation,
   serviceActivationRetirementOpen,
@@ -522,6 +529,209 @@ export function readServiceHostEnrollmentByObjectId(
     .prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`)
     .get(parseWorkspaceId(workspaceId), parseLiveUpdateIdentifier(objectId, "object ID"));
   return value ? row(value) : null;
+}
+function savedFile(payloadJson: string) {
+  let save: Record<string, unknown> | null;
+  try {
+    save = asRecord(JSON.parse(payloadJson));
+  } catch {
+    return null;
+  }
+  const objectId = save?.objectId,
+    path = save?.path,
+    before = save?.payloadBeforeBlobSha256;
+  return typeof objectId === "string" && typeof path === "string" && typeof before === "string"
+    ? { objectId, path, before }
+    : null;
+}
+function stoppedBy(
+  storage: StorageContext,
+  input: { workspaceId: string; userId: string; objectId: string; path: string },
+): boolean {
+  const { workspaceId, userId, objectId, path } = input;
+  const enrollment = storage.db
+    .prepare(
+      `SELECT path FROM ${SERVICE_HOST_ENROLLMENTS}
+        WHERE workspace_id=? AND object_id=? AND owner_user_id=? AND owner_stop='retire'`,
+    )
+    .get(workspaceId, objectId, userId);
+  return (
+    enrollment?.path === path &&
+    storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) === objectId
+  );
+}
+export function isOwnerSaveOfStoppedNote(
+  storage: StorageContext,
+  input: { workspaceId: string; userId: string; payloadJson: string },
+): boolean {
+  const { workspaceId, userId } = input;
+  const save = savedFile(input.payloadJson);
+  return (
+    save !== null &&
+    stoppedBy(storage, { workspaceId, userId, objectId: save.objectId, path: save.path })
+  );
+}
+export function isResumedHostSave(
+  storage: StorageContext,
+  input: { workspaceId: string; originId: string; payloadJson: string },
+): boolean {
+  const { workspaceId } = input;
+  const save = input.originId.startsWith(SERVICE_HOST_ORIGIN_PREFIX)
+    ? savedFile(input.payloadJson)
+    : null;
+  if (
+    !save ||
+    storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path: save.path }) !==
+      save.objectId
+  )
+    return false;
+  const stored = storage.currentFileBlobSha256({ workspaceId, versionId: "main", path: save.path });
+  const source = storage.db
+    .prepare(
+      `SELECT json_extract(source_json,'$.currentPath') AS path,json_extract(source_json,'$.sourceDigest') AS digest
+        FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=?
+        AND retire_requested_at_ms IS NULL AND retired_at_ms IS NULL`,
+    )
+    .get(workspaceId, save.objectId);
+  return stored !== undefined && source?.path === save.path && source.digest === stored;
+}
+/** Whether the server hosts the document for live editing, or is still letting go of it after a Stop. */
+export function isHostedForLiveEditing(
+  storage: StorageContext,
+  workspaceId: string,
+  objectId: string,
+): boolean {
+  return (
+    storage.db
+      .prepare(
+        `SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND retired_at_ms IS NULL
+          AND ${currentIdentity(SERVICE_ACTIVATIONS)}`,
+      )
+      .get(workspaceId, objectId) !== undefined
+  );
+}
+export function bindStoppedNoteClient(
+  storage: StorageContext,
+  input: { workspaceId: string; userId: string; payloadJson: string; authors: LiveAuthorSnapshot },
+): void {
+  const { workspaceId, userId } = input;
+  let row: Record<string, unknown> | null;
+  try {
+    row = asRecord(JSON.parse(input.payloadJson));
+  } catch {
+    return;
+  }
+  const objectId = row?.objectId,
+    path = row?.path,
+    lineageClaimId = row?.lineageClaimId,
+    update = row?.updateBlobSha256;
+  const [author, ...others] = input.authors;
+  if (
+    row?.versionId !== "main" ||
+    row.isBaseState !== false ||
+    asRecord(row.attribution)?.actorKind !== "human" ||
+    row.actorOriginId !== userId ||
+    typeof objectId !== "string" ||
+    typeof path !== "string" ||
+    typeof lineageClaimId !== "string" ||
+    typeof update !== "string" ||
+    author?.kind !== "human" ||
+    author.humanId !== userId ||
+    others.length > 0 ||
+    !stoppedBy(storage, { workspaceId, userId, objectId, path })
+  )
+    return;
+  const document = { workspaceId, mainVersionId: "main" as const, objectId, lineageClaimId };
+  if (
+    !storage.db
+      .prepare(
+        "SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND lineage_state='current'",
+      )
+      .get(workspaceId, objectId, lineageClaimId)
+  )
+    return;
+  const seed = liveJournalSeedClientId(storage, document);
+  const blob = storage.db
+    .prepare("SELECT content FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
+    .get(workspaceId, update);
+  if (!blob) return;
+  let clients: number[];
+  try {
+    clients = [...Y.parseUpdateMeta(new Uint8Array(blob.content as Uint8Array)).from.keys()];
+  } catch {
+    return;
+  }
+  const params = documentParams(document);
+  const unbound = clients.filter(
+    (clientId) =>
+      clientId !== seed &&
+      !storage.db
+        .prepare(
+          `SELECT 1 FROM ${LIVE_AUTHOR_CLIENTS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND client_id=?`,
+        )
+        .get(...params, clientId),
+  );
+  if (unbound.length !== 1) return;
+  const snapshot = JSON.stringify(input.authors);
+  const storageBytes = Buffer.byteLength(JSON.stringify([...params, unbound[0], snapshot]));
+  try {
+    assertWorkspaceQuota(storage, workspaceId, storageBytes);
+  } catch (error) {
+    if (error instanceof SyncRelayQuotaExceededError) return;
+    throw error;
+  }
+  storage.db
+    .prepare(
+      `INSERT INTO ${LIVE_AUTHOR_CLIENTS}(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,author_snapshot_json,storage_bytes) VALUES (?,?,?,?,?,?,?)`,
+    )
+    .run(...params, unbound[0]!, snapshot, storageBytes);
+}
+export function isOwnerSaveOfUnhostedNote(
+  storage: StorageContext,
+  input: { workspaceId: string; userId: string; payloadJson: string; recordedAtMs: number },
+): boolean {
+  const { workspaceId, userId, recordedAtMs } = input;
+  let save: Record<string, unknown> | null;
+  try {
+    save = asRecord(JSON.parse(input.payloadJson));
+  } catch {
+    return false;
+  }
+  const objectId = save?.objectId,
+    path = save?.path,
+    before = save?.payloadBeforeBlobSha256;
+  if (
+    typeof objectId !== "string" ||
+    typeof path !== "string" ||
+    typeof before !== "string" ||
+    liveDocumentKindForPath(path) !== "richdoc"
+  )
+    return false;
+  const stored = storage.db
+    .prepare(
+      `SELECT f.blob_sha256,l.origin_id,l.recorded_at_ms,json_extract(l.payload_json,'$.objectId') AS object_id
+        FROM sync_relay_current_files f JOIN sync_relay_log l ON l.relay_seq=f.state_relay_seq
+        WHERE f.workspace_id=? AND f.version_id='main' AND f.path=?`,
+    )
+    .get(workspaceId, path);
+  if (
+    typeof stored?.recorded_at_ms !== "number" ||
+    stored.object_id !== objectId ||
+    typeof stored.origin_id !== "string" ||
+    !isOwnerLogOrigin(stored.origin_id) ||
+    stored.blob_sha256 === before ||
+    recordedAtMs <= stored.recorded_at_ms
+  )
+    return false;
+  return (
+    storage.workspaceIsOwnedBy(workspaceId, userId) &&
+    storage.db
+      .prepare(
+        `SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS}
+          WHERE workspace_id=? AND object_id=? AND (retired=0 OR owner_stop IS NOT NULL)`,
+      )
+      .get(workspaceId, objectId) === undefined
+  );
 }
 /** A document retired because no Edit grant covered it is hosted again by the next Edit share that covers it. */
 const reclaimable = (enrollment: ServiceHostEnrollment) =>

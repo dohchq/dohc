@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium } from "@playwright/test";
+import { chromium, expect, type Page } from "@playwright/test";
 import { createLiveBufferBudget } from "@dohc/live-session-contract/live-connection";
 import { createLiveGateway } from "../../../../services/share-web/src/liveGateway";
 import { createShareWebApplication } from "../../../../services/share-web/src/server";
@@ -12,6 +12,13 @@ import { selfHostLiveProfile } from "../../../../services/sync-relay/src/selfHos
 import { desktopRoot } from "./desktopApp";
 
 export const sharedDatasetViewerOrigin = "https://viewer.example.com";
+
+export async function openAppFromFolderLink(page: Page) {
+  const apps = page.getByRole("button", { name: "Apps", exact: true });
+  await expect(apps).toHaveAttribute("aria-expanded", "false");
+  await apps.click();
+  await page.getByRole("button", { name: "Open app", exact: true }).click();
+}
 
 /** Real HTTPS with a test-only certificate and browser-local DNS; no host settings change. */
 // Edit share links need the release and the live editor's limits; these are small test bounds.

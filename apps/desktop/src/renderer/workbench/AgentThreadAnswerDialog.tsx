@@ -55,7 +55,7 @@ type View = "loading" | "form" | "unread" | "already-answered" | "closed";
 const ENDED: Record<"already-answered" | "closed", string> = {
   // dohc does not know who answered, so this names nobody.
   "already-answered": "This question was already answered.",
-  closed: "This question no longer waits for an answer.",
+  closed: "This question is no longer waiting for an answer.",
 };
 
 // Answers the question an agent's thread waits on, without leaving the chat.
@@ -280,7 +280,7 @@ export function AgentThreadAnswerDialog(props: {
               <div className="min-h-32">
                 <SkeletonRows
                   testId="agent-thread-answer-loading"
-                  label="Loading the question"
+                  label="Loading the question…"
                   rows={4}
                 />
               </div>

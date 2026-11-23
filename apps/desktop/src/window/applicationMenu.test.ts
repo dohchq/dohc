@@ -51,7 +51,7 @@ describe("application menu template", () => {
     const { template, sendCommand } = build();
     const fileItems = items(template, "File");
     const importFiles = fileItems.find((entry) => entry.label === "Import files");
-    const exportWorkspace = fileItems.find((entry) => entry.label === "Export workspace as zip");
+    const exportWorkspace = fileItems.find((entry) => entry.label === "Export workspace as ZIP");
     const fakeWindow = { id: 4 };
 
     (importFiles?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
@@ -506,7 +506,7 @@ describe("application menu template", () => {
     const file = items(template, "File");
     const enabled = (label: string) => file.find((entry) => entry.label === label)?.enabled;
     expect(
-      ["New page", "New folder", "New collection", "Import files", "Export workspace as zip"].map(
+      ["New page", "New folder", "New Collection", "Import files", "Export workspace as ZIP"].map(
         enabled,
       ),
     ).toEqual([true, false, false, true, true]);
