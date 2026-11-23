@@ -171,7 +171,7 @@ async function attribute(
     proposal.datasetPath,
     base.schemaPath,
     base.operationsPath,
-    proposal.migrationPath,
+    ...(proposal.migrationPath === null ? [] : [proposal.migrationPath]),
   ];
   const history = new Map(
     await Promise.all(
@@ -266,11 +266,13 @@ async function changeState(
   const definitionText = await readText(api, selection.workspaceId, proposal.datasetPath);
   const definition = definitionOf(definitionText, proposal.datasetPath);
   if (definition) {
-    const [schemaSql, operationSource, migrationSql] = await Promise.all(
-      [definition.schemaPath, definition.operationsPath, proposal.migrationPath].map((path) =>
-        readText(api, selection.workspaceId, path),
-      ),
-    );
+    const [schemaSql, operationSource, migrationSql] = await Promise.all([
+      readText(api, selection.workspaceId, definition.schemaPath),
+      readText(api, selection.workspaceId, definition.operationsPath),
+      proposal.migrationPath === null
+        ? Promise.resolve("SELECT 1;")
+        : readText(api, selection.workspaceId, proposal.migrationPath),
+    ]);
     if (schemaSql !== null && operationSource !== null && migrationSql !== null) {
       const digest = await collectionChangeDigest({
         definition,
@@ -474,7 +476,9 @@ export async function prepareCollectionChangeReview(
       },
       [schemaPath]: { before: saved.schemaSql, after: prepared.schemaSql },
       [operationsPath]: { before: saved.operationSource, after: prepared.operationSource },
-      [asked.migrationPath]: { before: "", after: prepared.migrationSql },
+      ...(asked.migrationPath === null
+        ? {}
+        : { [asked.migrationPath]: { before: "", after: prepared.migrationSql } }),
     };
     return {
       change: { proposal, rows, state: { kind: "waiting" } },

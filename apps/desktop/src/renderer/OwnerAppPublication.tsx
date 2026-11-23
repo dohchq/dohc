@@ -38,6 +38,7 @@ import { syncNamesServer } from "./workbench/WorkspaceSyncStatus";
 import { accessReasonForLane, serverName, type AccessContext } from "./workbench/accessReason";
 
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
+type StagedProposal = Extract<OwnerAppPublicationResult, { kind: "staged" }>["stage"];
 const collectionKey = (approvalId: string, datasetId: string) => `${approvalId}\0${datasetId}`;
 type Publication = Extract<OwnerAppPublicationResult, { kind: "listed" }>["publications"][number];
 type LocalPublication = Extract<
@@ -211,6 +212,75 @@ function linkLabel(link: ActiveLink) {
   return `${paths}${version} · ${link.access} · ${link.grantId.slice(0, 8)}`;
 }
 
+function stagedStateHeading(staged: StagedProposal): string {
+  const created = staged.collections.filter((entry) => entry.action === "create").length;
+  const updated = staged.collections.filter((entry) => entry.action === "migrate").length;
+  const parts: string[] = [];
+  if (created > 0) parts.push(`${created} new ${created === 1 ? "Collection" : "Collections"}`);
+  if (updated > 0) parts.push(`${updated} updated ${updated === 1 ? "Collection" : "Collections"}`);
+  if (parts.length === 0) return "Approve this staged version on this device.";
+  return `Review ${parts.join(" and ")} and approve this app.`;
+}
+
+function StagedCollectionsBox({ collections }: { collections: StagedProposal["collections"] }) {
+  const id = useId();
+  if (collections.length === 0) return null;
+  return (
+    <section aria-labelledby={id} data-testid="staged-app-collections">
+      <h3 id={id} className="m-0 mb-2 text-[13px] font-medium text-ink">
+        Collections
+      </h3>
+      <div className="divide-y divide-line rounded-lg border border-line bg-bg">
+        {collections.map((collection) => (
+          <div key={collection.datasetId} className="flex flex-col gap-1.5 px-3 py-3">
+            <div className="flex items-center gap-2">
+              <Table2 size={14} aria-hidden className="shrink-0 text-muted" />
+              <span className="min-w-0 truncate text-[13px] font-medium text-ink">
+                {collection.name}
+              </span>
+              {collection.alias ? (
+                <span className="shrink-0 font-mono text-[11px] text-muted">
+                  {collection.alias}
+                </span>
+              ) : null}
+              <span className="flex-1" />
+              {collection.action === "create" ? (
+                <Pill tone={collection.applied ? "success" : "warning"}>
+                  {collection.applied ? "Created" : "New"}
+                </Pill>
+              ) : collection.action === "migrate" ? (
+                <Pill tone={collection.applied ? "success" : "warning"}>
+                  {collection.applied ? "Updated" : "Update"}
+                </Pill>
+              ) : (
+                <Pill>Existing</Pill>
+              )}
+            </div>
+            {collection.action === "create" && collection.tables?.length ? (
+              <ul className="m-0 list-none space-y-1 pl-5 text-[12px] text-muted">
+                {collection.tables.map((table) => (
+                  <li key={table.name}>
+                    <span className="font-medium text-ink">{table.name}</span>
+                    {table.fields.length ? `: ${table.fields.join(", ")}` : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : collection.action === "migrate" && collection.changes?.length ? (
+              <ul className="m-0 list-none space-y-1 pl-5 text-[12px] text-muted">
+                {collection.changes.map((change, index) => (
+                  <li key={`${change.kind}-${index}`}>{change.summary}</li>
+                ))}
+              </ul>
+            ) : collection.action === "unchanged" ? (
+              <p className="m-0 pl-5 text-[12px] text-muted">No rule changes.</p>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 type LocalReview =
   | { status: "loading" }
   | { status: "failed" }
@@ -219,6 +289,7 @@ type LocalReview =
       rows: LocalPublication[];
       approval: LocalPublication | null;
       source: Checked | null;
+      staged: StagedProposal | null;
     };
 
 function PublicationDialog(
@@ -497,8 +568,21 @@ function PublicationDialog(
             else props.onReopen();
           });
       }
+      let staged: StagedProposal | null = null;
+      try {
+        const listed = await api.publishOwnerApp({
+          action: "listStaged",
+          workspaceId: props.workspaceId,
+          appRoot: props.appRoot,
+        });
+        if (listed && listed.kind === "stagedListed") {
+          staged = listed.stages.find((entry) => entry.appRoot === props.appRoot) ?? null;
+        }
+      } catch {
+        // Staged proposals are optional; keep normal local review when unavailable.
+      }
       if (!current) return;
-      setLocalReview({ status: "ready", rows, approval, source });
+      setLocalReview({ status: "ready", rows, approval, source, staged });
     })().catch((error) => {
       if (!current) return;
       setLocalReview({ status: "failed" });
@@ -514,9 +598,10 @@ function PublicationDialog(
 
   const review = localReview.status === "ready" ? localReview : null;
   const approval = review?.approval ?? null;
+  const staged = review?.staged ?? null;
   const changed =
     !!approval && !!review?.source && review.source.sourceRevision !== approval.sourceRevision;
-  const needsCandidate = !!review && (!approval || changed);
+  const needsCandidate = !!review && !staged && (!approval || changed);
 
   // A first review or changed source shows the exact candidate, so approval binds what the person read.
   const prepareLocalCandidate = async () => {
@@ -611,6 +696,58 @@ function PublicationDialog(
       if (!alive.current || mine !== request.current) return;
       openFailure.current = { publicationId, cause };
       setOpenFailed(ipcErrorMessage(cause, "dohc could not open this app in your browser."));
+    } finally {
+      if (alive.current && mine === request.current) setBusy(null);
+    }
+  };
+
+  const approveStaged = async (proposal: StagedProposal) => {
+    if (busy || responsesBusy) return;
+    const mine = ++request.current;
+    setBusy("approve");
+    setApproveFailed(null);
+    setError(null);
+    try {
+      const result = await api.publishOwnerApp({
+        action: "approveStaged",
+        workspaceId: props.workspaceId,
+        stageId: proposal.stageId,
+        reviewDigest: proposal.reviewDigest,
+      });
+      if (!alive.current || mine !== request.current) return;
+      if (result.kind !== "stagedApproved")
+        throw new Error("dohc could not confirm this approval.");
+      localChanged();
+      if (props.localApproval === "browser") await openApproved(result.publicationId);
+      if (alive.current && mine === request.current) props.onClose();
+    } catch (cause) {
+      if (!alive.current || mine !== request.current) return;
+      setApproveFailed(ipcErrorMessage(cause, "dohc could not approve this staged review."));
+      setLocalReload((value) => value + 1);
+    } finally {
+      if (alive.current && mine === request.current) setBusy(null);
+    }
+  };
+
+  const discardStaged = async (proposal: StagedProposal) => {
+    if (busy || responsesBusy) return;
+    const mine = ++request.current;
+    setBusy("withdraw");
+    setApproveFailed(null);
+    setError(null);
+    try {
+      const result = await api.publishOwnerApp({
+        action: "discardStaged",
+        workspaceId: props.workspaceId,
+        stageId: proposal.stageId,
+      });
+      if (!alive.current || mine !== request.current) return;
+      if (result.kind !== "stagedDiscarded")
+        throw new Error("dohc could not discard this staged review.");
+      localChanged();
+    } catch (cause) {
+      if (!alive.current || mine !== request.current) return;
+      setError(ipcErrorMessage(cause, "dohc could not discard this staged review."));
     } finally {
       if (alive.current && mine === request.current) setBusy(null);
     }
@@ -901,15 +1038,19 @@ function PublicationDialog(
   const localView = view === "local" && !prepared;
   // A candidate under review lists the files Approve changes binds; the source check's list is the fallback.
   const paths = localView
-    ? ((needsCandidate ? localCandidate?.sourcePaths : undefined) ?? review?.source?.sourcePaths)
+    ? (staged?.sourcePaths ??
+      (needsCandidate ? localCandidate?.sourcePaths : undefined) ??
+      review?.source?.sourcePaths)
     : undefined;
   const shown = (path: string) =>
     path.startsWith(`${props.appRoot}/`) ? path.slice(props.appRoot.length + 1) : path;
   const boxCapabilities = !review
     ? null
-    : !needsCandidate && approval
-      ? approvedCapabilities(approval)
-      : (localCandidate?.capabilities ?? null);
+    : staged
+      ? staged.capabilities
+      : !needsCandidate && approval
+        ? approvedCapabilities(approval)
+        : (localCandidate?.capabilities ?? null);
   const approving = busy === "approve" || candidateState === "loading";
   const canApprove = !!localCandidate && candidateState === "idle" && !busy && !responsesBusy;
   // Share links show once the server returns this app's publications. It stays hidden when the workspace is not synced,
@@ -1007,7 +1148,54 @@ function PublicationDialog(
               </ul>
             ) : null}
           </header>
-          {localView ? (
+          {localView && staged ? (
+            <div data-testid="staged-app-review-card" className="flex flex-col gap-6">
+              <StateLine icon={CircleDashed} tone="text-muted" text={stagedStateHeading(staged)}>
+                <More>Approving applies these Collection rules and approves this app.</More>
+              </StateLine>
+              <StagedCollectionsBox collections={staged.collections} />
+              <AccessBox
+                capabilities={staged.capabilities}
+                approved={approval ? approvedCapabilities(approval) : null}
+                failed={false}
+                onRetry={() => setLocalReload((value) => value + 1)}
+              />
+              {status}
+              <div className="flex flex-col gap-2">
+                {approveFailed !== null ? (
+                  <p
+                    role="alert"
+                    title={approveFailed}
+                    className="m-0 text-right text-[13px] text-danger"
+                  >
+                    {approveFailed}
+                  </p>
+                ) : null}
+                <footer className="flex items-center gap-2">
+                  <SecondaryButton
+                    data-testid="staged-app-discard"
+                    disabled={!!busy || responsesBusy}
+                    aria-busy={busy === "withdraw"}
+                    onClick={() => void discardStaged(staged)}
+                  >
+                    {busy === "withdraw" ? "Discarding…" : "Discard"}
+                  </SecondaryButton>
+                  <span className="flex-1" />
+                  <SecondaryButton disabled={committing} onClick={props.onClose}>
+                    Cancel
+                  </SecondaryButton>
+                  <PrimaryButton
+                    data-testid="staged-app-approve"
+                    aria-busy={busy === "approve"}
+                    disabled={!!busy || responsesBusy}
+                    onClick={() => void approveStaged(staged)}
+                  >
+                    {busy === "approve" ? "Approving…" : "Approve and open"}
+                  </PrimaryButton>
+                </footer>
+              </div>
+            </div>
+          ) : localView ? (
             <>
               {!review ? (
                 <div aria-hidden className="invisible text-[13px]">

@@ -2504,8 +2504,63 @@ describe("CLI socket server", () => {
           request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: request.operationId },
         }),
       ).rejects.toThrow("Automations cannot use app publication");
+      await expect(
+        invoke("appPublication", {
+          cwd: workspaceRoot,
+          actor,
+          request: { action: "stage", workspaceId: WORKSPACE_ID, appRoot: "app" },
+        }),
+      ).rejects.toThrow("Automations cannot use app publication");
+      await expect(
+        invoke("appPublication", {
+          cwd: workspaceRoot,
+          actor,
+          request: {
+            action: "approveStaged",
+            workspaceId: WORKSPACE_ID,
+            stageId: request.operationId,
+            reviewDigest: "a".repeat(64),
+          },
+        }),
+      ).rejects.toThrow("Automations cannot use app publication");
     }
+    agentRunDepth = 0;
     expect(context.appPublication).toHaveBeenCalledTimes(2);
+
+    // stage rebases appRoot and migration paths relative to cwd.
+    const subDir = join(workspaceRoot, "apps");
+    await mkdir(subDir, { recursive: true });
+    context.appPublication = vi.fn(async () => ({
+      kind: "stagedListed" as const,
+      stages: [],
+    }));
+    await invoke("appPublication", {
+      cwd: subDir,
+      actor: "agent",
+      request: {
+        action: "stage",
+        workspaceId: WORKSPACE_ID,
+        appRoot: "control-tower",
+        migrations: {
+          expenses: "control-tower/expenses/migrate.sql",
+          "control-tower/workouts/dataset.json": "control-tower/workouts/migrate.sql",
+        },
+        agentLabel: "Builder",
+      },
+    });
+    expect(context.appPublication).toHaveBeenLastCalledWith(
+      {
+        action: "stage",
+        workspaceId: WORKSPACE_ID,
+        appRoot: "apps/control-tower",
+        migrations: {
+          expenses: "apps/control-tower/expenses/migrate.sql",
+          "apps/control-tower/workouts/dataset.json": "apps/control-tower/workouts/migrate.sql",
+        },
+        agentLabel: "Builder",
+      },
+      { kind: "agent", label: "Builder", labelSource: "agent-declared" },
+    );
   });
 
   it("writes a random capability endpoint descriptor for a Windows named pipe", async (ctx) => {

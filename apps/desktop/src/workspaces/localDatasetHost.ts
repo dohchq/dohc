@@ -40,7 +40,11 @@ import {
   type DatasetInvocationResult,
   type DatasetSupervisorOptions,
 } from "@dohc/app-backend-runtime/supervisor";
-import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
+import {
+  initializeAppDatabase,
+  type AppBackendRuntimeOptions,
+  type JsonValue,
+} from "@dohc/app-backend-runtime";
 import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
@@ -1008,6 +1012,29 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
        */
       held(): void {
         assertCurrent();
+      },
+      preflightCreate(input: {
+        revision: DatasetRevision;
+        schemaSql: string;
+        operationSource: string;
+        signal?: AbortSignal;
+      }) {
+        return tracked(async () => {
+          const abort = signal(input.signal);
+          await compile(input.operationSource, input.revision.definition.operationsPath, abort);
+          assertCurrent();
+          abort.throwIfAborted();
+          await initializeAppDatabase(
+            {
+              schemaSql: input.schemaSql,
+              tables: input.revision.definition.tables.map((table) => table.sqlName),
+              journaled: true,
+              signal: abort,
+            },
+            options.runtime,
+          );
+          assertCurrent();
+        });
       },
       prepare,
       prepareMigration(input: PrepareLocalDatasetMigration) {

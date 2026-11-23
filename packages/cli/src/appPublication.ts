@@ -120,6 +120,57 @@ const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
     .strict(),
   z.object({ ...publication, manifestUnavailable: z.literal(true) }).strict(),
 ]);
+const StagedAppCollectionSummary = z
+  .object({
+    alias: z.string().min(1).max(64).optional(),
+    datasetId: z.string().uuid(),
+    name: z.string().min(1).max(256),
+    datasetPath: z.string().min(1).max(1024),
+    action: z.enum(["create", "migrate", "unchanged"]),
+    previousRevision: z.number().int().positive().optional(),
+    targetRevision: z.number().int().positive(),
+    targetRevisionSha256: hash,
+    migrationPath: z.string().min(1).max(1024).nullable().optional(),
+    applied: z.boolean(),
+    tables: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1).max(256),
+            fields: z.array(z.string().min(1).max(256)).max(256),
+          })
+          .strict(),
+      )
+      .max(64)
+      .optional(),
+    changes: z
+      .array(
+        z
+          .object({
+            kind: z.string().min(1).max(64),
+            summary: z.string().min(1).max(512),
+          })
+          .strict(),
+      )
+      .max(500)
+      .optional(),
+  })
+  .strict();
+export type StagedAppCollectionSummary = z.infer<typeof StagedAppCollectionSummary>;
+export const StagedAppSummary = z
+  .object({
+    stageId: z.string().uuid(),
+    appRoot: z.string().min(1).max(1024),
+    reviewDigest: hash,
+    createdAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    sourceRevision: hash,
+    sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512),
+    collections: z.array(StagedAppCollectionSummary).max(APP_DATASET_MAX_BINDINGS),
+    capabilities: z.array(OwnerAppCapability).max(APP_DATASET_MAX_BINDINGS),
+    externalNetwork: z.literal(true),
+  })
+  .strict();
+export type StagedAppSummary = z.infer<typeof StagedAppSummary>;
 function appPublicationAction<Shape extends z.ZodRawShape>(shape: Shape) {
   const names = Object.keys(shape);
   const action = (shape.action as { value?: string } | undefined)?.value ?? "";
@@ -156,6 +207,35 @@ const APP_PUBLICATION_REQUEST_OPTIONS = [
     action: z.literal("prepareLocal"),
     workspaceId: id,
     appRoot: z.string().min(1).max(1024),
+  }),
+  appPublicationAction({
+    action: z.literal("stage"),
+    workspaceId: id,
+    appRoot: z.string().min(1).max(1024),
+    migrations: z
+      .record(z.string().min(1).max(1024), z.string().min(1).max(1024))
+      .refine((value) => Object.keys(value).length <= APP_DATASET_MAX_BINDINGS, {
+        message: `At most ${APP_DATASET_MAX_BINDINGS} migration paths may be supplied.`,
+      })
+      .optional(),
+    agentLabel: z.string().min(1).max(160).optional(),
+  }),
+  appPublicationAction({
+    action: z.literal("listStaged"),
+    workspaceId: id,
+    appRoot: z.string().min(1).max(1024).optional(),
+  }),
+  appPublicationAction({
+    action: z.literal("approveStaged"),
+    workspaceId: id,
+    stageId: z.string().uuid(),
+    reviewDigest: hash,
+    agentLabel: z.string().min(1).max(160).optional(),
+  }),
+  appPublicationAction({
+    action: z.literal("discardStaged"),
+    workspaceId: id,
+    stageId: z.string().uuid(),
   }),
   appPublicationAction({
     action: z.literal("launchLocal"),
@@ -322,5 +402,28 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
       authorityRevision: z.number().int().positive(),
     })
     .strict(),
+  z.object({ kind: z.literal("staged"), stage: StagedAppSummary }).strict(),
+  z.object({ kind: z.literal("stagedListed"), stages: z.array(StagedAppSummary).max(16) }).strict(),
+  z
+    .object({
+      kind: z.literal("stagedApproved"),
+      stageId: z.string().uuid(),
+      publicationId: hash,
+      authorityRevision: z.number().int().positive(),
+      collectionsApplied: z
+        .array(
+          z
+            .object({
+              datasetId: z.string().uuid(),
+              action: z.enum(["create", "migrate"]),
+              revision: z.number().int().positive(),
+              revisionSha256: hash,
+            })
+            .strict(),
+        )
+        .max(APP_DATASET_MAX_BINDINGS),
+    })
+    .strict(),
+  z.object({ kind: z.literal("stagedDiscarded"), stageId: z.string().uuid() }).strict(),
 ]);
 export type OwnerAppPublicationResult = z.infer<typeof OwnerAppPublicationResult>;

@@ -575,12 +575,12 @@ const DATASET_REQUEST_OPTIONS = [
   datasetAction({
     ...selection,
     action: z.literal("prepareMigration"),
-    migrationPath: z.string().min(1).max(1024),
+    migrationPath: z.string().min(1).max(1024).nullable().optional(),
   }),
   datasetAction({
     ...selection,
     action: z.literal("askToApply"),
-    migrationPath: z.string().min(1).max(1024),
+    migrationPath: z.string().min(1).max(1024).nullable().optional(),
     note: z.string().trim().min(1).max(500).optional(),
   }),
   datasetAction({

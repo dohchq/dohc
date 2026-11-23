@@ -10227,6 +10227,27 @@ function registerIpcHandlers(): void {
     datasetForWorkspace: localDatasetHostFor,
     approvedArtifacts: async (workspace, datasetId, signal) =>
       (await datasetDependencies.dataForWorkspace(workspace, signal)).approvedArtifacts(datasetId),
+    migrationAuthority: async (workspace, signal) => {
+      const data = await datasetDependencies.dataForWorkspace(workspace, signal);
+      return {
+        approvedArtifacts: (datasetId) => Promise.resolve(data.approvedArtifacts(datasetId)),
+        prepareMigrationCandidate: (input) => {
+          if (!data.prepareMigrationCandidate)
+            throw new Error("Collection rule changes are unavailable on this host.");
+          return data.prepareMigrationCandidate(input);
+        },
+        approveMigrationCandidate: (input) => {
+          if (!data.approveMigrationCandidate)
+            throw new Error("Collection rule changes are unavailable on this host.");
+          return data.approveMigrationCandidate(input);
+        },
+        discardMigrationCandidate: (input) => {
+          if (!data.discardMigrationCandidate)
+            throw new Error("Collection rule changes are unavailable on this host.");
+          return data.discardMigrationCandidate(input);
+        },
+      };
+    },
     launchLocalDataset: async (workspace, publicationId, signal) =>
       (await localAppLauncher(workspace, signal)).launch(publicationId, signal),
   });
