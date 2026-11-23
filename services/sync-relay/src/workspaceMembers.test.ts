@@ -1631,6 +1631,49 @@ describe("folder rules", () => {
     ]);
   });
 
+  it("changes a rule through its marker's own spelling, so no twin hides the folder", async () => {
+    const { h, storage } = await seed();
+    const context = storage as unknown as StorageContext;
+    const rule = await created(h, "docs", "view");
+    const markers = () =>
+      context.db
+        .prepare(
+          "SELECT path, blob_sha256 FROM sync_relay_current_files WHERE workspace_id = ? AND lower(path) = 'docs/.dohc-access'",
+        )
+        .all(WORKSPACE)
+        .map((row) => ({ ...row }));
+    const [marker] = markers();
+    await ownerAppend(h, [
+      logOp("moment.append", {
+        momentId: "m-docs-respelled",
+        versionId: "main",
+        objectId: "object-docs-respelled",
+        path: "docs/.DOHC-ACCESS",
+        recordedAtMs: 6000,
+        operation: "rename",
+        payloadBeforeBlobSha256: marker!.blob_sha256,
+        payloadBeforePath: "docs/.dohc-access",
+        payloadAfterBlobSha256: marker!.blob_sha256,
+        payloadAfterPath: "docs/.DOHC-ACCESS",
+        payloadAfterContentKind: "text",
+        metadata: { origin: "user" },
+        beforePresent: "present",
+      }),
+    ]);
+    expect(markers().map((row) => row.path)).toEqual(["docs/.DOHC-ACCESS"]);
+    const changed = await post(h, OWNER, FOLDER_RULES, {
+      ruleId: rule.ruleId,
+      revision: 1,
+      members: "edit",
+      people: [],
+    });
+    expect(changed.status, await changed.clone().text()).toBe(200);
+    expect(markers().map((row) => row.path)).toEqual(["docs/.DOHC-ACCESS"]);
+    expect((await membersView(h, OWNER)).folderRules).toMatchObject([
+      { revision: 2, folders: [{ path: "docs", state: "covered" }] },
+    ]);
+  });
+
   it("keeps rules and their spans when the workspace's sync identity rotates", async () => {
     const { h, storage } = await seed();
     const context = storage as unknown as StorageContext;
