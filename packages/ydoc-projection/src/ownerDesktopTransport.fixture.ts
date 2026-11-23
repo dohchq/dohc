@@ -23,11 +23,6 @@ import { DatabaseSync } from "node:sqlite";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { afterAll, afterEach, expect, vi } from "vitest";
 import { LiveCommittedDeliveryStore } from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
-import {
-  beginStopRestore,
-  advanceStopRestoreFence,
-  readStopRestore,
-} from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import * as Y from "yjs";
 import {
@@ -119,7 +114,6 @@ export async function ownerDesktopTransport({
   );
   writeFileSync(join(workspaceRoot, "docs/a.md"), seed.markdown);
   const nativeConfig = join(root, "ordinary.json");
-  const restoreMaxBytes = 16_000_000;
   writeFileSync(
     nativeConfig,
     JSON.stringify({
@@ -142,7 +136,6 @@ export async function ownerDesktopTransport({
         },
         workingReserveBytes: 4_000_000,
       },
-      restore: { maxBytes: restoreMaxBytes, maxEvents: 100 },
       ownerOutbox: { maxPendingBytes: 1_000_000, maxPendingAgeMs: 600_000 },
     }),
   );
@@ -191,8 +184,6 @@ export async function ownerDesktopTransport({
   let handoffEditInjected = false;
   let handoffCount = 0;
   let closeNamedPeer: (() => void) | undefined;
-  let namedPeerInvalidated: AbortSignal | undefined;
-  let releaseTailAdmission: (() => void) | undefined;
   let failed = false,
     failure: unknown;
   try {
@@ -396,14 +387,6 @@ export async function ownerDesktopTransport({
         workspaceIds: ["workspace"],
         maxQueuedBytes: 4_000_000,
         maxActiveDrains: 2,
-        restore: {
-          maxBytes: restoreMaxBytes,
-          maxEvents: 100,
-          aggregateBytes: restoreMaxBytes * 16 + 1_000_000,
-          workingReserveBytes: 1_000_000,
-          maxOperations: 1,
-          validation: policy,
-        },
         client: {
           aggregateBytes: 200_000_000,
           maxUploads: 2,
@@ -472,7 +455,6 @@ export async function ownerDesktopTransport({
           maxRegistrations: 8,
           aggregateBytes: 200_000_000,
           sync: { maxClientVectorBytes: 100_000, maxOutputBytes: 2_000_000 },
-          maxRestoreBytes: restoreMaxBytes,
           maxAdoptionBytes: 1_000_000,
           maxAdoptionEvents: 2,
           requestDeadlineMs: 30_000,
@@ -493,28 +475,6 @@ export async function ownerDesktopTransport({
     await expect
       .poll(() => deployment!.storage.getLiveHostControl()?.admissionState, { timeout: 30_000 })
       .toBe("open");
-    // The old connection's disconnect clears its id and closes admission. Only a new, admitted
-    // registration has device delivery; registration and delivery are installed together.
-    const reconnect = async (whileDisconnected?: () => void) => {
-      const previous = deployment!.storage.getLiveHostControl()!.registeredConnectionId;
-      connection.stop();
-      await connection.closed;
-      whileDisconnected?.();
-      connection = connect();
-      await expect
-        .poll(
-          () => {
-            const current = deployment!.storage.getLiveHostControl();
-            return (
-              current?.admissionState === "open" &&
-              current.registeredConnectionId != null &&
-              current.registeredConnectionId !== previous
-            );
-          },
-          { timeout: 30_000 },
-        )
-        .toBe(true);
-    };
     const hostRow = deployment.storage.getLiveHostControl()!,
       host = {
         mode: "device" as const,
@@ -530,10 +490,6 @@ export async function ownerDesktopTransport({
         checkpoint: baseline,
       });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
-    const baselineDoc = new Y.Doc({ gc: false });
-    Y.applyUpdate(baselineDoc, baseline);
-    const baselineProjection = yDocToMarkdown(baselineDoc);
-    baselineDoc.destroy();
     expect(
       deployment.storage.registerLiveDocumentBaseline({
         host,
@@ -1035,7 +991,6 @@ export async function ownerDesktopTransport({
       expect(
         deployment.storage.getLinkPrincipal(ticket.authority.principalId)?.displayName,
       ).toBeNull();
-    namedPeerInvalidated = namedPeer.invalidated;
     const peerSignal = new AbortController();
     const peerSync = await namedPeer.openSync(Uint8Array.of(0), peerSignal.signal),
       browser = new Y.Doc();
@@ -1271,225 +1226,6 @@ export async function ownerDesktopTransport({
       native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count,
     ).toBe(0);
     assertIndependentRelayReader(root, baseline, rendererDoc);
-    const beforeStop = Y.encodeStateVector(remote);
-    remote.getMap("frontmatter").set("restoreCut", "Accepted before stopping");
-    const stopBytes = Y.encodeStateAsUpdate(remote, beforeStop),
-      stopAuthority = deployment.storage.resolveCurrentLiveDocumentBinding({ document, actor }),
-      stopCut = deployment.storage.readLiveUpdateJournalCut({ document });
-    if (stopAuthority.kind !== "current" || stopCut.kind !== "cut")
-      throw new Error("Stop cut unavailable.");
-    expect(
-      deployment.storage.commitLiveUpdateJournal({
-        host,
-        actor,
-        expectedAuthority: stopAuthority.authority,
-        metadata: {
-          deliveryId: "owner-stop-cut",
-          updateDigest: hash(stopBytes),
-          binding: stopAuthority.binding,
-        },
-        cutToken: stopCut.cut,
-        validation: createLiveMarkdownJournalValidator(policy)({
-          document,
-          currentPath: "docs/a.md",
-          checkpoint: stopCut.cut.checkpoint.bytes,
-          suffix: stopCut.cut.suffix.map((row) => row.bytes),
-          candidate: stopBytes,
-        }),
-        updateBytes: stopBytes,
-        receivedAtMs: Date.now(),
-      }).result.kind,
-    ).toBe("accepted");
-    const lostApplication = vi
-      .spyOn(LiveCommittedDeliveryStore.prototype, "acknowledgeOwnerDeliveryApplication")
-      .mockImplementationOnce(() => {
-        throw new Error("Lost owner application ACK before stop");
-      });
-    try {
-      await expect(drain()).rejects.toThrow("Lost owner application ACK before stop");
-    } finally {
-      lostApplication.mockRestore();
-    }
-    const appliedSequence = Number(
-      native
-        .prepare(
-          "SELECT local_ydoc_sequence FROM live_device_update_applications WHERE delivery_id='owner-stop-cut'",
-        )
-        .get()!.local_ydoc_sequence,
-    );
-    const originalAdmission = deployment.storage.commitLiveUpdateJournal.bind(deployment.storage);
-    const tailAdmission = vi
-      .spyOn(deployment.storage, "commitLiveUpdateJournal")
-      .mockImplementation((input) => {
-        if (input.actor.kind === "owner")
-          throw new Error("Injected unavailable owner admission before restore");
-        return originalAdmission(input);
-      });
-    releaseTailAdmission = () => tailAdmission.mockRestore();
-    rendererDoc.getMap("frontmatter").set("localRestoreTail", "Unadmitted owner work");
-    await renderer.flushPendingLocalUpdates();
-    await expect
-      .poll(
-        () =>
-          native
-            .prepare("SELECT COUNT(*) AS n FROM owner_ydoc_outbox_entries WHERE pending=1")
-            .get()!.n,
-      )
-      .toBeGreaterThan(0);
-    const pendingTail = native
-      .prepare(
-        "SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence",
-      )
-      .all();
-    const lookup = { operationId: "owner-stop", workspaceId: "workspace", ownerUserId: "owner" };
-    beginStopRestore(
-      deployment.storage as StorageContext,
-      {
-        deliveryKind: "owner",
-        ...lookup,
-        document,
-        shareId: "share",
-        grantId: "grant",
-        expectedGrantGeneration: 1,
-        expectedDependentGrantIds: [],
-        expectedFence: stopAuthority.binding.restoreFenceGeneration,
-        restorePointCursor: 0,
-        restorePointReceiptDigest: hash(baseline),
-      },
-      Date.now(),
-    );
-    advanceStopRestoreFence(deployment.storage as StorageContext, lookup, Date.now());
-    releaseTailAdmission();
-    releaseTailAdmission = undefined;
-    const stop = async () => {
-      let result: Awaited<ReturnType<typeof control.stopRestore>> | undefined, failure: unknown;
-      await expect
-        .poll(
-          async () => {
-            try {
-              result = await control.stopRestore(lookup);
-              return true;
-            } catch (error) {
-              if ((error as Error).message.includes("not ready")) return false;
-              failure = error;
-              return true;
-            }
-          },
-          { timeout: 30_000 },
-        )
-        .toBe(true);
-      if (failure) throw failure;
-      return result!;
-    };
-    expect(namedPeerInvalidated!.aborted).toBe(false);
-    await reconnect(() => {
-      expect(namedPeerInvalidated!.aborted).toBe(true);
-      closeNamedPeer!();
-      closeNamedPeer = undefined;
-      expect(frameChanges.listenerCount()).toBe(0);
-    });
-    const handoffsBeforeStop = handoffCount;
-    const stoppedRequests = vi.spyOn(singleton, "sendRequest");
-    expect(await stop()).toEqual({ kind: "pending", reason: "publication-pending" });
-    expect(native.prepare("SELECT COUNT(*) AS n FROM live_restore_fences").get()!.n).toBe(0);
-    expect(await publish()).toBeGreaterThan(0);
-    for (const row of pendingTail)
-      expect(deployment.storage.getBlob("workspace", String(row.update_digest))).toBeNull();
-    const lostFence = vi
-      .spyOn(LiveCommittedDeliveryStore.prototype, "acknowledgeStopRestoreFence")
-      .mockImplementationOnce(() => {
-        throw new Error("Lost owner fence receipt");
-      });
-    try {
-      await expect(stop()).rejects.toThrow("Lost owner fence receipt");
-    } finally {
-      lostFence.mockRestore();
-    }
-    expect(readStopRestore(deployment.storage as StorageContext, lookup)?.phase).toBe(
-      "old-cut-applied",
-    );
-    expect(handoffCount).toBe(handoffsBeforeStop);
-    expect(stoppedRequests.mock.calls.map((call) => call[0].method)).not.toContain(
-      "ydoc.ownerOutbox.readPending",
-    );
-    expect(
-      native
-        .prepare(
-          "SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence",
-        )
-        .all(),
-    ).toEqual(pendingTail);
-    expect(
-      native.prepare("SELECT state,quarantine_reason FROM owner_ydoc_outboxes").get(),
-    ).toMatchObject({ state: "quarantined", quarantine_reason: "restore-fenced" });
-    expect(rendererDoc.getMap("frontmatter").get("restoreCut")).toBe("Accepted before stopping");
-    expect(rendererDoc.getMap("frontmatter").get("localRestoreTail")).toBe("Unadmitted owner work");
-    stoppedRequests.mockRestore();
-    await renderer.destroy();
-    renderer = undefined;
-    ownerAvailable = false;
-    const replayRequests = vi.spyOn(singleton, "sendRequest");
-    const fenced = await stop();
-    expect(fenced).toMatchObject({
-      kind: "done",
-      receipt: {
-        operation: {
-          operationId: "owner-stop",
-          origin: { kind: "owner" },
-          terminal: { deliveryId: "owner-stop-cut" },
-        },
-      },
-    });
-    if (fenced.kind !== "done") throw new Error("Native owner fence must complete");
-    expect(fenced.receipt.operation.appliedSequence).toBe(appliedSequence);
-    expect(fenced.receipt.localHeadSequence).toBeGreaterThan(appliedSequence);
-    expect(await stop()).toEqual(fenced);
-    expect(readStopRestore(deployment.storage as StorageContext, lookup)?.phase).toBe(
-      "native-fenced",
-    );
-    expect(replayRequests.mock.calls.map((call) => call[0].method)).not.toContain(
-      "liveApplication.register",
-    );
-    expect(replayRequests.mock.calls.map((call) => call[0].method)).not.toContain(
-      "liveApplication.ownerState",
-    );
-    replayRequests.mockRestore();
-    const prepared = await control.prepareRestore(lookup);
-    if (prepared.kind !== "prepared") throw new Error("Owner restore proposal is pending.");
-    const resumed = await control.completeRestore(lookup, prepared.proposalDigest);
-    if (resumed.kind !== "resumed") throw new Error("Owner restore is pending.");
-    expect(readFileSync(join(workspaceRoot, "docs/a.md"), "utf8")).toBe(seed.markdown);
-    expect(
-      native
-        .prepare(
-          "SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence",
-        )
-        .all(),
-    ).toEqual(pendingTail);
-    renderer = await openRenderer("renderer-restored");
-    ownerAvailable = true;
-    expect(renderer.available).toBe(true);
-    expect(yDocToMarkdown(renderer.doc!)).toBe(baselineProjection);
-    const handoffsAfterRestore = handoffCount;
-    renderer.doc!.getMap("frontmatter").set("afterRestore", "Fresh owner generation");
-    await renderer.flushPendingLocalUpdates();
-    expect(await drain()).toHaveProperty("kind", "done");
-    expect(handoffCount).toBe(handoffsAfterRestore);
-    expect(
-      native
-        .prepare(
-          "SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence",
-        )
-        .all(),
-    ).toEqual(pendingTail);
-    expect(await control.settle(document)).toMatchObject({ materialized: true });
-    expect(readFileSync(join(workspaceRoot, "docs/a.md"), "utf8")).toBe(
-      yDocToMarkdown(renderer.doc!),
-    );
-    await reconnect();
-    expect(await drain()).toHaveProperty("kind", "done");
-    expect(handoffCount).toBe(handoffsAfterRestore);
-    expect(await control.completeRestore(lookup, prepared.proposalDigest)).toEqual(resumed);
     if (link)
       expect(
         native
@@ -1502,7 +1238,6 @@ export async function ownerDesktopTransport({
         principal_id: ticket.authority.principalId,
         grant_id: "private-link-grant",
       });
-    expect(membership.invalidated.aborted).toBe(true);
     writeFileSync(
       join(root, "result.json"),
       JSON.stringify(
@@ -1533,9 +1268,7 @@ export async function ownerDesktopTransport({
         cleanupErrors.push(error);
       }
     };
-    // The quarantined owner tail remains pending; retire sessions through app shutdown.
     await attempt(() => capture.beginShutdown());
-    await attempt(() => releaseTailAdmission?.());
     await attempt(() => closeNamedPeer?.());
     await attempt(() => captures.mockRestore());
     await attempt(() => restoreOutboxRequests?.());

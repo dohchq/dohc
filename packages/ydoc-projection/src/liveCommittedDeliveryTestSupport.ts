@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { expect } from "vitest";
 import * as Y from "yjs";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
-import { restoreValidators, type RestoreArtifact } from "./liveRestoreValidation.js";
 import { markdownToYDoc } from "./import-export.js";
 import {
   createLiveMarkdownRegistrationValidator,
@@ -23,10 +22,6 @@ import {
 } from "../../../services/sync-relay/src/relayDeployment.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import { liveJournalCheckpointDue } from "../../../services/sync-relay/src/storage/liveJournalCheckpoint.js";
-import {
-  liveRestoreValidator,
-  runLiveRestoreWork,
-} from "../../../services/sync-relay/src/liveRestoreValidation.js";
 import { openEmptyRelayTestStorage } from "../../../services/sync-relay/src/testing/emptyRelayStorage.js";
 
 export const policy = {
@@ -38,8 +33,6 @@ export const policy = {
   maxDeleteIntervalVisits: 1_000_000,
   maxIndexOperations: 10_000_000,
 };
-/** Restore validation in this process, through the relay's artifact protocol. */
-export const restore = liveRestoreValidator(async (work) => runLiveRestoreWork(work, policy));
 const validate = createLiveMarkdownRegistrationValidator(policy);
 const validateJournal = createLiveMarkdownJournalValidator(policy);
 export const { DatabaseSync } = createRequire(import.meta.url)(
@@ -67,12 +60,7 @@ function checkpoint(markdown = "Hello", edit?: (doc: Y.Doc) => void): Uint8Array
     doc.destroy();
   }
 }
-function validated(
-  bytes = checkpoint(),
-  currentPath = "docs/a.md",
-  objectId = "object",
-  artifact?: RestoreArtifact,
-) {
+function validated(bytes = checkpoint(), currentPath = "docs/a.md", objectId = "object") {
   const captured = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const document = {
     workspaceId: "workspace",
@@ -80,7 +68,7 @@ function validated(
     objectId,
     lineageClaimId: hash(captured),
   };
-  const result = (artifact ? restoreValidators(policy, artifact).registration : validate)({
+  const result = validate({
     document,
     currentPath,
     checkpoint: captured,
@@ -198,7 +186,6 @@ export function registered(
   options: {
     workspaceQuotaBytes?: number;
     baselineBytes?: Uint8Array;
-    readerArtifact?: RestoreArtifact;
     journalPolicy?: typeof policy;
     host?: LiveHostConnectionCoordinate;
     deployment?: boolean;
@@ -209,7 +196,7 @@ export function registered(
 ) {
   const f = fixture(options, options.host),
     input = {
-      ...validated(options.baselineBytes, options.currentPath, undefined, options.readerArtifact),
+      ...validated(options.baselineBytes, options.currentPath),
       host: { ...(options.host ?? host) },
     };
   f.moment(input);
