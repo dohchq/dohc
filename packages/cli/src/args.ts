@@ -2337,6 +2337,67 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
           };
         },
       },
+      folder: {
+        capabilityId: "members.folder.rule",
+        summary: "Set or clear access to a workspace folder.",
+        operands: "<path>",
+        flags: [
+          { name: "--members", value: "view|comment|edit|none", text: "Set the member level." },
+          {
+            name: "--person",
+            value: "email=level",
+            text: "Set one person's level. Repeat for more people.",
+          },
+          { name: "--clear", text: "Remove the folder's rule." },
+        ],
+        notes: [
+          "Use a workspace-relative path, or / for the workspace root.",
+          "Copies already on people's computers stay when access narrows.",
+        ],
+        parse: (input) => {
+          const [folder, ...extra] = input.operands;
+          noExtraArgs(extra, "members folder");
+          if (folder === undefined) return fail("Enter a workspace-relative folder path.");
+          const members = lastValue(input, "--members");
+          const people = allValues(input, "--person").map((entry) => {
+            const split = entry.lastIndexOf("=");
+            if (split < 1)
+              return fail("Enter --person as email=view, email=comment, or email=edit.");
+            return { email: entry.slice(0, split), level: entry.slice(split + 1) };
+          });
+          const clear = input.flags.has("--clear");
+          if (clear && (members !== undefined || people.length))
+            return fail("Use --clear by itself to remove a rule.");
+          if (
+            !clear &&
+            members !== "view" &&
+            members !== "comment" &&
+            members !== "edit" &&
+            members !== "none"
+          )
+            return fail("Set --members to view, comment, edit, or none.");
+          return {
+            verb: "members",
+            request: membersRequest({
+              action: "folder",
+              change: clear
+                ? { folder, clear }
+                : { folder, members: members === "none" ? null : members, people },
+            }),
+          };
+        },
+      },
+      "remove-folder-marker": {
+        capabilityId: "members.folder.marker.remove",
+        summary: "Remove an unknown or unreadable folder marker.",
+        operands: "<path>",
+        parse: (input) => {
+          const [folder, ...extra] = input.operands;
+          noExtraArgs(extra, "members remove-folder-marker");
+          if (folder === undefined) return fail("Enter a workspace-relative folder path.");
+          return { verb: "members", request: membersRequest({ action: "folderMarker", folder }) };
+        },
+      },
       end: {
         capabilityId: "members.end",
         summary:

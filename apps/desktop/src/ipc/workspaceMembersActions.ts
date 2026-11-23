@@ -1,8 +1,10 @@
 import {
+  FOLDER_RULE_CHANGED,
   type GroupRuleLevel,
   WORKSPACE_MEMBER_ROUTES,
 } from "@dohc/security-contract/workspace-members";
 import { MembersResult, type MembersRequest } from "@dohc/cli/members";
+import { prepareFolderRulePath } from "@dohc/security-contract/access-rules";
 import { createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
@@ -70,6 +72,8 @@ const PHRASES: Record<MembersRequest["action"], string> = {
   leave: "leave this workspace",
   end: "end membership",
   group: "change this Group's access",
+  folder: "change folder access",
+  folderMarker: "remove the folder marker",
 };
 
 function failure(action: MembersRequest["action"], status: number): Error {
@@ -317,6 +321,66 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
               { level: request.level },
               "PUT",
             );
+          case "folder": {
+            const asked = request.change;
+            let body: unknown = asked;
+            let creating = false;
+            if ("folder" in asked) {
+              const path = prepareFolderRulePath(asked.folder);
+              const explicitlyCreating = "create" in asked && asked.create;
+              let version: { ruleId: string; revision: number } | undefined;
+              if (!explicitlyCreating && path !== null) {
+                const listed = await list();
+                if (listed.status !== "ready" || listed.view.folderRules === null)
+                  throw failure(request.action, 403);
+                const matches = listed.view.folderRules.filter((rule) =>
+                  rule.folders.some((entry) => entry.path === path),
+                );
+                if (matches.length > 1)
+                  throw new Error(
+                    "More than one rule covers this folder. Use Members to choose a rule.",
+                  );
+                const match = matches[0];
+                if (match) version = { ruleId: match.ruleId, revision: match.revision };
+              }
+              if ("clear" in asked) {
+                if (!version)
+                  throw new Error("dohc found no rule for this folder. Check the folder path.");
+                body = { ...version, clear: true };
+              } else {
+                creating = version === undefined;
+                body = {
+                  ...(version ?? { folder: asked.folder }),
+                  members: asked.members,
+                  people: asked.people,
+                };
+              }
+            }
+            const { status, data } = await call(
+              route(WORKSPACE_MEMBER_ROUTES.folderRules, workspaceId),
+              body,
+            );
+            if (status === 409)
+              throw new Error(
+                creating
+                  ? "That folder already has an access rule. Reload Members to find it."
+                  : FOLDER_RULE_CHANGED,
+              );
+            changed(status);
+            return ready(data);
+          }
+          case "folderMarker": {
+            const { status, data } = await call(
+              route(WORKSPACE_MEMBER_ROUTES.folderMarkers, workspaceId),
+              {
+                folder: request.folder,
+              },
+            );
+            if (status === 404)
+              throw new Error("dohc found no unknown or unreadable marker. Check the folder path.");
+            changed(status);
+            return ready(data);
+          }
         }
       },
       assertMembersWorkspace,

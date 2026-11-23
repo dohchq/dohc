@@ -111,6 +111,8 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "members let-back-in": ["member-1"],
   "members link": ["reset"],
   "members group": ["Team", "--level", "view"],
+  "members folder": ["Team/Docs", "--members", "view"],
+  "members remove-folder-marker": ["Team/Docs"],
   "members end": ["--everyone"],
   "document read": ["Notes/a.md"],
   "document held": ["Notes/a.md"],

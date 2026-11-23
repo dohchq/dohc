@@ -1,6 +1,6 @@
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
-import { accessRuleFolder, isFolderMarkerPath } from "./accessRuleFiles";
-import { SHARE_ACCESS_VALUES, type ShareAccess } from "./shareSelector";
+import { accessRuleFolder, FOLDER_MARKER_FILE, isFolderMarkerPath } from "./accessRuleFiles";
+import { prepareSharePath, SHARE_ACCESS_VALUES, type ShareAccess } from "./shareSelector";
 
 export {
   FOLDER_MARKER_FILE,
@@ -27,6 +27,13 @@ export interface AccessRule {
 export const ACCESS_RULE_MAX_BYTES = 64 * 1024;
 export const ACCESS_RULE_MAX_PEOPLE = 1_000;
 const MAX_EMAIL_CHARS = 320;
+
+export function prepareFolderRulePath(value: string): string | null {
+  if (value.length > 4096) return null;
+  const folder = value.replace(/^\/+|\/+$/gu, "");
+  const marker = prepareSharePath(folder ? `${folder}/${FOLDER_MARKER_FILE}` : FOLDER_MARKER_FILE);
+  return marker ? accessRuleFolder(marker.path) : null;
+}
 
 /** The one form rule keys and account emails are compared in (`normalizeEmail` in workspace-auth). */
 export function normalizeRuleEmail(email: string): string {

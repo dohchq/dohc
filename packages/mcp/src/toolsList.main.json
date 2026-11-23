@@ -2914,7 +2914,7 @@
     },
     {
       "name": "dohc_members",
-      "description": "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level and a Group's access, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone, hide a Group, or end membership.",
+      "description": "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); set or clear folder access (folder with change containing a workspace-relative folder and members plus people, or clear: true; use ruleId and revision from list to target a specific rule; members null hides the folder; people are email and level pairs); remove an unknown marker (folderMarker with folder); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level and folder or Group access, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone, hide a Group, narrow folder access, or end membership.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3106,6 +3106,208 @@
                 "required": [
                   "action",
                   "group"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "const": "folder"
+                  },
+                  "change": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "folder": {
+                            "type": "string",
+                            "maxLength": 4096
+                          },
+                          "members": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "view",
+                                  "comment",
+                                  "edit"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "people": {
+                            "maxItems": 1000,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "email": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320,
+                                  "pattern": "^[^\\s@]+@[^\\s@]+$"
+                                },
+                                "level": {
+                                  "type": "string",
+                                  "enum": [
+                                    "view",
+                                    "comment",
+                                    "edit"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "email",
+                                "level"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "create": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "folder",
+                          "members",
+                          "people"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "ruleId": {
+                            "type": "string"
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "members": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "view",
+                                  "comment",
+                                  "edit"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "people": {
+                            "maxItems": 1000,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "email": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320,
+                                  "pattern": "^[^\\s@]+@[^\\s@]+$"
+                                },
+                                "level": {
+                                  "type": "string",
+                                  "enum": [
+                                    "view",
+                                    "comment",
+                                    "edit"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "email",
+                                "level"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "ruleId",
+                          "revision",
+                          "members",
+                          "people"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "folder": {
+                            "type": "string",
+                            "maxLength": 4096
+                          },
+                          "clear": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "folder",
+                          "clear"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "ruleId": {
+                            "type": "string"
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "clear": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "ruleId",
+                          "revision",
+                          "clear"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "action",
+                  "change"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "const": "folderMarker"
+                  },
+                  "folder": {
+                    "type": "string",
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "action",
+                  "folder"
                 ],
                 "additionalProperties": false
               }
@@ -5224,7 +5426,7 @@
     },
     {
       "name": "dohc_members",
-      "description": "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level and a Group's access, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone, hide a Group, or end membership.",
+      "description": "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); set or clear folder access (folder with change containing a workspace-relative folder and members plus people, or clear: true; use ruleId and revision from list to target a specific rule; members null hides the folder; people are email and level pairs); remove an unknown marker (folderMarker with folder); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level and folder or Group access, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone, hide a Group, narrow folder access, or end membership.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5416,6 +5618,208 @@
                 "required": [
                   "action",
                   "group"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "const": "folder"
+                  },
+                  "change": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "folder": {
+                            "type": "string",
+                            "maxLength": 4096
+                          },
+                          "members": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "view",
+                                  "comment",
+                                  "edit"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "people": {
+                            "maxItems": 1000,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "email": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320,
+                                  "pattern": "^[^\\s@]+@[^\\s@]+$"
+                                },
+                                "level": {
+                                  "type": "string",
+                                  "enum": [
+                                    "view",
+                                    "comment",
+                                    "edit"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "email",
+                                "level"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "create": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "folder",
+                          "members",
+                          "people"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "ruleId": {
+                            "type": "string"
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "members": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "view",
+                                  "comment",
+                                  "edit"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "people": {
+                            "maxItems": 1000,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "email": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320,
+                                  "pattern": "^[^\\s@]+@[^\\s@]+$"
+                                },
+                                "level": {
+                                  "type": "string",
+                                  "enum": [
+                                    "view",
+                                    "comment",
+                                    "edit"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "email",
+                                "level"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "ruleId",
+                          "revision",
+                          "members",
+                          "people"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "folder": {
+                            "type": "string",
+                            "maxLength": 4096
+                          },
+                          "clear": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "folder",
+                          "clear"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "ruleId": {
+                            "type": "string"
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "clear": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "ruleId",
+                          "revision",
+                          "clear"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "action",
+                  "change"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "const": "folderMarker"
+                  },
+                  "folder": {
+                    "type": "string",
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "action",
+                  "folder"
                 ],
                 "additionalProperties": false
               }
@@ -6261,7 +6665,7 @@
     },
     {
       "name": "dohc_members",
-      "description": "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level and a Group's access, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone, hide a Group, or end membership.",
+      "description": "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); set or clear folder access (folder with change containing a workspace-relative folder and members plus people, or clear: true; use ruleId and revision from list to target a specific rule; members null hides the folder; people are email and level pairs); remove an unknown marker (folderMarker with folder); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level and folder or Group access, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone, hide a Group, narrow folder access, or end membership.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6453,6 +6857,208 @@
                 "required": [
                   "action",
                   "group"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "const": "folder"
+                  },
+                  "change": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "folder": {
+                            "type": "string",
+                            "maxLength": 4096
+                          },
+                          "members": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "view",
+                                  "comment",
+                                  "edit"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "people": {
+                            "maxItems": 1000,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "email": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320,
+                                  "pattern": "^[^\\s@]+@[^\\s@]+$"
+                                },
+                                "level": {
+                                  "type": "string",
+                                  "enum": [
+                                    "view",
+                                    "comment",
+                                    "edit"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "email",
+                                "level"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "create": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "folder",
+                          "members",
+                          "people"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "ruleId": {
+                            "type": "string"
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "members": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "view",
+                                  "comment",
+                                  "edit"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "people": {
+                            "maxItems": 1000,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "email": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320,
+                                  "pattern": "^[^\\s@]+@[^\\s@]+$"
+                                },
+                                "level": {
+                                  "type": "string",
+                                  "enum": [
+                                    "view",
+                                    "comment",
+                                    "edit"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "email",
+                                "level"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "ruleId",
+                          "revision",
+                          "members",
+                          "people"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "folder": {
+                            "type": "string",
+                            "maxLength": 4096
+                          },
+                          "clear": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "folder",
+                          "clear"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "ruleId": {
+                            "type": "string"
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "clear": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "ruleId",
+                          "revision",
+                          "clear"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "action",
+                  "change"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "const": "folderMarker"
+                  },
+                  "folder": {
+                    "type": "string",
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "action",
+                  "folder"
                 ],
                 "additionalProperties": false
               }
@@ -7678,7 +8284,7 @@
     },
     {
       "name": "dohc_members",
-      "description": "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level and a Group's access, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone, hide a Group, or end membership.",
+      "description": "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); set or clear folder access (folder with change containing a workspace-relative folder and members plus people, or clear: true; use ruleId and revision from list to target a specific rule; members null hides the folder; people are email and level pairs); remove an unknown marker (folderMarker with folder); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level and folder or Group access, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone, hide a Group, narrow folder access, or end membership.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -7870,6 +8476,208 @@
                 "required": [
                   "action",
                   "group"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "const": "folder"
+                  },
+                  "change": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "folder": {
+                            "type": "string",
+                            "maxLength": 4096
+                          },
+                          "members": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "view",
+                                  "comment",
+                                  "edit"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "people": {
+                            "maxItems": 1000,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "email": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320,
+                                  "pattern": "^[^\\s@]+@[^\\s@]+$"
+                                },
+                                "level": {
+                                  "type": "string",
+                                  "enum": [
+                                    "view",
+                                    "comment",
+                                    "edit"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "email",
+                                "level"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "create": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "folder",
+                          "members",
+                          "people"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "ruleId": {
+                            "type": "string"
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "members": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "view",
+                                  "comment",
+                                  "edit"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "people": {
+                            "maxItems": 1000,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "email": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 320,
+                                  "pattern": "^[^\\s@]+@[^\\s@]+$"
+                                },
+                                "level": {
+                                  "type": "string",
+                                  "enum": [
+                                    "view",
+                                    "comment",
+                                    "edit"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "email",
+                                "level"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "ruleId",
+                          "revision",
+                          "members",
+                          "people"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "folder": {
+                            "type": "string",
+                            "maxLength": 4096
+                          },
+                          "clear": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "folder",
+                          "clear"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "ruleId": {
+                            "type": "string"
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "clear": {
+                            "type": "boolean",
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "ruleId",
+                          "revision",
+                          "clear"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "action",
+                  "change"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "const": "folderMarker"
+                  },
+                  "folder": {
+                    "type": "string",
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "action",
+                  "folder"
                 ],
                 "additionalProperties": false
               }

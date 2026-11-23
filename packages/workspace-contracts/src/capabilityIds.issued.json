@@ -204,6 +204,8 @@
   "links.in",
   "links.resolve",
   "members.end",
+  "members.folder.marker.remove",
+  "members.folder.rule",
   "members.group.rule",
   "members.invite",
   "members.leave",
