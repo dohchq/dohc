@@ -544,6 +544,7 @@ interface Live {
   offline: boolean;
   read: DatasetOperation;
   resources: CollectionResources;
+  relationLabels: ReadonlyMap<string, ReadonlyMap<string, string>> | null;
   onError: TransactionalCollectionPageProps["onError"];
 }
 function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
@@ -1748,6 +1749,109 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   );
   // A file or a relation is not a kind of value the table knows, so the page draws its cell and its editor.
   // Neither ever opens the table's text editor.
+  const relationScope = JSON.stringify([
+    workspaceId,
+    dataset.datasetId,
+    dataset.revision,
+    dataset.revisionSha256,
+  ]);
+  const [relationLabelsState, setRelationLabelsState] = useState<{
+    scope: string;
+    version: number;
+    byField: ReadonlyMap<string, ReadonlyMap<string, string>>;
+  }>({ scope: "", version: 0, byField: new Map() });
+  const resolveRelationRef = useRef(props.resolveRelation);
+  resolveRelationRef.current = props.resolveRelation;
+  const activeRelationLabels =
+    relationLabelsState.scope === relationScope ? relationLabelsState.byField : null;
+  const relationFields = useMemo(() => {
+    const byId = new Map<string, TransactionalField>();
+    for (const field of [...fields, ...createFields]) {
+      if (field.type === "relation" && field.relation?.datasetId === dataset.datasetId)
+        byId.set(field.fieldId, field);
+    }
+    return [...byId.values()];
+  }, [fields, createFields, dataset.datasetId]);
+  const populatedRelationTargets = useMemo(() => {
+    const groups = new Map<string, { representativeFieldId: string; fieldIds: string[] }>();
+    const hasNonEmpty = (value: AppBackendJson | undefined) =>
+      value !== undefined && !isEmptyValue(value);
+    for (const field of relationFields) {
+      const hasValue =
+        (page?.rows.some((row) => hasNonEmpty(row.values[field.fieldId])) ?? false) ||
+        (details !== null && hasNonEmpty(details.values[field.fieldId])) ||
+        (draft[field.fieldId] !== undefined && hasNonEmpty(draft[field.fieldId]!.value));
+      if (!hasValue) continue;
+      const targetKey = `${field.relation!.tableId}\0${field.relation!.fieldId}`;
+      const group = groups.get(targetKey);
+      if (group) group.fieldIds.push(field.fieldId);
+      else
+        groups.set(targetKey, { representativeFieldId: field.fieldId, fieldIds: [field.fieldId] });
+    }
+    return [...groups.values()];
+  }, [relationFields, page, details, draft]);
+  const relationTargetsKey = JSON.stringify(populatedRelationTargets);
+  const hasResolveRelation = props.resolveRelation !== undefined;
+  useEffect(() => {
+    if (offline || !hasResolveRelation || populatedRelationTargets.length === 0) return;
+    const resolve = resolveRelationRef.current;
+    if (!resolve) return;
+    const abort = new AbortController();
+    void (async () => {
+      const next = new Map<string, ReadonlyMap<string, string>>();
+      await Promise.all(
+        populatedRelationTargets.map(async (target) => {
+          try {
+            const response = await resolve(
+              {
+                workspaceId,
+                datasetId: dataset.datasetId,
+                revision: dataset.revision,
+                revisionSha256: dataset.revisionSha256,
+                fieldId: target.representativeFieldId,
+                search: "",
+                limit: 100,
+              },
+              abort.signal,
+            );
+            if (abort.signal.aborted || !Array.isArray(response.options)) return;
+            const map = new Map<string, string>();
+            for (const option of response.options) {
+              if (
+                ((typeof option.value === "string" &&
+                  option.value.length > 0 &&
+                  option.value.length <= 1024) ||
+                  (typeof option.value === "number" && Number.isSafeInteger(option.value))) &&
+                typeof option.label === "string" &&
+                option.label.length <= 2000
+              ) {
+                map.set(JSON.stringify(option.value), option.label);
+              }
+            }
+            for (const fieldId of target.fieldIds) next.set(fieldId, map);
+          } catch {
+            // Silent fallback to raw relation values when the related table cannot be read.
+          }
+        }),
+      );
+      if (abort.signal.aborted || next.size === 0) return;
+      setRelationLabelsState((previous) => ({
+        scope: relationScope,
+        version: previous.scope === relationScope ? previous.version + 1 : 1,
+        byField: next,
+      }));
+    })();
+    return () => {
+      abort.abort();
+    };
+  }, [
+    relationScope,
+    relationTargetsKey,
+    offline,
+    hasResolveRelation,
+    props.recordsVersion,
+    props.recordsChanged,
+  ]);
   const resourceKey = JSON.stringify([
     editableKey,
     offline,
@@ -1757,6 +1861,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     read?.operationId,
     dataset.revision,
     dataset.revisionSha256,
+    relationLabelsState.scope === relationScope ? relationLabelsState.version : 0,
   ]);
   const resourceCells = (of: readonly TransactionalField[]) =>
     new Map(
@@ -1778,6 +1883,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
                   scope={now.scope}
                   field={field}
                   value={value}
+                  relationLabels={now.relationLabels?.get(field.fieldId)}
                   unconfirmed={status !== undefined || unmade}
                   editable={unmade || now.editable.has(field.fieldId)}
                   offline={now.offline}
@@ -1817,6 +1923,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
                       scope={now.scope}
                       field={field}
                       initial={initial}
+                      relationLabels={now.relationLabels?.get(field.fieldId)}
                       upload={now.resources.uploadFile}
                       resolve={now.resources.resolveRelation}
                       onError={now.onError}
@@ -1922,6 +2029,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       readFile: props.readFile,
       resolveRelation: props.resolveRelation,
     },
+    relationLabels: activeRelationLabels,
     onError,
   };
   const rowHosted = !visual && page !== null && canCreate === true && !needsPanel;

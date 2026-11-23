@@ -98,6 +98,9 @@ vi.mock("./bridge", () => ({ bridge: () => backend }));
 const pageInvoke = vi.hoisted(() => ({
   current: null as TransactionalCollectionPageProps["invoke"] | null,
 }));
+const pageResolveRelation = vi.hoisted(() => ({
+  current: null as TransactionalCollectionPageProps["resolveRelation"] | null,
+}));
 const formDialog = vi.hoisted(() => ({ outcomes: [] as string[] }));
 const handoff = vi.hoisted(() => ({ opened: 0 }));
 vi.mock("./CreateDatasetFormDialog", () => ({
@@ -154,8 +157,10 @@ vi.mock("./TransactionalCollectionPage", () => ({
     onCustomize?(): void;
     onManageAccess?(): void;
     onCustomAction?(operationId: string): void;
+    resolveRelation?: TransactionalCollectionPageProps["resolveRelation"];
   }) => {
     pageInvoke.current = props.invoke;
+    pageResolveRelation.current = props.resolveRelation ?? null;
     return (
       <>
         {props.automations && (
@@ -2776,5 +2781,168 @@ describe("a read that waited for this Collection's move", () => {
     await waitFor(() => expect(onSettled).toHaveBeenCalledWith(row));
     expect(backend.findDatasetCollection).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("relation label resolution through connected resolver", () => {
+  it("omits empty search and requests up to 100 related records to display labels in table cells", async () => {
+    const membersTableId = id(20);
+    const memberPkId = id(21);
+    const memberNameId = id(22);
+    const readMembersOpId = id(23);
+    const expensesTableId = id(24);
+    const expensePkId = id(25);
+    const expenseTitleId = id(26);
+    const paidByFieldId = id(27);
+    const readExpensesOpId = id(28);
+    const multiTableDataset: DatasetDescription = {
+      datasetId: id(1),
+      name: "Split",
+      revision: 1,
+      revisionSha256: "a".repeat(64),
+      tables: [
+        {
+          tableId: membersTableId,
+          name: "Members",
+          fields: [
+            { fieldId: memberPkId, name: "ID", type: "text", required: true, unique: true },
+            { fieldId: memberNameId, name: "Name", type: "text", required: true, unique: false },
+          ],
+        },
+        {
+          tableId: expensesTableId,
+          name: "Expenses",
+          fields: [
+            { fieldId: expensePkId, name: "ID", type: "text", required: true, unique: true },
+            { fieldId: expenseTitleId, name: "Title", type: "text", required: true, unique: false },
+            {
+              fieldId: paidByFieldId,
+              name: "Paid by",
+              type: "relation",
+              required: false,
+              unique: false,
+              relation: {
+                datasetId: id(1),
+                tableId: membersTableId,
+                fieldId: memberPkId,
+                many: false,
+              },
+            },
+          ],
+        },
+      ],
+      operations: [
+        {
+          operationId: readMembersOpId,
+          name: "listMembers",
+          label: "List members",
+          tableId: membersTableId,
+          kind: "read",
+          access: "owner",
+          readOnly: true,
+          fieldIds: [memberPkId, memberNameId],
+        },
+        {
+          operationId: readExpensesOpId,
+          name: "listExpenses",
+          label: "List expenses",
+          tableId: expensesTableId,
+          kind: "read",
+          access: "owner",
+          readOnly: true,
+          fieldIds: [expensePkId, expenseTitleId, paidByFieldId],
+        },
+      ],
+    };
+    const memberReads: unknown[] = [];
+    backend.dataset.mockImplementation(
+      async (input: { action: string; operationId?: string; input?: unknown }) => {
+        if (input.action === "describe") return { kind: "description", dataset: multiTableDataset };
+        if (input.action === "invoke" && input.operationId === readExpensesOpId) {
+          return {
+            kind: "invoked",
+            result: {
+              rows: [
+                {
+                  id: "exp-1",
+                  version: 1,
+                  values: {
+                    [expensePkId]: "exp-1",
+                    [expenseTitleId]: "Lunch",
+                    [paidByFieldId]: "mem-1",
+                  },
+                },
+              ],
+              nextCursor: null,
+            },
+            revision: 1,
+            replayed: false,
+          };
+        }
+        if (input.action === "invoke" && input.operationId === readMembersOpId) {
+          memberReads.push(input.input);
+          return {
+            kind: "invoked",
+            result: {
+              rows: [
+                {
+                  id: "mem-1",
+                  version: 1,
+                  values: { [memberPkId]: "mem-1", [memberNameId]: "Alex" },
+                },
+              ],
+              nextCursor: null,
+            },
+            revision: 1,
+            replayed: false,
+          };
+        }
+        return { kind: "grant-updated" };
+      },
+    );
+    render(
+      <ConnectedTransactionalCollection
+        workspaceId="workspace-a"
+        datasetPath="data/dataset.json"
+        tableId={expensesTableId}
+        onError={vi.fn()}
+        onNotice={vi.fn()}
+        onFormCreated={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenScheduleSettings={vi.fn()}
+      />,
+    );
+    await screen.findByLabelText("Collection view state");
+    expect(pageResolveRelation.current).toBeTruthy();
+    const resolved = await pageResolveRelation.current!(
+      {
+        workspaceId: "workspace-a",
+        datasetId: id(1),
+        revision: 1,
+        revisionSha256: "a".repeat(64),
+        fieldId: paidByFieldId,
+        search: "",
+        limit: 100,
+      },
+      new AbortController().signal,
+    );
+    expect(resolved).toEqual({
+      options: [{ value: "mem-1", label: "Alex" }],
+      hasMore: false,
+    });
+    expect(memberReads).toEqual([{ limit: 100 }]);
+    await pageResolveRelation.current!(
+      {
+        workspaceId: "workspace-a",
+        datasetId: id(1),
+        revision: 1,
+        revisionSha256: "a".repeat(64),
+        fieldId: paidByFieldId,
+        search: "Al",
+        limit: 20,
+      },
+      new AbortController().signal,
+    );
+    expect(memberReads).toEqual([{ limit: 100 }, { limit: 20, search: "Al" }]);
   });
 });

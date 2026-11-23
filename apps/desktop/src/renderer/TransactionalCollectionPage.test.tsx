@@ -5495,4 +5495,74 @@ describe("what a change that did not save leaves for the person", () => {
     expect(strip()!.contains(words)).toBe(true);
     expect(sent(invoke, remove)).toHaveLength(0);
   });
+
+  it("resolves single and multi-relation cell labels with one bounded read per target and falls back silently on error", async () => {
+    const paidBy = id(51);
+    const splitWith = id(52);
+    const base = dataset();
+    base.tables[0]!.fields.push(
+      {
+        fieldId: paidBy,
+        name: "Paid by",
+        type: "relation",
+        required: false,
+        unique: false,
+        relation: { datasetId: id(1), tableId: id(41), fieldId: id(40), many: false },
+      },
+      {
+        fieldId: splitWith,
+        name: "Split with",
+        type: "relation",
+        required: false,
+        unique: false,
+        relation: { datasetId: id(1), tableId: id(41), fieldId: id(40), many: true },
+      },
+    );
+    base.operations.find((op) => op.operationId === read)!.fieldIds.push(paidBy, splitWith);
+    const resolveRelation = vi.fn<
+      NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["resolveRelation"]>
+    >(async () => ({
+      options: [
+        { value: "m-1", label: "Alex" },
+        { value: "m-2", label: "Sam" },
+      ],
+      hasMore: false,
+    }));
+    const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({
+      result: {
+        rows: [
+          {
+            id: 1,
+            version: 1,
+            values: {
+              [name]: "Dinner",
+              [amount]: 60,
+              [paidBy]: "m-1",
+              [splitWith]: ["m-1", "m-2", "m-missing"],
+            },
+          },
+        ],
+        nextCursor: null,
+      },
+    }));
+    const { onError } = setup({ dataset: base, invoke, resolveRelation });
+    await screen.findByText("Dinner");
+    await waitFor(() => {
+      expect(cell("Paid by").textContent).toBe("Alex");
+      expect(cell("Split with").textContent).toBe("Alex, Sam, m-missing");
+    });
+    expect(resolveRelation).toHaveBeenCalledTimes(1);
+    expect(resolveRelation.mock.calls[0]![0]).toMatchObject({ search: "", limit: 100 });
+    expect(onError).not.toHaveBeenCalled();
+
+    cleanup();
+    const failingResolve = vi.fn(async () => {
+      throw new Error("no read access");
+    });
+    const failed = setup({ dataset: base, invoke, resolveRelation: failingResolve });
+    await screen.findByText("Dinner");
+    await waitFor(() => expect(failingResolve).toHaveBeenCalledTimes(1));
+    expect(cell("Paid by").textContent).toBe("m-1");
+    expect(failed.onError).not.toHaveBeenCalled();
+  });
 });

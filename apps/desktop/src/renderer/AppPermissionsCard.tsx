@@ -41,20 +41,25 @@ type Access = {
 
 const addsRecords = "Adds records with ";
 
+function tablePrefix(display: AppDatasetCapability["operations"][number]["display"]): string {
+  return display?.table ? `${display.table}: ` : "";
+}
+
 function operationWords({ display }: AppDatasetCapability["operations"][number]): string {
   if (!display) return "Records";
+  const prefix = tablePrefix(display);
   const fields = display.fields.join(", ");
   switch (display.kind) {
     case "read":
-      return fields || "Records";
+      return `${prefix}${fields || "Records"}`;
     case "create":
-      return fields ? `${addsRecords}${fields}` : "Adds records";
+      return `${prefix}${fields ? `${addsRecords}${fields}` : "Adds records"}`;
     case "edit":
-      return fields ? `Edits ${fields}` : "Edits records";
+      return `${prefix}${fields ? `Edits ${fields}` : "Edits records"}`;
     case "delete":
-      return "Deletes records";
+      return `${prefix}Deletes records`;
     case "action":
-      return `Runs "${display.label}"`;
+      return `${prefix}Runs "${display.label}"`;
   }
 }
 
@@ -62,7 +67,7 @@ function actionSummary(operation: AppDatasetCapability["operations"][number]): s
   if (!operation.display) return "";
   if (operation.display.kind === "read") {
     const fields = operation.display.fields.join(", ");
-    return fields ? `Reads ${fields}` : "Reads records";
+    return `${tablePrefix(operation.display)}${fields ? `Reads ${fields}` : "Reads records"}`;
   }
   return operationWords(operation);
 }
@@ -111,7 +116,7 @@ function operationLine(
         (field) => !priorDisplay.fields.includes(field),
       );
       if (hasAddedField) {
-        const prefix = prefixForFieldKind(nextDisplay.kind);
+        const prefix = `${tablePrefix(nextDisplay)}${prefixForFieldKind(nextDisplay.kind) ?? ""}`;
         return {
           group: `fields ${operation.operationId}`,
           line: {
@@ -133,14 +138,21 @@ function operationLine(
           nextDisplay.label !== priorDisplay.label ||
           nextDisplay.fields.some((field) => !priorDisplay.fields.includes(field))));
     return {
-      group: nextDisplay?.kind === "action" ? `action ${operation.operationId}` : `words ${text}`,
+      group: !nextDisplay
+        ? `op ${operation.operationId}`
+        : nextDisplay.kind === "action"
+          ? `action ${operation.operationId}`
+          : `words ${text}`,
       line: { key: operation.operationId, items: [{ text, added: expanded }] },
     };
   }
   const added = comparing && !same?.operationIds.includes(operation.operationId);
   return {
-    group:
-      operation.display?.kind === "action" ? `action ${operation.operationId}` : `words ${text}`,
+    group: !operation.display
+      ? `op ${operation.operationId}`
+      : operation.display.kind === "action"
+        ? `action ${operation.operationId}`
+        : `words ${text}`,
     line: { key: operation.operationId, items: [{ text, added }] },
   };
 }
@@ -376,6 +388,7 @@ function deriveOperationDisplays(
   const generated =
     generatedSources === true &&
     hasGeneratedDatasetOperations(operationSource, revision.definition);
+  const multiTable = revision.definition.tables.length > 1;
   const operations: AppDatasetCapability["operations"] = [];
   for (const operation of capability.operations) {
     if (operation.display) {
@@ -389,10 +402,11 @@ function deriveOperationDisplays(
       (candidate) => candidate.tableId === declared?.tableId,
     );
     if (!declared || !table) return null;
+    const tableDisplay = multiTable ? { table: table.name } : {};
     if (!generated) {
       operations.push({
         ...operation,
-        display: { kind: "action", label: declared.label, fields: [] },
+        display: { kind: "action", label: declared.label, fields: [], ...tableDisplay },
       });
       continue;
     }
@@ -407,6 +421,7 @@ function deriveOperationDisplays(
         fields: table.fields
           .filter((field) => fieldIds.includes(field.fieldId))
           .map((field) => field.name),
+        ...tableDisplay,
       },
     });
   }

@@ -556,6 +556,19 @@ function accessBadge(meta: ViewMeta): { label: string; reason?: string } {
 }
 
 /** A file's title: its name, without the folders, and without the extension when it is a page. */
+function isDescriptorFile(path: string): boolean {
+  return (
+    path === "app.publish.json" ||
+    path.endsWith("/app.publish.json") ||
+    path === "dataset.json" ||
+    path.endsWith("/dataset.json")
+  );
+}
+
+function defaultSelectedFile(files: readonly SharedFile[]): SharedFile | undefined {
+  return files.find((file) => !isDescriptorFile(file.path)) ?? files[0];
+}
+
 function fileTitle(path: string): string {
   const name = path.slice(path.lastIndexOf("/") + 1);
   return isMarkdown(path) ? name.replace(/\.(md|markdown)$/i, "") : name;
@@ -1274,7 +1287,8 @@ export function App() {
   const [publishedApps, setPublishedApps] = useState<{
     session: string;
     items: readonly PublishedAppItem[];
-  }>({ session: "", items: [] });
+    hasMore: boolean;
+  }>({ session: "", items: [], hasMore: false });
   const scrollerRef = useRef<HTMLDivElement>(null);
   const narrow = useNarrow();
   useEffect(() => {
@@ -1346,7 +1360,7 @@ export function App() {
         const log = await loadCurrentState(session, controller.signal);
         const files = filesFromAccumulator(log.fileAccumulator);
         if (current) {
-          setSelectedPath(files[0]?.path ?? "");
+          setSelectedPath(defaultSelectedFile(files)?.path ?? "");
           setState({
             status: "ready",
             session,
@@ -1390,7 +1404,9 @@ export function App() {
   useEffect(() => {
     if (readyFiles === null) return;
     setSelectedPath((path) =>
-      readyFiles.some((file) => file.path === path) ? path : (readyFiles[0]?.path ?? ""),
+      readyFiles.some((file) => file.path === path)
+        ? path
+        : (defaultSelectedFile(readyFiles)?.path ?? ""),
     );
   }, [readyFiles]);
 
@@ -1568,6 +1584,14 @@ export function App() {
   const appToOpen = rawApp && PUBLICATION_ID.test(rawApp) ? rawApp : null;
   const appLanding = appToOpen !== null && !browsingFiles && !editing;
   const sessionApps = ready && publishedApps.session === ready.session ? publishedApps.items : [];
+  const onlySessionApp =
+    appToOpen === null &&
+    files.length > 0 &&
+    !editing &&
+    sessionApps.length === 1 &&
+    !publishedApps.hasMore
+      ? sessionApps[0]!
+      : null;
   const appTitle =
     appToOpen !== null
       ? (sessionApps.find((item) => item.publicationId === appToOpen)?.name ??
@@ -1575,8 +1599,8 @@ export function App() {
         "Shared app")
       : null;
   const reportPublications = useCallback(
-    (items: readonly PublishedAppItem[]) => {
-      setPublishedApps({ session: readySession ?? "", items });
+    (items: readonly PublishedAppItem[], hasMore: boolean) => {
+      setPublishedApps({ session: readySession ?? "", items, hasMore });
     },
     [readySession],
   );
@@ -1585,7 +1609,7 @@ export function App() {
   }, [readySession, appToOpen]);
   const selected = editing
     ? files.find((file) => file.path === editing.path)
-    : (files.find((file) => file.path === selectedPath) ?? files[0]);
+    : (files.find((file) => file.path === selectedPath) ?? defaultSelectedFile(files));
   useEffect(() => {
     if (appLanding && appTitle) {
       document.title = `${appTitle} · dohc`;
@@ -1955,6 +1979,13 @@ export function App() {
                     session={ready.session}
                     publicationId={appToOpen}
                     title={appTitle ?? undefined}
+                  />
+                ) : onlySessionApp !== null && ready ? (
+                  <OpenSharedApp
+                    key={`${ready.session}:${onlySessionApp.publicationId}`}
+                    session={ready.session}
+                    publicationId={onlySessionApp.publicationId}
+                    title={onlySessionApp.name}
                   />
                 ) : null}
                 {selected ? <h1 className="page-title">{fileTitle(selected.path)}</h1> : null}

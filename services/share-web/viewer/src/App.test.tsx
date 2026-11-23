@@ -5480,5 +5480,67 @@ describe("App", () => {
       expect(launchSignal?.aborted).toBe(true);
       expect(container.querySelector(".app-landing")).toBeNull();
     });
+
+    it("skips app.publish.json as default file and shows Open app when a folder share has one published app", async () => {
+      const files: SharedFile[] = [
+        { path: "app.publish.json", blobSha256: "b".repeat(64), contentKind: "text" },
+        { path: "README.md", blobSha256: "c".repeat(64), contentKind: "text" },
+      ];
+      mockPublishedApps = [{ publicationId: PUBLICATION_ID, name: "Trip poll" }];
+      const fallback = viewerFetch(() => {
+        throw new Error("Unexpected handoff");
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const route = requestPath(input);
+          if (route === "/api/view/current") return currentPage(files, 0);
+          if (route === "/api/view/log?since=0&limit=500") return logPage(files);
+          if (route === `/api/view/blob/${"c".repeat(64)}`) return new Response("# Trip Poll");
+          if (route === `/api/view/blob/${"b".repeat(64)}`)
+            return new Response('{"formatVersion":1}');
+          return fallback(input, init);
+        }),
+      );
+
+      await renderApp();
+      await settle(
+        () =>
+          container.querySelector("h1.page-title")?.textContent === "README" &&
+          buttonNamed("Open app") !== undefined,
+      );
+
+      expect(container.querySelector("h1.page-title")?.textContent).toBe("README");
+      expect(container.textContent).toContain("Trip Poll");
+      expect(buttonNamed("Open app")).toBeDefined();
+    });
+
+    it("does not show a single-app banner when a share has multiple published apps", async () => {
+      const files: SharedFile[] = [
+        { path: "note.md", blobSha256: "c".repeat(64), contentKind: "text" },
+      ];
+      mockPublishedApps = [
+        { publicationId: PUBLICATION_ID, name: "Trip poll" },
+        { publicationId: "e".repeat(64), name: "Packing list" },
+      ];
+      const fallback = viewerFetch(() => {
+        throw new Error("Unexpected handoff");
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const route = requestPath(input);
+          if (route === "/api/view/current") return currentPage(files, 0);
+          if (route === "/api/view/log?since=0&limit=500") return logPage(files);
+          if (route.startsWith("/api/view/blob/")) return new Response("# Shared note");
+          return fallback(input, init);
+        }),
+      );
+
+      await renderApp();
+      await settle(() => container.textContent.includes("Shared note"));
+
+      expect(container.querySelector(".column section[aria-label='Shared app']")).toBeNull();
+    });
   });
 });
