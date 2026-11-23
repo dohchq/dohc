@@ -347,6 +347,9 @@ export function leaveShare(
              AND status = 'active' AND revoked_at_ms IS NULL`,
       )
       .all(input.shareId, input.userId) as { grant_id: string }[];
+    // A member leaves through Members. Only an ended membership comes off the list here.
+    if (held.length > 0 && "kind" in selector && selector.kind === "workspace")
+      return { ok: false };
     if (held.length > 0 && input.onlyEnded) return { ok: true, left: false, workspaceId: null };
     if (held.length > 0 && "kind" in selector) return { ok: false };
     for (const { grant_id } of held) {
