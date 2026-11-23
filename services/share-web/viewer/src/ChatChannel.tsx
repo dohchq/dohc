@@ -9,6 +9,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { compareMessageOrder } from "@dohc/workspace-contracts/chat-order";
 import { renderSafeMarkdown } from "./markdown";
 import { readDraft, writeDraft } from "./drafts";
 import { CopyWork } from "./CopyWork";
@@ -418,6 +419,14 @@ function threadView(
       open: () => onOpen(opens, message.relaySeq),
     });
   }
+  // The relay's order is the order messages reached it, so two sent at once
+  // can swap. The desktop's order, by when each was sent, keeps them alike.
+  shown.sort((left, right) =>
+    compareMessageOrder(
+      { createdAtMs: left.createdAtMs, id: left.messageId },
+      { createdAtMs: right.createdAtMs, id: right.messageId },
+    ),
+  );
   return { shown, replies };
 }
 
