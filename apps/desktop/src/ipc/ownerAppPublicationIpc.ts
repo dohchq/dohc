@@ -38,7 +38,12 @@ import {
   verifyAppDatasetCapability,
   hasGeneratedDatasetRevision,
 } from "@dohc/security-contract/dataset-authorization";
-import { createRemoteDatasetData, resolveRemoteDatasetRevision } from "../workspaces/remoteDataset";
+import {
+  createRemoteDatasetData,
+  resolveRemoteDatasetArtifacts,
+  resolveRemoteDatasetRevision,
+} from "../workspaces/remoteDataset";
+import { hasGeneratedDatasetSources } from "../workspaces/datasetFieldMigration";
 
 /**
  * The relay's own refusal of the publication list: a 404 with its not_found body. A 403, or a 404 from something in
@@ -102,6 +107,11 @@ export function createOwnerAppPublicationHandler<
     binding: AppDatasetBinding,
     signal: AbortSignal,
   ): Promise<DatasetRevision>;
+  resolveDatasetArtifacts?(
+    workspace: Workspace,
+    binding: AppDatasetBinding,
+    signal: AbortSignal,
+  ): Promise<{ revision: DatasetRevision; schemaSql: string }>;
 }) {
   type Prepared = Awaited<ReturnType<typeof prepareOwnerAppPublication>>;
   const pending = new Map<
@@ -166,6 +176,26 @@ export function createOwnerAppPublicationHandler<
         assertCurrent: () => operation.assertCurrent(),
         relayJson: dependencies.relayJson,
       });
+      const resolveDatasetArtifacts = (binding: AppDatasetBinding) =>
+        session.run(async (): Promise<{ revision: DatasetRevision; schemaSql?: string }> => {
+          if (dependencies.resolveDatasetArtifacts) {
+            return await dependencies.resolveDatasetArtifacts(
+              operation.workspace,
+              binding,
+              operation.signal,
+            );
+          }
+          if (dependencies.resolveDatasetRevision) {
+            return {
+              revision: await dependencies.resolveDatasetRevision(
+                operation.workspace,
+                binding,
+                operation.signal,
+              ),
+            };
+          }
+          return await resolveRemoteDatasetArtifacts(remoteData, binding);
+        });
       const resolveDatasetRevision = (binding: AppDatasetBinding) =>
         session.run(() =>
           dependencies.resolveDatasetRevision
@@ -258,7 +288,7 @@ export function createOwnerAppPublicationHandler<
         reactivation?: { publicationId: string; authorityRevision: number },
         access: "view" | "comment" | "edit" = "view",
         selector?: { paths: string[]; versionId: string | null },
-        resolvedDataset?: DatasetRevision,
+        resolvedDataset?: { revision: DatasetRevision; schemaSql?: string },
       ) => {
         session.assertCurrent();
         operation.signal.throwIfAborted();
@@ -266,14 +296,17 @@ export function createOwnerAppPublicationHandler<
         const capabilities = await Promise.all(
           candidate.capabilities.map(async (capability) => {
             if (capability.kind !== "dataset") return capability;
-            const revision =
+            const resolved =
               resolvedDataset &&
-              resolvedDataset.datasetId === capability.datasetId &&
-              resolvedDataset.revision === capability.revision &&
-              resolvedDataset.revisionSha256 === capability.revisionSha256
+              resolvedDataset.revision.datasetId === capability.datasetId &&
+              resolvedDataset.revision.revision === capability.revision &&
+              resolvedDataset.revision.revisionSha256 === capability.revisionSha256
                 ? resolvedDataset
-                : await resolveDatasetRevision(capability);
-            const generated = hasGeneratedDatasetRevision(revision);
+                : await resolveDatasetArtifacts(capability);
+            const { revision, schemaSql } = resolved;
+            const generatedOperations = hasGeneratedDatasetRevision(revision);
+            const generatedSources =
+              schemaSql !== undefined && hasGeneratedDatasetSources(revision, schemaSql);
             const withFields = reactivation
               ? capability
               : {
@@ -285,7 +318,7 @@ export function createOwnerAppPublicationHandler<
                         read.kind === "read" &&
                         read.access === "helper",
                     );
-                    if (!read || !generated) return operation;
+                    if (!read || !generatedOperations) return operation;
                     const table = revision.definition.tables.find(
                       (table) => table.tableId === read.tableId,
                     )!;
@@ -301,7 +334,7 @@ export function createOwnerAppPublicationHandler<
                     };
                   }),
                 };
-            return displayAppDatasetCapability(withFields, revision, generated);
+            return displayAppDatasetCapability(withFields, revision, generatedSources);
           }),
         );
         session.assertCurrent();
@@ -400,9 +433,11 @@ export function createOwnerAppPublicationHandler<
           );
         const candidate = parseAppPublicationCandidate(row.candidate, APP_PUBLICATION_LIMITS);
         const dataset = candidate.capabilities.find((capability) => capability.kind === "dataset");
-        const verifiedDatasetRevision = dataset ? await resolveDatasetRevision(dataset) : undefined;
-        if (dataset && verifiedDatasetRevision)
-          verifyAppDatasetCapability(dataset, verifiedDatasetRevision);
+        const verifiedDatasetArtifacts = dataset
+          ? await resolveDatasetArtifacts(dataset)
+          : undefined;
+        if (dataset && verifiedDatasetArtifacts)
+          verifyAppDatasetCapability(dataset, verifiedDatasetArtifacts.revision);
         const selection = OwnerAppPublicationRequest.parse({
           action: "prepare",
           workspaceId: input.workspaceId,
@@ -423,7 +458,7 @@ export function createOwnerAppPublicationHandler<
           { publicationId: input.publicationId, authorityRevision: row.authorityRevision! },
           grant.access as "view" | "comment" | "edit",
           grant.selector ?? undefined,
-          verifiedDatasetRevision,
+          verifiedDatasetArtifacts,
         );
       }
       if (input.action === "list") {

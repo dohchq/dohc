@@ -9,6 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState, type ComponentProps, type ReactElement, type ReactNode } from "react";
@@ -557,9 +558,94 @@ describe("owner app publication", () => {
         },
         schemaSql: "",
         operationSource: generateDatasetOperations(definition),
+        generatedSources: true,
       }),
     );
     expect(card.textContent).toContain("Link actions: Adds records with Item · submit");
+  });
+
+  it("does not make field-level claims on published cards when schema triggers make sources custom", async () => {
+    const definition: DatasetDefinition = {
+      formatVersion: 1,
+      datasetId: datasetCapability.datasetId,
+      name: "Items",
+      schemaPath: "data/schema.sql",
+      operationsPath: "data/operations.js",
+      tables: [
+        {
+          tableId: "00000000-0000-4000-8000-000000000020",
+          name: "Items",
+          sqlName: "items",
+          primaryKey: "id",
+          fields: [
+            {
+              fieldId: "00000000-0000-4000-8000-000000000021",
+              name: "ID",
+              sqlColumn: "id",
+              type: "text",
+              required: true,
+              unique: true,
+            },
+            {
+              fieldId: "00000000-0000-4000-8000-000000000022",
+              name: "Item",
+              sqlColumn: "item",
+              type: "text",
+              required: true,
+              unique: false,
+            },
+          ],
+        },
+      ],
+      operations: [
+        {
+          operationId: "00000000-0000-4000-8000-000000000002",
+          name: "submit",
+          label: "Submit",
+          tableId: "00000000-0000-4000-8000-000000000020",
+          kind: "create",
+          access: "link",
+          readOnly: false,
+          fieldIds: ["00000000-0000-4000-8000-000000000022"],
+        },
+      ],
+    };
+    api.dataset.mockImplementation(async (request) => {
+      if (request?.action === "historyRevision") {
+        return {
+          kind: "history-revision",
+          revision: {
+            datasetId: datasetCapability.datasetId,
+            definition,
+            revision: datasetCapability.revision,
+            revisionSha256: datasetCapability.revisionSha256,
+            definitionSha256: "b".repeat(64),
+            schemaSha256: "c".repeat(64),
+            operationsSha256: "d".repeat(64),
+          },
+          schemaSql: "CREATE TRIGGER custom_edit AFTER INSERT ON items BEGIN SELECT 1; END;",
+          operationSource: generateDatasetOperations(definition),
+          generatedSources: false,
+        };
+      }
+      return datasetAnswer();
+    });
+    api.publishOwnerApp.mockImplementation(async (request) =>
+      request.action === "list"
+        ? { kind: "listed", publications: [datasetRow], nextCursor: null }
+        : answer(request),
+    );
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    fireEvent.click(screen.getByText("Approved Collection access"));
+    await waitFor(() =>
+      expect(screen.getByTestId("app-publication-capability").textContent).toContain(
+        'Runs "Submit"',
+      ),
+    );
+    expect(screen.getByTestId("app-publication-capability").textContent).not.toContain(
+      "Adds records with Item",
+    );
   });
 
   it("shows plain-English dataset action summaries and surfaces address warnings in the share-link review card", async () => {

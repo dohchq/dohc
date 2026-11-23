@@ -695,6 +695,7 @@ export const DatasetHistoryRevision = z
     revision,
     schemaSql: z.string().max(256 * 1024),
     operationSource: z.string().max(256 * 1024),
+    generatedSources: z.boolean().optional(),
   })
   .strict();
 export type DatasetHistoryRevision = z.infer<typeof DatasetHistoryRevision>;

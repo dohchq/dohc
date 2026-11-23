@@ -349,6 +349,7 @@ function deriveOperationDisplays(
   capability: AppDatasetCapability,
   revision: DatasetRevision,
   operationSource: string,
+  generatedSources: boolean | undefined,
 ): AppDatasetCapability["operations"] | null {
   if (
     revision.datasetId !== capability.datasetId ||
@@ -357,7 +358,9 @@ function deriveOperationDisplays(
   ) {
     return null;
   }
-  const generated = hasGeneratedDatasetOperations(operationSource, revision.definition);
+  const generated =
+    generatedSources === true &&
+    hasGeneratedDatasetOperations(operationSource, revision.definition);
   const operations: AppDatasetCapability["operations"] = [];
   for (const operation of capability.operations) {
     if (operation.display) {
@@ -459,6 +462,8 @@ export function DatasetPermissionCard({
       workspaceId,
       datasetId,
       capability.revisionSha256,
+      capability.operationIds,
+      capability.createFields ?? null,
       datasetPath ?? "",
       needsDisplay,
     ]),
@@ -474,7 +479,12 @@ export function DatasetPermissionCard({
         });
         signal.throwIfAborted();
         if (result.kind !== "history-revision") return null;
-        return deriveOperationDisplays(capability, result.revision, result.operationSource);
+        return deriveOperationDisplays(
+          capability,
+          result.revision,
+          result.operationSource,
+          result.generatedSources,
+        );
       } catch {
         return null;
       }
