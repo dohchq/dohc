@@ -558,7 +558,7 @@ fn pull_the_share() -> RelayOperation {
         workspace_id: "ws".to_owned(),
         share_id: "share".to_owned(),
         granted: dohc_engine_sync::ShareGrant {
-            paths: vec!["notes".to_owned()],
+            scope: dohc_engine_sync::ShareScope::Paths(vec!["notes".to_owned()]),
             version_id: None,
             access: dohc_engine_sync::ShareAccess::View,
         },
