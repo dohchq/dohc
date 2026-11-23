@@ -266,6 +266,15 @@ test("@two-client a rule that hides a folder rebuilds a member's copy without it
     await expect.poll(ruledFolders, { timeout: 120_000, intervals: [1_000] }).toEqual(["crew"]);
     expect(await exists(join(ownerTemp.rootPath, "team"))).toBe(false);
 
+    // A rename while dohc is closed moves the rule too, once dohc opens again.
+    expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    await owner.close();
+    owner = null;
+    await rename(join(ownerTemp.rootPath, "crew"), join(ownerTemp.rootPath, "squad"));
+    owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
+    await openWorkspaceFromFirstRun(owner.page, ownerTemp);
+    await expect.poll(ruledFolders, { timeout: 120_000, intervals: [1_000] }).toEqual(["squad"]);
+
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {

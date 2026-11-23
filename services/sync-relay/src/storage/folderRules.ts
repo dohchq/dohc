@@ -62,9 +62,10 @@ function heldFolderPath(statements: AccessRuleStatements, workspaceId: string, f
   if (folderHasFiles(statements, workspaceId, folder)) return folder;
   const key = pathCollisionKey(folder);
   const held = statements.keyUnder.get(workspaceId, `${key}/`, `${key}0`);
-  return held === undefined
-    ? folder
-    : String(held.path).split("/").slice(0, folder.split("/").length).join("/");
+  if (held === undefined) return folder;
+  // A name can fold to more than one segment, so check the folder matches.
+  const path = String(held.path).split("/").slice(0, folder.split("/").length).join("/");
+  return pathCollisionKey(path) === key ? path : folder;
 }
 
 export function changeFolderRule(

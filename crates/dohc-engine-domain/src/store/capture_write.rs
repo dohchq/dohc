@@ -1260,8 +1260,9 @@ pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 
 /// Read the initial scan manifest for one workspace and version.
 ///
-/// Includes capture heads, eligible Y.Doc heads, and capture-owned secret tips.
-/// Other origins are excluded because their content may never have reached disk.
+/// Includes capture heads, eligible Y.Doc heads, placed folder markers, and
+/// capture-owned secret tips. Other origins are excluded because their content
+/// may never have reached disk.
 /// A Y.Doc head is excluded while its matching producer write remains pending.
 /// Matching pending rollback restores also exclude their destination heads,
 /// and so do this version's pending plaintext switch writes with no file to
@@ -1375,6 +1376,45 @@ pub fn capture_manifest_seed(
                 continue;
             }
             entries.push(CaptureManifestSeedEntry { path, size, sha256 });
+        }
+        // The relay writes folder markers, so their heads are never capture
+        // heads. A placed one still belongs here: a folder renamed while dohc
+        // was closed must retire its old marker. LIKE only narrows the rows.
+        let mut markers = conn
+            .prepare(
+                "SELECT a.path, s.blob_sha256, tb.byte_length FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id \
+                   AND s.version_id = a.version_id AND s.object_id = a.object_id \
+                 JOIN blobs tb ON tb.sha256 = s.blob_sha256 \
+                 WHERE a.workspace_id = ?1 AND a.version_id = ?2 \
+                   AND a.path LIKE '%access%' \
+                   AND COALESCE(s.content_kind, 'text') = 'text' \
+                   AND s.metadata_origin NOT IN ('capture', 'ydoc') \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM materialization_jobs j \
+                        WHERE j.status = 'pending' \
+                          AND (j.workspace_id = ?1 OR j.workspace_id = '') \
+                          AND j.target_path = a.path)",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = markers
+            .query_map(params![ws, version], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(DomainError::sql_corrupt)?;
+        for row in rows {
+            let (path, sha256, len) = row.map_err(DomainError::sql_corrupt)?;
+            if dohc_engine_files::is_access_marker(&path) {
+                entries.push(CaptureManifestSeedEntry {
+                    path,
+                    size: len.max(0) as u64,
+                    sha256,
+                });
+            }
         }
         // Same capture-ownership rule for the encrypted store: a tip written
         // by the API or replication may legitimately have no plaintext on
