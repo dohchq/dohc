@@ -103,7 +103,7 @@ export const COMMAND_ROWS = {
     keywords: ["directory", "create"],
   },
   "new-collection": {
-    label: "New collection",
+    label: "New Collection",
     availability: "collectionCreatable",
     group: "Create",
     icon: "table",

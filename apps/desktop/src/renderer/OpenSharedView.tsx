@@ -330,6 +330,20 @@ export function OpenSharedView(
     }
   }
 
+  const onBackRef = useRef(props.onBack);
+  onBackRef.current = props.onBack;
+  useEffect(() => {
+    if (opening) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (document.documentElement.dataset.menuOpen !== undefined) return;
+      event.preventDefault();
+      onBackRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [opening]);
+
   const canOpen =
     gate.kind !== "checking" &&
     !opening &&
@@ -372,6 +386,7 @@ export function OpenSharedView(
           <div className="flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3 transition-colors focus-within:border-ink">
             <input
               data-testid="open-share-code"
+              data-framed-input=""
               aria-label="Share code"
               value={code}
               onChange={(event) => {

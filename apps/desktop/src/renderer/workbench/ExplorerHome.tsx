@@ -282,9 +282,9 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   if (sketches.length > 0) {
     sections.push({
       id: "sketches",
-      label: "Sketches",
+      label: "Drawings",
       count: kinds.sketches.count,
-      countLabel: (count) => plural(count, "sketch", "sketches"),
+      countLabel: (count) => plural(count, "drawing", "drawings"),
       rows: sketches,
       ...(kinds.sketches.count > FILES_SHOWN
         ? {

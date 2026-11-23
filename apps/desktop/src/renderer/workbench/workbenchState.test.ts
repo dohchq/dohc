@@ -17,6 +17,8 @@ import {
   transactionalCollectionTabPath,
   createEditorGroupRight,
   defaultWorkbenchState,
+  effectivePanelWidth,
+  fitWorkbenchSidebars,
   DEFAULT_EDITOR_GROUP_ID,
   ABOUT_DEFAULT_WIDTH,
   ABOUT_MAX_WIDTH,
@@ -1729,5 +1731,63 @@ describe("the record a Collection tab shows open, and the record panel's width",
     expect(parseUiState({ ...saved, recordPanelWidth: 5 }).recordPanelWidth).toBe(
       RECORD_PANEL_MIN_WIDTH,
     );
+  });
+});
+
+describe("fitWorkbenchSidebars", () => {
+  it("keeps both sidebars open when the workbench is wide enough", () => {
+    const previous = { ...defaultWorkbenchState(), sidebarVisible: true, aboutVisible: false };
+    const next = { ...previous, aboutVisible: true };
+    expect(fitWorkbenchSidebars(previous, next, 1200)).toBe(next);
+  });
+
+  it("closes the left sidebar when opening About on a narrow window", () => {
+    const previous = { ...defaultWorkbenchState(), sidebarVisible: true, aboutVisible: false };
+    const next = { ...previous, aboutVisible: true };
+    expect(fitWorkbenchSidebars(previous, next, 760)).toEqual({
+      ...next,
+      sidebarVisible: false,
+    });
+  });
+
+  it("closes About when opening the left sidebar or shrinking a narrow window", () => {
+    const previous = { ...defaultWorkbenchState(), sidebarVisible: false, aboutVisible: true };
+    const next = { ...previous, sidebarVisible: true };
+    expect(fitWorkbenchSidebars(previous, next, 760)).toEqual({
+      ...next,
+      aboutVisible: false,
+    });
+
+    const both = { ...defaultWorkbenchState(), sidebarVisible: true, aboutVisible: true };
+    expect(fitWorkbenchSidebars(both, both, 760)).toEqual({
+      ...both,
+      aboutVisible: false,
+    });
+  });
+
+  it("caps a single wide sidebar to keep editor room on a narrow window", () => {
+    expect(effectivePanelWidth(640, 672, SIDEBAR_MIN_WIDTH)).toBe(292);
+    expect(effectivePanelWidth(640, 1400, SIDEBAR_MIN_WIDTH)).toBe(640);
+    expect(effectivePanelWidth(640, 0, SIDEBAR_MIN_WIDTH)).toBe(640);
+  });
+
+  it("clamps a resize instead of closing About when both sidebars are already open", () => {
+    const previous = {
+      ...defaultWorkbenchState(),
+      sidebarVisible: true,
+      aboutVisible: true,
+      sidebarWidth: 320,
+      aboutWidth: 320,
+    };
+    const widenedAbout = { ...previous, aboutWidth: 336 };
+    expect(fitWorkbenchSidebars(previous, widenedAbout, 1020)).toEqual({
+      ...previous,
+      aboutWidth: 320,
+    });
+    const widenedSidebar = { ...previous, sidebarWidth: 336 };
+    expect(fitWorkbenchSidebars(previous, widenedSidebar, 1020)).toEqual({
+      ...previous,
+      sidebarWidth: 320,
+    });
   });
 });

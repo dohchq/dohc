@@ -75,7 +75,7 @@ export function QuickOpenPalette(props: {
       commands={commands}
       rank={rank}
       emptyText={quickOpenEmptyText}
-      acceptLabel="open"
+      acceptLabel="Open"
       onClose={props.onClose}
     />
   );

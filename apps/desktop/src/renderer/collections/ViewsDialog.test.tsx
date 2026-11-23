@@ -61,3 +61,51 @@ it("keeps keyboard focus on the delete control while it arms, then deletes", asy
   await waitFor(() => expect(onDeleted).toHaveBeenCalledWith("Board"));
   expect(apply).toHaveBeenCalledOnce();
 });
+
+it("preserves Table and lists categorical group fields first when adding the first Board view", async () => {
+  const emptyViews: CollectionSchema = {
+    name: "Tasks",
+    description: null,
+    fields: [
+      { name: "Name", type: "text" },
+      { name: "Status", type: "select", options: ["Todo", "Done"] },
+    ],
+    views: [],
+  };
+  let written: CollectionSchema | null = null;
+  const apply = vi.fn(async (mutate: (current: CollectionSchema) => CollectionSchema) => {
+    written = mutate(emptyViews);
+    return null;
+  });
+  render(
+    <ViewsDialog
+      schema={emptyViews}
+      apply={apply}
+      onClose={vi.fn()}
+      onRenamed={vi.fn()}
+      onDeleted={vi.fn()}
+    />,
+  );
+
+  fireEvent.change(screen.getByLabelText("View name"), { target: { value: "table" } });
+  fireEvent.change(screen.getByLabelText("View kind"), { target: { value: "board" } });
+  const groupSelect = screen.getByLabelText("Group by") as HTMLSelectElement;
+  expect([...groupSelect.options].slice(1).map((option) => option.value)).toEqual([
+    "Status",
+    "Name",
+  ]);
+  fireEvent.change(groupSelect, { target: { value: "Status" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create view" }));
+  expect(
+    await screen.findByText('A view named "table" already exists. Choose another name.'),
+  ).toBeTruthy();
+  expect(apply).not.toHaveBeenCalled();
+
+  fireEvent.change(screen.getByLabelText("View name"), { target: { value: "By status" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create view" }));
+  await waitFor(() => expect(apply).toHaveBeenCalledOnce());
+  expect(written!.views.map((view) => [view.name, view.kind, view.groupBy])).toEqual([
+    ["Table", "table", null],
+    ["By status", "board", "Status"],
+  ]);
+});

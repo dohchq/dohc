@@ -948,7 +948,7 @@ describe("ended Edit Collection shares", () => {
         true,
       );
       act(() => bridge.emitMenuCommand("command-palette"));
-      expect(screen.queryByText("New collection")).toBeNull();
+      expect(screen.queryByText("New Collection")).toBeNull();
     },
   );
 

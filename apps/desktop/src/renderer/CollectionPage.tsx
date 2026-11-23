@@ -57,7 +57,14 @@ import {
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
-import { addView, deleteView, renameView, setOptionColor } from "./collections/schemaAuthoring";
+import {
+  addView,
+  addViewPreservingTable,
+  deleteView,
+  orderGroupFields,
+  renameView,
+  setOptionColor,
+} from "./collections/schemaAuthoring";
 import { withErrorWords } from "../ipc/errorWords";
 import { openLink } from "./linkActivation";
 import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/collectionFieldMarks";
@@ -1133,7 +1140,7 @@ export function CollectionPage({
     async (view: NewCollectionView): Promise<string | null> => {
       const request = schemaWrites.current();
       const failure = await applySchemaChange((current) =>
-        addView(current, {
+        addViewPreservingTable(current, {
           name: view.name,
           kind: view.kind,
           groupBy: view.kind === "board" ? (view.groupBy ?? null) : null,
@@ -1344,9 +1351,10 @@ export function CollectionPage({
     ? undefined
     : {
         // A board groups by stored values, and a button stores none.
-        groupFields: schema.fields
-          .filter((field) => field.type !== "button")
-          .map((field) => ({ id: field.name, name: field.name })),
+        groupFields: orderGroupFields(schema.fields).map((field) => ({
+          id: field.name,
+          name: field.name,
+        })),
         dateFields: dateFields.map((field) => ({ id: field.name, name: field.name })),
         onAddDateField: () => setFieldsOpen("date"),
         create: createView,

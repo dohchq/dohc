@@ -238,7 +238,7 @@ it("takes Ctrl+/ for the body's Source only while focus is in the body", async (
 
   toggle().focus();
   fireEvent.keyDown(toggle(), { key: "/", ctrlKey: true });
-  await waitFor(() => expect(toggle().textContent).toBe("WYSIWYG"));
+  await waitFor(() => expect(toggle().textContent).toBe("Editor"));
   fireEvent.keyDown(toggle(), { key: "/", ctrlKey: true });
   await waitFor(() => expect(toggle().textContent).toBe("Source"));
 });

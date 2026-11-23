@@ -154,7 +154,7 @@ describe("shortcut menu contract", () => {
         ...findLabels,
         "new-file": "New file",
         "new-folder": "New folder",
-        "new-collection": "New collection",
+        "new-collection": "New Collection",
         "open-workspace": "Open workspace folder…",
         "import-files": "Import files",
         "export-workspace": "Export workspace as ZIP",

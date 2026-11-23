@@ -1238,8 +1238,8 @@ export async function enterMarkdownSource(
     expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
   });
 
-  // The label names the next surface: Edit (read) -> Source (WYSIWYG) ->
-  // WYSIWYG (source).
+  // The label names the next surface: Edit (read) -> Source (editor) ->
+  // Editor (source).
   if (toggle.textContent === "Edit") {
     await user.click(toggle);
     await waitFor(() => expect(toggle.textContent).toBe("Source"));
@@ -1247,7 +1247,7 @@ export async function enterMarkdownSource(
   if (toggle.textContent === "Source") {
     await user.click(toggle);
   } else {
-    expect(toggle.textContent).toBe("WYSIWYG");
+    expect(toggle.textContent).toBe("Editor");
   }
   return await waitFor(() => {
     const content = queries
