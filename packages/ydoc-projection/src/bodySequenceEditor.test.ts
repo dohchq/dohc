@@ -1242,8 +1242,10 @@ describe("a block that has text after it which it cannot hold", () => {
     const effects = a.effects(() => a.view.dispatch(a.view.state.tr.delete(rule, rule + 1)));
     expect(effects.goneLetters).toBe("");
     expect(effects.madeLetters).toBe("");
-    expect(effects.goneBoundaries).toEqual([]);
-    expect(effects.madeBoundaries).toHaveLength(1);
+    expect(effects.goneBoundaries).toHaveLength(1);
+    expect(effects.madeBoundaries).toHaveLength(2);
+    expect(a.sent).toHaveLength(2);
+    expect(boundariesMadeIn(a.sent[0]!).toSorted()).toEqual(effects.madeBoundaries.toSorted());
     expect(a.view.state.doc.toString()).toBe(
       'doc(heading("Head"), bulletList(listItem(paragraph, paragraph("tail"))), codeBlock("code"), paragraph(wikilink, "rest"))',
     );
@@ -1785,7 +1787,7 @@ describe.each(["bare", "hosted"] as const)(
       exchange(a, b);
       for (const each of [a, b]) {
         each.expectMirror();
-        expect(each.view.state.doc.toString()).toBe('doc(paragraph("c"))');
+        expect(each.view.state.doc.toString()).toBe('doc(paragraph, paragraph("c"))');
       }
     });
 
@@ -1933,7 +1935,7 @@ const ORACLE_COUNTS = {
     "range error": 0,
   },
   undone: 6289,
-  given: 3785,
+  given: 3653,
   excepted: {
     "a mark on an inline item": 467,
     "formatting stored under a code block's letters": 9,
@@ -2109,13 +2111,30 @@ describe("the note reads as the document ProseMirror computed", () => {
             above -= 1;
           const wasGivenItsOwn = givenFirst.includes(tokens[above]?.id ?? "");
           const standing = new Set(tokens.map((token) => token.id));
+          const cut = Y.decodeUpdate(a.sent.at(-1)!).ds.clients;
+          const wasCut = (id: string) => {
+            const [client, clock] = id.split(":").map(Number) as [number, number];
+            return (cut.get(client) ?? []).some(
+              (range) => clock >= range.clock && clock < range.clock + range.len,
+            );
+          };
+          const runsAcrossBlocks = wrote.steps.some((step, order) => {
+            let across = false;
+            step.getMap().forEach((oldStart, oldEnd) => {
+              const doc = wrote.docs[order]!;
+              if (oldEnd - oldStart > 1 && !doc.resolve(oldStart).sameParent(doc.resolve(oldEnd)))
+                across = true;
+            });
+            return across;
+          });
           const isItsOwn =
             !wasGivenItsOwn &&
             lacking.some((line) => {
               if (line.path !== JSON.stringify(attrs.path)) return false;
               if (line.next !== undefined)
-                return line.next === next.id && attrs.type === "paragraph";
-              return line.items.find((id) => standing.has(id)) === next.id;
+                return !runsAcrossBlocks && line.next === next.id && attrs.type === "paragraph";
+              const ranInto = runsAcrossBlocks && wasCut(line.items[0]!);
+              return !ranInto && line.items.find((id) => standing.has(id)) === next.id;
             });
           if (isItsOwn)
             throw new Error(

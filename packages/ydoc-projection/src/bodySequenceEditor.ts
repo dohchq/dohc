@@ -34,10 +34,13 @@ import {
   type Followed,
 } from "./bodySequenceReading.js";
 import {
+  changesBlocks,
   giveBoundaries,
   keepsContainers,
   keepsPairs,
   linesGivenBoundaries,
+  linesMade,
+  linesWithNoBoundary,
   writeTransaction,
 } from "./bodySequenceWriting.js";
 
@@ -517,8 +520,10 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           const recorded = pending.some(
             (transaction) => transaction.getMeta(ADD_TO_HISTORY) !== false,
           );
+          const had = changesBlocks(pending) ? linesWithNoBoundary(reader.reading()) : null;
           change(recorded, () => {
             for (const transaction of pending) if (!writeTransaction(target, transaction)) break;
+            if (had) giveBoundaries(target, linesMade(reader.reading(), had));
             writing = false;
           });
         } finally {
