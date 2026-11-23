@@ -40,6 +40,7 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // engine state — the same reason workspaceFiles/workspaceSearch
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
 import {
   VersionedTextStoreError,
   refuseCallerOperationId,
@@ -1878,10 +1879,7 @@ async function orderFileSteps(
   engine: CaptureVersionedTextStore,
   steps: { path: string; delete: boolean }[],
 ): Promise<string[]> {
-  if (
-    engine.orderFileSteps &&
-    steps.some(({ path }) => path.split("/").at(-1)?.toLowerCase() === ".dohc-access")
-  ) {
+  if (engine.orderFileSteps && steps.some(({ path }) => isFolderMarkerPath(path))) {
     return engine.orderFileSteps(steps);
   }
   return steps.map(({ path }) => path);

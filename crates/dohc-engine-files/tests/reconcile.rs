@@ -149,6 +149,25 @@ fn rename_looks_like_remove_plus_add() {
 }
 
 #[test]
+fn a_marker_is_every_name_the_relay_folds_to_the_marker_name() {
+    for path in [
+        ".dohc-access",
+        "a/.DOHC-ACCESS",
+        "a/\u{FF0E}dohc-access",
+        "a/.dohc-access. ",
+    ] {
+        assert!(dohc_engine_files::is_access_marker(path), "{path}");
+    }
+    for path in [
+        "a/.dohc-access.bak",
+        "a/dohc-access",
+        ".dohc-access/notes.md",
+    ] {
+        assert!(!dohc_engine_files::is_access_marker(path), "{path}");
+    }
+}
+
+#[test]
 fn capture_orders_marker_writes_before_and_deletes_after_contents() {
     let ws = Scratch::new();
     for path in ["old/.DOHC-ACCESS", "old/-first.md", "old/z-last.md"] {
