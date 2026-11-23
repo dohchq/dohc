@@ -8579,6 +8579,10 @@ function WorkspaceShell(props: {
                                 openAppTab={openAppTab}
                                 reportShellError={reportShellError}
                                 appNotices={appNotices}
+                                onCollectionsChange={() => {
+                                  void refreshCollections();
+                                  retryCollectionsList();
+                                }}
                                 setShareTarget={setShareTarget}
                               />
                             ) : null}
@@ -9440,6 +9444,10 @@ function WorkspaceShell(props: {
                                             label: target.label,
                                           })
                                         }
+                                        onCollectionsChange={() => {
+                                          void refreshCollections();
+                                          retryCollectionsList();
+                                        }}
                                         access={appAccess}
                                       />
                                     </Suspense>

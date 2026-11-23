@@ -1795,8 +1795,14 @@ it("renders a single plain-English staged review card for new/updated Collection
   });
   try {
     const user = userEvent.setup();
+    const collectionsChanged = vi.fn();
     render(
-      <OwnerAppPublication workspaceId="ws-trip" appRoot="control-tower" localApproval="tab" />,
+      <OwnerAppPublication
+        workspaceId="ws-trip"
+        appRoot="control-tower"
+        localApproval="tab"
+        onCollectionsChange={collectionsChanged}
+      />,
     );
     await user.click(screen.getByRole("button", { name: "Review app" }));
     const card = await screen.findByTestId("staged-app-review-card");
@@ -1812,6 +1818,7 @@ it("renders a single plain-English staged review card for new/updated Collection
         { action: "approveStaged", workspaceId: "ws-trip", stageId, reviewDigest },
       ]),
     );
+    expect(collectionsChanged).toHaveBeenCalledTimes(1);
 
     stagedVisible = true;
     await user.click(screen.getByRole("button", { name: "Review app" }));

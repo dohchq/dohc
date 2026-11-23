@@ -143,6 +143,7 @@ type PublicationProps = {
   onShareSource?: () => void;
   reportError?: ReportPermissionError;
   onLocalChange?: () => void;
+  onCollectionsChange?: () => void;
   access?: { context: AccessContext; server: string | null };
 };
 
@@ -718,12 +719,14 @@ function PublicationDialog(
       if (result.kind !== "stagedApproved")
         throw new Error("dohc could not confirm this approval.");
       localChanged();
+      if (result.collectionsApplied.length > 0) props.onCollectionsChange?.();
       if (props.localApproval === "browser") await openApproved(result.publicationId);
       if (alive.current && mine === request.current) props.onClose();
     } catch (cause) {
       if (!alive.current || mine !== request.current) return;
       setApproveFailed(ipcErrorMessage(cause, "dohc could not approve this staged review."));
       setLocalReload((value) => value + 1);
+      props.onCollectionsChange?.();
     } finally {
       if (alive.current && mine === request.current) setBusy(null);
     }
@@ -1149,7 +1152,7 @@ function PublicationDialog(
             ) : null}
           </header>
           {localView && staged ? (
-            <div data-testid="staged-app-review-card" className="flex flex-col gap-6">
+            <div data-testid="staged-app-review-card" className="flex flex-col gap-4">
               <StateLine icon={CircleDashed} tone="text-muted" text={stagedStateHeading(staged)}>
                 <More>Approving applies these Collection rules and approves this app.</More>
               </StateLine>
@@ -1161,7 +1164,7 @@ function PublicationDialog(
                 onRetry={() => setLocalReload((value) => value + 1)}
               />
               {status}
-              <div className="flex flex-col gap-2">
+              <div className="sticky -bottom-6 -mx-6 -mb-6 flex flex-col gap-2 border-t border-line bg-panel px-6 py-4">
                 {approveFailed !== null ? (
                   <p
                     role="alert"

@@ -15,6 +15,7 @@ import {
   Modal,
   PageHeader,
   Select,
+  Stack,
   StatCard,
   Tabs,
   formatCurrency,
@@ -125,7 +126,7 @@ export function PersonalControlTower() {
       setExpenseModal(false);
       expenses.reload();
     } catch {
-      // Mutation error renders inside the modal.
+      return;
     }
   };
 
@@ -145,7 +146,7 @@ export function PersonalControlTower() {
       setWorkoutModal(false);
       workouts.reload();
     } catch {
-      // Mutation error renders inside the modal.
+      return;
     }
   };
 
@@ -167,83 +168,84 @@ export function PersonalControlTower() {
         }
       />
 
-      {expenses.error ? (
-        <Callout
-          tone="danger"
-          title="Could not load expenses"
-          action={
-            <Button size="sm" onClick={expenses.reload}>
-              Try again
-            </Button>
-          }
-        >
-          {expenses.error.message}
-        </Callout>
-      ) : null}
-      {workouts.error ? (
-        <Callout
-          tone="danger"
-          title="Could not load workouts"
-          action={
-            <Button size="sm" onClick={workouts.reload}>
-              Try again
-            </Button>
-          }
-        >
-          {workouts.error.message}
-        </Callout>
-      ) : null}
+      <Stack gap={16}>
+        {expenses.error ? (
+          <Callout
+            tone="danger"
+            title="Could not load expenses"
+            action={
+              <Button size="sm" onClick={expenses.reload}>
+                Try again
+              </Button>
+            }
+          >
+            {expenses.error.message}
+          </Callout>
+        ) : null}
+        {workouts.error ? (
+          <Callout
+            tone="danger"
+            title="Could not load workouts"
+            action={
+              <Button size="sm" onClick={workouts.reload}>
+                Try again
+              </Button>
+            }
+          >
+            {workouts.error.message}
+          </Callout>
+        ) : null}
 
-      <Grid cols={4}>
-        <StatCard label="Total spend" value={formatCurrency(totalSpent)} />
-        <StatCard label="Expenses" value={String(expenseRows.length)} />
-        <StatCard label="Active minutes" value={`${totalMinutes} min`} />
-        <StatCard label="Workouts" value={String(workoutRows.length)} />
-      </Grid>
+        <Grid cols={4}>
+          <StatCard label="Total spend" value={formatCurrency(totalSpent)} />
+          <StatCard label="Expenses" value={String(expenseRows.length)} />
+          <StatCard label="Active minutes" value={`${totalMinutes} min`} />
+          <StatCard label="Workouts" value={String(workoutRows.length)} />
+        </Grid>
 
-      <Grid cols={2}>
-        <Card title="Spending by category" subtitle="From Expenses">
-          {spendByCategory.length > 0 ? (
-            <BarChart
-              data={spendByCategory}
-              formatValue={(value) => formatCurrency(value)}
-              ariaLabel="Spending by category"
-            />
-          ) : (
-            <EmptyState
-              title="No expenses yet"
-              description="Add an expense to see spending by category."
-              action={
-                <Button variant="primary" onClick={() => setExpenseModal(true)}>
-                  Add expense
-                </Button>
-              }
-            />
-          )}
-        </Card>
-        <Card title="Recent workout duration" subtitle="Minutes per session">
-          {workoutTrend.length > 0 ? (
-            <Sparkline
-              values={workoutTrend}
-              width={280}
-              height={96}
-              ariaLabel="Recent workout duration"
-            />
-          ) : (
-            <EmptyState
-              title="No workouts yet"
-              description="Log a workout to track session duration."
-              action={
-                <Button variant="secondary" onClick={() => setWorkoutModal(true)}>
-                  Log workout
-                </Button>
-              }
-            />
-          )}
-        </Card>
-      </Grid>
+        <Grid cols={2}>
+          <Card title="Spending by category" subtitle="From Expenses">
+            {spendByCategory.length > 0 ? (
+              <BarChart
+                data={spendByCategory}
+                formatValue={(value) => formatCurrency(value)}
+                ariaLabel="Spending by category"
+              />
+            ) : (
+              <EmptyState
+                title="No expenses yet"
+                description="Add an expense to see spending by category."
+                action={
+                  <Button variant="primary" onClick={() => setExpenseModal(true)}>
+                    Add expense
+                  </Button>
+                }
+              />
+            )}
+          </Card>
+          <Card title="Recent workout duration" subtitle="Minutes per session">
+            {workoutTrend.length > 0 ? (
+              <Sparkline
+                values={workoutTrend}
+                width={280}
+                height={96}
+                ariaLabel="Recent workout duration"
+              />
+            ) : (
+              <EmptyState
+                title="No workouts yet"
+                description="Log a workout to track session duration."
+                action={
+                  <Button variant="secondary" onClick={() => setWorkoutModal(true)}>
+                    Log workout
+                  </Button>
+                }
+              />
+            )}
+          </Card>
+        </Grid>
 
-      <Card>
+        <Card>
         <Tabs
           value={tab}
           onChange={setTab}
@@ -350,7 +352,8 @@ export function PersonalControlTower() {
             },
           ]}
         />
-      </Card>
+        </Card>
+      </Stack>
 
       <Modal open={expenseModal} title="Add expense" onClose={() => setExpenseModal(false)}>
         <form onSubmit={submitExpense} style={{ display: "grid", gap: 12 }}>

@@ -147,6 +147,7 @@ export function SitePreviewPage(props: {
   // Changes each time the person presses this page's tab, which puts focus in the app.
   focusRequest?: number;
   onTitle?: (title: string) => void;
+  onCollectionsChange?: () => void;
   // The workspace's server connection, for Review app's Share links.
   access?: ComponentProps<typeof OwnerAppPublication>["access"];
 }) {
@@ -806,6 +807,7 @@ export function SitePreviewPage(props: {
               open={reviewOpen}
               onOpenChange={setReviewOpen}
               onLocalChange={localApprovalChanged}
+              onCollectionsChange={props.onCollectionsChange}
               onShareSource={
                 props.onShareSite
                   ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title })

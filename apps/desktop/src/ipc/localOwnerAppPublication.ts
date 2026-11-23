@@ -20,7 +20,7 @@ import type { DatasetMigrationCandidate } from "@dohc/cli/dataset";
 import { isDatasetServerNotFound } from "./errorWords";
 
 export function createLocalOwnerAppPublicationHandler<
-  Workspace extends { workspaceId: string; rootPath?: string },
+  Workspace extends { workspaceId: string; rootPath?: string; attachmentId?: symbol },
   Operation extends {
     workspace: Workspace;
     signal: AbortSignal;
@@ -135,6 +135,7 @@ export function createLocalOwnerAppPublicationHandler<
         return createLocalStagedApps({
           workspaceId: operation.workspace.workspaceId,
           workspaceRoot: rootPath,
+          attachmentId: operation.workspace.attachmentId,
           assertCurrent: current,
           compile: deps.compile,
           preflightCreate: async (preflightInput) => {

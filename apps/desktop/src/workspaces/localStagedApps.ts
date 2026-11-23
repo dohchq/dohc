@@ -78,6 +78,7 @@ export interface StagedDatasetApproved {
 export interface LocalStagedAppsDependencies {
   workspaceId: string;
   workspaceRoot: string;
+  attachmentId?: symbol;
   assertCurrent(): void;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   preflightCreate(input: {
@@ -294,7 +295,11 @@ function formatChangeRow(row: Parameters<typeof describeCollectionChangeRow>[0])
 }
 
 export function createLocalStagedApps(deps: LocalStagedAppsDependencies) {
-  const localState = { workspaceId: deps.workspaceId, rootPath: deps.workspaceRoot };
+  const localState = {
+    workspaceId: deps.workspaceId,
+    rootPath: deps.workspaceRoot,
+    attachmentId: deps.attachmentId,
+  };
   const stagedRootForWrite = async (signal?: AbortSignal): Promise<string> => {
     const guard = { path: ".dohc/local/staged-apps", lead: "dohc could not stage this app." };
     try {
