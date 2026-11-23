@@ -286,6 +286,33 @@ test("@app-backend-local personal control tower stages via CLI, approves from on
     await expect(desktop.page.getByRole("button", { name: "Workouts" })).toBeVisible({
       timeout: 15_000,
     });
+    await expect(desktop.page.getByTestId("app-view-webview")).toBeVisible({ timeout: 20_000 });
+    await expect(desktop.page.getByTestId("app-view-loading")).toHaveCount(0, { timeout: 20_000 });
+    await expect(desktop.page.getByTestId("app-view-unapproved")).toHaveCount(0);
+    const embeddedDesktop = desktop;
+    await expect
+      .poll(
+        async () =>
+          embeddedDesktop.app.evaluate(async ({ webContents }) => {
+            const guest = webContents
+              .getAllWebContents()
+              .find(
+                (contents) =>
+                  contents.getType() === "webview" &&
+                  /^http:\/\/127\.0\.0\.1:\d+\/bootstrap(?:#|$)/.test(contents.getURL()),
+              );
+            const frame = guest?.mainFrame.framesInSubtree.find(
+              (entry) => entry.url === "about:srcdoc",
+            );
+            if (!frame) return "";
+            return (await frame.executeJavaScript(
+              "document.body?.innerText ?? ''",
+              true,
+            )) as string;
+          }),
+        { timeout: 20_000 },
+      )
+      .toContain("Control Tower");
     if (shotDir) {
       await desktop.page.screenshot({
         path: join(shotDir, "desktop-approved-sidebar-light.png"),

@@ -283,7 +283,10 @@ export function PersonalControlTower() {
                           variant="ghost"
                           size="sm"
                           onClick={() => {
-                            void deleteExpense.mutate({ id: row.id }).then(() => expenses.reload());
+                            void deleteExpense
+                              .mutate({ id: row.id })
+                              .then(() => expenses.reload())
+                              .catch(() => undefined);
                           }}
                         >
                           Remove
@@ -339,7 +342,10 @@ export function PersonalControlTower() {
                           variant="ghost"
                           size="sm"
                           onClick={() => {
-                            void deleteWorkout.mutate({ id: row.id }).then(() => workouts.reload());
+                            void deleteWorkout
+                              .mutate({ id: row.id })
+                              .then(() => workouts.reload())
+                              .catch(() => undefined);
                           }}
                         >
                           Remove

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -42,7 +42,9 @@ async function loadControlTowerFiles(): Promise<Map<string, string>> {
   return new Map(entries);
 }
 
-async function openFixture(overrides?: { onBeforeApproveCreate?: (datasetId: string) => void }) {
+async function openFixture(overrides?: {
+  onBeforeApproveCreate?: (revisionSha256: string) => void | Promise<void>;
+}) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-staged-apps-"));
   roots.push(workspaceRoot);
   await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
@@ -76,7 +78,7 @@ async function openFixture(overrides?: { onBeforeApproveCreate?: (datasetId: str
     },
     prepareCreate: (input) => host.prepare(input),
     approveCreate: async (input) => {
-      overrides?.onBeforeApproveCreate?.(input.revisionSha256);
+      await overrides?.onBeforeApproveCreate?.(input.revisionSha256);
       return host.approve(input);
     },
     discardCreate: (id) => host.discard(id),
@@ -309,5 +311,157 @@ describe("localStagedApps", () => {
     expect(await staged.list()).toHaveLength(1);
     await staged.discard(third.stageId);
     expect(await staged.list()).toEqual([]);
+  }, 60_000);
+
+  it("refuses a stale second Collection before committing the first so the active app stays live", async () => {
+    const { host, staged } = await openFixture();
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    const initialStage = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+    const initialApproved = await staged.approve({
+      stageId: initialStage.stageId,
+      reviewDigest: initialStage.reviewDigest,
+      signal,
+    });
+    const expensesCol = initialStage.collections.find((c) => c.alias === "expenses")!;
+    const workoutsCol = initialStage.collections.find((c) => c.alias === "workouts")!;
+
+    const updatedFiles = new Map(files);
+    updatedFiles.set(
+      "personal-control-tower/expenses/operations.js",
+      `${files.get("personal-control-tower/expenses/operations.js")!}\n// expense v2\n`,
+    );
+    updatedFiles.set(
+      "personal-control-tower/workouts/operations.js",
+      `${files.get("personal-control-tower/workouts/operations.js")!}\n// workout v2\n`,
+    );
+    const updateStage = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(updatedFiles),
+      signal,
+    });
+
+    await host.apps.request(initialApproved.publicationId, "invoke", {
+      authorityRevision: initialApproved.authorityRevision,
+      dataset: "workouts",
+      operation: "logWorkout",
+      idempotencyKey: "wrk-stale",
+      input: {
+        date: "2026-11-23",
+        activity: "Run",
+        minutes: 20,
+        effort: "Easy",
+        notes: "",
+      },
+    });
+
+    await expect(
+      staged.approve({
+        stageId: updateStage.stageId,
+        reviewDigest: updateStage.reviewDigest,
+        signal,
+      }),
+    ).rejects.toThrow(/changed after staging/i);
+
+    expect(host.approvedArtifacts(expensesCol.datasetId).revision.revision).toBe(1);
+    expect(host.approvedArtifacts(workoutsCol.datasetId).revision.revision).toBe(1);
+    expect(host.apps.list("personal-control-tower").some((p) => p.active)).toBe(true);
+  }, 60_000);
+
+  it("refuses discard while an approval is in progress so receipts and Collections stay consistent", async () => {
+    let releaseFirst!: () => void;
+    let enteredFirst!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      enteredFirst = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let seen = 0;
+    const { host, staged } = await openFixture({
+      onBeforeApproveCreate: async () => {
+        seen += 1;
+        if (seen === 1) {
+          enteredFirst();
+          await gate;
+        }
+      },
+    });
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    const summary = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+
+    const approving = staged.approve({
+      stageId: summary.stageId,
+      reviewDigest: summary.reviewDigest,
+      signal,
+    });
+    await firstEntered;
+
+    await expect(staged.discard(summary.stageId)).rejects.toThrow(/currently being approved/i);
+    await expect(
+      staged.approve({
+        stageId: summary.stageId,
+        reviewDigest: summary.reviewDigest,
+        signal,
+      }),
+    ).rejects.toThrow(/already being approved/i);
+
+    releaseFirst();
+    const result = await approving;
+    expect(result.collectionsApplied).toHaveLength(2);
+    expect(host.list().datasets).toHaveLength(2);
+    expect(host.apps.list("personal-control-tower").some((p) => p.active)).toBe(true);
+    expect(await staged.list()).toEqual([]);
+  }, 60_000);
+
+  it("refuses approval when staged revision.json fields are modified", async () => {
+    const { workspaceRoot, host, staged } = await openFixture();
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    const summary = await staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+
+    const expensesCol = summary.collections.find((c) => c.alias === "expenses")!;
+    const revisionPath = join(
+      workspaceRoot,
+      ".dohc",
+      "local",
+      "staged-apps",
+      summary.stageId,
+      "collections",
+      expensesCol.datasetId,
+      "revision.json",
+    );
+    const parsed = JSON.parse(await readFile(revisionPath, "utf8")) as {
+      schemaSha256: string;
+    };
+    parsed.schemaSha256 = parsed.schemaSha256.startsWith("0")
+      ? `1${parsed.schemaSha256.slice(1)}`
+      : `0${parsed.schemaSha256.slice(1)}`;
+    await writeFile(revisionPath, JSON.stringify(parsed));
+
+    await expect(
+      staged.approve({ stageId: summary.stageId, reviewDigest: summary.reviewDigest, signal }),
+    ).rejects.toThrow(/failed integrity check/i);
+    expect(host.list().datasets).toHaveLength(0);
   }, 60_000);
 });

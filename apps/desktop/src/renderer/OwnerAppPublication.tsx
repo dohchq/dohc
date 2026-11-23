@@ -580,7 +580,7 @@ function PublicationDialog(
           staged = listed.stages.find((entry) => entry.appRoot === props.appRoot) ?? null;
         }
       } catch {
-        // Staged proposals are optional; keep normal local review when unavailable.
+        staged = null;
       }
       if (!current) return;
       setLocalReview({ status: "ready", rows, approval, source, staged });
