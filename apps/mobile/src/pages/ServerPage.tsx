@@ -99,6 +99,7 @@ function PageScreen({ path }: { path: string }) {
   // The web view's page, prepared once; Try again after a lost page prepares it again.
   const [uri, setUri] = useState<string | null>(null);
   const [lostPage, setLostPage] = useState<false | "failed" | "noSpace">(false);
+  const [needsNewer, setNeedsNewer] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [host] = useState(() =>
     createPageHost({ inject: (script) => web.current?.injectJavaScript(script) }),
@@ -173,6 +174,7 @@ function PageScreen({ path }: { path: string }) {
     if (data.kind === "painted") host.painted(from);
     // The page's fonts didn't load, so it didn't draw: Try again mounts a fresh page.
     if (data.kind === "fontsFailed") setLostPage("failed");
+    if (data.kind === "unsupportedFormat") setNeedsNewer(true);
     // The answer to the one Copy as Markdown waiting for it; the page can't copy unasked.
     if (data.kind === "markdown" || data.kind === "markdownUnavailable") {
       const done = copying.current;
@@ -235,6 +237,8 @@ function PageScreen({ path }: { path: string }) {
   const gap = useWorkspaceGap();
   const failure = gap ? (
     <NoWorkspace />
+  ) : needsNewer ? (
+    <ScreenFailure text={documentWords.needsNewerDohc} />
   ) : state.value?.kind === "missing" && !deleted && !holding ? (
     <ScreenFailure text={documentWords.noLongerAvailable} />
   ) : state.value?.kind === "too-large" && !holding ? (
