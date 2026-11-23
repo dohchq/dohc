@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Fragment, type Node as ProseMirrorNode, type NodeType } from "@tiptap/pm/model";
 import { getDohcProseMirrorSchema, parseRichdocMarkdown } from "./import-export.js";
 import {
@@ -369,6 +369,24 @@ describe("reading any sequence", () => {
       calloutType: "note",
       title: "",
     });
+  });
+
+  it("checks a container's settings once in a read, however often the container is reopened", () => {
+    const title = `${"x".repeat(64)}${String.fromCharCode(0x2028)}`;
+    const records = new Map<string, unknown>([
+      ["c", "callout"],
+      ["c.title", title],
+    ]);
+    const pieces: SequencePiece[] = Array.from({ length: 200 }, (_, at) => ({
+      boundary: { type: "paragraph", path: at % 2 === 0 ? ["c"] : [] },
+    }));
+    const tested = vi.spyOn(RegExp.prototype, "test");
+    const doc = readBodyLeaves(schema, leavesOfSequence(schema, pieces, records));
+    const scans = tested.mock.calls.filter(([text]) => text === title).length;
+    tested.mockRestore();
+    expect(doc.childCount).toBe(200);
+    expect(doc.firstChild!.attrs.title).toBe("");
+    expect(scans).toBe(1);
   });
 
   it("turns a mark on only for an object, and reads code alone when code is on", () => {
