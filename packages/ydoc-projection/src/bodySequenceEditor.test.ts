@@ -464,17 +464,21 @@ describe("what one editor change does to the items of the sequence", () => {
 });
 
 describe("a note with no boundary for some of its blocks", () => {
-  it("types into an empty note with letters only, and gives the first line a boundary when it is split at its start", () => {
+  it("gives an empty note's line its boundary before the first letter typed in it, and writes one boundary for each split after", () => {
     const a = person(Y.encodeStateAsUpdate(new Y.Doc()), 10);
     const b = person(Y.encodeStateAsUpdate(new Y.Doc()), 20);
     expect(a.lines()).toEqual([""]);
-    expect(a.effects(() => a.type("ab")).made).toEqual({ ...quiet(), letters: 2 });
+    expect(a.effects(() => a.type("a")).made).toEqual({ ...BOUNDARY, letters: 1 });
+    expect(a.sent).toHaveLength(2);
+    expect(boundariesMadeIn(a.sent[0]!)).toEqual(a.boundaryIds());
+    expect(a.effects(() => a.type("b")).made).toEqual({ ...quiet(), letters: 1 });
+    expect(a.sent).toHaveLength(3);
     a.expectMirror();
     expect(a.effects(() => a.split(0, 1)).made).toEqual(BOUNDARY);
     expect(a.lines()).toEqual(["a", "b"]);
     a.expectMirror();
     const split = a.effects(() => a.split(0, 0));
-    expect(split.made).toEqual({ ...quiet(), boundaries: 2, attributes: 4 });
+    expect(split.made).toEqual(BOUNDARY);
     expect(a.lines()).toEqual(["", "a", "b"]);
     expect(a.boundaryLines().map((line) => line.text)).toEqual(["", "a", "b"]);
     a.expectMirror();
@@ -521,7 +525,7 @@ describe("a note with no boundary for some of its blocks", () => {
     b.expectMirror();
 
     const c = person(head(), 30);
-    expect(c.effects(() => c.typeAt(0, 1, "x")).made).toEqual({ ...quiet(), letters: 1 });
+    expect(c.effects(() => c.typeAt(0, 1, "x")).made).toEqual({ ...BOUNDARY, letters: 1 });
     expect(c.effects(() => c.join(1)).gone).toEqual(BOUNDARY);
     expect(c.lines()).toEqual(["axbcd"]);
     c.expectMirror();
@@ -542,7 +546,7 @@ describe("a note with no boundary for some of its blocks", () => {
     expect(a.blocks()).toEqual(["horizontalRule", "paragraph", "codeBlock", "paragraph"]);
     expect(a.lines()).toEqual(["", "after", "code", "tail"]);
     a.expectMirror();
-    expect(a.effects(() => a.typeAt(1, 5, "!")).made).toEqual({ ...quiet(), letters: 1 });
+    expect(a.effects(() => a.typeAt(1, 5, "!")).made).toEqual({ ...BOUNDARY, letters: 1 });
     expect(a.effects(() => a.typeAt(1, 0, ">")).made).toEqual({ ...quiet(), letters: 1 });
     expect(a.lines()).toEqual(["", ">after!", "code", "tail"]);
     a.expectMirror();
@@ -1327,17 +1331,19 @@ describe("a paragraph the reader added in front of a list item's content", () =>
       }
     });
 
-  it("keeps the list when the item's only stored line is deleted, by making its boundary the paragraph's", () => {
+  it("keeps the list when the item's only stored line is deleted: that paragraph is given its boundary first", () => {
     const a = person(item([{ type: "heading", level: 2 }, ""]), 10);
-    const [, heading] = a.boundaryIds();
+    const [top, heading] = a.boundaryIds();
     expect(a.view.state.doc.toString()).toBe(
       'doc(paragraph("Top"), bulletList(listItem(paragraph, heading)))',
     );
     a.select([2, 0]);
     const effects = a.effects(() => expect(a.press("Backspace")).toBe(true));
-    expect(effects.goneBoundaries).toEqual([]);
-    expect(effects.madeBoundaries).toEqual([]);
-    expect(a.boundaryIds()).toEqual([a.boundaryIds()[0], heading]);
+    expect(effects.goneBoundaries).toEqual([heading]);
+    expect(a.sent).toHaveLength(2);
+    expect(boundariesMadeIn(a.sent[0]!)).toEqual(effects.madeBoundaries);
+    expect(a.boundaryIds()).toEqual([top, ...effects.madeBoundaries]);
+    expect(effects.madeBoundaries).toHaveLength(1);
     expect(a.view.state.doc.toString()).toBe(
       'doc(paragraph("Top"), bulletList(listItem(paragraph)))',
     );
@@ -1354,8 +1360,9 @@ describe("a paragraph the reader added in front of a list item's content", () =>
     const [, heading] = a.boundaryIds();
     const first = a.view.state.doc.child(0).nodeSize + 3;
     const effects = a.effects(() => a.view.dispatch(a.view.state.tr.join(first + 1)));
-    expect(effects).toMatchObject({ goneLetters: "", madeLetters: "", goneBoundaries: [] });
-    expect(a.boundaryLines()[1]).toEqual({ id: heading, text: "Title" });
+    expect(effects).toMatchObject({ goneLetters: "", madeLetters: "", goneBoundaries: [heading] });
+    expect(boundariesMadeIn(a.sent[0]!)).toEqual(effects.madeBoundaries);
+    expect(a.boundaryLines()[1]).toEqual({ id: effects.madeBoundaries[0], text: "Title" });
     expect(a.view.state.doc.toString()).toBe(
       'doc(paragraph("Top"), bulletList(listItem(paragraph("Title"))))',
     );
@@ -1926,7 +1933,7 @@ const ORACLE_COUNTS = {
     "range error": 0,
   },
   undone: 6289,
-  given: 1652,
+  given: 3785,
   excepted: {
     "a mark on an inline item": 467,
     "formatting stored under a code block's letters": 9,
@@ -2113,6 +2120,45 @@ describe("the note reads as the document ProseMirror computed", () => {
           if (isItsOwn)
             throw new Error(
               `${label} in ${before.toString()}: the recorded change wrote the boundary of a line that had none`,
+            );
+        }
+        const recorded = a.sent.length > 0 ? Y.decodeUpdate(a.sent.at(-1)!) : null;
+        const idOf = (id: Y.ID) => `${String(id.client)}:${String(id.clock)}`;
+        const deleted = (id: string) => {
+          const [client, clock] = id.split(":").map(Number) as [number, number];
+          return (recorded?.ds.clients.get(client) ?? []).some(
+            (range) => clock >= range.clock && clock < range.clock + range.len,
+          );
+        };
+        const standing = new Set(tokens.map((token) => token.id));
+        for (const line of lacking) {
+          const first = line.items.find((id) => standing.has(id));
+          if (!recorded || first === undefined) continue;
+          const own = new Set(line.items);
+          const inIt = (id: Y.ID | null) => id !== null && own.has(idOf(id));
+          const startsALine = (struct: Y.Item) =>
+            struct.content instanceof Y.ContentType &&
+            struct.content.type instanceof Y.XmlElement &&
+            struct.content.type.nodeName === BLOCK_ELEMENT;
+          const edited =
+            line.items.some(deleted) ||
+            recorded.structs.some(
+              (struct) =>
+                struct instanceof Y.Item &&
+                ((inIt(struct.origin) && (!startsALine(struct) || inIt(struct.rightOrigin))) ||
+                  (struct.parent instanceof Y.ID && inIt(struct.parent))),
+            );
+          if (!edited) continue;
+          const now = createBodyReader(schema, a.sequence, a.containers).reading();
+          const at = tokens.findIndex((token) => token.id === first);
+          const stillBare = now.blocks.some(
+            (block, index) =>
+              boundaryAt(now, index) < 0 &&
+              block.shown.some((piece) => now.bases[index]! + piece.index === at),
+          );
+          if (stillBare)
+            throw new Error(
+              `${label} in ${before.toString()}: the recorded change edited a line that had no boundary, and gave it none first`,
             );
         }
         if (a.undo()) {
@@ -2469,6 +2515,50 @@ describe.each(["bare", "hosted"] as const)(
           expect(each.boundaryIds()).toHaveLength(3);
           expect(each.boundaryIds()).toContain(given);
         }
+      },
+    );
+
+    it.each([
+      [
+        "a letter typed",
+        (a: Person) => a.typeAt(1, 3, "X"),
+        'doc(codeBlock("ab"), paragraph(hardBreak, "cdXxy"), paragraph("end"))',
+      ],
+      [
+        "an inline item put",
+        (a: Person) => {
+          a.select([1, 3]);
+          a.put("wikilink", { target: "Other", label: null });
+        },
+        'doc(codeBlock("ab"), paragraph(hardBreak, "cd", wikilink, "xy"), paragraph("end"))',
+      ],
+      [
+        "a mark set",
+        (a: Person) => {
+          a.select([1, 1], [1, 3]);
+          a.toggle("bold");
+        },
+        'doc(codeBlock("ab"), paragraph(hardBreak, bold("cd"), "xy"), paragraph("end"))',
+      ],
+    ])(
+      "gives the paragraph after a code block its boundary before %s in its middle, in a change undo does not record, and the undo reads as before",
+      (_name, act, changed) => {
+        const a = person(noteOfLines(CODE_NOTE), 10, shape);
+        const before = a.view.state.doc.toJSON();
+        const [code, end] = a.boundaryIds();
+        act(a);
+        expect(a.view.state.doc.toString()).toBe(changed);
+        expect(a.sent).toHaveLength(2);
+        const [given] = boundariesMadeIn(a.sent[0]!);
+        expect(boundariesMadeIn(a.sent[1]!)).toEqual([]);
+        expect(a.boundaryIds()).toEqual([code, given, end]);
+        expect(a.history.undoStack).toHaveLength(1);
+        a.expectMirror();
+        expect(a.undo()).toBe(true);
+        expect(a.view.state.doc.toJSON()).toEqual(before);
+        expect(a.boundaryIds()).toEqual([code, given, end]);
+        a.expectMirror();
+        expect(a.undo()).toBe(false);
       },
     );
 
@@ -3021,7 +3111,7 @@ describe.each(["bare", "hosted"] as const)(
       const head = [stored(null, `h${EMOJI}h`), stored({}, "ab")];
       const a = person(noteOfLines(head), 10, shape);
       const b = person(noteOfLines(head), 20, shape);
-      b.typeAt(0, 1, "!");
+      b.typeAt(1, 1, "!");
       const fromPeer = b.sent.splice(0);
       let delivered = false;
       a.doc.on("update", () => {
@@ -3032,7 +3122,7 @@ describe.each(["bare", "hosted"] as const)(
       a.select([0, 0]);
       a.press("Enter");
       expect(delivered).toBe(true);
-      expect(a.lines()).toEqual([`h!${EMOJI}h`, "ab"]);
+      expect(a.lines()).toEqual([`h${EMOJI}h`, "a!b"]);
       expect(a.sent).toHaveLength(1);
       expect(a.history.undoStack).toHaveLength(0);
       a.expectMirror();
@@ -3041,7 +3131,7 @@ describe.each(["bare", "hosted"] as const)(
       exchange(a, b);
       for (const each of [a, b]) {
         each.expectMirror();
-        expect(each.lines()).toEqual(["", `h!${EMOJI}h`, "ab"]);
+        expect(each.lines()).toEqual(["", `h${EMOJI}h`, "a!b"]);
         expect(loneSurrogate.test(each.sequence.toString())).toBe(false);
       }
     });

@@ -201,17 +201,25 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
         sequence.insert(sequence.length, LINE, {});
       }
     });
-    const timed = (act: (view: EditorView) => void) => {
+    const timed = (...acts: ((view: EditorView) => void)[]) => {
       const { view } = editorWithNoPage(headed, 40);
-      const start = performance.now();
-      act(view);
-      return `${(performance.now() - start).toFixed(1)} ms`;
+      return acts.map((act) => {
+        const start = performance.now();
+        act(view);
+        return `${(performance.now() - start).toFixed(1)} ms`;
+      });
     };
+    const typed = timed(
+      (view) => view.dispatch(view.state.tr.insertText("x", 30)),
+      (view) => view.dispatch(view.state.tr.insertText("x", 31)),
+    );
+    const edits =
+      "10,000 paragraphs, the first with no boundary, each edit of which is first written to a copy of the note";
     report.push(
-      `10,000 paragraphs, the first with no boundary: one letter typed in its middle, once: ${timed((view) => view.dispatch(view.state.tr.insertText("x", 30)))}`,
-      `10,000 paragraphs, the first with no boundary: one letter typed at its start, which is first written to a copy of the note, once: ${timed((view) => view.dispatch(view.state.tr.insertText("x", 1)))}`,
-      `10,000 paragraphs, the first with no boundary: one Enter in its middle, once: ${timed((view) => view.dispatch(view.state.tr.split(30)))}`,
-      `10,000 paragraphs, the first with no boundary: one Enter at its start, which is first written to a copy of the note, once: ${timed((view) => view.dispatch(view.state.tr.split(1)))}`,
+      `${edits}: the first letter typed in its middle, once: ${typed[0]!}`,
+      `${edits}: the next letter typed there, once the line has its boundary: ${typed[1]!}`,
+      `${edits}: one Enter in its middle, once: ${timed((view) => view.dispatch(view.state.tr.split(30)))[0]!}`,
+      `${edits}: one Enter at its start, once: ${timed((view) => view.dispatch(view.state.tr.split(1)))[0]!}`,
     );
     console.log(report.join("\n"));
   },

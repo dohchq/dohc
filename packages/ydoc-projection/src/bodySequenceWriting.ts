@@ -333,45 +333,35 @@ function readerAddedParagraphBefore(reading: BodyReading, block: number, from: n
   );
 }
 
-function needsOwnBoundaryFirst(
-  reading: BodyReading,
-  holder: number,
-  atStart: boolean,
-  tokens: readonly Token[],
-): boolean {
-  if (holder < 0 || tokens.length === 0 || boundaryAt(reading, holder) >= 0) return false;
-  const empty = reading.blocks[holder]!.node.content.size === 0;
-  if (empty && reading.paths[holder]!.length > 0) return true;
-  if (!atStart) return false;
-  if (tokens.some((token) => "block" in token)) return true;
-  const own = reading.lines[holder]?.read?.own.node;
-  return isParagraphAfterItsLeaf(reading, holder) && own?.isTextblock === true;
-}
-
 /**
- * The block with no boundary of its own that a replaced range needs to have one, or -1: the block
- * whose start the range replaces with another block's start, the later block the range ends in
- * and whose text it keeps, or the block the range writes into.
+ * The blocks with no boundary of their own that a replaced range gives one first: the block the
+ * range writes into, the block whose start it replaces with another block's start, and the later
+ * block it ends in and whose text it keeps.
  */
-function lineThatNeedsItsBoundary(
+function linesARangeEdits(
   reading: BodyReading,
   oldStart: number,
   oldEnd: number,
   tokens: readonly Token[],
-): number {
+): number[] {
+  const lines = new Set<number>();
+  const edits = (block: number) => {
+    if (block >= 0 && boundaryAt(reading, block) < 0) lines.add(block);
+  };
   const holder = blockHolding(reading, oldStart);
+  edits(holder);
+  if (oldEnd === oldStart) return [...lines];
+  const endsIn = blockHolding(reading, oldEnd);
   const first = tokens[0];
-  const endsIn = oldEnd > oldStart ? blockHolding(reading, oldEnd) : -1;
-  if (oldEnd > oldStart && first !== undefined && "block" in first) {
+  if (first !== undefined && "block" in first) {
     const opened = blockStartingAt(reading, oldStart);
-    if (opened >= 0 && endsIn <= opened && boundaryAt(reading, opened) < 0) return opened;
+    if (opened >= 0 && endsIn <= opened) edits(opened);
   }
-  if (endsIn >= 0 && boundaryAt(reading, endsIn) < 0 && tokens.some((token) => "block" in token)) {
+  if (endsIn >= 0 && tokens.some((token) => "block" in token)) {
     const from = holder >= 0 ? holder : (tokenFrom(reading, oldStart)?.block ?? endsIn);
-    if (endsIn > from) return endsIn;
+    if (endsIn > from) edits(endsIn);
   }
-  const atStart = holder >= 0 && oldStart === reading.starts[holder]! + 1;
-  return needsOwnBoundaryFirst(reading, holder, atStart, tokens) ? holder : -1;
+  return [...lines];
 }
 
 function writeRange(
@@ -391,11 +381,9 @@ function writeRange(
   const atStart = holder >= 0 && oldStart === reading.starts[holder]! + 1;
   const hasText = holder >= 0 && reading.blocks[holder]!.node.content.size > 0;
 
-  const needy = lineThatNeedsItsBoundary(reading, oldStart, oldEnd, tokens);
-  if (needy >= 0) {
-    giveBoundary(writing, reading, needy);
-    reading = reader.reading();
-  }
+  for (const line of linesARangeEdits(reading, oldStart, oldEnd, tokens))
+    giveBoundary(writing, reader.reading(), line);
+  reading = reader.reading();
 
   const first = tokenFrom(reading, oldStart);
   const last = tokenBefore(reading, oldEnd);
@@ -635,88 +623,104 @@ type Formatting = { index: number; length: number; key: string; change: Attribut
 
 function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseMirrorNode): void {
   const { sequence, reader } = writing;
-  const reading = reader.reading();
-  const ranges: Formatting[] = [];
-  const starts: { at: number; block: ProseMirrorNode }[] = [];
-  let held: Formatting | null = null;
-  const takesNoMarks = (index: number) => {
-    if (held?.open === index) held.open = index + 1;
-  };
-  const letters = (index: number, length: number, change: Attributes) => {
-    const key = JSON.stringify(change);
-    if (held?.key === key && held.open === index) {
-      held.length = index + length - held.index;
-      held.open = index + length;
-      return;
-    }
-    held = { index, length, key, change, open: index + length };
-    ranges.push(held);
+  const planOn = (reading: BodyReading) => {
+    const ranges: Formatting[] = [];
+    const elements: (() => void)[] = [];
+    const edited = new Set<number>();
+    let held: Formatting | null = null;
+    const takesNoMarks = (index: number) => {
+      if (held?.open === index) held.open = index + 1;
+    };
+    const letters = (index: number, length: number, change: Attributes) => {
+      const key = JSON.stringify(change);
+      if (held?.key === key && held.open === index) {
+        held.length = index + length - held.index;
+        held.open = index + length;
+        return;
+      }
+      held = { index, length, key, change, open: index + length };
+      ranges.push(held);
+    };
+
+    changedBlocks(was.content, now.content, 0, (before, block, pos) => {
+      const at = blockStartingAt(reading, pos);
+      if (at < 0) return;
+      const boundary = boundaryAt(reading, at);
+      if (boundary >= 0) takesNoMarks(boundary);
+      if (!before.sameMarkup(block)) {
+        edited.add(at);
+        const element = boundaryElement(reading, at);
+        const stored = reading.blocks[at]!.node;
+        if (element)
+          elements.push(() => {
+            reader.touch(boundary, boundary);
+            setBoundary(element, stored, block, null);
+          });
+      }
+      if (!block.isTextblock || before.childCount === 0 || block.childCount === 0) return;
+      let one = 0;
+      let other = 0;
+      let usedOne = 0;
+      let usedOther = 0;
+      for (let offset = 0; one < before.childCount && other < block.childCount;) {
+        const left = before.child(one);
+        const right = block.child(other);
+        const length = Math.min(left.nodeSize - usedOne, right.nodeSize - usedOther);
+        if (!right.isText) {
+          const token = tokenIn(reading, at, offset);
+          takesNoMarks(token.index);
+          const element = token.piece?.element;
+          const differs = ([key, value]: [string, unknown]) => !sameValue(left.attrs[key], value);
+          if (element && left.type === right.type && Object.entries(right.attrs).some(differs)) {
+            edited.add(at);
+            elements.push(() => {
+              reader.touch(token.index, token.index);
+              setItem(element, right);
+            });
+          }
+        } else if (left.isText && !Mark.sameSet(left.marks, right.marks)) {
+          const change = markChange(left.marks, right.marks);
+          edited.add(at);
+          for (let done = 0; done < length;) {
+            const token = tokenIn(reading, at, offset + done);
+            const piece = token.piece!;
+            const run = Math.min(
+              length - done,
+              reading.bases[at]! +
+                piece.index +
+                ("text" in piece ? piece.text.length : 1) -
+                token.index,
+            );
+            letters(token.index, run, change);
+            done += run;
+          }
+        }
+        offset += length;
+        usedOne += length;
+        usedOther += length;
+        if (usedOne === left.nodeSize) {
+          one += 1;
+          usedOne = 0;
+        }
+        if (usedOther === right.nodeSize) {
+          other += 1;
+          usedOther = 0;
+        }
+      }
+    });
+    return { ranges, elements, edited };
   };
 
-  changedBlocks(was.content, now.content, 0, (before, block, pos) => {
-    const at = blockStartingAt(reading, pos);
-    if (at < 0) return;
-    const boundary = boundaryAt(reading, at);
-    if (boundary >= 0) takesNoMarks(boundary);
-    if (!before.sameMarkup(block)) {
-      if (boundary < 0) starts.push({ at, block });
-      else {
-        reader.touch(boundary, boundary);
-        setBoundary(boundaryElement(reading, at)!, reading.blocks[at]!.node, block, null);
-      }
-    }
-    if (!block.isTextblock || before.childCount === 0 || block.childCount === 0) return;
-    let one = 0;
-    let other = 0;
-    let usedOne = 0;
-    let usedOther = 0;
-    for (let offset = 0; one < before.childCount && other < block.childCount;) {
-      const left = before.child(one);
-      const right = block.child(other);
-      const length = Math.min(left.nodeSize - usedOne, right.nodeSize - usedOther);
-      if (!right.isText) {
-        const token = tokenIn(reading, at, offset);
-        takesNoMarks(token.index);
-        const element = token.piece?.element;
-        const differs = ([key, value]: [string, unknown]) => !sameValue(left.attrs[key], value);
-        if (element && left.type === right.type && Object.entries(right.attrs).some(differs)) {
-          reader.touch(token.index, token.index);
-          setItem(element, right);
-        }
-      } else if (left.isText && !Mark.sameSet(left.marks, right.marks)) {
-        const change = markChange(left.marks, right.marks);
-        for (let done = 0; done < length;) {
-          const token = tokenIn(reading, at, offset + done);
-          const piece = token.piece!;
-          const run = Math.min(
-            length - done,
-            reading.bases[at]! +
-              piece.index +
-              ("text" in piece ? piece.text.length : 1) -
-              token.index,
-          );
-          letters(token.index, run, change);
-          done += run;
-        }
-      }
-      offset += length;
-      usedOne += length;
-      usedOther += length;
-      if (usedOne === left.nodeSize) {
-        one += 1;
-        usedOne = 0;
-      }
-      if (usedOther === right.nodeSize) {
-        other += 1;
-        usedOther = 0;
-      }
-    }
-  });
+  let plan = planOn(reader.reading());
+  const bare = [...plan.edited].filter((at) => boundaryAt(reader.reading(), at) < 0);
+  for (const at of bare) giveBoundary(writing, reader.reading(), at);
+  if (bare.length > 0) plan = planOn(reader.reading());
 
-  if (ranges.length > 0) {
+  for (const set of plan.elements) set();
+  if (plan.ranges.length > 0) {
     const changes: Change[] = [];
     let at = 0;
-    for (const range of ranges) {
+    for (const range of plan.ranges) {
       reader.touch(range.index, range.index + range.length);
       changes.push(...retain(range.index - at), {
         retain: range.length,
@@ -725,14 +729,6 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
       at = range.index + range.length;
     }
     apply(sequence, changes);
-  }
-  for (const { at, block } of starts.reverse()) {
-    giveBoundary(writing, reader.reading(), at);
-    const given = reader.reading();
-    const boundary = boundaryAt(given, at);
-    if (boundary < 0) continue;
-    reader.touch(boundary, boundary);
-    setBoundary(boundaryElement(given, at)!, given.blocks[at]!.node, block, null);
   }
 }
 
@@ -752,8 +748,9 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  *
  * A block with no boundary of its own can come or go when its neighbours change: the paragraph
  * for what stands before the first boundary, the one the reader adds in front of a list item's
- * content, and the one for what a block cannot hold. A step that needs such a block to have a
- * boundary gives it a paragraph boundary first, and then meets an ordinary line. After each step
+ * content, and the one for what a block cannot hold. A step that edits such a block, with a
+ * letter, an inline item, a mark or a kind, gives it a paragraph boundary first, and so does one
+ * that needs it to have one; the step then meets an ordinary line. After each step
  * the sequence is read again, and each block start the editor has and the reading lacks is
  * written as a boundary, in front of the boundary of the text that follows it. No letter and no
  * inline item is written to make the two agree.
@@ -795,11 +792,10 @@ export function writeTransaction(writing: BodyWriting, transaction: Transaction)
 }
 
 /**
- * The blocks with no boundary of their own that some editor transactions can reach: each block
- * whose start stands in a range a step replaces or at its end, and the block a range starts in
- * unless the first step starts past that block's first position. A first step that changes what
- * one block holds and starts no block reaches that block alone, and only from its first
- * position: what stands past it decides no block's start.
+ * The blocks with no boundary of their own that some editor transactions can reach: the block a
+ * step's range starts in, each block whose start stands in the range or at its end, and each
+ * block a mark step covers. A first step that changes what one block holds and starts no block
+ * reaches that block alone.
  */
 function linesNear(reading: BodyReading, transactions: readonly Transaction[]): Set<number> {
   const near = new Set<number>();
@@ -812,8 +808,8 @@ function linesNear(reading: BodyReading, transactions: readonly Transaction[]): 
     transaction.steps.forEach((step, at) => {
       const map = step.getMap();
       const marks = step instanceof AddMarkStep || step instanceof RemoveMarkStep;
-      let from = step instanceof AttrStep ? step.pos : Infinity;
-      let to = step instanceof AttrStep ? step.pos : -1;
+      let from = marks ? step.from : step instanceof AttrStep ? step.pos : Infinity;
+      let to = marks ? step.to : step instanceof AttrStep ? step.pos : -1;
       let newFrom = Infinity;
       let newTo = -1;
       if (!marks)
@@ -834,8 +830,7 @@ function linesNear(reading: BodyReading, transactions: readonly Transaction[]): 
       const next = countBelow(reading.starts, from);
       const holder = next - 1;
       const startsInIt = first && holder >= 0 && blockHolding(reading, from) === holder;
-      const pastItsStart = startsInIt && from > reading.starts[holder]! + 1;
-      if (!pastItsStart) reach(holder);
+      reach(holder);
       const after = transaction.docs[at + 1] ?? transaction.doc;
       const staysInIt =
         startsInIt &&
@@ -855,10 +850,9 @@ function itemAt(sequence: Y.Text, index: number): string | null {
 
 /**
  * The blocks with no boundary of their own that writing some editor transactions would give one,
- * by their index in what the sequence reads as now: each such block the transactions write into
- * in a way that needs it to have one, and each whose reading they alter, as the paragraph after a
- * block they delete, end or change the kind of. The transactions are the ones of one dispatch,
- * and the first starts from that reading.
+ * by their index in what the sequence reads as now: each such block the transactions edit, and
+ * each whose reading they alter, as the paragraph after a block they delete, end or change the
+ * kind of. The transactions are the ones of one dispatch, and the first starts from that reading.
  *
  * Nothing is written. A dispatch that reaches such a block is written to a copy of the note's
  * document, which costs a read of the whole note, and what the writer does there is the answer:

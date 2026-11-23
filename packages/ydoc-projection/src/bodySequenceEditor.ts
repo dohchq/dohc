@@ -51,9 +51,9 @@ export type BodySequenceOptions = {
    * before it returns, inside a Yjs transaction of its own with no origin if it likes, and
    * returns whether it ran it. When it did not, the editor shows the note as it stands.
    *
-   * One dispatch of the editor asks for one change. It asks for two, one after the other, when a
-   * line that had no boundary of its own needs one: the first gives the line its boundary and
-   * undo does not record it, the second is the dispatch.
+   * One dispatch of the editor asks for one change. It asks for two, one after the other, when
+   * it edits a line that has no boundary of its own, or needs such a line to have one: the first
+   * gives the line its boundary and undo does not record it, the second is the dispatch.
    *
    * The host opens no Yjs transaction around the dispatch itself. A dispatch that changes the
    * document is refused, so the editor stays as it is and nothing is written:
@@ -304,9 +304,9 @@ function holdSelection(
  * shown again where it differs. One dispatch of the editor, with what other plugins append to
  * it, is one Yjs transaction and one update. The history follows it unless every editor
  * transaction in it is kept out (`addToHistory` false), so undoing a typed letter also takes back
- * what a plugin appended to that dispatch. When the dispatch needs a line that had no boundary of
- * its own to have one, that boundary is written first, in a transaction and an update of its own
- * that the history does not follow.
+ * what a plugin appended to that dispatch. When the dispatch edits a line that has no boundary of
+ * its own, or needs such a line to have one, that boundary is written first, in a transaction and
+ * an update of its own that the history does not follow.
  *
  * A change of the sequence from elsewhere, and an undo or redo, is shown as one transaction that
  * replaces what differs, keeps the nodes of the blocks it does not touch, and keeps the selection
