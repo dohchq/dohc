@@ -46,9 +46,10 @@ y-prosemirror and the per-edit check, and
 `src/types/text.rs` adds `Text::try_visit_items` and `TextItem`. It visits
 every live item of a text in stored order and delivers a formatting item as
 it is stored, where `try_visit_diff` folds every formatting key into a map of
-its own. The engine reads a note body sequence with it, so each stored item
-spends from the projection budget and a formatting key that is no mark name
-keeps no state. `src/branch.rs` adds `Branch::holds_unkeyed_item` and
+its own. The engine reads a note body sequence with it: it walks every stored
+item once, spends its node budget only on what it builds from them, and keeps
+no state for a formatting key that is no mark name. `src/branch.rs` adds
+`Branch::holds_unkeyed_item` and
 `Branch::holds_keyed_item`, which say whether a shared type holds an item of
 that kind, live or deleted. An update does not carry a root's kind, so the
 engine checks with them that a format-2 note keeps nothing under `body`, no

@@ -24,6 +24,11 @@ type Path = Vec<(String, &'static str)>;
 type Marks = Vec<MarkdownMark>;
 type MarkAttributes = Arc<HashMap<String, Any>>;
 
+#[cfg(test)]
+thread_local! {
+    static MARK_VALUES_COMPARED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const LEAVES: [&str; 6] = [
     PARAGRAPH,
     "heading",
@@ -289,6 +294,7 @@ struct ReadMarks {
     marks: Marks,
     nodes: usize,
     bytes: usize,
+    generation: u64,
 }
 
 #[derive(Default)]
@@ -296,6 +302,7 @@ struct Formatting {
     code: Option<MarkAttributes>,
     others: [Option<MarkAttributes>; MARKS.len()],
     read: Option<ReadMarks>,
+    generation: u64,
 }
 
 impl Formatting {
@@ -307,14 +314,12 @@ impl Formatting {
                 None => return,
             },
         };
-        let stored = match value {
+        *mark = match value {
             Any::Map(attributes) => Some(attributes.clone()),
             _ => None,
         };
-        if *mark != stored {
-            *mark = stored;
-            self.read = None;
-        }
+        self.read = None;
+        self.generation += 1;
     }
 }
 
@@ -354,8 +359,8 @@ impl Budget<'_> {
         match (holds, stored) {
             (_, Any::Null) => Ok(holds.null().then_some(Value::Null)),
             (Holds::Text | Holds::TextOrNull, Any::String(text)) => self.string(text),
-            (Holds::Line | Holds::LineOrNull, Any::String(text)) if is_one_line(text) => {
-                self.string(text)
+            (Holds::Line | Holds::LineOrNull, Any::String(text)) => {
+                Ok(self.string(text)?.filter(|_| is_one_line(text)))
             }
             (Holds::Fold, Any::String(text)) if is_fold(text) => self.string(text),
             (Holds::Side, Any::String(text)) if is_side(text) => self.string(text),
@@ -430,6 +435,7 @@ impl Budget<'_> {
             marks,
             nodes: MAX_PROJECTION_NODES - nodes,
             bytes: *self.bytes - bytes,
+            generation: stored.generation,
         })
     }
 
@@ -441,11 +447,33 @@ impl Budget<'_> {
         Ok(read.marks.clone())
     }
 
+    fn joins(
+        &mut self,
+        run: &TextRun,
+        read: Option<&ReadMarks>,
+        newest_run: Option<u64>,
+    ) -> ProjectionResult<bool> {
+        let Some(read) = read else {
+            return Ok(run.marks.is_empty());
+        };
+        if newest_run == Some(read.generation) {
+            return Ok(true);
+        }
+        if run.marks.len() != read.marks.len() {
+            return Ok(false);
+        }
+        self.bytes(read.bytes)?;
+        #[cfg(test)]
+        MARK_VALUES_COMPARED.with(|count| count.set(count.get() + 1));
+        Ok(run.marks == read.marks)
+    }
+
     fn letters(
         &mut self,
         place: &mut Vec<MarkdownNode>,
         text: &str,
         read: Option<&ReadMarks>,
+        newest_run: &mut Option<u64>,
         depth: usize,
     ) -> ProjectionResult<()> {
         if !matches!(place.last(), Some(MarkdownNode::Text(_))) {
@@ -454,13 +482,11 @@ impl Budget<'_> {
         let Some(MarkdownNode::Text(runs)) = place.last_mut() else {
             return Ok(());
         };
-        let marks: &[MarkdownMark] = match read {
-            Some(read) => &read.marks,
-            None => &[],
-        };
+        let generation = read.map(|read| read.generation);
         if let Some(run) = runs.last_mut() {
-            if run.marks.as_slice() == marks {
+            if self.joins(run, read, *newest_run)? {
                 run.text.push_str(text);
+                *newest_run = generation;
                 return Ok(());
             }
         }
@@ -473,6 +499,7 @@ impl Budget<'_> {
             text: text.to_owned(),
             marks,
         });
+        *newest_run = generation;
         Ok(())
     }
 }
@@ -540,6 +567,7 @@ struct Reader<'a> {
     top: Vec<MarkdownNode>,
     open: Vec<Open>,
     leaf: Option<Leaf>,
+    newest_run: Option<u64>,
 }
 
 impl Reader<'_> {
@@ -572,7 +600,8 @@ impl Reader<'_> {
         let read = self.formatting.read.as_ref().filter(|_| !unmarked);
         let holds = Leaf::holds_letters;
         let place = inline_place(&mut self.leaf, &mut self.budget, holds, depth)?;
-        self.budget.letters(place, text, read, depth)
+        let newest_run = &mut self.newest_run;
+        self.budget.letters(place, text, read, newest_run, depth)
     }
 
     fn element(&mut self, stored: &yrs::XmlElementRef) -> ProjectionResult<()> {
@@ -720,6 +749,10 @@ pub(super) fn roots_hold_only_their_own_items(
         && !containers.holds_unkeyed_item()
 }
 
+pub(super) fn holds_the_body(sequence: &impl AsRef<Branch>, body: &impl AsRef<Branch>) -> bool {
+    sequence.as_ref().holds_unkeyed_item() || !body.as_ref().holds_unkeyed_item()
+}
+
 pub(super) fn blocks<T: ReadTxn>(
     txn: &T,
     sequence: &yrs::TextRef,
@@ -737,6 +770,7 @@ pub(super) fn blocks<T: ReadTxn>(
         top: Vec::new(),
         open: Vec::new(),
         leaf: None,
+        newest_run: None,
     };
     sequence.try_visit_items(txn, |stored| reader.item(stored))?;
     reader.finish()
@@ -1268,6 +1302,32 @@ mod tests {
         assert!(note.project_richdoc_with_node_budget(nodes).is_ok());
     }
 
+    fn stops_one_byte_short_of(note: &Ydoc, bytes: usize) {
+        assert_eq!(spent(note).1, bytes);
+        let with_bytes_left = |left: usize| {
+            let mut nodes = MAX_PROJECTION_NODES;
+            let mut used = MAX_PROJECTION_BYTES - left;
+            read(note, &mut nodes, &mut used)
+        };
+        assert!(too_large(with_bytes_left(bytes - 1)));
+        assert!(with_bytes_left(bytes).is_ok());
+    }
+
+    fn mark_values_compared(note: &Ydoc) -> usize {
+        MARK_VALUES_COMPARED.with(|count| count.set(0));
+        spent(note);
+        MARK_VALUES_COMPARED.with(|count| count.get())
+    }
+
+    fn linked(href: &str, after_the_link: &[Stored]) -> Ydoc {
+        let link = format!("{{\"href\":\"{href}\"}}");
+        let mut items = vec![Stored::Format("link".to_owned(), link)];
+        items.extend_from_slice(after_the_link);
+        let note = empty_note();
+        note.apply(&sequence_of(&items)).expect("the items apply");
+        note
+    }
+
     #[test]
     fn spends_nothing_for_a_stored_item_it_skips() {
         let note = note_of(|txn, sequence| {
@@ -1389,29 +1449,131 @@ mod tests {
     fn charges_a_mark_again_for_every_text_run_that_holds_a_copy_of_it() {
         let href = "h".repeat(1_000);
         let cut_into = |runs: usize| {
-            let link = format!("{{\"href\":\"{href}\"}}");
-            let mut items = vec![Stored::Format("link".to_owned(), link)];
+            let mut letters = Vec::new();
             for run in 0..runs {
                 if run > 0 {
-                    items.push(Stored::Element("hardBreak"));
+                    letters.push(Stored::Element("hardBreak"));
                 }
-                items.push(Stored::Letters("x"));
+                letters.push(Stored::Letters("x"));
             }
-            let note = empty_note();
-            note.apply(&sequence_of(&items)).expect("the items apply");
-            note
+            linked(&href, &letters)
         };
         let (one_run, many_runs) = (cut_into(1), cut_into(21));
         let (_, bytes) = spent(&many_runs);
         assert!(bytes - spent(&one_run).1 >= 20 * href.len());
+        stops_one_byte_short_of(&many_runs, bytes);
+    }
 
-        let with_bytes_left = |left: usize| {
-            let mut nodes = MAX_PROJECTION_NODES;
-            let mut bytes = MAX_PROJECTION_BYTES - left;
-            read(&many_runs, &mut nodes, &mut bytes)
-        };
-        assert!(too_large(with_bytes_left(bytes - 1)));
-        assert!(with_bytes_left(bytes).is_ok());
+    #[test]
+    fn joins_letters_under_unchanged_formatting_without_comparing_their_marks() {
+        let href = "h".repeat(1_000);
+        let mut letters = Vec::new();
+        for _ in 0..1_001 {
+            letters.push(Stored::Letters("x"));
+            letters.push(Stored::Element("nonsense"));
+        }
+        let note = linked(&href, &letters);
+        assert_eq!(mark_values_compared(&note), 0);
+
+        let read = document(&note).expect("the note reads");
+        let runs = read["content"][0]["content"].as_array().expect("its runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["text"], "x".repeat(1_001));
+        assert_eq!(runs[0]["marks"][0]["attrs"]["href"], href);
+
+        let (paragraph, run, link, its_href) = (1, 1, 1, 1);
+        stops_one_node_short_of(&note, paragraph + run + link + its_href);
+        let (letters, read_once, copied_once) = (1_001, href.len(), href.len());
+        stops_one_byte_short_of(&note, letters + read_once + copied_once);
+    }
+
+    #[test]
+    fn charges_the_marks_each_time_it_reads_and_compares_them_after_a_formatting_item() {
+        let href = "h".repeat(1_000);
+        let mut letters = Vec::new();
+        for _ in 0..10 {
+            letters.push(Stored::Format("italic".to_owned(), "{}".to_owned()));
+            letters.push(Stored::Format("italic".to_owned(), "null".to_owned()));
+            letters.push(Stored::Letters("x"));
+        }
+        let note = linked(&href, &letters);
+        assert_eq!(mark_values_compared(&note), 9);
+
+        let read = document(&note).expect("the note reads");
+        let runs = read["content"][0]["content"].as_array().expect("its runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["text"], "x".repeat(10));
+
+        let (paragraph, run, link, its_href) = (1, 1, 1, 1);
+        stops_one_node_short_of(&note, paragraph + run + link + its_href);
+        let (letters, reads, copies, compares) = (10, 10, 1, 9);
+        stops_one_byte_short_of(&note, letters + (reads + copies + compares) * href.len());
+    }
+
+    #[test]
+    fn charges_a_container_attribute_each_time_the_container_opens_kept_or_repaired() {
+        let a_line = "x".repeat(1_000);
+        let two_lines = format!("{a_line}\u{2028}");
+        for title in [a_line.as_str(), two_lines.as_str()] {
+            let note = note_of(|txn, sequence| {
+                for _ in 0..20 {
+                    insert_boundary(txn, sequence, PARAGRAPH, &["c"]);
+                    insert_boundary(txn, sequence, PARAGRAPH, &[]);
+                }
+            });
+            let containers = note.doc.get_or_insert_map(ROOT_CONTAINERS);
+            {
+                let mut txn = note.doc.transact_mut();
+                containers.insert(&mut txn, "c", Any::from("callout"));
+                containers.insert(&mut txn, "c.title", Any::from(title));
+            }
+            let read = document(&note).expect("the note reads");
+            let kept = if title == a_line { title } else { "" };
+            assert_eq!(read["content"][38]["attrs"]["title"], kept);
+
+            let (entry, callout, its_title, paragraph) = (1, 1, 1, 1);
+            let inside = entry + callout + its_title + paragraph;
+            stops_one_node_short_of(&note, 20 * (inside + paragraph));
+            let inside = "c".len() + "callout".len() + title.len() + PARAGRAPH.len();
+            stops_one_byte_short_of(&note, 20 * (inside + PARAGRAPH.len()));
+        }
+    }
+
+    #[test]
+    fn charges_the_bytes_of_an_attribute_it_repairs() {
+        let note = note_of(|txn, sequence| {
+            let code = sequence.insert_embed(txn, 0, XmlElementPrelim::empty(BOUNDARY));
+            code.insert_attribute(txn, "type", Any::from("codeBlock"));
+            code.insert_attribute(txn, "language", Any::from("two\nlines"));
+        });
+        let read = document(&note).expect("the note reads");
+        assert_eq!(read["content"][0]["attrs"], json!({ "language": null }));
+
+        let (code_block, its_language) = (1, 1);
+        stops_one_node_short_of(&note, code_block + its_language);
+        stops_one_byte_short_of(&note, "codeBlock".len() + "two\nlines".len());
+    }
+
+    #[test]
+    fn reads_body_when_a_copy_marked_2_holds_its_text_only_there() {
+        let copy = empty_note();
+        copy.richdoc_append_paragraph("Written before the marker");
+        assert!(copy.body_sequence_roots().is_some());
+        assert_eq!(live_items(&copy), 0);
+        let written = copy.project(ContentKind::Richdoc).expect("it writes");
+        assert_eq!(written.content, "Written before the marker\n");
+        assert!(admitted(&copy).is_err());
+    }
+
+    #[test]
+    fn reads_the_sequence_when_it_holds_an_item_whatever_body_holds() {
+        let note = &notes()[0];
+        let markdown = note.markdown.as_deref().expect("it is recorded");
+        let doc = stored(note);
+        doc.richdoc_append_paragraph("stray");
+        let written = doc.project(ContentKind::Richdoc).expect("it writes");
+        assert_eq!(written.content, markdown);
+        assert!(admitted(&doc).is_err());
     }
 
     #[test]

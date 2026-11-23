@@ -1298,8 +1298,9 @@ impl Ydoc {
         let frontmatter = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        let sequence = self.body_sequence_roots();
+        let roots = self.body_sequence_roots();
         let txn = self.doc.transact();
+        let sequence = roots.filter(|roots| body_sequence::holds_the_body(&roots.0, &body));
         let uses_crlf = matches!(
             meta.get(&txn, MARKDOWN_CRLF_META_KEY),
             Some(Out::Any(Any::Bool(true)))
