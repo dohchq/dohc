@@ -1502,7 +1502,7 @@ it("waits to stop a retained activation that no running host can prepare", async
 it("answers a note whose start failed with why, keeps it off on the owner's open, and starts it again on Resume", async () => {
   for (const [cause, reason] of [
     ["refused", "session-host-refused"],
-    ["failing", "live-start-failing"],
+    ["failing", "session-host-refused"],
   ] as const) {
     const f = await fixture(),
       enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });

@@ -405,7 +405,7 @@ export type ServiceHostDocumentState =
 const START_FAILED: Readonly<Record<LiveNoteStartFailure, string>> = {
   refused: "session-host-refused",
   "no-lineage": "live-document-without-lineage",
-  failing: "live-start-failing",
+  failing: "session-host-refused",
 };
 export function serviceHostReadiness(options: {
   storage: SyncRelayStorage;

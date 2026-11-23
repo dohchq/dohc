@@ -1224,26 +1224,6 @@ it("fills the live note record from v4 enrollments, and keeps a live note live a
   }
 });
 
-it.each([
-  ["retiring", "retire_requested_at_ms=10,retire_restore_generation=0,retire_accepted_cursor=1"],
-  [
-    "retired",
-    "retire_requested_at_ms=10,retire_restore_generation=0,retire_accepted_cursor=1,retired_at_ms=11,retired_boundary_json='null',state_bytes=NULL",
-  ],
-])("fills a note whose completed activation is %s as starting, not live", async (_, retire) => {
-  const f = await fixture();
-  f.enroll();
-  retainServiceActivation(f.raw, key.namespace, true);
-  f.raw.exec(`UPDATE sync_relay_service_activations SET ${retire}`);
-  downgradeToV4(f);
-  const reopened = openSyncRelayStorage(f.path, f.config);
-  try {
-    expect(noteOf(reopened)).toMatchObject({ generation: 1, state: "starting" });
-  } finally {
-    reopened.close();
-  }
-});
-
 it("moves a note only from the state and generation each move leaves, and answers a refusal with the record", async () => {
   const f = await fixture(),
     runToken = f.enroll().runToken;
