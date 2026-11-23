@@ -1002,10 +1002,11 @@ const RECORD_ATTRIBUTES = [
 ];
 
 /**
- * What a note's sequence holds, and the most nodes the engine spends to read it: one for each live
- * item, and for a boundary its path entries, the containers it opens with their records and first
- * paragraphs, and its own attributes; for an inline item its attributes; for a run of letters its
- * marks, read once and copied once.
+ * What a note's sequence holds, and the most nodes the engine spends on what it builds from it:
+ * for a boundary its block and a paragraph after it, its path entries, the containers it opens with
+ * their records and first paragraphs, and its own attributes; for an inline item the item and its
+ * attributes; for a run of letters a text run and its copy of the marks on it. A formatting item
+ * costs nothing by itself.
  */
 function storedItems(doc: Y.Doc) {
   const counts = { letters: 0, formatting: 0, boundaries: 0, inlineItems: 0, other: 0, deleted: 0 };
@@ -1026,11 +1027,11 @@ function storedItems(doc: Y.Doc) {
       counts.deleted++;
       continue;
     }
-    nodesAtMost++;
     const content = item.content;
     if (content instanceof Y.ContentString) {
       counts.letters++;
-      for (const cost of marks.values()) nodesAtMost += 2 * cost;
+      nodesAtMost++;
+      for (const cost of marks.values()) nodesAtMost += cost;
     } else if (content instanceof Y.ContentFormat) {
       counts.formatting++;
       const value = content.value as unknown;
@@ -1050,7 +1051,7 @@ function storedItems(doc: Y.Doc) {
         const stood = storedValue(content.type, "path");
         const path = Array.isArray(stood) ? (stood as unknown[]).slice(0, 64) : [];
         nodesAtMost +=
-          1 + path.length + stored.filter((key) => OWN_ATTRIBUTES.includes(key)).length;
+          2 + path.length + stored.filter((key) => OWN_ATTRIBUTES.includes(key)).length;
         for (const id of path) nodesAtMost += container(id);
       } else {
         counts.inlineItems++;
@@ -1096,14 +1097,14 @@ it.runIf(MEASURED !== undefined)(
       [10_000, 100_000],
     ] as const) {
       const started = Date.now();
-      const note = editedAtLength(lines, edits).first;
-      const bytes = Y.encodeStateAsUpdate(note).length;
-      const measured = { lines, edits, ...storedItems(note), bytes, ms: Date.now() - started };
-      appendFileSync(
-        MEASURED!,
-        `${JSON.stringify(measured)}
-`,
-      );
+      const update = Y.encodeStateAsUpdate(editedAtLength(lines, edits).first);
+      const note = new Y.Doc({ gc: false });
+      note.getText(BODY_SEQUENCE_FIELD);
+      Y.applyUpdate(note, update);
+      const stored = storedItems(note);
+      const measured = { lines, edits, ...stored, bytes: update.length, ms: Date.now() - started };
+      appendFileSync(MEASURED!, `${JSON.stringify(measured)}\n`);
+      writeFileSync(`${MEASURED!}.${String(lines)}-${String(edits)}.bin`, update);
     }
   },
 );

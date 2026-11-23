@@ -5423,6 +5423,8 @@ fn consume_projection_value_node(
 ) -> ProjectionResult<()> {
     if depth > MAX_PROJECTION_DEPTH || *remaining_nodes == 0 {
         return Err(CollabError::ProjectionTooComplex {
+            depth,
+            nodes_left: *remaining_nodes,
             max_depth: MAX_PROJECTION_DEPTH,
             max_nodes: MAX_PROJECTION_NODES,
         });
@@ -6167,13 +6169,7 @@ fn markdown_node<T: ReadTxn>(
     remaining_nodes: &mut usize,
     source_text_bytes: &mut usize,
 ) -> ProjectionResult<MarkdownNode> {
-    if depth > MAX_PROJECTION_DEPTH || *remaining_nodes == 0 {
-        return Err(CollabError::ProjectionTooComplex {
-            max_depth: MAX_PROJECTION_DEPTH,
-            max_nodes: MAX_PROJECTION_NODES,
-        });
-    }
-    *remaining_nodes -= 1;
+    consume_projection_value_node(depth, remaining_nodes)?;
     match node {
         XmlOut::Text(text) => {
             let mut runs = Vec::new();
@@ -9960,11 +9956,14 @@ mod projection_tests {
         }
         let doc = remote_doc_with_body([child]);
 
+        const ONE_TOO_DEEP: usize = MAX_PROJECTION_DEPTH + 1;
         assert!(matches!(
             doc.project(ContentKind::Richdoc),
             Err(CollabError::ProjectionTooComplex {
+                depth: ONE_TOO_DEEP,
                 max_depth: MAX_PROJECTION_DEPTH,
-                max_nodes: MAX_PROJECTION_NODES
+                max_nodes: MAX_PROJECTION_NODES,
+                ..
             })
         ));
     }

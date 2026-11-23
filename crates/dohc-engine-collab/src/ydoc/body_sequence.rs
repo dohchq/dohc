@@ -307,11 +307,14 @@ impl Formatting {
                 None => return,
             },
         };
-        *mark = match value {
+        let stored = match value {
             Any::Map(attributes) => Some(attributes.clone()),
             _ => None,
         };
-        self.read = None;
+        if *mark != stored {
+            *mark = stored;
+            self.read = None;
+        }
     }
 }
 
@@ -417,11 +420,15 @@ impl Budget<'_> {
     }
 
     fn read_marks(&mut self, stored: &Formatting, depth: usize) -> ProjectionResult<ReadMarks> {
-        let (nodes, bytes) = (*self.nodes, *self.bytes);
-        let marks = self.marks(stored, depth)?;
+        let (mut nodes, bytes) = (MAX_PROJECTION_NODES, *self.bytes);
+        let mut reading = Budget {
+            nodes: &mut nodes,
+            bytes: self.bytes,
+        };
+        let marks = reading.marks(stored, depth)?;
         Ok(ReadMarks {
             marks,
-            nodes: nodes - *self.nodes,
+            nodes: MAX_PROJECTION_NODES - nodes,
             bytes: *self.bytes - bytes,
         })
     }
@@ -457,6 +464,7 @@ impl Budget<'_> {
                 return Ok(());
             }
         }
+        self.node(depth)?;
         let marks = match read {
             Some(read) => self.copy_of(read, depth)?,
             None => Marks::new(),
@@ -536,7 +544,6 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn item(&mut self, stored: TextItem<'_>) -> ProjectionResult<()> {
-        self.budget.node(self.open.len())?;
         match stored {
             TextItem::Letters(text) => self.letters(text),
             TextItem::Format(key, value) => {
@@ -576,6 +583,7 @@ impl Reader<'_> {
             return Ok(());
         };
         let depth = self.open.len() + 1;
+        self.budget.node(depth)?;
         self.budget.bytes(tag.len())?;
         let held = |name: &str| stored_under(stored, name);
         let attrs = self.budget.attributes(tag, depth, held)?;
@@ -618,6 +626,7 @@ impl Reader<'_> {
             });
         }
         let depth = self.open.len();
+        self.budget.node(depth)?;
         self.budget.bytes(tag.len())?;
         let attrs = self.budget.attributes(tag, depth, held)?;
         self.leaf = Some(Leaf::new(tag, attrs));
@@ -838,6 +847,7 @@ mod tests {
         bytes.extend_from_slice(text.as_bytes());
     }
 
+    #[derive(Clone)]
     enum Stored {
         Format(String, String),
         Letters(&'static str),
@@ -964,10 +974,6 @@ mod tests {
 
     fn admitted(doc: &Ydoc) -> Result<(), CollabError> {
         doc.validate_public_baseline(&doc.encode_full_state())
-    }
-
-    fn too_complex<T>(read: Result<T, CollabError>) -> bool {
-        matches!(read, Err(CollabError::ProjectionTooComplex { .. }))
     }
 
     fn too_large<T>(read: Result<T, CollabError>) -> bool {
@@ -1249,37 +1255,134 @@ mod tests {
     #[test]
     fn stops_at_the_node_budget() {
         let doc = stored(&notes()[0]);
-        let spent = nodes_spent(&doc);
-        assert!(too_complex(doc.project_richdoc_with_node_budget(spent - 1)));
-        assert!(doc.project_richdoc_with_node_budget(spent).is_ok());
+        stops_one_node_short_of(&doc, nodes_spent(&doc));
+    }
+
+    fn stops_one_node_short_of(note: &Ydoc, nodes: usize) {
+        assert_eq!(nodes_spent(note), nodes);
+        let stopped = note.project_richdoc_with_node_budget(nodes - 1);
+        let Err(CollabError::ProjectionTooComplex { nodes_left, .. }) = stopped else {
+            panic!("it reads with one node fewer");
+        };
+        assert_eq!(nodes_left, 0);
+        assert!(note.project_richdoc_with_node_budget(nodes).is_ok());
     }
 
     #[test]
-    fn spends_a_node_for_a_stored_item_it_skips() {
+    fn spends_nothing_for_a_stored_item_it_skips() {
         let note = note_of(|txn, sequence| {
             sequence.insert_embed(txn, 0, Any::from("an embedded string"));
             sequence.insert_embed(txn, 1, XmlElementPrelim::empty("nonsense"));
         });
-        assert_eq!(nodes_spent(&note), 3);
+        assert_eq!(live_items(&note), 2);
+        stops_one_node_short_of(&note, 1);
     }
 
     #[test]
-    fn spends_a_node_for_a_formatting_item_under_a_key_that_is_no_mark() {
+    fn reads_many_stored_items_that_make_one_text_run_with_three_nodes() {
+        let mut items = Vec::new();
+        for at in 0..1_000 {
+            items.push(Stored::Format(format!("key{at}"), "true".to_owned()));
+            items.push(Stored::Format("bold".to_owned(), "{}".to_owned()));
+            items.push(Stored::Format("italic".to_owned(), "{}".to_owned()));
+            items.push(Stored::Format("italic".to_owned(), "null".to_owned()));
+            items.push(Stored::Element("nonsense"));
+            items.push(Stored::Letters("x"));
+        }
         let note = empty_note();
-        let items = formatting_items_under_keys_that_are_no_marks(1_000);
-        note.apply(&items).expect("the items apply");
-        assert_eq!(nodes_spent(&note), 1_001);
-        assert!(too_complex(note.project_richdoc_with_node_budget(1_000)));
-        let written = note.project_richdoc_with_node_budget(1_001);
-        assert_eq!(written.expect("it writes"), "");
+        note.apply(&sequence_of(&items)).expect("the items apply");
+        assert_eq!(live_items(&note), 6_000);
+        let (paragraph, run, its_copy_of_bold) = (1, 1, 1);
+        stops_one_node_short_of(&note, paragraph + run + its_copy_of_bold);
+
+        let letters = "x".repeat(1_000);
+        let run = json!({ "type": "text", "text": letters, "marks": [{ "type": "bold" }] });
+        let paragraph = json!({ "type": PARAGRAPH, "content": [run] });
+        let read = document(&note).expect("the note reads");
+        assert_eq!(read, json!({ "type": TOP, "content": [paragraph] }));
     }
 
     #[test]
-    fn refuses_a_note_of_more_formatting_items_than_the_node_budget() {
+    fn reads_a_note_of_more_formatting_items_than_the_node_budget() {
         let note = empty_note();
         let items = formatting_items_under_keys_that_are_no_marks(MAX_PROJECTION_NODES + 1);
         note.apply(&items).expect("the items apply");
-        assert!(too_complex(note.project(ContentKind::Richdoc)));
+        assert_eq!(nodes_spent(&note), 1);
+        let written = note.project(ContentKind::Richdoc).expect("it writes");
+        assert_eq!(written.content, "");
+    }
+
+    #[test]
+    fn spends_nodes_for_each_text_run_that_alternating_marks_make() {
+        let mut items = Vec::new();
+        for _ in 0..100 {
+            items.push(Stored::Format("bold".to_owned(), "{}".to_owned()));
+            items.push(Stored::Letters("x"));
+            items.push(Stored::Format("bold".to_owned(), "null".to_owned()));
+            items.push(Stored::Letters("y"));
+        }
+        let note = empty_note();
+        note.apply(&sequence_of(&items)).expect("the items apply");
+        let (paragraph, bold_runs, plain_runs) = (1, 100, 100);
+        let (a_run, its_copy_of_bold) = (1, 1);
+        let bold = bold_runs * (a_run + its_copy_of_bold);
+        stops_one_node_short_of(&note, paragraph + bold + plain_runs * a_run);
+    }
+
+    #[test]
+    fn spends_a_node_for_each_block_that_boundaries_make() {
+        let note = empty_note();
+        let boundaries = vec![Stored::Element(BOUNDARY); 500];
+        note.apply(&sequence_of(&boundaries)).expect("they apply");
+        stops_one_node_short_of(&note, 500);
+    }
+
+    #[test]
+    fn spends_nodes_for_no_more_than_64_entries_of_a_path() {
+        let ids: Vec<String> = (0..70).map(|depth| format!("q{depth}")).collect();
+        let path: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let note = note_of(|txn, sequence| {
+            insert_boundary(txn, sequence, PARAGRAPH, &path);
+        });
+        let containers = note.doc.get_or_insert_map(ROOT_CONTAINERS);
+        {
+            let mut txn = note.doc.transact_mut();
+            for id in &ids {
+                containers.insert(&mut txn, id.as_str(), Any::from("blockquote"));
+            }
+        }
+        let (entries, quotes, paragraph) = (MAX_PATH_ENTRIES, MAX_PATH_ENTRIES, 1);
+        stops_one_node_short_of(&note, entries + quotes + paragraph);
+    }
+
+    #[test]
+    fn spends_a_node_for_each_paragraph_it_adds_however_many() {
+        let after_rules = note_of(|txn, sequence| {
+            for rule in 0..50 {
+                insert_boundary(txn, sequence, "horizontalRule", &[]);
+                sequence.insert(txn, 2 * rule + 1, "x");
+            }
+        });
+        let (rule, paragraph_after, run) = (1, 1, 1);
+        stops_one_node_short_of(&after_rules, 50 * (rule + paragraph_after + run));
+
+        let items: Vec<String> = (0..50).map(|item| format!("i{item}")).collect();
+        let first_in_items = note_of(|txn, sequence| {
+            for item in &items {
+                insert_boundary(txn, sequence, "heading", &["L", item.as_str()]);
+            }
+        });
+        let containers = first_in_items.doc.get_or_insert_map(ROOT_CONTAINERS);
+        {
+            let mut txn = first_in_items.doc.transact_mut();
+            containers.insert(&mut txn, "L", Any::from("bulletList"));
+            for item in &items {
+                containers.insert(&mut txn, item.as_str(), Any::from("listItem"));
+            }
+        }
+        let (list, entries, item, first_paragraph, heading) = (1, 2, 1, 1, 1);
+        let each = entries + item + first_paragraph + heading;
+        stops_one_node_short_of(&first_in_items, list + 50 * each);
     }
 
     #[test]
@@ -1371,7 +1474,7 @@ mod tests {
         let (live, nodes) = (live_items(&doc), nodes_spent(&doc));
         let (counted, at_most) = (edited.stored.live, edited.stored.nodes_at_most);
         assert!((1_000..=counted).contains(&live), "{live} live items");
-        assert!((live..=at_most).contains(&nodes), "{nodes} for {live}");
+        assert!(nodes <= at_most, "{nodes} for {live}");
     }
 
     #[test]
