@@ -148,4 +148,47 @@ describe("dataset MCP transport", () => {
     });
     expect(send).not.toHaveBeenCalled();
   });
+  it("returns self-remedying errors for wrong actions, unrecognized keys, and broken definitions", async () => {
+    const send = vi.fn(),
+      context: ToolContext = { root: "/workspace", home: "/home", request: send };
+
+    const badAction = await dataset(context, { action: "help" });
+    expect(badAction).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("Valid actions:"),
+    });
+
+    const wrongKey = await dataset(context, {
+      action: "prepare",
+      workspaceId: "workspace",
+      datasetPath: "equipment/dataset.json",
+    });
+    expect(wrongKey).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('Unrecognized key "datasetPath" for action "prepare"'),
+    });
+    expect((wrongKey as { reason: string }).reason).toContain("descriptorPath");
+
+    const folderPath = await dataset(context, {
+      action: "describe",
+      workspaceId: "workspace",
+      datasetPath: "equipment",
+    });
+    expect(folderPath).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("equipment/dataset.json"),
+    });
+
+    const badCreate = await dataset(context, {
+      action: "create",
+      workspaceId: "workspace",
+      definition: { formatVersion: 2 },
+    });
+    expect(badCreate).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("missing required field(s)"),
+    });
+
+    expect(send).not.toHaveBeenCalled();
+  });
 });

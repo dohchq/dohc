@@ -51,7 +51,11 @@ function describe(match: CallMatch): string {
   return `${match.tool}${args}${outcome}`;
 }
 
-export function grade(expect: Expectation, run: RunRecord): Check[] {
+export function grade(
+  expect: Expectation,
+  run: RunRecord,
+  extraChecks?: (run: RunRecord) => Check[],
+): Check[] {
   const checks: Check[] = [];
   const called = run.calls.map((call) => call.tool).join(", ") || "no tools";
 
@@ -134,6 +138,8 @@ export function grade(expect: Expectation, run: RunRecord): Check[] {
       });
     }
   }
+
+  if (extraChecks) checks.push(...extraChecks(run));
 
   return checks;
 }

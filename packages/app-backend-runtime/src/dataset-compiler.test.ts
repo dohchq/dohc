@@ -62,4 +62,17 @@ describe("shared dataset compiler", () => {
       compileDatasetOperations("globalThis.operations={};", "data/operations.js", { signal }),
     ).rejects.toThrow();
   });
+  it("includes sanitized syntax diagnostics without leaking host paths", async () => {
+    const bad = "globalThis.operations = { broken( { return 1; } };";
+    await expect(compileDatasetOperations(bad, "data/operations.ts")).rejects.toThrow(
+      /dohc could not build these Collection actions:.*(?:ERROR:|Expected).*Fix the source\. Then approve again\./i,
+    );
+    let caught = "";
+    try {
+      await compileDatasetOperations(bad, "data/operations.ts");
+    } catch (error) {
+      caught = error instanceof Error ? error.message : String(error);
+    }
+    expect(caught).not.toMatch(/[A-Za-z]:\\|\/Users\/|\/home\//);
+  });
 });

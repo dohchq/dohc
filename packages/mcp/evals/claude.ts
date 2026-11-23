@@ -32,6 +32,7 @@ export interface SampleOutcome {
   error?: string;
   usage: SampleUsage;
   harness?: string;
+  refusals?: string[];
 }
 
 interface StreamEvent {
@@ -157,21 +158,47 @@ export function workspacePaths(calls: readonly RecordedCall[], root: string): Re
 }
 
 /** Makes the workspace folder and writes the case's files into it. */
-export async function seedWorkspace(root: string, evalCase: EvalCase): Promise<void> {
-  await mkdir(root);
+export async function seedWorkspace(
+  root: string,
+  evalCase: EvalCase,
+  home?: string,
+): Promise<void> {
+  await mkdir(root, { recursive: true });
   for (const [path, content] of Object.entries(evalCase.files ?? {})) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), content);
   }
+  if (evalCase.workspaceId) {
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await writeFile(
+      join(root, ".dohc", "manifest.json"),
+      JSON.stringify({ workspaceId: evalCase.workspaceId, version: 1 }, null, 2) + "\n",
+    );
+    if (home) {
+      await mkdir(home, { recursive: true });
+      await writeFile(
+        join(home, "dohc-workspaces.json"),
+        JSON.stringify(
+          {
+            workspaces: [{ workspaceId: evalCase.workspaceId, rootPath: root, kind: "local" }],
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+    }
+  }
 }
 
-/** The workspace's files as a case names them. */
+/** The workspace's files as a case names them. Leaves out hidden .dohc metadata. */
 export async function workspaceFiles(root: string): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
   for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
     if (!entry.isFile()) continue;
     const absolute = join(entry.parentPath, entry.name);
-    files[relative(root, absolute).split(sep).join("/")] = await readFile(absolute, "utf8");
+    const rel = relative(root, absolute).split(sep).join("/");
+    if (rel === ".dohc" || rel.startsWith(".dohc/")) continue;
+    files[rel] = await readFile(absolute, "utf8");
   }
   return files;
 }
@@ -194,6 +221,7 @@ export function claudeArguments(input: {
   prompt: string;
   model: string;
   mcpConfigPath: string;
+  skillPrompt?: string;
 }): string[] {
   return [
     "-p",
@@ -212,6 +240,7 @@ export function claudeArguments(input: {
     "--allowedTools",
     `mcp__dohc,${BUILT_IN_TOOLS}`,
     "--no-session-persistence",
+    ...(input.skillPrompt ? ["--append-system-prompt", input.skillPrompt] : []),
   ];
 }
 
@@ -220,15 +249,17 @@ export async function runClaudeSample(input: {
   model: string;
   timeoutMs: number;
   keepSessionRoute: boolean;
+  skillPrompt?: string;
 }): Promise<SampleOutcome> {
   const here = dirname(fileURLToPath(import.meta.url));
   const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
   const sampleDir = await mkdtemp(join(tmpdir(), "dohc-eval-"));
   const root = join(sampleDir, "workspace");
+  const home = join(sampleDir, "home");
   const unansweredLog = join(sampleDir, "unanswered.log");
   const mcpConfigPath = join(sampleDir, "mcp.json");
   try {
-    await seedWorkspace(root, input.evalCase);
+    await seedWorkspace(root, input.evalCase, home);
     await writeFile(
       mcpConfigPath,
       JSON.stringify({
@@ -242,6 +273,7 @@ export async function runClaudeSample(input: {
               input.evalCase.id,
               root,
               unansweredLog,
+              home,
             ],
           },
         },
@@ -250,7 +282,12 @@ export async function runClaudeSample(input: {
 
     const child = spawn(
       "claude",
-      claudeArguments({ prompt: input.evalCase.prompt, model: input.model, mcpConfigPath }),
+      claudeArguments({
+        prompt: input.evalCase.prompt,
+        model: input.model,
+        mcpConfigPath,
+        ...(input.skillPrompt ? { skillPrompt: input.skillPrompt } : {}),
+      }),
       {
         cwd: root,
         env: input.keepSessionRoute ? process.env : sampleEnvironment(process.env),

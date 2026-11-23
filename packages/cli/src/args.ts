@@ -3,7 +3,7 @@ import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspac
 import { OutsideChangesInput } from "@dohc/workspace-contracts/outside-changes";
 import { RetrievalKind, WorkspaceSearchInput } from "@dohc/workspace-contracts/retrieval";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
-import type { z } from "zod";
+import { z } from "zod";
 import {
   CHAT_WATCH_TIMEOUT_MS,
   CHAT_WATCH_MAX_TIMEOUT_MS,
@@ -1567,6 +1567,21 @@ interface JsonVerbHelp {
   take?: readonly CliFieldSource[];
 }
 
+function formatJsonVerbError(error: unknown, help: JsonVerbHelp): string | undefined {
+  if (!(error instanceof z.ZodError) || error.issues.length === 0) return undefined;
+  const takeByField = new Map((help.take ?? []).map((source) => [source.field, source]));
+  return error.issues
+    .slice(0, 2)
+    .map((issue) => {
+      const path = issue.path.map(String).join(".");
+      const field = issue.path[0] === undefined ? undefined : String(issue.path[0]);
+      const source = field ? takeByField.get(field) : undefined;
+      const hint = source ? ` (set ${source.field} to ${source.path} from ${source.from})` : "";
+      return path ? `${path}: ${issue.message}${hint}` : `${issue.message}${hint}`;
+    })
+    .join("; ");
+}
+
 function jsonVerb(
   capabilityId: CapabilityId,
   command: string,
@@ -1590,8 +1605,9 @@ function jsonVerb(
       let value: unknown;
       try {
         value = JSON.parse(json);
-      } catch {
-        fail(invalid);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "malformed JSON";
+        fail(`invalid ${label} JSON (${detail}); pass one JSON object or run dohc ${label} --help`);
       }
       if (!value || typeof value !== "object" || Array.isArray(value))
         fail(`${label} requires one JSON object`);
@@ -1602,8 +1618,9 @@ function jsonVerb(
       if (missing) fail(`${label} requires ${missing}`);
       try {
         return build({ ...value, action });
-      } catch {
-        fail(invalid);
+      } catch (error) {
+        const detail = formatJsonVerbError(error, help);
+        fail(detail ? `invalid ${label} arguments: ${detail}; run dohc ${label} --help` : invalid);
       }
     },
   };

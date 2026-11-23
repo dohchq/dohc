@@ -18,6 +18,7 @@ import {
   CHAT_SOCKET_VERBS,
   DATASET_RESULTS,
   MCP_RETURNS,
+  MCP_TOOL_GROUPS,
   REFERENCE_PATH,
   mcpToolNames,
   renderReference,
@@ -35,9 +36,13 @@ describe("CLI, MCP, and app channel reference", () => {
   it("says what every registered MCP tool returns, and nothing more", async () => {
     const contexts = [undefined, "view", "comment", "edit"] as const;
     const registered = await Promise.all(contexts.map((context) => mcpToolNames(context)));
-    expect(Object.keys(MCP_RETURNS).sort()).toEqual([...new Set(registered.flat())].sort());
+    const allRegistered = [...new Set(registered.flat())].sort();
+    expect(Object.keys(MCP_RETURNS).sort()).toEqual(allRegistered);
+    expect(MCP_TOOL_GROUPS.flatMap((group) => group.tools).sort()).toEqual(allRegistered);
     const page = await renderReference();
     for (const name of registered.flat()) expect(page).toContain(`### \`${name}\``);
+    expect(page).toContain("**Core everyday building**");
+    expect(page).toContain("**Internal sync, live-document, and recovery**");
   });
 
   it("documents tools available only in editable shares", async () => {

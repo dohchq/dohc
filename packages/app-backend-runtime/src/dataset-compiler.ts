@@ -29,8 +29,54 @@ function installedCompiler(): string {
   );
 }
 
+function sanitizeCompilerDiagnostic(stderr: string): string {
+  const cleaned = stderr
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/gu, "")
+    .replace(/[A-Za-z]:\\[^\s:"]+/g, "<path>")
+    .replace(/\/(?:Users|home|tmp|var|opt|etc|private|Volumes|mnt)\/[^\s:"]+/g, "<path>");
+  const lines = cleaned
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[\s✘x]+/, "").trim())
+    .filter(
+      (line) =>
+        line.length > 0 &&
+        !/^\d+\s*[|│]/.test(line) &&
+        !/^[╷╵~^]+/.test(line) &&
+        !/^\d+\s+errors?$/.test(line),
+    );
+  const preferred = lines.filter((line) => /\[ERROR\]|ERROR:|<stdin>:/i.test(line));
+  const picked = (preferred.length > 0 ? preferred : lines).slice(0, 3).join(" ");
+  return picked.length > 300 ? `${picked.slice(0, 297)}...` : picked;
+}
+
+function compilerFailureMessage(error: unknown, stderr: string): string {
+  const execError = error as { killed?: boolean; code?: string | number; signal?: string } | null;
+  if (execError?.killed || execError?.signal === "SIGTERM" || execError?.code === "ETIMEDOUT") {
+    return "dohc timed out while building these Collection actions. Simplify the source. Then approve again.";
+  }
+  const detail = sanitizeCompilerDiagnostic(stderr);
+  if (detail) {
+    return `dohc could not build these Collection actions: ${detail} Fix the source. Then approve again.`;
+  }
+  return "dohc could not build these Collection actions within this host's limits. Check the source. Then approve again.";
+}
+
 function assertClosedScript(source: string): void {
-  const nodes: unknown[] = [parse(source, { ecmaVersion: "latest", sourceType: "script" })];
+  let root: unknown;
+  try {
+    root = parse(source, { ecmaVersion: "latest", sourceType: "script" });
+  } catch (error) {
+    const detail = error instanceof Error ? sanitizeCompilerDiagnostic(error.message) : "";
+    throw new DatasetCompilerError(
+      "invalid",
+      detail
+        ? `dohc could not parse the compiled Collection actions: ${detail} Fix the source. Then approve again.`
+        : "dohc could not parse the compiled Collection actions. Check the source. Then approve again.",
+      { cause: error },
+    );
+  }
+  const nodes: unknown[] = [root];
   while (nodes.length) {
     const value = nodes.pop();
     if (!value || typeof value !== "object") continue;
@@ -90,12 +136,12 @@ export async function compileDatasetOperations(
             encoding: "utf8",
             signal: options.signal,
           },
-          (error, stdout) => {
+          (error, stdout, stderr) => {
             if (error)
               reject(
                 new DatasetCompilerError(
                   "invalid",
-                  "dohc could not build these Collection actions within this host's limits. Check the source. Then approve again.",
+                  compilerFailureMessage(error, typeof stderr === "string" ? stderr : ""),
                   { cause: error },
                 ),
               );

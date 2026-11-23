@@ -77,7 +77,14 @@ export interface AppPublicationPreparationDependencies {
 export function parseAppPublicationDeclaration(bytes: Uint8Array, appRoot: string) {
   const manifestPath = `${appRoot}/app.publish.json`;
   if (bytes.byteLength > manifestLimit) throw new Error(`${manifestPath} is larger than 64 KB.`);
-  const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch (error) {
+    throw new Error(
+      `${manifestPath} is not valid JSON: ${error instanceof Error ? error.message : "check syntax"}.`,
+    );
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(
       `${manifestPath} must hold entryPath, inputs, and packageMap, and at most one of collection or dataset.`,

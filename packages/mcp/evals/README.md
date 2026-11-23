@@ -6,13 +6,15 @@ A unit test cannot check this. The same text can lead a model to the right tool 
 
 ## What a sample is
 
-Each sample starts Claude Code in a temporary copy of the case's workspace, with only the dohc MCP server connected.
+Each sample starts Claude Code or Codex CLI in a temporary copy of the case's workspace, with only the dohc MCP server connected.
 
 - The server is `createDohcMcpServer` from this checkout, so the agent reads the tool list this checkout advertises.
-- A stand-in answers for the dohc app (`desktop.ts`). Document and file writes change the temporary workspace. Every other request gets the answer the case lists.
-- Claude Code runs with `--restricted` and `--strict-mcp-config`. Your own settings, instructions, plugins, and MCP servers stay out of the run. The agent has `Read`, `Glob`, `Grep`, `Edit`, and `Write` inside the temporary folder, and no shell.
-- Claude Code enforces that limit, not this eval. With Claude Code 2.1.322 on Windows, a sample asked to read, write, and edit a file beside its workspace was refused each time, and the file was unchanged. A test keeps the flags on every sample. Check the limit again when you move to a Claude Code version that changes `--restricted`.
-- The run uses the Claude Code sign-in on your machine. It needs no API key. A sample drops every `ANTHROPIC_`, `CLAUDE`, and `T3CODE_` environment variable, so a run started from inside another agent session does not inherit that session's model route or effort.
+- For `tool-use` cases, a stand-in answers for the dohc app (`desktop.ts`): document and file writes change the temporary workspace, and every other request gets the answer the case lists.
+- For `everyday` cases (`everydayDesktop.ts`, `everydayCases.ts`), a stateful stand-in validates real Collection definitions, app publication manifests, and `automations.yaml` files and executes SQLite schemas and sandboxed operation code.
+- Claude Code (`--harness claude`, default) runs with `--restricted` and `--strict-mcp-config`. Your own settings, instructions, plugins, and MCP servers stay out of the run. The agent has `Read`, `Glob`, `Grep`, `Edit`, and `Write` inside the temporary folder, and no shell.
+- Codex CLI (`--harness codex`) runs with `--ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --json --approve-for-me` and `sandbox_mode="workspace-write"`, injecting only the dohc stdio MCP server via `-c mcp_servers.dohc.*`. Your personal `~/.codex/config.toml` and other MCP servers never load.
+- Claude Code enforces its sandbox, not this eval. With Claude Code 2.1.322 on Windows, a sample asked to read, write, and edit a file beside its workspace was refused each time, and the file was unchanged. A test keeps the flags on every sample. Check the limit again when you move to a Claude Code version that changes `--restricted`.
+- The run uses the Claude Code or Codex CLI sign-in on your machine. It needs no API key. A Claude sample drops every `ANTHROPIC_`, `CLAUDE`, and `T3CODE_` environment variable, so a run started from inside another agent session does not inherit that session's model route or effort.
 
 The grader (`grade.ts`) is plain logic. It checks the calls, the final answer, and the workspace's files against the case. No model judges a result.
 
@@ -23,12 +25,17 @@ From `packages/mcp`:
 ```sh
 pnpm eval --context
 pnpm eval --dry-run
+pnpm eval --suite everyday --harness codex --samples 1 --out ../../.agent-artifacts/evals/everyday-baseline
+pnpm eval --suite everyday --harness codex --skill ../../skills/dohc/SKILL.md --baseline ../../.agent-artifacts/evals/everyday-baseline/results.jsonl --out ../../.agent-artifacts/evals/everyday-with-skill
 pnpm eval --case <id> --samples 1 --out ../../.agent-artifacts/evals/check
 pnpm eval --model claude-haiku-5-5 --out ../../.agent-artifacts/evals/haiku
 ```
 
 - `--out <folder>` is required for a run. It gets `results.jsonl` and `summary.md`. Keep runs under `.agent-artifacts/`, which git ignores.
-- `--model <id>` picks the model. The default is `claude-sonnet-5-5`.
+- `--harness <claude|codex>` selects Claude Code (default) or Codex CLI.
+- `--suite <tool-use|everyday|all>` picks the case suite. Default is `tool-use`.
+- `--skill <path>` injects a `SKILL.md` file (and sibling `references/*.md` files) into the run's agent prompt for before/after comparisons.
+- `--model <id>` picks the model. Defaults to `claude-sonnet-5-5` for Claude and `gpt-6.2-sol` for Codex.
 - `--case <ids>` runs only those cases, separated by commas.
 - `--samples <n>` sets samples per case. The default is 2, and a third runs when the first two disagree.
 - `--concurrency <n>` sets how many cases run at once. The default is 2.
@@ -68,6 +75,5 @@ Cases are in `cases.ts`. `case.ts` describes every field.
 
 ## Limits
 
-- The stand-in for the dohc app models document and file writes on plain files. It has no live editing, sync, permissions, or History.
-- The eval measures which tools an agent chooses and how it recovers from a refusal. It does not prove the work is right in the dohc app.
-- It runs Claude Code only. Codex is not covered yet: its command-line run loads the MCP servers in the person's own config, and an eval must not reach those.
+- The stand-in for `tool-use` cases models document and file writes on plain files and has no live editing, sync, permissions, or History. The stand-in for `everyday` cases executes real Collection contracts, SQLite schemas, and sandboxed operations, but still omits real desktop sync, relay, and OS UI flows.
+- The eval measures how an agent chooses tools, writes valid workspace files, and recovers from refusals. It does not replace desktop QA.

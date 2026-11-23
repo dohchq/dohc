@@ -522,3 +522,45 @@ it("accepts an expected Collection identity and derives migration source from it
     DatasetRequest.parse({ ...request, descriptorPath: "another/dataset.json" }),
   ).toThrow();
 });
+
+it("explains field mistakes, unrecognized keys, and definition errors before transport", async () => {
+  const send = vi.fn();
+
+  const wrongKey = await executeCli({
+    argv: [
+      "dataset",
+      "prepare",
+      JSON.stringify({ workspaceId: "workspace", datasetPath: "equipment/dataset.json" }),
+    ],
+    request: send,
+  });
+  expect(wrongKey.exitCode).toBe(1);
+  expect(wrongKey.stderr).toContain('Unrecognized key "datasetPath" for action "prepare"');
+  expect(wrongKey.stderr).toContain("descriptorPath");
+
+  const badJson = await executeCli({
+    argv: ["dataset", "list", "{not-json"],
+    request: send,
+  });
+  expect(badJson.exitCode).toBe(1);
+  expect(badJson.stderr).toContain("invalid dataset list JSON");
+
+  const badDef = structuredClone(definition);
+  badDef.operations[0]!.readOnly = false;
+  const badCreate = await executeCli({
+    argv: ["dataset", "create", JSON.stringify({ workspaceId: "workspace", definition: badDef })],
+    request: send,
+  });
+  expect(badCreate.exitCode).toBe(1);
+  expect(badCreate.stderr).toContain('readOnly must be true when kind is "read"');
+
+  const missingTake = await executeCli({
+    argv: ["app", "approve", JSON.stringify({ workspaceId: "workspace" })],
+    request: send,
+  });
+  expect(missingTake.exitCode).toBe(1);
+  expect(missingTake.stderr).toContain("approvalId");
+  expect(missingTake.stderr).toContain("from prepare");
+
+  expect(send).not.toHaveBeenCalled();
+});

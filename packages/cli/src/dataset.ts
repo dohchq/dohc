@@ -35,7 +35,7 @@ const datasetPath = z
         code: "custom",
         message: value.startsWith("../")
           ? "This Collection sits outside the MCP folder. Run the MCP server from the workspace root or a folder containing the Collection."
-          : "Use the caller-relative dataset.json path.",
+          : 'Use the caller-relative dataset.json path, such as "equipment/dataset.json" (not a folder path or UUID). Run list to find Collection paths.',
       });
     }
   });
@@ -64,8 +64,11 @@ const pinned = { ...selection, revision: z.number().int().positive(), revisionSh
 const file = z.unknown().transform((value, context) => {
   try {
     return parseAppBackendFile(value);
-  } catch {
-    context.addIssue({ code: "custom", message: "Invalid Collection file." });
+  } catch (error) {
+    context.addIssue({
+      code: "custom",
+      message: error instanceof Error ? error.message : "Invalid Collection file.",
+    });
     return z.NEVER;
   }
 });
@@ -73,16 +76,22 @@ const fileBytes = z.string().max(Math.ceil(APP_BACKEND_UPLOAD_BYTES / 3) * 4);
 const json = z.unknown().transform((value, context) => {
   try {
     return parseAppBackendJson(value, 64 * 1024);
-  } catch {
-    context.addIssue({ code: "custom", message: "Invalid Collection input." });
+  } catch (error) {
+    context.addIssue({
+      code: "custom",
+      message: error instanceof Error ? error.message : "Invalid Collection input.",
+    });
     return z.NEVER;
   }
 });
 const definition = z.unknown().transform((value, context) => {
   try {
     return parseDatasetDefinition(value);
-  } catch {
-    context.addIssue({ code: "custom", message: "Invalid Collection definition." });
+  } catch (error) {
+    context.addIssue({
+      code: "custom",
+      message: error instanceof Error ? error.message : "Invalid Collection definition.",
+    });
     return z.NEVER;
   }
 });
@@ -105,8 +114,11 @@ const revision = z.unknown().transform((value, context) => {
       },
     });
     return { ...parsed, definition: { ...parsed.definition, schemaPath, operationsPath } };
-  } catch {
-    context.addIssue({ code: "custom", message: "Invalid Collection revision." });
+  } catch (error) {
+    context.addIssue({
+      code: "custom",
+      message: error instanceof Error ? error.message : "Invalid Collection revision.",
+    });
     return z.NEVER;
   }
 });
@@ -355,133 +367,177 @@ export const DatasetPendingAttemptsPage = z
   })
   .strict();
 export type DatasetPendingAttemptsPage = z.infer<typeof DatasetPendingAttemptsPage>;
-export const DatasetRequest = z.discriminatedUnion("action", [
-  z
-    .object({
+const DATASET_ACTION_HINTS: Partial<Record<string, string>> = {
+  prepare:
+    "Use descriptorPath (not datasetPath) for prepare, and find workspaceId with dohc_list_workspaces or .dohc/manifest.json.",
+  approve:
+    "Pass preparationId and revisionSha256 (from prepare's revision.revisionSha256), without datasetPath.",
+  approveMigration:
+    "Pass preparationId, revisionSha256 (from revision.revisionSha256), and approvalDigest from the migration preparation, without datasetPath.",
+  prepareSchemaChange:
+    "Read revision, revisionSha256, and tableId from describe first. Supported change.kind values: renameCollection, renameTable, renameField, changeField, addButton, addField.",
+  prepareRelationChoices:
+    "Read revision, revisionSha256, tableId, fieldId, and labelFieldId from describe first.",
+  createForm:
+    "Read revision, revisionSha256, tableId, createOperationId, and fieldIds from describe first.",
+  create:
+    "Pass workspaceId and definition (formatVersion: 1, datasetId, name, schemaPath, operationsPath, tables, operations).",
+  describe:
+    'Pass workspaceId and datasetPath (for example "equipment/dataset.json"). Find workspaceId with dohc_list_workspaces or .dohc/manifest.json.',
+  list: "Pass workspaceId (from dohc_list_workspaces or .dohc/manifest.json).",
+};
+
+function datasetAction<Shape extends z.ZodRawShape>(shape: Shape) {
+  const names = Object.keys(shape);
+  const action = (shape.action as { value?: string } | undefined)?.value ?? "";
+  const hint = DATASET_ACTION_HINTS[action];
+  return z.strictObject(shape, {
+    error: (issue) => {
+      if (issue.code !== "unrecognized_keys") return undefined;
+      const unknown = issue.keys.map((key) => JSON.stringify(key)).join(", ");
+      const base = `Unrecognized key${issue.keys.length === 1 ? "" : "s"} ${unknown} for action "${action}". Allowed fields: ${names.join(", ")}.`;
+      return hint ? `${base} ${hint}` : base;
+    },
+  });
+}
+
+const DATASET_ACTIONS = [
+  "list",
+  "describe",
+  "create",
+  "prepare",
+  "approve",
+  "discard",
+  "invoke",
+  "cancelInvoke",
+  "prepareSchemaChange",
+  "prepareMigration",
+  "askToApply",
+  "migrationPreviewPage",
+  "approveMigration",
+  "discardMigration",
+  "prepareRelationChoices",
+  "createForm",
+  "history",
+  "historyRevision",
+  "prepareHistoryRestore",
+  "permissions",
+  "setGrant",
+  "removeGrant",
+  "lifecycle",
+  "archive",
+  "restore",
+  "deletePreview",
+  "delete",
+  "pendingAttempts",
+  "reconcileAttempt",
+  "cancelAttempt",
+  "upload",
+  "file",
+  "export",
+  "prepareRecovery",
+  "claimRecovery",
+  "discardRecovery",
+] as const;
+
+export const DatasetRequest = z.discriminatedUnion(
+  "action",
+  [
+    datasetAction({
       ...workspace,
       action: z.literal("prepareRecovery"),
       sourcePath: z.string().min(1).max(4096).optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...workspace,
       action: z.literal("claimRecovery"),
       transferId: identity,
       manifestSha256: sha256,
       sourceCursor: DatasetCursor,
       oldHostStopped: z.literal(true),
-    })
-    .strict(),
-  z.object({ ...workspace, action: z.literal("discardRecovery"), transferId: identity }).strict(),
-  z
-    .object({
+    }),
+    datasetAction({ ...workspace, action: z.literal("discardRecovery"), transferId: identity }),
+    datasetAction({
       ...selection,
       action: z.literal("history"),
       beforeRevision: z.number().int().positive().optional(),
       limit: z.number().int().min(1).max(100).optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...workspace,
       action: z.literal("list"),
       after: identity.optional(),
       limit: z.number().int().min(1).max(100).optional(),
       includeArchived: z.boolean().optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("describe"),
       includeArchived: z.boolean().optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("lifecycle"),
       after: z.string().min(1).max(256).optional(),
       limit: z.number().int().min(1).max(100).optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("deletePreview"),
       after: z.string().min(1).max(256).optional(),
       limit: z.number().int().min(1).max(100).optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("delete"),
       expected: DatasetCursor,
       reviewToken: sha256,
       acknowledge: z.literal(true),
-    })
-    .strict(),
-  z.object({ ...selection, action: z.literal("archive") }).strict(),
-  z.object({ ...selection, action: z.literal("restore") }).strict(),
-  z
-    .object({
+    }),
+    datasetAction({ ...selection, action: z.literal("archive") }),
+    datasetAction({ ...selection, action: z.literal("restore") }),
+    datasetAction({
       ...selection,
       action: z.literal("pendingAttempts"),
       after: z.number().int().nonnegative().optional(),
       limit: z.number().int().min(1).max(100).optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("reconcileAttempt"),
       reference: sha256,
       acknowledge: z.literal(true),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("cancelAttempt"),
       reference: sha256,
       acknowledge: z.literal(true),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("permissions"),
       after: z.string().min(1).max(1024).optional(),
       limit: z.number().int().min(1).max(100).optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("setGrant"),
       grantId: z.string().min(1).max(256),
       grant: DatasetDataGrant,
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("removeGrant"),
       principalKey: z.string().min(1).max(256),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("export"),
       savePath: z.string().min(1).max(4096).optional(),
       overwrite: z.boolean().optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...pinned,
       action: z.literal("upload"),
       fieldId: identity,
@@ -489,18 +545,14 @@ export const DatasetRequest = z.discriminatedUnion("action", [
       name: z.string().min(1).max(255),
       contentType: z.string().min(1).max(128),
       bytesBase64: fileBytes,
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...pinned,
       action: z.literal("file"),
       fileId: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
       read: z.object({ operationId: identity, fieldId: identity, input: json }).strict().optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("createForm"),
       revision: z.number().int().positive(),
@@ -516,73 +568,59 @@ export const DatasetRequest = z.discriminatedUnion("action", [
         )
         .max(DATASET_MAX_FIELDS)
         .optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...pinned,
       action: z.literal("prepareRelationChoices"),
       tableId: identity,
       fieldId: identity,
       labelFieldId: identity,
-    })
-    .strict(),
-  z.object({ ...workspace, action: z.literal("create"), definition }).strict(),
-  z
-    .object({
+    }),
+    datasetAction({ ...workspace, action: z.literal("create"), definition }),
+    datasetAction({
       ...workspace,
       action: z.literal("prepare"),
       descriptorPath: z.string().min(1).max(1024),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...workspace,
       action: z.literal("approve"),
       agentLabel: z.string().min(1).max(160).optional(),
       preparationId: identity,
       revisionSha256: sha256,
-    })
-    .strict(),
-  z.object({ ...workspace, action: z.literal("discard"), preparationId: identity }).strict(),
-  z.object({ ...selection, action: z.literal("historyRevision"), revisionSha256: sha256 }).strict(),
-  z
-    .object({
+    }),
+    datasetAction({ ...workspace, action: z.literal("discard"), preparationId: identity }),
+    datasetAction({ ...selection, action: z.literal("historyRevision"), revisionSha256: sha256 }),
+    datasetAction({
       ...pinned,
       action: z.literal("prepareHistoryRestore"),
       targetRevisionSha256: sha256,
       changedRevisionSha256: sha256,
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("prepareMigration"),
       migrationPath: z.string().min(1).max(1024),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...selection,
       action: z.literal("askToApply"),
       migrationPath: z.string().min(1).max(1024),
       note: z.string().trim().min(1).max(500).optional(),
-    })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
       ...workspace,
       action: z.literal("migrationPreviewPage"),
       preparationId: identity,
       after: z.string().min(1).max(1024).optional(),
       limit: z.number().int().min(1).max(100).optional(),
-    })
-    .strict(),
-  z
-    .object({ ...pinned, action: z.literal("prepareSchemaChange"), change: DatasetSchemaChange })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({
+      ...pinned,
+      action: z.literal("prepareSchemaChange"),
+      change: DatasetSchemaChange,
+    }),
+    datasetAction({
       ...workspace,
       action: z.literal("approveMigration"),
       agentLabel: z.string().min(1).max(160).optional(),
@@ -594,13 +632,9 @@ export const DatasetRequest = z.discriminatedUnion("action", [
           "The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs.",
         )
         .optional(),
-    })
-    .strict(),
-  z
-    .object({ ...workspace, action: z.literal("discardMigration"), preparationId: identity })
-    .strict(),
-  z
-    .object({
+    }),
+    datasetAction({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }),
+    datasetAction({
       ...selection,
       action: z.literal("invoke"),
       operationId: identity,
@@ -613,10 +647,16 @@ export const DatasetRequest = z.discriminatedUnion("action", [
           "A fresh id for this running request. cancelInvoke requests cancellation; retry with the same input and idempotencyKey.",
         )
         .optional(),
-    })
-    .strict(),
-  z.object({ ...workspace, action: z.literal("cancelInvoke"), invocationId: identity }).strict(),
-]);
+    }),
+    datasetAction({ ...workspace, action: z.literal("cancelInvoke"), invocationId: identity }),
+  ],
+  {
+    error: (issue) =>
+      issue.code === "invalid_union"
+        ? `Unsupported Collection action. Valid actions: ${DATASET_ACTIONS.join(", ")}.`
+        : undefined,
+  },
+);
 export type DatasetRequest = z.infer<typeof DatasetRequest>;
 export const DatasetPreparation = z
   .object({ preparationId: identity, revision, sourceDigest: sha256 })

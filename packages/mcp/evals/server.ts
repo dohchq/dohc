@@ -6,17 +6,25 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createDohcMcpServer } from "../src/server";
 import { CASES } from "./cases";
 import { fakeDesktop } from "./desktop";
+import { EVERYDAY_CASES } from "./everydayCases";
 
-const [caseId, root, unansweredLog] = process.argv.slice(2);
-const evalCase = CASES.find((candidate) => candidate.id === caseId);
+const [caseId, root, unansweredLog, homeArg] = process.argv.slice(2);
+const evalCase = [...CASES, ...EVERYDAY_CASES].find((candidate) => candidate.id === caseId);
 if (!evalCase || !root || !unansweredLog) {
-  process.stderr.write("usage: server.ts <case id> <workspace folder> <unanswered-request log>\n");
+  process.stderr.write(
+    "usage: server.ts <case id> <workspace folder> <unanswered-request log> [home folder]\n",
+  );
   process.exit(1);
 }
 
+const answers = {
+  ...(evalCase.setupDesktop ? evalCase.setupDesktop(root) : {}),
+  ...evalCase.desktop,
+};
+
 const server = createDohcMcpServer({
   root,
-  home: root,
-  request: fakeDesktop({ root, answers: evalCase.desktop ?? {}, unansweredLog }),
+  home: homeArg || root,
+  request: fakeDesktop({ root, answers, unansweredLog }),
 });
 await server.connect(new StdioServerTransport());

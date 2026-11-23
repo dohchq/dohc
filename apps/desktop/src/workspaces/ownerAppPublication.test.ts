@@ -222,6 +222,12 @@ describe("app.publish.json paths", () => {
       parseAppPublicationDeclaration(new TextEncoder().encode('{"version":2}'), "app"),
     ).toThrow("app/app.publish.json uses a newer version. Update dohc to read this file.");
   });
+
+  it("names the manifest path when app.publish.json is not valid JSON", () => {
+    expect(() =>
+      parseAppPublicationDeclaration(new TextEncoder().encode("{bad json"), "apps/shop"),
+    ).toThrow(/apps\/shop\/app\.publish\.json is not valid JSON:/);
+  });
   const manifest = {
     entryPath: "main.ts",
     inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"],

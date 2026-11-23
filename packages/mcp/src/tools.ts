@@ -1924,7 +1924,11 @@ export async function testApp(ctx: ToolContext, args: { appRoot: string }) {
   const root = await resolveAppRoot(ctx, args.appRoot);
   if (!root.ok) return root;
   const detected = await detectSiteAt(ctx, root.absolute, root.normalized);
-  if (!detected) return { ok: false as const, reason: `not a detected app: ${root.normalized}` };
+  if (!detected)
+    return {
+      ok: false as const,
+      reason: `not a detected app: ${root.normalized}. Add index.html, package.json, dohc.json, or app.publish.json, or call dohc_create_app.`,
+    };
   const { site: app } = detected;
 
   const checks: SiteCheck[] = [];
@@ -1994,7 +1998,10 @@ export async function importData(
   const dbRel = await safeResolve(ctx, args.databasePath);
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
   if (!isVisibleDatabase(dbRel)) {
-    return { ok: false as const, reason: `not a visible database target: ${args.databasePath}` };
+    return {
+      ok: false as const,
+      reason: `not a visible database target: ${args.databasePath}. Use a workspace-relative .sqlite path outside .dohc (for example, data/records.sqlite).`,
+    };
   }
 
   const body = await readFile(sourceRel.absolute, "utf8");
@@ -2041,10 +2048,17 @@ export async function queryDatabase(ctx: ToolContext, args: { databasePath: stri
   // Only a visible user database (parity with import_data): never a sidecar,
   // hidden internal, or a non-db file that merely contains SQLite bytes.
   if (!isVisibleDatabase(dbRel)) {
-    return { ok: false as const, reason: `not a visible database: ${args.databasePath}` };
+    return {
+      ok: false as const,
+      reason: `not a visible database: ${args.databasePath}. Pass a workspace-relative .sqlite file outside .dohc (not a sidecar such as -wal or -shm).`,
+    };
   }
   if (!isReadOnlySelect(args.sql)) {
-    return { ok: false as const, reason: "only a single read-only SELECT is allowed" };
+    return {
+      ok: false as const,
+      reason:
+        "only a single read-only SELECT is allowed. Remove extra statements or write clauses (INSERT, UPDATE, DELETE, PRAGMA).",
+    };
   }
   const { DatabaseSync } = nodeSqlite();
   const db = new DatabaseSync(dbRel.absolute, { readOnly: true });
@@ -2257,11 +2271,31 @@ export async function resolveVersionConflict(
   return requestCli(ctx, "versionResolve", args);
 }
 
+function formatRequestValidationError(error: z.ZodError, prefix: string, fallback: string): string {
+  const details = error.issues
+    .slice(0, 3)
+    .map((issue) => {
+      const path = issue.path.map(String).join(".");
+      return path ? `${path}: ${issue.message}` : issue.message;
+    })
+    .filter((entry) => entry.length > 0);
+  if (details.length === 0) return fallback;
+  return `${prefix}: ${details.join("; ")}`;
+}
+
 export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {
   if (ctx.shareAccess !== undefined)
     return { ok: false as const, reason: "Share copy details require the owning workspace." };
   const parsed = ShareCopyInput.safeParse(input);
-  if (!parsed.success) return { ok: false as const, reason: "Invalid share copy request." };
+  if (!parsed.success)
+    return {
+      ok: false as const,
+      reason: formatRequestValidationError(
+        parsed.error,
+        "Invalid share copy request",
+        "Invalid share copy request.",
+      ),
+    };
   return requestCli(ctx, "shareCopy", parsed.data);
 }
 
@@ -2271,7 +2305,15 @@ export async function listLinkAgents(ctx: ToolContext, input: unknown) {
   if (ctx.shareAccess !== undefined)
     return { ok: false as const, reason: "Open the owning workspace to list a link's agents." };
   const parsed = ShareLinkAgentsInput.safeParse(input);
-  if (!parsed.success) return { ok: false as const, reason: "Invalid link agents request." };
+  if (!parsed.success)
+    return {
+      ok: false as const,
+      reason: formatRequestValidationError(
+        parsed.error,
+        "Invalid link agents request",
+        "Invalid link agents request.",
+      ),
+    };
   return requestCli(ctx, "shareAgents", parsed.data);
 }
 
@@ -2282,7 +2324,15 @@ export async function disconnectLinkAgent(ctx: ToolContext, input: unknown) {
       reason: "Open the owning workspace to disconnect a link's agent.",
     };
   const parsed = ShareLinkAgentDisconnectInput.safeParse(input);
-  if (!parsed.success) return { ok: false as const, reason: "Invalid disconnect request." };
+  if (!parsed.success)
+    return {
+      ok: false as const,
+      reason: formatRequestValidationError(
+        parsed.error,
+        "Invalid disconnect request",
+        "Invalid disconnect request.",
+      ),
+    };
   return requestCli(ctx, "shareDisconnect", parsed.data);
 }
 
@@ -2291,7 +2341,15 @@ export async function publishApp(ctx: ToolContext, input: unknown) {
   if (ctx.shareAccess !== undefined)
     return { ok: false as const, reason: "App publication requires the owning workspace." };
   const parsed = OwnerAppPublicationRequest.safeParse(input);
-  if (!parsed.success) return { ok: false as const, reason: "Invalid app publication request." };
+  if (!parsed.success)
+    return {
+      ok: false as const,
+      reason: formatRequestValidationError(
+        parsed.error,
+        "Invalid app publication request",
+        "Invalid app publication request.",
+      ),
+    };
   return requestCli(ctx, "appPublication", { request: parsed.data });
 }
 
@@ -2300,13 +2358,19 @@ export async function dataset(ctx: ToolContext, input: unknown) {
   if (ctx.shareAccess !== undefined)
     return { ok: false as const, reason: "Collections require the owning workspace." };
   const parsed = DatasetRequest.safeParse(input);
-  if (!parsed.success)
+  if (!parsed.success) {
+    const datasetPathIssue = parsed.error.issues.find((issue) => issue.path[0] === "datasetPath");
     return {
       ok: false as const,
       reason:
-        parsed.error.issues.find((issue) => issue.path[0] === "datasetPath")?.message ??
-        "Invalid Collection request. Use a supported action and its required fields.",
+        datasetPathIssue?.message ??
+        formatRequestValidationError(
+          parsed.error,
+          "Invalid Collection request",
+          "Invalid Collection request. Use a supported action and its required fields.",
+        ),
     };
+  }
   if (parsed.data.action === "prepareRecovery" && !parsed.data.sourcePath)
     return {
       ok: false as const,

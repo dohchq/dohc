@@ -1,0 +1,55 @@
+---
+name: dohc
+description: Build, edit, automate, and publish Collections, documents, data, chat, and small apps inside a local-first dohc workspace through the dohc MCP server or CLI. Use when working inside a dohc workspace or when the user asks to create or update dohc Collections, notes, automations, apps, or versions.
+---
+
+# Working in a dohc workspace
+
+dohc keeps files, Markdown documents, structured Collections, automations, chat, and small web apps in one local-first workspace with History and Versions. Every user action runs through the same operations in the desktop app, the `dohc` CLI, and the `dohc` MCP server.
+
+## Before your first call
+
+1. Get the workspace ID once with `dohc_list_workspaces` (or read `.dohc/manifest.json`). Never guess `"local"`.
+2. Keep the dohc desktop app open for writes, Collections, apps, chat, and Versions.
+3. For Markdown files (`.md`), use `dohc_create_document`, `dohc_read_document`, and `dohc_edit_document`. `dohc_write_file` refuses Markdown documents because live documents own their text.
+
+## Core building tools
+
+The desktop MCP server registers over 75 tools, most of them for sync recovery, live-document quarantine, and sharing administration. Start with these core building tools:
+
+| Goal | Primary MCP tool | CLI equivalent |
+| --- | --- | --- |
+| Recall context across pages, Collections, records, and chat | `dohc_search_workspace` | `dohc workspace search <query>` |
+| Explore files | `dohc_list_files`, `dohc_read_file`, `dohc_search_files` | (use workspace files directly) |
+| Write non-Markdown files (code, YAML, JSON) | `dohc_write_file` | (use workspace files directly) |
+| Create, read, and edit Markdown documents | `dohc_create_document`, `dohc_read_document`, `dohc_edit_document` | `dohc document create\|read\|edit` |
+| Work with document Collections (`collection.yaml`) | `dohc_query_collection`, `dohc_create_record`, `dohc_set_record_fields` | `dohc document set-fields` |
+| Create, approve, migrate, and invoke transactional Collections (`dataset.json`) | `dohc_dataset` | `dohc dataset <verb> '<JSON>'` |
+| Scaffold, check, and publish web apps (`app.publish.json`) | `dohc_create_app`, `dohc_test_app`, `dohc_publish_app` | `dohc app <verb> '<JSON>'` |
+| Import CSV/JSON and query SQLite | `dohc_import_data`, `dohc_query_database` | (MCP only) |
+| Check and toggle Collection automations (`automations.yaml`) | `dohc_list_automations`, `dohc_switch_automation` | `dohc automation list\|switch` |
+| Post or reply in Groups and file comments | `dohc_list_groups`, `dohc_start_group_chat`, `dohc_start_file_chat`, `dohc_reply_to_chat` | `dohc chat groups\|post\|reply` |
+| Try changes safely in a Version | `dohc_create_version`, `dohc_compare_version`, `dohc_merge_version` | `dohc version create\|compare\|merge` |
+
+## Choose the right data model
+
+- **Document Collection (`collection.yaml` + `.md` records)**: Best for notes with typed properties (trip plans, tasks, specs) where each record also has a rich Markdown body.
+- **Transactional Collection (`dataset.json` + SQLite + operations)**: Best for structured records, multi-table relations, capacity or business rules, public forms, and dynamic apps. Apps bind to approved operations on these Collections; apps have no separate private database.
+- **Visible SQLite file (`dohc_import_data` + `dohc_query_database`)**: Best for quick one-off CSV/JSON imports and read-only `SELECT` analysis.
+
+## Detailed references
+
+Read the matching reference before authoring schemas, apps, or automations:
+
+- [references/collections-and-datasets.md](references/collections-and-datasets.md): `collection.yaml` syntax, `dataset.json` invariants, `dohc_dataset` action fields, custom `backend.ts` operations, schema migrations, and public relation choices.
+- [references/apps-and-publishing.md](references/apps-and-publishing.md): `app.publish.json` format, `dohc-app-channel` `MessagePort` protocol, local approval (`prepareLocal` -> `approve` -> `launchLocal`), and share-link publishing (`createLink` -> `prepare` -> `approve`).
+- [references/automations.md](references/automations.md): `automations.yaml` schema, triggers, steps, formulas vs. conditions, and message templates.
+
+## Common pitfalls
+
+- **`dohc_dataset` path field name**: `action: "prepare"` takes `descriptorPath`; every other dataset action takes `datasetPath`. Always pass the path ending in `dataset.json` (for example `"tracker/dataset.json"`), never the folder alone and never `datasetId`.
+- **Approval arguments**: `dohc_dataset` `approve` takes `{ action: "approve", workspaceId, preparationId, revisionSha256 }` (read `revision.revisionSha256` from `prepare`; omit `datasetPath` and `sourceDigest`). `approveMigration` takes `{ action: "approveMigration", workspaceId, preparationId, revisionSha256, approvalDigest }` (omit `datasetPath`).
+- **Stale app bindings after migrations**: Whenever a Collection migrates to a new revision, update `revision` and `revisionSha256` in each bound app's `app.publish.json`, then run `prepareLocal`/`prepare` and `approve` again.
+- **File comments vs. Group posts**: To comment on a file, use `dohc_start_file_chat` (not `dohc_start_group_chat`). To check existing discussions on a file first, use `dohc_list_file_chats`.
+- **Versions**: `dohc_create_version` creates the copy and switches the workspace folder to it immediately. Edit files, run `dohc_compare_version`, then merge with `dohc_merge_version`.
+- **Secrets and sharing**: Never include owner-only read operations in a public share-link app's `operationIds`. Never read or copy secret files (`.env*`) into workspace apps or databases.

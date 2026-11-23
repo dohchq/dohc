@@ -6,26 +6,43 @@
  */
 export type DesktopAnswer = unknown | ((args: Record<string, unknown>, root: string) => unknown);
 
+export type EvalSuite = "tool-use" | "everyday";
+
 export interface EvalCase {
   id: string;
-  /** `bad` reproduces a mistake, `guard` protects correct behavior, `control` is ordinary work. */
-  kind: "bad" | "guard" | "control";
+  /** `tool-use` is focused single-flow tool selection; `everyday` is multi-step user jobs. */
+  suite?: EvalSuite;
+  /** `bad` reproduces a mistake, `guard` protects correct behavior, `control` is ordinary work, `everyday` is a full user job. */
+  kind: "bad" | "guard" | "control" | "everyday";
   /** The real experience, in a sentence. */
   experience: string;
-  /** Where it happened: a pull request, an issue, or a commit. */
+  /** Where it happened: a pull request, an issue, a commit, or a tracked eval category. */
   source: string;
+  /** Workspace ID registered in the sample's desktop registry and .dohc/manifest.json. */
+  workspaceId?: string;
   /** The workspace's files, by path. */
   files?: Record<string, string>;
   /** What the dohc app answers, by request verb. An unlisted verb ends the sample as an error. */
   desktop?: Record<string, DesktopAnswer>;
+  /** Builds fresh per-sample stateful desktop handlers (for example, SQLite-backed datasets). */
+  setupDesktop?: (root: string) => Record<string, DesktopAnswer>;
   /** What the person asks the agent. */
   prompt: string;
   expect: Expectation;
+  /** Optional deterministic checks on the finished workspace, calls, and final answer. */
+  gradeRun?: (run: RunRecord) => Check[];
   /**
    * Calls that meet `expect`, and the answer that goes with them. cases.test.ts replays them
    * against the real server with no model, so a case that cannot pass fails in CI.
+   * Multi-step stateful cases can provide `run` to chain dynamic IDs from earlier calls.
    */
-  solution: { calls: { tool: string; args: Record<string, unknown> }[]; text?: string };
+  solution: {
+    calls?: { tool: string; args: Record<string, unknown> }[];
+    run?: (
+      callTool: (tool: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>,
+    ) => Promise<string | void>;
+    text?: string;
+  };
 }
 
 /** One tool call to look for. `args` match partially; see `matchesArgs` in grade.ts. */
