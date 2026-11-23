@@ -222,6 +222,49 @@ it("reads what is stored, not what a key named __proto__ or an embedded string m
   reopened.destroy();
 });
 
+it("takes an attribute or a record only from an item that holds plain values", () => {
+  const made = note(10);
+  const keyed = (holder: Y.XmlElement | Y.Map<unknown>, key: string, content: Y.Item["content"]) =>
+    made.doc.transact((transaction) => {
+      new Y.Item(
+        Y.createID(made.doc.clientID, Y.getState(made.doc.store, made.doc.clientID)),
+        null,
+        null,
+        null,
+        null,
+        holder,
+        key,
+        content,
+      ).integrate(transaction, 0);
+    });
+  const boundary = new Y.XmlElement(BLOCK_ELEMENT);
+  boundary.setAttribute("path", ["q", "c"] as unknown as string);
+  made.sequence.insertEmbed(0, boundary, {});
+  made.sequence.insert(1, "plain");
+  keyed(boundary, "type", new Y.ContentString("heading"));
+  keyed(boundary, "level", new Y.ContentJSON([3]));
+  keyed(made.records, "q", new Y.ContentEmbed("blockquote"));
+  keyed(made.records, "c", new Y.ContentJSON(["callout"]));
+  const several = new Y.XmlElement(BLOCK_ELEMENT);
+  made.sequence.insertEmbed(made.sequence.length, several, {});
+  made.sequence.insert(made.sequence.length, "last value");
+  keyed(several, "type", new Y.ContentAny(["codeBlock", "heading"]));
+  keyed(several, "level", new Y.ContentAny([5, 2]));
+  const reopened = new Y.Doc({ gc: false });
+  reopened.getText(BODY_SEQUENCE_FIELD);
+  reopened.getMap(BODY_CONTAINERS_FIELD);
+  Y.applyUpdate(reopened, Y.encodeStateAsUpdate(made.doc));
+  for (const doc of [made.doc, reopened])
+    expect(shown(doc)).toEqual({
+      type: "doc",
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: "plain" }] },
+        { type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: "last value" }] },
+      ],
+    });
+  reopened.destroy();
+});
+
 it("reads the join that two people made and one undid as three lines with the typed letter", () => {
   const stored = JSON.parse(readFileSync(FILE, "utf8")) as Fixture[];
   const document = stored.at(-1)!.document as { content: { content?: { text: string }[] }[] };

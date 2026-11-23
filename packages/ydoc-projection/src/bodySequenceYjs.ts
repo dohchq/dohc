@@ -10,12 +10,21 @@ import {
   type SequencePiece,
 } from "./bodySequenceGrammar.js";
 
+/**
+ * The value stored under a key of a shared type: the last value of a live item that holds plain
+ * values. An item of any other kind holds none, because Yjs and yrs read such an item differently.
+ */
+export function storedValue(holder: { _map: Map<string, Y.Item> }, key: string): unknown {
+  const item = holder._map.get(key);
+  return item && !item.deleted && item.content instanceof Y.ContentAny
+    ? item.content.arr.at(-1)
+    : undefined;
+}
+
 function attributesOf(element: Y.XmlElement): SequenceAttrs {
-  const entries: [string, unknown][] = [];
-  element._map.forEach((item, key) => {
-    if (!item.deleted) entries.push([key, item.content.getContent()[item.length - 1]]);
-  });
-  return Object.fromEntries(entries);
+  return Object.fromEntries(
+    [...element._map.keys()].map((key): [string, unknown] => [key, storedValue(element, key)]),
+  );
 }
 
 /**
@@ -51,12 +60,13 @@ export function piecesOfSequence(
 
 /** The document a format-2 note's Yjs document stands for. */
 export function readBodySequence(schema: Schema, doc: Y.Doc): ProseMirrorNode {
+  const containers = doc.getMap(BODY_CONTAINERS_FIELD);
   return readBodyLeaves(
     schema,
     leavesOfSequence(
       schema,
       piecesOfSequence(doc.getText(BODY_SEQUENCE_FIELD), new Set(Object.keys(schema.marks))),
-      doc.getMap(BODY_CONTAINERS_FIELD),
+      { get: (key) => storedValue(containers, key) },
     ),
   );
 }

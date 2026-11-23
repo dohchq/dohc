@@ -56,8 +56,8 @@ The reader is `packages/ydoc-projection/src/bodySequenceGrammar.ts`, read from Y
 | `orderedList.type`, `wikilink.label`, `image.title` | string or null | null |
 | `codeBlock.language` | null, or a string with no line break (`\n`, `\r`, U+2028 or U+2029) | null |
 | `callout.fold` | `""`, `"+"` or `"-"` | `""` |
-| `callout.calloutType` | string with no line break | `"note"` |
-| `callout.title` | string with no line break | `""` |
+| `callout.calloutType` | string with no line break (the same four) | `"note"` |
+| `callout.title` | string with no line break (the same four) | `""` |
 | `mathBlock.tex`, `mathInline.tex`, `rawBlock.source`, `rawInline.source`, `image.src`, `image.alt`, `wikilink.target`, `escapedPunctuation.value`, `inlineAtom.atomId`, `inlineAtom.params`, `inlineAtom.source` | string | `""` |
 | `tableCell.colwidth`, `tableHeader.colwidth` | null, or an array of at most 1,000 finite numbers each 0 or more (a BigInt in the safe range counts as its number) | null |
 | `tableCell.align`, `tableHeader.align` | null, `"left"`, `"right"`, `"center"` | null |
@@ -70,6 +70,7 @@ The schema has no other attribute; a test pins the list and the defaults.
 
 - An attribute name that the item's own node or mark type does not have is ignored (a `language` left on a boundary whose type is now `heading` is not read).
 - An attribute, a mark and a mark's attribute are read by their own key only. A key named `__proto__` is a key like any other and names nothing here; what it holds is not read as the item's attributes.
+- An element's attribute, a record and the format marker are each read from the newest item stored under their key, and only when that item is live and holds plain values (`ContentAny`, which is what `setAttribute` and `Y.Map.set` write); the value is the item's last. An item of any other kind under the key (a run of letters, an embedded value, old-style JSON, a binary value, a shared type, a sub-document) holds no value, so the attribute or record reads as missing. Yjs and yrs show such items differently, and both readers must give one document.
 - An array holds a value of its own at every position: one with a hole or `undefined` in it breaks the rule for `colwidth`, and a `path` with a hole is no path.
 - A mark is ON for a letter when the nearest earlier `ContentFormat` with that key holds a plain object (the mark's attributes; `{}` for none), and OFF when it holds anything else, an array or a binary value included, or there is none. Wherever these rules say object they mean a plain one. Keys that are not exactly a mark name are ignored (no hashed names).
 - When `code` is on, every other mark is ignored for that letter.
