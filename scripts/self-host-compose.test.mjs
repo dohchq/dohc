@@ -1428,4 +1428,14 @@ test("APNs settings are all or none, in the formats the relay accepts, with the 
       "Keep DOHC_RELAY_APNS_KEY_FILE outside DOHC_DATA_DIRECTORY. A deployment archive copies the deployment's folders.",
     ],
   );
+  const links = mkdtempSync(join(tmpdir(), "dohc-apns-link-"));
+  t.after(() => rmSync(links, { recursive: true, force: true }));
+  fs.symlinkSync(values.DOHC_RELAY_APNS_KEY_FILE, join(links, "apns-key.p8"));
+  assert.ok(
+    validateSettings({
+      ...values,
+      DOHC_RELAY_APNS_KEY_FILE: join(links, "apns-key.p8"),
+      DOHC_DATA_DIRECTORY: dirname(values.DOHC_RELAY_APNS_KEY_FILE),
+    }).some((error) => error.startsWith("Keep DOHC_RELAY_APNS_KEY_FILE outside")),
+  );
 });

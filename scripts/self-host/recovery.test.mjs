@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -527,7 +527,10 @@ test("an archive keeps bound configuration files but leaves out the APNs auth ke
         image: "image",
         volumes: [bind(ca, "/etc/dohc/postgres-ca.pem"), bind(key, apnsKeyTarget)],
       },
-      "workspace-api": { image: "image", volumes: [bind(ca, "/etc/dohc/postgres-ca.pem")] },
+      "workspace-api": {
+        image: "image",
+        volumes: [bind(ca, "/etc/dohc/postgres-ca.pem"), bind(key, "/run/override/apns.p8")],
+      },
     },
     volumes: {},
   };
@@ -572,6 +575,37 @@ test("an archive refuses an APNs auth key inside the deployment's storage before
     false,
   );
 });
+
+test(
+  "an archive refuses a link to an APNs auth key inside the deployment's storage",
+  { skip: process.platform === "win32" && "Links need administrator rights on Windows." },
+  async (t) => {
+    const root = await fixture(t),
+      folder = join(root, "disk", "sync-relay"),
+      link = join(root, "apns-key.p8");
+    await mkdir(folder, { recursive: true });
+    await writeFile(join(folder, "apns-key.p8"), "apple signing key");
+    await symlink(join(folder, "apns-key.p8"), link);
+    const mock = runner({
+      volumes: { recovery_data: bound(folder) },
+      served: {
+        ...config,
+        services: {
+          "sync-relay": {
+            ...config.services["sync-relay"],
+            volumes: [{ type: "bind", source: link, target: apnsKeyTarget, read_only: true }],
+          },
+        },
+      },
+    });
+    await assert.rejects(
+      runRecovery(parseRecoveryArguments(["archive", join(root, "archive")]), mock.run, () => {}, [
+        "compose",
+      ]),
+      /is inside the deployment's storage/,
+    );
+  },
+);
 
 test("offline verify needs no APNs auth key, and every other command does", async (t) => {
   const root = await fixture(t),

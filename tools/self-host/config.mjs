@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isDeepStrictEqual, parseEnv } from "node:util";
 import { posix, resolve } from "node:path";
 
@@ -240,7 +240,11 @@ export function validateSettings(settings) {
       errors.push(
         "Set DOHC_RELAY_APNS_KEY_FILE to the absolute path of the APNs auth key (.p8) on this server.",
       );
-    if (key && settings.DOHC_DATA_DIRECTORY && inside(key, settings.DOHC_DATA_DIRECTORY))
+    if (
+      key &&
+      settings.DOHC_DATA_DIRECTORY &&
+      inside(realPath(key), realPath(settings.DOHC_DATA_DIRECTORY))
+    )
       errors.push(
         "Keep DOHC_RELAY_APNS_KEY_FILE outside DOHC_DATA_DIRECTORY. A deployment archive copies the deployment's folders.",
       );
@@ -255,6 +259,14 @@ export function validateSettings(settings) {
   }
   return errors;
 }
+
+export const realPath = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
 
 const isFile = (path) => {
   try {
@@ -538,12 +550,14 @@ const storageFolders = (config, volumes) =>
 
 /** Returns each APNs auth key file inside the deployment's storage, where an archive would copy it. */
 export function apnsKeysInStorage(config, volumes) {
-  const storage = storageFolders(config, volumes);
+  const storage = storageFolders(config, volumes).map(realPath);
   return Object.values(config.services ?? {})
     .flatMap((service) => service.volumes ?? [])
     .filter((volume) => volume.type === "bind" && volume.target === apnsKeyTarget)
     .map((volume) => volume.source)
-    .filter((source) => storage.some((folder) => inside(normalizeDirectory(source), folder)));
+    .filter((source) =>
+      storage.some((folder) => inside(realPath(normalizeDirectory(source)), folder)),
+    );
 }
 
 /**

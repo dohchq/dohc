@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { apnsKeyTarget } from "../../tools/self-host/config.mjs";
+import { apnsKeyTarget, realPath } from "../../tools/self-host/config.mjs";
 
 const archiveVolumeScript = `
 const {spawnSync}=require('node:child_process');
@@ -55,8 +55,11 @@ export async function archiveDeployment(options, config, run) {
   const sources = (keep) => [
     ...new Set(binds.filter((volume) => keep(volume.target)).map((volume) => volume.source)),
   ];
-  const bindSources = sources((target) => target !== apnsKeyTarget);
   const apnsKeys = sources((target) => target === apnsKeyTarget);
+  const apnsFiles = new Set(apnsKeys.map(realPath));
+  const bindSources = sources((target) => target !== apnsKeyTarget).filter(
+    (source) => !apnsFiles.has(realPath(source)),
+  );
   for (const [index, source] of bindSources.entries()) {
     if (!(await stat(source)).isFile())
       throw new Error(
