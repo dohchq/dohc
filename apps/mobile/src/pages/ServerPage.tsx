@@ -10,12 +10,14 @@ import {
   useSyncExternalStore,
   type ComponentRef,
 } from "react";
-import { Alert, PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
+import { EllipsisVertical } from "lucide-react-native";
+import { Alert, PixelRatio, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { useReducedMotion } from "react-native-reanimated";
 import { WebView } from "react-native-webview";
 import { PageScrollTop } from "../../modules/page-scroll-top";
 import { useAccount, useSignIn } from "../account/AccountProvider";
+import { HeaderButton } from "../AndroidHeader";
 import { copyText } from "../copy";
 import { pageTitle } from "../home/homeModel";
 import { phoneWrites } from "../server/phoneWrites";
@@ -23,6 +25,7 @@ import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
+import { documentActions } from "./documentActions";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
 import { createPageHost } from "./pageHost";
 import { createPageLive, holdsPage, holdsUnsent, liveMark, type PageLiveState } from "./pageLive";
@@ -319,9 +322,22 @@ function PageScreen({ path }: { path: string }) {
                 <Mark markKey={markKey} theme={theme} />
               </Pressable>
             ),
+          headerRight:
+            Platform.OS === "android" && markdown !== null
+              ? () =>
+                  typing ? (
+                    <HeaderButton label="Done" onPress={endEditing} />
+                  ) : (
+                    <HeaderButton
+                      icon={EllipsisVertical}
+                      label={documentWords.documentActions}
+                      onPress={() => void documentActions(() => copyMarkdown())}
+                    />
+                  )
+              : undefined,
         }}
       />
-      {markdown === null ? null : (
+      {Platform.OS !== "ios" || markdown === null ? null : (
         <Stack.Toolbar placement="right">
           {typing ? (
             <Stack.Toolbar.Button variant="done" onPress={endEditing}>
