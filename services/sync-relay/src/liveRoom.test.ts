@@ -5,6 +5,10 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import type { LiveUpdateRefusal } from "@dohc/live-session-contract/live-update-admission";
 import {
+  createLiveMarkdownJournalValidator,
+  WORKER_LIVE_VALIDATION_POLICY,
+} from "@dohc/ydoc-projection/live-journal-validation";
+import {
   cleanupLiveDeliveryFixtures,
   registered,
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
@@ -497,6 +501,60 @@ it("saves one sender's edits under one access, and never joins two senders or tw
   expect(nextSave([edit(ana, undefined, 160)], 100)).toEqual([0]);
 });
 
+it("ends a save at someone's deletion it would come ahead of, so no save holds a note larger than one that was", () => {
+  const checkpoint = Y.encodeStateAsUpdate(
+    markdownToYDoc(`${"a".repeat(2 * 1024 * 1024 - 120)}\n\nBee\n\nCee\n`),
+  );
+  const page = () => {
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, checkpoint);
+    return doc;
+  };
+  const a = page(),
+    b = page(),
+    secondTab = page();
+  const rows: { sender: LiveAuthorSnapshot; authority: LiveRoomAuthority; bytes: Uint8Array }[] =
+    [];
+  const type = (doc: Y.Doc, paragraph: number, change: (text: Y.XmlText) => void) => {
+    let bytes: Uint8Array | undefined;
+    doc.once("update", (update: Uint8Array) => (bytes = update));
+    const body = doc.getXmlFragment("body");
+    doc.transact(() => change((body.get(paragraph) as Y.XmlElement).get(0) as Y.XmlText));
+    for (const other of [a, b, secondTab]) if (other !== doc) Y.applyUpdate(other, bytes!);
+    rows.push({ sender: doc === b ? ben : ana, authority: owner, bytes: bytes! });
+  };
+  type(a, 0, (text) => text.insert(1, "A"));
+  type(b, 1, (text) => text.insert(1, "b".repeat(70)));
+  type(a, 1, (text) => text.insert(71, "D"));
+  type(b, 1, (text) => text.delete(1, 70));
+  type(secondTab, 0, (text) => text.insert(2, "x".repeat(70)));
+  // Every note the edits made in turn fits the largest note. Ana's last edit saved ahead of
+  // Ben's deletion would leave Ben's paste a save that holds a note past it.
+  const journal = createLiveMarkdownJournalValidator(WORKER_LIVE_VALIDATION_POLICY);
+  const document = {
+    workspaceId: "workspace",
+    mainVersionId: "main",
+    objectId: "object",
+    lineageClaimId: "lineage",
+  };
+  const saved: Uint8Array[] = [];
+  let left = rows;
+  while (left.length) {
+    const picked = nextSave(left, 2 * 1024 * 1024);
+    const candidate = Y.mergeUpdates(picked.map((index) => left[index]!.bytes));
+    const answer = journal({
+      document,
+      currentPath: "note.md",
+      checkpoint,
+      suffix: saved,
+      candidate,
+    });
+    expect(answer.kind).toBe("accepted");
+    saved.push(candidate);
+    left = left.filter((_, index) => !picked.includes(index));
+  }
+});
+
 it("saves each person's edits together while two people type side by side, and tells the owner every row through which all are saved", async () => {
   const f = note();
   const engine: Engine = {};
@@ -566,42 +624,26 @@ it("leaves a person's edit that builds on someone else's unsaved edit for a save
   expect(saved.getMap("frontmatter").get("title")).toBe("Faro");
 });
 
-it("saves edits in the order they were taken when a save that left some out would hold a note the journal refuses", async () => {
-  const f = note(Y.encodeStateAsUpdate(markdownToYDoc("Original\r\nline\r\n")));
-  const engine: Engine = {};
+it("saves edits in the order they were taken when the journal refuses a save that left some out", async () => {
+  const f = note();
+  const engine: Engine = { answers: ["invalid-update"] };
   const room = rooms(f, {}, engine);
   const a = editor(f, room, ana),
     b = editor(f, room, ben);
   await a.open();
   await b.open();
-  const change = (page: typeof a, edit: (body: Y.XmlFragment) => void) => {
-    const before = Y.encodeStateVector(page.doc);
-    edit(page.doc.getXmlFragment("body"));
-    return Y.encodeStateAsUpdate(page.doc, before);
-  };
-  const first = (body: Y.XmlFragment) => (body.get(0) as Y.XmlElement).get(0) as Y.XmlText;
-  expect((await a.submit(change(a, (body) => first(body).insert(1, "A")))).result).toBe("success");
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
   await b.next();
-  const added = (body: Y.XmlFragment) => {
-    const text = new Y.XmlText();
-    text.insert(0, "B");
-    const paragraph = new Y.XmlElement("paragraph");
-    paragraph.insert(0, [text]);
-    body.insert(1, [paragraph]);
-  };
-  expect((await b.submit(change(b, added))).result).toBe("success");
+  expect((await b.submit(b.change("place", "Porto"))).result).toBe("success");
   await a.next();
-  // Without Ben's paragraph, Ana's two edits leave a note with no text, which a CRLF note can't be.
-  expect((await a.submit(change(a, (body) => body.delete(0, 1)))).result).toBe("success");
+  expect((await a.submit(a.change("day", "Monday"))).result).toBe("success");
   a.session.close();
   b.session.close();
   await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
   expect(pauses(f)).toEqual([]);
+  // The refused save held both of Ana's edits; the next three hold one edit each, in turn.
+  expect(engine.saves).toBe(4);
   expect(savedAuthors(f)).toEqual([ana, ben, ana]);
-  const saved = new Y.Doc();
-  Y.applyUpdate(saved, Y.encodeStateAsUpdate(f.doc));
-  for (const row of f.journalRows().journal) Y.applyUpdate(saved, rowBytes(row));
-  expect(saved.getXmlFragment("body").toString()).toBe("<paragraph>B</paragraph>");
 });
 
 it("ends a save at a deletion that would come ahead of someone's edit the save leaves out", async () => {

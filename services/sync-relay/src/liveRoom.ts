@@ -270,9 +270,10 @@ function buildsOn(update: ReturnType<typeof Y.decodeUpdate>, leftOut: ReadonlyMa
 /**
  * Which unsaved edits one save holds, oldest first: the oldest edit's sender's edits under its
  * access, up to the largest update the engine passes on. Others' edits are left for their own
- * saves, and so is any of the sender's that builds on one left out. A deletion past an edit left
- * out ends the save, since it would come ahead of that edit. `inOrder` ends the save at
- * someone else's edit instead, so it holds the note as it was when its last edit was taken.
+ * saves, and so is any of the sender's that builds on one left out. Once one is left out, the
+ * next deletion ends the save, so the note it holds is one that was, less some text added after.
+ * `inOrder` ends the save at someone else's edit instead, so it holds the note as it was when its
+ * last edit was taken.
  */
 export function nextSave(
   unsaved: readonly {
@@ -293,9 +294,8 @@ export function nextSave(
     if (!sender && inOrder) break;
     if (sender && !isDeepStrictEqual(edit.authority, first!.authority)) break;
     if (sender && taken.length && bytes + edit.bytes.byteLength > maxBytes) break;
-    const skipped = index !== taken.length;
-    const update = sender && !skipped ? undefined : Y.decodeUpdate(edit.bytes);
-    if (sender && skipped && update!.ds.clients.size) break;
+    const update = sender && index === taken.length ? undefined : Y.decodeUpdate(edit.bytes);
+    if (update?.ds.clients.size) break;
     if (sender && (!update || !buildsOn(update, leftOut))) {
       taken.push(index);
       bytes += edit.bytes.byteLength;
