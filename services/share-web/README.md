@@ -35,9 +35,9 @@ The share page also advertises `/api/mcp` through its HTTP `Link` header. That e
 An agent signs in with the standard MCP authorization (MCP 2025-06-18):
 
 1. The MCP client connects without a token. share-web answers 401, and its `WWW-Authenticate` header names `/.well-known/oauth-protected-resource/mcp/s/<secret>`.
-2. The client reads that document and `/.well-known/oauth-authorization-server`, then registers at `/oauth/register`.
+2. The client reads that document and `/.well-known/oauth-authorization-server` (which advertises RFC 9207 `authorization_response_iss_parameter_supported`), then registers at `/oauth/register`.
 3. The client opens `/oauth/authorize` in a browser with an S256 PKCE challenge. Its `resource` is the full MCP address.
-4. A person reads the consent page and selects **Allow**. The page names the share, its access, the name the agent reported, and the host the browser returns to. Anyone who has the MCP address can do this step, because the address holds the link secret.
+4. A person reads the consent page and selects **Allow**. The page names the share, its access, the name the agent reported, the host the browser returns to, and a note that dohc limits only what the agent reaches here. The redirect back to the client carries `iss` matching the server's `issuer`. Anyone who has the MCP address can do this step, because the address holds the link secret.
 5. The client trades the code for tokens at `/oauth/token`. It sends `Authorization: Bearer <access token>` on each MCP request.
 
 An access token lasts 1 hour. The client gets a new one with its refresh token.
@@ -92,7 +92,7 @@ The sign-in follows the steps above, with its own metadata at `/.well-known/oaut
 If the browser is signed out, `/oauth/authorize` first asks for the account's email and password, then returns to the same request.
 The consent page shows the signed-in account with **Not you?**, which signs the browser out.
 The person names a new agent, or chooses one of their agents to sign in again.
-They choose View, Comment, Edit, or None for each workspace the account owns. The address's workspace starts at Edit and the rest at None. Signing in again starts from the agent's current reach.
+They choose View, Comment, Edit, or None for each workspace the account owns. The address's workspace starts at View and the rest at None. Signing in again starts from the agent's current reach.
 **Allow** asks for no password. If the account's password changed after this browser signed in, the page asks the browser to sign in again first.
 The page runs no script, so choosing who the agent is posts the form and draws the page again.
 The relay keeps the agent, its reach, and its tokens, as it does for a link. Restarting share-web does not sign it out.

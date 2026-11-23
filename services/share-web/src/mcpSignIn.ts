@@ -351,6 +351,13 @@ function note(content: string): string {
   return `<div class="note">${INFO_ICON}<span>${content}</span></div>`;
 }
 
+function outsideDohcNote(agentName: string | null): string {
+  return note(
+    `${agentName === null ? "This agent" : `<bdi>${escapeHtml(agentName)}</bdi>`} runs outside dohc. ` +
+      "dohc limits what it reaches here, not what it does elsewhere.",
+  );
+}
+
 const START_AGAIN = "Start the sign-in again from your agent.";
 const TOO_MANY_SIGN_INS =
   "Too many sign-in requests came from this address. Try again in a few minutes.";
@@ -415,10 +422,15 @@ function sameSecret(left: string, right: string): boolean {
   return a.byteLength === b.byteLength && timingSafeEqual(a, b);
 }
 
-function redirectTo(redirectUri: string, values: Record<string, string | null>): Response {
+function redirectTo(
+  redirectUri: string,
+  iss: string,
+  values: Record<string, string | null>,
+): Response {
   const location = new URL(redirectUri);
   for (const [key, value] of Object.entries(values))
     if (value !== null) location.searchParams.set(key, value);
+  location.searchParams.set("iss", iss);
   return new Response(null, { status: 303, headers: { location: location.href } });
 }
 
@@ -484,8 +496,6 @@ function personalReturn(value: string | undefined, origin: string): string | nul
   return typeof auth === "string" || auth.workspaceId === null ? null : authorizeQuery(auth);
 }
 
-// The levels the consent page names, each adding to the one before. Edit
-// writes Collections only, so it says so: live documents are not offered yet.
 const LEVELS = ["view", "comment", "edit"] as const;
 type PersonalLevel = (typeof LEVELS)[number];
 const LEVEL_LABELS: Readonly<Record<PersonalLevel, string>> = {
@@ -493,11 +503,13 @@ const LEVEL_LABELS: Readonly<Record<PersonalLevel, string>> = {
   comment: "Comment",
   edit: "Edit",
 };
-const LEVEL_MEANINGS: Readonly<Record<PersonalLevel, string>> = {
-  view: "View reads files and chats.",
-  comment: "Comment also posts in chats and Comments.",
-  edit: "Edit also changes Collections, but no other files.",
-};
+function levelMeaning(level: PersonalLevel, liveDocuments: boolean): string {
+  if (level === "view") return "View reads files and chats.";
+  if (level === "comment") return "Comment also posts in chats and Comments.";
+  return liveDocuments
+    ? "Edit also changes Collections, and pages you have opened in dohc, but no other files."
+    : "Edit also changes Collections, but no other files.";
+}
 const isLevel = (value: unknown): value is PersonalLevel =>
   (LEVELS as readonly unknown[]).includes(value);
 
@@ -602,9 +614,6 @@ interface ConsentView {
   errors: ConsentErrors;
 }
 
-// A new agent starts with the address's workspace at the highest level
-// offered, and the name its client reported. Signing in again starts from
-// the agent's current reach.
 function startingChoice(
   consent: PersonalConsent,
   as: string,
@@ -616,11 +625,11 @@ function startingChoice(
       name: agent.name,
       reach: new Map([...agent.reach].filter(([workspaceId]) => listed.has(workspaceId))),
     };
-  const highest = consent.levels[consent.levels.length - 1];
+  const initialLevel = consent.levels[0];
   return {
     name: consent.reportedClientName ?? "",
     reach: new Map(
-      highest && listed.has(consent.workspaceId) ? [[consent.workspaceId, highest]] : [],
+      initialLevel && listed.has(consent.workspaceId) ? [[consent.workspaceId, initialLevel]] : [],
     ),
   };
 }
@@ -664,7 +673,12 @@ function chosenAgent(view: ConsentView): ChosenAgent {
   return { agent: null, name: typed.ok ? typed.name : null };
 }
 
-function consentContent(view: ConsentView, chosen: ChosenAgent, host: string): string {
+function consentContent(
+  view: ConsentView,
+  chosen: ChosenAgent,
+  host: string,
+  liveDocuments: boolean,
+): string {
   const { consent, errors } = view;
   const binding =
     hidden("request", view.requestId) +
@@ -752,7 +766,7 @@ function consentContent(view: ConsentView, chosen: ChosenAgent, host: string): s
   const meanings =
     consent.levels.length === 0
       ? ""
-      : `<p class="cap">${consent.levels.map((level) => LEVEL_MEANINGS[level]).join(" ")}</p>`;
+      : `<p class="cap">${consent.levels.map((level) => levelMeaning(level, liveDocuments)).join(" ")}</p>`;
   const allow =
     '<button type="submit" name="decision" value="allow" class="btn primary">Allow</button>';
   return (
@@ -762,10 +776,7 @@ function consentContent(view: ConsentView, chosen: ChosenAgent, host: string): s
     name +
     reach +
     meanings +
-    note(
-      `${chosen.name === null ? "This agent" : `<bdi>${escapeHtml(chosen.name)}</bdi>`} runs outside dohc. ` +
-        "dohc limits what it reaches here, not what it does elsewhere.",
-    ) +
+    outsideDohcNote(chosen.name) +
     (errors.form ? `<p class="error" role="alert">${escapeHtml(errors.form)}</p>` : "") +
     actions(returnsTo(consent.redirectUri), cancel + allow) +
     "</form>" +
@@ -777,6 +788,7 @@ function consentContent(view: ConsentView, chosen: ChosenAgent, host: string): s
 function consentPage(
   origin: string,
   view: ConsentView,
+  liveDocuments: boolean,
   status = 200,
   headers: HeadersInit = {},
 ): Response {
@@ -796,7 +808,7 @@ function consentPage(
   return page(
     origin,
     head,
-    consentContent(view, chosen, new URL(origin).host),
+    consentContent(view, chosen, new URL(origin).host, liveDocuments),
     {
       contentSecurityPolicy: signInPageCsp(consentFormAction(consent.redirectUri)),
       referrerPolicy: "same-origin",
@@ -886,7 +898,9 @@ export function createMcpSignIn(options: {
   newConsentSecret?: () => string;
   /** The browser's account, which signs a personal agent in. Without it only share links sign in. */
   account?: PersonalSignInAccount;
+  liveDocuments?: boolean;
 }) {
+  const liveDocuments = options.liveDocuments === true;
   const newConsentSecret =
     options.newConsentSecret ?? (() => randomBytes(32).toString("base64url"));
   const clientIp = (request: Request) =>
@@ -962,6 +976,7 @@ export function createMcpSignIn(options: {
       authorization_endpoint: `${origin}${AUTHORIZE}`,
       token_endpoint: `${origin}${TOKEN}`,
       registration_endpoint: `${origin}${REGISTER}`,
+      authorization_response_iss_parameter_supported: true,
       code_challenge_methods_supported: ["S256"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       response_types_supported: ["code"],
@@ -1128,14 +1143,14 @@ export function createMcpSignIn(options: {
       (value.reportedClientName !== null && typeof value.reportedClientName !== "string") ||
       value.redirectUri !== redirectUri
     ) {
-      return redirectTo(redirectUri, {
+      return redirectTo(redirectUri, origin, {
         error: consent.status === 404 ? "access_denied" : "temporarily_unavailable",
         state,
       });
     }
     const secret = newConsentSecret();
     if (!CONSENT_SECRET.test(secret))
-      return redirectTo(redirectUri, { error: "server_error", state });
+      return redirectTo(redirectUri, origin, { error: "server_error", state });
     const maxAge = Math.max(1, Math.ceil((value.expiresAtMs - options.nowMs()) / 1_000));
     const agentName =
       typeof value.reportedClientName === "string" ? value.reportedClientName : null;
@@ -1144,6 +1159,7 @@ export function createMcpSignIn(options: {
       `<div class="row"><dt>Share</dt><dd class="k">${escapeHtml(typeof value.subjectName === "string" ? value.subjectName : "Untitled share")}</dd></div>` +
       `<div class="row"><dt>Access</dt><dd class="k">${escapeHtml(ACCESS_LABELS[value.access] ?? value.access)}</dd></div>` +
       "</dl>" +
+      outsideDohcNote(agentName) +
       `<form method="post" action="${DECISION}">${hidden("request", requestId)}${hidden("secret", secret)}` +
       actions(
         returnsTo(redirectUri),
@@ -1273,7 +1289,7 @@ export function createMcpSignIn(options: {
       return errorPage(origin, ACCOUNT_UNAVAILABLE, 503);
     const secret = newConsentSecret();
     if (!CONSENT_SECRET.test(secret))
-      return redirectTo(auth.redirectUri, { error: "server_error", state: auth.state });
+      return redirectTo(auth.redirectUri, origin, { error: "server_error", state: auth.state });
     const maxAge = Math.max(1, Math.ceil((consent.expiresAtMs - options.nowMs()) / 1_000));
     return consentPage(
       origin,
@@ -1287,6 +1303,7 @@ export function createMcpSignIn(options: {
         ...startingChoice(consent, "new"),
         errors: {},
       },
+      liveDocuments,
       200,
       {
         "set-cookie": `${consentCookieName(requestId)}=${secret}; Path=/; Max-Age=${maxAge}; Secure; HttpOnly; SameSite=Strict`,
@@ -1345,6 +1362,7 @@ export function createMcpSignIn(options: {
     const state = typeof value.state === "string" ? value.state : null;
     const answer = redirectTo(
       value.redirectUri,
+      origin,
       decision === "allow"
         ? { code: String(value.code), state }
         : { error: "access_denied", state },
@@ -1533,7 +1551,7 @@ export function createMcpSignIn(options: {
       value: Record<string, unknown> & { redirectUri: string },
       values: Record<string, string | null>,
     ) => {
-      const answer = redirectTo(value.redirectUri, {
+      const answer = redirectTo(value.redirectUri, origin, {
         ...values,
         state: typeof value.state === "string" ? value.state : null,
       });
@@ -1568,7 +1586,11 @@ export function createMcpSignIn(options: {
       return errorPage(origin, `dohc could not read this choice. ${START_AGAIN}`);
     const base = { requestId, secret, returnQuery, email: signedIn.email, consent, as };
     if (decision === "choose")
-      return consentPage(origin, { ...base, ...startingChoice(consent, as), errors: {} });
+      return consentPage(
+        origin,
+        { ...base, ...startingChoice(consent, as), errors: {} },
+        liveDocuments,
+      );
 
     const listed = new Set(consent.workspaces.map((workspace) => workspace.workspaceId));
     const reach = new Map<string, PersonalLevel>();
@@ -1592,7 +1614,12 @@ export function createMcpSignIn(options: {
     else if (reach.size > PERSONAL_REACH_LIMIT)
       errors.reach = `Choose at most ${String(PERSONAL_REACH_LIMIT)} workspaces.`;
     const again = (status: number, shown: ConsentErrors) =>
-      consentPage(origin, { ...base, name: typedName, reach, errors: shown }, status);
+      consentPage(
+        origin,
+        { ...base, name: typedName, reach, errors: shown },
+        liveDocuments,
+        status,
+      );
     if (Object.keys(errors).length > 0) return again(400, errors);
 
     const allowed = await relay(
@@ -1629,6 +1656,7 @@ export function createMcpSignIn(options: {
           form: "dohc could not sign in this agent with these choices. Check that this account still owns each workspace, then choose Allow again.",
         },
       },
+      liveDocuments,
       409,
     );
   }
