@@ -1,6 +1,7 @@
 import { AGENT_RUN_HISTORY_DECLARATIONS } from "./agentRunHistoryDeclarations";
 import { CAPTURE_DECLARATIONS } from "./captureDeclarations";
 import { CHAT_DECLARATIONS } from "./chatDeclarations";
+import { INBOX_DECLARATIONS } from "./inboxDeclarations";
 import { LINKS_DECLARATIONS } from "./linksDeclarations";
 import { RETRIEVAL_DECLARATIONS } from "./retrievalDeclarations";
 import { ENVELOPE_FIELDS, type OperationFamily } from "./operationDeclaration";
@@ -10,6 +11,7 @@ import { ENVELOPE_FIELDS, type OperationFamily } from "./operationDeclaration";
 export const DECLARATION_FAMILIES = {
   capture: CAPTURE_DECLARATIONS,
   chat: CHAT_DECLARATIONS,
+  inbox: INBOX_DECLARATIONS,
   links: LINKS_DECLARATIONS,
   retrieval: RETRIEVAL_DECLARATIONS,
   agentRunHistory: AGENT_RUN_HISTORY_DECLARATIONS,

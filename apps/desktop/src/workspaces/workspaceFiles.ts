@@ -19,7 +19,10 @@ import {
 // It is imported directly rather than routed through the daemon because it is
 // a pure string decision on fail-closed paths, called up to ~2,000 times per
 // interaction here -- an RPC would add a failure mode where today there is none.
-import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import {
+  classifyEngineFilePath,
+  classifyEngineFilePathForRead,
+} from "@dohc/security-contract/engine-path-floor";
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import {
   directoryMayContainListedFiles,
@@ -1154,6 +1157,7 @@ export async function screenDroppedPaths(
   absolutePaths: string[],
   registeredRoots: string[],
   relDir: string,
+  options?: { onSecretSkipped?: (path: string) => void },
 ): Promise<{ usable: DroppedSource[]; skips: ImportSkips }> {
   // Defense in depth beyond the zod cap (bridgeContract): the handler refuses
   // an over-long batch itself, so a code path that ever reaches here without
@@ -1212,6 +1216,9 @@ export async function screenDroppedPaths(
         screened.entries,
         count,
         (path, reason) => skips.add(`${name}/${path}`, reason),
+        options?.onSecretSkipped
+          ? (path) => options.onSecretSkipped!(`${name}/${path}`)
+          : undefined,
       );
     }
     usable.push(screened);
@@ -1304,6 +1311,7 @@ async function screenDroppedFolder(
   entries: DroppedEntry[],
   count: DropCount,
   skip: (path: string, reason: ImportSkipReason) => void,
+  onSecretSkipped?: (path: string) => void,
 ): Promise<void> {
   await verifyDroppedFolder(dir, identity);
   for await (const dirent of await opendir(dir)) {
@@ -1312,6 +1320,11 @@ async function screenDroppedFolder(
       continue;
     }
     const path = prefix ? `${prefix}/${dirent.name}` : dirent.name;
+    if (onSecretSkipped && classifyEngineFilePath(dirent.name).kind === "secret") {
+      count.leaveOut();
+      onSecretSkipped(path);
+      continue;
+    }
     const info = await lstat(join(dir, dirent.name), { bigint: true }).catch(() => null);
     // The entry was seen through the folder the screen checked, not a link
     // swapped in for it.
@@ -1344,6 +1357,7 @@ async function screenDroppedFolder(
         entries,
         count,
         skip,
+        onSecretSkipped,
       );
     }
   }

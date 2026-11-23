@@ -155,6 +155,7 @@ describe("shortcut menu contract", () => {
         "new-file": "New file",
         "new-folder": "New folder",
         "new-collection": "New Collection",
+        "quick-capture": "Capture to Inbox",
         "open-workspace": "Open workspace folder…",
         "import-files": "Import files",
         "export-workspace": "Export workspace as ZIP",
@@ -182,7 +183,7 @@ describe("shortcut menu contract", () => {
     const row = SHORTCUTS["new-file"];
     const originalOwner = row.owner;
     const originalAccelerators = row.accelerators;
-    Reflect.set(row, "accelerators", ["CommandOrControl+N", "CommandOrControl+Shift+N"]);
+    Reflect.set(row, "accelerators", ["CommandOrControl+N", "CommandOrControl+Alt+N"]);
     try {
       for (const [owner, registerAccelerator] of [
         ["main", undefined],

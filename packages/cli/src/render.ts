@@ -761,6 +761,43 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderPlanUndoAgentRun(result as CliResultByVerb["planUndoAgentRun"]);
     case "undoAgentRun":
       return renderUndoAgentRun(result as Extract<CliResultByVerb["undoAgentRun"], { ok: true }>);
+    case "inboxList": {
+      const list = result as CliResultByVerb["inboxList"];
+      if (!list.exists || list.items.length === 0) return "Inbox is empty.";
+      const lines = list.items.map((item) => {
+        const parts = [
+          `[${item.status ?? "New"}]`,
+          lineSafe(item.title || item.path),
+          item.path,
+          ...(item.source ? [item.source] : []),
+          ...(item.received ? [item.received] : []),
+        ];
+        return parts.join(" · ");
+      });
+      if (list.hasMore) lines.push("More items exist; raise --limit to see them.");
+      return lines.join("\n");
+    }
+    case "inboxAdd": {
+      const added = result as CliResultByVerb["inboxAdd"];
+      return added.ok ? `Captured ${lineSafe(added.title)} · ${added.path}` : added.reason;
+    }
+    case "inboxArchive": {
+      const archived = result as CliResultByVerb["inboxArchive"];
+      return archived.ok ? `Archived ${archived.path}` : archived.reason;
+    }
+    case "inboxMove": {
+      const moved = result as CliResultByVerb["inboxMove"];
+      if (!moved.ok) return moved.reason;
+      const lines = [
+        `Moved ${moved.fromPath} → ${moved.toPath}${moved.operationId ? ` · operation ${moved.operationId}` : ""}`,
+      ];
+      for (const attachment of moved.attachments) {
+        lines.push(
+          `Moved ${attachment.fromPath} → ${attachment.toPath}${attachment.operationId ? ` · operation ${attachment.operationId}` : ""}`,
+        );
+      }
+      return lines.join("\n");
+    }
     default:
       return JSON.stringify(result, null, 2);
   }

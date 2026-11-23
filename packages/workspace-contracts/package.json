@@ -69,7 +69,10 @@
     "./usage": "./src/usage.ts",
     "./work-links": "./src/workLinks.ts",
     "./workspace-secrets": "./src/workspaceSecrets.ts",
-    "./http-step-approvals": "./src/httpStepApprovals.ts"
+    "./http-step-approvals": "./src/httpStepApprovals.ts",
+    "./inbox": "./src/inbox.ts",
+    "./inbox-declarations": "./src/inboxDeclarations.ts",
+    "./inbox-write-declarations": "./src/inboxWriteDeclarations.ts"
   },
   "scripts": {
     "test": "vitest run",

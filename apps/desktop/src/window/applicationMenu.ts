@@ -151,6 +151,7 @@ export function buildMenuTemplate(options: {
         ...command("new-file"),
         ...command("new-folder"),
         ...command("new-collection"),
+        ...command("quick-capture"),
         { type: "separator" },
         ...command("open-workspace"),
         {

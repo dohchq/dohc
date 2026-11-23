@@ -246,5 +246,12 @@
   "desktop:outside-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:retrieve-workspace": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:plan-undo-agent-run": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:undo-agent-run": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:undo-agent-run": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:inbox-list": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:inbox-add": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:inbox-archive": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:inbox-capture-files": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "inboxHandlers.currentWorkspaceOperation" } },
+  "desktop:inbox-move": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:inbox-undo-archive": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:inbox-undo-move": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }

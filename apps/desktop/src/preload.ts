@@ -7,6 +7,11 @@ import {
   protectedCopyOperations,
   stoppedRunOperations,
 } from "./ipc/writeOperations";
+import {
+  inboxDesktopOperations,
+  inboxReadOperations,
+  inboxWriteOperations,
+} from "./ipc/inboxOperations";
 import { heldChangeOperations } from "./ipc/heldChangeOperations";
 import {
   shareHandoffOperations,
@@ -599,6 +604,9 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(stoppedRunOperations, invoke),
   ...operationBridge(protectedCopyOperations, invoke),
   ...operationBridge(agentRunUndoOperations, invoke),
+  ...operationBridge(inboxReadOperations, invoke),
+  ...operationBridge(inboxWriteOperations, invoke),
+  ...operationBridge(inboxDesktopOperations, invoke),
   ...operationBridge(chatDispatchPauseOperations, invoke),
   ...operationBridge(agentThreadOperations, invoke),
   onChatDispatchPaused: (listener) =>
