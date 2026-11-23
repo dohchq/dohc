@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -127,22 +127,39 @@ describe("eval cases", () => {
     },
   );
 
-  it("answers dohc_search_workspace and refuses paths outside the sample workspace", async () => {
+  it("answers dohc_search_workspace, refuses paths outside workspace (including junctions), rejects invalid collection manifests, and serializes concurrent writes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "dohc-eval-standin-"));
     const root = join(dir, "workspace");
     const home = join(dir, "home");
-    const outside = join(dir, "outside.json");
+    const outsideDir = join(dir, "outside-dir");
     const unansweredLog = join(dir, "unanswered.log");
     try {
       await seedWorkspace(
         root,
         {
           ...EVERYDAY_CASES[0]!,
-          files: { "notes/plan.md": "# Kyoto\nVisit Fushimi Inari.\n" },
+          files: {
+            "notes/plan.md": "# Kyoto\nVisit Fushimi Inari.\n",
+            "bad-app/index.html": "<!doctype html><h1>Bad</h1>\n",
+            "bad-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html"],
+              packageMap: {},
+              collection: true,
+            }),
+          },
         },
         home,
       );
-      await writeFile(outside, JSON.stringify({ secret: true }));
+      await mkdir(outsideDir, { recursive: true });
+      await writeFile(join(outsideDir, "secret.json"), JSON.stringify({ secret: true }));
+      await symlink(
+        outsideDir,
+        join(root, "escape-dir"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
       const answers = await createEverydayDesktop(root, { workspaceId: "ws-everyday" });
       const desktop = fakeDesktop({ root, answers, unansweredLog });
       const server = createDohcMcpServer({
@@ -171,32 +188,160 @@ describe("eval cases", () => {
           request: {
             action: "prepare",
             workspaceId: "ws-everyday",
-            descriptorPath: "../outside.json",
+            descriptorPath: "../outside-dir/secret.json",
           },
         },
       });
       expect(traversal.isError).toBe(true);
 
-      let symlinkCreated = false;
-      try {
-        await symlink(outside, join(root, "escape.json"));
-        symlinkCreated = true;
-      } catch {
-        symlinkCreated = false;
-      }
-      if (symlinkCreated) {
-        const escaped = await client.callTool({
+      const escaped = await client.callTool({
+        name: "dohc_dataset",
+        arguments: {
+          request: {
+            action: "prepare",
+            workspaceId: "ws-everyday",
+            descriptorPath: "escape-dir/secret.json",
+          },
+        },
+      });
+      expect(escaped.isError).toBe(true);
+
+      const badManifest = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "prepareLocal",
+            workspaceId: "ws-everyday",
+            appRoot: "bad-app",
+          },
+        },
+      });
+      expect(badManifest.isError).toBe(true);
+
+      // Verify concurrent dataset writes do not clobber each other's snapshot.
+      const createRes = await client.callTool({
+        name: "dohc_dataset",
+        arguments: {
+          request: {
+            action: "create",
+            workspaceId: "ws-everyday",
+            definition: {
+              formatVersion: 1,
+              datasetId: "99000000-0000-4000-8000-000000000001",
+              name: "Concurrent",
+              schemaPath: "conc/schema.sql",
+              operationsPath: "conc/ops.js",
+              tables: [
+                {
+                  tableId: "99000000-0000-4000-8000-000000000002",
+                  name: "Items",
+                  sqlName: "items",
+                  primaryKey: "id",
+                  fields: [
+                    {
+                      fieldId: "99000000-0000-4000-8000-000000000003",
+                      name: "ID",
+                      sqlColumn: "id",
+                      type: "text",
+                      required: true,
+                      unique: true,
+                      generated: "record-id",
+                    },
+                    {
+                      fieldId: "99000000-0000-4000-8000-000000000004",
+                      name: "Label",
+                      sqlColumn: "label",
+                      type: "text",
+                      required: true,
+                      unique: false,
+                    },
+                  ],
+                },
+              ],
+              operations: [
+                {
+                  operationId: "99000000-0000-4000-8000-000000000005",
+                  name: "addItem",
+                  label: "Add",
+                  tableId: "99000000-0000-4000-8000-000000000002",
+                  kind: "create",
+                  access: "owner",
+                  readOnly: false,
+                  fieldIds: ["99000000-0000-4000-8000-000000000004"],
+                },
+                {
+                  operationId: "99000000-0000-4000-8000-000000000006",
+                  name: "listItems",
+                  label: "List",
+                  tableId: "99000000-0000-4000-8000-000000000002",
+                  kind: "read",
+                  access: "owner",
+                  readOnly: true,
+                  fieldIds: [
+                    "99000000-0000-4000-8000-000000000003",
+                    "99000000-0000-4000-8000-000000000004",
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      });
+      const rev = (
+        createRes.structuredContent as { revision: { revision: number; revisionSha256: string } }
+      ).revision;
+      const [w1, w2] = await Promise.all([
+        client.callTool({
           name: "dohc_dataset",
           arguments: {
             request: {
-              action: "prepare",
+              action: "invoke",
               workspaceId: "ws-everyday",
-              descriptorPath: "escape.json",
+              datasetPath: "conc/dataset.json",
+              operationId: "99000000-0000-4000-8000-000000000005",
+              revision: rev.revision,
+              revisionSha256: rev.revisionSha256,
+              input: { values: { "99000000-0000-4000-8000-000000000004": "First" } },
+              idempotencyKey: "k1",
             },
           },
-        });
-        expect(escaped.isError).toBe(true);
-      }
+        }),
+        client.callTool({
+          name: "dohc_dataset",
+          arguments: {
+            request: {
+              action: "invoke",
+              workspaceId: "ws-everyday",
+              datasetPath: "conc/dataset.json",
+              operationId: "99000000-0000-4000-8000-000000000005",
+              revision: rev.revision,
+              revisionSha256: rev.revisionSha256,
+              input: { values: { "99000000-0000-4000-8000-000000000004": "Second" } },
+              idempotencyKey: "k2",
+            },
+          },
+        }),
+      ]);
+      expect(w1.isError).not.toBe(true);
+      expect(w2.isError).not.toBe(true);
+      const listed = await client.callTool({
+        name: "dohc_dataset",
+        arguments: {
+          request: {
+            action: "invoke",
+            workspaceId: "ws-everyday",
+            datasetPath: "conc/dataset.json",
+            operationId: "99000000-0000-4000-8000-000000000006",
+            revision: rev.revision,
+            revisionSha256: rev.revisionSha256,
+            input: {},
+            idempotencyKey: "k3",
+          },
+        },
+      });
+      const listedText = JSON.stringify(listed.structuredContent);
+      expect(listedText).toContain("First");
+      expect(listedText).toContain("Second");
 
       await client.close();
       await server.close();
@@ -206,23 +351,34 @@ describe("eval cases", () => {
     }
   });
 
-  it("fails the finance and booking graders on broken implementations", async () => {
+  it("fails the finance, booking, and connected-form graders on broken implementations", async () => {
     const finance = EVERYDAY_CASES.find((c) => c.id === "everyday-finance-health-tracker")!;
     const financeSolved = await replay(finance, "solution");
-    const readOnlyFinanceRun: RunRecord = {
+    const spoofedFinanceRun: RunRecord = {
       ...financeSolved.run,
       calls: financeSolved.run.calls.map((call) => {
-        if (
-          call.tool === "dohc_dataset" &&
-          (call.args.request as Record<string, unknown> | undefined)?.action === "invoke"
-        ) {
+        const req = call.args.request as Record<string, unknown> | undefined;
+        if (call.tool === "dohc_dataset" && req?.action === "invoke") {
           return {
             ...call,
             args: {
               request: {
-                ...(call.args.request as Record<string, unknown>),
-                operationId: "a1000000-0000-4000-8000-000000000014",
-                input: {},
+                ...req,
+                input: {
+                  values:
+                    req.operationId === "a1000000-0000-4000-8000-000000000013"
+                      ? {
+                          "a1000000-0000-4000-8000-000000000004": "2026-11-22",
+                          "a1000000-0000-4000-8000-000000000005": "Seafood",
+                          "a1000000-0000-4000-8000-000000000006": 118.5,
+                          "a1000000-0000-4000-8000-000000000007": "Seafood 118.50",
+                        }
+                      : {
+                          "a1000000-0000-4000-8000-000000000010": "2026-11-22",
+                          "a1000000-0000-4000-8000-000000000011": 17.5,
+                          "a1000000-0000-4000-8000-000000000012": 400,
+                        },
+                },
               },
             },
           };
@@ -230,7 +386,7 @@ describe("eval cases", () => {
         return call;
       }),
     };
-    const financeChecks = await grade(finance.expect, readOnlyFinanceRun, finance.gradeRun);
+    const financeChecks = await grade(finance.expect, spoofedFinanceRun, finance.gradeRun);
     expect(financeChecks.some((c) => !c.pass && c.name.includes("expense"))).toBe(true);
     expect(financeChecks.some((c) => !c.pass && c.name.includes("check-in"))).toBe(true);
 
@@ -241,9 +397,9 @@ describe("eval cases", () => {
       files: {
         ...bookingSolved.run.files,
         "workshop/backend.ts": `globalThis.operations = {
-  // mentions ctx.refuse in a comment without enforcing capacity
   bookSeat(ctx, input) {
-    ctx.db.execute("INSERT INTO bookings(id, name, seats) VALUES(?, ?, ?)", [ctx.requestId, String(input?.name ?? ""), Number(input?.seats ?? 1)]);
+    if (Number(input?.seats) === 4) ctx.refuse("no_four", "No fours");
+    ctx.db.execute("INSERT INTO bookings(id, name, seats) VALUES(?, ?, ?)", [ctx.requestId, String(input?.name ?? ""), 1]);
     return { id: ctx.requestId };
   },
   listBookings(ctx) {
@@ -253,7 +409,24 @@ describe("eval cases", () => {
       },
     };
     const bookingChecks = await grade(booking.expect, brokenBookingRun, booking.gradeRun);
-    expect(bookingChecks.some((c) => !c.pass && c.name.includes("refuses 4 more"))).toBe(true);
+    expect(bookingChecks.some((c) => !c.pass && c.name.includes("8-seat capacity"))).toBe(true);
+
+    const form = EVERYDAY_CASES.find((c) => c.id === "everyday-connected-form-relations")!;
+    const formSolved = await replay(form, "solution");
+    const bogusManifest = JSON.parse(formSolved.run.files["apps/signup-form/app.publish.json"]!);
+    bogusManifest.dataset.operationIds = [
+      "e2000000-0000-4000-8000-000000000011",
+      "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    ];
+    const bogusFormRun: RunRecord = {
+      ...formSolved.run,
+      files: {
+        ...formSolved.run.files,
+        "apps/signup-form/app.publish.json": JSON.stringify(bogusManifest, null, 2),
+      },
+    };
+    const formChecks = await grade(form.expect, bogusFormRun, form.gradeRun);
+    expect(formChecks.some((c) => !c.pass && c.detail?.includes("not in approved"))).toBe(true);
   });
 
   it("keeps public skill automations.yaml examples valid under parseAutomationsFile", async () => {

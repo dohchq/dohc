@@ -27,7 +27,7 @@ export interface EvalCase {
   /** Builds fresh per-sample stateful desktop handlers (for example, SQLite-backed datasets). */
   setupDesktop?: (
     root: string,
-    options?: { onWrite?: (path: string) => void },
+    options?: { onWrite?: (path: string, contentSha256: string) => void },
   ) => Record<string, DesktopAnswer> | Promise<Record<string, DesktopAnswer>>;
   /** What the person asks the agent. */
   prompt: string;

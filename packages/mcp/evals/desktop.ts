@@ -4,6 +4,7 @@
 // request gets the answer the case lists, and an unlisted one is recorded so the sample ends
 // as an error instead of grading an agent against an app that does not answer.
 
+import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ToolContext } from "../src/tools";
@@ -20,16 +21,23 @@ async function writeText(
   root: string,
   path: string,
   content: string | Buffer,
-  onWrite?: (path: string) => void,
+  onWrite?: (path: string, contentSha256: string) => void,
 ): Promise<void> {
   await mkdir(dirname(join(root, path)), { recursive: true });
   await writeFile(join(root, path), content);
-  onWrite?.(path.replaceAll("\\", "/"));
+  if (onWrite) {
+    const hash = createHash("sha256").update(content).digest("hex");
+    onWrite(path.replaceAll("\\", "/"), hash);
+  }
 }
 
 export const workspaceVerbs: Record<
   string,
-  (root: string, args: Args, onWrite?: (path: string) => void) => Promise<unknown>
+  (
+    root: string,
+    args: Args,
+    onWrite?: (path: string, contentSha256: string) => void,
+  ) => Promise<unknown>
 > = {
   async documentRead(root, args) {
     const path = String(args.path);
@@ -88,7 +96,7 @@ export function fakeDesktop(input: {
   answers: Readonly<Record<string, DesktopAnswer>>;
   /** Receives one line per request the case does not answer. */
   unansweredLog: string;
-  onWrite?: (path: string) => void;
+  onWrite?: (path: string, contentSha256: string) => void;
 }): DesktopRequest {
   return async (request) => {
     const args = request.args as Args;

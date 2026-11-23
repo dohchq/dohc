@@ -3,6 +3,7 @@ import {
   evaluateAppOperation,
   initializeAppDatabase,
   isAppBackendRuntimeError,
+  type JsonValue,
 } from "@dohc/app-backend-runtime";
 import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
@@ -720,7 +721,17 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         { tool: "dohc_publish_app", args: { "request.action": "launchLocal" }, ok: true },
       ],
     },
-    gradeRun: (run) => {
+    gradeRun: async (run) => {
+      const collectPrimitives = (value: unknown, out: Array<string | number> = []) => {
+        if (typeof value === "string" || typeof value === "number") {
+          out.push(value);
+        } else if (Array.isArray(value)) {
+          for (const item of value) collectPrimitives(item, out);
+        } else if (value && typeof value === "object") {
+          for (const entry of Object.values(value)) collectPrimitives(entry, out);
+        }
+        return out;
+      };
       const checks: Check[] = [
         checkDatasetJsonValid(run, "tracker/dataset.json"),
         checkAppPublishDataset(run, "apps/control-tower/app.publish.json", "tracker/dataset.json"),
@@ -741,15 +752,27 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       } catch {
         def = undefined;
       }
-      const tableNames = (def?.tables ?? []).map((t) => `${t.name} ${t.sqlName}`.toLowerCase());
+      const expenseTable = def?.tables.find((t) =>
+        `${t.name} ${t.sqlName}`.toLowerCase().includes("expense"),
+      );
+      const checkinTable = def?.tables.find((t) => {
+        const label = `${t.name} ${t.sqlName}`.toLowerCase();
+        return (
+          label.includes("checkin") || label.includes("check-in") || label.includes("check_in")
+        );
+      });
       const hasBothTables =
-        (def?.tables.length ?? 0) >= 2 &&
-        tableNames.some((n) => n.includes("expense")) &&
-        tableNames.some((n) => n.includes("checkin") || n.includes("check-in"));
+        expenseTable !== undefined &&
+        checkinTable !== undefined &&
+        expenseTable.tableId !== checkinTable.tableId;
       checks.push({
         name: "tracker/dataset.json declares both expenses and checkins tables",
         pass: hasBothTables,
-        ...(hasBothTables ? {} : { detail: `tables: ${tableNames.join(", ") || "none"}` }),
+        ...(hasBothTables
+          ? {}
+          : {
+              detail: `tables: ${(def?.tables ?? []).map((t) => t.sqlName).join(", ") || "none"}`,
+            }),
       });
       const opById = new Map((def?.operations ?? []).map((op) => [op.operationId, op]));
       const writeInvokes = run.calls
@@ -761,22 +784,82 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
           return op !== undefined && !op.readOnly;
         });
       const expenseWrite = writeInvokes.find((req) => {
-        const text = JSON.stringify(req.input ?? {}).toLowerCase();
-        return text.includes("food") && text.includes("18.5");
+        const op = opById.get(String(req.operationId));
+        if (!op || (expenseTable && op.tableId !== expenseTable.tableId)) return false;
+        const vals = collectPrimitives(req.input);
+        const hasFood = vals.some(
+          (v) => typeof v === "string" && v.trim().toLowerCase() === "food",
+        );
+        const hasAmount = vals.some((v) => v === 18.5);
+        return hasFood && hasAmount;
       });
       const checkinWrite = writeInvokes.find((req) => {
-        const text = JSON.stringify(req.input ?? {}).toLowerCase();
-        return text.includes("7.5") && text.includes("40");
+        const op = opById.get(String(req.operationId));
+        if (!op || (checkinTable && op.tableId !== checkinTable.tableId)) return false;
+        const vals = collectPrimitives(req.input);
+        const hasSleep = vals.some((v) => v === 7.5);
+        const hasWorkout = vals.some((v) => v === 40);
+        return hasSleep && hasWorkout;
       });
+      let expensePersisted = false;
+      let checkinPersisted = false;
+      if (def && expenseWrite && checkinWrite) {
+        const schemaSql = run.files[def.schemaPath];
+        const opSource = run.files[def.operationsPath];
+        if (schemaSql && opSource) {
+          try {
+            const compiled = await compileDatasetOperations(opSource, def.operationsPath);
+            const tables = def.tables.map((t) => t.sqlName);
+            const db0 = await initializeAppDatabase({ schemaSql, tables });
+            const expOp = opById.get(String(expenseWrite.operationId))!;
+            const afterExp = await evaluateAppOperation({
+              database: db0,
+              source: compiled,
+              operation: expOp.name,
+              caller: { kind: "owner" },
+              input: (expenseWrite.input ?? {}) as JsonValue,
+              nowMs: 1_760_000_000_000,
+              requestId: "grade-exp-1",
+              tables,
+              readOnly: false,
+            });
+            expensePersisted = afterExp.changed;
+            const chkOp = opById.get(String(checkinWrite.operationId))!;
+            const afterChk = await evaluateAppOperation({
+              database: afterExp.database,
+              source: compiled,
+              operation: chkOp.name,
+              caller: { kind: "owner" },
+              input: (checkinWrite.input ?? {}) as JsonValue,
+              nowMs: 1_760_000_001_000,
+              requestId: "grade-chk-1",
+              tables,
+              readOnly: false,
+            });
+            checkinPersisted = afterChk.changed;
+          } catch {
+            expensePersisted = false;
+            checkinPersisted = false;
+          }
+        }
+      }
       checks.push({
         name: "saved the expense (Food, 18.5) via an approved write operation",
-        pass: expenseWrite !== undefined,
-        ...(expenseWrite ? {} : { detail: `saw ${writeInvokes.length} write invoke(s)` }),
+        pass: expenseWrite !== undefined && expensePersisted,
+        ...(expenseWrite && expensePersisted
+          ? {}
+          : {
+              detail: `matched=${String(expenseWrite !== undefined)}, persisted=${String(expensePersisted)}`,
+            }),
       });
       checks.push({
         name: "saved the check-in (7.5 sleep, 40 workout) via an approved write operation",
-        pass: checkinWrite !== undefined,
-        ...(checkinWrite ? {} : { detail: `saw ${writeInvokes.length} write invoke(s)` }),
+        pass: checkinWrite !== undefined && checkinPersisted,
+        ...(checkinWrite && checkinPersisted
+          ? {}
+          : {
+              detail: `matched=${String(checkinWrite !== undefined)}, persisted=${String(checkinPersisted)}`,
+            }),
       });
       return checks;
     },
@@ -1030,56 +1113,65 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
             const compiled = await compileDatasetOperations(opSource, def.operationsPath);
             const tables = def.tables.map((t) => t.sqlName);
             const db0 = await initializeAppDatabase({ schemaSql, tables });
-            const first = await evaluateAppOperation({
-              database: db0,
-              source: compiled,
-              operation: "bookSeat",
-              caller: { kind: "link", shareId: "s1", grantId: "g1" },
-              input: { name: "Alice", seats: 5 },
-              nowMs: 1_760_000_000_000,
-              requestId: "book-1",
-              tables,
-              readOnly: false,
-            });
-            let refusedOverCap = false;
-            try {
-              await evaluateAppOperation({
-                database: first.database,
+            const book = (database: Uint8Array, name: string, seats: number, requestId: string) =>
+              evaluateAppOperation({
+                database,
                 source: compiled,
                 operation: "bookSeat",
                 caller: { kind: "link", shareId: "s1", grantId: "g1" },
-                input: { name: "Bob", seats: 4 },
-                nowMs: 1_760_000_001_000,
-                requestId: "book-2",
+                input: { name, seats },
+                nowMs: 1_760_000_000_000,
+                requestId,
                 tables,
                 readOnly: false,
               });
-            } catch (error) {
-              refusedOverCap = isAppBackendRuntimeError(error);
-            }
-            const exactCap = await evaluateAppOperation({
-              database: first.database,
-              source: compiled,
-              operation: "bookSeat",
-              caller: { kind: "link", shareId: "s1", grantId: "g1" },
-              input: { name: "Cara", seats: 3 },
-              nowMs: 1_760_000_002_000,
-              requestId: "book-3",
-              tables,
-              readOnly: false,
-            });
+            const expectRefused = async (
+              database: Uint8Array,
+              name: string,
+              seats: number,
+              requestId: string,
+            ): Promise<boolean> => {
+              try {
+                await book(database, name, seats, requestId);
+                return false;
+              } catch (error) {
+                return isAppBackendRuntimeError(error);
+              }
+            };
+            const first = await book(db0, "Alice", 5, "book-1");
+            const refusedOverCap = await expectRefused(first.database, "Bob", 4, "book-2");
+            const exactCap = await book(first.database, "Cara", 3, "book-3");
+            const refusedAfterFull = await expectRefused(exactCap.database, "Dan", 1, "book-4");
+
+            const fourFirst = await book(db0, "Solo", 4, "book-5");
+            const fourSecond = await book(fourFirst.database, "Pair", 4, "book-6");
+            const refusedAfterPairs = await expectRefused(
+              fourSecond.database,
+              "Extra",
+              1,
+              "book-7",
+            );
+
+            const passed =
+              first.changed &&
+              refusedOverCap &&
+              exactCap.changed &&
+              refusedAfterFull &&
+              fourFirst.changed &&
+              fourSecond.changed &&
+              refusedAfterPairs;
             checks.push({
-              name: "bookSeat accepts 5 seats, refuses 4 more (>8), and accepts 3 more (=8)",
-              pass: refusedOverCap && exactCap.changed,
-              ...(refusedOverCap && exactCap.changed
+              name: "bookSeat enforces 8-seat capacity across multiple booking sequences",
+              pass: passed,
+              ...(passed
                 ? {}
                 : {
-                    detail: `refusedOverCap=${String(refusedOverCap)}, exactCapChanged=${String(exactCap.changed)}`,
+                    detail: `5+4ref=${String(refusedOverCap)}, 5+3ok=${String(exactCap.changed)}, 8+1ref=${String(refusedAfterFull)}, 4+4ok=${String(fourFirst.changed && fourSecond.changed)}, pairsFullRef=${String(refusedAfterPairs)}`,
                   }),
             });
           } catch (error) {
             checks.push({
-              name: "bookSeat accepts 5 seats, refuses 4 more (>8), and accepts 3 more (=8)",
+              name: "bookSeat enforces 8-seat capacity across multiple booking sequences",
               pass: false,
               detail: error instanceof Error ? error.message : String(error),
             });
@@ -1507,25 +1599,53 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         },
       ],
     },
-    gradeRun: (run) => [
-      checkAppPublishDataset(
-        run,
-        "apps/signup-form/app.publish.json",
-        "events/dataset.json",
-        (ref) => {
-          if (ref.operationIds.includes(uuid("e2000000", 10))) {
-            return "leaked private owner readSessions operation";
-          }
-          if (!ref.operationIds.includes(uuid("e2000000", 11))) {
-            return "missing createSignup operation";
-          }
-          if (ref.operationIds.length < 2) {
-            return "missing generated relation-choices read operation";
-          }
-          return null;
-        },
-      ),
-    ],
+    gradeRun: (run) => {
+      let approvedDef: DatasetDefinition | undefined;
+      try {
+        approvedDef = parseDatasetDefinition(JSON.parse(run.files["events/dataset.json"] ?? ""));
+      } catch {
+        approvedDef = undefined;
+      }
+      const approvedById = new Map((approvedDef?.operations ?? []).map((o) => [o.operationId, o]));
+      const validChoiceOps = new Set(
+        (approvedDef?.operations ?? [])
+          .filter(
+            (o) =>
+              o.kind === "read" &&
+              o.access === "link" &&
+              o.tableId === uuid("e2000000", 2) &&
+              o.fieldIds.length === 2 &&
+              o.fieldIds.includes(uuid("e2000000", 3)) &&
+              o.fieldIds.includes(uuid("e2000000", 4)) &&
+              !o.fieldIds.includes(uuid("e2000000", 5)),
+          )
+          .map((o) => o.operationId),
+      );
+      return [
+        checkDatasetJsonValid(run, "events/dataset.json"),
+        checkAppPublishDataset(
+          run,
+          "apps/signup-form/app.publish.json",
+          "events/dataset.json",
+          (ref) => {
+            if (ref.operationIds.includes(uuid("e2000000", 10))) {
+              return "leaked private owner readSessions operation";
+            }
+            if (!ref.operationIds.includes(uuid("e2000000", 11))) {
+              return "missing createSignup operation";
+            }
+            const unknownOp = ref.operationIds.find((opId) => !approvedById.has(opId));
+            if (unknownOp) {
+              return `operationId ${unknownOp} is not in approved events/dataset.json`;
+            }
+            if (!ref.operationIds.some((opId) => validChoiceOps.has(opId))) {
+              return "missing approved Title-only Sessions relation-choices read operation";
+            }
+            return null;
+          },
+        ),
+      ];
+    },
     solution: {
       run: async (callTool) => {
         const described = (await callTool("dohc_dataset", {

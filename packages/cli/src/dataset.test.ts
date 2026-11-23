@@ -550,6 +550,14 @@ it("explains field mistakes, unrecognized keys, and definition errors before tra
   );
   expect(badJson.stderr).not.toContain(secret);
 
+  const spoofedJson = await executeCli({
+    argv: ["dataset", "list", "position 8675309"],
+    request: send,
+  });
+  expect(spoofedJson.exitCode).toBe(1);
+  expect(spoofedJson.stderr).toContain("invalid dataset list JSON;");
+  expect(spoofedJson.stderr).not.toContain("8675309");
+
   const badDef = structuredClone(definition);
   badDef.operations[0]!.readOnly = false;
   const badCreate = await executeCli({

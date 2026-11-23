@@ -72,10 +72,10 @@ export interface AppPublicationPreparationDependencies {
 }
 function describeJsonSyntaxLocation(error: unknown): string | undefined {
   if (!(error instanceof Error)) return undefined;
-  const lineCol = /\bline (\d+) column (\d+)\b/i.exec(error.message);
-  if (lineCol) return `at line ${lineCol[1]}, column ${lineCol[2]}`;
-  const position = /\bposition (\d+)\b/i.exec(error.message);
-  if (position) return `at position ${position[1]}`;
+  const posLineCol = / at position \d+ \(line (\d+) column (\d+)\)$/.exec(error.message);
+  if (posLineCol) return `at line ${posLineCol[1]}, column ${posLineCol[2]}`;
+  const posOnly = / at position (\d+)$/.exec(error.message);
+  if (posOnly) return `at position ${posOnly[1]}`;
   return undefined;
 }
 

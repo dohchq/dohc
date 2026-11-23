@@ -19,8 +19,11 @@ if (!evalCase || !root || !unansweredLog) {
 }
 
 const onWrite = writesLog
-  ? (path: string) => {
-      appendFileSync(writesLog, `${path.replaceAll("\\", "/")}\n`);
+  ? (path: string, contentSha256: string) => {
+      appendFileSync(
+        writesLog,
+        `${JSON.stringify({ path: path.replaceAll("\\", "/"), sha256: contentSha256 })}\n`,
+      );
     }
   : undefined;
 

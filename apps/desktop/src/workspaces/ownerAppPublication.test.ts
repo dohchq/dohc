@@ -638,7 +638,7 @@ it.each(["会议", "Cafe\u0301"])(
   },
 );
 
-it("reports malformed app.publish.json on one line without disclosing input contents", () => {
+it("reports malformed app.publish.json on one line without disclosing input contents or spoofed offsets", () => {
   const secret = "SECRET_MANIFEST_TOKEN_999";
   const malformed = new TextEncoder().encode(`{\n  "token": "${secret}",\n  broken\n}`);
   let message = "";
@@ -652,4 +652,13 @@ it("reports malformed app.publish.json on one line without disclosing input cont
   );
   expect(message).not.toContain(secret);
   expect(message).not.toContain("\n");
+
+  let spoofed = "";
+  try {
+    parseAppPublicationDeclaration(new TextEncoder().encode("position 8675309"), "app");
+  } catch (error) {
+    spoofed = error instanceof Error ? error.message : String(error);
+  }
+  expect(spoofed).toBe("app/app.publish.json is not valid JSON. Check its syntax.");
+  expect(spoofed).not.toContain("8675309");
 });

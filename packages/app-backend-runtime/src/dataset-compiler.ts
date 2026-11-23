@@ -30,9 +30,14 @@ function installedCompiler(): string {
 }
 
 function extractCompilerLocations(stderr: string): string | undefined {
+  const lines = stderr.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split(/\r?\n/);
   const locations: string[] = [];
   const seen = new Set<string>();
-  for (const match of stderr.matchAll(/<stdin>:(\d+):(\d+)/g)) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^    <stdin>:(\d+):(\d+):$/.exec(lines[index] ?? "");
+    if (!match) continue;
+    const nextLine = lines[index + 1] ?? "";
+    if (!new RegExp(`^\\s+${match[1]}\\s+[│|]`).test(nextLine)) continue;
     const label = `line ${match[1]}, column ${match[2]}`;
     if (!seen.has(label)) {
       seen.add(label);

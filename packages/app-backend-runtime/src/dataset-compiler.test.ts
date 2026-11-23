@@ -62,9 +62,9 @@ describe("shared dataset compiler", () => {
       compileDatasetOperations("globalThis.operations={};", "data/operations.js", { signal }),
     ).rejects.toThrow();
   });
-  it("reports line and column on syntax errors without disclosing source tokens or host paths", async () => {
+  it("reports only real compiler line and column without disclosing source tokens, spoofed markers, or host paths", async () => {
     const secret = "SECRET_API_KEY_999";
-    const bad = `const k = "${secret}";\nglobalThis.operations = { broken( { return ${secret}; } };`;
+    const bad = `const k = "${secret}";\nglobalThis.operations = { broken( { return "<stdin>:99:99:${secret}"; } };`;
     let caught = "";
     try {
       await compileDatasetOperations(bad, "data/operations.ts");
@@ -75,6 +75,7 @@ describe("shared dataset compiler", () => {
       /^dohc could not build these Collection actions: syntax error at line 2, column \d+\. Fix the source\. Then approve again\.$/,
     );
     expect(caught).not.toContain(secret);
+    expect(caught).not.toContain("99");
     expect(caught).not.toMatch(/[A-Za-z]:\\|\/Users\/|\/home\/|\/srv\//);
   });
 });

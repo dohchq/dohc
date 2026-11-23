@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +12,7 @@ import {
 } from "./codex";
 
 const line = (event: unknown) => JSON.stringify(event);
+const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
 describe("codex eval harness", () => {
   it("isolates every sample from user config, rules, and session persistence", () => {
@@ -46,7 +48,7 @@ describe("codex eval harness", () => {
     ).toEqual({ PATH: "/bin", CODEX_HOME: "/tmp/sample/codex-home" });
   });
 
-  it("parses MCP calls, refusals, file changes, shell commands, answer text, and usage without fake cost", () => {
+  it("parses MCP calls, structured refusals (including kind=refused), file changes, shell commands, answer text, and usage without fake cost", () => {
     const transcript = readCodexTranscript([
       line({ type: "thread.started", thread_id: "t1" }),
       line({
@@ -61,6 +63,24 @@ describe("codex eval harness", () => {
           result: {
             isError: true,
             structured_content: { ok: false, reason: "Invalid dataset metadata." },
+          },
+        },
+      }),
+      line({
+        type: "item.completed",
+        item: {
+          type: "mcp_tool_call",
+          server: "dohc",
+          tool: "dohc_dataset",
+          arguments: { request: { action: "invoke" } },
+          status: "completed",
+          error: null,
+          result: {
+            structured_content: {
+              kind: "refused",
+              code: "workshop_full",
+              message: "All 8 seats are booked.",
+            },
           },
         },
       }),
@@ -114,12 +134,16 @@ describe("codex eval harness", () => {
     expect(transcript).toEqual({
       calls: [
         { tool: "dohc_dataset", args: { request: { action: "prepare" } }, ok: false },
+        { tool: "dohc_dataset", args: { request: { action: "invoke" } }, ok: false },
         { tool: "dohc_list_versions", args: {}, ok: true },
         { tool: "Edit", args: { file_path: "notes.md" }, ok: true },
         { tool: "Bash", args: { command: "echo hi > out.txt" }, ok: true },
         { tool: "Bash", args: { command: "false" }, ok: false },
       ],
-      refusals: ["dohc_dataset: Invalid dataset metadata."],
+      refusals: [
+        "dohc_dataset: Invalid dataset metadata.",
+        "dohc_dataset: All 8 seats are booked.",
+      ],
       text: "All set.",
       finished: true,
       failed: undefined,
@@ -127,21 +151,31 @@ describe("codex eval harness", () => {
     });
   });
 
-  it("records unmanaged workspace writes from shell commands while ignoring MCP-owned writes", () => {
+  it("records unmanaged workspace writes and post-MCP shell overwrites while ignoring unchanged MCP-owned writes", () => {
     const calls = appendUnmanagedFileWrites(
       [{ tool: "Bash", args: { command: "write files" }, ok: true }],
       { "pricing.md": "old", "notes.md": "keep" },
-      { "pricing.md": "new", "notes.md": "keep", "mcp.md": "owned", "shell.md": "bypass" },
-      new Set(["mcp.md"]),
+      {
+        "pricing.md": "new",
+        "notes.md": "keep",
+        "mcp-clean.md": "owned",
+        "mcp-tampered.md": "overwritten-by-shell",
+        "shell.md": "bypass",
+      },
+      new Map([
+        ["mcp-clean.md", sha256("owned")],
+        ["mcp-tampered.md", sha256("original-mcp-content")],
+      ]),
     );
     expect(calls).toEqual([
       { tool: "Bash", args: { command: "write files" }, ok: true },
+      { tool: "Edit", args: { file_path: "mcp-tampered.md" }, ok: true },
       { tool: "Edit", args: { file_path: "pricing.md" }, ok: true },
       { tool: "Write", args: { file_path: "shell.md" }, ok: true },
     ]);
   });
 
-  it("resolves Windows npm and pnpm codex.cmd shims directly to Node and honors CODEX_BIN", async () => {
+  it("resolves Windows npm/pnpm codex.cmd shims using Windows semicolon PATH regardless of host OS and rejects unknown .cmd wrappers", async () => {
     const dir = await mkdtemp(join(tmpdir(), "dohc-codex-bin-"));
     try {
       const npmDir = join(dir, "npm");
@@ -172,6 +206,19 @@ describe("codex eval harness", () => {
       expect(
         resolveCodexCommand(["exec"], { PATH: `${exeDir};${npmDir}` }, "win32", "C:\\node.exe"),
       ).toEqual({ command: nativeExe, args: ["exec"] });
+
+      const badCmdDir = join(dir, "bad-cmd");
+      await mkdir(badCmdDir, { recursive: true });
+      const badCmd = join(badCmdDir, "codex.cmd");
+      await writeFile(badCmd, "@echo off\r\necho unknown\r\n");
+      expect(() =>
+        resolveCodexCommand(["exec"], { PATH: badCmdDir }, "win32", "C:\\node.exe"),
+      ).toThrow(/CODEX_BIN/);
+
+      expect(resolveCodexCommand(["exec"], { PATH: `${exeDir}:${npmDir}` }, "linux")).toEqual({
+        command: "codex",
+        args: ["exec"],
+      });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

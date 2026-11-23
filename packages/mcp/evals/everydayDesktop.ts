@@ -10,6 +10,7 @@ import {
 } from "@dohc/app-backend-runtime";
 import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { openPersistentAppBackend } from "@dohc/app-backend-runtime/persistent";
+import { parseAppCollectionCapability } from "@dohc/security-contract/app-publication";
 import {
   datasetColumnFields,
   datasetDefinitionDigestContent,
@@ -45,10 +46,10 @@ function sha256(text: string): string {
 
 function describeJsonSyntaxLocation(error: unknown): string | undefined {
   if (!(error instanceof Error)) return undefined;
-  const lineCol = /\bline (\d+) column (\d+)\b/i.exec(error.message);
-  if (lineCol) return `at line ${lineCol[1]}, column ${lineCol[2]}`;
-  const position = /\bposition (\d+)\b/i.exec(error.message);
-  if (position) return `at position ${position[1]}`;
+  const posLineCol = / at position \d+ \(line (\d+) column (\d+)\)$/.exec(error.message);
+  if (posLineCol) return `at line ${posLineCol[1]}, column ${posLineCol[2]}`;
+  const posOnly = / at position (\d+)$/.exec(error.message);
+  if (posOnly) return `at position ${posOnly[1]}`;
   return undefined;
 }
 
@@ -95,12 +96,12 @@ async function writeWorkspaceText(
   root: string,
   relPath: string,
   content: string,
-  onWrite?: (path: string) => void,
+  onWrite?: (path: string, contentSha256: string) => void,
 ): Promise<void> {
   const resolved = await resolveWorkspacePath(root, relPath, "write");
   await mkdir(dirname(resolved.absolute), { recursive: true });
   await writeFile(resolved.absolute, content, "utf8");
-  onWrite?.(resolved.normalized);
+  onWrite?.(resolved.normalized, sha256(content));
 }
 
 function sqlIdent(name: string): string {
@@ -401,6 +402,25 @@ async function parseAppManifestForEval(root: string, appRootInput: string) {
       throw new Error(`${manifestRel} lists ${inputPath}, which does not exist.`);
     }
   }
+  if (Object.hasOwn(row, "collection")) {
+    if (
+      !row.collection ||
+      typeof row.collection !== "object" ||
+      Array.isArray(row.collection) ||
+      Object.hasOwn(row.collection, "schemaSha256")
+    ) {
+      throw new Error(
+        `${manifestRel} has a collection that is not an object without schemaSha256.`,
+      );
+    }
+    const declared = row.collection as Record<string, unknown>;
+    const collectionPath = await resolveRel(declared.collectionPath, "collectionPath");
+    parseAppCollectionCapability({
+      ...declared,
+      collectionPath,
+      schemaSha256: "0".repeat(64),
+    });
+  }
   const dataset = Object.hasOwn(row, "dataset") ? parseAppDatasetReference(row.dataset) : undefined;
   return { appRoot, entryPath, inputs, dataset };
 }
@@ -426,10 +446,19 @@ async function listWorkspaceTextFiles(root: string): Promise<Map<string, string>
 export async function createEverydayDesktop(
   root: string,
   seed: EverydayDesktopSeed = {},
-  options: { onWrite?: (path: string) => void } = {},
+  options: { onWrite?: (path: string, contentSha256: string) => void } = {},
 ): Promise<Record<string, DesktopAnswer>> {
   const workspaceId = seed.workspaceId ?? "ws-everyday";
   const onWrite = options.onWrite;
+  let datasetQueue: Promise<void> = Promise.resolve();
+  function serializeDataset<T>(fn: () => Promise<T>): Promise<T> {
+    const next = datasetQueue.then(fn, fn);
+    datasetQueue = next.then(
+      () => {},
+      () => {},
+    );
+    return next;
+  }
   const datasetsByPath = new Map<string, StoredDataset>();
   const preparations = new Map<string, PendingPreparation>();
   const migrations = new Map<string, PendingMigration>();
@@ -1584,7 +1613,7 @@ export async function createEverydayDesktop(
   }
 
   return {
-    dataset: (args: Args) => handleDataset(args.request as DatasetRequest),
+    dataset: (args: Args) => serializeDataset(() => handleDataset(args.request as DatasetRequest)),
     appPublication: (args: Args) =>
       handleAppPublication(args.request as OwnerAppPublicationRequest),
     workspaceSearch: (args: Args) => handleWorkspaceSearch(args),

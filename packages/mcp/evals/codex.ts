@@ -3,11 +3,12 @@
 // when --skill is passed).
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, extname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { EvalCase, RecordedCall, RunRecord } from "./case";
 import {
@@ -49,11 +50,21 @@ interface CodexEvent {
   };
 }
 
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
 function mcpCallSucceeded(item: NonNullable<CodexEvent["item"]>): boolean {
   if (item.status !== "completed" || item.error != null) return false;
   if (item.result?.isError === true || item.result?.is_error === true) return false;
   const structured = item.result?.structured_content ?? item.result?.structuredContent;
-  if (structured?.ok === false || structured?.kind === "partial") return false;
+  if (
+    structured?.ok === false ||
+    structured?.kind === "partial" ||
+    structured?.kind === "refused"
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -61,6 +72,9 @@ function mcpCallFailureText(item: NonNullable<CodexEvent["item"]>): string | und
   if (item.error?.message) return item.error.message;
   const structured = item.result?.structured_content ?? item.result?.structuredContent;
   if (typeof structured?.reason === "string") return structured.reason;
+  if (structured?.kind === "refused" && typeof structured?.message === "string") {
+    return structured.message;
+  }
   const firstText = item.result?.content?.find((c) => typeof c.text === "string")?.text;
   return firstText ? firstText.slice(0, 400) : undefined;
 }
@@ -139,14 +153,14 @@ export function readCodexTranscript(lines: readonly string[]): {
 }
 
 /**
- * Records any workspace file added, modified, or deleted outside dohc MCP tools so shell writes
- * cannot bypass `notCalls` checks.
+ * Records any workspace file added, modified, or deleted outside dohc MCP tools (including shell
+ * overwrites after an earlier MCP write) so unmanaged writes cannot bypass `notCalls` checks.
  */
 export function appendUnmanagedFileWrites(
   calls: readonly RecordedCall[],
   initialFiles: Readonly<Record<string, string>>,
   finalFiles: Readonly<Record<string, string>>,
-  mcpWrittenPaths: ReadonlySet<string>,
+  mcpWrittenHashes: ReadonlyMap<string, string>,
 ): RecordedCall[] {
   const out = [...calls];
   const recordedPaths = new Set(
@@ -157,9 +171,13 @@ export function appendUnmanagedFileWrites(
   );
   const allPaths = new Set([...Object.keys(initialFiles), ...Object.keys(finalFiles)]);
   for (const relPath of [...allPaths].sort()) {
-    if (initialFiles[relPath] === finalFiles[relPath]) continue;
-    if (mcpWrittenPaths.has(relPath) || recordedPaths.has(relPath)) continue;
-    const tool = Object.hasOwn(initialFiles, relPath) ? "Edit" : "Write";
+    const initial = initialFiles[relPath];
+    const final = finalFiles[relPath];
+    if (initial === final) continue;
+    if (final !== undefined && mcpWrittenHashes.get(relPath) === sha256(final)) continue;
+    if (recordedPaths.has(relPath) && !mcpWrittenHashes.has(relPath)) continue;
+    const tool =
+      Object.hasOwn(initialFiles, relPath) || mcpWrittenHashes.has(relPath) ? "Edit" : "Write";
     out.push({ tool, args: { file_path: relPath }, ok: true });
   }
   return out;
@@ -179,23 +197,19 @@ export function codexSampleEnvironment(
 function unwrapWindowsCmdShim(
   cmdPath: string,
   args: readonly string[],
-  env: Readonly<Record<string, string | undefined>>,
   nodeExecutable: string,
 ): { command: string; args: string[] } {
-  try {
-    const script = readFileSync(cmdPath, "utf8");
-    const match = /["']?%~?dp0%?[\\/]+([^"'\r\n]+?\.(?:c|m)?js)["']?/i.exec(script);
-    if (match?.[1]) {
-      const target = resolve(dirname(cmdPath), match[1]);
-      if (existsSync(target)) {
-        return { command: nodeExecutable, args: [target, ...args] };
-      }
+  const script = readFileSync(cmdPath, "utf8");
+  const match = /["']?%~?dp0%?[\\/]+([^"'\r\n]+?\.(?:c|m)?js)["']?/i.exec(script);
+  if (match?.[1]) {
+    const target = resolve(dirname(cmdPath), match[1]);
+    if (existsSync(target)) {
+      return { command: nodeExecutable, args: [target, ...args] };
     }
-  } catch {
-    /* fall through to cmd.exe */
   }
-  const comspec = env.ComSpec ?? env.COMSPEC ?? "cmd.exe";
-  return { command: comspec, args: ["/d", "/s", "/c", cmdPath, ...args] };
+  throw new Error(
+    `Cannot locate a Node entrypoint inside ${cmdPath}; set CODEX_BIN to codex.exe or its .js entrypoint.`,
+  );
 }
 
 /**
@@ -211,7 +225,7 @@ export function resolveCodexCommand(
   const explicit = env.CODEX_BIN?.trim();
   if (explicit) {
     if (platform === "win32" && /\.(?:cmd|bat)$/i.test(extname(explicit))) {
-      return unwrapWindowsCmdShim(explicit, args, env, nodeExecutable);
+      return unwrapWindowsCmdShim(explicit, args, nodeExecutable);
     }
     return { command: explicit, args: [...args] };
   }
@@ -219,12 +233,12 @@ export function resolveCodexCommand(
     return { command: "codex", args: [...args] };
   }
   const pathValue = env.PATH ?? env.Path ?? "";
-  for (const dir of pathValue.split(delimiter).filter(Boolean)) {
+  for (const dir of pathValue.split(";").filter(Boolean)) {
     for (const candidate of ["codex.exe", "codex.cmd", "codex.CMD", "codex.bat"]) {
       const full = join(dir, candidate);
       if (!existsSync(full)) continue;
       if (/\.(?:cmd|bat)$/i.test(candidate)) {
-        return unwrapWindowsCmdShim(full, args, env, nodeExecutable);
+        return unwrapWindowsCmdShim(full, args, nodeExecutable);
       }
       return { command: full, args: [...args] };
     }
@@ -278,6 +292,23 @@ async function prepareIsolatedCodexHome(
   if (skillPrompt) {
     await writeFile(join(codexHome, "AGENTS.md"), skillPrompt, "utf8");
   }
+}
+
+function parseMcpWritesLog(raw: string): Map<string, string> {
+  const hashes = new Map<string, string>();
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const entry = JSON.parse(trimmed) as { path?: unknown; sha256?: unknown };
+      if (typeof entry.path === "string" && typeof entry.sha256 === "string") {
+        hashes.set(entry.path, entry.sha256);
+      }
+    } catch {
+      /* ignore partial line */
+    }
+  }
+  return hashes;
 }
 
 export async function runCodexSample(input: {
@@ -369,18 +400,13 @@ export async function runCodexSample(input: {
         refusals: transcript.refusals,
       };
     const mcpWritesRaw = await readFile(writesLog, "utf8").catch(() => "");
-    const mcpWrittenPaths = new Set(
-      mcpWritesRaw
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean),
-    );
+    const mcpWrittenHashes = parseMcpWritesLog(mcpWritesRaw);
     const finalFiles = await workspaceFiles(root);
     const calls = appendUnmanagedFileWrites(
       workspacePaths(transcript.calls, root),
       initialFiles,
       finalFiles,
-      mcpWrittenPaths,
+      mcpWrittenHashes,
     );
     const run: RunRecord = {
       calls,
