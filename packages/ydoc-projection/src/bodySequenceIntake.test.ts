@@ -1869,7 +1869,11 @@ describe("the room's check of one change, by itself", () => {
           content: new Y.ContentType(new Y.XmlElement("block")),
         })),
       ),
-      past("units of weight, one for each item and 6 more for each element", 280_000, 280_007),
+      past(
+        "units of weight, one for each item, two for each range it deletes and 6 more for each element",
+        280_000,
+        280_007,
+      ),
     ],
   ] as const)(
     "a change of %s is refused for capacity with a sentence that names the limit, and the save refuses it for capacity too",
@@ -1905,6 +1909,62 @@ describe("the room's check of one change, by itself", () => {
       else expect(save).not.toMatch(/capacity/);
     },
   );
+
+  const lineWithDeletes = (text: string, ranges: number, width: number, apart: number) =>
+    updateOf(
+      [{ client: 77, clock: 0, origin: idsIn(note).last, content: new Y.ContentString(text) }],
+      Array.from({ length: ranges }, (_, index) => [77, apart * index, width] as const),
+    );
+
+  it.each([
+    [
+      "one line of 500,000 letters and 249,999 of them deleted one by one, every other letter",
+      lineWithDeletes("a".repeat(500_000), 249_999, 1, 2),
+      249_999,
+    ],
+    [
+      "249,999 emoji, each deleted by a range of its own",
+      lineWithDeletes("😀".repeat(249_999), 249_999, 2, 2),
+      249_999,
+    ],
+  ] as const)(
+    "%s: refused for capacity by its count of delete ranges, which names the limit, before it is read",
+    (_name, bytes, deletes) => {
+      expect(bodySequenceChangeSize(bytes)).toMatchObject({ structs: 1, values: 0, deletes });
+      const { refusal, work } = checked(bytes);
+      expect(refusal).toEqual({
+        reason: "capacity-refused",
+        limit: past(
+          "items, counting two more for each range it deletes, which can split one",
+          100_000,
+          1 + 2 * deletes,
+        ),
+      });
+      expect(work).toEqual({ steps: 1 + deletes });
+    },
+    120_000,
+  );
+
+  it("one line of 100,000 letters and 49,999 of them deleted one by one is at the limit: the room takes it, and the save takes it", () => {
+    const bytes = lineWithDeletes("a".repeat(100_000), 49_999, 1, 2);
+    const { refusal, work } = checked(bytes);
+    expect(refusal).toBeUndefined();
+    expect(work.steps).toBe(3 + 5 * 49_999);
+    const after = new Y.Doc({ gc: false });
+    Y.applyUpdate(after, note);
+    Y.applyUpdate(after, bytes);
+    expect(after.store.clients.get(77)).toHaveLength(2 * 49_999);
+    after.destroy();
+    expect(saved(bytes)).toBe("accepted");
+  }, 120_000);
+
+  it("40,000 emoji, each deleted by a range of its own: the room is at each range four times, looks no pair up twice, and the save takes it", () => {
+    const bytes = lineWithDeletes("😀".repeat(40_000), 40_000, 2, 2);
+    const { refusal, work } = checked(bytes);
+    expect(refusal).toBeUndefined();
+    expect(work.steps).toBe(3 + 4 * 40_000);
+    expect(saved(bytes)).toBe("accepted");
+  }, 120_000);
 
   it("a small change is not counted, and is read once", () => {
     const bytes = changeMadeBy(note, 77, ({ sequence }) => sequence.insert(2, "x"))!;

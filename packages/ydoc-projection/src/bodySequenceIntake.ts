@@ -254,18 +254,22 @@ function indexed(read: Read, work: BodySequenceIntakeWork): Sent {
 
 /**
  * What can be told from the change alone and the note before it. A whole state has no note
- * before it, and every pair it could cut is one it sends.
+ * before it, and every pair it could cut is one it sends. The read has already refused a struct
+ * or a delete range that starts or ends inside a pair the change sends, so those are looked up
+ * only in the note.
  */
 function fitsAsSent(before: Y.Doc | undefined, sent: Sent, work: BodySequenceIntakeWork): boolean {
   const { read } = sent;
+  const insideAPairOfTheNote = (client: number, clock: number) =>
+    before !== undefined && insideAPairTheNoteHolds(before, client, clock);
   const insideAPair = (client: number, clock: number) =>
-    (before !== undefined && insideAPairTheNoteHolds(before, client, clock)) ||
-    holdsPoint(read.insidePairs.get(client), clock, work);
+    insideAPairOfTheNote(client, clock) || holdsPoint(read.insidePairs.get(client), clock, work);
   for (const struct of read.structs) {
     work.steps += 1;
     if (struct instanceof Y.Skip) return false;
     const { client, clock } = struct.id;
-    if (insideAPair(client, clock) || insideAPair(client, clock + struct.length)) return false;
+    if (insideAPairOfTheNote(client, clock) || insideAPairOfTheNote(client, clock + struct.length))
+      return false;
     if (!(struct instanceof Y.Item)) continue;
     // Yjs cuts a letter run where an item is placed inside it, and writes U+FFFD for each half of
     // a pair it cuts.
@@ -293,7 +297,7 @@ function fitsAsSent(before: Y.Doc | undefined, sent: Sent, work: BodySequenceInt
   for (const [client, clocks] of read.deleteEndpoints)
     for (const clock of clocks) {
       work.steps += 1;
-      if (insideAPair(client, clock)) return false;
+      if (insideAPairOfTheNote(client, clock)) return false;
     }
   return true;
 }
@@ -568,6 +572,8 @@ export interface BodySequenceChangeSize {
   readonly structs: number;
   readonly elements: number;
   readonly values: number;
+  /** Its delete ranges, as it wrote them. */
+  readonly deletes: number;
 }
 
 /**
@@ -578,7 +584,9 @@ export function bodySequenceChangeSize(
   update: Uint8Array,
   work: BodySequenceIntakeWork = { steps: 0 },
 ): BodySequenceChangeSize {
-  const { structs } = Y.decodeUpdate(update);
+  const { structs, ds } = Y.decodeUpdate(update);
+  let deletes = 0;
+  for (const ranges of ds.clients.values()) deletes += ranges.length;
   let elements = 0;
   let values = 0;
   const open: object[] = [];
@@ -603,16 +611,18 @@ export function bodySequenceChangeSize(
         for (const key in holder) count((holder as Record<string, unknown>)[key]);
     }
   }
-  work.steps += structs.length + values;
-  return { structs: structs.length, elements, values };
+  work.steps += structs.length + values + deletes;
+  return { structs: structs.length, elements, values, deletes };
 }
 
 /**
  * The limit a change is past by itself, as a sentence that names the limit, its unit and what
  * the change holds. Such a change could not be saved into an empty note, so a room refuses it
- * before it reads it. `save` is the policy of the save's check. A value takes at least one byte
- * of a change, an item two and an element six, so a change of no more bytes than the most values
- * one may hold is past none of these and is not counted.
+ * before it reads it. `save` is the policy of the save's check. A delete range can split the item
+ * it starts in and the one it ends in, so each counts as two items the change can leave in the
+ * note. A value takes at least one byte of a change, an item and a delete range two each and an
+ * element five, so a change of no more bytes than the most values one may hold is past none of
+ * these and is not counted.
  */
 export function bodySequenceChangeLimit(
   update: Uint8Array,
@@ -628,11 +638,18 @@ export function bodySequenceChangeLimit(
     return past(BODY_SEQUENCE_CHANGE_MAX_VALUES, "values", size.values);
   const structs = bodySequenceRoomPolicy(save).maxStructVisits;
   if (size.structs > structs) return past(structs, "items", size.structs);
-  const weight = size.structs + LIVE_NOTE_ELEMENT_WEIGHT * size.elements;
+  const left = size.structs + 2 * size.deletes;
+  if (left > structs)
+    return past(
+      structs,
+      "items, counting two more for each range it deletes, which can split one",
+      left,
+    );
+  const weight = left + LIVE_NOTE_ELEMENT_WEIGHT * size.elements;
   if (weight > LIVE_NOTE_CAPACITY)
     return past(
       LIVE_NOTE_CAPACITY,
-      `units of weight, one for each item and ${String(LIVE_NOTE_ELEMENT_WEIGHT)} more for each element`,
+      `units of weight, one for each item, two for each range it deletes and ${String(LIVE_NOTE_ELEMENT_WEIGHT)} more for each element`,
       weight,
     );
   return undefined;
