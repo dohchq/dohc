@@ -138,21 +138,14 @@ function operationLine(
           nextDisplay.label !== priorDisplay.label ||
           nextDisplay.fields.some((field) => !priorDisplay.fields.includes(field))));
     return {
-      group: !nextDisplay
-        ? `op ${operation.operationId}`
-        : nextDisplay.kind === "action"
-          ? `action ${operation.operationId}`
-          : `words ${text}`,
+      group: nextDisplay?.kind === "action" ? `action ${operation.operationId}` : `words ${text}`,
       line: { key: operation.operationId, items: [{ text, added: expanded }] },
     };
   }
   const added = comparing && !same?.operationIds.includes(operation.operationId);
   return {
-    group: !operation.display
-      ? `op ${operation.operationId}`
-      : operation.display.kind === "action"
-        ? `action ${operation.operationId}`
-        : `words ${text}`,
+    group:
+      operation.display?.kind === "action" ? `action ${operation.operationId}` : `words ${text}`,
     line: { key: operation.operationId, items: [{ text, added }] },
   };
 }

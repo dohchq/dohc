@@ -2881,16 +2881,15 @@ describe("relation label resolution through connected resolver", () => {
         }
         if (input.action === "invoke" && input.operationId === readMembersOpId) {
           memberReads.push(input.input);
+          const count = (input.input as { limit?: number })?.limit === 100 ? 51 : 1;
           return {
             kind: "invoked",
             result: {
-              rows: [
-                {
-                  id: "mem-1",
-                  version: 1,
-                  values: { [memberPkId]: "mem-1", [memberNameId]: "Alex" },
-                },
-              ],
+              rows: Array.from({ length: count }, (_, index) => ({
+                id: `mem-${index + 1}`,
+                version: 1,
+                values: { [memberPkId]: `mem-${index + 1}`, [memberNameId]: `Member ${index + 1}` },
+              })),
               nextCursor: null,
             },
             revision: 1,
@@ -2926,10 +2925,10 @@ describe("relation label resolution through connected resolver", () => {
       },
       new AbortController().signal,
     );
-    expect(resolved).toEqual({
-      options: [{ value: "mem-1", label: "Alex" }],
-      hasMore: false,
-    });
+    expect(resolved.options).toHaveLength(51);
+    expect(resolved.options[0]).toEqual({ value: "mem-1", label: "Member 1" });
+    expect(resolved.options[50]).toEqual({ value: "mem-51", label: "Member 51" });
+    expect(resolved.hasMore).toBe(false);
     expect(memberReads).toEqual([{ limit: 100 }]);
     await pageResolveRelation.current!(
       {

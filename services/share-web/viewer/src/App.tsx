@@ -555,7 +555,6 @@ function accessBadge(meta: ViewMeta): { label: string; reason?: string } {
       };
 }
 
-/** A file's title: its name, without the folders, and without the extension when it is a page. */
 function isDescriptorFile(path: string): boolean {
   return (
     path === "app.publish.json" ||
@@ -569,6 +568,7 @@ function defaultSelectedFile(files: readonly SharedFile[]): SharedFile | undefin
   return files.find((file) => !isDescriptorFile(file.path)) ?? files[0];
 }
 
+/** A file's title: its name, without the folders, and without the extension when it is a page. */
 function fileTitle(path: string): string {
   const name = path.slice(path.lastIndexOf("/") + 1);
   return isMarkdown(path) ? name.replace(/\.(md|markdown)$/i, "") : name;
@@ -1985,7 +1985,6 @@ export function App() {
                     key={`${ready.session}:${onlySessionApp.publicationId}`}
                     session={ready.session}
                     publicationId={onlySessionApp.publicationId}
-                    title={onlySessionApp.name}
                   />
                 ) : null}
                 {selected ? <h1 className="page-title">{fileTitle(selected.path)}</h1> : null}

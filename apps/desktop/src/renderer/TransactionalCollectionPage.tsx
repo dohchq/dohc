@@ -1830,7 +1830,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
             }
             for (const fieldId of target.fieldIds) next.set(fieldId, map);
           } catch {
-            // Silent fallback to raw relation values when the related table cannot be read.
+            return;
           }
         }),
       );

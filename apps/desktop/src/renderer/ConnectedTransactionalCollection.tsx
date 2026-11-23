@@ -795,10 +795,6 @@ function ScopedCollection({
             );
             if (!target || !read)
               throw Error("This related Collection has no permitted read action.");
-            const limit =
-              Number.isSafeInteger(input.limit) && input.limit >= 1 && input.limit <= 100
-                ? input.limit
-                : 20;
             const response = await bridge().dataset({
               action: "invoke",
               workspaceId,
@@ -807,12 +803,12 @@ function ScopedCollection({
               revision: dataset.revision,
               revisionSha256: dataset.revisionSha256,
               operationId: read.operationId,
-              input: { limit, ...(input.search ? { search: input.search } : {}) },
+              input: { limit: input.limit, ...(input.search ? { search: input.search } : {}) },
               idempotencyKey: crypto.randomUUID(),
             });
             signal.throwIfAborted();
             if (response.kind !== "invoked") throw Error("dohc could not read related records.");
-            const page = parsePage(response.result, read.fieldIds);
+            const page = parsePage(response.result, read.fieldIds, input.limit);
             const label = target.fields.find(
               (field) =>
                 read.fieldIds.includes(field.fieldId) &&
