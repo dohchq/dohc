@@ -81,8 +81,11 @@ function startsBlock(doc: ProseMirrorNode, from: number, to: number): boolean {
  * that write goes here too. `shareAnId` says whether the container that ends at one place of
  * `before` and the one that starts at another share an id.
  *
- * So is a step that splits the first block of a list item: section 4 gives the new line a new
- * item, with a fresh id and its records. A split of a later block stays in its item and is taken.
+ * So is a step that starts a block from inside the first block of a list item: Enter there, and
+ * a paste of several paragraphs over it. Section 4 gives the line after the split a new item,
+ * with a fresh id and its records, and the item's later blocks go with it. The paste is refused
+ * although the item itself survives, because its second paragraph needs that new item. The
+ * container writer's split lifts both. A split of a later block stays in its item and is taken.
  */
 export function keepsContainers(
   step: Step,
@@ -692,6 +695,8 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
  * the boundary of the text that follows it. No letter and no inline item is written to make the
  * two agree.
  *
+ * A step that leaves the editor's document as it was writes nothing.
+ *
  * Returns false when it stopped at a step after which the sequence does not read as the editor's
  * document: two containers that share an id became neighbours and read as one.
  */
@@ -704,13 +709,18 @@ export function writeTransaction(writing: BodyWriting, transaction: Transaction)
       if (formatted < 0) formatted = at;
       continue;
     }
-    if (formatted >= 0) writeFormatting(writing, docs[formatted]!, docs[at]!);
-    formatted = -1;
+    const before = docs[at]!;
     const after = docs[at + 1]!;
     const ranges: [number, number, number, number][] = [];
-    map.forEach((oldStart, oldEnd, newStart, newEnd) =>
-      ranges.push([oldStart, oldEnd, newStart, newEnd]),
-    );
+    map.forEach((oldStart, oldEnd, newStart, newEnd) => {
+      const same =
+        oldEnd - oldStart === newEnd - newStart &&
+        before.slice(oldStart, oldEnd).eq(after.slice(newStart, newEnd));
+      if (!same) ranges.push([oldStart, oldEnd, newStart, newEnd]);
+    });
+    if (ranges.length === 0) continue;
+    if (formatted >= 0) writeFormatting(writing, docs[formatted]!, before);
+    formatted = -1;
     for (const range of ranges.reverse()) writeRange(writing, after, ...range);
     if (!writeBlockStartsThatDiffer(writing, after)) return false;
   }

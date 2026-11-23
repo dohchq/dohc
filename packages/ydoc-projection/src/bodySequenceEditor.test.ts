@@ -1,11 +1,17 @@
 // @vitest-environment jsdom
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setBlockType } from "@tiptap/pm/commands";
-import { Fragment, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { EditorState, NodeSelection, Plugin, TextSelection } from "@tiptap/pm/state";
+import { Fragment, Mark, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import {
+  EditorState,
+  NodeSelection,
+  Plugin,
+  TextSelection,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { EditorView } from "@tiptap/pm/view";
 import { recordsOfContainer } from "./bodySequenceGrammar.js";
 import {
@@ -16,6 +22,7 @@ import {
   isBodySequenceChange,
   keepBodySequenceFormatting,
 } from "./bodySequenceEditor.js";
+import { keepsContainers } from "./bodySequenceWriting.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import {
   boundary,
@@ -1555,53 +1562,6 @@ describe.each(["bare", "hosted"] as const)("on a %s page, a finding of the revie
     expect(pathsOf(a)).toEqual(["", "L/I", "L/I", ""]);
     a.expectMirror();
   });
-
-  it("keeps what a plugin appended outside the history when the person's change is undone", () => {
-    const appendsY = new Plugin({
-      appendTransaction(transactions, _before, state) {
-        if (!transactions.some((transaction) => transaction.getMeta("appendY") === true))
-          return null;
-        const lower = state.doc.child(0).nodeSize + 1;
-        return state.tr.insertText("Y", lower).setMeta("addToHistory", false);
-      },
-    });
-    const a = person(note("abc", "def"), 10, shape, [appendsY]);
-    const b = person(note("abc", "def"), 20, shape);
-    a.view.dispatch(a.view.state.tr.insertText("X", 2).setMeta("appendY", true));
-    expect(a.lines()).toEqual(["aXbc", "Ydef"]);
-    a.expectMirror();
-    exchange(a, b);
-    expect(b.lines()).toEqual(["aXbc", "Ydef"]);
-    expect(a.undo()).toBe(true);
-    expect(a.lines()).toEqual(["abc", "Ydef"]);
-    expect(a.undo()).toBe(false);
-    expect(a.redo()).toBe(true);
-    expect(a.lines()).toEqual(["aXbc", "Ydef"]);
-    a.expectMirror();
-    exchange(a, b);
-    b.expectMirror();
-    expect(b.lines()).toEqual(["aXbc", "Ydef"]);
-    expect(b.sent).toEqual([]);
-  });
-
-  it("keeps a tracked change in the history when it follows an untracked one in the same dispatch", () => {
-    const appendsY = new Plugin({
-      appendTransaction(transactions, _before, state) {
-        if (!transactions.some((transaction) => transaction.getMeta("appendY") === true))
-          return null;
-        return state.tr.insertText("Y", state.doc.child(0).nodeSize + 1);
-      },
-    });
-    const a = person(note("abc", "def"), 10, shape, [appendsY]);
-    a.view.dispatch(
-      a.view.state.tr.insertText("X", 2).setMeta("appendY", true).setMeta("addToHistory", false),
-    );
-    expect(a.lines()).toEqual(["aXbc", "Ydef"]);
-    expect(a.undo()).toBe(true);
-    expect(a.lines()).toEqual(["aXbc", "def"]);
-    expect(a.undo()).toBe(false);
-    a.expectMirror();
-  });
 });
 
 describe("a split inside a list item someone else stored", () => {
@@ -1834,48 +1794,6 @@ describe.each(["bare", "hosted"] as const)(
       a.expectMirror();
     });
 
-    it("sends each run of a dispatch as its own update, so a peer never shows a state the writer never showed", () => {
-      const replacesXWithZ = new Plugin({
-        appendTransaction(transactions, _before, state) {
-          if (!transactions.some((transaction) => transaction.getMeta("replaceX") === true))
-            return null;
-          return state.tr.insertText("Z", 2, 3).setMeta("addToHistory", false);
-        },
-      });
-      const a = person(note("abc"), 10, shape, [replacesXWithZ]);
-      const peer = page(note("abc"), 20);
-      a.view.dispatch(a.view.state.tr.insertText("X", 2).setMeta("replaceX", true));
-      expect(a.lines()).toEqual(["aZbc"]);
-      const seen = a.sent.map((update) => {
-        peer.receive(update);
-        return readBodySequence(schema, peer.doc).textContent;
-      });
-      expect(seen).toEqual(["aXbc", "aZbc"]);
-      a.expectMirror();
-    });
-
-    it("refuses undo while part of a dispatch still waits to be written", () => {
-      const appendsY = new Plugin({
-        appendTransaction(transactions, _before, state) {
-          if (!transactions.some((transaction) => transaction.getMeta("appendY") === true))
-            return null;
-          return state.tr.insertText("Y", 1).setMeta("addToHistory", false);
-        },
-      });
-      const a = person(note("abc"), 10, shape, [appendsY]);
-      a.typeAt(0, 3, "!");
-      let inside: boolean | null = null;
-      a.doc.transact(() => {
-        a.view.dispatch(a.view.state.tr.insertText("X", 2).setMeta("appendY", true));
-        inside = a.undo();
-      });
-      expect(inside).toBe(false);
-      expect(a.lines()).toEqual(["YaXbc!"]);
-      a.expectMirror();
-      expect(a.undo()).toBe(true);
-      expect(a.lines()).toEqual(["Yabc!"]);
-    });
-
     it("gives an anchor at the start of a block with no boundary of its own that stays in that block", () => {
       const a = person(noteOfLines([stored(CODE, "ab", HARD_BREAK, "cd")]), 10, shape);
       const b = person(noteOfLines([stored(CODE, "ab", HARD_BREAK, "cd")]), 20, shape);
@@ -1999,6 +1917,19 @@ for (const [aboveName, above] of SWEPT_ABOVE)
         [...(above ? [above] : []), stored(inItem ? { ...block, ...IN_ITEM } : block, ...parts)],
       ]);
 
+const ORACLE_COUNTS = {
+  outcomes: {
+    applied: 6719,
+    "filtered by keepsContainers": 2055,
+    "not offered": 587,
+    "range error": 0,
+  },
+  excepted: {
+    "a mark on an inline item": 467,
+    "formatting stored under a code block's letters": 9,
+  },
+};
+
 const ORACLE_KINDS: [string, Record<string, unknown> | undefined][] = [
   ["paragraph", undefined],
   ["heading", { level: 1 }],
@@ -2006,80 +1937,140 @@ const ORACLE_KINDS: [string, Record<string, unknown> | undefined][] = [
   ["codeBlock", undefined],
 ];
 
-/**
- * A difference between what ProseMirror computed for a step and what the note then reads as that
- * is right: the reader gives the format's reading where ProseMirror's document has no stored form.
- */
+type MarkDifference = {
+  onItem: boolean;
+  wasUnderCode: boolean;
+  computedHasMarks: boolean;
+  readHasMarks: boolean;
+};
+
+function markDifferences(
+  before: ProseMirrorNode,
+  applied: Transaction,
+  read: ProseMirrorNode,
+): MarkDifference[] | null {
+  const computed = applied.doc;
+  if (withoutMarks(computed) !== withoutMarks(read)) return null;
+  const toBefore = applied.mapping.invert();
+  const found: MarkDifference[] = [];
+  read.descendants((node, pos) => {
+    if (!node.isInline) return true;
+    for (let at = 0; at < node.nodeSize; at++) {
+      const other = computed.nodeAt(pos + at)!;
+      if (Mark.sameSet(node.marks, other.marks)) continue;
+      found.push({
+        onItem: !node.isText,
+        wasUnderCode: before.resolve(toBefore.map(pos + at, 1)).parent.type.spec.code === true,
+        computedHasMarks: other.marks.length > 0,
+        readHasMarks: node.marks.length > 0,
+      });
+    }
+    return false;
+  });
+  return found;
+}
+
 const ORACLE_EXCEPTIONS: {
   name: string;
   why: string;
-  holds: (computed: ProseMirrorNode, read: ProseMirrorNode) => boolean;
+  explains: (difference: MarkDifference) => boolean;
 }[] = [
   {
     name: "formatting stored under a code block's letters",
-    why: "A code block's letters keep the formatting items stored around them, which no reader shows while the block is code. ProseMirror's code block holds no marks, so its document has none after the block changes kind; the note reads the stored ones again.",
-    holds: (computed, read) =>
-      withoutMarks(computed) === withoutMarks(read) &&
-      computed.rangeHasMark(0, computed.content.size, schema.marks.bold!) === false,
+    why: "A code block's letters keep the formatting items stored around them, which no reader shows while the block is code. ProseMirror's code block holds no marks, so its document has none on those letters once they leave the code block; the note reads the stored ones again.",
+    explains: (difference) =>
+      !difference.onItem && difference.wasUnderCode && !difference.computedHasMarks,
+  },
+  {
+    name: "a mark on an inline item",
+    why: "ProseMirror puts a mark on an inline item that stands in a marked range. The format gives marks to letters only, so the note reads the item with none.",
+    explains: (difference) => difference.onItem && !difference.readHasMarks,
   },
 ];
 
-const oracle = { applied: 0, refused: 0, excepted: new Map<string, number>() };
-afterAll(() => {
-  console.log(
-    `the oracle run: ${String(oracle.applied)} steps applied and compared, ${String(oracle.refused)} refused or not offered; exceptions: ${
-      [...oracle.excepted].map(([name, count]) => `${name} (${String(count)})`).join("; ") || "none"
-    }`,
-  );
-});
+type Outcome = "applied" | "filtered by keepsContainers" | "not offered" | "range error";
+const oracle = {
+  notes: 0,
+  outcomes: { applied: 0, "filtered by keepsContainers": 0, "not offered": 0, "range error": 0 },
+  excepted: new Map<string, number>(),
+};
 
 describe("the note reads as the document ProseMirror computed", () => {
-  it.each(ORACLE_NOTES)("for every delete and every kind change in %s", (_name, lines) => {
+  it.each(ORACLE_NOTES)("for every step tried in %s", (_name, lines) => {
     const baseline = noteOfLines(lines);
-    const size = readBodySequence(schema, person(baseline, 10).doc).content.size;
+    const start = readBodySequence(schema, person(baseline, 10).doc);
     stopEveryone();
-    let applied = 0;
+    const size = start.content.size;
+    const inText: number[] = [];
+    for (let pos = 0; pos <= size; pos++)
+      if (start.resolve(pos).parent.isTextblock) inText.push(pos);
+
     const check = (label: string, act: (a: Person) => void) => {
       const a = person(baseline, 10);
       const before = a.view.state.doc;
-      let computed: ProseMirrorNode | null = null;
+      let applied: Transaction | null = null;
+      let filtered: Transaction | null = null;
       const dispatch = a.view.dispatch.bind(a.view);
       a.view.dispatch = (transaction) => {
-        const own = transaction.docChanged && !isBodySequenceChange(transaction);
-        if (own && a.view.state.applyTransaction(transaction).transactions.length > 0)
-          computed = transaction.doc;
+        if (transaction.docChanged && !isBodySequenceChange(transaction)) {
+          if (a.view.state.applyTransaction(transaction).transactions.length > 0)
+            applied = transaction;
+          else filtered = transaction;
+        }
         dispatch(transaction);
       };
+      let outcome: Outcome = "not offered";
       try {
         act(a);
       } catch (error) {
         if (!(error instanceof RangeError)) throw error;
+        outcome = "range error";
       }
-      const wanted = computed as ProseMirrorNode | null;
-      if (!wanted) oracle.refused += 1;
-      else {
-        applied += 1;
-        oracle.applied += 1;
+      const wrote = applied as Transaction | null;
+      const refused = filtered as Transaction | null;
+      if (wrote) {
+        outcome = "applied";
         a.expectMirror();
         const read = readBodySequence(schema, a.doc);
-        if (!read.eq(wanted)) {
-          const exception = ORACLE_EXCEPTIONS.find((each) => each.holds(wanted, read));
-          if (!exception)
+        if (!read.eq(wrote.doc)) {
+          const differences = markDifferences(before, wrote, read);
+          const names = new Set<string>();
+          const unexplained =
+            differences === null ||
+            differences.some((difference) => {
+              const exception = ORACLE_EXCEPTIONS.find((each) => each.explains(difference));
+              if (exception) names.add(exception.name);
+              return !exception;
+            });
+          if (unexplained)
             throw new Error(
-              `${label} in ${before.toString()}\n  ProseMirror computed ${wanted.toString()}\n  the note reads as     ${read.toString()}`,
+              `${label} in ${before.toString()}\n  ProseMirror computed ${wrote.doc.toString()}\n  the note reads as     ${read.toString()}`,
             );
-          oracle.excepted.set(exception.name, (oracle.excepted.get(exception.name) ?? 0) + 1);
+          for (const name of names) oracle.excepted.set(name, (oracle.excepted.get(name) ?? 0) + 1);
         }
+      } else if (refused) {
+        const docs = [...refused.docs, refused.doc];
+        const byContainers = refused.steps.some(
+          (step, at) => !keepsContainers(step, docs[at]!, docs[at + 1]!, () => false),
+        );
+        if (!byContainers)
+          throw new Error(`${label} in ${before.toString()} was refused for no listed reason`);
+        outcome = "filtered by keepsContainers";
       }
+      oracle.outcomes[outcome] += 1;
       stopEveryone();
     };
+    const select = (a: Person, from: number, to = from) =>
+      a.view.dispatch(
+        a.view.state.tr.setSelection(TextSelection.create(a.view.state.doc, from, to)),
+      );
+
     for (let from = 0; from < size; from++)
       for (let to = from + 1; to <= size; to++)
         check(`delete(${String(from)}, ${String(to)})`, (a) =>
           a.view.dispatch(a.view.state.tr.delete(from, to)),
         );
-    const places = textPlaces(readBodySequence(schema, person(baseline, 10).doc));
-    stopEveryone();
+    const places = textPlaces(start);
     const ranges: [number, number][] = places.map((place) => [place.pos, place.pos]);
     if (places.length > 1) {
       const last = places.at(-1)!;
@@ -2089,12 +2080,165 @@ describe("the note reads as the document ProseMirror computed", () => {
     for (const [from, to] of ranges)
       for (const [kind, attrs] of ORACLE_KINDS)
         check(`${kind}${JSON.stringify(attrs ?? {})} over ${String(from)}-${String(to)}`, (a) => {
-          a.view.dispatch(
-            a.view.state.tr.setSelection(TextSelection.create(a.view.state.doc, from, to)),
-          );
+          select(a, from, to);
           a.retype(kind, attrs);
         });
-    expect(applied).toBeGreaterThan(0);
+    for (const pos of inText) {
+      check(`Enter at ${String(pos)}`, (a) => {
+        select(a, pos);
+        a.press("Enter");
+      });
+      check(`a letter at ${String(pos)}`, (a) =>
+        a.view.dispatch(a.view.state.tr.insertText("x", pos)),
+      );
+      for (const to of inText)
+        if (to > pos)
+          check(`bold over ${String(pos)}-${String(to)}`, (a) => {
+            select(a, pos, to);
+            a.toggle("bold");
+          });
+    }
+    oracle.notes += 1;
+  });
+
+  it("applies, refuses and excepts as many steps as counted", () => {
+    console.log(
+      `the oracle run: ${String(oracle.notes)} notes; ${Object.entries(oracle.outcomes)
+        .map(([outcome, count]) => `${outcome} ${String(count)}`)
+        .join(", ")}; exceptions: ${
+        [...oracle.excepted].map(([name, count]) => `${name} (${String(count)})`).join("; ") ||
+        "none"
+      }`,
+    );
+    if (oracle.notes !== ORACLE_NOTES.length) return;
+    expect(oracle.outcomes).toEqual(ORACLE_COUNTS.outcomes);
+    expect(Object.fromEntries(oracle.excepted)).toEqual(ORACLE_COUNTS.excepted);
+  });
+});
+
+describe.each(["bare", "hosted"] as const)("one dispatch of the editor on a %s page", (shape) => {
+  const replacesXWithZ = () =>
+    new Plugin({
+      appendTransaction(transactions, _before, state) {
+        if (!transactions.some((transaction) => transaction.getMeta("replaceX") === true))
+          return null;
+        return state.tr.insertText("Z", 2, 3).setMeta("addToHistory", false);
+      },
+    });
+  const typeX = (a: Person) =>
+    a.view.dispatch(a.view.state.tr.insertText("X", 2).setMeta("replaceX", true));
+
+  it("is one update and one undo step, also for what a plugin appended to it outside the history", () => {
+    const a = person(note("abc"), 10, shape, [replacesXWithZ()]);
+    const peer = page(note("abc"), 20);
+    typeX(a);
+    expect(a.lines()).toEqual(["aZbc"]);
+    expect(a.sent).toHaveLength(1);
+    peer.receive(a.sent[0]!);
+    expect(readBodySequence(schema, peer.doc).textContent).toBe("aZbc");
+    expect(a.history.undoStack).toHaveLength(1);
+    expect(a.undo()).toBe(true);
+    expect(a.lines()).toEqual(["abc"]);
+    expect(a.undo()).toBe(false);
+    expect(a.redo()).toBe(true);
+    expect(a.lines()).toEqual(["aZbc"]);
+    a.expectMirror();
+  });
+
+  it("is not undoable when every transaction in it is kept out of the history", () => {
+    const a = person(note("abc"), 10, shape);
+    a.view.dispatch(a.view.state.tr.insertText("Q", 1).setMeta("addToHistory", false));
+    expect(a.lines()).toEqual(["Qabc"]);
+    expect(a.sent).toHaveLength(1);
+    expect(a.history.undoStack).toHaveLength(0);
+    expect(a.undo()).toBe(false);
+    expect(a.lines()).toEqual(["Qabc"]);
+    a.expectMirror();
+  });
+
+  it("loses nothing when a change from someone else arrives while its update is sent", () => {
+    const a = person(note("abc"), 10, shape, [replacesXWithZ()]);
+    const b = person(note("abc"), 20, shape);
+    b.typeAt(0, 0, "!");
+    const fromPeer = b.sent.splice(0);
+    let delivered = false;
+    a.doc.on("update", () => {
+      if (delivered) return;
+      delivered = true;
+      for (const update of fromPeer) a.receive(update);
+    });
+    typeX(a);
+    exchange(a, b);
+    for (const each of [a, b]) {
+      each.expectMirror();
+      expect(each.lines()).toEqual(["!aZbc"]);
+    }
+    expect(tokensOf(b.sequence)).toEqual(tokensOf(a.sequence));
+  });
+
+  it("is written whole when the editor is destroyed while its update is sent", () => {
+    const a = person(note("abc"), 10, shape, [replacesXWithZ()]);
+    const b = person(note("abc"), 20, shape);
+    let destroyed = false;
+    a.doc.on("update", () => {
+      if (destroyed) return;
+      destroyed = true;
+      a.view.destroy();
+    });
+    typeX(a);
+    expect(readBodySequence(schema, a.doc).textContent).toBe("aZbc");
+    for (const update of a.sent.splice(0)) b.receive(update);
+    b.expectMirror();
+    expect(b.lines()).toEqual(["aZbc"]);
+  });
+
+  it("writes nothing and takes no undo step for a step that leaves the document as it was", () => {
+    const a = person(noteOfLines([stored(CODE, "ab", HARD_BREAK, "cd")]), 10, shape);
+    a.typeAt(1, 3, "!");
+    expect(a.lines()).toEqual(["ab", "cd!"]);
+    const before = a.view.state.doc;
+    const steps = a.history.undoStack.length;
+    a.view.dispatch(a.view.state.tr.setSelection(TextSelection.create(before, 3, 5)));
+    const effects = a.effects(() => expect(a.press("Delete")).toBe(true));
+    expect(effects).toMatchObject({ made: quiet(), gone: quiet(), other: 0, shown: 0 });
+    expect(a.view.state.doc.eq(before)).toBe(true);
+    expect(a.history.undoStack).toHaveLength(steps);
+    expect(a.undo()).toBe(true);
+    expect(a.lines()).toEqual(["ab", "cd"]);
+    a.expectMirror();
+  });
+});
+
+describe("an anchor", () => {
+  it("stays in a list item's added paragraph when someone types there", () => {
+    const item = () => noteOfLines([stored({ type: "heading", level: 2, ...IN_ITEM }, "Title")]);
+    const a = person(item(), 10);
+    const b = person(item(), 20);
+    expect(a.view.state.doc.toString()).toBe(
+      'doc(bulletList(listItem(paragraph, heading("Title"))))',
+    );
+    const anchor = bodySequenceAnchor(a.view.state, 3)!;
+    expect(bodySequenceAnchorPosition(a.view.state, anchor)).toBe(3);
+    a.view.dispatch(a.view.state.tr.insertText("!", 3));
+    expect(a.view.state.doc.toString()).toBe(
+      'doc(bulletList(listItem(paragraph("!"), heading("Title"))))',
+    );
+    expect(bodySequenceAnchorPosition(a.view.state, anchor)).toBe(4);
+    exchange(a, b);
+    expect(bodySequenceAnchorPosition(b.view.state, anchor)).toBe(4);
+  });
+
+  it("reads the association a caller gives by its sign alone", () => {
+    const a = person(noteOfLines([stored(CODE, "ab", HARD_BREAK, "cd")]), 10);
+    const resolved = (pos: number, assoc?: number) =>
+      bodySequenceAnchorPosition(a.view.state, bodySequenceAnchor(a.view.state, pos, assoc)!);
+    for (const assoc of [undefined, 0, 1, 2, 7]) {
+      expect(resolved(3, assoc)).toBe(3);
+      expect(resolved(5, assoc)).toBe(5);
+    }
+    expect(resolved(3, -1)).toBe(3);
+    expect(resolved(5, -1)).toBe(3);
+    expect(resolved(6, 1)).toBe(6);
   });
 });
 

@@ -43,9 +43,8 @@ export type BodySequenceOptions = {
   /**
    * The origin of the Yjs transaction each editor change is written in. A host may instead run a
    * change inside a Yjs transaction of its own that has no origin. Such a transaction holds one
-   * dispatch of the editor and nothing else: no second change, and no undo, which is refused
-   * until all of that dispatch is written. Give the history the same origin. Defaults to
-   * `bodySequenceKey`.
+   * dispatch of the editor and nothing else: no second change, and no undo. Give the history the
+   * same origin. Defaults to `bodySequenceKey`.
    */
   origin?: unknown;
   /**
@@ -126,12 +125,7 @@ export function keepBodySequenceFormatting(sequence: Y.Text): () => void {
   return () => doc.off("afterTransaction", keep);
 }
 
-type Bound = {
-  sequence: Y.Text;
-  history: Y.UndoManager;
-  reader: BodyReader;
-  writesWait: () => boolean;
-};
+type Bound = { sequence: Y.Text; history: Y.UndoManager; reader: BodyReader };
 
 function boundOf(state: EditorState): Bound | null {
   const read = bodySequenceKey.get(state)?.spec.bound as (() => Bound | null) | undefined;
@@ -140,32 +134,32 @@ function boundOf(state: EditorState): Bound | null {
 
 /**
  * Undoes this person's last change. The change comes back from the sequence as its own
- * transaction, so a host whose commands carry a transaction must not dispatch that one too. It is
- * refused while part of an editor change still waits to be written.
+ * transaction, so a host whose commands carry a transaction must not dispatch that one too.
  */
 export const undoBodySequence: Command = (state, dispatch) => {
-  const bound = boundOf(state);
-  if (!bound || bound.writesWait() || bound.history.undoStack.length === 0) return false;
-  if (dispatch) bound.history.undo();
+  const history = boundOf(state)?.history;
+  if (!history || history.undoStack.length === 0) return false;
+  if (dispatch) history.undo();
   return true;
 };
 
-/** Redoes the change this person last undid. It dispatches and is refused as `undoBodySequence`. */
+/** Redoes the change this person last undid. It dispatches as `undoBodySequence` does. */
 export const redoBodySequence: Command = (state, dispatch) => {
-  const bound = boundOf(state);
-  if (!bound || bound.writesWait() || bound.history.redoStack.length === 0) return false;
-  if (dispatch) bound.history.redo();
+  const history = boundOf(state)?.history;
+  if (!history || history.redoStack.length === 0) return false;
+  if (dispatch) history.redo();
   return true;
 };
 
-const BEFORE_WHAT_FOLLOWS = 1;
+const HELD_BY_WHAT_FOLLOWS = 2;
 
 /**
  * A place in the note that stays with its letters through everyone's changes: for a caret shown
  * to other people, or a mark that must survive a reload of the editor. `state` is the view's
- * current state. `assoc` is Yjs's association: negative keeps the place with what stands before
- * it. At the start of a block with no boundary of its own the place is kept with what follows it,
- * so it stays in that block, unless `assoc` is negative.
+ * current state. `assoc` is read by its sign, as Yjs reads it: negative keeps the place with
+ * what stands before it. At the start of a block with no boundary of its own the place is kept
+ * with what follows it, so it stays in that block, unless `assoc` is negative. Such an anchor
+ * carries an association of 2, which no anchor made here for another place has.
  */
 export function bodySequenceAnchor(
   state: EditorState,
@@ -175,10 +169,11 @@ export function bodySequenceAnchor(
   const bound = boundOf(state);
   if (!bound) return null;
   const reading = bound.reader.reading();
-  const follows = assoc < 0 ? -1 : whatFollowsStartOf(reading, pos);
+  const side = assoc < 0 ? -1 : 0;
+  const follows = side < 0 ? -1 : whatFollowsStartOf(reading, pos);
   return follows < 0
-    ? Y.createRelativePositionFromTypeIndex(bound.sequence, indexAt(reading, pos), assoc)
-    : Y.createRelativePositionFromTypeIndex(bound.sequence, follows, BEFORE_WHAT_FOLLOWS);
+    ? Y.createRelativePositionFromTypeIndex(bound.sequence, indexAt(reading, pos), side)
+    : Y.createRelativePositionFromTypeIndex(bound.sequence, follows, HELD_BY_WHAT_FOLLOWS);
 }
 
 /** Where an anchor stands in the editor now, or null when it is not of this note. */
@@ -191,7 +186,7 @@ export function bodySequenceAnchorPosition(
   const place = doc && Y.createAbsolutePositionFromRelativePosition(anchor, doc);
   if (!bound || !place || place.type !== bound.sequence) return null;
   const reading = bound.reader.reading();
-  const held = place.assoc === BEFORE_WHAT_FOLLOWS && anchor.item !== null;
+  const held = place.assoc === HELD_BY_WHAT_FOLLOWS && anchor.item !== null;
   if (held && !Y.getItem(doc.store, anchor.item!).deleted) {
     const start = startBefore(reading, place.index);
     if (start >= 0) return start;
@@ -264,11 +259,10 @@ function holdSelection(
  *
  * The editor always shows what `readBodySequence` reads. A person's change is written to the
  * sequence step by step, each step by its own step map, and what the sequence then reads as is
- * shown again where it differs. Editor transactions that are kept out of the history
- * (`addToHistory` false) are written in a Yjs transaction of their own, apart from the ones the
- * history follows. Where the host's own Yjs transaction is open around the editor's change, it
- * takes the first of them, and the rest are written once its update has gone out, so each is an
- * update of its own and a peer sees them in the order the writer made them. A change of the sequence from elsewhere, and an undo or redo, is
+ * shown again where it differs. One dispatch of the editor, with what other plugins append to
+ * it, is one Yjs transaction and one update. The history follows it unless every editor
+ * transaction in it is kept out (`addToHistory` false), so undoing a typed letter also takes back
+ * what a plugin appended to that dispatch. A change of the sequence from elsewhere, and an undo or redo, is
  * shown as one transaction that replaces what differs, keeps the nodes of the blocks it does not
  * touch, and keeps the selection around its letters. Such a transaction is never written back.
  *
@@ -331,20 +325,18 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       if (!doc) throw new Error("The body sequence must be part of a Yjs document.");
       const releaseFormatting = keepBodySequenceFormatting(sequence);
       const reader = createBodyReader(view.state.schema, sequence, containers);
-      let runs: { tracked: boolean; transactions: Transaction[] }[] = [];
       const here: Bound = {
         sequence,
         reader,
         history: options.history ?? createBodySequenceHistory(doc, { origin }),
-        writesWait: () => runs.length > 0,
       };
       bound = here;
       const written = new WeakSet<Y.Transaction>();
       let shown: ProseMirrorNode | null = null;
-      let writingRuns = false;
-      let wroteWhileBusy = false;
+      let destroyed = false;
 
       const show = (select?: (transaction: Transaction, end: number) => void) => {
+        if (destroyed) return;
         const reading = reader.reading();
         const current = view.state.doc;
         const start =
@@ -368,44 +360,12 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
         shown = view.state.doc;
       };
 
-      const writeRuns = () => {
-        if (writingRuns) return;
-        writingRuns = true;
-        try {
-          while (runs.length > 0) {
-            const busy = doc._transaction !== null || doc._transactionCleanups.length > 0;
-            if (busy && wroteWhileBusy) break;
-            const run = runs.shift()!;
-            wroteWhileBusy = busy;
-            let whole = false;
-            doc.transact((carrier) => {
-              written.add(carrier);
-              if (run.tracked) carrier.meta.set(bodySequenceKey, origin);
-              const writing = { sequence, reader };
-              whole = run.transactions.every((each) => writeTransaction(writing, each));
-            }, origin);
-            if (!whole) runs = [];
-          }
-        } catch (error) {
-          runs = [];
-          throw error;
-        } finally {
-          writingRuns = false;
-          if (runs.length === 0) show();
-        }
-      };
-
-      const writeWaitingRuns = () => {
-        wroteWhileBusy = false;
-        if (runs.length > 0) writeRuns();
-      };
-
       const onTransaction = (changed: Y.Transaction) => {
         if (!changes(changed.changedParentTypes, sequence) && !changes(changed.changed, containers))
           return;
         if (written.has(changed)) {
           reader.note(changed);
-          if (runs.length === 0 && !writingRuns) show();
+          show();
           return;
         }
         if (changed.origin === here.history) {
@@ -427,28 +387,31 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       const write = () => {
         const pending = bodySequenceKey.getState(view.state) ?? NONE;
         if (pending === flushed) {
-          if (runs.length === 0 && !writingRuns && view.state.doc !== shown) show();
+          if (view.state.doc !== shown) show();
           return;
         }
         flushed = pending;
-        for (const transaction of pending) {
-          const tracked = transaction.getMeta(ADD_TO_HISTORY) !== false;
-          const last = runs.at(-1);
-          if (last?.tracked === tracked) last.transactions.push(transaction);
-          else runs.push({ tracked, transactions: [transaction] });
+        try {
+          doc.transact((carrier) => {
+            written.add(carrier);
+            if (pending.some((transaction) => transaction.getMeta(ADD_TO_HISTORY) !== false))
+              carrier.meta.set(bodySequenceKey, origin);
+            const writing = { sequence, reader };
+            for (const transaction of pending) if (!writeTransaction(writing, transaction)) break;
+          }, origin);
+        } finally {
+          show();
         }
-        writeRuns();
       };
 
       show();
       write();
       doc.on("afterTransaction", onTransaction);
-      doc.on("afterAllTransactions", writeWaitingRuns);
       return {
         update: write,
         destroy() {
+          destroyed = true;
           doc.off("afterTransaction", onTransaction);
-          doc.off("afterAllTransactions", writeWaitingRuns);
           releaseFormatting();
           if (!options.history) here.history.destroy();
           if (bound === here) bound = null;
