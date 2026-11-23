@@ -48,6 +48,29 @@ class DeadlineExceededError extends Error {}
 const VERIFY_PARTITION = "dohc-app-verify";
 const IDLE_SETTLE_MS = 150;
 const MAX_ITEMS = 64;
+const BLOCK_WEBRTC_SCRIPT = `(() => {
+  for (const name of [
+    "RTCPeerConnection",
+    "webkitRTCPeerConnection",
+    "mozRTCPeerConnection",
+    "RTCDataChannel",
+    "RTCSessionDescription",
+    "RTCIceCandidate",
+    "RTCIceTransport",
+    "RTCSctpTransport",
+  ]) {
+    if (name in globalThis) {
+      try {
+        Object.defineProperty(globalThis, name, {
+          value: undefined,
+          writable: false,
+          configurable: false,
+          enumerable: false,
+        });
+      } catch {}
+    }
+  }
+})();`;
 const ALLOWED_PATHS = new Set([
   "/bootstrap",
   "/session",
@@ -211,7 +234,14 @@ async function executeVerification(
     throw error;
   }
 
-  const origin = new URL(launchedSession.url).origin;
+  const launchUrl = new URL(launchedSession.url);
+  const origin = launchUrl.origin;
+  await isolated.setProxy({
+    mode: "fixed_servers",
+    proxyRules: "http://127.0.0.1:1",
+    proxyBypassRules: `<-loopback>,${launchUrl.host}`,
+  });
+  input.signal.throwIfAborted();
   const deadlineAt = Date.now() + input.timeoutMs;
   const remainingMs = () => Math.max(0, deadlineAt - Date.now());
   const handshake = { delivered: false, messageCount: 0 };
@@ -521,6 +551,8 @@ async function executeVerification(
         cdpRaw("Log.enable", {}, childId),
         cdpRaw("Audits.enable", {}, childId),
         cdpRaw("Page.enable", {}, childId),
+        cdpRaw("Page.addScriptToEvaluateOnNewDocument", { source: BLOCK_WEBRTC_SCRIPT }, childId),
+        cdpRaw("Runtime.evaluate", { expression: BLOCK_WEBRTC_SCRIPT }, childId),
       ]).finally(() => {
         void cdpRaw("Runtime.runIfWaitingForDebugger", {}, childId).catch(() => {});
       });
@@ -678,8 +710,33 @@ async function executeVerification(
   };
 
   try {
-    // Electron 43 creates the initial RenderFrameHost on the first navigation; a data: URL avoids about:blank stopLoading races.
-    await raceDeadline(wc.loadURL("data:text/html,"));
+    const waitNotLoading = async () => {
+      if (!wc.isLoading() || wc.isDestroyed()) return;
+      await raceDeadline(
+        new Promise<void>((resolve) => {
+          const done = () => {
+            wc.removeListener("did-stop-loading", done);
+            wc.removeListener("destroyed", done);
+            resolve();
+          };
+          wc.once("did-stop-loading", done);
+          wc.once("destroyed", done);
+        }),
+      );
+    };
+    // Electron 43 creates the initial RenderFrameHost on the first navigation; a fresh WebContentsView
+    // can emit did-stop-loading for its initial empty entry and reject loadURL with ERR_FAILED (-2).
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await waitNotLoading();
+      try {
+        await raceDeadline(wc.loadURL("data:text/html,"));
+        break;
+      } catch (error) {
+        const code = (error as { code?: unknown } | null)?.code;
+        if (attempt === 2 || code !== "ERR_FAILED" || wc.isDestroyed()) throw error;
+      }
+    }
+    await waitNotLoading();
     const gateNav = (details: { url: string; isMainFrame: boolean; preventDefault(): void }) => {
       if (!appViewNavigationAllowed(details.url, details.isMainFrame, origin))
         details.preventDefault();
@@ -697,6 +754,7 @@ async function executeVerification(
     mainFrameId = initTree.frameTree?.frame?.id;
     await cdp("Runtime.enable");
     await cdp("Runtime.addBinding", { name: "__dohcVerifyObserve" });
+    await cdp("Page.addScriptToEvaluateOnNewDocument", { source: BLOCK_WEBRTC_SCRIPT });
     await cdp("Log.enable");
     await cdp("Audits.enable");
     await cdp("Target.setAutoAttach", {
@@ -928,6 +986,13 @@ async function executeVerification(
       await closed;
     }
     await launchedSession.stop().catch(() => {});
+    await isolated
+      .setProxy({
+        mode: "fixed_servers",
+        proxyRules: "http://127.0.0.1:1",
+        proxyBypassRules: "<-loopback>",
+      })
+      .catch(() => {});
     await clearSession();
   }
 }

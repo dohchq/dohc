@@ -792,12 +792,19 @@ describe("eval cases", () => {
               packageMap: {},
             }),
             "nested-ts-enum-app/ui/index.html":
-              '<!doctype html><div id="booking:status">ok</div><script type="application/json">{"stop":"Kyoto"}</script><script nomodule src="./legacy.js"></script><script type="module" src="./app.ts"></script>\n',
+              '<!doctype html><div id="booking:status">ok</div><script type="application/json">{"stop":"Kyoto"}</script><script nomodule src="./legacy.js"></script><script>const form = {}; form.onsubmit = (e) => e;</script><script type="module" src="./app.ts"></script>\n',
             "nested-ts-enum-app/ui/app.ts": "export enum SeatState { Open = 'open' }\n",
             "nested-ts-enum-app/app.publish.json": JSON.stringify({
               version: 1,
               entryPath: "ui/index.html",
               inputs: ["ui/index.html", "ui/app.ts"],
+              packageMap: {},
+            }),
+            "inline-handler-app/index.html": '<!doctype html><button onclick="go()">Go</button>\n',
+            "inline-handler-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html"],
               packageMap: {},
             }),
             "syntax-err-app/index.html":
@@ -885,6 +892,19 @@ describe("eval cases", () => {
         },
       });
       expect(nestedTsRes.isError).not.toBe(true);
+
+      const inlineHandlerRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "inline-handler-app",
+          },
+        },
+      });
+      expect(inlineHandlerRes.isError).toBe(true);
+      expect(JSON.stringify(inlineHandlerRes.structuredContent)).toContain("csp_violation");
 
       const tsInJsRes = await client.callTool({
         name: "dohc_publish_app",

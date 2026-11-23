@@ -76,6 +76,23 @@ export function isEvalExecutableScriptTag(attrs: string): boolean {
   return !/\bnomodule(?:\s*=|\s|$)/i.test(attrs);
 }
 
+/** Checks HTML opening tags for inline on* event handler attributes without scanning script/style bodies. */
+export function hasEvalInlineEventHandler(html: string): boolean {
+  const withoutRawBodies = html
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(
+      /(<(?:script|style)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>)[\s\S]*?(<\/(?:script|style)\s*>)/gi,
+      "$1$2",
+    );
+  for (const tag of withoutRawBodies.matchAll(
+    /<[A-Za-z][^\s/>]*(\s(?:[^"'<>]|"[^"]*"|'[^']*')*)>/g,
+  )) {
+    const attrs = (tag[1] ?? "").replace(/"[^"]*"|'[^']*'/g, '""');
+    if (/\s+on[a-z]+\s*=/i.test(attrs)) return true;
+  }
+  return false;
+}
+
 /** Checks script syntax using file-extension-specific JS/JSX/TS/TSX parsing matching desktop esbuild loaders. */
 export function checkEvalScriptSyntax(source: string, path: string): string | null {
   const lower = path.toLowerCase();
@@ -1609,7 +1626,7 @@ export async function createEverydayDesktop(
         const diagnostics: AppFrontendDiagnostic[] = [];
         const normalizedInputs = new Set(manifest.inputs);
         const scriptCodeParts: string[] = [];
-        if (/\bon(?:click|submit|change|input|load|error)\s*=/i.test(entryHtml)) {
+        if (hasEvalInlineEventHandler(entryHtml)) {
           diagnostics.push({
             code: "csp_violation",
             severity: "error",

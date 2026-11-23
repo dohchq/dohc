@@ -760,6 +760,220 @@ describe("verifyLocalAppFrontend", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("refuses reversible dataset actions that omit or oversize undo without committing", async () => {
+    const controller = new AbortController();
+    const idField = uuid("b9200000", 3);
+    const nameField = uuid("b9200000", 4);
+    const addOpId = uuid("b9200000", 6);
+    const undoOpId = uuid("b9200000", 7);
+    const listOpId = uuid("b9200000", 8);
+    const revDef: DatasetDefinition = {
+      formatVersion: 1,
+      datasetId: uuid("b9200000", 1),
+      name: "Tasks",
+      schemaPath: "tasks/schema.sql",
+      operationsPath: "tasks/backend.ts",
+      tables: [
+        {
+          tableId: uuid("b9200000", 2),
+          name: "Tasks",
+          sqlName: "tasks",
+          primaryKey: "id",
+          fields: [
+            {
+              fieldId: idField,
+              name: "ID",
+              sqlColumn: "id",
+              type: "text",
+              required: true,
+              unique: true,
+            },
+            {
+              fieldId: nameField,
+              name: "Name",
+              sqlColumn: "name",
+              type: "text",
+              required: true,
+              unique: false,
+            },
+          ],
+        },
+      ],
+      operations: [
+        {
+          operationId: addOpId,
+          name: "addTask",
+          label: "Add task",
+          tableId: uuid("b9200000", 2),
+          kind: "action",
+          access: "link",
+          readOnly: false,
+          fieldIds: [],
+          reversedBy: "removeTask",
+        },
+        {
+          operationId: undoOpId,
+          name: "removeTask",
+          label: "Remove task",
+          tableId: uuid("b9200000", 2),
+          kind: "action",
+          access: "owner",
+          readOnly: false,
+          fieldIds: [],
+        },
+        {
+          operationId: listOpId,
+          name: "listTasks",
+          label: "List tasks",
+          tableId: uuid("b9200000", 2),
+          kind: "read",
+          access: "owner",
+          readOnly: true,
+          fieldIds: [idField, nameField],
+        },
+      ],
+    };
+    const revSchema = `CREATE TABLE "tasks" ("id" TEXT PRIMARY KEY NOT NULL, "name" TEXT NOT NULL);`;
+    const revBackend = `globalThis.operations = {
+      addTask(ctx, input) {
+        ctx.db.execute("INSERT INTO tasks(id, name) VALUES(?, ?)", [ctx.requestId, String(input?.name ?? "")]);
+        if (input?.mode === "missing") return { id: ctx.requestId };
+        if (input?.mode === "oversize") return { id: ctx.requestId, undo: { blob: "x".repeat(20_000) } };
+        return { id: ctx.requestId, undo: { id: ctx.requestId } };
+      },
+      removeTask(ctx, input) {
+        ctx.db.execute("DELETE FROM tasks WHERE id = ?", [String(input?.id ?? "")]);
+        return { removed: true };
+      },
+      listTasks(ctx) {
+        return { rows: ctx.db.query("SELECT id, name FROM tasks ORDER BY id") };
+      },
+    };`;
+    const revRevision: DatasetRevision = (() => {
+      const draft: DatasetRevision = {
+        datasetId: revDef.datasetId,
+        revision: 1,
+        revisionSha256: "0".repeat(64),
+        definitionSha256: sha(datasetDefinitionDigestContent(revDef)),
+        schemaSha256: sha(revSchema),
+        operationsSha256: sha(revBackend),
+        definition: revDef,
+      };
+      draft.revisionSha256 = sha(datasetRevisionDigestContent(draft));
+      return draft;
+    })();
+    const files: Record<string, string> = {
+      "tasks/dataset.json": JSON.stringify(revDef),
+      "apps/tasks/app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "index.html",
+        inputs: ["index.html"],
+        packageMap: {},
+        dataset: {
+          kind: "dataset",
+          datasetPath: "tasks/dataset.json",
+          revision: 1,
+          revisionSha256: revRevision.revisionSha256,
+          operationIds: [addOpId, listOpId],
+        },
+      }),
+      "apps/tasks/index.html": "<!doctype html><h1>Tasks</h1>",
+    };
+
+    const result = await verifyLocalAppFrontend(
+      { action: "verifyFrontend", workspaceId: "ws-1", appRoot: "apps/tasks" },
+      {
+        workspaceId: "ws-1",
+        workspaceRoot: "C:\\workspace",
+        signal: controller.signal,
+        assertCurrent: () => {},
+        flushCapture: async () => ({ deferredWrites: [] }),
+        withAdapter: async (work) => work(makeMemoryAdapter(files)),
+        compile: (req) => compileClosedApp(req),
+        compileDataset: (src, path) => compileDatasetOperations(src, path),
+        datasetRuntime: {},
+        approvedArtifacts: async () => ({
+          revision: revRevision,
+          schemaSql: revSchema,
+          operationSource: revBackend,
+          active: true,
+        }),
+        verificationPublication: vi.fn(),
+        runBrowser: async (browserInput) => {
+          const started = await browserInput.startSession();
+          try {
+            const { backend } = await exchangeLaunchProof(started.url);
+
+            const missing = await backend({
+              id: "u1",
+              op: "backend.invoke",
+              operation: "addTask",
+              idempotencyKey: "k-missing",
+              input: { name: "bad-1", mode: "missing" },
+            });
+            expect(missing.status).toBe(409);
+            expect(await missing.json()).toMatchObject({ code: "undo_missing" });
+
+            const oversize = await backend({
+              id: "u2",
+              op: "backend.invoke",
+              operation: "addTask",
+              idempotencyKey: "k-oversize",
+              input: { name: "bad-2", mode: "oversize" },
+            });
+            expect(oversize.status).toBe(409);
+            expect(await oversize.json()).toMatchObject({ code: "undo_missing" });
+
+            const emptyList = await backend({
+              id: "u3",
+              op: "backend.invoke",
+              operation: "listTasks",
+              idempotencyKey: "k-list-1",
+              input: {},
+            });
+            expect(emptyList.status).toBe(200);
+            expect(await emptyList.json()).toMatchObject({ result: { rows: [] } });
+
+            const okAdd = await backend({
+              id: "u4",
+              op: "backend.invoke",
+              operation: "addTask",
+              idempotencyKey: "k-ok",
+              input: { name: "good-1", mode: "ok" },
+            });
+            expect(okAdd.status).toBe(200);
+
+            const afterList = await backend({
+              id: "u5",
+              op: "backend.invoke",
+              operation: "listTasks",
+              idempotencyKey: "k-list-2",
+              input: {},
+            });
+            expect(afterList.status).toBe(200);
+            expect(await afterList.json()).toMatchObject({
+              result: { rows: [{ name: "good-1" }] },
+            });
+          } finally {
+            await started.stop();
+          }
+          return {
+            ok: true,
+            stage: "complete",
+            startupOk: true,
+            stepsOk: true,
+            handshake: { delivered: true, messageCount: 5 },
+            brokerCalls: [],
+            steps: [],
+            diagnostics: [],
+            externalRequestsBlocked: 0,
+          };
+        },
+      },
+    );
+    expect(result.ok).toBe(true);
+  });
+
   it("matches overlapping backend expectations using complete one-to-one bipartite matching", () => {
     const calls = [
       { op: "backend.invoke" as const, operation: "load", status: 200, ok: true },

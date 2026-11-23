@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import {
+  AppBackendRuntimeError,
   evaluateAppOperation,
   initializeAppDatabase,
   isAppBackendRuntimeError,
   type AppBackendRuntimeOptions,
   type JsonValue,
 } from "@dohc/app-backend-runtime";
+import { missingUndo } from "@dohc/app-backend-runtime/dataset-host";
 import { orderedRequestIds } from "@dohc/app-backend-runtime/supervisor";
 import {
   OwnerAppPublicationRequest,
@@ -492,6 +494,14 @@ export async function verifyLocalAppFrontend(
                 },
                 deps.datasetRuntime,
               );
+              const definedOperation = resolvedDataset!.revision.definition.operations.find(
+                (item) => item.operationId === operation.operationId,
+              );
+              const undoRefusal =
+                definedOperation?.reversedBy !== undefined
+                  ? missingUndo(definedOperation, evaluated.result)
+                  : null;
+              if (undoRefusal) throw new AppBackendRuntimeError(undoRefusal);
               if (!operation.readOnly && evaluated.changed) {
                 currentDb = evaluated.database;
                 dbRevision++;

@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createServer as createTcpServer } from "node:net";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -153,6 +154,13 @@ test("@app-frontend-verify runs sandboxed Electron verification, catches broken 
   await new Promise<void>((resolve) => externalServer.listen(0, "127.0.0.1", resolve));
   const externalPort = (externalServer.address() as { port: number }).port;
   const externalUrl = `http://127.0.0.1:${externalPort}/probe`;
+  let turnHits = 0;
+  const turnServer = createTcpServer((socket) => {
+    turnHits++;
+    socket.destroy();
+  });
+  await new Promise<void>((resolve) => turnServer.listen(0, "127.0.0.1", resolve));
+  const turnPort = (turnServer.address() as { port: number }).port;
 
   const writeApp = async (dir: string, files: Record<string, string>) => {
     await mkdir(join(workspace.rootPath, dir), { recursive: true });
@@ -336,6 +344,34 @@ send({ op: "backend.invoke", operation: "listBookings", input: {}, idempotencyKe
       "index.html":
         '<!doctype html><body><p id="out">wait</p><script type="module" src="./app.js"></script></body>',
       "app.js": `fetch(${JSON.stringify(externalUrl)}).then(() => { document.getElementById("out").textContent = "leaked"; }).catch(() => { document.getElementById("out").textContent = "blocked"; });`,
+    });
+
+    await writeApp("apps/webrtc-turn", {
+      "app.publish.json": JSON.stringify({
+        version: 1,
+        entryPath: "index.html",
+        inputs: ["index.html", "app.js"],
+        packageMap: {},
+      }),
+      "index.html":
+        '<!doctype html><body><p id="rtc">wait</p><script type="module" src="./app.js"></script></body>',
+      "app.js": `const out = document.getElementById("rtc");
+try {
+  const Ctor = globalThis.RTCPeerConnection ?? globalThis.webkitRTCPeerConnection;
+  if (typeof Ctor !== "function") {
+    out.textContent = "rtc:blocked";
+  } else {
+    const pc = new Ctor({
+      iceServers: [{ urls: "turn:127.0.0.1:${turnPort}?transport=tcp", username: "secret", credential: "secret" }],
+      iceTransportPolicy: "relay",
+    });
+    pc.createDataChannel("leak");
+    pc.createOffer().then((offer) => pc.setLocalDescription(offer));
+    out.textContent = "rtc:leaked";
+  }
+} catch {
+  out.textContent = "rtc:blocked";
+}`,
     });
 
     await writeApp("apps/disabled-click", {
@@ -594,6 +630,16 @@ document.getElementById("q").addEventListener("input", () => {
       ).toBe(true);
     }
 
+    // WebRTC TURN/TCP must be blocked with zero TCP hits to the listener
+    const rtcVerify = await publish(desktop.page, {
+      action: "verifyFrontend",
+      workspaceId,
+      appRoot: "apps/webrtc-turn",
+      steps: [{ kind: "waitFor", selector: "#rtc", textIncludes: "rtc:blocked" }],
+    });
+    expect(turnHits).toBe(0);
+    expect(rtcVerify).toMatchObject({ kind: "frontendVerified", ok: true, stage: "complete" });
+
     // Disabled button click must fail with step_not_clickable
     const disabledClick = await publish(desktop.page, {
       action: "verifyFrontend",
@@ -672,6 +718,7 @@ document.getElementById("q").addEventListener("input", () => {
       badKeys,
       unapprovedOp,
       extVerify,
+      rtcVerify,
       disabledClick,
       prefillClick,
       longWaitFor,
@@ -684,6 +731,7 @@ document.getElementById("q").addEventListener("input", () => {
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
     await new Promise<void>((resolve) => externalServer.close(() => resolve()));
+    await new Promise<void>((resolve) => turnServer.close(() => resolve()));
     await cleanupDesktopWorkspace(desktop, workspace);
   }
 });
