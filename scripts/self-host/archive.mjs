@@ -9,7 +9,7 @@ const fs=require('node:fs');
 const [name,uid,gid]=process.argv.slice(1);
 const path='/backup/'+name;
 process.umask(0o077);
-const result=spawnSync('tar',['--numeric-owner','--create','--gzip','--file',path,'-C','/source','.'],{stdio:'inherit'});
+const result=spawnSync('tar',['--numeric-owner','--create','--use-compress-program','gzip -1','--file',path,'-C','/source','.'],{stdio:'inherit'});
 if(result.error || result.status!==0) process.exit(1);
 fs.chmodSync(path,0o600);
 if(uid!=='none') fs.chownSync(path,Number(uid),Number(gid));

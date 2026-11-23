@@ -336,8 +336,8 @@ An absent `recovery.json` means the export did not complete.
 
 ## Upgrade without rolling back authority
 
-Save a relay snapshot and complete private archive before upgrading.
-Then follow [Upgrade the server](self-host.md#upgrade-the-server).
+Stop the deployment, then save a relay snapshot and a complete private archive before upgrading.
+[Upgrade the server](self-host.md#upgrade-the-server) lists the commands, which stop the server once.
 If the new version changes the schema, its migration advances continuity.
 The pre-upgrade snapshot can then be used for offline salvage, but not in-place rollback.
 If an upgrade fails, keep its volumes and diagnose or install a corrected version.

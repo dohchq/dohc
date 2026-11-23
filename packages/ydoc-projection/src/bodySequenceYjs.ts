@@ -10,15 +10,25 @@ import {
   type SequencePiece,
 } from "./bodySequenceGrammar.js";
 
+export const BODY_SEQUENCE_SCHEMA_VERSION = 2;
+
+type StoredKeys = { readonly _map: Map<string, Y.Item> };
+type StoredList = { readonly _start: Y.Item | null };
+
 /**
  * The value stored under a key of a shared type: the last value of a live item that holds plain
  * values. An item of any other kind holds none, because Yjs and yrs read such an item differently.
  */
-export function storedValue(holder: { _map: Map<string, Y.Item> }, key: string): unknown {
-  const item = holder._map.get(key);
+export function storedValue(holder: StoredKeys | undefined, key: string): unknown {
+  const item = holder?._map.get(key);
   return item && !item.deleted && item.content instanceof Y.ContentAny
     ? item.content.arr.at(-1)
     : undefined;
+}
+
+/** Whether a note's body is one sequence. Reads the stored marker, and declares no root. */
+export function holdsBodySequence(doc: Y.Doc): boolean {
+  return storedValue(doc.share.get("meta"), "schemaVersion") === BODY_SEQUENCE_SCHEMA_VERSION;
 }
 
 function attributesOf(element: Y.XmlElement): SequenceAttrs {
@@ -34,7 +44,7 @@ function attributesOf(element: Y.XmlElement): SequenceAttrs {
  * under any other key is left out.
  */
 export function piecesOfSequence(
-  sequence: Y.Text,
+  sequence: StoredList,
   markNames?: ReadonlySet<string>,
 ): SequencePiece[] {
   const pieces: SequencePiece[] = [];
@@ -58,15 +68,20 @@ export function piecesOfSequence(
   return pieces;
 }
 
-/** The document a format-2 note's Yjs document stands for. */
+/**
+ * The document a format-2 note's Yjs document stands for. It declares no root: Yjs deletes
+ * formatting on its own in a document where the sequence is a declared text, so a document that
+ * will take more changes is read as stored.
+ */
 export function readBodySequence(schema: Schema, doc: Y.Doc): ProseMirrorNode {
-  const containers = doc.getMap(BODY_CONTAINERS_FIELD);
+  const sequence = doc.share.get(BODY_SEQUENCE_FIELD);
+  const records = doc.share.get(BODY_CONTAINERS_FIELD);
   return readBodyLeaves(
     schema,
     leavesOfSequence(
       schema,
-      piecesOfSequence(doc.getText(BODY_SEQUENCE_FIELD), new Set(Object.keys(schema.marks))),
-      { get: (key) => storedValue(containers, key) },
+      sequence ? piecesOfSequence(sequence, new Set(Object.keys(schema.marks))) : [],
+      { get: (key) => storedValue(records, key) },
     ),
   );
 }
