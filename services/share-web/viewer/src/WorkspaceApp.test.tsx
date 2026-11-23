@@ -932,6 +932,25 @@ it("shows a Chat Group as one conversation, and answers a message in its thread"
   expect(document.activeElement).toBe(button("2 replies"));
 });
 
+it("orders a Chat Group by when each message was sent, as the desktop does", async () => {
+  server({
+    groups: [{ wire: "wire-plans", name: "plans", type: "chat" }],
+    history: {
+      // Sam sent first, but the relay took Ana's message first.
+      "wire-plans": [
+        chat(4, "Train at 8", "ana", { threadId: "t-ana", lane: "chat" }),
+        {
+          ...chat(5, "Ferry at 9", "sam", { threadId: "t-sam", lane: "chat" }),
+          createdAtMs: 3_500,
+        },
+      ],
+    },
+  });
+  await render();
+  await settle(() => listed().length === 2);
+  expect(listed()).toEqual(["Ferry at 9", "Train at 8"]);
+});
+
 it("switches a Group with both lanes between Posts and Chat", async () => {
   server({
     history: {
