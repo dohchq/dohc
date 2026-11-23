@@ -95,6 +95,7 @@ export interface AccessRuleStatements {
   unbind: ReturnType<SqliteDb["prepare"]>;
   bound: ReturnType<SqliteDb["prepare"]>;
   ruleFolders: ReturnType<SqliteDb["prepare"]>;
+  boundAbove: ReturnType<SqliteDb["prepare"]>;
   fileUnder: ReturnType<SqliteDb["prepare"]>;
   open: ReturnType<SqliteDb["prepare"]>;
   close: ReturnType<SqliteDb["prepare"]>;
@@ -130,6 +131,10 @@ export function accessRuleStatements(db: SqliteDb): AccessRuleStatements {
     ),
     ruleFolders: db.prepare(
       "SELECT folder FROM sync_relay_folder_rule_bindings WHERE workspace_id = ? AND rule_id = ?",
+    ),
+    boundAbove: db.prepare(
+      `SELECT DISTINCT folder FROM sync_relay_folder_rule_bindings
+       WHERE workspace_id = ? AND folder <> '' AND ? >= folder || '/' AND ? < folder || '0'`,
     ),
     // "0" sorts just after "/", so this range is every path under the folder.
     fileUnder: db.prepare(
@@ -209,8 +214,8 @@ export function folderHasFiles(
 
 /**
  * Brings a folder's open span up to date at `relaySeq`, after a marker in it
- * was written or removed, or a rule binding it changed. Call it inside the
- * transaction that made the change.
+ * was written or removed, its last file left, or a rule binding it changed.
+ * Call it inside the transaction that made the change.
  *
  * A marker naming an active rule binds its folder to that rule. A marker that
  * names no known rule, can't be read, or has a twin hides the folder, and so
