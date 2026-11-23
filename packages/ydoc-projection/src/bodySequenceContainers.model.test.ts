@@ -382,7 +382,7 @@ type Step = {
   marks: boolean;
   formats: boolean;
   known: Set<Id>;
-  was?: { look: Look; received: number; gave: number };
+  was?: { look: Look; received: number; made: number; gave: number };
 };
 
 const step = (): Step => ({
@@ -490,6 +490,9 @@ const tally = () => ({
   joinsOfALineWithNoBoundary: 0,
   undosReadAsBeforeTheStep: 0,
   undosCheckedWithABoundaryGivenSinceTheStepBegan: 0,
+  undosOfARedoneStepSomeoneElseChangedSinceItBegan: 0,
+  ofThoseLeftAnExtraEmptyParagraphOrListItem: 0,
+  ofThoseReadOtherwise: 0,
   boundariesForLinesAChangeMade: 0,
   othersLettersKeptInAGivenLine: 0,
   othersLettersAtTheStartOfABlockAnUndoPutBack: 0,
@@ -653,6 +656,25 @@ function rowsKept(what: string, [, after, between, made]: Done) {
   }
   const was = between.rows.map((row) => ({ b: row.boundary, chars: row.chars }));
   if (json(got) !== json(was)) throw new Error(`[writer] ${what} changed what a line holds`);
+}
+
+function readingWithoutEmpty(look: Look) {
+  const kept = (node: ProseMirrorNode): unknown => {
+    const size = node.content.size;
+    if (node.isTextblock || node.isLeaf)
+      return node.type.name === "paragraph" && size === 0
+        ? null
+        : [node.type.name, node.attrs, node.textBetween(0, size, undefined, OBJECT)];
+    const held: unknown[] = [];
+    node.forEach((child) => {
+      const one = kept(child);
+      if (one !== null) held.push(one);
+    });
+    return held.length === 0 && node.type !== schema.topNodeType
+      ? null
+      : [node.type.name, node.attrs, held];
+  };
+  return json(kept(readBodyLeaves(schema, look.leaves)));
 }
 
 function madeRows(doc: Y.Doc, between: Look, after: Look): Set<Id> {
@@ -865,7 +887,7 @@ function person(baseline: Uint8Array, who: number, oracle: Oracle, gc: boolean, 
       claims.set(slot, { value: change.to?.value, round: oracle.round });
     for (const key of settings) effects.settings.add(key);
     const top = undoMirror.at(-1);
-    effects.was = { look: before, received, gave };
+    effects.was = { look: before, received, made: received, gave };
     if (history.undoStack.length > depth) undoMirror.push(effects);
     else if (top && history.undoStack.length === depth) join(top, effects);
     if (history.redoStack.length === 0) redoMirror = [];
@@ -1237,18 +1259,27 @@ PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
       ]++;
     oracle.count[which === "undo" ? "undos" : "redos"]++;
     const done = did ? popped[0]! : step();
-    if (did && popped.length === 1 && done.was?.received === received) {
+    const itsStep = did && popped.length === 1 ? done.was : undefined;
+    if (itsStep?.received === received) {
       const marks = !done.formats && !changedFormatting;
-      if (readingOf(done.was.look, marks) !== readingOf(after, marks))
+      if (readingOf(itsStep.look, marks) !== readingOf(after, marks))
         throw new Error(
           `[3 undo] ${which}, with no change from anyone else since its step, left the note reading other than before the step${
             process.env.BODY_CONTAINERS_DEBUG
-              ? `\nWAS ${readingOf(done.was.look, marks)}\nNOW ${readingOf(after, marks)}`
+              ? `\nWAS ${readingOf(itsStep.look, marks)}\nNOW ${readingOf(after, marks)}`
               : ""
           }`,
         );
       oracle.count.undosReadAsBeforeTheStep++;
-      if (done.was.gave !== gave) oracle.count.undosCheckedWithABoundaryGivenSinceTheStepBegan++;
+      if (itsStep.gave !== gave) oracle.count.undosCheckedWithABoundaryGivenSinceTheStepBegan++;
+    } else if (itsStep?.made === received) {
+      oracle.count.undosOfARedoneStepSomeoneElseChangedSinceItBegan++;
+      if (readingOf(itsStep.look, false) !== readingOf(after, false))
+        oracle.count[
+          readingWithoutEmpty(itsStep.look) === readingWithoutEmpty(after)
+            ? "ofThoseLeftAnExtraEmptyParagraphOrListItem"
+            : "ofThoseReadOtherwise"
+        ]++;
     }
     const changed = [
       effects.insertedChars,
@@ -1346,7 +1377,7 @@ PATHS ${json(before.lines.map((line) => idsOf(line.path)))}`
 
     for (const key of done.settings)
       if (effects.slots.has(`record ${key}`)) effects.settings.add(key);
-    effects.was = { look: before, received, gave };
+    effects.was = { look: before, received: done.was?.received ?? received, made: received, gave };
     if (other().length > otherDepth) to.push(effects);
     kindsHold(after.shot);
     return did;
