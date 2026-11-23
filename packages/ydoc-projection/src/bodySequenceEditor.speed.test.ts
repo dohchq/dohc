@@ -208,6 +208,8 @@ it.skipIf(!process.env.BODY_SEQUENCE_SPEED)(
       return `${(performance.now() - start).toFixed(1)} ms`;
     };
     report.push(
+      `10,000 paragraphs, the first with no boundary: one letter typed in its middle, once: ${timed((view) => view.dispatch(view.state.tr.insertText("x", 30)))}`,
+      `10,000 paragraphs, the first with no boundary: one letter typed at its start, which is first written to a copy of the note, once: ${timed((view) => view.dispatch(view.state.tr.insertText("x", 1)))}`,
       `10,000 paragraphs, the first with no boundary: one Enter in its middle, once: ${timed((view) => view.dispatch(view.state.tr.split(30)))}`,
       `10,000 paragraphs, the first with no boundary: one Enter at its start, which is first written to a copy of the note, once: ${timed((view) => view.dispatch(view.state.tr.split(1)))}`,
     );

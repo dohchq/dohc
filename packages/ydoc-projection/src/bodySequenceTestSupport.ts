@@ -221,24 +221,24 @@ export function person(
 
 /**
  * A plain ProseMirror editor on a page that is already there, so a test can listen to the page's
- * document before the editor does, or put two editors with their own histories on one document.
+ * document before the editor does, or put two editors on one document: each with a history of
+ * its own, or both given one history, as two panes on one note are.
  */
 export function editorOn(
   base: Page,
   shape: HostShape = "bare",
   plugins: Plugin[] = [],
   pluginsBefore: Plugin[] = [],
-  options: { origin?: object; edit?: (change: () => void) => boolean } = {},
+  options: { history?: Y.UndoManager; edit?: (change: () => void) => boolean } = {},
 ) {
   const mount = window.document.createElement("div");
   window.document.body.append(mount);
-  const own = options.origin ? { origin: options.origin } : {};
   const hosted = (change: () => void) => {
     base.doc.transact(change);
     return true;
   };
   const edit = options.edit ?? (shape === "hosted" ? hosted : undefined);
-  const history = createBodySequenceHistory(base.doc, { captureTimeout: 0, ...own });
+  const history = options.history ?? createBodySequenceHistory(base.doc, { captureTimeout: 0 });
   const shown = { count: 0 };
   const view = new EditorView(mount, {
     state: EditorState.create({
@@ -249,7 +249,6 @@ export function editorOn(
           sequence: base.sequence,
           containers: base.containers,
           history,
-          ...own,
           ...(edit ? { edit } : {}),
         }),
         keymap(baseKeymap),
@@ -263,7 +262,7 @@ export function editorOn(
   });
   stops.push(() => {
     view.destroy();
-    history.destroy();
+    if (!options.history) history.destroy();
     mount.remove();
   });
   return withEditor({ ...base, history, view, shown });

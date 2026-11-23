@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { Editor } from "@tiptap/core";
+import type * as Y from "yjs";
+import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
 import {
@@ -30,7 +31,9 @@ import {
   stopEveryone,
   withEditor,
   type Effects,
+  type Page,
 } from "@dohc/ydoc-projection/body-sequence-testing";
+import { lookupEmoji, makeEmojiPlugin } from "./emojiTrigger";
 import { desktopMarkdownExtensions } from "./extensions";
 import { ListConversions } from "./listEditing";
 
@@ -38,11 +41,20 @@ afterEach(stopEveryone);
 
 const BOUNDARY = { ...quiet(), boundaries: 1, attributes: 2 };
 
+const EmojiTrigger = Extension.create({
+  name: "emojiTrigger",
+  addProseMirrorPlugins: () => [makeEmojiPlugin(() => {})],
+});
+
 function desktop(baseline: Uint8Array, clientID: number) {
-  const base = page(baseline, clientID);
+  return desktopOn(page(baseline, clientID));
+}
+
+/** The desktop editor on a page that is already there. Two panes on one note are given one history. */
+function desktopOn(base: Page, shared?: Y.UndoManager) {
   const element = window.document.createElement("div");
   window.document.body.append(element);
-  const history = createBodySequenceHistory(base.doc, { captureTimeout: 0 });
+  const history = shared ?? createBodySequenceHistory(base.doc, { captureTimeout: 0 });
   const shown = { count: 0 };
   const editor = new Editor({
     element,
@@ -63,6 +75,7 @@ function desktop(baseline: Uint8Array, clientID: number) {
       DohcTaskItem,
       TableKit.configure({ table: false }),
       DohcMarkdownTable,
+      EmojiTrigger,
       BodySequence.configure({ sequence: base.sequence, containers: base.containers, history }),
     ],
     onTransaction({ transaction }) {
@@ -71,7 +84,7 @@ function desktop(baseline: Uint8Array, clientID: number) {
   });
   onStop(() => {
     editor.destroy();
-    history.destroy();
+    if (!shared) history.destroy();
     element.remove();
   });
   const seat = withEditor({ ...base, view: editor.view, history, shown });
@@ -422,3 +435,75 @@ it.skipIf(!process.env.BODY_SEQUENCE_COMMANDS)(
     console.log(report.join("\n"));
   },
 );
+
+describe("the desktop editor's own plugins, which add to a change", () => {
+  const ADDRESS = "https://example.com";
+  const twoPanes = (line: string) => {
+    const base = page(note(line), 10);
+    const history = createBodySequenceHistory(base.doc, { captureTimeout: 0 });
+    onStop(() => history.destroy());
+    return { base, first: desktopOn(base, history), second: desktopOn(base, history) };
+  };
+
+  it("write no link when a pane shows an address a peer typed, also a pane nobody can edit", () => {
+    const { base, first, second } = twoPanes("see ");
+    second.editor.setEditable(false);
+    const peer = person(note("see "), 20);
+    peer.typeAt(0, 4, `${ADDRESS} and`);
+    exchange(peer, base);
+    expect(base.sent).toEqual([]);
+    for (const pane of [first, second]) {
+      pane.expectMirror();
+      expect(pane.lines()).toEqual([`see ${ADDRESS} and`]);
+    }
+    expect(first.lettersMarked("link")).toBe("");
+  });
+
+  it("still link an address the person types, once, and show it in the other pane", () => {
+    const { first, second } = twoPanes("see ");
+    first.select([0, 4]);
+    first.type(`${ADDRESS} `);
+    expect(first.lettersMarked("link")).toBe(ADDRESS);
+    for (const pane of [first, second]) {
+      pane.expectMirror();
+      expect(pane.lines()).toEqual([`see ${ADDRESS} `]);
+    }
+  });
+
+  it("expand no shortcode when a peer makes one bold just before the caret", () => {
+    const a = desktop(note("say :smile:"), 10);
+    const b = person(note("say :smile:"), 20);
+    a.select([0, 11]);
+    b.select([0, 4], [0, 11]);
+    b.toggle("bold");
+    exchange(b, a);
+    expect(a.sent).toEqual([]);
+    expect(a.lines()).toEqual(["say :smile:"]);
+    expect(a.lettersMarked("bold")).toBe(":smile:");
+    a.expectMirror();
+  });
+
+  it("still expand a shortcode the person types", () => {
+    const a = desktop(note("say "), 10);
+    a.select([0, 4]);
+    a.type(":smile:");
+    expect(a.lines()).toEqual([`say ${lookupEmoji("smile")!.emoji}`]);
+    a.expectMirror();
+  });
+
+  it("share undo between two panes on one note", () => {
+    const { first, second } = twoPanes("ab");
+    first.typeAt(0, 1, "A");
+    second.typeAt(0, 2, "B");
+    expect(first.editor.commands.undo()).toBe(true);
+    for (const pane of [first, second]) expect(pane.lines()).toEqual(["aAb"]);
+    expect(second.editor.commands.undo()).toBe(true);
+    for (const pane of [first, second]) expect(pane.lines()).toEqual(["ab"]);
+    expect(first.editor.commands.redo()).toBe(true);
+    expect(second.editor.commands.redo()).toBe(true);
+    for (const pane of [first, second]) {
+      pane.expectMirror();
+      expect(pane.lines()).toEqual(["aABb"]);
+    }
+  });
+});

@@ -47,11 +47,6 @@ export type BodySequenceOptions = {
   /** The note's `containers`, declared before any update was applied to its document. */
   containers: Y.Map<unknown>;
   /**
-   * The origin of the Yjs transactions an editor change is written in. Give the history the same
-   * origin. Defaults to `bodySequenceKey`.
-   */
-  origin?: unknown;
-  /**
    * The guard a host puts around a person's change, for a host that has one. It runs `change`
    * before it returns, inside a Yjs transaction of its own with no origin if it likes, and
    * returns whether it ran it. When it did not, the editor shows the note as it stands.
@@ -63,14 +58,14 @@ export type BodySequenceOptions = {
    * The host opens no Yjs transaction around the dispatch itself. A dispatch that changes the
    * document is refused, so the editor stays as it is and nothing is written:
    *
-   * - while a Yjs transaction is open on the note's document;
+   * - while a Yjs transaction is open on the note's document, or Yjs has not told of every
+   *   finished one yet. That is the case inside every Yjs callback, and for good once a listener
+   *   of the host has thrown from `update`: Yjs then tells of nothing more on that document, and
+   *   the host mounts the note again. Undo and redo are refused then too;
    * - while that document holds a change the editor does not show yet;
-   * - while Yjs tells of a transaction, from its end until its update is made, because a write
-   *   made then would go out in that update without its deletions. A change another plugin adds
-   *   to the adapter's own showing of the note is taken, in a transaction of its own.
-   *
-   * A key press never arrives then. A host or a plugin that wants to change the document from a
-   * Yjs callback does it from `update` or later.
+   * - while the editor shows the note. What another plugin adds to such a transaction is not
+   *   applied, so showing a peer's change, a mounted note, a correction, an undo or a redo writes
+   *   nothing.
    *
    * A plugin that dispatches from its own view update before the adapter has written the edit
    * that caused it has its edit written with that edit: one update and one undo step.
@@ -78,7 +73,8 @@ export type BodySequenceOptions = {
   edit?: (change: () => void) => boolean;
   /**
    * A history that outlives this editor, made with `createBodySequenceHistory`. Without one the
-   * plugin makes its own and destroys it with the view.
+   * plugin makes its own and destroys it with the view. Editors given one history share its undo
+   * steps, as two panes on one note do.
    */
   history?: Y.UndoManager;
 };
@@ -97,11 +93,14 @@ export function isBodySequenceChange(transaction: Transaction): boolean {
   return transaction.getMeta(bodySequenceKey) === true;
 }
 
+const originOfHistory = new WeakMap<Y.UndoManager, symbol>();
+
 /**
- * A history of this person's own changes to a note's sequence and container records. It follows
- * a Yjs transaction only when the editor adapter marked it as the person's change, so it works
- * the same when the host runs an editor change inside its own Yjs transaction with no origin.
- * Apply other people's changes with any other origin, or with none.
+ * A history of one person's own changes to a note's sequence and container records. It follows
+ * a Yjs transaction only when an editor given this history marked it as the person's change, so
+ * it works the same when the host runs an editor change inside its own Yjs transaction with no
+ * origin. Each history has an origin of its own for those changes, so two histories on one
+ * document never undo each other's.
  *
  * An undo puts an earlier value back over someone else's later one. It never deletes a container
  * record, and never an attribute of a boundary that still stands. An inline item's attribute is
@@ -113,9 +112,9 @@ export function isBodySequenceChange(transaction: Transaction): boolean {
  */
 export function createBodySequenceHistory(
   doc: Y.Doc,
-  options: { origin?: unknown; captureTimeout?: number } = {},
+  options: { captureTimeout?: number } = {},
 ): Y.UndoManager {
-  const origin = options.origin ?? bodySequenceKey;
+  const origin = Symbol("one person's changes to a note's body");
   const containers = doc.getMap(BODY_CONTAINERS_FIELD);
   const history: Y.UndoManager = new Y.UndoManager([doc.getText(BODY_SEQUENCE_FIELD), containers], {
     trackedOrigins: new Set([origin, null]),
@@ -131,6 +130,7 @@ export function createBodySequenceHistory(
       ),
     ...(options.captureTimeout === undefined ? {} : { captureTimeout: options.captureTimeout }),
   });
+  originOfHistory.set(history, origin);
   return history;
 }
 
@@ -165,24 +165,33 @@ function boundOf(state: EditorState): Bound | null {
   return read?.() ?? null;
 }
 
+/** Whether Yjs has a transaction open on a document, or has not told of every finished one yet. */
+function isBusy(doc: Y.Doc): boolean {
+  return doc._transaction !== null || doc._transactionCleanups.length > 0;
+}
+
+function stepOfHistory(step: "undo" | "redo"): Command {
+  return (state, dispatch) => {
+    const bound = boundOf(state);
+    const doc = bound?.sequence.doc;
+    if (!bound || !doc || isBusy(doc)) return false;
+    const steps = step === "undo" ? bound.history.undoStack : bound.history.redoStack;
+    if (steps.length === 0) return false;
+    if (dispatch) bound.history[step]();
+    return true;
+  };
+}
+
 /**
  * Undoes this person's last change. The change comes back from the sequence as its own
- * transaction, so a host whose commands carry a transaction must not dispatch that one too.
+ * transaction, so a host whose commands carry a transaction must not dispatch that one too. Like
+ * an edit, it is refused while a Yjs transaction is open on the note's document or Yjs has not
+ * told of every finished one: Yjs would lose the redo.
  */
-export const undoBodySequence: Command = (state, dispatch) => {
-  const history = boundOf(state)?.history;
-  if (!history || history.undoStack.length === 0) return false;
-  if (dispatch) history.undo();
-  return true;
-};
+export const undoBodySequence: Command = stepOfHistory("undo");
 
-/** Redoes the change this person last undid. It dispatches as `undoBodySequence` does. */
-export const redoBodySequence: Command = (state, dispatch) => {
-  const history = boundOf(state)?.history;
-  if (!history || history.redoStack.length === 0) return false;
-  if (dispatch) history.redo();
-  return true;
-};
+/** Redoes the change this person last undid. It dispatches and is refused as `undoBodySequence` is. */
+export const redoBodySequence: Command = stepOfHistory("redo");
 
 const HELD_BY_WHAT_FOLLOWS = 2;
 
@@ -307,16 +316,16 @@ function holdSelection(
  * A transaction that would start, change or cut a list, quote, callout or table is refused, also
  * one that would remove the last line between two of them that share an id. So is one that would
  * write between the two units of a surrogate pair, and one dispatched while a Yjs transaction is
- * open or before the editor shows a change the note's document holds, whose offsets are of a
- * document the sequence no longer reads as.
+ * open, while Yjs has not told of every finished one, or before the editor shows a change the
+ * note's document holds: its offsets may be of a document the sequence no longer reads as. So is
+ * what a plugin adds to a transaction that shows the note.
  *
- * What the editor has not shown is counted from Yjs's `beforeTransaction`, so a listener of the
- * host that throws leaves the editor neither behind for good nor refusing for good: what was not
- * shown is shown when Yjs has told of everything, or in the next microtask.
+ * What the editor has not shown is counted from Yjs's `beforeTransaction`. When a listener of the
+ * host throws from `afterTransaction` before the editor's own is called, the editor shows what it
+ * missed once Yjs has told of everything.
  */
 export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonly Transaction[]> {
   const { sequence, containers } = options;
-  const origin = options.origin ?? bodySequenceKey;
   const edit =
     options.edit ??
     ((change: () => void) => {
@@ -383,19 +392,19 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       const here: Bound = {
         sequence,
         reader,
-        history: options.history ?? createBodySequenceHistory(doc, { origin }),
+        history: options.history ?? createBodySequenceHistory(doc),
       };
+      const origin = originOfHistory.get(here.history);
+      if (!origin) throw new Error("The history must be one createBodySequenceHistory made.");
       bound = here;
       const unread: Y.Transaction[] = [];
       let shown: ProseMirrorNode | null = null;
       let destroyed = false;
       let writing = false;
       let showing = false;
-      let telling = false;
-      let settling = false;
       const stands = (base: ProseMirrorNode) =>
-        doc._transaction === null && unread.length === 0 && reader.reading().doc === base;
-      showsWhatStands = (base) => (showing || !telling) && stands(base);
+        !isBusy(doc) && unread.length === 0 && reader.reading().doc === base;
+      showsWhatStands = (base) => !showing && stands(base);
 
       const show = (select?: (transaction: Transaction, end: number) => void) => {
         if (destroyed) return;
@@ -461,19 +470,6 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
 
       const onStart = (started: Y.Transaction) => {
         unread.push(started);
-        if (settling) return;
-        settling = true;
-        queueMicrotask(() => {
-          settling = false;
-          telling = false;
-          if (unread.length > 0) catchUp();
-        });
-      };
-      const onTelling = () => {
-        telling = true;
-      };
-      const onTold = () => {
-        telling = false;
       };
       const onTransaction = () => {
         if (!writing) showUnread();
@@ -483,22 +479,27 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
         if (unread.length > 0) catchUp();
       };
 
-      const change = (recorded: boolean, write: () => void) =>
+      const change = (recorded: boolean, write: () => void) => {
+        let wrote = false;
         edit(() =>
           doc.transact((carrier) => {
             const own = carrier.changed.size === 0 ? unread.lastIndexOf(carrier) : -1;
-            if (own >= 0) unread.splice(own, 1);
+            if (own < 0) return;
+            unread.splice(own, 1);
+            if (unread.length > 0) return;
             if (recorded) carrier.meta.set(bodySequenceKey, origin);
             write();
+            wrote = true;
           }, origin),
         );
+        return wrote;
+      };
 
       const write = () => {
         if (writing) return;
         const pending = bodySequenceKey.getState(view.state) ?? NONE;
         if (pending === flushed) {
-          if (unread.length > 0) catchUp();
-          else if (view.state.doc !== shown) show();
+          if (view.state.doc !== shown) show();
           return;
         }
         flushed = pending;
@@ -510,8 +511,7 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           const lines = linesGivenBoundaries(target, pending);
           if (lines.length > 0) {
             if (!change(false, () => giveBoundaries(target, lines))) return;
-            if (doc._transaction !== null || unread.length > 0) return;
-            if (!reader.reading().doc.eq(base)) return;
+            if (isBusy(doc) || unread.length > 0 || !reader.reading().doc.eq(base)) return;
             reader.adopt(base);
           }
           const recorded = pending.some(
@@ -523,14 +523,11 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           });
         } finally {
           writing = false;
-          if (unread.length > 0) catchUp();
-          else show();
+          show();
         }
       };
 
       doc.on("beforeTransaction", onStart);
-      doc.on("beforeObserverCalls", onTelling);
-      doc.on("afterTransactionCleanup", onTold);
       doc.on("afterTransaction", onTransaction);
       doc.on("afterAllTransactions", onSettled);
       show();
@@ -540,8 +537,6 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
         destroy() {
           destroyed = true;
           doc.off("beforeTransaction", onStart);
-          doc.off("beforeObserverCalls", onTelling);
-          doc.off("afterTransactionCleanup", onTold);
           doc.off("afterTransaction", onTransaction);
           doc.off("afterAllTransactions", onSettled);
           releaseFormatting();

@@ -36,8 +36,8 @@ export type BodyWriting = {
   sequence: Y.Text;
   reader: BodyReader;
   /**
-   * Told where a boundary is about to be written and with which path, when it is one for a block
-   * that has none of its own, or for a block start the sequence does not read.
+   * Told where a boundary was just written and with which path, when it is one for a block that
+   * has none of its own, or for a block start the sequence does not read.
    */
   given?: (index: number, path: readonly string[]) => void;
 };
@@ -312,9 +312,9 @@ function placeForBoundaryOf(reading: BodyReading, block: number): number {
  */
 function giveBoundary(writing: BodyWriting, reading: BodyReading, block: number): void {
   const index = placeForBoundaryOf(reading, block);
-  writing.given?.(index, reading.paths[block]!);
   const paragraph = reading.doc.type.schema.nodes.paragraph!.create();
   insertBoundary(writing, index, paragraph, reading.paths[block]!);
+  writing.given?.(index, reading.paths[block]!);
 }
 
 function isParagraphAfterItsLeaf(reading: BodyReading, block: number): boolean {
@@ -604,8 +604,8 @@ function writeBlockStartsThatDiffer(writing: BodyWriting, after: ProseMirrorNode
       const path = pathOfSameContainer(reading, after, depth > 0 ? $block.before(depth) : 0, depth);
       if (path === null) return false;
       const index = indexAt(reading, stored[edit.before]?.pos ?? a);
-      writing.given?.(index, path);
       insertBoundary(writing, index, $block.nodeAfter!, path);
+      writing.given?.(index, path);
       wrote = true;
     }
     if (!wrote) return false;
@@ -797,7 +797,9 @@ export function writeTransaction(writing: BodyWriting, transaction: Transaction)
 /**
  * The blocks with no boundary of their own that some editor transactions can reach: each block
  * whose start stands in a range a step replaces or at its end, and the block a range starts in
- * unless the first step starts past that block's first position.
+ * unless the first step starts past that block's first position. A first step that changes what
+ * one block holds and starts no block reaches that block alone, and only from its first
+ * position: what stands past it decides no block's start.
  */
 function linesNear(reading: BodyReading, transactions: readonly Transaction[]): Set<number> {
   const near = new Set<number>();
@@ -807,53 +809,42 @@ function linesNear(reading: BodyReading, transactions: readonly Transaction[]): 
       near.add(block);
   };
   for (const transaction of transactions)
-    for (const step of transaction.steps) {
+    transaction.steps.forEach((step, at) => {
       const map = step.getMap();
       const marks = step instanceof AddMarkStep || step instanceof RemoveMarkStep;
       let from = step instanceof AttrStep ? step.pos : Infinity;
       let to = step instanceof AttrStep ? step.pos : -1;
+      let newFrom = Infinity;
+      let newTo = -1;
       if (!marks)
-        map.forEach((oldStart, oldEnd) => {
+        map.forEach((oldStart, oldEnd, newStart, newEnd) => {
           from = Math.min(from, oldStart);
           to = Math.max(to, oldEnd);
+          newFrom = Math.min(newFrom, newStart);
+          newTo = Math.max(newTo, newEnd);
         });
+      const first = maps.length === 0;
       for (let earlier = maps.length - 1; earlier >= 0 && to >= 0; earlier--) {
         const back = maps[earlier]!.invert();
         from = back.map(from, -1);
         to = back.map(to, 1);
       }
-      if (to >= 0) {
-        const next = countBelow(reading.starts, from);
-        const holder = next - 1;
-        const pastItsStart =
-          maps.length === 0 &&
-          blockHolding(reading, from) === holder &&
-          from > reading.starts[holder]! + 1;
-        if (!pastItsStart) reach(holder);
-        const last = countBelow(reading.starts, to);
-        for (let block = next; block <= last; block++) reach(block);
-      }
       maps.push(map);
-    }
+      if (to < 0) return;
+      const next = countBelow(reading.starts, from);
+      const holder = next - 1;
+      const startsInIt = first && holder >= 0 && blockHolding(reading, from) === holder;
+      const pastItsStart = startsInIt && from > reading.starts[holder]! + 1;
+      if (!pastItsStart) reach(holder);
+      const after = transaction.docs[at + 1] ?? transaction.doc;
+      const staysInIt =
+        startsInIt &&
+        blockHolding(reading, to) === holder &&
+        (newTo < 0 || !startsBlock(after, newFrom, newTo));
+      const last = staysInIt ? holder : countBelow(reading.starts, to);
+      for (let block = next; block <= last; block++) reach(block);
+    });
   return near;
-}
-
-function soleChangeInsideOneBlock(
-  transactions: readonly Transaction[],
-): { oldStart: number; oldEnd: number; tokens: Token[] } | null {
-  const only = transactions[0]!;
-  if (transactions.length !== 1 || only.steps.length !== 1) return null;
-  const ranges: [number, number, number, number][] = [];
-  only.steps[0]!.getMap().forEach((oldStart, oldEnd, newStart, newEnd) => {
-    ranges.push([oldStart, oldEnd, newStart, newEnd]);
-  });
-  const range = ranges[0];
-  if (ranges.length !== 1 || !range) return null;
-  const [oldStart, oldEnd, newStart, newEnd] = range;
-  const $start = only.before.resolve(oldStart);
-  if (!$start.parent.isTextblock || oldEnd > $start.end()) return null;
-  const tokens = tokensBetween(only.doc, newStart, newEnd);
-  return tokens.some((token) => "block" in token) ? null : { oldStart, oldEnd, tokens };
 }
 
 function itemAt(sequence: Y.Text, index: number): string | null {
@@ -869,10 +860,11 @@ function itemAt(sequence: Y.Text, index: number): string | null {
  * block they delete, end or change the kind of. The transactions are the ones of one dispatch,
  * and the first starts from that reading.
  *
- * Nothing is written. A change inside one block is answered from the reading. Any other change
- * that reaches such a block or a neighbour of one is written to a copy of the note's document,
- * which costs a read of the whole note. A boundary written there is matched to its block by the
- * item it stands in front of, or else by the item it stands behind, and by its path.
+ * Nothing is written. A dispatch that reaches such a block is written to a copy of the note's
+ * document, which costs a read of the whole note, and what the writer does there is the answer:
+ * a boundary written there is matched to its block by the item it stands in front of, or else by
+ * the item it stands behind, and by its path. A boundary the dispatch itself deletes again, as a
+ * Backspace that joins the block away does, is not given.
  */
 export function linesGivenBoundaries(
   writing: BodyWriting,
@@ -882,16 +874,6 @@ export function linesGivenBoundaries(
   const reading = reader.reading();
   const near = linesNear(reading, transactions);
   if (near.size === 0) return [];
-  const sole = soleChangeInsideOneBlock(transactions);
-  if (sole) {
-    const holder = blockHolding(reading, sole.oldStart);
-    if (holder < 0 || boundaryAt(reading, holder) >= 0) return [];
-    const start = reading.starts[holder]! + 1;
-    const atStart = sole.oldStart === start;
-    if (needsOwnBoundaryFirst(reading, holder, atStart, sole.tokens)) return [holder];
-    const end = start + reading.blocks[holder]!.node.content.size;
-    if (!atStart || sole.oldEnd !== end || sole.tokens.length > 0) return [];
-  }
 
   const inFrontOf = new Map<string, number>();
   const behind = new Map<string, number>();
@@ -906,19 +888,20 @@ export function linesGivenBoundaries(
   const copied = copy.getText(BODY_SEQUENCE_FIELD);
   const records = copy.getMap<unknown>(BODY_CONTAINERS_FIELD);
   Y.applyUpdate(copy, Y.encodeStateAsUpdate(sequence.doc!));
-  const given = new Set<number>();
+  const given = new Map<number, string>();
   const trial: BodyWriting = {
     sequence: copied,
     reader: createBodyReader(reading.doc.type.schema, copied, records),
     given(index, path) {
-      const next = itemAt(copied, index);
+      const written = itemAt(copied, index);
+      const next = itemAt(copied, index + 1);
       const last = itemAt(copied, index - 1);
       for (const block of [
         next === null ? undefined : inFrontOf.get(next),
         last === null ? undefined : behind.get(last),
       ])
-        if (block !== undefined && samePath(path, reading.paths[block]!)) {
-          given.add(block);
+        if (written !== null && block !== undefined && samePath(path, reading.paths[block]!)) {
+          given.set(block, written);
           return;
         }
     },
@@ -926,8 +909,11 @@ export function linesGivenBoundaries(
   copy.transact(() => {
     for (const transaction of transactions) if (!writeTransaction(trial, transaction)) break;
   });
+  const standing = new Set<string>();
+  for (let item = copied._start; item !== null; item = item.right)
+    if (!item.deleted) standing.add(`${String(item.id.client)}:${String(item.id.clock)}`);
   copy.destroy();
-  return [...given];
+  return [...given].filter(([, written]) => standing.has(written)).map(([block]) => block);
 }
 
 /**
