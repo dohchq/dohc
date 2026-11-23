@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, relative, sep } from "node:path";
 import {
@@ -61,6 +62,30 @@ function hashEvalAppSources(
       ...inputs.map(([p, text]) => `${p}:${text}`),
     ].join("\n"),
   );
+}
+
+/** Checks JS/TS script syntax without executing code; skips JSX/TSX where Node's stripper does not parse JSX. */
+export function checkEvalScriptSyntax(source: string, path: string): string | null {
+  if (/\.[jt]sx$/i.test(path)) return null;
+  try {
+    stripTypeScriptTypes(source);
+    return null;
+  } catch (error) {
+    return error instanceof Error
+      ? (error.message.split("\n", 1)[0] ?? "Syntax error")
+      : String(error);
+  }
+}
+
+async function readEvalAppSourceRevision(
+  root: string,
+  manifest: { appRoot: string; inputs: readonly string[] },
+): Promise<string> {
+  const manifestRaw = (await readWorkspaceText(root, `${manifest.appRoot}/app.publish.json`)) ?? "";
+  const inputs = await Promise.all(
+    manifest.inputs.map(async (p) => [p, (await readWorkspaceText(root, p)) ?? ""] as const),
+  );
+  return hashEvalAppSources(manifest.appRoot, manifestRaw, inputs);
 }
 
 /** Canonical app source revision covering app.publish.json and every listed input file. */
@@ -1378,27 +1403,32 @@ export async function createEverydayDesktop(
     assertWorkspace(req.workspaceId);
     switch (req.action) {
       case "verifyFrontend": {
+        let targetAppRoot: string;
+        let pubMeta: StoredAppPublication | undefined;
+        if (req.publicationId !== undefined) {
+          pubMeta = appPublications.get(req.publicationId);
+          if (!pubMeta || !pubMeta.local) {
+            throw new Error("This app approval changed. Prepare the app again.");
+          }
+          targetAppRoot = pubMeta.appRoot;
+        } else {
+          targetAppRoot = (await resolveWorkspacePath(root, req.appRoot!, "read")).normalized;
+        }
         if (options.verifyFrontend) {
           const result = await options.verifyFrontend(req);
-          let sourceRevision =
-            result.target.kind === "candidate" ? result.target.sourceRevision : undefined;
-          if (!sourceRevision) {
+          let sourceRevision: string | undefined;
+          if (pubMeta) {
+            sourceRevision = pubMeta.sourceRevision;
+          } else {
             try {
               const manifest = await parseAppManifestForEval(root, result.target.appRoot);
-              const manifestRaw =
-                (await readWorkspaceText(root, `${manifest.appRoot}/app.publish.json`)) ?? "";
-              const inputs = await Promise.all(
-                manifest.inputs.map(
-                  async (p) => [p, (await readWorkspaceText(root, p)) ?? ""] as const,
-                ),
-              );
-              sourceRevision = hashEvalAppSources(manifest.appRoot, manifestRaw, inputs);
+              sourceRevision = await readEvalAppSourceRevision(root, manifest);
             } catch {
               sourceRevision = undefined;
             }
           }
           onFrontendVerified?.(result.target.appRoot, {
-            observed: true,
+            mode: "observed",
             ...(sourceRevision ? { sourceRevision } : {}),
             ok: result.ok,
             stage: result.stage,
@@ -1415,17 +1445,6 @@ export async function createEverydayDesktop(
           });
           return result;
         }
-        let targetAppRoot: string;
-        let pubMeta: StoredAppPublication | undefined;
-        if (req.publicationId !== undefined) {
-          pubMeta = appPublications.get(req.publicationId);
-          if (!pubMeta || !pubMeta.local) {
-            throw new Error("This app approval changed. Prepare the app again.");
-          }
-          targetAppRoot = pubMeta.appRoot;
-        } else {
-          targetAppRoot = (await resolveWorkspacePath(root, req.appRoot!, "read")).normalized;
-        }
         let manifest: Awaited<ReturnType<typeof parseAppManifestForEval>>;
         try {
           manifest = await parseAppManifestForEval(root, targetAppRoot);
@@ -1437,7 +1456,7 @@ export async function createEverydayDesktop(
             ? "missing_input"
             : "manifest_error";
           onFrontendVerified?.(targetAppRoot, {
-            observed: false,
+            mode: "stand-in",
             ok: false,
             stage: "compile",
             brokerCalls: [],
@@ -1470,12 +1489,9 @@ export async function createEverydayDesktop(
             externalRequestsBlocked: 0,
           };
         }
-        const manifestRaw =
-          (await readWorkspaceText(root, `${manifest.appRoot}/app.publish.json`)) ?? "";
-        const inputs = await Promise.all(
-          manifest.inputs.map(async (p) => [p, (await readWorkspaceText(root, p)) ?? ""] as const),
-        );
-        const sourceRevision = hashEvalAppSources(manifest.appRoot, manifestRaw, inputs);
+        const sourceRevision = pubMeta
+          ? pubMeta.sourceRevision
+          : await readEvalAppSourceRevision(root, manifest);
         const target = pubMeta
           ? {
               kind: "publication" as const,
@@ -1484,6 +1500,7 @@ export async function createEverydayDesktop(
               authorityRevision: pubMeta.authorityRevision,
             }
           : { kind: "candidate" as const, appRoot: manifest.appRoot, sourceRevision };
+        let approvedOpNames: Set<string> | undefined;
         if (manifest.dataset) {
           try {
             const datasetPath = (
@@ -1491,7 +1508,7 @@ export async function createEverydayDesktop(
             ).normalized;
             const stored = datasetsByPath.get(datasetPath);
             if (!stored) throw new Error(`Collection reference broken: ${datasetPath}.`);
-            resolveAppDatasetCapability(
+            const cap = resolveAppDatasetCapability(
               {
                 kind: "dataset",
                 datasetId: stored.revision.datasetId,
@@ -1502,10 +1519,11 @@ export async function createEverydayDesktop(
               stored.revision,
               () => stored.generated,
             );
+            approvedOpNames = new Set(cap.operations.map((op) => op.name));
           } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             onFrontendVerified?.(manifest.appRoot, {
-              observed: false,
+              mode: "stand-in",
               sourceRevision,
               ok: false,
               stage: "compile",
@@ -1533,26 +1551,160 @@ export async function createEverydayDesktop(
             };
           }
         }
+        const entryHtml = (await readWorkspaceText(root, manifest.entryPath)) ?? "";
+        const diagnostics: AppFrontendDiagnostic[] = [];
+        const stepResults: AppFrontendStepResult[] = [];
+        const normalizedInputs = new Set(manifest.inputs);
+        const scriptCodeParts: string[] = [];
+        if (/\bon(?:click|submit|change|input|load|error)\s*=/i.test(entryHtml)) {
+          diagnostics.push({
+            code: "csp_violation",
+            severity: "error",
+            directive: "script-src-attr",
+            detail: "Inline event handler attribute violates the sandboxed app CSP.",
+            remedy: "Attach event listeners with addEventListener in a listed module script.",
+          });
+        }
+        for (const match of entryHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+          const attrs = match[1] ?? "";
+          const body = match[2] ?? "";
+          const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
+          if (srcMatch?.[1]) {
+            const rawSrc = srcMatch[1].trim();
+            if (!/^(?:https?:|data:|blob:)/i.test(rawSrc)) {
+              const resolved = posix.normalize(
+                posix.join(manifest.appRoot, rawSrc.replace(/[?#].*$/, "")),
+              );
+              if (!normalizedInputs.has(resolved)) {
+                diagnostics.push({
+                  code: "missing_input",
+                  severity: "error",
+                  detail: `Script src "${rawSrc}" is not listed in app.publish.json inputs.`,
+                  remedy:
+                    "List every imported file relative to the app root in app.publish.json inputs.",
+                });
+              }
+            }
+          } else if (body.trim()) {
+            const syntaxErr = checkEvalScriptSyntax(body, manifest.entryPath);
+            if (syntaxErr) {
+              diagnostics.push({
+                code: "compile_error",
+                severity: "error",
+                path: manifest.entryPath,
+                detail: syntaxErr.slice(0, 200),
+                remedy: "Fix the JavaScript syntax error in the app frontend.",
+              });
+            }
+            scriptCodeParts.push(body);
+          }
+        }
+        for (const file of manifest.inputs) {
+          if (/\.(?:c|m)?[jt]sx?$/i.test(file)) {
+            const text = (await readWorkspaceText(root, file)) ?? "";
+            const syntaxErr = checkEvalScriptSyntax(text, file);
+            if (syntaxErr) {
+              diagnostics.push({
+                code: "compile_error",
+                severity: "error",
+                path: file,
+                detail: syntaxErr.slice(0, 200),
+                remedy: "Fix the JavaScript syntax error in the app frontend.",
+              });
+            }
+            scriptCodeParts.push(text);
+          }
+        }
+        const strippedCode = scriptCodeParts
+          .join("\n")
+          .replace(/\/\*[\s\S]*?\*\//g, "")
+          .replace(/\/\/[^\n]*/g, "");
+        if (approvedOpNames) {
+          for (const opMatch of strippedCode.matchAll(
+            /\boperation\s*:\s*["']([A-Za-z][A-Za-z0-9_.-]{0,63})["']/g,
+          )) {
+            const opName = opMatch[1]!;
+            if (!approvedOpNames.has(opName)) {
+              diagnostics.push({
+                code: "broker_operation_not_approved",
+                severity: "error",
+                op: "backend.invoke",
+                operation: opName,
+                detail: `Operation "${opName}" is not in app.publish.json dataset.operationIds.`,
+                remedy: "Remove the unapproved operation call or add its operationId.",
+              });
+            }
+          }
+        }
+        const selectorKnown = (selector: string): boolean => {
+          const idMatch = /#([A-Za-z0-9_-]+)/.exec(selector);
+          if (idMatch?.[1]) {
+            const id = idMatch[1];
+            return (
+              new RegExp(`id\\s*=\\s*["']${id}["']`).test(entryHtml) ||
+              strippedCode.includes(`"${id}"`) ||
+              strippedCode.includes(`'${id}'`)
+            );
+          }
+          const nameMatch = /\[name\s*=\s*["']?([^"'\]]+)["']?\]/.exec(selector);
+          if (nameMatch?.[1])
+            return new RegExp(`name\\s*=\\s*["']${nameMatch[1]}["']`).test(entryHtml);
+          const tagMatch = /^([a-z][a-z0-9-]*)/i.exec(selector.trim());
+          if (tagMatch?.[1]) return new RegExp(`<${tagMatch[1]}\\b`, "i").test(entryHtml);
+          return true;
+        };
+        if (diagnostics.length === 0 && (req.steps?.length ?? 0) > 0) {
+          for (let index = 0; index < req.steps!.length; index++) {
+            const step = req.steps![index]!;
+            if (!selectorKnown(step.selector)) {
+              const remedy = "Ensure the selector matches an element in the rendered DOM.";
+              stepResults.push({
+                index,
+                kind: step.kind,
+                ok: false,
+                code: "step_selector_not_found",
+                remedy,
+              });
+              diagnostics.push({
+                code: "step_selector_not_found",
+                severity: "error",
+                stepIndex: index,
+                detail: `Selector "${step.selector}" not found in app markup or scripts.`.slice(
+                  0,
+                  200,
+                ),
+                remedy,
+              });
+              break;
+            }
+          }
+        }
+        const ok = diagnostics.length === 0;
+        const stage: "compile" | "steps" | "complete" = !ok
+          ? diagnostics.some((d) => d.stepIndex !== undefined)
+            ? "steps"
+            : "compile"
+          : "complete";
         onFrontendVerified?.(manifest.appRoot, {
-          observed: false,
+          mode: "stand-in",
           sourceRevision,
-          ok: true,
-          stage: "complete",
+          ok,
+          stage,
           ...(req.expectStartupBackend ? { expectStartupBackend: req.expectStartupBackend } : {}),
           ...(req.steps ? { requestedSteps: req.steps } : {}),
           brokerCalls: [],
         });
         return {
           kind: "frontendVerified" as const,
-          ok: true,
-          stage: "complete" as const,
+          ok,
+          stage,
           target,
-          startupOk: true,
-          stepsOk: true,
+          startupOk: false,
+          stepsOk: false,
           handshake: { delivered: false, messageCount: 0 },
           brokerCalls: [],
-          steps: [],
-          diagnostics: [],
+          steps: stepResults,
+          diagnostics,
           externalRequestsBlocked: 0,
         };
       }
@@ -1611,10 +1763,7 @@ export async function createEverydayDesktop(
       }
       case "checkLocal": {
         const manifest = await parseAppManifestForEval(root, req.appRoot);
-        const contents = await Promise.all(
-          manifest.inputs.map(async (p) => `${p}:${(await readWorkspaceText(root, p)) ?? ""}`),
-        );
-        const sourceRevision = sha256(contents.join("\n"));
+        const sourceRevision = await readEvalAppSourceRevision(root, manifest);
         return {
           kind: "localChecked",
           appRoot: manifest.appRoot,
@@ -1645,10 +1794,7 @@ export async function createEverydayDesktop(
             resolveAppDatasetCapability(binding, stored.revision, () => stored.generated),
           );
         }
-        const contents = await Promise.all(
-          manifest.inputs.map(async (p) => `${p}:${(await readWorkspaceText(root, p)) ?? ""}`),
-        );
-        const sourceRevision = sha256(contents.join("\n"));
+        const sourceRevision = await readEvalAppSourceRevision(root, manifest);
         const approvalId = randomUUID();
         const candidateDigest = sha256(
           `${manifest.appRoot}:${sourceRevision}:${JSON.stringify(capabilities)}`,

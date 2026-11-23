@@ -256,8 +256,9 @@ form.addEventListener("submit", async (event) => {
     await writeApp("apps/control-tower", {
       "app.publish.json": bookingManifest([WORKSHOP_LIST_OP_ID], ["app.js"]),
       "index.html":
-        '<!doctype html><html><body><p id="summary">Loading</p><script type="module" src="./app.js"></script></body></html>',
+        '<!doctype html><html><body><p id="summary">Loading</p><p id="binding"></p><script type="module" src="./app.js"></script></body></html>',
       "app.js": `${CHANNEL_HELPER}
+document.getElementById("binding").textContent = "binding:" + typeof globalThis.__dohcVerifyObserve;
 (async () => {
   const res = await send({ op: "backend.invoke", operation: "listBookings", input: {}, idempotencyKey: crypto.randomUUID() });
   document.getElementById("summary").textContent = "Rows: " + res.result.rows.length;
@@ -484,7 +485,10 @@ document.getElementById("q").addEventListener("input", () => {
       workspaceId,
       appRoot: "apps/control-tower",
       expectStartupBackend: [{ op: "backend.invoke", operation: "listBookings", status: 200 }],
-      steps: [{ kind: "waitFor", selector: "#summary", textIncludes: "Rows: 0" }],
+      steps: [
+        { kind: "waitFor", selector: "#summary", textIncludes: "Rows: 0" },
+        { kind: "waitFor", selector: "#binding", textIncludes: "binding:undefined" },
+      ],
     });
     expect(controlTowerVerify, JSON.stringify(controlTowerVerify)).toMatchObject({
       kind: "frontendVerified",
@@ -607,6 +611,7 @@ document.getElementById("q").addEventListener("input", () => {
       action: "verifyFrontend",
       workspaceId,
       appRoot: "apps/prefill-click",
+      timeoutMs: 1500,
       steps: [
         { kind: "fill", selector: "#q", value: "hi" },
         {

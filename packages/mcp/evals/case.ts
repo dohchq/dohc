@@ -15,7 +15,7 @@ export interface DatasetSnapshot {
 }
 
 export interface FrontendVerificationRecord {
-  observed: boolean;
+  mode: "observed" | "stand-in";
   sourceRevision?: string;
   ok: boolean;
   stage: "compile" | "runtime" | "steps" | "complete";

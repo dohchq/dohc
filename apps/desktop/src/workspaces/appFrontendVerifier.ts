@@ -131,6 +131,7 @@ function classifyCompileDiagnostic(
       locFields.column = Number(loc[3]);
   }
   const detail = scrub(raw);
+  const detailField = detail ? { detail } : {};
   const manifestPath = `${appRoot}/app.publish.json`;
   const rules: Array<
     [RegExp, AppFrontendDiagnostic["code"], string, Partial<AppFrontendDiagnostic>]
@@ -162,12 +163,12 @@ function classifyCompileDiagnostic(
   ];
   const matched = rules.find(([pattern]) => pattern.test(raw));
   return matched
-    ? { code: matched[1], severity: "error", ...matched[3], detail, remedy: matched[2] }
+    ? { code: matched[1], severity: "error", ...matched[3], ...detailField, remedy: matched[2] }
     : {
         code: "compile_error",
         severity: "error",
         ...locFields,
-        detail,
+        ...detailField,
         remedy: "Fix the frontend syntax or bundle error reported above and verify again.",
       };
 }
@@ -381,10 +382,14 @@ export async function verifyLocalAppFrontend(
     async request(id, action, raw, signal) {
       if (id !== publicationId) throw new Error("Unknown verification publication.");
       const op = actionToBrokerOp(action);
+      const rawOpName =
+        raw && typeof raw === "object" && "operation" in raw && typeof raw.operation === "string"
+          ? raw.operation
+          : undefined;
       if (!capability) {
         failBackend(
           op,
-          undefined,
+          rawOpName,
           "unconnected",
           `Unconnected app attempted ${op}.`,
           "Declare a dataset or collection binding in app.publish.json, or remove workspace data calls.",
@@ -393,16 +398,9 @@ export async function verifyLocalAppFrontend(
       }
       if (capability.kind === "dataset") {
         if (action === "upload" || action === "attempt") {
-          const opName =
-            raw &&
-            typeof raw === "object" &&
-            "operation" in raw &&
-            typeof raw.operation === "string"
-              ? raw.operation
-              : undefined;
           failBackend(
             op,
-            opName,
+            rawOpName,
             "unsupported_in_dry_run",
             `${op} is unavailable in dry-run verification.`,
             "Avoid invoking file uploads or pending attempts during dry-run verification.",
@@ -412,7 +410,7 @@ export async function verifyLocalAppFrontend(
         if (action !== "invoke") {
           failBackend(
             op,
-            undefined,
+            rawOpName,
             "operation_not_approved",
             `Dataset app attempted ${op}.`,
             "Use backend.invoke for Dataset-backed apps.",
@@ -434,9 +432,9 @@ export async function verifyLocalAppFrontend(
         const runSerialized = datasetChain
           .catch(() => {})
           .then(async () => {
-            const receiptKey = `${operation.operationId}:${parsed.idempotencyKey}`;
+            const receiptKey = parsed.idempotencyKey;
             const payloadHash = sha256(JSON.stringify([operation.operationId, parsed.input]));
-            const existing = datasetReceipts.get(receiptKey);
+            const existing = !operation.readOnly ? datasetReceipts.get(receiptKey) : undefined;
             if (existing) {
               if (existing.payloadSha256 !== payloadHash) {
                 failBackend(
@@ -585,7 +583,7 @@ export async function verifyLocalAppFrontend(
       }
       failBackend(
         op,
-        undefined,
+        rawOpName,
         "operation_not_approved",
         `Document Collection app attempted ${op}.`,
         "Use collection.list and collection.create for document Collection apps.",
@@ -598,17 +596,15 @@ export async function verifyLocalAppFrontend(
   const abortLifetime = () => lifetime.abort(deps.signal.reason);
   deps.signal.addEventListener("abort", abortLifetime, { once: true });
   const host = await createLocalAppLaunchHost({ backend: dryBackend, lifetime: lifetime.signal });
-  let session: Awaited<ReturnType<typeof host.launchSession>> | undefined;
   try {
-    session = await host.launchSession(publicationId, deps.signal, { observeBroker: true });
     const report = await deps.runBrowser({
-      url: session.url,
+      startSession: () => host.launchSession(publicationId, deps.signal, { observeBroker: true }),
       expectStartupBackend: input.expectStartupBackend,
       steps: input.steps,
       timeoutMs: input.timeoutMs ?? 10_000,
       signal: deps.signal,
       consumeBackendHint,
-      scrub: createDiagnosticScrubber(deps.workspaceRoot, new URL(session.url).origin),
+      scrub: createDiagnosticScrubber(deps.workspaceRoot),
     });
     current();
     return OwnerAppPublicationResult.parse({
@@ -619,7 +615,6 @@ export async function verifyLocalAppFrontend(
   } finally {
     deps.signal.removeEventListener("abort", abortLifetime);
     if (!lifetime.signal.aborted) lifetime.abort();
-    await session?.stop().catch(() => {});
     await host.close().catch(() => {});
   }
 }

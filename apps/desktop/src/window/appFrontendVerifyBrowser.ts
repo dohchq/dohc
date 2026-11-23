@@ -16,8 +16,13 @@ export interface BackendFailureHint {
   remedy: string;
 }
 
-export interface AppFrontendBrowserVerifyInput {
+export interface AppFrontendBrowserSession {
   url: string;
+  stop(): Promise<void>;
+}
+
+export interface AppFrontendBrowserVerifyInput {
+  startSession: () => Promise<AppFrontendBrowserSession>;
   expectStartupBackend?: readonly AppFrontendBackendExpectation[];
   steps?: readonly AppFrontendStep[];
   timeoutMs: number;
@@ -42,7 +47,6 @@ class DeadlineExceededError extends Error {}
 
 const VERIFY_PARTITION = "dohc-app-verify";
 const IDLE_SETTLE_MS = 150;
-const EXPECT_QUIET_MS = 1500;
 const MAX_ITEMS = 64;
 const ALLOWED_PATHS = new Set([
   "/bootstrap",
@@ -136,18 +140,28 @@ const describeExpectation = (exp: AppFrontendBackendExpectation) =>
     .filter(Boolean)
     .join(" ") || "backend call";
 
-const unmatchedExpectations = (
+export function unmatchedExpectations(
   calls: readonly AppFrontendBrokerCall[],
   expected: readonly AppFrontendBackendExpectation[],
-) => {
-  const used = new Set<number>();
-  return expected.filter((exp) => {
-    const idx = calls.findIndex((call, i) => !used.has(i) && matchesExpectation(call, exp));
-    if (idx < 0) return true;
-    used.add(idx);
+): AppFrontendBackendExpectation[] {
+  const matchCall = new Array<number>(calls.length).fill(-1);
+  const matchedExp = new Array<boolean>(expected.length).fill(false);
+  const augment = (ei: number, seen: Uint8Array): boolean => {
+    for (let ci = 0; ci < calls.length; ci++) {
+      if (seen[ci] || !matchesExpectation(calls[ci]!, expected[ei]!)) continue;
+      seen[ci] = 1;
+      if (matchCall[ci] === -1 || augment(matchCall[ci]!, seen)) {
+        matchCall[ci] = ei;
+        return true;
+      }
+    }
     return false;
-  });
-};
+  };
+  for (let ei = 0; ei < expected.length; ei++) {
+    matchedExp[ei] = augment(ei, new Uint8Array(calls.length));
+  }
+  return expected.filter((_, ei) => !matchedExp[ei]);
+}
 
 const stepExpression = (step: AppFrontendStep): string => {
   const sel = JSON.stringify(step.selector);
@@ -179,7 +193,6 @@ async function executeVerification(
   input: AppFrontendBrowserVerifyInput,
 ): Promise<AppFrontendBrowserVerifyOutput> {
   input.signal.throwIfAborted();
-  const origin = new URL(input.url).origin;
   const isolated = ensureVerifySession();
   const clearSession = async () => {
     await isolated.closeAllConnections().catch(() => {});
@@ -189,6 +202,16 @@ async function executeVerification(
   await clearSession();
   input.signal.throwIfAborted();
 
+  let launchedSession: AppFrontendBrowserSession | undefined;
+  try {
+    launchedSession = await input.startSession();
+    input.signal.throwIfAborted();
+  } catch (error) {
+    await launchedSession?.stop().catch(() => {});
+    throw error;
+  }
+
+  const origin = new URL(launchedSession.url).origin;
   const deadlineAt = Date.now() + input.timeoutMs;
   const remainingMs = () => Math.max(0, deadlineAt - Date.now());
   const handshake = { delivered: false, messageCount: 0 };
@@ -198,12 +221,15 @@ async function executeVerification(
   const diagnostics: AppFrontendDiagnostic[] = [];
   const stepResults: AppFrontendStepResult[] = [];
   const iframeSessions = new Set<string>();
+  const mainContextIds = new Set<number>();
   const cspSeen = new Set<string>();
   const waiters = new Set<() => void>();
+  let mainFrameId: string | undefined;
   let externalRequestsBlocked = 0;
   let inFlight = 0;
   let lastBrokerChangeAt = Date.now();
   let closingView = false;
+  let startupFinished = false;
 
   const notify = () => {
     for (const wake of waiters) wake();
@@ -373,17 +399,8 @@ async function executeVerification(
         expected,
       );
     if (missing().length) {
-      let quietSince = inFlight === 0 ? Date.now() : null;
-      await waitUntil(() => {
-        if (missing().length === 0 && inFlight === 0) return true;
-        if (inFlight > 0) {
-          quietSince = null;
-          return false;
-        }
-        if (quietSince === null) quietSince = Date.now();
-        return Date.now() - quietSince >= EXPECT_QUIET_MS;
-      }, remainingMs());
-      await waitBrokerIdle();
+      await waitUntil(() => missing().length === 0 && inFlight === 0, remainingMs());
+      if (missing().length === 0) await waitBrokerIdle();
     }
     return missing();
   };
@@ -483,33 +500,13 @@ async function executeVerification(
     });
   };
 
-  const pushCsp = (directive?: string, line?: number, column?: number, text?: string) => {
-    const key = `${directive ?? ""}:${line ?? ""}:${column ?? ""}`;
-    if (cspSeen.has(key)) return;
-    cspSeen.add(key);
-    pushDiag({
-      code: "csp_violation",
-      severity: "error",
-      ...(directive ? { directive: directive.slice(0, 64) } : {}),
-      ...(line ? { line } : {}),
-      ...(column ? { column } : {}),
-      detail: clean(
-        text ??
-          (directive
-            ? `Blocked by CSP directive ${directive}.`
-            : "Blocked by Content Security Policy."),
-      ),
-      remedy:
-        "Keep scripts in module files listed in app.publish.json and prevent native form submission with event.preventDefault().",
-    });
-  };
-
   const handleCdpMessage = (
     _event: Electron.Event,
     method: string,
     params: Record<string, unknown>,
     sessionId?: string,
   ) => {
+    const isMain = !sessionId || sessionId === "";
     if (method === "Target.detachedFromTarget") {
       if (typeof params.sessionId === "string") iframeSessions.delete(params.sessionId);
       return;
@@ -529,11 +526,39 @@ async function executeVerification(
       });
       return;
     }
+    if (isMain && method === "Page.frameNavigated") {
+      const frame = params.frame as { id?: string; parentId?: string } | undefined;
+      if (frame?.id && !frame.parentId) mainFrameId = frame.id;
+      return;
+    }
+    if (isMain && method === "Runtime.executionContextCreated") {
+      const ctx = params.context as
+        | { id?: number; auxData?: { isDefault?: boolean; frameId?: string } }
+        | undefined;
+      if (
+        typeof ctx?.id === "number" &&
+        ctx.auxData?.isDefault &&
+        (!mainFrameId || ctx.auxData.frameId === mainFrameId)
+      )
+        mainContextIds.add(ctx.id);
+      return;
+    }
+    if (isMain && method === "Runtime.executionContextDestroyed") {
+      if (typeof params.executionContextId === "number")
+        mainContextIds.delete(params.executionContextId);
+      return;
+    }
+    if (isMain && method === "Runtime.executionContextsCleared") {
+      mainContextIds.clear();
+      return;
+    }
     if (method === "Runtime.bindingCalled") {
       if (
-        (!sessionId || sessionId === "") &&
+        isMain &&
         params.name === "__dohcVerifyObserve" &&
-        typeof params.payload === "string"
+        typeof params.payload === "string" &&
+        typeof params.executionContextId === "number" &&
+        mainContextIds.has(params.executionContextId)
       )
         handleBrokerEvent(params.payload);
       return;
@@ -555,14 +580,31 @@ async function executeVerification(
           ? issue.details?.contentSecurityPolicyViolationDetails
           : undefined;
       if (!csp || csp.isReportOnly) return;
+      const directive = csp.violatedDirective || csp.effectiveDirective || undefined;
       const loc = csp.sourceCodeLocation;
-      pushCsp(
-        csp.violatedDirective || csp.effectiveDirective || undefined,
-        typeof loc?.lineNumber === "number" && loc.lineNumber >= 0 ? loc.lineNumber + 1 : undefined,
+      const line =
+        typeof loc?.lineNumber === "number" && loc.lineNumber >= 0 ? loc.lineNumber + 1 : undefined;
+      const column =
         typeof loc?.columnNumber === "number" && loc.columnNumber >= 0
           ? loc.columnNumber + 1
-          : undefined,
-      );
+          : undefined;
+      const key = `${directive ?? ""}:${line ?? ""}:${column ?? ""}`;
+      if (cspSeen.has(key)) return;
+      cspSeen.add(key);
+      pushDiag({
+        code: "csp_violation",
+        severity: "error",
+        ...(directive ? { directive: directive.slice(0, 64) } : {}),
+        ...(line ? { line } : {}),
+        ...(column ? { column } : {}),
+        detail: clean(
+          directive
+            ? `Blocked by CSP directive ${directive}.`
+            : "Blocked by Content Security Policy.",
+        ),
+        remedy:
+          "Keep scripts in module files listed in app.publish.json and prevent native form submission with event.preventDefault().",
+      });
       return;
     }
     if (method === "Log.entryAdded") {
@@ -572,8 +614,16 @@ async function executeVerification(
         entry.source === "security" &&
         entry.text?.includes("Content Security Policy") &&
         cspSeen.size === 0
-      )
-        pushCsp(undefined, undefined, undefined, entry.text);
+      ) {
+        cspSeen.add("log");
+        pushDiag({
+          code: "csp_violation",
+          severity: "error",
+          detail: clean(entry.text),
+          remedy:
+            "Keep scripts in module files listed in app.publish.json and prevent native form submission with event.preventDefault().",
+        });
+      }
       return;
     }
     if (method === "Runtime.exceptionThrown") {
@@ -628,8 +678,8 @@ async function executeVerification(
   };
 
   try {
-    // Electron 43 creates the initial RenderFrameHost on the first navigation; CDP commands time out before it.
-    await raceDeadline(wc.loadURL("about:blank"));
+    // Electron 43 creates the initial RenderFrameHost on the first navigation; a data: URL avoids about:blank stopLoading races.
+    await raceDeadline(wc.loadURL("data:text/html,"));
     const gateNav = (details: { url: string; isMainFrame: boolean; preventDefault(): void }) => {
       if (!appViewNavigationAllowed(details.url, details.isMainFrame, origin))
         details.preventDefault();
@@ -640,17 +690,21 @@ async function executeVerification(
 
     wc.debugger.attach("1.3");
     wc.debugger.on("message", handleCdpMessage);
+    await cdp("Page.enable");
+    const initTree = (await cdp("Page.getFrameTree")) as {
+      frameTree?: { frame?: { id?: string } };
+    };
+    mainFrameId = initTree.frameTree?.frame?.id;
     await cdp("Runtime.enable");
     await cdp("Runtime.addBinding", { name: "__dohcVerifyObserve" });
     await cdp("Log.enable");
     await cdp("Audits.enable");
-    await cdp("Page.enable");
     await cdp("Target.setAutoAttach", {
       autoAttach: true,
       waitForDebuggerOnStart: true,
       flatten: true,
     });
-    await raceDeadline(wc.loadURL(input.url));
+    await raceDeadline(wc.loadURL(launchedSession.url));
 
     if (!(await waitUntil(() => handshake.delivered, remainingMs()))) {
       pushDiag({
@@ -676,6 +730,7 @@ async function executeVerification(
     const startupOk = handshake.delivered && errorCount() === 0;
     const steps = input.steps ?? [];
     if (!startupOk) return buildOutput(false, "runtime", false, steps.length === 0);
+    startupFinished = true;
     if (steps.length === 0) return buildOutput(true, "complete", true, true);
 
     const resolveAppWorld = async (): Promise<{ sessionId?: string; contextId: number } | null> => {
@@ -727,6 +782,7 @@ async function executeVerification(
       expr: string,
       stopWhen: (v: string) => boolean,
       maxMs: number,
+      onBeforeEval?: () => void,
     ): Promise<string> => {
       const end = Math.min(deadlineAt, Date.now() + maxMs);
       let last = "invalid";
@@ -736,6 +792,7 @@ async function executeVerification(
         if (evaluated && Date.now() >= end) return last;
         let res: { result?: { value?: string }; exceptionDetails?: { text?: string } };
         try {
+          onBeforeEval?.();
           res = (await cdp(
             "Runtime.evaluate",
             {
@@ -784,11 +841,16 @@ async function executeVerification(
           });
       };
 
-      const clickStartSeq = callSeq;
+      let clickStartSeq = callSeq;
       const status = await pollEval(
         stepExpression(step),
         step.kind === "waitFor" ? (v) => v === "ok" || v === "invalid" : (v) => v !== "missing",
         step.kind === "waitFor" ? remainingMs() : 3000,
+        step.kind === "click"
+          ? () => {
+              clickStartSeq = callSeq;
+            }
+          : undefined,
       );
       if (status !== "ok") {
         const code: keyof typeof STEP_REMEDY =
@@ -848,7 +910,7 @@ async function executeVerification(
         detail: "Verification exceeded timeoutMs before completing.",
         remedy: STEP_REMEDY.verification_timeout,
       });
-      return buildOutput(false, handshake.delivered ? "steps" : "runtime", false, false);
+      return buildOutput(false, startupFinished ? "steps" : "runtime", startupFinished, false);
     }
     throw error;
   } finally {
@@ -865,6 +927,7 @@ async function executeVerification(
       closeViewNow();
       await closed;
     }
+    await launchedSession.stop().catch(() => {});
     await clearSession();
   }
 }

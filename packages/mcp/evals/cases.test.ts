@@ -703,12 +703,24 @@ describe("eval cases", () => {
     const commentOnlyChecks = await grade(booking.expect, commentOnlyBooking, booking.gradeRun);
     expect(commentOnlyChecks.some((c) => !c.pass)).toBe(true);
 
+    const syntaxBrokenBooking: RunRecord = {
+      ...bookingSolved.run,
+      files: {
+        ...bookingSolved.run.files,
+        "apps/booking/app.js": `${bookingSolved.run.files["apps/booking/app.js"]}\nconst = ;\n`,
+      },
+    };
+    const syntaxBrokenChecks = await grade(booking.expect, syntaxBrokenBooking, booking.gradeRun);
+    expect(syntaxBrokenChecks.some((c) => !c.pass && c.detail?.includes("syntax error"))).toBe(
+      true,
+    );
+
     const observedWithoutBookSeat: RunRecord = {
       ...bookingSolved.run,
       frontendVerifications: {
         "apps/booking": {
           ...bookingSolved.run.frontendVerifications!["apps/booking"]!,
-          observed: true,
+          mode: "observed",
           brokerCalls: [],
           steps: [{ index: 0, kind: "waitFor", ok: true }],
         },
@@ -756,6 +768,15 @@ describe("eval cases", () => {
             "comment-app/app.js":
               "// dohc-app-channel ports .onmessage backend.invoke bookSeat preventDefault\n",
             "comment-app/app.publish.json": JSON.stringify({
+              version: 1,
+              entryPath: "index.html",
+              inputs: ["index.html", "app.js"],
+              packageMap: {},
+            }),
+            "syntax-err-app/index.html":
+              '<!doctype html><div id="out">hi</div><script type="module" src="./app.js"></script>\n',
+            "syntax-err-app/app.js": "const = ;\n",
+            "syntax-err-app/app.publish.json": JSON.stringify({
               version: 1,
               entryPath: "index.html",
               inputs: ["index.html", "app.js"],
@@ -816,12 +837,43 @@ describe("eval cases", () => {
       });
       expect(commentRes.structuredContent).toMatchObject({
         kind: "frontendVerified",
+        startupOk: false,
+        stepsOk: false,
         handshake: { delivered: false, messageCount: 0 },
         brokerCalls: [],
         steps: [],
       });
-      expect(recorded["comment-app"]?.observed).toBe(false);
+      expect(recorded["comment-app"]?.mode).toBe("stand-in");
       expect(recorded["comment-app"]?.brokerCalls).toEqual([]);
+
+      const missingSelectorRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "comment-app",
+            steps: [{ kind: "waitFor", selector: "#never-renders", textIncludes: "Booked" }],
+          },
+        },
+      });
+      expect(missingSelectorRes.isError).toBe(true);
+      expect(JSON.stringify(missingSelectorRes.structuredContent)).toContain(
+        "step_selector_not_found",
+      );
+
+      const syntaxRes = await client.callTool({
+        name: "dohc_publish_app",
+        arguments: {
+          request: {
+            action: "verifyFrontend",
+            workspaceId: "ws-everyday",
+            appRoot: "syntax-err-app",
+          },
+        },
+      });
+      expect(syntaxRes.isError).toBe(true);
+      expect(JSON.stringify(syntaxRes.structuredContent)).toContain("compile_error");
 
       const missingRes = await client.callTool({
         name: "dohc_publish_app",
@@ -853,6 +905,91 @@ describe("eval cases", () => {
 
       await client.close();
       await server.close();
+
+      // Injected desktop verifier returning an engine-style sourceRevision must pass final-source grading
+      // because everydayDesktop computes sourceRevision with the same canonical hash as the grader.
+      const bookingCase = EVERYDAY_CASES.find((c) => c.id === "everyday-booking-capacity-app")!;
+      const injectedDir = await mkdtemp(join(tmpdir(), "dohc-eval-injected-"));
+      try {
+        const injRoot = join(injectedDir, "workspace");
+        const injHome = join(injectedDir, "home");
+        const injLog = join(injectedDir, "unanswered.log");
+        const injVerifications: Record<string, FrontendVerificationRecord> = {};
+        await seedWorkspace(injRoot, bookingCase, injHome);
+        const injAnswers = await createEverydayDesktop(
+          injRoot,
+          { workspaceId: "ws-everyday" },
+          {
+            onFrontendVerified: (appRoot, record) => {
+              injVerifications[appRoot] = record;
+            },
+            verifyFrontend: async (req) => ({
+              kind: "frontendVerified",
+              ok: true,
+              stage: "complete",
+              target: {
+                kind: "candidate",
+                appRoot: req.appRoot ?? "apps/booking",
+                sourceRevision: "f".repeat(64),
+              },
+              startupOk: true,
+              stepsOk: true,
+              handshake: { delivered: true, messageCount: 2 },
+              brokerCalls: [
+                { op: "backend.invoke", operation: "bookSeat", status: 200, ok: true },
+                {
+                  op: "backend.invoke",
+                  operation: "bookSeat",
+                  status: 409,
+                  ok: false,
+                  rejectedBy: "backend",
+                  reasonCode: "refused",
+                  refusalCode: "workshop_full",
+                },
+              ],
+              steps: (req.steps ?? []).map((step, index) => ({
+                index,
+                kind: step.kind,
+                ok: true,
+              })),
+              diagnostics: [],
+              externalRequestsBlocked: 0,
+            }),
+          },
+        );
+        const injDesktop = fakeDesktop({
+          root: injRoot,
+          answers: injAnswers,
+          unansweredLog: injLog,
+        });
+        const injServer = createDohcMcpServer({
+          root: injRoot,
+          home: injHome,
+          request: injDesktop,
+        });
+        const injClient = new Client({ name: "eval-injected", version: "1" });
+        const [ct, st] = InMemoryTransport.createLinkedPair();
+        await Promise.all([injServer.connect(st), injClient.connect(ct)]);
+        const injCalls: RunRecord["calls"] = [];
+        await bookingCase.solution.run!(async (tool, args) => {
+          const res = await injClient.callTool({ name: tool, arguments: args });
+          injCalls.push({ tool, args, ok: res.isError !== true });
+          return (res.structuredContent as Record<string, unknown> | undefined) ?? {};
+        });
+        await injClient.close();
+        await injServer.close();
+        const injRun: RunRecord = {
+          calls: injCalls,
+          text: bookingCase.solution.text ?? "",
+          files: await workspaceFiles(injRoot),
+          frontendVerifications: injVerifications,
+        };
+        expect(injVerifications["apps/booking"]?.mode).toBe("observed");
+        const injChecks = await grade(bookingCase.expect, injRun, bookingCase.gradeRun);
+        expect(injChecks.filter((c) => !c.pass)).toEqual([]);
+      } finally {
+        await rm(injectedDir, { recursive: true, force: true });
+      }
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

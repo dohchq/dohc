@@ -18,7 +18,11 @@ import {
 } from "@dohc/security-contract/dataset";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import type { Check, EvalCase, RunRecord } from "./case";
-import { computeEvalAppSourceRevision, createEverydayDesktop } from "./everydayDesktop";
+import {
+  checkEvalScriptSyntax,
+  computeEvalAppSourceRevision,
+  createEverydayDesktop,
+} from "./everydayDesktop";
 
 const WS = "ws-everyday";
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -787,6 +791,15 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
         checkDatasetJsonValid(run, "tracker/dataset.json"),
         checkAppPublishDataset(run, "apps/control-tower/app.publish.json", "tracker/dataset.json"),
       ];
+      const appScripts = Object.entries(run.files).filter(
+        ([path]) => path.startsWith("apps/control-tower/") && /\.(?:c|m)?[jt]sx?$/i.test(path),
+      );
+      const syntaxProblems = appScripts
+        .map(([path, text]) => {
+          const err = checkEvalScriptSyntax(text, path);
+          return err ? `${path}: ${err}` : null;
+        })
+        .filter((x): x is string => x !== null);
       const appText = stripJsComments(
         Object.entries(run.files)
           .filter(
@@ -802,14 +815,19 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       checks.push({
         name: "apps/control-tower connects to dohc-app-channel, calls backend.invoke, and handles responses",
         pass:
+          syntaxProblems.length === 0 &&
           appText.includes("dohc-app-channel") &&
           appText.includes("backend.invoke") &&
           handlesPortResponses,
-        ...(handlesPortResponses ? {} : { detail: "missing port response handler" }),
+        ...(syntaxProblems.length > 0
+          ? { detail: syntaxProblems.join("; ") }
+          : handlesPortResponses
+            ? {}
+            : { detail: "missing port response handler" }),
       });
       checks.push(
         checkFrontendVerifiedForFinalSource(run, "apps/control-tower", (record) => {
-          if (record.observed) {
+          if (record.mode === "observed") {
             const observedBackend = record.brokerCalls.some(
               (c) => c.op === "backend.invoke" && c.ok,
             );
@@ -819,8 +837,13 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
             }
             return null;
           }
-          const requestedSteps = (record.requestedSteps ?? []) as Array<{ kind?: string }>;
-          const hasBackendCheck = (record.expectStartupBackend?.length ?? 0) > 0;
+          const requestedSteps = (record.requestedSteps ?? []) as Array<{
+            kind?: string;
+            expectBackend?: unknown;
+          }>;
+          const hasBackendCheck =
+            (record.expectStartupBackend?.length ?? 0) > 0 ||
+            requestedSteps.some((s) => s.kind === "click" && s.expectBackend !== undefined);
           const hasUiCheck = requestedSteps.some((s) => s.kind === "waitFor");
           if (!hasBackendCheck || !hasUiCheck) {
             return "verifyFrontend must check both a backend.invoke call and rendered UI";
@@ -1389,13 +1412,20 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
                 }
               }
             } else if (body.trim()) {
+              const syntaxErr = checkEvalScriptSyntax(body, entryPath);
+              if (syntaxErr)
+                problems.push(`syntax error in apps/booking/${entryPath}: ${syntaxErr}`);
               scriptParts.push(body);
             }
           }
           for (const item of normalizedInputs) {
             if (/\.(?:c|m)?[jt]sx?$/i.test(item)) {
               const content = run.files[`apps/booking/${item}`];
-              if (content && !scriptParts.includes(content)) scriptParts.push(content);
+              if (content) {
+                const syntaxErr = checkEvalScriptSyntax(content, item);
+                if (syntaxErr) problems.push(`syntax error in apps/booking/${item}: ${syntaxErr}`);
+                if (!scriptParts.includes(content)) scriptParts.push(content);
+              }
             }
           }
           const scriptText = stripJsComments(scriptParts.join("\n"));
@@ -1437,7 +1467,7 @@ export const EVERYDAY_CASES: readonly EvalCase[] = [
       );
       checks.push(
         checkFrontendVerifiedForFinalSource(run, "apps/booking", (record) => {
-          if (record.observed) {
+          if (record.mode === "observed") {
             const observedBook = record.brokerCalls.some(
               (c) => c.op === "backend.invoke" && c.operation === "bookSeat" && c.ok,
             );

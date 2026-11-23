@@ -8,7 +8,10 @@ import {
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import type { AppFrontendBrowserVerifyInput } from "../window/appFrontendVerifyBrowser";
+import {
+  unmatchedExpectations,
+  type AppFrontendBrowserVerifyInput,
+} from "../window/appFrontendVerifyBrowser";
 import { createDiagnosticScrubber, verifyLocalAppFrontend } from "./appFrontendVerifier";
 import { compileClosedApp } from "./closedAppCompiler";
 
@@ -18,6 +21,7 @@ const uuid = (prefix: string, n: number) =>
 
 const BOOK_OP_ID = uuid("b9000000", 6);
 const LIST_OP_ID = uuid("b9000000", 7);
+const CANCEL_OP_ID = uuid("b9000000", 8);
 
 const WORKSHOP_DEF: DatasetDefinition = {
   formatVersion: 1,
@@ -80,6 +84,16 @@ const WORKSHOP_DEF: DatasetDefinition = {
       readOnly: true,
       fieldIds: [uuid("b9000000", 3), uuid("b9000000", 4), uuid("b9000000", 5)],
     },
+    {
+      operationId: CANCEL_OP_ID,
+      name: "cancelBooking",
+      label: "Cancel booking",
+      tableId: uuid("b9000000", 2),
+      kind: "action",
+      access: "link",
+      readOnly: false,
+      fieldIds: [],
+    },
   ],
 };
 
@@ -94,6 +108,10 @@ const WORKSHOP_BACKEND = `globalThis.operations = {
   },
   listBookings(ctx) {
     return { rows: ctx.db.query("SELECT id, name, seats FROM bookings ORDER BY id") };
+  },
+  cancelBooking(ctx, input) {
+    ctx.db.execute("DELETE FROM bookings WHERE name = ?", [String(input?.name ?? "")]);
+    return { cancelled: true };
   },
 };`;
 
@@ -275,7 +293,7 @@ describe("verifyLocalAppFrontend", () => {
           datasetPath: "workshop/dataset.json",
           revision: 1,
           revisionSha256: WORKSHOP_REVISION.revisionSha256,
-          operationIds: [BOOK_OP_ID],
+          operationIds: [BOOK_OP_ID, CANCEL_OP_ID],
         },
       }),
       "apps/booking/index.html": '<!doctype html><script type="module" src="./app.js"></script>',
@@ -302,74 +320,97 @@ describe("verifyLocalAppFrontend", () => {
         }),
         verificationPublication: vi.fn(),
         runBrowser: async (browserInput: AppFrontendBrowserVerifyInput) => {
-          const { backend } = await exchangeLaunchProof(browserInput.url);
+          const started = await browserInput.startSession();
+          try {
+            const { backend } = await exchangeLaunchProof(started.url);
 
-          const okRes = await backend({
-            id: "r1",
-            op: "backend.invoke",
-            operation: "bookSeat",
-            idempotencyKey: "k1",
-            input: { name: "Ada", seats: 5 },
-          });
-          expect(okRes.status).toBe(200);
-          expect(await okRes.json()).toMatchObject({ result: { seats: 5 }, replayed: false });
+            const okRes = await backend({
+              id: "r1",
+              op: "backend.invoke",
+              operation: "bookSeat",
+              idempotencyKey: "k1",
+              input: { name: "Ada", seats: 5 },
+            });
+            expect(okRes.status).toBe(200);
+            expect(await okRes.json()).toMatchObject({ result: { seats: 5 }, replayed: false });
 
-          const replayRes = await backend({
-            id: "r2",
-            op: "backend.invoke",
-            operation: "bookSeat",
-            idempotencyKey: "k1",
-            input: { name: "Ada", seats: 5 },
-          });
-          expect(replayRes.status).toBe(200);
-          expect(await replayRes.json()).toMatchObject({ replayed: true });
+            const replayRes = await backend({
+              id: "r2",
+              op: "backend.invoke",
+              operation: "bookSeat",
+              idempotencyKey: "k1",
+              input: { name: "Ada", seats: 5 },
+            });
+            expect(replayRes.status).toBe(200);
+            expect(await replayRes.json()).toMatchObject({ replayed: true });
 
-          const fullRes = await backend({
-            id: "r3",
-            op: "backend.invoke",
-            operation: "bookSeat",
-            idempotencyKey: "k2",
-            input: { name: "Bob", seats: 4 },
-          });
-          expect(fullRes.status).toBe(409);
-          expect(await fullRes.json()).toEqual({
-            code: "workshop_full",
-            message: "All 8 seats are booked.",
-          });
+            // Reusing the same idempotencyKey on a different write operation must fail like the live journal.
+            const crossOpConflict = await backend({
+              id: "r2b",
+              op: "backend.invoke",
+              operation: "cancelBooking",
+              idempotencyKey: "k1",
+              input: { name: "Ada" },
+            });
+            expect(crossOpConflict.status).toBe(404);
+            expect(
+              browserInput.consumeBackendHint("backend.invoke", "cancelBooking"),
+            ).toMatchObject({
+              reasonCode: "runtime_error",
+              diagnosticCode: "broker_runtime_error",
+            });
 
-          const unapprovedRes = await backend({
-            id: "r4",
-            op: "backend.invoke",
-            operation: "listBookings",
-            idempotencyKey: "k3",
-            input: {},
-          });
-          expect(unapprovedRes.status).toBe(404);
-          expect(browserInput.consumeBackendHint("backend.invoke", "listBookings")).toMatchObject({
-            reasonCode: "operation_not_approved",
-            diagnosticCode: "broker_operation_not_approved",
-          });
+            const fullRes = await backend({
+              id: "r3",
+              op: "backend.invoke",
+              operation: "bookSeat",
+              idempotencyKey: "k2",
+              input: { name: "Bob", seats: 4 },
+            });
+            expect(fullRes.status).toBe(409);
+            expect(await fullRes.json()).toEqual({
+              code: "workshop_full",
+              message: "All 8 seats are booked.",
+            });
 
-          const uploadRes = await backend({
-            id: "r5",
-            op: "backend.upload",
-            idempotencyKey: "k4",
-            name: "a.txt",
-            contentType: "text/plain",
-            bytesBase64: "YQ==",
-          });
-          expect(uploadRes.status).toBe(404);
-          expect(browserInput.consumeBackendHint("backend.upload", undefined)).toMatchObject({
-            reasonCode: "unsupported_in_dry_run",
-            diagnosticCode: "broker_unsupported_in_dry_run",
-          });
+            const unapprovedRes = await backend({
+              id: "r4",
+              op: "backend.invoke",
+              operation: "listBookings",
+              idempotencyKey: "k3",
+              input: {},
+            });
+            expect(unapprovedRes.status).toBe(404);
+            expect(browserInput.consumeBackendHint("backend.invoke", "listBookings")).toMatchObject(
+              {
+                reasonCode: "operation_not_approved",
+                diagnosticCode: "broker_operation_not_approved",
+              },
+            );
+
+            const uploadRes = await backend({
+              id: "r5",
+              op: "backend.upload",
+              idempotencyKey: "k4",
+              name: "a.txt",
+              contentType: "text/plain",
+              bytesBase64: "YQ==",
+            });
+            expect(uploadRes.status).toBe(404);
+            expect(browserInput.consumeBackendHint("backend.upload", undefined)).toMatchObject({
+              reasonCode: "unsupported_in_dry_run",
+              diagnosticCode: "broker_unsupported_in_dry_run",
+            });
+          } finally {
+            await started.stop();
+          }
 
           return {
             ok: true,
             stage: "complete",
             startupOk: true,
             stepsOk: true,
-            handshake: { delivered: true, messageCount: 5 },
+            handshake: { delivered: true, messageCount: 6 },
             brokerCalls: [],
             steps: [],
             diagnostics: [],
@@ -425,20 +466,25 @@ describe("verifyLocalAppFrontend", () => {
         approvedArtifacts: vi.fn(),
         verificationPublication: vi.fn(),
         runBrowser: async (browserInput) => {
-          const { backend } = await exchangeLaunchProof(browserInput.url);
-          const created = await backend({
-            id: "c1",
-            op: "collection.create",
-            idempotencyKey: "k1",
-            fields: { Name: "Ada" },
-          });
-          expect(created.status).toBe(200);
-          const listed = await backend({ id: "l1", op: "collection.list", limit: 10 });
-          expect(listed.status).toBe(200);
-          expect(await listed.json()).toMatchObject({
-            records: [{ fields: { Name: "Ada" } }],
-            nextPath: null,
-          });
+          const started = await browserInput.startSession();
+          try {
+            const { backend } = await exchangeLaunchProof(started.url);
+            const created = await backend({
+              id: "c1",
+              op: "collection.create",
+              idempotencyKey: "k1",
+              fields: { Name: "Ada" },
+            });
+            expect(created.status).toBe(200);
+            const listed = await backend({ id: "l1", op: "collection.list", limit: 10 });
+            expect(listed.status).toBe(200);
+            expect(await listed.json()).toMatchObject({
+              records: [{ fields: { Name: "Ada" } }],
+              nextPath: null,
+            });
+          } finally {
+            await started.stop();
+          }
           return {
             ok: true,
             stage: "complete",
@@ -470,13 +516,18 @@ describe("verifyLocalAppFrontend", () => {
         approvedArtifacts: vi.fn(),
         verificationPublication: vi.fn(),
         runBrowser: async (browserInput) => {
-          const { backend } = await exchangeLaunchProof(browserInput.url);
-          const denied = await backend({ id: "u1", op: "collection.list", limit: 10 });
-          expect(denied.status).toBe(404);
-          expect(browserInput.consumeBackendHint("collection.list", undefined)).toMatchObject({
-            reasonCode: "unconnected",
-            diagnosticCode: "broker_unconnected",
-          });
+          const started = await browserInput.startSession();
+          try {
+            const { backend } = await exchangeLaunchProof(started.url);
+            const denied = await backend({ id: "u1", op: "collection.list", limit: 10 });
+            expect(denied.status).toBe(404);
+            expect(browserInput.consumeBackendHint("collection.list", undefined)).toMatchObject({
+              reasonCode: "unconnected",
+              diagnosticCode: "broker_unconnected",
+            });
+          } finally {
+            await started.stop();
+          }
           return {
             ok: false,
             stage: "runtime",
@@ -492,5 +543,18 @@ describe("verifyLocalAppFrontend", () => {
       },
     );
     expect(unconnectedResult.ok).toBe(false);
+  });
+
+  it("matches overlapping backend expectations using complete one-to-one bipartite matching", () => {
+    const calls = [
+      { op: "backend.invoke" as const, operation: "load", status: 200, ok: true },
+      { op: "backend.invoke" as const, operation: "save", status: 200, ok: true },
+    ];
+    expect(unmatchedExpectations(calls, [{ op: "backend.invoke" }, { operation: "load" }])).toEqual(
+      [],
+    );
+    expect(
+      unmatchedExpectations(calls, [{ operation: "load" }, { operation: "load" }]),
+    ).toHaveLength(1);
   });
 });
