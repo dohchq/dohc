@@ -2730,6 +2730,7 @@ it("compares a BigInt with the number it reads as, in a record, an attribute and
   expect(written(doc, start(3))).toBe(true);
   expect(doc.getMap(CONTAINERS).get("N.start")).toBe(3);
   expect(written(doc, start(4n))).toBe(true);
+  expect(doc.getMap(CONTAINERS).get("N.start")).toBe(4);
   expect(blocksOf(doc)[0]).toMatchObject({ type: "orderedList", attrs: { start: 4 } });
 });
 
@@ -2742,7 +2743,7 @@ const calloutNote = (more: Record<string, unknown> = {}) =>
 
 it("copies every record under a split container's id to the fresh id, whatever it names", () => {
   const more = { "C.checked": true, "C.start": 7n };
-  const copy = { checked: true, start: 7n, ...TIP };
+  const copy = { checked: true, start: 7, ...TIP };
   const lifter = open(calloutNote(more), 10);
   expect(
     written(

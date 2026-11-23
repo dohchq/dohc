@@ -89,6 +89,15 @@ const whole = (value: unknown) =>
     ? Number(value)
     : value;
 
+function plain(value: unknown): unknown {
+  const one = whole(value);
+  if (Array.isArray(one)) return Array.from(one, plain);
+  if (typeof one !== "object" || one === null) return one;
+  const built = Object.getPrototypeOf(one) as unknown;
+  if (built !== Object.prototype && built !== null) return one;
+  return Object.fromEntries(Object.entries(one).map(([key, held]) => [key, plain(held)]));
+}
+
 function same(left: unknown, right: unknown): boolean {
   const one = whole(left);
   const other = whole(right);
@@ -817,22 +826,25 @@ function formattingAt(sequence: Y.Text, index: number): Record<string, unknown> 
   return Object.fromEntries(marks);
 }
 
-/** Write one change. Call it inside one transaction that has the writer's own origin. */
+/**
+ * Write one change. Call it inside one transaction that has the writer's own origin. It stores
+ * plain data: a BigInt it is given is stored as the number it reads as.
+ */
 export function writeBody(doc: Y.Doc, writes: BodyWrites): void {
   const sequence = doc.getText(BODY_SEQUENCE_FIELD);
   const records = doc.getMap(BODY_CONTAINERS_FIELD);
-  for (const [key, value] of writes.records) records.set(key, value);
+  for (const [key, value] of writes.records) records.set(key, plain(value));
   for (const [element, attrs] of writes.attributes)
     for (const [key, value] of Object.entries(attrs))
-      element.setAttribute(key, value as unknown as string);
+      element.setAttribute(key, plain(value) as string);
   const embed = (index: number, name: string, attrs: SequenceAttrs) => {
     const element = new Y.XmlElement(name);
     for (const [key, value] of Object.entries(attrs))
-      element.setAttribute(key, value as unknown as string);
+      element.setAttribute(key, plain(value) as string);
     sequence.insertEmbed(index, element, formattingAt(sequence, index));
   };
   const { marked, typed, placed } = writes;
-  if (marked) sequence.format(marked.index, marked.length, { ...marked.marks });
+  if (marked) sequence.format(marked.index, marked.length, plain(marked.marks) as SequenceAttrs);
   const edits: { index: number; rank: number; make: () => void }[] = [];
   for (const { index, length } of writes.erased)
     edits.push({ index, rank: 0, make: () => sequence.delete(index, length) });
@@ -840,7 +852,7 @@ export function writeBody(doc: Y.Doc, writes: BodyWrites): void {
     edits.push({
       index: typed.index,
       rank: 1,
-      make: () => sequence.insert(typed.index, typed.letters, { ...typed.marks }),
+      make: () => sequence.insert(typed.index, typed.letters, plain(typed.marks) as SequenceAttrs),
     });
   if (placed)
     edits.push({
