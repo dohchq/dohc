@@ -1,4 +1,4 @@
-import { accountIsFenced } from "./storage/accountDeletion";
+import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { parseRoute } from "./relayRoute";
 import { RELAY_ROUTE_PATTERNS, SYNC_RELAY_REQUEST_LOG } from "./requestLog";
 export { SYNC_RELAY_REQUEST_LOG } from "./requestLog";
@@ -57,6 +57,11 @@ import type {
 } from "@dohc/workspace-auth/session";
 import { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
+import {
+  createWorkspaceSecretRateLimiter,
+  createWorkspaceSecretRoutes,
+  WORKSPACE_SECRET_MAX_BODY_BYTES,
+} from "./workspaceSecretRoutes";
 import {
   createNoticeRoutes,
   createNoticeWaits,
@@ -248,6 +253,7 @@ export interface CreateSyncRelayHandlerOptions {
   noticePostRateLimiter?: TokenBucketLimiter;
   // Changes to a workspace's automation host, and to the server's runs, keyed by owner.
   automationHostRateLimiter?: TokenBucketLimiter;
+  workspaceSecretRateLimiter?: TokenBucketLimiter;
   // This server while it runs workspaces' automations; absent when it does not.
   automationServer?: AutomationServer;
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
@@ -362,6 +368,7 @@ export function createSyncRelayHandler({
     AUTOMATION_HOST_REFILL_PER_SECOND,
     AUTOMATION_HOST_MAX_OWNERS,
   ),
+  workspaceSecretRateLimiter = createWorkspaceSecretRateLimiter(),
   linkFreshnessPageSize = MAX_LOG_PAGE_SIZE,
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
@@ -627,6 +634,12 @@ export function createSyncRelayHandler({
   const respondToWorkspaceBlobs = createWorkspaceBlobRoutes(storage, nowMs);
 
   const respondToKeyEnvelopes = createKeyEnvelopeRoutes(storage, nowMs);
+  const respondToWorkspaceSecrets = createWorkspaceSecretRoutes({
+    storage,
+    linkKey,
+    nowMs,
+    rateLimiter: workspaceSecretRateLimiter,
+  });
 
   const noticeWaits = createNoticeWaits(storage, discussionActivity);
   const respondToNotices = createNoticeRoutes(
@@ -1623,6 +1636,26 @@ export function createSyncRelayHandler({
         );
         return await respondToWorkspaceName(storage, request, route.workspaceId, actor.userId);
       }
+      if (route.route === "workspace-secrets" || route.route === "workspace-secret") {
+        const sessionResolver = resolvePhoneCapableAccountSession ?? resolveAccountSession;
+        if (!sessionResolver) throw notFound();
+        const authorizeDesktopOwner = async () => {
+          const session = await bearerAccountSession(storage, sessionResolver, request);
+          if (session.clientKind !== "desktop") throw notFound();
+          if (
+            workspaceIsDeleted(storage, route.workspaceId) ||
+            !storage.workspaceIsOwnedBy(route.workspaceId, session.userId)
+          ) {
+            throw notFound();
+          }
+          return session;
+        };
+        const session = await authorizeDesktopOwner();
+        return await respondToWorkspaceSecrets(request, route, session.userId, async () => {
+          const current = await authorizeDesktopOwner();
+          if (current.userId !== session.userId) throw notFound();
+        });
+      }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
         request.method === "POST" &&
@@ -1859,6 +1892,8 @@ export function maxRequestBodyBytes(url: URL): number {
     case "shares-create":
     case "share-link-create-atomic":
       return 1024 * 1024;
+    case "workspace-secret":
+      return WORKSPACE_SECRET_MAX_BODY_BYTES;
     default:
       return DEFAULT_BODY_BYTES;
   }

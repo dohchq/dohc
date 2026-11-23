@@ -5,6 +5,7 @@ import type { captureOperations } from "./captureOperations";
 import type { linksOperations } from "./linksOperations";
 import type { retrievalOperations } from "./retrievalOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
+import type { workspaceSecretsOperations } from "./workspaceSecretsOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
@@ -9399,6 +9400,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof usageRecordOperations>,
     OperationBridge<typeof noticeOperations>,
     OperationBridge<typeof scheduleHostOperations>,
+    OperationBridge<typeof workspaceSecretsOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,

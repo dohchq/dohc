@@ -283,6 +283,75 @@ Every read rechecks current authority and uses bounded history scans.
 See [share reads](../../services/sync-relay/src/shareReadQueries.ts) and the
 [named recipient tests](../../services/sync-relay/src/namedShareHistory.test.ts).
 
+## Workspace secrets and outbound HTTPS
+
+Workspace automation secrets are separate from `.env` secret files. They stay write-only
+and outside the workspace directory, so copying a workspace or running a file-based agent
+inside it never exposes secret values.
+
+Each secret belongs to one workspace and has one fixed purpose:
+
+- `http-header`: an opaque credential (printable ASCII without tabs or line breaks, up to
+  4 KiB) pinned to 1–10 exact lowercase public hostnames. It can be attached only to
+  requests whose canonical host matches that list.
+- `http-url`: a complete public HTTPS URL (port 443, no credentials, no fragment, no IP
+  literals or local hosts, up to 2 KiB), reserved for outbound destination URLs and never
+  returned by any list or metadata API.
+
+Creating, rotating, and deleting workspace secrets happen only through the desktop
+Settings UI. Add uses create-only semantics and Replace updates an existing name, so a
+stale list cannot silently overwrite a secret. CLI and MCP doors expose no secret
+mutation operations, preventing local or connected agents from overwriting a secret URL
+or credential. Saved secret values never return to the renderer; while the owner types a
+new value in the desktop Settings dialog, the unsaved input lives transiently in the
+trusted desktop renderer until saved, cancelled, or unmounted, isolated from sandboxed
+apps and previews.
+
+Storage follows the workspace's sync mode:
+
+- **Local-only workspaces** seal secrets in the desktop profile's `workspace-secrets/`
+  folder (`0700` directory, `0600` file) with Electron `safeStorage`. On Linux, dohc
+  checks that `safeStorage.getSelectedStorageBackend()` is neither `basic_text` nor
+  `unknown` and refuses to store secrets when no OS keyring is active. An unreadable or
+  schema-invalid local vault fails closed instead of appearing empty, so existing
+  ciphertext cannot be overwritten. OS keychain storage keeps values out of workspace
+  files and API responses; it does not defend against arbitrary code running as the same
+  OS user. Turning on sync later does not copy local secrets to the server; the owner
+  enters them on the server directly. Pausing sync on a synced workspace keeps its server
+  binding and refuses secret reads or changes until sync resumes instead of switching to
+  local keychain storage.
+- **Synced workspaces** seal secrets on `sync-relay` in `sync_relay_workspace_secrets`
+  using AES-256-GCM (12-byte random nonce, key derived via HKDF-SHA256 from
+  `DOHC_RELAY_LINK_KEY` with info `dohc-workspace-secret-seal-v1`, recorded `key_id`, and
+  AAD binding workspace, owner, secret name, usage, allowed hosts, generation, and key ID). The relay
+  accepts only cookie-less desktop owner Bearer sessions (`resolveAccountSession` with
+  `clientKind === "desktop"`), refusing browser sessions (cookie or Bearer), phone
+  sessions, personal agents, share links, and non-owners, and rechecks session authority,
+  account fencing, and workspace ownership at commit time. Because the server holds the
+  sealing key in its environment, the server operator (dohc Drive or a self-hoster) has
+  technical capability to unseal stored secrets at runtime; rotating `DOHC_RELAY_LINK_KEY`
+  invalidates previously sealed secrets until re-entered. Account deletion purges all
+  workspace secret rows automatically.
+
+Shared outbound HTTPS transport (`packages/service-http/src/safeOutboundHttps.ts`)
+enforces HTTPS on port 443 only, rejects credentials, fragments (including empty `#`),
+raw IPv4/IPv6 literals, trailing dots, single-label hosts, and reserved local suffixes
+(`.local`, `.internal`, `.localhost`, `.home.arpa`), resolves cancellable DNS A and AAAA
+records via `node:dns/promises` `Resolver` with a 2-second timeout, refuses any answer
+containing a private, loopback, link-local, carrier-grade NAT, multicast, mapped,
+translated, or non-global IP, brands the resolved destination internally so forged or
+mutated destinations are rejected, pins the validated address through `node:https`
+connect with TLS certificate verification (`servername` set to the canonical host,
+`rejectUnauthorized: true`, `autoSelectFamily: false`, `agent: false`, no proxy env
+variables), enforces a finite request timeout (default 10 s, capped at 30 s), disables
+response compression (`Accept-Encoding: identity`), refuses redirects by default, bounds
+header and response sizes, and scrubs transport errors.
+Hosted relays still require host or network egress isolation: IP classification alone
+cannot tell whether a public-looking IP routes to an internal network service.
+See the [outbound HTTPS tests](../../packages/service-http/src/safeOutboundHttps.test.ts),
+[relay secret route tests](../../services/sync-relay/src/workspaceSecretRoutes.test.ts),
+and [local secret store tests](../../apps/desktop/src/workspaces/localWorkspaceSecretStore.test.ts).
+
 ## Decision numbers in existing code
 
 Existing comments cite the former ADR numbers. Their current boundaries are here:

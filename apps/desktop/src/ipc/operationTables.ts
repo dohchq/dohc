@@ -65,6 +65,7 @@ import type { OperationDefinition, OperationTable } from "./operationTable";
 import { shareCopyOperations } from "./shareCopyOperations";
 import { accessOperations } from "./accessOperations";
 import { workspaceFileOperations } from "./workspaceFileOperations";
+import { workspaceSecretsOperations } from "./workspaceSecretsOperations";
 import { explorerMenuOperations } from "./explorerMenuOperations";
 
 export const OPERATION_TABLES = [
@@ -120,6 +121,7 @@ export const OPERATION_TABLES = [
   agentsListeningOperations,
   personalAgentsOperations,
   scheduleHostOperations,
+  workspaceSecretsOperations,
   noticeOperations,
   sharedViewAccessOperations,
   shareDirectWriteDeliveryOperations,
