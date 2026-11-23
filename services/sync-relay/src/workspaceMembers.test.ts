@@ -923,7 +923,7 @@ describe("what a member reaches", () => {
     expect(admin.marks).toEqual([]);
   });
 
-  it("changes the visibility signature only when what a member reaches changes, and lists both on every pull page", async () => {
+  it("changes the visibility signature only when what a member reaches or where they read History changes, and lists both on every pull page", async () => {
     const { h } = await seed();
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
@@ -959,6 +959,11 @@ describe("what a member reaches", () => {
     await expectChanged("content edit", false, false);
     await ownerWrite(h, "team/access.yaml", "members: view\n");
     await expectChanged("level-only rule change", true, false);
+    // History needs Edit, so the copy rebuilds when Edit starts or stops.
+    await ownerWrite(h, "team/access.yaml", "members: edit\n");
+    await expectChanged("promotion to Edit", true, true);
+    await ownerWrite(h, "team/access.yaml", "members: view\n");
+    await expectChanged("demotion below Edit", true, true);
     await ownerWrite(h, "team/access.yaml", "");
     await expectChanged("hiding a folder", true, true);
     await ownerWrite(h, "team/access.yaml", "members: edit\n");
@@ -984,7 +989,7 @@ describe("what a member reaches", () => {
     expect(
       (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
     ).toBe(200);
-    await expectChanged("member level change", true, false);
+    await expectChanged("member level change to Edit", true, true);
     // A held read that ends on a changed level lists the reach too.
     const ended = await h(
       request("ana", `/sync/shares/${shareId}/log?since=0&limit=10&hold=5000&level=comment`),
@@ -1448,6 +1453,55 @@ describe("what a member reaches", () => {
       expect(refused.status).toBe(403);
       expect(await code(refused)).toBe("share_read_only");
     }
+  });
+
+  it("lists and withdraws only a member's own proposals, though every member holds the same share", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    await invited(h, "ben");
+    const shareId = await shareIdOf(h, "ana");
+    expect(await shareIdOf(h, "ben")).toBe(shareId);
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
+    ).toBe(200);
+    expect((await uploadBlob(h, "ana", shareId, "ana's edit")).status).toBe(200);
+    const submit = (userId: string) =>
+      post(h, userId, `/sync/shares/${shareId}/proposals`, {
+        submitId: "submit-ana",
+        ops: [
+          {
+            basedOnPath: "docs/plan.md",
+            basedOnBlobSha256: sha256("the plan"),
+            operation: "write",
+            afterPath: "docs/plan.md",
+            afterBlobSha256: sha256("ana's edit"),
+            afterContentKind: "text",
+            afterByteLength: "ana's edit".length,
+            recordedAtMs: 9000,
+          },
+        ],
+      });
+    const submitted = await submit("ana");
+    expect(submitted.status, await submitted.clone().text()).toBe(200);
+    const { proposalId } = (await json(submitted)) as { proposalId: string };
+
+    const listed = async (userId: string) =>
+      (
+        (await json(await h(request(userId, `/sync/shares/${shareId}/proposals`))))
+          .proposals as Array<{
+          proposalId: string;
+        }>
+      ).map((proposal) => proposal.proposalId);
+    expect(await listed("ana")).toEqual([proposalId]);
+    expect(await listed("ben")).toEqual([]);
+    // Ana's submit id from Ben is not a resend of Ana's proposal.
+    expect((await submit("ben")).status).toBe(409);
+
+    const withdrawn = (userId: string) =>
+      post(h, userId, `/sync/shares/${shareId}/proposals/${proposalId}/withdraw`);
+    expect((await withdrawn("ben")).status).toBe(404);
+    expect(await listed("ana")).toEqual([proposalId]);
+    expect((await withdrawn("ana")).status).toBe(200);
   });
 
   it("starts a thread with its first message in one batch, on a file or in a Group", async () => {
