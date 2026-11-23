@@ -1014,9 +1014,8 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                 return kept;
               },
             },
-            agentRunUndo: async (agentRunId, planToken) => {
-              const person = await localPerson();
-              const result = await capture.undoAgentRun(agentRunId, person, {
+            agentRunUndo: async (agentRunId, planToken, origin) => {
+              const result = await capture.undoAgentRun(agentRunId, agentWriteAuthor(origin), {
                 expectedPlanToken: planToken,
                 hasOtherWindow: () =>
                   dependencies.hasOpenWorkspaceWindow?.(workspace.workspaceId) ?? false,

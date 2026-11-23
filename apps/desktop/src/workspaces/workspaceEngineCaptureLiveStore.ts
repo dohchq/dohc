@@ -1042,18 +1042,19 @@ export function createCaptureLiveStores(
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       momentId?: string;
+      beforeSend?: () => void;
     }) {
-      const { metadata, author, ...writeInput } = input;
+      const { metadata, author, beforeSend, ...writeInput } = input;
       const requestId = input.requestId ?? randomUUID();
-      const raw = await runMutation(
-        async (adapter) =>
-          await adapter.writeTextFile({
-            ...writeInput,
-            requestId,
-            ...(author ? { author: adapterAuthor(author) } : {}),
-            metadata: adapterMetadata(metadata),
-          }),
-      );
+      const raw = await runMutation(async (adapter) => {
+        beforeSend?.();
+        return await adapter.writeTextFile({
+          ...writeInput,
+          requestId,
+          ...(author ? { author: adapterAuthor(author) } : {}),
+          metadata: adapterMetadata(metadata),
+        });
+      });
       return {
         materialized: raw.materialized,
         deduped: raw.deduped,
@@ -1078,18 +1079,19 @@ export function createCaptureLiveStores(
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       momentId?: string;
+      beforeSend?: () => void;
     }) {
-      const { metadata, author, ...writeInput } = input;
+      const { metadata, author, beforeSend, ...writeInput } = input;
       const requestId = input.requestId ?? randomUUID();
-      const raw = await runMutation(
-        async (adapter) =>
-          await adapter.writeBinaryFile({
-            ...writeInput,
-            requestId,
-            ...(author ? { author: adapterAuthor(author) } : {}),
-            metadata: adapterMetadata(metadata),
-          }),
-      );
+      const raw = await runMutation(async (adapter) => {
+        beforeSend?.();
+        return await adapter.writeBinaryFile({
+          ...writeInput,
+          requestId,
+          ...(author ? { author: adapterAuthor(author) } : {}),
+          metadata: adapterMetadata(metadata),
+        });
+      });
       const value: VersionedTextReadValue = {
         workspaceId: input.workspaceId,
         versionId: input.versionId,
@@ -1134,16 +1136,17 @@ export function createCaptureLiveStores(
       author?: MomentWriteAuthor;
       momentId?: string;
       captureHoldId?: string;
+      beforeSend?: () => void;
     }) {
-      const { metadata, author, ...deleteInput } = input;
-      const raw = await runMutation(
-        async (adapter) =>
-          await adapter.deleteTextFile({
-            ...deleteInput,
-            ...(author ? { author: adapterAuthor(author) } : {}),
-            metadata: adapterMetadata(metadata),
-          }),
-      );
+      const { metadata, author, beforeSend, ...deleteInput } = input;
+      const raw = await runMutation(async (adapter) => {
+        beforeSend?.();
+        return await adapter.deleteTextFile({
+          ...deleteInput,
+          ...(author ? { author: adapterAuthor(author) } : {}),
+          metadata: adapterMetadata(metadata),
+        });
+      });
       if (!raw.moment.beforePresent) {
         throw new VersionedTextStoreError(
           "state-corrupt",

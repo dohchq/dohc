@@ -869,7 +869,7 @@ export interface WorkspaceEngineCapture {
   ): Promise<PlanUndoAgentRunResult>;
   undoAgentRun(
     agentRunId: string,
-    person: Extract<MomentWriteAuthor, { kind: "human" }>,
+    author: MomentWriteAuthor,
     options: (
       | { expectedTargets: readonly UndoAgentRunTarget[]; expectedPlanToken?: undefined }
       | { expectedPlanToken: string; expectedTargets?: undefined }
@@ -6891,7 +6891,7 @@ export function createWorkspaceEngineCapture(
     activeVersionId: string,
     policy: WorkspaceEnginePolicySnapshot,
     momentId: string,
-    author: Extract<MomentWriteAuthor, { kind: "human" }>,
+    author: MomentWriteAuthor,
     restoreOptions: {
       expectedHeadMomentId?: string;
       aloneInFolder?: true;
@@ -7096,35 +7096,39 @@ export function createWorkspaceEngineCapture(
       }
       const correlationId =
         restoreOptions.correlationId ?? restoreOptions.requestId ?? `restore-${createId()}`;
-      const disk = await readDiskTextState(rootPath, path);
-      if (disk.kind === "unreadable") {
-        throw new Error(`Could not read the current ${path} on disk.`);
-      }
-      if (disk.kind === "untracked-content") {
-        throw new Error(
-          `Only tracked files can be restored. ${path} is no longer tracked by dohc.`,
-        );
-      }
-      const saveMetadata: ActorNeutralWriteMetadata = {
-        origin: "local-file",
-        summary: "Saved latest edits",
-        correlationId,
-      };
-      if (disk.kind === "text" || disk.kind === "binary") {
-        await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
-      } else {
-        try {
-          await deleteIfTracked(engine, activeVersionId, path, saveMetadata, undefined, true);
-        } catch (error) {
-          const again = await readDiskTextState(rootPath, path);
-          if (again.kind !== "text" && again.kind !== "binary") throw error;
-          await writeIfChanged(engine, activeVersionId, path, again, saveMetadata);
+      if (restoreOptions.expectedHeadMomentId === undefined) {
+        const disk = await readDiskTextState(rootPath, path);
+        if (disk.kind === "unreadable") {
+          throw new Error(`Could not read the current ${path} on disk.`);
+        }
+        if (disk.kind === "untracked-content") {
+          throw new Error(
+            `Only tracked files can be restored. ${path} is no longer tracked by dohc.`,
+          );
+        }
+        const saveMetadata: ActorNeutralWriteMetadata = {
+          origin: "local-file",
+          summary: "Saved latest edits",
+          correlationId,
+        };
+        if (disk.kind === "text" || disk.kind === "binary") {
+          await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
+        } else {
+          try {
+            await deleteIfTracked(engine, activeVersionId, path, saveMetadata, undefined, true);
+          } catch (error) {
+            const again = await readDiskTextState(rootPath, path);
+            if (again.kind !== "text" && again.kind !== "binary") throw error;
+            await writeIfChanged(engine, activeVersionId, path, again, saveMetadata);
+          }
         }
       }
       const target = moment.payload.before;
       const metadata: ActorNeutralWriteMetadata = {
         origin: "restore",
-        summary: `Restored ${path}`,
+        summary: correlationId.startsWith("restore-agent-run-")
+          ? "Undid agent run"
+          : `Restored ${path}`,
         correlationId,
       };
       const current = await engine.readTextFile({
@@ -7171,6 +7175,13 @@ export function createWorkspaceEngineCapture(
               : {}),
           }
         : {};
+      const beforeSend = restoreOptions.hasOtherWindow
+        ? () => {
+            if (restoreOptions.hasOtherWindow?.()) {
+              throw new RestoreOtherWindowError(path);
+            }
+          }
+        : undefined;
       if (target) {
         if (
           current &&
@@ -7204,6 +7215,7 @@ export function createWorkspaceEngineCapture(
                   ...pathClearFields,
                   metadata,
                   author,
+                  ...(beforeSend ? { beforeSend } : {}),
                 });
               })()
             : await (async () => {
@@ -7223,6 +7235,7 @@ export function createWorkspaceEngineCapture(
                   ...pathClearFields,
                   metadata,
                   author,
+                  ...(beforeSend ? { beforeSend } : {}),
                 });
               })();
         requirePublishedWrite(path, result);
@@ -7253,6 +7266,7 @@ export function createWorkspaceEngineCapture(
           : {}),
         metadata,
         author,
+        ...(beforeSend ? { beforeSend } : {}),
       });
       if (!expectedSha256) await materialize([{ kind: "delete", path }], policy);
       return {
@@ -7379,7 +7393,7 @@ export function createWorkspaceEngineCapture(
     policy: WorkspaceEnginePolicySnapshot,
     earliestMomentId: string,
     latestMomentId: string,
-    author: Extract<MomentWriteAuthor, { kind: "human" }>,
+    author: MomentWriteAuthor,
     replayOptions: {
       committedMomentId: string;
       requestId: string;
@@ -7485,7 +7499,9 @@ export function createWorkspaceEngineCapture(
         createHash("sha256").update(latest.payload.after.text).digest("hex"));
     const metadata: ActorNeutralWriteMetadata = {
       origin: "restore",
-      summary: `Restored ${path}`,
+      summary: replayOptions.correlationId.startsWith("restore-agent-run-")
+        ? "Undid agent run"
+        : `Restored ${path}`,
       correlationId: replayOptions.correlationId,
     };
     const pathClearFields = {
@@ -7495,6 +7511,13 @@ export function createWorkspaceEngineCapture(
         ? { expectedPathClearHeadMomentId: replayOptions.pathClearSince.expectedHeadMomentId }
         : {}),
     };
+    const beforeSend = replayOptions.hasOtherWindow
+      ? () => {
+          if (replayOptions.hasOtherWindow?.()) {
+            throw new RestoreOtherWindowError(path);
+          }
+        }
+      : undefined;
     const target = earliest.payload.before;
     try {
       if (target) {
@@ -7522,6 +7545,7 @@ export function createWorkspaceEngineCapture(
                   ...pathClearFields,
                   metadata,
                   author,
+                  ...(beforeSend ? { beforeSend } : {}),
                 });
               })()
             : await (async () => {
@@ -7541,6 +7565,7 @@ export function createWorkspaceEngineCapture(
                   ...pathClearFields,
                   metadata,
                   author,
+                  ...(beforeSend ? { beforeSend } : {}),
                 });
               })();
         requirePublishedWrite(path, result);
@@ -7563,6 +7588,7 @@ export function createWorkspaceEngineCapture(
           : {}),
         metadata,
         author,
+        ...(beforeSend ? { beforeSend } : {}),
       });
       return {
         restored: "deleted" as const,

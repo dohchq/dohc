@@ -208,8 +208,16 @@ export function AgentRunUndoDialog(props: AgentRunUndoDialogProps) {
         return;
       }
       if (result.restored.length === 0) {
+        const changedSincePreview = result.skipped.some(
+          (item) =>
+            item.reason === "not-in-plan" ||
+            item.reason === "later-edits" ||
+            item.reason === "local-changes",
+        );
         setStaleMessage(
-          "No files were undone because they changed since this preview loaded. Review the updated list below.",
+          changedSincePreview
+            ? "No files were undone because they changed since this preview loaded. Review the updated list below."
+            : "No files were undone. Review the skipped files below.",
         );
         void planQuery.retry();
         return;

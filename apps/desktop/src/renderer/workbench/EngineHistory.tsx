@@ -114,8 +114,15 @@ export function HistoryPaused(props: { testId: string; className?: string }) {
 // The list label for one moment: its real engine summary when it has one,
 // else calm product copy derived from the operation.
 export function engineMomentSummary(
-  moment: Pick<EngineMomentRecord, "summary" | "operation" | "path" | "contentKind" | "byteLength">,
+  moment: Pick<
+    EngineMomentRecord,
+    "summary" | "operation" | "path" | "contentKind" | "byteLength"
+  > &
+    Partial<Pick<EngineMomentRecord, "origin" | "correlationId">>,
 ): string {
+  if (moment.origin === "restore" && moment.correlationId?.startsWith("restore-agent-run-")) {
+    return "Undid agent run";
+  }
   if (moment.summary) return moment.summary;
   if (moment.operation === "rename") return `Renamed to ${basenameOf(moment.path)}`;
   if (moment.operation === "delete") return `Deleted ${basenameOf(moment.path)}`;
@@ -374,14 +381,14 @@ export function groupTimeline(loaded: readonly TimelineEntry[]): TimelineItem[] 
     if (
       previous?.kind === "files" &&
       moment.correlationId !== undefined &&
-      previous.group.correlationId === moment.correlationId
+      previous.group.correlationId === moment.correlationId &&
+      previous.group.agentRunId === runId
     ) {
       previous.group.moments.push(moment);
-      if (moment.correlationId.startsWith("restore-agent-run-")) {
+      if (moment.origin === "restore" && moment.correlationId.startsWith("restore-agent-run-")) {
         previous.group.summary = "Undid agent run";
-      }
-      if (previous.group.agentRunId !== undefined && runId !== previous.group.agentRunId) {
-        delete previous.group.agentRunId;
+      } else if (previous.group.agentRunId !== undefined) {
+        previous.group.summary = "Agent run";
       }
       continue;
     }
@@ -389,7 +396,8 @@ export function groupTimeline(loaded: readonly TimelineEntry[]): TimelineItem[] 
     const startsPass =
       moment.correlationId !== undefined &&
       next?.kind === "file" &&
-      next.moment.correlationId === moment.correlationId;
+      next.moment.correlationId === moment.correlationId &&
+      soleAgentRunId(next.moment) === runId;
     if (
       previous?.kind === "files" &&
       (previous.group.run || previous.group.moments.length === 1) &&
@@ -418,13 +426,17 @@ export function groupTimeline(loaded: readonly TimelineEntry[]): TimelineItem[] 
       previous.key = previous.group.key = moment.id;
       continue;
     }
+    const initialSummary =
+      moment.origin === "restore" && moment.correlationId?.startsWith("restore-agent-run-")
+        ? "Undid agent run"
+        : engineMomentSummary(moment);
     items.push({
       kind: "files",
       key: moment.id,
       group: {
         key: moment.id,
         run: false,
-        summary: engineMomentSummary(moment),
+        summary: initialSummary,
         recordedAtMs: moment.recordedAtMs,
         ...(moment.correlationId !== undefined ? { correlationId: moment.correlationId } : {}),
         ...(runId !== undefined ? { agentRunId: runId } : {}),

@@ -33,13 +33,13 @@ export const AGENT_RUN_UNDO_WRITE_DECLARATIONS = {
       operands: "<agent-run-id> <plan-token>",
       notes: [
         "Pass the planToken returned by `dohc history agent-run-plan <agent-run-id>`.",
-        "Only a person can run this command; requests from agents or active runs are refused.",
+        "Recorded in History as an agent undo on behalf of the local owner; refused inside dohc-managed runs, active automation chains, received shares, and read-only workspaces.",
         "Skips files with later edits, renames, path collisions, live editors, open desktop windows, Collections, created drawings, or protection.",
       ],
       example: ["run-1", "plan-token"],
     },
     mcp: {
-      none: "Undoing an entire agent run is a human recovery action from desktop History or the CLI, not an MCP tool.",
+      none: "Undoing an entire agent run is kept off MCP; use desktop History or `dohc history undo-agent-run` with a reviewed plan token.",
     },
   },
 } as const satisfies WriteFamily;

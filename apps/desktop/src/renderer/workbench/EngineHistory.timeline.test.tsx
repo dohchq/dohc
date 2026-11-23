@@ -909,4 +909,62 @@ describe("History timeline sources", () => {
     fireEvent.click(screen.getByTestId("engine-moment-undo-run"));
     expect(onUndoAgentRun).toHaveBeenCalledWith("run-1", "Rover");
   });
+
+  it("shows Agent run and keeps Undo run on correlated multi-file captures from one run, and separates distinct runs sharing a correlationId", () => {
+    const onUndoAgentRun = vi.fn();
+    const runAuthor = (agentRunId: string) => ({
+      kind: "agent" as const,
+      agentId: "rover",
+      onBehalfOf: "user-1",
+      agentRunId,
+    });
+    view({
+      onUndoAgentRun,
+      entries: [
+        file("m-3", {
+          path: "notes/c.md",
+          correlationId: "corr-shared",
+          recordedAtMs: DAY,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-2")],
+        }),
+        file("m-2", {
+          path: "notes/b.md",
+          correlationId: "corr-shared",
+          recordedAtMs: DAY - 1000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+        file("m-1", {
+          path: "notes/a.md",
+          correlationId: "corr-shared",
+          recordedAtMs: DAY - 2000,
+          agentAuthorName: "Rover",
+          authors: [runAuthor("run-1")],
+        }),
+      ],
+    });
+
+    const toggle = screen.getByTestId("engine-moment-group-toggle");
+    expect(toggle.textContent).toContain("Agent run");
+    expect(toggle.textContent).toContain("2 files");
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByTestId("engine-moment-undo-run"));
+    expect(onUndoAgentRun).toHaveBeenCalledWith("run-1", "Rover");
+  });
+
+  it("labels a single-file agent-run undo as Undid agent run", () => {
+    view({
+      entries: [
+        file("r-1", {
+          path: "notes/plan.md",
+          origin: "restore",
+          correlationId: "restore-agent-run-single",
+          summary: "Restored notes/plan.md",
+          recordedAtMs: DAY,
+        }),
+      ],
+    });
+    expect(screen.getByText("Undid agent run")).toBeTruthy();
+  });
 });

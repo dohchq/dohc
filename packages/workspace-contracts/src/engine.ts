@@ -628,6 +628,7 @@ export interface VersionedTextStore {
     metadata: ActorNeutralWriteMetadata;
     author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
+    beforeSend?: () => void;
   }): Promise<VersionedTextWriteResult>;
   writeBinaryFile(input: {
     workspaceId: WorkspaceId;
@@ -643,6 +644,7 @@ export interface VersionedTextStore {
     metadata: ActorNeutralWriteMetadata;
     author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
+    beforeSend?: () => void;
   }): Promise<VersionedTextWriteResult>;
   readBinaryFile(input: {
     workspaceId: WorkspaceId;
@@ -727,6 +729,7 @@ export interface VersionedTextStore {
     momentId?: VersionedTextMomentId;
     // Refused once this `capture.hold` ended.
     captureHoldId?: string;
+    beforeSend?: () => void;
   }): Promise<VersionedTextDeleteResult>;
   // Fails closed (invalid-input) on sync record-only moments: divergent peer
   // history never rewrites the local materialized snapshot.

@@ -2560,7 +2560,7 @@ export function parseCliArguments(
     );
   if (help) return { help: [commandName, verbName] };
   const agent =
-    (commandName === "history" && verbName === "undo") ||
+    (commandName === "history" && (verbName === "undo" || verbName === "undo-agent-run")) ||
     commandName === "document" ||
     commandName === "file" ||
     global.actorFlag ||

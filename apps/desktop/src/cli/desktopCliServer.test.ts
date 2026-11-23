@@ -2953,7 +2953,11 @@ it("passes open-window state and planToken through CLI agent-run undo", async ()
   expect(openRun.exitCode).toBe(0);
   const firstCall = vi.mocked(f.capture.undoAgentRun).mock.lastCall;
   expect(firstCall?.[0]).toBe("run-1");
-  expect(firstCall?.[1]).toEqual({ kind: "human", humanId: "local:test" });
+  expect(firstCall?.[1]).toEqual({
+    kind: "agent",
+    agentId: "dohc-mcp",
+    onBehalfOf: "person-local",
+  });
   expect(firstCall?.[2]).toMatchObject({ expectedPlanToken: "plan-token-1" });
   expect(firstCall?.[2]?.hasOtherWindow?.()).toBe(true);
 

@@ -865,4 +865,227 @@ describe("planUndoAgentRun and undoAgentRun", () => {
       await engine.stop();
     }
   });
+
+  it("skips secret-floor paths as protected and files.toml exclusions as untracked without restoring them on disk", async () => {
+    const root = await createTestScratch("dohc-agent-run-undo-secret-");
+    const loopback = new VersionedLoopbackEngine();
+    const engine = createCapture(root, loopback);
+    try {
+      await writeDisk(root, "notes/safe.md", "Safe before\n");
+      await writeDisk(root, "notes/excluded.md", "Excluded before\n");
+      await writeDisk(root, ".env", "API_KEY=after\n");
+      await engine.flush();
+
+      const run = agentAuthor("run-secret");
+      await engine.writeAuthoredFile(join(root, "notes/safe.md"), "Safe after\n", run);
+      await engine.writeAuthoredFile(join(root, "notes/excluded.md"), "Excluded after\n", run);
+      await writeDisk(
+        root,
+        ".dohc/files.toml",
+        '[[rule]]\npath = "notes/excluded.md"\ntracked = false\n',
+      );
+
+      const send = loopback.sendRequest.bind(loopback);
+      let templateMoment: Record<string, unknown> | undefined;
+      const secretMomentId = "m-secret-agent";
+      const secretObjectId = "obj-secret-env";
+      const makeSecretMoment = () => ({
+        ...templateMoment!,
+        momentId: secretMomentId,
+        objectId: secretObjectId,
+        path: ".env",
+        momentOrder: 999_999,
+      });
+      const spy = vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+        if (
+          request.method === VERSIONED_METHOD.momentsGet &&
+          (request.params as { momentId?: string }).momentId === secretMomentId
+        ) {
+          const safeGet = await send({
+            ...request,
+            params: { momentId: templateMoment!.momentId },
+          });
+          const safeMoment = (safeGet as { result: Record<string, unknown> }).result;
+          return {
+            id: request.id,
+            result: {
+              ...safeMoment,
+              momentId: secretMomentId,
+              objectId: secretObjectId,
+              path: ".env",
+              momentOrder: 999_999,
+            },
+          };
+        }
+        const response = await send(request);
+        if (request.method === VERSIONED_METHOD.momentsList && "result" in response) {
+          const result = response.result as {
+            moments: Array<Record<string, unknown>>;
+            nextBeforeMomentOrder: number | null;
+          };
+          const params = request.params as {
+            objectId?: string | null;
+            beforeMomentOrder?: number | null;
+          };
+          if (!templateMoment) {
+            templateMoment = result.moments.find((row) => row.path === "notes/safe.md");
+          }
+          if (params.objectId === secretObjectId && templateMoment) {
+            return {
+              ...response,
+              result: {
+                moments: [makeSecretMoment()],
+                nextBeforeMomentOrder: null,
+                latestMomentOrder: 999_999,
+              },
+            };
+          }
+          if (params.objectId == null && params.beforeMomentOrder == null && templateMoment) {
+            return {
+              ...response,
+              result: {
+                ...result,
+                moments: [makeSecretMoment(), ...result.moments],
+              },
+            };
+          }
+        }
+        return response;
+      });
+
+      const plan = await engine.planUndoAgentRun("run-secret");
+      expect(plan.restorable.map((item) => item.path)).toEqual(["notes/safe.md"]);
+      expect(plan.skipped).toEqual([
+        expect.objectContaining({ path: ".env", reason: "protected" }),
+        expect.objectContaining({ path: "notes/excluded.md", reason: "untracked" }),
+      ]);
+
+      const undone = await engine.undoAgentRun("run-secret", RESTORER, {
+        expectedPlanToken: plan.planToken,
+      });
+      expect(undone.restored.map((item) => item.path)).toEqual(["notes/safe.md"]);
+      expect(undone.skipped).toEqual([
+        expect.objectContaining({ path: ".env", reason: "protected" }),
+        expect.objectContaining({ path: "notes/excluded.md", reason: "untracked" }),
+      ]);
+      expect(await readDisk(root, "notes/safe.md")).toBe("Safe before\n");
+      expect(await readDisk(root, "notes/excluded.md")).toBe("Excluded after\n");
+      expect(await readDisk(root, ".env")).toBe("API_KEY=after\n");
+      spy.mockRestore();
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it("rechecks hasOtherWindow inside runMutation after session acquisition and never emits Saved latest edits during undo", async () => {
+    const root = await createTestScratch("dohc-agent-run-undo-session-window-");
+    const loopback = new VersionedLoopbackEngine();
+    const workspaceId = "agent-run-undo-test";
+    const sessions = mockDaemonSessions({ rootPath: root, workspaceId, loopback });
+    let flipOnNextRun = false;
+    let windowOpened = false;
+    const rawRun = sessions.run.bind(sessions);
+    vi.spyOn(sessions, "run").mockImplementation(async (workspace, operation, runOptions) => {
+      return await rawRun(
+        workspace,
+        async (binding) => {
+          if (flipOnNextRun) {
+            flipOnNextRun = false;
+            windowOpened = true;
+          }
+          return await operation(binding);
+        },
+        runOptions,
+      );
+    });
+    const engine = createWorkspaceEngineCapture({
+      workspaceId,
+      rootPath: root,
+      attachmentId: Symbol("agent-run-undo-session-window"),
+      rustEngineSessions: sessions,
+    });
+    try {
+      await writeDisk(root, "notes/guarded.md", "Before\n");
+      await engine.flush();
+      const run = agentAuthor("run-session-window");
+      await engine.writeAuthoredFile(join(root, "notes/guarded.md"), "After\n", run);
+
+      const plan = await engine.planUndoAgentRun("run-session-window", {
+        hasOtherWindow: () => false,
+      });
+      expect(plan.restorable.map((item) => item.path)).toEqual(["notes/guarded.md"]);
+
+      let sawTextWrite = false;
+      let sawSavedLatestEdits = false;
+      const send = loopback.sendRequest.bind(loopback);
+      let scanCount = 0;
+      vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+        if (request.method === VERSIONED_METHOD.textWrite) {
+          sawTextWrite = true;
+          if ((request.params as { summary?: string }).summary === "Saved latest edits") {
+            sawSavedLatestEdits = true;
+          }
+        }
+        const response = await send(request);
+        if (
+          request.method === VERSIONED_METHOD.momentsList &&
+          (request.params as { objectId?: string }).objectId === undefined &&
+          (request.params as { limit?: number }).limit === 200
+        ) {
+          // Arm flip right after the final pre-write collision scan, so sessions.run flips
+          // windowOpened AFTER restoreFileToBeforeMomentInQueue's outer check but BEFORE beforeSend.
+          if (scanCount++ >= 1) flipOnNextRun = true;
+        }
+        return response;
+      });
+
+      const undone = await engine.undoAgentRun("run-session-window", RESTORER, {
+        expectedPlanToken: plan.planToken,
+        hasOtherWindow: () => windowOpened,
+      });
+      expect(sawSavedLatestEdits).toBe(false);
+      expect(sawTextWrite).toBe(false);
+      expect(undone.restored).toEqual([]);
+      expect(undone.failed).toEqual([]);
+      expect(undone.skipped).toEqual([
+        expect.objectContaining({ path: "notes/guarded.md", reason: "other-window" }),
+      ]);
+      expect(await readDisk(root, "notes/guarded.md")).toBe("After\n");
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it("records agent-attributed CLI undos with Undid agent run summary", async () => {
+    const root = await createTestScratch("dohc-agent-run-undo-cli-author-");
+    const loopback = new VersionedLoopbackEngine();
+    const engine = createCapture(root, loopback);
+    try {
+      await writeDisk(root, "notes/solo.md", "Before\n");
+      await engine.flush();
+      const run = agentAuthor("run-solo");
+      await engine.writeAuthoredFile(join(root, "notes/solo.md"), "After\n", run);
+
+      const plan = await engine.planUndoAgentRun("run-solo");
+      const cliAuthor = {
+        kind: "agent" as const,
+        agentId: "dohc-mcp",
+        onBehalfOf: "local-person",
+      };
+      const undone = await engine.undoAgentRun("run-solo", cliAuthor, {
+        expectedPlanToken: plan.planToken,
+      });
+      expect(undone.restored).toHaveLength(1);
+      expect(await readDisk(root, "notes/solo.md")).toBe("Before\n");
+
+      const restoredMoment = await engine.readMoment(undone.restored[0]!.restoredMomentId);
+      expect(restoredMoment?.protected).toBe(false);
+      if (restoredMoment && !restoredMoment.protected) {
+        expect(restoredMoment.moment.metadata.summary).toBe("Undid agent run");
+        expect(restoredMoment.moment.authors).toEqual([cliAuthor]);
+      }
+    } finally {
+      await engine.stop();
+    }
+  });
 });

@@ -823,6 +823,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
                 command.verb === "saveRecoveryCopy"
                 ? 420_000
                 : command.verb === "historyUndo" ||
+                    command.verb === "undoAgentRun" ||
                     command.verb === "dataset" ||
                     command.verb === "appPublication" ||
                     command.verb === "ownerAppResponses" ||

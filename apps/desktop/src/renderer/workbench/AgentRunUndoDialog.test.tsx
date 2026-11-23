@@ -277,4 +277,61 @@ describe("AgentRunUndoDialog", () => {
     expect(banner.textContent).toContain("250 History pages");
     expect(banner.textContent).toContain("11,240 changes");
   });
+
+  it("uses neutral zero-undone copy when files were skipped for another window instead of changing", async () => {
+    planUndoAgentRun
+      .mockResolvedValueOnce({
+        agentRunId: "run-1",
+        agentName: "Rover",
+        planToken: "plan-token-6",
+        truncated: false,
+        scannedChanges: 1,
+        restorable: [
+          {
+            objectId: "obj-a",
+            path: "notes/a.md",
+            earliestMomentId: "m-1",
+            latestMomentId: "m-1",
+            momentCount: 1,
+            action: "restore",
+          },
+        ],
+        skipped: [],
+      } satisfies PlanUndoAgentRunResult)
+      .mockResolvedValueOnce({
+        agentRunId: "run-1",
+        agentName: "Rover",
+        planToken: "plan-token-7",
+        truncated: false,
+        scannedChanges: 1,
+        restorable: [],
+        skipped: [
+          {
+            path: "notes/a.md",
+            reason: "other-window",
+            detail: "Open in another window. Close that window and try again.",
+          },
+        ],
+      } satisfies PlanUndoAgentRunResult);
+    undoAgentRun.mockResolvedValueOnce({
+      agentRunId: "run-1",
+      correlationId: "restore-agent-run-3",
+      truncated: false,
+      restored: [],
+      skipped: [
+        {
+          path: "notes/a.md",
+          reason: "other-window",
+          detail: "Open in another window. Close that window and try again.",
+        },
+      ],
+      failed: [],
+    } satisfies UndoAgentRunResult);
+
+    renderDialog();
+    fireEvent.click(await screen.findByTestId("agent-run-undo-confirm"));
+
+    const stale = await screen.findByTestId("agent-run-undo-stale");
+    expect(stale.textContent).toBe("No files were undone. Review the skipped files below.");
+  });
 });
