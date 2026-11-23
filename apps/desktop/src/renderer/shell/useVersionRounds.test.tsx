@@ -108,7 +108,7 @@ it("lets go and takes back its answers when the window leaves the workspace", as
   view.rerender({ id: "other" });
   expect(release).toHaveBeenCalledOnce();
   const reason =
-    "A dohc window left this workspace while the change waited, so nothing changed. Try again.";
+    "A dohc window switched away while the version change was waiting, so nothing changed. Try again.";
   expect(bridge.answerVersionRound).toHaveBeenCalledWith({ roundId: 5, ready: false, reason });
   expect(bridge.answerVersionRound).toHaveBeenCalledWith({ roundId: 6, ready: false, reason });
   await act(async () => {

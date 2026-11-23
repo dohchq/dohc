@@ -151,7 +151,7 @@ export function useDatasetFieldMarks(datasetId: string, table: string | null): F
 /** What a field's ⚡ says: the automations that set it. */
 export function automationFieldMarkLabel(automations: readonly string[]): string {
   const names = AND.format(automations.map((name) => `"${name}"`));
-  return automations.length === 1 ? `${names} sets this field` : `${names} set this field`;
+  return `Set by ${names}`;
 }
 
 /** The bare ⚡: muted, no border or fill. Whoever places it gives it its words. */

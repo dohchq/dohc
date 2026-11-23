@@ -26,6 +26,7 @@ import {
   validateGroupShareSelector,
   validateShareSelector,
 } from "./shareFilter";
+import type { createShareInvitationEmailer } from "./shareInvitationEmail";
 import type { createShareSummaries } from "./shareSummaries";
 import type {
   SyncRelayShareGrantRow,
@@ -41,8 +42,11 @@ export type ShareGrantTransitionRoute =
   | { route: "share-link-rotate"; shareId: string; grantId: string }
   | { route: "share-link-retune"; shareId: string; grantId: string }
   | { route: "share-grant-promote"; shareId: string; grantId: string }
+  | { route: "share-grant-retune"; shareId: string; grantId: string }
   | { route: "share-grant-revoke"; shareId: string; grantId: string }
+  | { route: "share-grant-invitation-email"; shareId: string; grantId: string }
   | { route: "share-undo"; shareId: string }
+  | { route: "share-leave"; shareId: string }
   | { route: "share-revoke"; shareId: string };
 
 export type WorkspaceShareCreationRoute =
@@ -77,7 +81,7 @@ const MAX_EMAIL_CHARS = 320;
 // longer current, so this is not the current-grant rule.
 export function requireOwnedShareGrant(
   storage: Pick<SyncRelayStorage, "getShare" | "getShareGrant" | "workspaceIsOwnedBy">,
-  kind: "link" | "user",
+  kind: "link" | "user" | "person",
   shareId: string,
   grantId: string,
   actor: { userId: string },
@@ -85,14 +89,18 @@ export function requireOwnedShareGrant(
 ): SyncRelayShareWithGrantRow {
   const share = storage.getShare(shareId);
   const grant = storage.getShareGrant(grantId);
+  const claimed = grant?.principalKind === "user" && Boolean(grant.principalUserId);
+  const ofKind =
+    kind === "link"
+      ? grant?.principalKind === "link"
+      : claimed || (kind === "person" && grant?.principalKind === "email");
   if (
     !share ||
     share.granterUserId !== actor.userId ||
     !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
     !grant ||
     grant.shareId !== share.shareId ||
-    grant.principalKind !== kind ||
-    (kind === "user" && !grant.principalUserId) ||
+    !ofKind ||
     (!allowRevoked && (grant.status !== "active" || grant.revokedAtMs !== null))
   ) {
     throw notFound();
@@ -108,16 +116,20 @@ export function createShareGrantRoutes(
     SyncRelayStorage,
     | "getShare"
     | "getShareGrant"
+    | "getShareLabels"
     | "getCurrentLinkCredential"
     | "workspaceIsOwnedBy"
     | "rotateLinkGrant"
     | "retuneShareGrant"
+    | "retuneNamedShareGrant"
     | "promoteShareGrant"
     | "revokeShareGrant"
     | "revokeShare"
     | "removeShareAccess"
     | "serviceHostEnrollmentsCoveredByShare"
     | "undoShareRemoval"
+    | "leaveShare"
+    | "listActiveShareGrantsForRecipient"
     | "readLinkCreation"
     | "createFileLinkShare"
     | "createLinkGrant"
@@ -146,6 +158,7 @@ export function createShareGrantRoutes(
   namedGrantTransitionBody: ReturnType<typeof createShareSummaries>["namedGrantTransitionBody"],
   dependentGrantSummary: ReturnType<typeof createShareSummaries>["dependentGrantSummary"],
   namedBrowserInvitation: ReturnType<typeof createShareSummaries>["namedBrowserInvitation"],
+  emailShareInvitation: ReturnType<typeof createShareInvitationEmailer>,
   publicEditRelease?: PublicEditRelease,
   liveRooms: () => Pick<LiveRooms, "saveFirst"> | undefined = () => undefined,
 ) {
@@ -211,7 +224,7 @@ export function createShareGrantRoutes(
     return access;
   };
   const requireOwnedGrant = (
-    kind: "link" | "user",
+    kind: "link" | "user" | "person",
     shareId: string,
     grantId: string,
     actor: { userId: string },
@@ -242,6 +255,34 @@ export function createShareGrantRoutes(
     route: ShareGrantTransitionRoute,
     actor: { userId: string },
   ): Promise<Response> {
+    if (route.route === "share-leave") {
+      if (request.method !== "POST") throw relayError("method_not_allowed");
+      const input = await readJsonObject(request);
+      if (Object.keys(input).some((key) => key !== "ended") || typeof input.ended !== "boolean") {
+        throw badRequest("ended must be true or false, and the only field");
+      }
+      const onlyEnded = input.ended;
+      const leavesEdit =
+        !onlyEnded &&
+        storage
+          .listActiveShareGrantsForRecipient(route.shareId, actor.userId)
+          .some((grant) => grant.access === "edit");
+      const result = await endAccess(route.shareId, leavesEdit, () =>
+        storage.leaveShare({
+          shareId: route.shareId,
+          userId: actor.userId,
+          nowMs: nowMs(),
+          onlyEnded,
+        }),
+      );
+      if (!result.ok) throw notFound();
+      if (result.workspaceId !== null) {
+        discussionActivity.wake(route.shareId);
+        discussionActivity.wakeLog(result.workspaceId);
+      }
+      return jsonResponse({ ok: true, left: result.left });
+    }
+
     if (route.route === "share-undo") {
       if (request.method !== "POST") throw relayError("method_not_allowed");
       const input = await readJsonObject(request);
@@ -403,13 +444,71 @@ export function createShareGrantRoutes(
     }
     if (route.route === "share-grant-promote") throw relayError("method_not_allowed");
 
+    if (route.route === "share-grant-retune" && request.method === "POST") {
+      const input = await readJsonObject(request);
+      if (Object.keys(input).some((key) => key !== "workspaceId" && key !== "access")) {
+        throw badRequest("request body contains an unknown field");
+      }
+      const workspaceId = parseWorkspaceId(input.workspaceId);
+      const accessValidation = validateFileShareAccess(input.access);
+      if (!accessValidation.ok) {
+        throw relayError(accessValidation.code, accessValidation.message);
+      }
+      const access = accessValidation.access;
+      const owned = () => {
+        const share = storage.getShare(route.shareId);
+        const grant = storage.getShareGrant(route.grantId);
+        if (
+          !share ||
+          share.granterUserId !== actor.userId ||
+          !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
+          !grant ||
+          grant.shareId !== share.shareId ||
+          grant.principalKind === "link" ||
+          grant.status !== "active" ||
+          grant.revokedAtMs !== null
+        ) {
+          throw notFound();
+        }
+        requireShareWorkspace(share, workspaceId);
+        return { share, grant };
+      };
+      const { share, grant } = owned();
+      const result = await endAccess(
+        share.shareId,
+        grant.access === "edit" && access !== "edit",
+        () =>
+          storage.retuneNamedShareGrant({
+            shareId: share.shareId,
+            grantId: grant.grantId,
+            access,
+            changedAtMs: nowMs(),
+            guard: () => void owned(),
+          }),
+      );
+      if (!result.ok) throw notFound();
+      discussionActivity.wake(share.shareId);
+      discussionActivity.wakeLog(share.workspaceId);
+      return jsonResponse({
+        ok: true,
+        ...namedGrantTransitionBody(result.grant),
+      });
+    }
+    if (route.route === "share-grant-retune") throw relayError("method_not_allowed");
+
     if (route.route === "share-grant-revoke" && request.method === "POST") {
       const input = await readJsonObject(request);
       const workspaceId = parseWorkspaceId(input.workspaceId);
       if (Object.keys(input).some((key) => key !== "workspaceId")) {
         throw badRequest("request body contains an unknown field");
       }
-      const { share, grant } = requireOwnedGrant("user", route.shareId, route.grantId, actor, true);
+      const { share, grant } = requireOwnedGrant(
+        "person",
+        route.shareId,
+        route.grantId,
+        actor,
+        true,
+      );
       requireShareWorkspace(share, workspaceId);
       const result = await endAccess(route.shareId, grant.access === "edit", () =>
         storage.removeShareAccess({
@@ -419,7 +518,7 @@ export function createShareGrantRoutes(
           nowMs: nowMs(),
           guard: () => {
             requireShareWorkspace(
-              requireOwnedGrant("user", route.shareId, route.grantId, actor, true).share,
+              requireOwnedGrant("person", route.shareId, route.grantId, actor, true).share,
               workspaceId,
             );
           },
@@ -435,6 +534,55 @@ export function createShareGrantRoutes(
       });
     }
     if (route.route === "share-grant-revoke") throw relayError("method_not_allowed");
+
+    if (route.route === "share-grant-invitation-email" && request.method === "POST") {
+      const input = await readJsonObject(request);
+      if (Object.keys(input).some((key) => key !== "workspaceId")) {
+        throw badRequest("request body contains an unknown field");
+      }
+      const workspaceId = parseWorkspaceId(input.workspaceId);
+      const invited = () => {
+        const { share, grant } = requireOwnedGrant("person", route.shareId, route.grantId, actor);
+        requireShareWorkspace(share, workspaceId);
+        const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+        const recipient = grant.principalUserId
+          ? { recipientUserId: grant.principalUserId }
+          : grant.principalEmail
+            ? { recipientEmail: grant.principalEmail }
+            : null;
+        if (!selector || "kind" in selector || grant.parentGrantId !== null || !recipient) {
+          throw notFound();
+        }
+        return { share, grant, selector, recipient };
+      };
+      const granted = () => {
+        const { share, grant, selector } = invited();
+        const browserInvitation: { browserInvitationUrl?: string } = namedBrowserInvitation(
+          share.workspaceId,
+          grant.grantId,
+          selector,
+          grant.access,
+        );
+        return {
+          access: grant.access,
+          browserInvitationUrl: browserInvitation.browserInvitationUrl ?? null,
+        };
+      };
+      const { share, grant, recipient } = invited();
+      return jsonResponse({
+        ok: true,
+        ...(await emailShareInvitation({
+          inviterUserId: actor.userId,
+          ...recipient,
+          shareId: share.shareId,
+          grantId: grant.grantId,
+          subjectName: storage.getShareLabels(share.shareId, "member").subjectName,
+          ...granted(),
+          beforeResend: granted,
+        })),
+      });
+    }
+    if (route.route === "share-grant-invitation-email") throw relayError("method_not_allowed");
 
     if (route.route === "share-revoke" && request.method === "POST") {
       const share = storage.getShare(route.shareId);
@@ -861,6 +1009,7 @@ export function createShareGrantRoutes(
       if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
         throw relayError("invalid_chat", "chat is not shareable");
       }
+      const subjectName = normalizeShareLabel(input.subjectName);
       const createFor = (recipientUserId: string | null) =>
         storage.createShare({
           share: {
@@ -868,7 +1017,7 @@ export function createShareGrantRoutes(
             workspaceId: route.workspaceId,
             granterUserId: actor.userId,
             selectorJson: JSON.stringify(selector),
-            labels: { subjectName: normalizeShareLabel(input.subjectName) },
+            labels: { subjectName },
             createdAtMs,
           },
           grant: {
@@ -888,6 +1037,12 @@ export function createShareGrantRoutes(
       // An account being deleted counts as no account: its address gets the
       // pending invite any other address gets, and the reply stays the same.
       if (!resolved || !createFor(resolved)) createFor(null);
+      const browserInvitation: { browserInvitationUrl?: string } = namedBrowserInvitation(
+        route.workspaceId,
+        grantId,
+        selector,
+        access,
+      );
       return jsonResponse({
         ok: true,
         shareId,
@@ -895,9 +1050,20 @@ export function createShareGrantRoutes(
         selector,
         access,
         grantId,
-        ...namedBrowserInvitation(route.workspaceId, grantId, selector, access),
+        ...browserInvitation,
         generation: 1,
         createdAtMs,
+        ...("kind" in selector
+          ? {}
+          : await emailShareInvitation({
+              inviterUserId: actor.userId,
+              recipientEmail: email.trim().toLowerCase(),
+              shareId,
+              grantId,
+              subjectName,
+              access,
+              browserInvitationUrl: browserInvitation.browserInvitationUrl ?? null,
+            })),
       });
     }
     throw relayError("method_not_allowed");

@@ -41,9 +41,9 @@ describe("startupFailureBox", () => {
     const registryFile = join(await createTestScratch("dohc-startup-box-"), "dohc-workspaces.json");
     await prepare(registryFile);
     expect(startupFailureBox(listingFailure(registryFile))).toEqual({
-      title: "dohc couldn't read its workspace registry",
+      title: "dohc could not read its workspace list",
       content: [
-        "Your files are untouched. Fix or move the registry file named in the technical details, then relaunch dohc.",
+        "Your files are untouched. Fix or move the workspace list file named in the technical details, then restart dohc.",
         "",
         "Technical details",
         `File: ${registryFile}`,
@@ -56,9 +56,9 @@ describe("startupFailureBox", () => {
     const registryFile = join(await createTestScratch("dohc-startup-box-"), "dohc-workspaces.json");
     await writeFile(registryFile, JSON.stringify({ version: 2, workspaces: [] }));
     expect(startupFailureBox(listingFailure(registryFile))).toEqual({
-      title: "dohc couldn't read its workspace registry",
+      title: "dohc could not read its workspace list",
       content: [
-        "Your files are untouched. A newer version of dohc wrote this registry. Update dohc to open it.",
+        "Your files are untouched. A newer version of dohc wrote this workspace list. Update dohc to open it.",
         "",
         "Technical details",
         `File: ${registryFile}`,
@@ -69,7 +69,7 @@ describe("startupFailureBox", () => {
 
   it("keeps the generic box for any other startup failure", () => {
     expect(startupFailureBox(new Error("settings unavailable"))).toEqual({
-      title: "dohc failed to start",
+      title: "dohc could not start",
       content: "settings unavailable\n\nRestart dohc. If it fails again, review the desktop logs.",
     });
   });

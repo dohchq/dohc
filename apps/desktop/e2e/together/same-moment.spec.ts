@@ -147,14 +147,18 @@ function everyPageShows(end: Ending, expected: readonly string[], boxes = "__"):
  * order, each new word is there once, and no box is ticked. Line breaks may fall anywhere, so a
  * fix is free to choose where a merged line ends.
  */
-function nothingLost(end: Ending, ...words: string[]): void {
+function nothingLostBoxes(end: Ending, boxes: string, ...words: string[]): void {
   everyoneStillEdits(end);
   for (const page of pages(end)) {
     expect(page.lines, "the pages differ").toEqual(end.one.lines);
     expect(run(page.lines, ...words)).toBe(run(START));
     for (const word of words) expect(count(page, word), word).toBe(1);
-    expect(page.boxes).toBe("__");
+    expect(page.boxes).toBe(boxes);
   }
+}
+
+function nothingLost(end: Ending, ...words: string[]): void {
+  nothingLostBoxes(end, "__", ...words);
 }
 
 /** The page tells its person that someone else's change removed this text of theirs, and quotes it. */
@@ -430,7 +434,7 @@ test("both delete neighbouring lines", async ({ scene }) => {
   );
 });
 
-// On a share page, Enter at the end of a to-do starts a new line inside that to-do.
+// On a share page, Enter at the end of a to-do starts a new unchecked to-do item.
 test("one starts a new line in a to-do while the other types at the end of it", async ({
   scene,
 }) => {
@@ -447,7 +451,7 @@ test("one starts a new line in a to-do while the other types at the end of it", 
     "one starts a new line in a to-do while the other types at the end of it",
     await ending(scene, two),
     (end) => {
-      nothingLost(end, "NEWLINE", "TYPEDWORD");
+      nothingLostBoxes(end, "___", "NEWLINE", "TYPEDWORD");
       expect(end.one.lines).toContain("task Fig TYPEDWORD");
     },
   );
@@ -465,7 +469,7 @@ test("both start a new line in the same to-do", async ({ scene }) => {
   await two.page.keyboard.insertText("TWOLINE");
 
   judge("both start a new line in the same to-do", await ending(scene, two), (end) => {
-    nothingLost(end, "ONELINE", "TWOLINE");
+    nothingLostBoxes(end, "____", "ONELINE", "TWOLINE");
     for (const word of ["ONELINE", "TWOLINE"]) expect(end.one.lines).toContain(word);
   });
 });

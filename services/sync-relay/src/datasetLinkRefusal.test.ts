@@ -6,12 +6,13 @@ import type { SyncRelayStorage } from "./storage";
 it("keeps admission limits opaque before a link's operation or file is authorized", async () => {
   const invoke = vi.fn();
   const host = {
-    publication: () => ({
+    servedPublication: () => ({
       workspaceId: "w",
       datasetId: "dataset",
       authorityRevision: 1,
       authority: { principalKey: "profile", caller: { kind: "link", grantId: "grant" } },
-      capability: { operations: [] },
+      capability: { datasetId: "dataset", operations: [] },
+      capabilities: [{ datasetId: "dataset", operations: [] }],
     }),
     invoke,
   } as unknown as RelayDatasetHost;

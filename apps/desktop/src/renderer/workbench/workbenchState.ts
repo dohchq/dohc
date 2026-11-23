@@ -397,7 +397,7 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     virtual: true,
     singleton: false,
     title: () => "Compare with Main",
-    tooltip: () => "Compare this Version with Main",
+    tooltip: () => "Compare this version with Main",
     explorerTitle: () => "Compare with Main",
     glyph: () => "compare",
   },
@@ -489,7 +489,7 @@ type EditorTransitionActivation = "target" | "preserve";
 
 export const SIDEBAR_MIN_WIDTH = 160;
 export const SIDEBAR_MAX_WIDTH = 2400;
-export const SIDEBAR_DEFAULT_WIDTH = 240;
+export const SIDEBAR_DEFAULT_WIDTH = 320;
 export const ABOUT_MIN_WIDTH = 240;
 export const ABOUT_MAX_WIDTH = 2400;
 export const ABOUT_DEFAULT_WIDTH = 320;
@@ -1108,6 +1108,60 @@ export function showView(state: WorkbenchState, view: ActivityViewId): Workbench
 
 export function toggleSidebar(state: WorkbenchState): WorkbenchState {
   return { ...state, sidebarVisible: !state.sidebarVisible };
+}
+
+export const MIN_EDITOR_AREA_WIDTH = 380;
+
+export function bothSidebarsFit(
+  workbenchWidth: number,
+  sidebarWidth: number,
+  aboutWidth: number,
+): boolean {
+  return workbenchWidth >= sidebarWidth + aboutWidth + MIN_EDITOR_AREA_WIDTH;
+}
+
+export function effectivePanelWidth(
+  savedWidth: number,
+  workbenchWidth: number,
+  minWidth: number,
+): number {
+  if (workbenchWidth <= 0) return savedWidth;
+  const available = workbenchWidth - MIN_EDITOR_AREA_WIDTH;
+  if (available >= savedWidth) return savedWidth;
+  return Math.max(minWidth, Math.min(savedWidth, available));
+}
+
+export function fitWorkbenchSidebars(
+  previous: WorkbenchState,
+  next: WorkbenchState,
+  workbenchWidth: number,
+): WorkbenchState {
+  if (
+    workbenchWidth <= 0 ||
+    !next.sidebarVisible ||
+    !next.aboutVisible ||
+    bothSidebarsFit(workbenchWidth, next.sidebarWidth, next.aboutWidth)
+  ) {
+    return next;
+  }
+  if (previous.sidebarVisible && previous.aboutVisible) {
+    if (next.aboutWidth !== previous.aboutWidth) {
+      const maxAbout = workbenchWidth - next.sidebarWidth - MIN_EDITOR_AREA_WIDTH;
+      if (maxAbout >= ABOUT_MIN_WIDTH) {
+        return { ...next, aboutWidth: Math.min(next.aboutWidth, Math.floor(maxAbout)) };
+      }
+    }
+    if (next.sidebarWidth !== previous.sidebarWidth) {
+      const maxSidebar = workbenchWidth - next.aboutWidth - MIN_EDITOR_AREA_WIDTH;
+      if (maxSidebar >= SIDEBAR_MIN_WIDTH) {
+        return { ...next, sidebarWidth: Math.min(next.sidebarWidth, Math.floor(maxSidebar)) };
+      }
+    }
+  }
+  if (next.aboutVisible && !previous.aboutVisible) {
+    return { ...next, sidebarVisible: false };
+  }
+  return { ...next, aboutVisible: false };
 }
 
 export function toggleAbout(state: WorkbenchState): WorkbenchState {

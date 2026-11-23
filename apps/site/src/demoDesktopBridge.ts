@@ -6,6 +6,7 @@ import type {
 } from "../../desktop/src/ipc/bridgeContract";
 import {
   collectWorkspacePaths,
+  resolveDemoWikilink,
   findFileAncestor,
   isPathAtOrBelow,
   planDemoPathMove,
@@ -21,6 +22,7 @@ export type DemoBridgeDocument = {
 type DemoBridgeContext = {
   documents: DemoBridgeDocument[];
   folders: string[];
+  fixedPaths: string[];
   createFile: (path: string) => void;
   createFolder: (path: string) => void;
   movePath: (fromPath: string, toPath: string) => void;
@@ -30,6 +32,7 @@ type DemoBridgeContext = {
 let context: DemoBridgeContext = {
   documents: [],
   folders: [],
+  fixedPaths: [],
   createFile: () => undefined,
   createFolder: () => undefined,
   movePath: () => undefined,
@@ -353,6 +356,57 @@ export function searchDemoDocuments(
   return entries;
 }
 
+type DemoAuthor = "you" | "sam" | "priya" | "agent";
+
+const AUTHORS: Record<DemoAuthor, { name: string; kind: "human" | "agent" }> = {
+  you: { name: "You", kind: "human" },
+  sam: { name: "Sam", kind: "human" },
+  priya: { name: "Priya", kind: "human" },
+  agent: { name: "Your agent", kind: "agent" },
+};
+
+type DemoPost = { author: DemoAuthor; body: string; ageMs: number };
+
+const THREADS: Record<string, DemoPost[]> = {
+  "channel-trip": [
+    {
+      author: "sam",
+      body: "Who's sorting the Sintra cottage? It goes fast on weekends.",
+      ageMs: 5_400_000,
+    },
+    {
+      author: "priya",
+      body: "I'll book it tonight. Jonas and I are in it, so I put us both in Guests.",
+      ageMs: 4_800_000,
+    },
+    {
+      author: "you",
+      body: "Thanks! Mei still needs a room. I left her as Not booked.",
+      ageMs: 600_000,
+    },
+  ],
+  "channel-bookings": [
+    {
+      author: "you",
+      body: "Flat's booked for the 14th to the 17th. Deposit is in Budget.",
+      ageMs: 86_400_000,
+    },
+    { author: "sam", body: "Paid my share. Ticked it in Guests.", ageMs: 80_000_000 },
+  ],
+  "channel-agent": [
+    {
+      author: "you",
+      body: "Make us a small app with each day's times from the Days pages, and a way to split costs.",
+      ageMs: 3_900_000,
+    },
+    {
+      author: "agent",
+      body: "Done. It's in trip-planner/index.html, so it shows as Trip planner under Apps. It has the three days from the Days pages and a cost splitter for five people.",
+      ageMs: 3_600_000,
+    },
+  ],
+};
+
 function channel(id: string, name: string, kind: "channel" | "agent" = "channel") {
   return {
     id,
@@ -366,47 +420,71 @@ function channel(id: string, name: string, kind: "channel" | "agent" = "channel"
   } as const;
 }
 
-function thread(channelId = "channel-general", body = "What needs attention next?") {
+function presentation(author: DemoAuthor) {
+  return { group: `demo-${author}`, hue: null, self: author === "you" };
+}
+
+function thread(channelId: string, posts: readonly DemoPost[]) {
+  const opening = posts[0] ?? { author: "you" as const, body: "", ageMs: 0 };
+  const last = posts.at(-1) ?? opening;
   return {
     id: `thread-${channelId}`,
-    title: body,
-    createdAtMs: now - 3_600_000,
-    updatedAtMs: now - 120_000,
+    title: opening.body,
+    createdAtMs: now - opening.ageMs,
+    updatedAtMs: now - last.ageMs,
     channelId,
-    messageCount: 2,
-    lastReadSequence: 1,
+    messageCount: posts.length,
+    lastReadSequence: channelId === "channel-agent" ? posts.length - 1 : posts.length,
     unreadCount: channelId === "channel-agent" ? 1 : 0,
     openDecisionCount: 0,
     openingMessage: {
-      presentation: { group: "demo-you", hue: null, self: true },
-      id: `message-${channelId}-1`,
-      authorKind: "human" as const,
-      authorDisplayName: "You",
-      bodySnippet: body,
-      createdAtMs: now - 3_600_000,
+      presentation: presentation(opening.author),
+      id: `message-${channelId}-0`,
+      authorKind: AUTHORS[opening.author].kind,
+      authorDisplayName: AUTHORS[opening.author].name,
+      bodySnippet: opening.body,
+      createdAtMs: now - opening.ageMs,
       reactions: [],
     },
   };
 }
 
-function demoThreadBody(channelId: string): string {
-  return channelId === "channel-agent"
-    ? "Turn this week's work into a plan I can review."
-    : channelId === "channel-projects"
-      ? "Review the launch checklist."
-      : "What needs attention next?";
-}
-
-function message(threadId: string, id: string, body: string, agent = false) {
+function message(threadId: string, id: string, post: DemoPost) {
   return {
-    presentation: { group: agent ? "demo-agent" : "demo-you", hue: null, self: true },
+    presentation: presentation(post.author),
     id,
     threadId,
-    authorKind: agent ? ("agent" as const) : ("human" as const),
-    authorDisplayName: agent ? "Your agent" : "You",
-    body,
-    createdAtMs: agent ? now - 90_000 : now - 3_600_000,
+    authorKind: AUTHORS[post.author].kind,
+    authorDisplayName: AUTHORS[post.author].name,
+    body: post.body,
+    createdAtMs: now - post.ageMs,
   };
+}
+
+function yourPost(body: string): DemoPost {
+  return { author: "you", body, ageMs: 0 };
+}
+
+const WIKILINK = /\[\[([^[\]|#\n]+)(?:[#|][^[\]\n]*)?\]\]/g;
+
+export function demoLinkEdges(documents: readonly DemoBridgeDocument[]) {
+  const paths = documents.map((document) => document.path);
+  const entries: Array<{ source: string; target: string; kind: "wikilink"; ordinal: number }> = [];
+  for (const document of documents) {
+    let ordinal = 0;
+    for (const match of document.body.matchAll(WIKILINK)) {
+      const target = resolveDemoWikilink(paths, match[1] ?? "");
+      if (target)
+        entries.push({ source: document.path, target, kind: "wikilink", ordinal: ordinal++ });
+    }
+  }
+  return entries;
+}
+
+function refuseFixed(path: string): void {
+  if (context.fixedPaths.some((fixed) => isPathAtOrBelow(fixed, path))) {
+    throw new Error("The demo keeps its app and Collection where they are.");
+  }
 }
 
 export function answerDemoJoinedLane(
@@ -452,12 +530,7 @@ const demoBridge = {
         path: document.path,
         title: document.title,
       })),
-      entries: context.documents.slice(1, 50).map((document, ordinal) => ({
-        source: context.documents[0]?.path ?? document.path,
-        target: document.path,
-        kind: "wikilink" as const,
-        ordinal,
-      })),
+      entries: demoLinkEdges(context.documents.slice(0, 50)),
       unchecked: [],
       complete: true,
       indexBuilding: false,
@@ -471,7 +544,11 @@ const demoBridge = {
     if (fileAncestor) {
       throw new Error(`A file cannot contain ${payload.relativePath}: ${fileAncestor}`);
     }
-    const workspacePaths = collectWorkspacePaths([...filePaths, ...context.folders]);
+    const workspacePaths = collectWorkspacePaths([
+      ...filePaths,
+      ...context.folders,
+      ...context.fixedPaths,
+    ]);
     if (workspacePaths.includes(payload.relativePath)) {
       throw new Error(`A document already exists at ${payload.relativePath}`);
     }
@@ -490,7 +567,11 @@ const demoBridge = {
     if (fileAncestor) {
       throw new Error(`A file cannot contain ${payload.relativePath}: ${fileAncestor}`);
     }
-    const workspacePaths = collectWorkspacePaths([...filePaths, ...context.folders]);
+    const workspacePaths = collectWorkspacePaths([
+      ...filePaths,
+      ...context.folders,
+      ...context.fixedPaths,
+    ]);
     if (workspacePaths.includes(payload.relativePath)) {
       throw new Error(`A folder already exists at ${payload.relativePath}`);
     }
@@ -499,6 +580,7 @@ const demoBridge = {
     return { path: payload.relativePath };
   },
   async moveWorkspacePath(payload: { fromPath: string; toPath: string }) {
+    refuseFixed(payload.fromPath);
     const fileAncestor = findFileAncestor(
       context.documents.map((document) => document.path),
       payload.toPath,
@@ -509,6 +591,7 @@ const demoBridge = {
     const workspacePaths = collectWorkspacePaths([
       ...context.documents.map((document) => document.path),
       ...context.folders,
+      ...context.fixedPaths,
       ...assetUrls.keys(),
     ]);
     planDemoPathMove(workspacePaths, payload.fromPath, payload.toPath);
@@ -525,6 +608,7 @@ const demoBridge = {
     return { path: payload.toPath };
   },
   async deleteWorkspacePath(payload: { relativePath: string }) {
+    refuseFixed(payload.relativePath);
     const workspacePaths = collectWorkspacePaths([
       ...context.documents.map((document) => document.path),
       ...context.folders,
@@ -588,17 +672,17 @@ const demoBridge = {
   async listChatChannels() {
     return {
       channels: [
-        channel("channel-agent", "My agent", "agent"),
-        channel("channel-general", "general"),
-        channel("channel-projects", "projects"),
+        channel("channel-agent", "Your agent", "agent"),
+        channel("channel-trip", "lisbon-trip"),
+        channel("channel-bookings", "bookings"),
       ],
       fileThreads: [
         {
-          id: "thread-file-launch",
-          title: "Launch plan review",
+          id: "thread-file-budget",
+          title: "Who still owes a deposit?",
           createdAtMs: now - 7_200_000,
           updatedAtMs: now - 7_200_000,
-          path: "projects/launch-plan.md",
+          path: "Budget.md",
         },
       ],
     };
@@ -627,7 +711,7 @@ const demoBridge = {
   },
   async listChannelThreads(payload: { channelId: string }) {
     return {
-      threads: [thread(payload.channelId, demoThreadBody(payload.channelId))],
+      threads: [thread(payload.channelId, THREADS[payload.channelId] ?? [])],
       viewerAuthorId: "demo-user",
     };
   },
@@ -635,17 +719,11 @@ const demoBridge = {
     return { revision: 1 };
   },
   async listChatMessages(payload: { threadId: string }) {
-    const channelId = payload.threadId.replace(/^thread-/, "");
+    const posts = THREADS[payload.threadId.replace(/^thread-/, "")] ?? [];
     return {
-      messages: [
-        message(payload.threadId, `${payload.threadId}-1`, demoThreadBody(channelId)),
-        message(
-          payload.threadId,
-          `${payload.threadId}-2`,
-          "Start with the launch plan. Once it is approved, save the checklist as a skill.",
-          true,
-        ),
-      ],
+      messages: posts.map((post, index) =>
+        message(payload.threadId, `message-${payload.threadId.slice(7)}-${index}`, post),
+      ),
     };
   },
   async listChatReactions() {
@@ -676,15 +754,18 @@ const demoBridge = {
     return { channel: channel(`channel-${Date.now()}`, payload.name) };
   },
   async startChannelThread(payload: { channelId: string; body: string }) {
-    const nextThread = thread(payload.channelId, payload.body);
+    const post = yourPost(payload.body);
+    const nextThread = { ...thread(payload.channelId, [post]), id: `thread-new-${Date.now()}` };
     return {
       thread: nextThread,
-      message: message(nextThread.id, `message-${Date.now()}`, payload.body),
+      message: message(nextThread.id, `message-${Date.now()}`, post),
       viewerAuthorId: "demo-user",
     };
   },
   async sendChatMessage(payload: { threadId: string; body: string }) {
-    return { message: message(payload.threadId, `message-${Date.now()}`, payload.body) };
+    return {
+      message: message(payload.threadId, `message-${Date.now()}`, yourPost(payload.body)),
+    };
   },
   async setChatReaction(payload: Parameters<DohcDesktopBridge["setChatReaction"]>[0]) {
     return {
@@ -725,7 +806,7 @@ const demoBridge = {
     return { undo: { undoId: "demo-undo", expiresAtMs: Date.now() + 600_000 } };
   },
   async startDm() {
-    throw new Error("Direct messages are unavailable in the demo");
+    throw new Error("Direct messages are unavailable in the demo.");
   },
   // A browser saves an export as a download. A PDF opens the browser's print
   // dialog, where the person saves it as a PDF.

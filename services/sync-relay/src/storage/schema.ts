@@ -1,11 +1,4 @@
-import { initializeReplicaCurrentViewSchema } from "./replicaCurrentViewSchema";
 import { initializeWorkReferenceSchema } from "./workReferenceSchema";
-import {
-  initializeReplicaHistorySchema,
-  HISTORY_JOURNAL_POSITION_INDEX,
-} from "./replicaHistorySchema";
-import { initializeReplicaHistoryWorkSchema } from "./replicaHistoryWorkSchema";
-import { initializeReplicaCurrentViewIncrementalSchema } from "./replicaCurrentViewIncrementalSchema";
 import { initializeHostedSettlementSchema, SETTLEMENT_CUTS } from "./hostedSettlementSchema";
 import {
   initializeLiveAuthorshipSchema,
@@ -49,7 +42,7 @@ import {
   initializePushRevokedSessionSchema,
   initializePushSchema,
 } from "./pushSchema";
-import { initializePushDeliveries } from "./pushDeliveries";
+import { initializeNativePushDeliveries, initializePushDeliveries } from "./pushDeliveries";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
   LINK_DISCUSSION_NAME_BYTE_LIMIT,
@@ -66,7 +59,7 @@ import {
 import { initializeLiveRoomSchema } from "./liveRoomEdits";
 import { initializeLiveRoomPauseSchema } from "./liveRoomPauses";
 import { initializePhoneAppSchema } from "./phoneApps";
-
+import { initializeShareInvitationEmailSchema } from "./shareInvitationEmails";
 import {
   initializeWorkspaceLevelChanges,
   initializeWorkspaceMemberSchema,
@@ -156,6 +149,12 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_removals_expiry ON sync_relay_share_removals(expires_at_ms);
+  CREATE TABLE IF NOT EXISTS sync_relay_share_departures (
+    share_id TEXT NOT NULL,
+    recipient_user_id TEXT NOT NULL,
+    left_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (share_id, recipient_user_id)
+  ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_removals_share ON sync_relay_share_removals(share_id, removed_grant_id, expires_at_ms);
 
   CREATE TABLE IF NOT EXISTS sync_relay_link_credentials (
@@ -1188,9 +1187,7 @@ function assertLiveJournalSchema(db: SqliteDb): void {
         .all()
         .filter(
           (r) =>
-            r.name !== LIVE_APPLICATION_AUTHORSHIP_INDEX &&
-            r.name !== LIVE_JOURNAL_WORKSPACE_INDEX &&
-            r.name !== HISTORY_JOURNAL_POSITION_INDEX,
+            r.name !== LIVE_APPLICATION_AUTHORSHIP_INDEX && r.name !== LIVE_JOURNAL_WORKSPACE_INDEX,
         )
         .map((r) => [r.name, r.unique, r.origin, r.partial])
         .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
@@ -1639,6 +1636,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         completed_at_ms INTEGER NOT NULL
       ) STRICT;
     `);
+  retireReadReplicaTriggers(db);
   initializeLinkCredentialSealSchema(db);
   initializeSessionHostControlSchema(db);
   initializeDeviceHostCredentialSchema(db);
@@ -1660,10 +1658,6 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeLiveApplicationAuthorshipIndex(db);
   initializeHostedSettlementSchema(db);
   initializeRelayAdmissionColumn(db);
-  initializeReplicaCurrentViewSchema(db);
-  initializeReplicaHistorySchema(db);
-  initializeReplicaHistoryWorkSchema(db);
-  initializeReplicaCurrentViewIncrementalSchema(db);
   initializeNoticeSchema(db);
   initializeShareNoticeDeliverySchema(db);
   initializeAutomationHostSchema(db);
@@ -1684,6 +1678,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializePushDeliveries(db);
   initializePushDeviceSchema(db);
   initializePushRevokedSessionSchema(db);
+  initializeNativePushDeliveries(db);
   initializeLiveClaimIndex(db);
   initializeServiceHostFeedIndex(db);
   initializeAgentConnectionSchema(db);
@@ -1694,6 +1689,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeLiveRoomSchema(db);
   initializeLiveRoomPauseSchema(db);
   initializePhoneAppSchema(db);
+  initializeShareInvitationEmailSchema(db);
   initializeAccountNames(db);
   initializeWorkspaceLevelChanges(db);
   db.exec(`
@@ -2168,6 +2164,43 @@ function assertLiveTicketSchema(db: SqliteDb): void {
       .prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = ?")
       .all(LIVE_TICKET_TABLE),
     [],
+  );
+}
+
+const READ_REPLICA_RETIREMENT_MIGRATION = "read-replica-triggers-retired-v1";
+const READ_REPLICA_TRIGGERS = [
+  "replica_current_view_delete",
+  "replica_current_view_grant_delete",
+  "replica_current_view_grant_update",
+  "replica_current_view_identity",
+  "replica_current_view_share_delete",
+  "replica_current_view_share_update",
+  "replica_history_grant_delete",
+  "replica_history_grant_floor",
+  "replica_history_grant_restore",
+  "replica_history_grant_update",
+  "replica_history_identity",
+  "replica_history_identity_floor",
+  "replica_history_pin_delete",
+  "replica_history_share_delete",
+  "replica_history_share_update",
+  "replica_history_usage_delete",
+  "replica_history_usage_insert",
+  "replica_history_usage_update",
+];
+
+function retireReadReplicaTriggers(db: SqliteDb): void {
+  if (
+    db
+      .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+      .get(READ_REPLICA_RETIREMENT_MIGRATION)
+  )
+    return;
+  for (const name of READ_REPLICA_TRIGGERS) db.exec(`DROP TRIGGER IF EXISTS ${name}`);
+  db.exec("DROP INDEX IF EXISTS replica_history_journal_position");
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    READ_REPLICA_RETIREMENT_MIGRATION,
+    Date.now(),
   );
 }
 

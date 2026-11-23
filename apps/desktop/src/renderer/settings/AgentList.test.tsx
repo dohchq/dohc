@@ -22,6 +22,7 @@ import {
 import { testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { AgentList } from "./AgentList";
+import { agentLinkCloudWarning, isPrivateServerHost } from "./AddAgentSheet";
 
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
 let _listeningListener: ((event: AgentsListeningEvent) => void) | null = null;
@@ -485,7 +486,7 @@ it("leaves an agent that came back after Undo read the file", async () => {
   onNotice.mock.calls[0]![1]!();
   await vi.waitFor(() =>
     expect(onError).toHaveBeenCalledWith(
-      "Undo didn't replace the new Codex, so the one you removed stays removed.",
+      "Undo did not replace the new Codex, so the removed agent stays removed.",
     ),
   );
   expect(onOrder).not.toHaveBeenCalled();
@@ -516,7 +517,7 @@ it("holds Check back in Restricted Mode with the band's words, and adds an agent
   expect(Object.keys(onSave.mock.calls[0]![0].agents)).toContain("codex-2");
   expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
   expect(onError).not.toHaveBeenCalled();
-  expect(screen.queryByText("Didn't reply.")).toBeNull();
+  expect(screen.queryByText("Did not reply")).toBeNull();
   await userEvent.click(
     (await openAgent("Codex")).getByRole("switch", { name: "Run Codex on this computer" }),
   );
@@ -921,5 +922,248 @@ it("lists archived agents and removed agents' chats under Archived, with their a
   await back();
   expect(document.activeElement).toBe(
     within(screen.getByTestId("agents-archived")).getByRole("button", { name: "Codex" }),
+  );
+});
+
+it("classifies private, HTTP, Tailscale, and public agent link hosts", () => {
+  expect(isPrivateServerHost("127.0.0.1:52153")).toBe(true);
+  expect(isPrivateServerHost("localhost:1790")).toBe(true);
+  expect(isPrivateServerHost("localhost.")).toBe(true);
+  expect(isPrivateServerHost("app.localhost")).toBe(true);
+  expect(isPrivateServerHost("[::1]:1790")).toBe(true);
+  expect(isPrivateServerHost("[::]:1790")).toBe(true);
+  expect(isPrivateServerHost("[fe80::1]:1790")).toBe(true);
+  expect(isPrivateServerHost("[fd7a::1]")).toBe(true);
+  expect(isPrivateServerHost("[fc::1]")).toBe(false);
+  expect(isPrivateServerHost("[fe8::1]")).toBe(false);
+  expect(isPrivateServerHost("[2001:db8::1]")).toBe(false);
+  expect(isPrivateServerHost("[::ffff:127.0.0.1]:1790")).toBe(true);
+  expect(isPrivateServerHost("[::ffff:8.8.8.8]:1790")).toBe(false);
+  expect(isPrivateServerHost("[64:ff9b::192.0.2.1]")).toBe(true);
+  expect(isPrivateServerHost("172.15.255.255")).toBe(false);
+  expect(isPrivateServerHost("172.16.0.1")).toBe(true);
+  expect(isPrivateServerHost("172.31.255.255")).toBe(true);
+  expect(isPrivateServerHost("172.32.0.1")).toBe(false);
+  expect(isPrivateServerHost("100.63.255.255")).toBe(false);
+  expect(isPrivateServerHost("100.64.0.1")).toBe(true);
+  expect(isPrivateServerHost("100.127.255.255")).toBe(true);
+  expect(isPrivateServerHost("100.128.0.1")).toBe(false);
+  expect(isPrivateServerHost("192.168.1.20")).toBe(true);
+  expect(isPrivateServerHost("my-mac.local")).toBe(true);
+  expect(isPrivateServerHost("dohc.tail1234.ts.net")).toBe(false);
+  expect(isPrivateServerHost("share.dohc.computer")).toBe(false);
+
+  expect(agentLinkCloudWarning("https://share.dohc.computer/mcp/agent/w/w1")).toBeNull();
+  expect(agentLinkCloudWarning("http://share.dohc.computer/mcp/agent/w/w1")).toContain(
+    "HTTP instead of HTTPS",
+  );
+  expect(agentLinkCloudWarning("https://127.0.0.1:52153/mcp/agent/w/w1")).toContain(
+    "local or private address",
+  );
+  expect(agentLinkCloudWarning("https://dohc.tail1234.ts.net/mcp/agent/w/w1")).toContain("Funnel");
+});
+
+it("defaults Add agent to Agent link when no local CLI is ready and the workspace syncs, waiting for account load", async () => {
+  const personal = deferred<PersonalAgentsEvent>();
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({
+    workingDirectory: "C:\\Work",
+    tools: [],
+  });
+  bridgeMock.readPersonalAgents.mockReturnValueOnce(personal.promise);
+  renderList();
+  await openAdd();
+  await waitFor(() => expect(runsWith("claude").textContent).toContain("Not found"));
+  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("false");
+  expect(runsWith("link").getAttribute("aria-checked")).toBe("false");
+
+  await act(async () => {
+    personal.resolve({
+      accounts: [
+        {
+          ...account(),
+          host: "share.dohc.computer",
+          agentLinkOrigin: "https://share.dohc.computer",
+        },
+      ],
+    });
+  });
+
+  await waitFor(() => expect(runsWith("link").getAttribute("aria-checked")).toBe("true"));
+  expect(screen.getByTestId("agent-add-sheet").contains(document.activeElement)).toBe(true);
+  expect(sheet().getByTestId("agent-add-link-note").textContent).toContain(
+    "Claude, ChatGPT, OpenClaw",
+  );
+  expect(sheet().queryByTestId("agent-add-link-private-note")).toBeNull();
+});
+
+it("keeps an early click or typed name on Add agent when account load finishes, and falls back to MCP when unsynced or when CLI resolves ready", async () => {
+  const earlyClickPersonal = deferred<PersonalAgentsEvent>();
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({ workingDirectory: "C:\\Work", tools: [] });
+  bridgeMock.readPersonalAgents.mockReturnValueOnce(earlyClickPersonal.promise);
+  const first = renderList();
+  await openAdd();
+  await waitFor(() => expect(runsWith("claude").textContent).toContain("Not found"));
+  await userEvent.click(runsWith("mcp"));
+  await act(async () => {
+    earlyClickPersonal.resolve({
+      accounts: [
+        {
+          ...account(),
+          host: "share.dohc.computer",
+          agentLinkOrigin: "https://share.dohc.computer",
+        },
+      ],
+    });
+  });
+  await waitFor(() => expect(runsWith("link").disabled).toBe(false));
+  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true");
+  expect(runsWith("link").getAttribute("aria-checked")).toBe("false");
+  first.unmount();
+
+  const typingPersonal = deferred<PersonalAgentsEvent>();
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({ workingDirectory: "C:\\Work", tools: [] });
+  bridgeMock.readPersonalAgents.mockReturnValueOnce(typingPersonal.promise);
+  const second = renderList();
+  await openAdd();
+  await waitFor(() => expect(runsWith("claude").textContent).toContain("Not found"));
+  await userEvent.clear(sheet().getByTestId("agent-add-name"));
+  await userEvent.type(sheet().getByTestId("agent-add-name"), "Helper");
+  await act(async () => {
+    typingPersonal.resolve({
+      accounts: [
+        {
+          ...account(),
+          host: "share.dohc.computer",
+          agentLinkOrigin: "https://share.dohc.computer",
+        },
+      ],
+    });
+  });
+  await waitFor(() => expect(runsWith("link").disabled).toBe(false));
+  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true");
+  expect((sheet().getByTestId("agent-add-name") as HTMLInputElement).value).toBe("Helper");
+  second.unmount();
+
+  const lateTools = deferred<AgentToolsResult>();
+  bridgeMock.detectAgentTools.mockReturnValueOnce(lateTools.promise);
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({
+    accounts: [
+      {
+        ...account(),
+        host: "share.dohc.computer",
+        agentLinkOrigin: "https://share.dohc.computer",
+      },
+    ],
+  });
+  const third = renderList();
+  await openAdd();
+  await waitFor(() => expect(runsWith("link").disabled).toBe(false));
+  await act(async () => {
+    lateTools.resolve({
+      workingDirectory: "C:\\Work",
+      tools: [
+        {
+          tool: "claude",
+          probe: "detected",
+          executable: "/bin/claude",
+          version: "2.1.316",
+          auth: "signed-in",
+        },
+      ],
+    });
+  });
+  await waitFor(() => expect(runsWith("claude").getAttribute("aria-checked")).toBe("true"));
+  third.unmount();
+
+  const unsynced = account();
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({ workingDirectory: "C:\\Work", tools: [] });
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({
+    accounts: [
+      {
+        ...unsynced,
+        host: "share.dohc.computer",
+        agentLinkOrigin: "https://share.dohc.computer",
+        roster: { ...unsynced.roster!, workspaces: [] },
+      },
+    ],
+  });
+  renderList();
+  await openAdd();
+  await waitFor(() => expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true"));
+});
+
+it("warns on Add agent for private hosts, guides local MCP when config is available, and hides paste steps when config is unavailable", async () => {
+  const mcpConfig = {
+    command: "dohc",
+    args: ["mcp", "--workspace", "C:\\Work"],
+    workspacePath: "C:\\Work",
+    home: "C:\\Users\\Sam\\.dohc",
+  };
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({
+    workingDirectory: "C:\\Work",
+    tools: [],
+  });
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({
+    accounts: [
+      { ...account(), host: "127.0.0.1:52153", agentLinkOrigin: "http://127.0.0.1:52153" },
+    ],
+  });
+  const first = renderList({ config: mcpConfig });
+  await openAdd();
+  await waitFor(() => expect(runsWith("link").getAttribute("aria-checked")).toBe("true"));
+  expect(sheet().getByTestId("agent-add-link-private-note").textContent).toContain(
+    "public HTTPS server",
+  );
+  first.unmount();
+
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({
+    workingDirectory: "C:\\Work",
+    tools: [],
+  });
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [] });
+  const second = renderList({ config: mcpConfig });
+  await openAdd();
+  await waitFor(() => expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true"));
+  expect(sheet().getByTestId("agent-add-mcp-note").textContent).toContain("Claude Desktop");
+  expect(sheet().getByTestId("agent-add-mcp-note").textContent).not.toContain("OpenCode");
+  expect(sheet().getByTestId("agent-add-mcp-note").textContent).toContain(
+    "sign in to a server and sync this workspace",
+  );
+  second.unmount();
+
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({ workingDirectory: "C:\\Work", tools: [] });
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [] });
+  const third = renderList({
+    config: {
+      unavailable: true,
+      message: "Start dohc from its app folder to copy an MCP config.",
+    },
+  });
+  await openAdd();
+  await waitFor(() => expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true"));
+  expect(sheet().getByTestId("agent-add-mcp-note").textContent).not.toContain("Save the app's");
+  await userEvent.click(sheet().getByRole("button", { name: "Cancel" }));
+  await openAgent("Claude in Terminal");
+  expect(page().queryByTestId("agent-mcp-note")).toBeNull();
+  third.unmount();
+
+  renderList({ config: mcpConfig });
+  await openAgent("Claude in Terminal");
+  await waitFor(() => expect(page().getByTestId("agent-mcp-note").textContent).toContain("Cursor"));
+});
+
+it("shows the outside-dohc disclosure and opened-pages reach wording on personal agent pages and reach sheets", async () => {
+  await renderServer();
+  await openAgent("Grok Bot");
+  expect(page().getByTestId("personal-agent-reach-meanings").textContent).toContain(
+    "pages you have opened in dohc where the server hosts them",
+  );
+  expect(page().getByTestId("personal-agent-outside-note").textContent).toBe(
+    "Grok Bot runs outside dohc. dohc limits what it reaches here, not what it does elsewhere.",
+  );
+  await userEvent.click(page().getByRole("button", { name: "Change what Grok Bot can reach" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
+  expect(dialog.getByTestId("personal-agent-reach-outside-note").textContent).toBe(
+    "Grok Bot runs outside dohc. dohc limits what it reaches here, not what it does elsewhere.",
   );
 });

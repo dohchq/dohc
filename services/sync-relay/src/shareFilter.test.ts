@@ -1209,6 +1209,31 @@ describe("chat share op filter", () => {
     expect(local.allowed).toBe(true);
     if (!local.allowed) return;
     expect(local.payload).not.toHaveProperty("authorAgentId");
+    const reaction = {
+      reactionId: "reaction",
+      messageId: "m-local",
+      threadId: "thread-in",
+      emoji: "👍",
+      authorId: "u1",
+      authorKind: "agent",
+      authorDisplayName: "Helper",
+      state: "added",
+      atMs: 3,
+    };
+    const personalReaction = decide("chat.reaction.set", {
+      ...reaction,
+      authorAgentId: `p-${"a".repeat(26)}`,
+    });
+    expect(personalReaction.allowed && personalReaction.payload).toMatchObject({
+      authorAgentId: `p-${"a".repeat(26)}`,
+    });
+    const localReaction = decide("chat.reaction.set", {
+      ...reaction,
+      authorAgentId: "PRIVATE-helper",
+    });
+    expect(localReaction.allowed).toBe(true);
+    if (!localReaction.allowed) return;
+    expect(localReaction.payload).not.toHaveProperty("authorAgentId");
   });
 
   it("serves parentMessageId on a granted-channel message", () => {

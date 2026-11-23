@@ -24,10 +24,12 @@ const responseHeaders = {
 const appError = (status: number) => new Response(null, { status, headers: responseHeaders });
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
-const exact = (value: Record<string, unknown>, keys: string[]) => {
-  const actual = Object.keys(value).sort(),
-    expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+const exact = (value: Record<string, unknown>, keys: string[], optional: string[] = []) => {
+  const actual = Object.keys(value);
+  return (
+    keys.every((key) => Object.hasOwn(value, key)) &&
+    actual.every((key) => keys.includes(key) || optional.includes(key))
+  );
 };
 
 /** The launch supplies authority. The sandbox supplies only operation input and retry identity. */
@@ -63,31 +65,42 @@ export async function forwardAppBackend(input: {
       new TextEncoder().encode(JSON.stringify(body)).byteLength > APP_BACKEND_REQUEST_BYTES
     )
       return error(413);
+    const datasetField = Object.hasOwn(body, "dataset") ? { dataset: body.dataset } : {};
     if (body.op === "backend.invoke") {
-      if (!exact(body, ["id", "op", "operation", "idempotencyKey", "input"])) return error(400);
+      if (!exact(body, ["id", "op", "operation", "idempotencyKey", "input"], ["dataset"]))
+        return error(400);
       action = "invoke";
       payload = parseAppBackendInvokeRequest({
         authorityRevision: input.authorityRevision,
         operation: body.operation,
         idempotencyKey: body.idempotencyKey,
         input: body.input,
+        ...datasetField,
       });
     } else if (body.op === "backend.attempt") {
-      if (!exact(body, ["id", "op", "operation", "request"])) return error(400);
+      if (!exact(body, ["id", "op", "operation", "request"], ["dataset"])) return error(400);
       action = "attempt";
       const checked = parseAppBackendInvokeRequest({
         authorityRevision: input.authorityRevision,
         operation: body.operation,
         idempotencyKey: "attempt",
         input: null,
+        ...datasetField,
       });
       payload = {
         authorityRevision: checked.authorityRevision,
         operation: checked.operation,
+        ...(checked.dataset === undefined ? {} : { dataset: checked.dataset }),
         ...parseDatasetAttemptRequest(body.request),
       };
     } else if (body.op === "backend.upload") {
-      if (!exact(body, ["id", "op", "idempotencyKey", "name", "contentType", "bytesBase64"]))
+      if (
+        !exact(
+          body,
+          ["id", "op", "idempotencyKey", "name", "contentType", "bytesBase64"],
+          ["dataset"],
+        )
+      )
         return error(400);
       action = "upload";
       payload = parseAppBackendUploadRequest({
@@ -96,10 +109,11 @@ export async function forwardAppBackend(input: {
         name: body.name,
         contentType: body.contentType,
         bytesBase64: body.bytesBase64,
+        ...datasetField,
       });
     } else if (body.op === "backend.file") {
       if (
-        !exact(body, ["id", "op", "fileId", "operation", "input"]) ||
+        !exact(body, ["id", "op", "fileId", "operation", "input"], ["dataset"]) ||
         typeof body.fileId !== "string" ||
         !/^[A-Za-z0-9_-]{16,128}$/.test(body.fileId) ||
         body.fileId.includes("\n")
@@ -111,12 +125,14 @@ export async function forwardAppBackend(input: {
         operation: body.operation,
         idempotencyKey: "file-read",
         input: body.input,
+        ...datasetField,
       });
       payload = {
         authorityRevision: checked.authorityRevision,
         fileId: body.fileId,
         operation: checked.operation,
         input: checked.input,
+        ...(checked.dataset === undefined ? {} : { dataset: checked.dataset }),
       };
     } else return error(400);
   } catch {

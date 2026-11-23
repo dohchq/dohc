@@ -11,7 +11,7 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import {
   parseDatasetDefinition,
   parseAppDatasetReference,
-  type AppDatasetBinding,
+  resolveAppDatasetReferenceBinding,
 } from "@dohc/security-contract/dataset";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { createDatasetJournal } from "./journal.ts";
@@ -44,11 +44,13 @@ async function fixture(app = "fundraiser") {
   );
   const reference = parseAppDatasetReference(declaration.dataset ?? declaration);
   expect(reference.datasetPath).toBe(`${app}/dataset.json`);
-  const { datasetPath, ...fields } = reference;
   const resolved = parseDatasetDefinition(
-    JSON.parse(readFileSync(new URL(`../../../examples/${datasetPath}`, import.meta.url), "utf8")),
+    JSON.parse(
+      readFileSync(new URL(`../../../examples/${reference.datasetPath}`, import.meta.url), "utf8"),
+    ),
+    { descriptorPath: reference.datasetPath },
   );
-  const binding: AppDatasetBinding = { ...fields, datasetId: resolved.datasetId };
+  const binding = resolveAppDatasetReferenceBinding(reference, resolved.datasetId, revision);
   expect(binding.revisionSha256).toBe(revision.revisionSha256);
   if (declaration.inputs)
     expect(declaration.inputs.map((path: string) => `${app}/${path}`)).not.toEqual(

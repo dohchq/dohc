@@ -65,15 +65,15 @@ export function registerNativeMenusIpcHandlers<
           const separator = { type: "separator" as const };
           return input.context === "tab"
             ? [
-                item("Move into New Group", "move-tab-to-new-group"),
-                item("Close Editor Group", "close-editor-group", {
+                item("Move into new editor group", "move-tab-to-new-group"),
+                item("Close editor group", "close-editor-group", {
                   enabled: input.canCloseEditorGroup === true,
                 }),
                 separator,
-                item("Close Tab", "close-tab"),
-                item("Close Other Tabs", "close-other-tabs"),
+                item("Close tab", "close-tab"),
+                item("Close other tabs", "close-other-tabs"),
                 separator,
-                item("Copy Path", "copy-path"),
+                item("Copy path", "copy-path"),
                 item("Show in Explorer", "show-in-explorer"),
               ]
             : input.context === "status"
@@ -83,12 +83,12 @@ export function registerNativeMenusIpcHandlers<
                   item("Connect server", "connect-cloud"),
                   item("Settings", "settings"),
                   separator,
-                  item("Check for Updates…", "check-updates"),
-                  item("Restart to Update", "install-update", {
+                  item("Check for updates…", "check-updates"),
+                  item("Restart to update", "install-update", {
                     enabled: currentUpdateState().canInstall === true,
                   }),
                   separator,
-                  item("Toggle Theme", "toggle-theme"),
+                  item("Toggle theme", "toggle-theme"),
                 ]
               : [item("Unpin", "unpin-app")];
         },

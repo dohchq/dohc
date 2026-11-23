@@ -547,7 +547,7 @@ describe("registry read failure", () => {
 
     expect(
       await screen.findByText(
-        "Your files are untouched. A newer version of dohc wrote this registry. Update dohc to open it.",
+        "Your files are untouched. A newer version of dohc wrote this workspace list. Update dohc to open it.",
       ),
     ).toBeTruthy();
     expect(screen.getByText(refusal.message)).toBeTruthy();
@@ -830,7 +830,7 @@ describe("the window's title and menu commands", () => {
     async (platform) => {
       const root = stub({ windowRole: "workspace", platform, workspaces: [], registryFails: true });
       render(<DesktopRoot />);
-      await screen.findByText("dohc couldn't read its workspace registry");
+      await screen.findByText("dohc could not read its workspace list");
       expect(document.title).toBe("dohc");
       await waitFor(() => expect(root.listening()).toBe(true));
 

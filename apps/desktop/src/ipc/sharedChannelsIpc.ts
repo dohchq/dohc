@@ -598,13 +598,13 @@ export function createSharedChannelsIpc<
           ).folderLeft === true;
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
-        throw new Error(`Left the group, but its folder could not be removed. ${reason}`);
+        throw new Error(`Left the Group, but its folder could not be removed. ${reason}`);
       }
       if (folderLeft) {
         // The mount record is gone, so Settings offers nothing for it;
         // the folder itself is what remains.
         throw new Error(
-          "Left the group. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.",
+          "Left the Group. Its folder is still in shared-with-me/. Delete it yourself if you do not want it.",
         );
       }
     }

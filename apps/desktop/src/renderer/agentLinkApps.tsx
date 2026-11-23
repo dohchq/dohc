@@ -79,7 +79,7 @@ export function AgentLinkAppMenu(props: {
   reportTo.current = report;
   const secret = useRef(props.sensitive);
   secret.current = props.sensitive;
-  const action = useRef<ReturnType<typeof createCopy> | null>(null);
+  const action = useRef<ReturnType<typeof createCopy<void>> | null>(null);
   useLayoutEffect(() => {
     const copy = createCopy({
       getText: () => current.current.find((setup) => setup.id === picked.current)?.text ?? null,

@@ -56,7 +56,8 @@ async function readAll(
   const answers = await Promise.all(
     lanes.map((lane) => readLane(lane, (cursor) => list(lane, cursor), signal)),
   );
-  if (answers.every((answer) => answer === null)) throw new Error("No sharing list could be read.");
+  if (answers.every((answer) => answer === null))
+    throw new Error("dohc could not read the sharing lists.");
   return answers.flatMap((answer) => answer ?? []);
 }
 

@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import {
+  DATASET_METADATA_MAX_BYTES,
   datasetBaseFolder,
   datasetColumnFields,
   parseDatasetDefinition,
@@ -152,12 +153,31 @@ export function generateDatasetSources(value: DatasetDefinition): {
     }
   }
   const descriptor = posix.join(datasetBaseFolder(definition), "dataset.json");
+  const prettyDescriptor = JSON.stringify(definition, null, 2) + "\n";
+  const descriptorContent =
+    Buffer.byteLength(prettyDescriptor, "utf8") <= DATASET_METADATA_MAX_BYTES
+      ? prettyDescriptor
+      : JSON.stringify(definition) + "\n";
+  const schemaSql = generateDatasetSchema(definition);
+  const operationSource = generateDatasetOperations(definition);
+  for (const [label, content] of [
+    [descriptor, descriptorContent],
+    [definition.schemaPath, schemaSql],
+    [definition.operationsPath, operationSource],
+  ] as const) {
+    const bytes = Buffer.byteLength(content, "utf8");
+    if (bytes > DATASET_METADATA_MAX_BYTES) {
+      throw new Error(
+        `Generated ${label} is ${bytes} bytes, exceeding the ${DATASET_METADATA_MAX_BYTES} byte limit.`,
+      );
+    }
+  }
   return {
     definition,
     files: {
-      [descriptor]: JSON.stringify(definition, null, 2) + "\n",
-      [definition.schemaPath]: generateDatasetSchema(definition),
-      [definition.operationsPath]: generateDatasetOperations(definition),
+      [descriptor]: descriptorContent,
+      [definition.schemaPath]: schemaSql,
+      [definition.operationsPath]: operationSource,
     },
   };
 }

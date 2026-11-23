@@ -8,6 +8,9 @@ import {
 import { invalidateDatasetAddresses } from "../workspaces/datasetAddress";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
+import type { ShareLinkPublication } from "../workspaces/datasetBoundApps";
 import { isDatasetOwnerOnly } from "./errorWords";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
@@ -16,6 +19,8 @@ import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { describeApprovedDataset, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
+import { generateDatasetSchema } from "../workspaces/datasetGenerator";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import { DatasetResult, type DatasetPlace } from "@dohc/cli/dataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
@@ -1103,7 +1108,7 @@ it.each(
   ).rejects.toThrow(
     waiting
       ? `"${path}" has an outside change waiting`
-      : `dohc cannot use "${path}" for this change. dohc cannot take in this file's Markdown.`,
+      : `dohc cannot use "${path}" for this change. dohc cannot read this file's Markdown.`,
   );
   expect(
     f.sourceRequests.filter((request) => request.method === "versionedText.captureSources"),
@@ -1465,7 +1470,7 @@ it.each([2, 3])("recovers revision %s to the base address", async (number) => {
 });
 
 const unclaimed =
-  "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
+  "dohc does not know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
 
 it("returns an unclaimed Collections list refusal as data on every refresh (#3016)", async () => {
   const root = await createTestScratch("dohc-dataset-ipc-unclaimed-");
@@ -1643,4 +1648,196 @@ it("reads a received share's Collections through its server, never the local sto
     nextCursor: null,
   });
   expect(localHost).not.toHaveBeenCalled();
+});
+
+it("computes generatedSources on historyRevision from both schemaSql and operationSource", async () => {
+  const f = fixture();
+  const definition = f.revision.definition;
+  const generatedSchemaSql = generateDatasetSchema(definition);
+  const generatedOperations = generateDatasetOperations(definition);
+  const generatedRevision = describeDatasetRevision({
+    definition,
+    revision: 1,
+    schemaSql: generatedSchemaSql,
+    operationSource: generatedOperations,
+  });
+  const triggeredSchemaSql = `${generatedSchemaSql}\nCREATE TRIGGER audit_insert AFTER INSERT ON responses BEGIN SELECT 1; END;`;
+  const triggeredRevision = describeDatasetRevision({
+    definition,
+    revision: 2,
+    schemaSql: triggeredSchemaSql,
+    operationSource: generatedOperations,
+  });
+  const historyRevision = vi.fn(async ({ revisionSha256 }: { revisionSha256: string }) =>
+    revisionSha256 === generatedRevision.revisionSha256
+      ? {
+          revision: generatedRevision,
+          schemaSql: generatedSchemaSql,
+          operationSource: generatedOperations,
+        }
+      : {
+          revision: triggeredRevision,
+          schemaSql: triggeredSchemaSql,
+          operationSource: generatedOperations,
+          generatedSources: true,
+        },
+  );
+  const fWithHistory = fixture({
+    ...(f.host as unknown as OwnerDatasetData),
+    historyRevision,
+  });
+  const plain = DatasetResult.parse(
+    await fWithHistory.handler("window", {
+      workspaceId: "workspace",
+      action: "historyRevision",
+      datasetPath: "data/dataset.json",
+      revisionSha256: generatedRevision.revisionSha256,
+    }),
+  );
+  expect(plain).toMatchObject({ kind: "history-revision", generatedSources: true });
+  const triggered = DatasetResult.parse(
+    await fWithHistory.handler("window", {
+      workspaceId: "workspace",
+      action: "historyRevision",
+      datasetPath: "data/dataset.json",
+      revisionSha256: triggeredRevision.revisionSha256,
+    }),
+  );
+  expect(triggered).toMatchObject({ kind: "history-revision", generatedSources: false });
+});
+
+it("surfaces local and share-link boundApps on permissions and migration previews without opening a missing local store", async () => {
+  const emptyRoot = await createTestScratch("dataset-ipc-bound-apps-");
+  const f = fixture();
+  const def = f.revision.definition;
+  const rev1 = describeDatasetRevision({
+    definition: def,
+    revision: 1,
+    schemaSql: generateDatasetSchema(def),
+    operationSource: generateDatasetOperations(def),
+  });
+  const linkPubId = createHash("sha256").update("share-link-pub").digest("hex");
+  const linkCap = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      datasetId: rev1.datasetId,
+      revision: 1,
+      revisionSha256: rev1.revisionSha256,
+      operationIds: [def.operations[0]!.operationId],
+    },
+    rev1,
+  );
+  const localHost = vi.fn(async (): Promise<LocalDatasetHost> => {
+    throw new Error("Should not open local store when no SQLite file exists.");
+  });
+  const readShareLinkPublication = vi.fn(
+    async (
+      _workspace: { workspaceId: string },
+      publicationId: string,
+    ): Promise<ShareLinkPublication | null> =>
+      publicationId === linkPubId
+        ? {
+            publicationId: linkPubId,
+            active: true,
+            authorityRevision: 2,
+            shareId: "share-1",
+            grantId: "grant-1",
+            candidate: {
+              appRoot: "apps/signup",
+              versionId: "main",
+              sourceRevision: "a".repeat(64),
+              sourceDigest: "d".repeat(64),
+              dependencyLockDigest: "e".repeat(64),
+              bundleDigest: "f".repeat(64),
+              buildDigest: "1".repeat(64),
+              entryPath: "apps/signup/index.html",
+              inputs: [{ path: "apps/signup/index.html", sha256: "b".repeat(64), byteLength: 10 }],
+              packageMap: {},
+              dependencies: ["apps/signup/index.html"],
+              compilerIdentity: { recipe: "test", version: "1", binarySha256: "2".repeat(64) },
+              files: [
+                {
+                  path: "bundle.js",
+                  sha256: "c".repeat(64),
+                  byteLength: 10,
+                  contentType: "text/javascript; charset=utf-8",
+                },
+              ],
+              capabilities: [linkCap],
+            },
+          }
+        : null,
+  );
+  const abort = new AbortController();
+  const workspace = { workspaceId: "workspace", rootPath: emptyRoot };
+  const sources = new Map([["data/dataset.json", JSON.stringify(def)]]);
+  const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace" });
+  const remote = {
+    list: vi.fn(async () => ({ datasets: [], nextCursor: null })),
+    describe: vi.fn(async () => describeApprovedDataset(rev1, def.operations)),
+    approvedArtifacts: vi.fn(async () => ({
+      active: true,
+      revision: rev1,
+      schemaSql: generateDatasetSchema(def),
+      operationSource: generateDatasetOperations(def),
+      cursor: {
+        workspaceId: "workspace",
+        datasetId: rev1.datasetId,
+        hostEpoch: "epoch",
+        approvedRevisionHash: rev1.revisionSha256,
+        revision: 1,
+        digest: "d".repeat(64),
+      },
+    })),
+    permissions: vi.fn(async () => ({
+      permissions: [
+        {
+          kind: "app" as const,
+          principal: linkPubId,
+          current: true,
+          metadata: {
+            kind: "dataset" as const,
+            datasetId: rev1.datasetId,
+            revision: 1,
+            revisionSha256: rev1.revisionSha256,
+            operationIds: [def.operations[0]!.operationId],
+          },
+        },
+      ],
+      nextCursor: null,
+    })),
+  };
+  const handler = createDatasetHandler({
+    flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }),
+    withWorkspaceOperation: async (_caller: string, _id, work) =>
+      work({ workspace, signal: abort.signal, assertCurrent() {} }),
+    hostForWorkspace: localHost,
+    dataForWorkspace: async () => remote as unknown as OwnerDatasetData,
+    withAdapter: async (_ws, work) => work(adapter),
+    createSources: async () => {},
+    readShareLinkPublication,
+  });
+  const perms = DatasetResult.parse(
+    await handler("window", {
+      workspaceId: "workspace",
+      action: "permissions",
+      datasetPath: "data/dataset.json",
+    }),
+  );
+  expect(localHost).not.toHaveBeenCalled();
+  expect(readShareLinkPublication).toHaveBeenCalledTimes(1);
+  expect(perms).toMatchObject({
+    kind: "permissions",
+    boundApps: [
+      {
+        scope: "link",
+        publicationId: linkPubId,
+        authorityRevision: 2,
+        appRoot: "apps/signup",
+        shareId: "share-1",
+        grantId: "grant-1",
+        status: "compatible",
+      },
+    ],
+  });
 });

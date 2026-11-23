@@ -57,7 +57,7 @@ export type LiveFrameBegin = {
   | {
       readonly purpose: "applied-update";
       readonly journalCursor: number;
-      /** On a live room's save to the owner: the last room position the save holds, below its cursor. */
+      /** On a live room's save to the owner: the position through which every room row is saved, below its cursor. */
       readonly rowsThrough?: number;
     }
   /** An edit a live room took and has not saved yet, sent to the note's owner at its room position. */

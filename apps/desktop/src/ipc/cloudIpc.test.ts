@@ -235,7 +235,7 @@ async function harness() {
   const notify = vi.fn(() => {
     steps.push("notify");
   });
-  const changing = vi.fn<Dependencies["notifyCloudSessionChangedWithKey"]>();
+  const changing = vi.fn<(key: string | null, phase: "changing") => void>();
   const ready = vi.fn<Dependencies["notifyCloudSessionChanged"]>();
   const createFolder = vi.fn(async (input: { workspaceId?: string; rootPath: string }) => {
     steps.push("create");
@@ -276,6 +276,7 @@ async function harness() {
     release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
     closeRelay: cleanup,
     rollbackComplete: notify,
+    lostDrawings: () => [],
     logError: vi.fn(),
   });
   const stopWorkspaceSync = vi.fn<Dependencies["stopWorkspaceSync"]>(async (operation) => ({
@@ -355,7 +356,10 @@ async function harness() {
       steps.push("reconcile");
     },
     notifyCloudSessionChanged: ready,
-    notifyCloudSessionChangedWithKey: changing,
+    cloudSessionChange: (key) => ({
+      notifySessionChanging: () => changing(key(), "changing"),
+      notifyCloudSessionChanged: () => ready("ready"),
+    }),
     notifyRenderer: notify,
     findWorkspace: (id) => registry.get(id) ?? null,
     engineDaemonStartup: daemonStartup,
@@ -475,7 +479,7 @@ describe("registered cloud handlers", () => {
       const expected =
         action === "enable"
           ? "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again."
-          : `This drive can't store the workspace's secret key safely. Files stay in ${h.joinPayload.rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`;
+          : `This drive cannot store the workspace's secret key safely. Files stay in ${h.joinPayload.rootPath}. Choose an empty folder on an NTFS, APFS, or ext4 drive to try again.`;
       const failure = await result.catch((error) => error);
       expect(failure).toMatchObject({ message: expected });
       const channel = action === "enable" ? CHANNELS.cloudEnableSync : CHANNELS.cloudJoinWorkspace;
@@ -958,7 +962,7 @@ describe("registered cloud handlers", () => {
     h.readdir.mockResolvedValue([]);
     h.probe.mockResolvedValue({ hasContent: false, identity: null });
     await expect(h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload)).rejects.toThrow(
-      "hasn't synced anything yet",
+      "has not synced anything yet",
     );
     expect(h.mkdir).not.toHaveBeenCalled();
     expect(h.createFolder).not.toHaveBeenCalled();
@@ -1044,7 +1048,7 @@ describe("registered cloud handlers", () => {
     );
     expect(h.registry.has("joined")).toBe(true);
     await expect(h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload)).rejects.toThrow(
-      "already on this machine",
+      "already on this computer",
     );
     expect(h.bootstrap).toHaveBeenCalledTimes(1);
   });

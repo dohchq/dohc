@@ -25,11 +25,15 @@ const COPY_ICON_MARKUP: Record<CopyFeedback | "rest", string> = {
     '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
 };
 
-function copyIcon(feedback: CopyFeedback | null): SVGSVGElement {
+const WRAP_ICON_MARKUP =
+  '<line x1="3" x2="21" y1="6" y2="6"/><path d="M3 12h15a3 3 0 1 1 0 6h-4"/><polyline points="16 16 14 18 16 20"/><line x1="3" x2="10" y1="18" y2="18"/>';
+const CHEVRON_DOWN_MARKUP = '<path d="m6 9 6 6 6-6"/>';
+
+function toolbarIcon(markup: string, size = 13, className?: string): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   for (const [name, value] of Object.entries({
-    width: "13",
-    height: "13",
+    width: String(size),
+    height: String(size),
     viewBox: "0 0 24 24",
     fill: "none",
     stroke: "currentColor",
@@ -39,8 +43,13 @@ function copyIcon(feedback: CopyFeedback | null): SVGSVGElement {
     "aria-hidden": "true",
   }))
     svg.setAttribute(name, value);
-  svg.innerHTML = COPY_ICON_MARKUP[feedback ?? "rest"];
+  if (className) svg.setAttribute("class", className);
+  svg.innerHTML = markup;
   return svg;
+}
+
+function copyIcon(feedback: CopyFeedback | null): SVGSVGElement {
+  return toolbarIcon(COPY_ICON_MARKUP[feedback ?? "rest"]);
 }
 
 // What each toolbar's copy needs when ProseMirror destroys the toolbar.
@@ -161,12 +170,15 @@ function buildCodeLanguageDecorations(
   owners: Map<number, string>,
   nextOwnerKey: () => string,
   report: ErrorReporter,
+  wrappedOwners: Set<string>,
 ): DecorationSet {
   const decorations: Decoration[] = [];
   // A textblock holds only inline content, so the walk never enters one.
   doc.descendants((node, pos) => {
     if (!isCodeBlockNode(node)) return !node.isTextblock;
-    decorations.push(codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report));
+    decorations.push(
+      codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report, wrappedOwners),
+    );
     return false;
   });
   return DecorationSet.create(doc, decorations);
@@ -177,6 +189,7 @@ function codeBlockToolbar(
   pos: number,
   ownerKey: string,
   report: ErrorReporter,
+  wrappedOwners: Set<string>,
 ): Decoration {
   const language = cleanCodeLanguage(String(node.attrs.language ?? ""));
   return Decoration.widget(
@@ -188,6 +201,15 @@ function codeBlockToolbar(
 
       const left = document.createElement("div");
       left.className = "dohc-code-block-toolbar-left";
+
+      const picker = document.createElement("span");
+      picker.className = "dohc-code-language-picker";
+
+      const labelEl = document.createElement("span");
+      labelEl.className = "dohc-code-language-label";
+      labelEl.setAttribute("aria-hidden", "true");
+
+      const chevron = toolbarIcon(CHEVRON_DOWN_MARKUP, 12, "dohc-code-language-chevron");
 
       const select = document.createElement("select");
       select.className = "dohc-code-language-select";
@@ -205,6 +227,11 @@ function codeBlockToolbar(
         select.appendChild(el);
       }
       select.value = language;
+      const syncLabel = (value: string) => {
+        const matched = options.find((option) => option.value === value);
+        labelEl.textContent = matched?.label ?? (value || "plain text");
+      };
+      syncLabel(language);
 
       const commit = () => {
         if (view.editable === false) return;
@@ -216,6 +243,7 @@ function codeBlockToolbar(
         const nextLanguage = cleanCodeLanguage(select.value);
         const currentLanguage = cleanCodeLanguage(String(current.attrs.language ?? ""));
         select.value = nextLanguage;
+        syncLabel(nextLanguage);
         if (nextLanguage === currentLanguage) return;
 
         view.dispatch(
@@ -235,10 +263,35 @@ function codeBlockToolbar(
         if (event.key === "Escape") {
           event.preventDefault();
           select.value = language;
+          syncLabel(language);
           view.focus();
         }
       });
       select.addEventListener("change", commit);
+
+      const wrapBtn = document.createElement("button");
+      wrapBtn.type = "button";
+      wrapBtn.setAttribute("aria-label", "Wrap lines");
+      wrapBtn.title = "Wrap lines";
+      wrapBtn.appendChild(toolbarIcon(WRAP_ICON_MARKUP));
+      const syncWrap = (wrapped: boolean) => {
+        wrapBtn.setAttribute("aria-pressed", String(wrapped));
+        wrapBtn.className = `dohc-code-wrap-btn${wrapped ? " is-active" : ""}`;
+        toolbar.classList.toggle("is-wrapped", wrapped);
+        const nextSibling = toolbar.nextElementSibling;
+        if (nextSibling instanceof HTMLElement && nextSibling.tagName === "PRE") {
+          nextSibling.classList.toggle("dohc-code-wrapped", wrapped);
+        }
+      };
+      syncWrap(wrappedOwners.has(ownerKey));
+      wrapBtn.addEventListener("mousedown", stopEditorMouseEvent);
+      wrapBtn.addEventListener("click", (event) => {
+        stopEditorMouseEvent(event);
+        const next = !wrappedOwners.has(ownerKey);
+        if (next) wrappedOwners.add(ownerKey);
+        else wrappedOwners.delete(ownerKey);
+        syncWrap(next);
+      });
 
       // The shared copy tile, drawn here because React does not render
       // this toolbar. Its name stays "Copy code".
@@ -282,8 +335,12 @@ function codeBlockToolbar(
         void action.copy();
       });
 
-      left.append(select);
-      toolbar.append(left, copy, status);
+      picker.append(labelEl, chevron, select);
+      left.append(picker);
+      const actions = document.createElement("div");
+      actions.className = "dohc-code-block-toolbar-actions";
+      actions.append(wrapBtn, copy, status);
+      toolbar.append(left, actions);
       disposeToolbar.set(toolbar, () => {
         action.dispose();
         if (announce !== null) clearTimeout(announce);
@@ -306,11 +363,18 @@ function codeBlockToolbar(
 export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
   let nextId = 0;
   const nextOwnerKey = () => String(nextId++);
+  const wrappedOwners = new Set<string>();
   return new Plugin({
     key: codeLanguageKey,
     state: {
       init(_, instance) {
-        return buildCodeLanguageDecorations(instance.doc, new Map(), nextOwnerKey, report);
+        return buildCodeLanguageDecorations(
+          instance.doc,
+          new Map(),
+          nextOwnerKey,
+          report,
+          wrappedOwners,
+        );
       },
       // Only the code blocks that start inside the changed range get their
       // toolbar again; the rest move with the edit and keep their DOM.
@@ -342,8 +406,30 @@ export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
               blocks.map(({ pos }) => pos),
             )
           : mapWidgetOwners(previous, tr.mapping);
+        if (!remote && owners.size < blocks.length) {
+          const usedOwners = new Set(owners.values());
+          for (const dec of previous) {
+            const key = dec.spec.ownerKey;
+            if (typeof key !== "string" || usedOwners.has(key)) continue;
+            const mapped = tr.mapping.mapResult(dec.from, -1);
+            if (!mapped.deleted && !owners.has(mapped.pos)) {
+              const beforeNode = tr.before.nodeAt(dec.from);
+              const afterNode = tr.doc.nodeAt(mapped.pos);
+              if (
+                beforeNode &&
+                afterNode &&
+                isCodeBlockNode(beforeNode) &&
+                isCodeBlockNode(afterNode) &&
+                beforeNode.content.eq(afterNode.content)
+              ) {
+                owners.set(mapped.pos, key);
+                usedOwners.add(key);
+              }
+            }
+          }
+        }
         const toolbars = blocks.map(({ node, pos }) =>
-          codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report),
+          codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report, wrappedOwners),
         );
         return decorations.remove(decorations.find(range.from, range.to)).add(tr.doc, toolbars);
       },
@@ -376,6 +462,71 @@ function nodeFollowsBlock(state: EditorState, blockPos: number): boolean {
   return state.doc.resolve(blockPos + node.nodeSize).nodeAfter != null;
 }
 
+function indentCodeBlock(
+  view: EditorView,
+  block: { node: ProseMirrorNode; pos: number },
+  outdent: boolean,
+): boolean {
+  if (view.editable === false) return false;
+  const { state } = view;
+  const { from, to } = state.selection;
+  const contentStart = block.pos + 1;
+  const contentEnd = contentStart + block.node.content.size;
+  if (from < contentStart || to > contentEnd) return false;
+  const text = block.node.textContent;
+  const startOffset = from - contentStart;
+  const endOffset = to - contentStart;
+
+  if (!outdent && from === to) {
+    view.dispatch(state.tr.insertText("  ", from, to).scrollIntoView());
+    return true;
+  }
+
+  const lineStart = text.lastIndexOf("\n", Math.max(0, startOffset - 1)) + 1;
+  const effectiveEnd =
+    endOffset > startOffset && text[endOffset - 1] === "\n" ? endOffset - 1 : endOffset;
+  const nextNewline = text.indexOf("\n", effectiveEnd);
+  const lineEnd = nextNewline === -1 ? text.length : nextNewline;
+
+  const lines = text.slice(lineStart, lineEnd).split("\n");
+  let newStart = startOffset;
+  let newEnd = endOffset;
+  let cursor = lineStart;
+  let changed = false;
+
+  const updated = lines.map((line) => {
+    const lineFrom = cursor;
+    cursor += line.length + 1;
+    if (!outdent) {
+      changed = true;
+      if (lineFrom <= startOffset) newStart += 2;
+      if (lineFrom <= endOffset) newEnd += 2;
+      return `  ${line}`;
+    }
+    const remove = line.startsWith("  ")
+      ? 2
+      : line.startsWith("\t") || line.startsWith(" ")
+        ? 1
+        : 0;
+    if (remove > 0) {
+      changed = true;
+      if (lineFrom < startOffset) newStart -= Math.min(remove, startOffset - lineFrom);
+      if (lineFrom < endOffset) newEnd -= Math.min(remove, endOffset - lineFrom);
+    }
+    return line.slice(remove);
+  });
+
+  if (!changed) return true;
+  const tr = state.tr.insertText(
+    updated.join("\n"),
+    contentStart + lineStart,
+    contentStart + lineEnd,
+  );
+  tr.setSelection(TextSelection.create(tr.doc, contentStart + newStart, contentStart + newEnd));
+  view.dispatch(tr.scrollIntoView());
+  return true;
+}
+
 export function makeCodeBlockContinuationPlugin() {
   return new Plugin({
     key: codeBlockContinuationKey,
@@ -383,6 +534,12 @@ export function makeCodeBlockContinuationPlugin() {
       handleKeyDown(view, event) {
         const block = codeBlockAtSelection(view.state);
         if (!block) return false;
+
+        if (event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          if (!indentCodeBlock(view, block, event.shiftKey)) return false;
+          event.preventDefault();
+          return true;
+        }
 
         const explicitExit =
           event.key === "Enter" && hasPrimaryModifier(event, window.dohcDesktop?.platform);

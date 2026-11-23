@@ -140,9 +140,9 @@ describe("Explorer collection folders", () => {
     try {
       const unreadable = screen.getByRole("button", {
         description:
-          "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History.",
+          "dohc cannot read this Collection's dataset.json. Fix the file, or restore it from History.",
       });
-      expect(unreadable.textContent).toContain("Can't read dataset.json");
+      expect(unreadable.textContent).toContain("Cannot read dataset.json");
       expect(unreadable.hasAttribute("aria-disabled")).toBe(false);
       fireEvent.click(unreadable);
       expect(onOpenDataCollection).not.toHaveBeenCalled();
@@ -151,7 +151,7 @@ describe("Explorer collection folders", () => {
 
       const share = screen.getByRole("button", {
         description:
-          "This share doesn't include the Collection's dataset.json. Ask the owner to include it.",
+          "This share does not include the Collection's dataset.json. Ask the owner to include it.",
       });
       expect(share.textContent).toContain("Not in this share");
       expect(share.getAttribute("aria-disabled")).toBe("true");
@@ -220,7 +220,7 @@ describe("Explorer collection folders", () => {
     try {
       const guests = screen.getByRole("button", {
         description:
-          "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History.",
+          "dohc cannot read this Collection's dataset.json. Fix the file, or restore it from History.",
       });
       const rooms = screen.getByRole("button", {
         description:
@@ -308,7 +308,7 @@ describe("Explorer collection folders", () => {
     try {
       const share = screen.getByRole("button", {
         description:
-          "This share doesn't include the Collection's dataset.json. Ask the owner to include it.",
+          "This share does not include the Collection's dataset.json. Ask the owner to include it.",
       });
       for (const key of [{ key: "ContextMenu" }, { key: "F10", shiftKey: true }]) {
         share.focus();
@@ -413,7 +413,7 @@ describe("Collections this computer cannot use", () => {
     );
     const section = screen.getByRole("region", { name: "Collections" });
     expect(within(section).getByTestId("collections-refusal").textContent).toBe(
-      "Which computer keeps these Collections?Use this computer",
+      "Choose which computer keeps these CollectionsUse this computer",
     );
     expect(within(section).queryByRole("button", { name: "Collections actions" })).toBeNull();
     fireEvent.click(within(section).getByRole("button", { name: "Use this computer" }));

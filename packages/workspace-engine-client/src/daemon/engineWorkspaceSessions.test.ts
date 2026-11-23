@@ -2025,6 +2025,29 @@ describe("EngineWorkspaceSessions", () => {
     ]);
   });
 
+  it("tells the open observer which workspaces opened as share mounts", async () => {
+    const mount = await tempWorkspace("workspace-share-observed");
+    const flagged = await tempWorkspace("workspace-share-flagged");
+    const ordinary = await tempWorkspace("workspace-ordinary-observed");
+    const client = new MockClient("share-observed-handle");
+    const opened: Array<[string, true | undefined]> = [];
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      { onOpened: (workspace) => opened.push([workspace.workspaceId, workspace.shareMount]) },
+    );
+    sessions.rememberShareMount({ ...mount, shareMount: true });
+
+    await sessions.run(mount, async () => undefined);
+    await sessions.run({ ...flagged, shareMount: true }, async () => undefined);
+    await sessions.run(ordinary, async () => undefined);
+
+    expect(opened).toEqual([
+      [mount.workspaceId, true],
+      [flagged.workspaceId, true],
+      [ordinary.workspaceId, undefined],
+    ]);
+  });
+
   it("preserves a remembered share mount across rebind but not physical close", async () => {
     const workspace = {
       ...(await tempWorkspace("workspace-share-rebind")),
@@ -4141,6 +4164,50 @@ describe("EngineWorkspaceSessions", () => {
         "consult `shuttingDown` for every run, not just a bounded region -> one attempt, the write is abandoned, and the edit is gone.",
       ).toBe(3);
       expect(sleep).toHaveBeenCalled();
+    });
+
+    it("ends a read's retries at quit, so its workspace closes", async () => {
+      const workspace = await tempWorkspace("workspace-read-quit");
+      const client = new MockClient("handle-read-quit");
+      const sleeping = deferred<void>();
+      let published = true;
+      let attempts = 0;
+      const sessions = new EngineWorkspaceSessions(
+        {
+          currentClient: () => {
+            if (!published) throw new EngineDaemonUnavailableError("The engine is restarting.");
+            return client;
+          },
+        },
+        {
+          sleep: async () => {
+            sleeping.resolve();
+            await new Promise<never>(() => {});
+          },
+        },
+      );
+      await sessions.run(workspace, async () => undefined);
+      published = false;
+      const read = sessions.run(workspace, async () => "unreachable", {
+        retryTransportErrors: true,
+        endRetriesAtQuit: true,
+      });
+      await sleeping.promise;
+      sessions.beginShutdown();
+      await expect(read).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      published = true;
+      await expect(
+        sessions.run(
+          workspace,
+          async () => {
+            attempts += 1;
+            throw transportFailure();
+          },
+          { retryTransportErrors: true, endRetriesAtQuit: true },
+        ),
+      ).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      expect(attempts).toBe(1);
+      await sessions.closeWorkspace(workspace);
     });
 
     it("stops waiting for a run marked abandonAtQuit, so its workspace closes", async () => {

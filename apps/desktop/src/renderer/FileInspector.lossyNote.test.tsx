@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 import { createHash } from "node:crypto";
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render as renderBare,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -11,6 +19,12 @@ import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import type { DohcDesktopBridge, EngineYDocLineageReplacementEvent } from "../ipc/bridgeContract";
 import { settleAfterUnmount } from "./FileInspector.draft-fixture";
 import { captureHeldLiveMessage } from "../ipc/errorWords";
+import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
+
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="ws-1">{children}</WorkspaceSessionProvider>;
+}
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: Session });
 
 setupFileInspectorTests();
 
@@ -26,7 +40,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-// The four forms the editor can't hold.
+// Two forms the editor keeps as written, and two it can't hold.
 const LOSSY = [
   "# Readme",
   "",
@@ -181,16 +195,19 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     const notice = await screen.findByTestId("lossy-note-notice");
-    expect(notice.textContent).toContain("This note has parts dohc can't show.");
+    expect(notice.textContent).toContain("This note has parts dohc cannot save without rewriting.");
     await waitFor(() =>
       expect(screen.getByTestId("view-markdown").textContent).toContain("See the docs."),
     );
     expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).toBe("true");
     expect(
       screen
-        .getByRole("button", { name: "Edit", description: "This note has parts dohc can't show." })
+        .getByRole("button", {
+          name: "Edit",
+          description: "This note has parts dohc cannot save without rewriting.",
+        })
         .getAttribute("title"),
-    ).toBe("This note has parts dohc can't show.");
+    ).toBe("This note has parts dohc cannot save without rewriting.");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(screen.queryByTestId("properties-panel")).toBeNull();
     expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
@@ -260,7 +277,7 @@ describe("a lossy note", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" receivedShare />);
 
     const notice = await screen.findByTestId("lossy-note-notice");
-    expect(notice.textContent).toContain("This note has parts dohc can't show.");
+    expect(notice.textContent).toContain("This note has parts dohc cannot save without rewriting.");
     expect(screen.queryByTestId("lossy-note-edit-anyway")).toBeNull();
     await user.click(screen.getByTestId("lossy-note-open-externally"));
     expect(bridge.openFileExternally).toHaveBeenCalledWith({
@@ -286,7 +303,7 @@ describe("a lossy note", () => {
     const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() =>
       expect(dialog.textContent).toContain(
-        "Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original.",
+        "Saving rewrites the parts dohc cannot keep as written. History keeps the original.",
       ),
     );
     expect(bridge.listEngineMoments).toHaveBeenCalledWith({

@@ -76,7 +76,7 @@ export function fieldDraftError(draft: FieldDraft, takenNames: readonly string[]
     return `A field named "${name}" already exists. Choose another name.`;
   }
   if (draft.type === "relation" && draft.relationTarget === "") {
-    return "Choose a collection to relate to.";
+    return "Choose a Collection to relate to.";
   }
   if (
     (draft.type === "select" || draft.type === "multi-select") &&
@@ -164,13 +164,13 @@ export function FieldDraftRow({
       {draft.type === "relation" ? (
         <div className="flex items-center gap-1.5">
           <select
-            aria-label="Related collection"
+            aria-label="Related Collection"
             disabled={disabled}
             value={draft.relationTarget}
             onChange={(event) => onChange({ ...draft, relationTarget: event.target.value })}
             className={selectClass}
           >
-            <option value="">Choose a collection</option>
+            <option value="">Choose a Collection</option>
             {relationTargets.map((target) => (
               <option key={target} value={target}>
                 {target}

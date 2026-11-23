@@ -71,7 +71,8 @@ pub use cursor::{
 };
 pub use deferred::{WAITING_VERSION_CODE, waiting_versions};
 pub use enrolment::{
-    first_exports_held_open_in, originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_in_tx,
+    first_exports_held_open_in, journal_owner_save_in_tx, originate_closing_ydoc_base_in_tx,
+    originate_live_ydoc_base_in_tx,
 };
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
@@ -126,9 +127,10 @@ pub use relay::{
     HostedPullRequest, HostedPullResponse, HostedPushRefusal, HostedScope, HostedScopeDocument,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BASE_REPAIR_LOOKUPS,
-    MAX_BLOB_DOWNLOAD_BATCH, MAX_BLOB_UPLOAD_BATCH, PreparedOrdinaryPull, ProbeRequest,
-    ProbeResponse, PullContinuation, PullRequest, PullResponse, PushRequest, PushResponse,
-    PushWorkspaceProgress, RecoverResponse, RelaySyncClient, RelayTransport, SHARE_CHAT_REFUSED,
+    MAX_BLOB_DOWNLOAD_BATCH, MAX_BLOB_UPLOAD_BATCH, MAX_SHARE_BLOB_BATCH, PreparedOrdinaryPull,
+    ProbeRequest, ProbeResponse, PullContinuation, PullRequest, PullResponse, PushRequest,
+    PushResponse, PushWorkspaceProgress, RecoverResponse, RelaySyncClient, RelayTransport,
+    SHARE_CHAT_REFUSED,
     SettlementPublicationRefusal, ShareBlobRequest, ShareBlobUploadRequest,
     ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
     ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,

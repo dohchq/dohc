@@ -129,10 +129,12 @@ sign-in, its account fence, the workspace's owner, and Show on phone.
    - **A page with history.** The open enrolls it as the owner's open. It never
      resumes a Pause or Stop. A page enrolled before at another path answers
      `document-unavailable`. A phone's open creates no new enrollment once its
-     account has 16 enrolled for its owner's opens. Desktop opens, and pages
-     already enrolled through a share or an agent, don't count against this
-     limit. Until the live host activates the page, the open answers
-     `preparing`.
+     account has 16 pages enrolled by its owner's opens. A desktop open counts
+     toward those 16, but the limit never stops one, so after 16 desktop
+     opens a phone's open of a new page answers `live_host_full`. Pages
+     enrolled only through a share or an agent don't count, and neither does
+     the page being opened if it is already enrolled. Until the live host
+     activates the page, the open answers `preparing`.
    - **Checks.** The open checks access again after reading the body, and
      before and after minting.
 2. **Ticket and connection.** Once the page is ready, the open reads the
@@ -165,8 +167,9 @@ Automatic device-to-service failover requires fences against competing writers.
 Direct Edit checks the sender's grant in full when the relay accepts each edit,
 not again when the edit is saved to the note. An edit accepted before access
 ended is kept. It is saved to the note, or, if the note can no longer take it,
-kept in the copy its owner gets when the note pauses. Each save records who
-sent which edit. Others' edits handed to a reader check its access again at
+kept in the copy its owner gets when the note pauses. Each save holds one
+sender's edits and is stored under the access that sender had when the relay
+accepted them, never the owner's. Others' edits handed to a reader check its access again at
 most once a second, so a reader whose link session or token expires can receive
 them for up to a second more. Its own edits are refused at once, and access
 removed by hand ends its connection at once.
@@ -260,15 +263,14 @@ See the [Collection write tests](../../services/sync-relay/src/collectionWrites.
 
 A View or Comment grant reads current files only, by link or by name.
 The relay serves such a grant a file's content only while it is that file's
-current state. No log op, content hash, blob, History pin, or live document
+current state. No log op, content hash, blob, or live document
 session gives it a version replaced earlier. It keeps following later changes.
 The relay reads the level from the current grant on every request, so a
 narrowed grant loses history on its next read. Bytes a device already holds stay there.
 
 An Edit grant reads the share's retained history. A named Edit recipient reads
 every version that an op admitted by its selector names, with no epoch floor and
-no grant-time cutoff. An Edit grant reads every History pin of a file that is
-still current in its share, including pins sampled before the grant began.
+no grant-time cutoff.
 A link with Edit reads earlier revisions only while the same file remains
 continuously inside its share and the revision remains above the workspace's
 epoch floor. Deletion or movement outside the share withdraws that file's
@@ -292,6 +294,6 @@ Existing comments cite the former ADR numbers. Their current boundaries are here
 | ADR 0004, ADR 0006 | [App approval](#app-approval-pins-code-and-capabilities) |
 | ADR 0007, ADR 0010, ADR 0011 | [Dataset and document authority](#dataset-hosts-commit-authority) |
 | ADR 0008, ADR 0012 | [Automation access](#automation-edits-do-not-widen-access) |
-| ADR 0009 | [Hosting requirements](../reference/desktop-capabilities.md) and [local ownership](../../AGENTS.md#product-commitments) |
+| ADR 0009 | [Hosting requirements](../reference/desktop-capabilities.md) and [local ownership](../../AGENTS.md#what-dohc-stands-for) |
 | ADR 0013 | [Direct Collection writes](#direct-collection-writes-stay-narrow) |
 | ADR 0014 | [Share history](#share-history-needs-edit) |

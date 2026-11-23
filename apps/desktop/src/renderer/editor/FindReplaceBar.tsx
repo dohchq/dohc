@@ -6,10 +6,10 @@
 // closing/reopening the bar (or a future second view of it) can never
 // drift from what the decorations are actually highlighting.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { Editor } from "@tiptap/core";
 import { ChevronDown, ChevronUp, Replace, X } from "lucide-react";
-import { shortcutTitle } from "../../shortcuts/shortcutRegistry";
+import { matchesShortcut, shortcutTitle } from "../../shortcuts/shortcutRegistry";
 import { isComposingKey } from "../ui/keys";
 import { scrollToPlace } from "./scrollToPlace";
 import {
@@ -18,13 +18,36 @@ import {
   CLOSED_FIND_REPLACE_STATE,
   findReplaceKey,
   findStepForKey,
+  runFindCommand,
   type FindReplaceAction,
   type FindReplaceState,
 } from "./findReplace";
 
+function findOpenCommandForKey(
+  event: ReactKeyboardEvent<HTMLInputElement>,
+  platform: string | undefined,
+): "editor-find" | "editor-replace" | null {
+  if (matchesShortcut(event, "editor-find", platform)) return "editor-find";
+  if (
+    matchesShortcut(event, "editor-replace", platform) ||
+    (platform === "darwin" &&
+      event.metaKey &&
+      event.altKey &&
+      !event.ctrlKey &&
+      !event.shiftKey &&
+      (event.code === "KeyF" || event.keyCode === 70))
+  ) {
+    return "editor-replace";
+  }
+  return null;
+}
+
 export function FindReplaceBar({ editor }: { editor: Editor | null }) {
   const [state, setState] = useState<FindReplaceState>(CLOSED_FIND_REPLACE_STATE);
   const findInputRef = useRef<HTMLInputElement>(null);
+  const replaceInputRef = useRef<HTMLInputElement>(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   useEffect(() => {
     if (!editor) return;
@@ -37,8 +60,15 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
   }, [editor]);
 
   useEffect(() => {
-    if (state.open) findInputRef.current?.focus();
-  }, [state.open]);
+    if (!state.open) return;
+    const current = stateRef.current;
+    const target =
+      current.focusTarget === "replace" && current.replaceOpen && editor?.isEditable
+        ? replaceInputRef.current
+        : findInputRef.current;
+    target?.focus();
+    target?.select();
+  }, [state.open, state.openNonce, editor]);
 
   useEffect(() => {
     if (!editor || !state.open || state.activeIndex < 0) return;
@@ -61,137 +91,158 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
   const platform = window.dohcDesktop?.platform;
   const total = state.matches.length;
   const position = state.activeIndex >= 0 ? state.activeIndex + 1 : 0;
+  const noMatches = state.query.length > 0 && total === 0;
 
   return (
-    <div className="dohc-find-replace" role="search" aria-label="find and replace">
-      <div className="dohc-find-replace__row">
-        <input
-          ref={findInputRef}
-          type="text"
-          className="dohc-find-replace__input"
-          placeholder="Find"
-          value={state.query}
-          onChange={(event) => dispatch({ type: "setQuery", query: event.target.value })}
-          onKeyDown={(event) => {
-            if (isComposingKey(event)) return;
-            const step = findStepForKey(event);
-            if (step) {
-              event.preventDefault();
-              dispatch({ type: step });
-            } else if (event.key === "Enter") {
-              event.preventDefault();
-              dispatch({ type: event.shiftKey ? "prev" : "next" });
-            } else if (event.key === "Escape") {
-              event.preventDefault();
-              close();
-            }
-          }}
-        />
-        <span className="dohc-find-replace__count" aria-live="polite">
-          {position}/{total}
-        </span>
-        <button
-          type="button"
-          className="dohc-find-replace__icon-btn"
-          aria-label="previous match"
-          title={`previous match (${shortcutTitle("find-previous", platform)})`}
-          disabled={total === 0}
-          onClick={() => dispatch({ type: "prev" })}
-        >
-          <ChevronUp size={13} aria-hidden />
-        </button>
-        <button
-          type="button"
-          className="dohc-find-replace__icon-btn"
-          aria-label="next match"
-          title={`next match (${shortcutTitle("find-next", platform)})`}
-          disabled={total === 0}
-          onClick={() => dispatch({ type: "next" })}
-        >
-          <ChevronDown size={13} aria-hidden />
-        </button>
-        <button
-          type="button"
-          className={`dohc-find-replace__icon-btn${state.caseSensitive ? " is-active" : ""}`}
-          aria-label="match case"
-          aria-pressed={state.caseSensitive}
-          title="match case"
-          onClick={() => dispatch({ type: "toggleCase" })}
-        >
-          Aa
-        </button>
-        {readOnly ? null : (
-          <button
-            type="button"
-            className={`dohc-find-replace__icon-btn${state.replaceOpen ? " is-active" : ""}`}
-            aria-label={state.replaceOpen ? "hide replace" : "show replace"}
-            aria-pressed={state.replaceOpen}
-            title="replace"
-            onClick={() => dispatch({ type: "toggleReplace" })}
-          >
-            <Replace size={13} aria-hidden />
-          </button>
-        )}
-        <button
-          type="button"
-          className="dohc-find-replace__icon-btn"
-          aria-label="close find"
-          title={`close (${shortcutTitle("find-close", platform)})`}
-          onClick={close}
-        >
-          <X size={13} aria-hidden />
-        </button>
-      </div>
-      {readOnly || !state.replaceOpen ? null : (
-        <div className="dohc-find-replace__row dohc-find-replace__row--replace">
+    <div className="dohc-find-replace-anchor">
+      <div className="dohc-find-replace dohc-pop-in" role="search" aria-label="Find and replace">
+        <div className="dohc-find-replace__row">
           <input
+            ref={findInputRef}
             type="text"
             className="dohc-find-replace__input"
-            placeholder="Replace"
-            value={state.replacement}
-            onChange={(event) =>
-              dispatch({ type: "setReplacement", replacement: event.target.value })
-            }
+            placeholder="Find"
+            value={state.query}
+            onChange={(event) => dispatch({ type: "setQuery", query: event.target.value })}
             onKeyDown={(event) => {
               if (isComposingKey(event)) return;
+              const openCommand = findOpenCommandForKey(event, platform);
+              if (openCommand) {
+                event.preventDefault();
+                event.stopPropagation();
+                runFindCommand(editor, openCommand);
+                return;
+              }
               const step = findStepForKey(event);
               if (step) {
                 event.preventDefault();
                 dispatch({ type: step });
+              } else if (event.key === "Enter") {
+                event.preventDefault();
+                dispatch({ type: event.shiftKey ? "prev" : "next" });
               } else if (event.key === "Escape") {
                 event.preventDefault();
                 close();
-              } else if (event.key === "Enter") {
-                event.preventDefault();
-                const tr = buildReplaceActiveTransaction(editor.state, state);
-                if (tr) editor.view.dispatch(tr);
               }
             }}
           />
+          <span
+            className={`dohc-find-replace__count${noMatches ? " is-empty text-danger" : ""}`}
+            aria-live="polite"
+          >
+            {position}/{total}
+          </span>
           <button
             type="button"
-            className="dohc-find-replace__text-btn"
+            className="dohc-find-replace__icon-btn"
+            aria-label="previous match"
+            title={`previous match (${shortcutTitle("find-previous", platform)})`}
             disabled={total === 0}
-            onClick={() => {
-              const tr = buildReplaceActiveTransaction(editor.state, state);
-              if (tr) editor.view.dispatch(tr);
-            }}
+            onClick={() => dispatch({ type: "prev" })}
           >
-            Replace
+            <ChevronUp size={13} aria-hidden />
           </button>
           <button
             type="button"
-            className="dohc-find-replace__text-btn"
+            className="dohc-find-replace__icon-btn"
+            aria-label="next match"
+            title={`next match (${shortcutTitle("find-next", platform)})`}
             disabled={total === 0}
-            onClick={() => {
-              const { tr, count } = buildReplaceAllTransaction(editor.state, state);
-              if (count > 0) editor.view.dispatch(tr);
-            }}
+            onClick={() => dispatch({ type: "next" })}
           >
-            Replace all
+            <ChevronDown size={13} aria-hidden />
+          </button>
+          <button
+            type="button"
+            className={`dohc-find-replace__icon-btn${state.caseSensitive ? " is-active" : ""}`}
+            aria-label="match case"
+            aria-pressed={state.caseSensitive}
+            title="match case"
+            onClick={() => dispatch({ type: "toggleCase" })}
+          >
+            Aa
+          </button>
+          {readOnly ? null : (
+            <button
+              type="button"
+              className={`dohc-find-replace__icon-btn${state.replaceOpen ? " is-active" : ""}`}
+              aria-label={state.replaceOpen ? "hide replace" : "show replace"}
+              aria-pressed={state.replaceOpen}
+              title="replace"
+              onClick={() => dispatch({ type: "toggleReplace" })}
+            >
+              <Replace size={13} aria-hidden />
+            </button>
+          )}
+          <button
+            type="button"
+            className="dohc-find-replace__icon-btn"
+            aria-label="close find"
+            title={`close (${shortcutTitle("find-close", platform)})`}
+            onClick={close}
+          >
+            <X size={13} aria-hidden />
           </button>
         </div>
-      )}
+        {readOnly || !state.replaceOpen ? null : (
+          <div className="dohc-find-replace__row dohc-find-replace__row--replace">
+            <input
+              ref={replaceInputRef}
+              type="text"
+              className="dohc-find-replace__input"
+              placeholder="Replace"
+              value={state.replacement}
+              onChange={(event) =>
+                dispatch({ type: "setReplacement", replacement: event.target.value })
+              }
+              onKeyDown={(event) => {
+                if (isComposingKey(event)) return;
+                const openCommand = findOpenCommandForKey(event, platform);
+                if (openCommand) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  runFindCommand(editor, openCommand);
+                  return;
+                }
+                const step = findStepForKey(event);
+                if (step) {
+                  event.preventDefault();
+                  dispatch({ type: step });
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  close();
+                } else if (event.key === "Enter") {
+                  event.preventDefault();
+                  const tr = buildReplaceActiveTransaction(editor.state, state);
+                  if (tr) editor.view.dispatch(tr);
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="dohc-find-replace__text-btn"
+              disabled={total === 0}
+              onClick={() => {
+                const tr = buildReplaceActiveTransaction(editor.state, state);
+                if (tr) editor.view.dispatch(tr);
+              }}
+            >
+              Replace
+            </button>
+            <button
+              type="button"
+              className="dohc-find-replace__text-btn"
+              disabled={total === 0}
+              onClick={() => {
+                const { tr, count } = buildReplaceAllTransaction(editor.state, state);
+                if (count > 0) editor.view.dispatch(tr);
+              }}
+            >
+              Replace all
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

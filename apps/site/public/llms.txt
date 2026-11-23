@@ -1,0 +1,28 @@
+# dohc
+
+> dohc is a local-first workspace where people and their agents build, share, and manage small apps alongside files, Markdown documents, structured Collections, automations, and chat.
+
+## Start here for agents
+
+- [Agent quickstart](https://github.com/dohchq/dohc/blob/main/docs/how-to/build-with-agents.md): Connect Claude Code, Codex, OpenClaw, or another agent to a local dohc workspace via MCP or CLI.
+- [Public dohc Agent Skill](https://github.com/dohchq/dohc/blob/main/skills/dohc/SKILL.md): Concise, task-oriented instructions covering the core building tools, data model choices, and pitfalls.
+- [Collections and datasets reference](https://github.com/dohchq/dohc/blob/main/skills/dohc/references/collections-and-datasets.md): `collection.yaml`, `dataset.json` rules, `dohc_dataset` actions, custom QuickJS operations, and safe schema migrations.
+- [Apps and publishing reference](https://github.com/dohchq/dohc/blob/main/skills/dohc/references/apps-and-publishing.md): `app.publish.json`, `dohc-app-channel` MessagePort protocol, local launch, and share-link publishing.
+- [Collection automations reference](https://github.com/dohchq/dohc/blob/main/skills/dohc/references/automations.md): `automations.yaml` triggers, steps, formulas vs. conditions, and message templates.
+
+## Core everyday building tools (MCP)
+
+The desktop MCP server registers over 75 tools, including sync recovery and sharing administration. Start with these core building tools:
+
+- Recall and files: `dohc_search_workspace`, `dohc_list_files`, `dohc_read_file`, `dohc_search_files`, `dohc_write_file`, `dohc_create_document`, `dohc_read_document`, `dohc_edit_document`
+- Structured data: `dohc_query_collection`, `dohc_create_record`, `dohc_set_record_fields`, `dohc_dataset`, `dohc_import_data`, `dohc_query_database`
+- Apps: `dohc_create_app`, `dohc_test_app`, `dohc_publish_app`
+- Automations, chat, and safety: `dohc_list_automations`, `dohc_switch_automation`, `dohc_list_groups`, `dohc_start_group_chat`, `dohc_start_file_chat`, `dohc_reply_to_chat`, `dohc_create_version`, `dohc_compare_version`, `dohc_merge_version`
+
+## Complete documentation
+
+- [Build an app connected to a Collection](https://github.com/dohchq/dohc/blob/main/docs/how-to/app-backend.md): End-to-end guide for Collections, forms, custom rules, migrations, and sharing.
+- [CLI, MCP, and app channel reference](https://github.com/dohchq/dohc/blob/main/docs/reference/cli-mcp-sdk.md): Generated reference for every desktop MCP tool, `dohc` CLI command, and app channel operation.
+- [Workspace file versions](https://github.com/dohchq/dohc/blob/main/docs/reference/workspace-file-versions.md): `version: 1` rules for `app.publish.json`, `collection.yaml`, `dohc.json`, and `.dohc/files.toml`.
+- [Self-hosting guide](https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md): Run your own sync and sharing server.
+- [Fundraiser example](https://github.com/dohchq/dohc/blob/main/examples/fundraiser/README.md): Complete transactional Collection + custom operations + web app example.

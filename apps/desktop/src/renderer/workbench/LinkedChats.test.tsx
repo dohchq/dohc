@@ -178,7 +178,7 @@ describe("LinkedChatsPanel startup", () => {
     );
 
     await act(async () => undefined);
-    expect(screen.getByText("Loading comments...")).toBeTruthy();
+    expect(screen.getByText("Loading comments…")).toBeTruthy();
     expect(screen.queryByTestId("about-chats-count")).toBeNull();
     expect(screen.queryByText("Try again")).toBeNull();
     expect(screen.getByTestId("about-history-file").textContent).toBe("updating");

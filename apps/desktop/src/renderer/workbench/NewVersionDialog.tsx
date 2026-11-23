@@ -1,5 +1,5 @@
-import { ArrowLeftRight, CircleAlert, Info, Layers, Lock, PenLine } from "lucide-react";
-import { type ReactNode, type Ref, useEffect, useId, useRef, useState } from "react";
+import { ArrowLeftRight, CircleAlert, Info, Layers, Link, Lock, PenLine } from "lucide-react";
+import { type ReactNode, type Ref, useId, useRef } from "react";
 import type { WorkspaceVersionRecord } from "../../ipc/bridgeContract";
 import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -17,7 +17,8 @@ import {
   useOpeningFocus,
 } from "../ui/ConfirmDialog";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
-import { useRequestSequence } from "../useRequestSequence";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { versionDotClass } from "./versionHue";
 
 export type VersionLastChange = { atMs: number; personName?: string };
@@ -27,7 +28,7 @@ const megabytes = (bytes: number) => `${bytes / (1024 * 1024)} MB`;
 
 // What a version leaves alone. The sizes are the engine's capture caps:
 // larger files stay as they are on disk.
-export const SAME_IN_EVERY_VERSION = `Chats are the same in every version. Files over ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)} (text over ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)}) aren't copied, so changing one here changes it in Main too.`;
+export const SAME_IN_EVERY_VERSION = `Chats are the same in every version. Files over ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)}, or text over ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)}, are not copied, so changing one here changes it in Main too.`;
 
 type CardProps = {
   // The version you're in, which the new one starts from.
@@ -99,6 +100,7 @@ export function NewVersionCard(
             id={`${id}-name`}
             data-testid="version-new-input"
             value={props.name}
+            placeholder="e.g. Try new layout"
             maxLength={80}
             readOnly={props.busy}
             aria-invalid={invalid || undefined}
@@ -131,7 +133,7 @@ export function NewVersionCard(
             {props.lastChange ? (
               <span
                 data-testid="version-new-start-changed"
-                className="ml-auto shrink-0 font-mono text-[11px] text-subtle"
+                className="ml-auto shrink-0 tabular-nums text-[12px] text-subtle"
               >
                 Changed {relativeTime(props.lastChange.atMs)}
                 {props.lastChange.personName === undefined
@@ -148,15 +150,20 @@ export function NewVersionCard(
           {props.saveFirst ? (
             <Fact icon={PenLine}>dohc saves your changes in {startName} first.</Fact>
           ) : null}
-          <Fact icon={ArrowLeftRight}>dohc switches you to it. Your edits go there.</Fact>
+          <Fact icon={ArrowLeftRight}>
+            dohc switches to the new version, and your edits go there.
+          </Fact>
           <Fact icon={Lock}>
-            {startName} stays as it is{fromMain ? " until you merge" : ""}.
+            Changes leave {startName} untouched{fromMain ? " until you merge" : ""}.
           </Fact>
           {fromMain ? null : (
             <Fact icon={CircleAlert} tone="warning" testId="version-new-no-merge">
-              It can't merge into Main, because it starts from {startName}.
+              It cannot merge into Main because it starts from {startName}.
             </Fact>
           )}
+          <Fact icon={Link} testId="version-new-agents">
+            Agents connected through an Agent link still read files from Main.
+          </Fact>
           <Fact icon={Info} testId="version-new-same">
             {SAME_IN_EVERY_VERSION}
           </Fact>
@@ -196,24 +203,14 @@ export function NewVersionDialog(props: CardProps & { workspaceId: string }) {
   const startId = props.start?.id ?? null;
 
   // A failed read leaves the line out.
-  const [lastChange, setLastChange] = useState<VersionLastChange | null>(null);
-  const reads = useRequestSequence([props.workspaceId, startId]);
-  useEffect(() => {
-    setLastChange(null);
-    if (startId === null) return;
-    const token = reads.next();
-    bridge()
-      .listVersionLastChanges({ workspaceId: props.workspaceId })
-      .then(
-        (result) => {
-          if (!reads.isCurrent(token)) return;
-          setLastChange(
-            result.versions.find((version) => version.versionId === startId)?.lastChange ?? null,
-          );
-        },
-        () => undefined,
-      );
-  }, [props.workspaceId, startId]);
+  const lastChanges = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([props.workspaceId, startId]),
+    manual: startId === null,
+    load: () => bridge().listVersionLastChanges({ workspaceId: props.workspaceId }),
+  });
+  const lastChange: VersionLastChange | null =
+    lastChanges.value?.versions.find((version) => version.versionId === startId)?.lastChange ??
+    null;
 
   const cancel = () => {
     if (!props.busy) props.onCancel();

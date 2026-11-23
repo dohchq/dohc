@@ -198,7 +198,7 @@ export function AppsSettings(props: {
           >
             <span data-testid="apps-trust-state" className="text-[12px] text-muted">
               {props.trust.trusted === null
-                ? "Checking"
+                ? "Checking…"
                 : props.trust.trusted
                   ? "Trusted"
                   : "Restricted Mode"}
@@ -214,7 +214,7 @@ export function AppsSettings(props: {
         <h4 className="m-0 mb-2.5 text-sm font-semibold text-ink">Apps in this workspace</h4>
         <div ref={card}>
           {current.status === "loading" ? (
-            <SkeletonRows layout="panel" label="Loading apps..." />
+            <SkeletonRows layout="panel" label="Loading apps…" />
           ) : current.status === "failed" ? (
             <RetryRow testId="settings-apps-failed" onRetry={retry}>
               dohc could not list this workspace's apps.
@@ -250,9 +250,7 @@ export function AppsSettings(props: {
                         </span>
                         <AppMarks app={app} />
                       </span>
-                      <span className="block truncate font-mono text-[11px] text-subtle">
-                        {app.root}
-                      </span>
+                      <span className="block truncate text-[12px] text-subtle">{app.root}</span>
                     </span>
                     <span
                       data-testid="settings-app-mode"
@@ -260,7 +258,7 @@ export function AppsSettings(props: {
                     >
                       {start ? (
                         <>
-                          <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-ink">
+                          <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[12px] text-ink">
                             {modeLabel(start.mode)}
                           </span>
                           <span>{SOURCE_WORDS[start.source]}</span>
@@ -286,11 +284,10 @@ function fallbackWords(
 ): string {
   if (!fallback) return "This app has nothing to preview yet.";
   const mode = modeLabel(fallback.mode);
-  if (fallback.source === "app") return `Default starts ${mode}, as its dohc.json sets.`;
-  if (fallback.source === "workspace") return `Default starts ${mode}, the workspace default.`;
-  if (fallback.source === "shared")
-    return `Default starts ${mode}, the only mode a shared app has.`;
-  return `Default starts ${mode}, which dohc picks for this app.`;
+  if (fallback.source === "app") return `Default uses ${mode}, set in dohc.json.`;
+  if (fallback.source === "workspace") return `Default uses ${mode}, from workspace settings.`;
+  if (fallback.source === "shared") return `Default uses ${mode}, the only mode for a shared app.`;
+  return `Default uses ${mode}, which dohc chooses for this app.`;
 }
 
 function AppPage(props: {
@@ -316,7 +313,7 @@ function AppPage(props: {
     app.scripts.start;
   const buildScript = app.configuredScripts.build ?? app.scripts.build;
   const output = preferredBuildOutput(app);
-  const details: Array<[string, string]> = [
+  const details: Array<[label: string, value: string, command?: true]> = [
     ["Folder", app.root],
     ...(app.entryPath ? [["Opens", app.entryPath] as [string, string]] : []),
     ...(app.configPath ? [["Settings file", app.configPath] as [string, string]] : []),
@@ -328,8 +325,8 @@ function AppPage(props: {
           ] as [string, string],
         ]
       : []),
-    ...(devScript ? [["Dev script", devScript] as [string, string]] : []),
-    ...(buildScript ? [["Build script", buildScript] as [string, string]] : []),
+    ...(devScript ? [["Dev script", devScript, true] as [string, string, true]] : []),
+    ...(buildScript ? [["Build script", buildScript, true] as [string, string, true]] : []),
     ...(output ? [["Build output", output] as [string, string]] : []),
   ];
   return (
@@ -350,7 +347,7 @@ function AppPage(props: {
             <span className="min-w-0 truncate">{app.title}</span>
             <AppMarks app={app} />
           </h3>
-          <p className="m-0 mt-0.5 truncate font-mono text-[12px] text-muted">{app.root}</p>
+          <p className="m-0 mt-0.5 truncate text-[12px] text-muted">{app.root}</p>
         </div>
         {props.onOpen ? (
           <SecondaryButton
@@ -410,13 +407,15 @@ function AppPage(props: {
 
       <SettingsSection title="Details">
         <dl data-testid="settings-app-details" className="m-0">
-          {details.map(([label, value]) => (
+          {details.map(([label, value, command]) => (
             <div
               key={label}
               className="flex items-baseline gap-4 border-b border-line py-2.5 last:border-b-0"
             >
               <dt className="w-28 shrink-0 text-[13px] text-muted">{label}</dt>
-              <dd className="m-0 min-w-0 select-text break-all font-mono text-[12px] text-ink">
+              <dd
+                className={`m-0 min-w-0 select-text break-all text-ink ${command ? "font-mono text-[12px]" : "text-[13px]"}`}
+              >
                 {value}
               </dd>
             </div>
@@ -440,7 +439,7 @@ function AppPage(props: {
                 <span className="min-w-0 text-ink">
                   {diagnostic.message || APP_CHECK_FALLBACK_MESSAGE}
                   {diagnostic.path ? (
-                    <span className="ml-1.5 font-mono text-subtle">{diagnostic.path}</span>
+                    <span className="ml-1.5 text-subtle">{diagnostic.path}</span>
                   ) : null}
                 </span>
               </li>

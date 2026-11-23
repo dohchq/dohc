@@ -1,8 +1,6 @@
 import { LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES } from "@dohc/live-session-contract/live-frame";
 import { createHash } from "node:crypto";
-import { setTimeout as backoff } from "node:timers/promises";
 import { afterEach, expect, it, vi } from "vitest";
-import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import {
   createNamedLiveFrameSession,
@@ -21,11 +19,6 @@ import {
   OwnerYDocOutboxDrainer,
   type OwnerYDocDeliveryEnvelope,
 } from "./ownerYDocOutbox";
-
-vi.mock("node:timers/promises", async (importOriginal) => {
-  const timers = await importOriginal<typeof import("node:timers/promises")>();
-  return { ...timers, setTimeout: vi.fn(timers.setTimeout) };
-});
 
 const binding = {
   workspaceId: "workspace",
@@ -72,7 +65,6 @@ function deferred<T>() {
 const disposals: (() => void)[] = [];
 afterEach(() => {
   for (const close of disposals.splice(0)) close();
-  vi.mocked(backoff).mockReset();
   vi.useRealTimers();
 });
 
@@ -81,7 +73,6 @@ function fixture(
     binding?: typeof binding;
     initialCursor?: number;
     initialResult?: "applied" | "retry";
-    retained?: boolean;
     accountId?: string | null;
     result?: NamedFrameSubmissionResult;
     state?: Partial<OwnerAcceptedState>;
@@ -90,41 +81,45 @@ function fixture(
 ) {
   const controller = new AbortController(),
     submitted = deferred<void>(),
-    receiptChecked = deferred<void>(),
     feedApplied = deferred<void>();
   const queue: NamedFrameAppliedUpdate[] = [],
-    waiters: (() => void)[] = [],
-    retained = new Map<number, string>();
+    waiters: (() => void)[] = [];
   const receipt = {
     deliveryId: envelope.deliveryId,
     updateDigest: envelope.updateDigest,
     journalCursor: 9,
     acceptingHostEpoch: parseHostEpoch(2),
   };
-  if (overrides.retained) retained.set(receipt.journalCursor, receipt.updateDigest);
   const acceptedState: OwnerAcceptedState = {
     readState: vi.fn(async () => ({ stateVector: new Uint8Array([0]), journalCursor: 0 })),
     applyInitialSync: vi.fn(async () => overrides.initialResult ?? "applied"),
-    applyAcceptedFrame: vi.fn(async (input) => {
-      retained.set(input.journalCursor, hash(input.updateBytes));
+    applyAcceptedFrame: vi.fn(async () => {
       feedApplied.resolve();
       return "applied" as const;
     }),
-    isReceiptApplied: vi.fn(async (input) => {
-      receiptChecked.resolve();
-      return retained.get(input.receipt.journalCursor) === input.receipt.updateDigest;
-    }),
+    putRow: vi.fn(async () => "added" as const),
     ...overrides.state,
   };
-  const submit = vi.fn(async (input) => {
-    submitted.resolve();
-    return (
-      overrides.result ?? {
-        result: "success" as const,
-        ack: { ...receipt, localYDocSequence: 4, applicationReplayed: false },
-      }
-    );
-  });
+  // Each submission the room takes lands at the next position.
+  let taken = 0;
+  const submit = vi.fn(
+    async (input: { deliveryId: string; updateDigest: string; updateBytes: Uint8Array }) => {
+      submitted.resolve();
+      return (
+        overrides.result ?? {
+          result: "success" as const,
+          ack: {
+            ...receipt,
+            deliveryId: input.deliveryId,
+            updateDigest: input.updateDigest,
+            journalCursor: receipt.journalCursor + taken++,
+            localYDocSequence: 4,
+            applicationReplayed: false,
+          },
+        }
+      );
+    },
+  );
   let server: ReturnType<typeof createNamedLiveFrameSession> | undefined;
   const connect = vi.fn<NonNullable<OwnerYDocFrameDeliveryOptions["connect"]>>(
     overrides.connect ??
@@ -188,7 +183,6 @@ function fixture(
     connect,
     submit,
     submitted,
-    receiptChecked,
     feedApplied,
     receipt,
     controller,
@@ -201,7 +195,7 @@ function fixture(
   };
 }
 
-it("uses owner bearer route and exact stored delivery bytes; waits for durable ordered application after ACK", async () => {
+it("uses owner bearer route and exact stored delivery bytes; answers the relay's receipt before the save reaches the owner", async () => {
   const f = fixture(),
     fresh = await f.delivery.freshOwnerAuthority(binding);
   expect(fresh.kind).toBe("authority");
@@ -212,13 +206,11 @@ it("uses owner bearer route and exact stored delivery bytes; waits for durable o
   );
   expect(call.bearer).toBe("actual-owner-bearer");
   expect(call.url.toString()).not.toContain("bearer");
-  let settled = false;
-  const work = f.delivery.deliver(fresh.authority, envelope).then((result) => {
-    settled = true;
-    return result;
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({
+    kind: "receipt",
+    receipt: f.receipt,
   });
-  await f.receiptChecked.promise;
-  expect(settled).toBe(false);
+  expect(f.acceptedState.applyAcceptedFrame).not.toHaveBeenCalled();
   expect(f.submit).toHaveBeenCalledWith(
     {
       deliveryId: envelope.deliveryId,
@@ -228,16 +220,77 @@ it("uses owner bearer route and exact stored delivery bytes; waits for durable o
     },
     expect.any(AbortSignal),
   );
-  f.feed();
-  expect(await work).toEqual({ kind: "receipt", receipt: f.receipt });
+  f.feed({ journalCursor: 10, rowsThrough: 9, updateBytes: envelope.update });
+  await f.feedApplied.promise;
   expect(f.acceptedState.applyAcceptedFrame).toHaveBeenCalledWith(
-    { binding, previousAcceptedCursor: 0, journalCursor: 9, updateBytes: envelope.update },
+    {
+      binding,
+      previousAcceptedCursor: 0,
+      journalCursor: 10,
+      rowsThrough: 9,
+      updateBytes: envelope.update,
+    },
     expect.any(AbortSignal),
   );
 });
 
+it("carries the next head over the route that stays open, and opens a new one for another note", async () => {
+  const f = fixture(),
+    first = await f.delivery.freshOwnerAuthority(binding);
+  if (first.kind !== "authority") throw new Error("Missing authority");
+  expect(await f.delivery.deliver(first.authority, envelope)).toEqual({
+    kind: "receipt",
+    receipt: f.receipt,
+  });
+  const next = await f.delivery.freshOwnerAuthority(binding);
+  expect(next).toEqual(first);
+  const update = new Uint8Array([4, 5]),
+    second = { ...envelope, deliveryId: "next-delivery", update, updateDigest: hash(update) };
+  expect(await f.delivery.deliver(first.authority, second)).toEqual({
+    kind: "receipt",
+    receipt: {
+      ...f.receipt,
+      deliveryId: "next-delivery",
+      updateDigest: hash(update),
+      journalCursor: 10,
+    },
+  });
+  expect(f.connect).toHaveBeenCalledTimes(1);
+  expect(f.submit).toHaveBeenCalledTimes(2);
+  let closed = false;
+  void f.delivery.ended().then(() => (closed = true));
+  await f.delivery.freshOwnerAuthority({
+    ...binding,
+    objectId: "other",
+    currentPath: "b.md",
+    selectorPaths: ["b.md"],
+  });
+  expect(closed).toBe(true);
+  expect(f.connect).toHaveBeenCalledTimes(2);
+});
+
+it("puts the room's unsaved edits on the owner's screen, and reopens when one differs", async () => {
+  const putRow = vi.fn<OwnerAcceptedState["putRow"]>(async () => "added"),
+    f = fixture({ state: { putRow } }),
+    fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  f.feed({ journalCursor: 4, roomRow: true, updateBytes: new Uint8Array([7]) });
+  await vi.waitFor(() => expect(putRow).toHaveBeenCalledOnce());
+  expect(putRow).toHaveBeenCalledWith(
+    { binding, position: 4, updateBytes: new Uint8Array([7]) },
+    expect.any(AbortSignal),
+  );
+  // An open route that receives rows still carries the next head.
+  expect(await f.delivery.freshOwnerAuthority(binding)).toEqual(fresh);
+  putRow.mockResolvedValueOnce("reconnect");
+  const ended = f.delivery.ended();
+  f.feed({ journalCursor: 5, roomRow: true, updateBytes: new Uint8Array([8]) });
+  await ended;
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({ kind: "retry" });
+});
+
 it("submits the agent a queued edit declared, owned before transport, beside its stored bytes", async () => {
-  const f = fixture({ retained: true }),
+  const f = fixture(),
     fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
   const agentDeclaration = { agentId: "trip-agent-ü", onBehalfOf: "local-person", depth: 2 };
@@ -262,7 +315,7 @@ it("submits the agent a queued edit declared, owned before transport, beside its
 it.each([{}, { agentDeclaration: { agentId: "trip-agent", onBehalfOf: null, depth: 0 } }])(
   "retries a credited entry while the recording account is unavailable (%j)",
   async (declaration) => {
-    const f = fixture({ retained: true, accountId: null }),
+    const f = fixture({ accountId: null }),
       fresh = await f.delivery.freshOwnerAuthority(binding);
     if (fresh.kind !== "authority") throw new Error("Missing authority");
     const work = f.delivery.deliver(fresh.authority, { ...envelope, ...declaration });
@@ -397,32 +450,6 @@ it("does not advance an unsupported initial native checkpoint or send pending by
   expect(f.submit).not.toHaveBeenCalled();
 });
 
-it("a later checkpoint alone cannot release a pending delta after lost ACK", async () => {
-  const f = fixture({ initialCursor: 12 }),
-    fresh = await f.delivery.freshOwnerAuthority(binding);
-  if (fresh.kind !== "authority") throw new Error("Missing authority");
-  let settled = false;
-  const work = f.delivery.deliver(fresh.authority, envelope).then((result) => {
-    settled = true;
-    return result;
-  });
-  await f.receiptChecked.promise;
-  expect(settled).toBe(false);
-  f.delivery.dispose();
-  expect(await work).toEqual({ kind: "retry" });
-});
-
-it("retained exact native application proof permits an older replayed receipt", async () => {
-  const f = fixture({ initialCursor: 12, retained: true }),
-    fresh = await f.delivery.freshOwnerAuthority(binding);
-  if (fresh.kind !== "authority") throw new Error("Missing authority");
-  expect(await f.delivery.deliver(fresh.authority, envelope)).toMatchObject({
-    kind: "receipt",
-    receipt: f.receipt,
-  });
-  expect(f.acceptedState.applyAcceptedFrame).not.toHaveBeenCalled();
-});
-
 it("disposal aborts a stalled native read and prevents bearer or transport work", async () => {
   const read = deferred<{ stateVector: Uint8Array; journalCursor: number }>(),
     f = fixture({ state: { readState: () => read.promise } });
@@ -449,10 +476,13 @@ it("observes a native read refused after its attempt already stopped", async () 
 
 it("rejects mutated envelope binding, digest and a replaced authority", async () => {
   const f = fixture(),
-    first = await f.delivery.freshOwnerAuthority(binding),
-    second = await f.delivery.freshOwnerAuthority(binding);
+    first = await f.delivery.freshOwnerAuthority(binding);
+  // Another note's route replaces this one, so the next opens with its own authority.
+  await f.delivery.freshOwnerAuthority({ ...binding, objectId: "other" });
+  const second = await f.delivery.freshOwnerAuthority(binding);
   if (first.kind !== "authority" || second.kind !== "authority")
     throw new Error("Missing authority");
+  expect(second.authority).not.toBe(first.authority);
   expect(await f.delivery.deliver(first.authority, envelope)).toEqual({ kind: "retry" });
   expect(
     await f.delivery.deliver(second.authority, {
@@ -466,140 +496,19 @@ it("rejects mutated envelope binding, digest and a replaced authority", async ()
   expect(f.submit).not.toHaveBeenCalled();
 });
 
-it("retains pending when native ordered application refuses", async () => {
+it("closes the route when native ordered application refuses", async () => {
   const f = fixture({ state: { applyAcceptedFrame: async () => "retry" } }),
     fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
-  const work = f.delivery.deliver(fresh.authority, envelope);
-  await f.receiptChecked.promise;
+  const ended = f.delivery.ended();
   f.feed();
-  expect(await work).toEqual({ kind: "retry" });
-});
-
-const capacityRefusal = () =>
-  new EngineRequestError(1, {
-    code: "OVERLOADED",
-    message: "live-settlement-capacity",
-    retry: "afterBackoff",
-  });
-
-it("backs off repeated receipt proof refusals without reconnecting or resubmitting", async () => {
-  const proof = vi.fn().mockResolvedValue(true);
-  for (let refusal = 0; refusal < 6; refusal++) {
-    proof.mockRejectedValueOnce(capacityRefusal());
-    vi.mocked(backoff).mockResolvedValueOnce(undefined);
-  }
-  const f = fixture({ state: { isReceiptApplied: proof } }),
-    fresh = await f.delivery.freshOwnerAuthority(binding);
-  if (fresh.kind !== "authority") throw new Error("Missing authority");
-  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({
-    kind: "receipt",
-    receipt: f.receipt,
-  });
-  expect(proof).toHaveBeenCalledTimes(7);
-  expect(vi.mocked(backoff).mock.calls.map(([ms]) => ms)).toEqual([25, 50, 100, 200, 250, 250]);
-  for (const [input] of proof.mock.calls) expect(input).toEqual({ binding, receipt: f.receipt });
-  expect(f.connect).toHaveBeenCalledTimes(1);
-  expect(f.submit).toHaveBeenCalledTimes(1);
-});
-
-it("keeps a refused then false receipt pending until the accepted frame proves it", async () => {
-  vi.useFakeTimers();
-  let applied = false;
-  const checked = deferred<void>();
-  const proof = vi
-    .fn()
-    .mockRejectedValueOnce(capacityRefusal())
-    .mockImplementation(async () => {
-      checked.resolve();
-      return applied;
-    });
-  const f = fixture({
-    state: {
-      isReceiptApplied: proof,
-      applyAcceptedFrame: async () => {
-        applied = true;
-        return "applied";
-      },
-    },
-  });
-  const fresh = await f.delivery.freshOwnerAuthority(binding);
-  if (fresh.kind !== "authority") throw new Error("Missing authority");
-  let settled = false;
-  const work = f.delivery.deliver(fresh.authority, envelope).then((result) => {
-    settled = true;
-    return result;
-  });
-  await Promise.race([checked.promise, work]);
-  expect(proof).toHaveBeenCalledTimes(2);
-  expect(settled).toBe(false);
-  f.feed();
-  expect(await work).toEqual({ kind: "receipt", receipt: f.receipt });
-  expect(proof).toHaveBeenCalledTimes(3);
-});
-
-it.each(["deadline", "cancellation", "replacement"])(
-  "bounds repeated proof overloads by %s",
-  async (ending) => {
-    vi.useFakeTimers();
-    const waiting = deferred<void>();
-    vi.mocked(backoff)
-      .mockResolvedValueOnce(undefined)
-      .mockImplementationOnce(
-        (_ms, _value, options) =>
-          new Promise<never>((_resolve, reject) => {
-            const signal = options!.signal!;
-            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-            waiting.resolve();
-          }),
-      );
-    const proof = vi.fn().mockRejectedValue(capacityRefusal());
-    const f = fixture({ state: { isReceiptApplied: proof } }),
-      fresh = await f.delivery.freshOwnerAuthority(binding);
-    if (fresh.kind !== "authority") throw new Error("Missing authority");
-    let settled = false;
-    const work = f.delivery.deliver(fresh.authority, envelope).then((result) => {
-      settled = true;
-      return result;
-    });
-    await Promise.race([waiting.promise, work]);
-    expect(proof).toHaveBeenCalledTimes(2);
-    expect(settled).toBe(false);
-    const waits = vi.mocked(backoff).mock.calls.length;
-    const pendingWait = vi.mocked(backoff).mock.results.at(-1)!.value;
-    const rejectedWait = expect(pendingWait).rejects.toMatchObject({ name: "AbortError" });
-    if (ending === "deadline") await vi.advanceTimersByTimeAsync(10_000);
-    else if (ending === "cancellation") f.controller.abort();
-    else await f.delivery.freshOwnerAuthority(binding);
-    await rejectedWait;
-    expect(await work).toEqual({ kind: "retry" });
-    const calls = proof.mock.calls.length;
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(vi.mocked(backoff)).toHaveBeenCalledTimes(waits);
-    expect(proof).toHaveBeenCalledTimes(calls);
-    expect(f.submit).toHaveBeenCalledTimes(1);
-  },
-);
-
-it.each([
-  new Error("unclassified failure"),
-  new EngineRequestError(1, { code: "OVERLOADED", message: "capacity", retry: "no" }),
-  new EngineRequestError(1, {
-    code: "DEADLINE_EXCEEDED",
-    message: "deadline",
-    retry: "afterBackoff",
-  }),
-])("does not locally retry an undeclared receipt overload: %s", async (error) => {
-  const proof = vi.fn().mockRejectedValue(error),
-    f = fixture({ state: { isReceiptApplied: proof } });
-  const fresh = await f.delivery.freshOwnerAuthority(binding);
-  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  await ended;
   expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({ kind: "retry" });
-  expect(proof).toHaveBeenCalledTimes(1);
+  expect(f.submit).not.toHaveBeenCalled();
 });
 
 it("owns Buffer-backed pending bytes before an asynchronous transport can observe caller mutation", async () => {
-  const f = fixture({ retained: true }),
+  const f = fixture(),
     fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
   const update = Buffer.from(envelope.update),
@@ -612,7 +521,7 @@ it("owns Buffer-backed pending bytes before an asynchronous transport can observ
 it.each(["seed", "automation", "actorless", "Collection adoption", "owner delivery"])(
   "leaves %s entries unattributed",
   async () => {
-    const f = fixture({ retained: true }),
+    const f = fixture(),
       fresh = await f.delivery.freshOwnerAuthority(binding);
     if (fresh.kind !== "authority") throw new Error("Missing authority");
     const { personEdit: _, ...uncredited } = envelope;
@@ -626,7 +535,6 @@ it.each(["seed", "automation", "actorless", "Collection adoption", "owner delive
 
 it("keeps an entry's submitted account through a missing lookup", async () => {
   const options: Parameters<typeof fixture>[0] = {
-    retained: true,
     accountId: "owner",
     result: { result: "retry", reason: "admission-unavailable" },
   };
@@ -654,22 +562,7 @@ it("finishes an accepted Try again of a quarantined head and resumes delivery", 
   };
   const granted = (deliveryId: string) =>
     outbox.state !== "quarantined" || outbox.retryDeliveryId === deliveryId;
-  const applied = new Map<number, string>(),
-    checked = deferred<void>();
-  const isReceiptApplied = vi.fn<OwnerAcceptedState["isReceiptApplied"]>(async ({ receipt }) => {
-    checked.resolve();
-    if (!granted(receipt.deliveryId)) throw new Error("owner-outbox-frozen");
-    return applied.get(receipt.journalCursor) === receipt.updateDigest;
-  });
-  const f = fixture({
-    state: {
-      isReceiptApplied,
-      applyAcceptedFrame: async (input) => {
-        applied.set(input.journalCursor, hash(input.updateBytes));
-        return "applied";
-      },
-    },
-  });
+  const f = fixture();
   const head = (): Awaited<ReturnType<OwnerYDocOutbox["readHead"]>> => ({
     outboxId: "outbox",
     binding,
@@ -693,14 +586,11 @@ it("finishes an accepted Try again of a quarantined head and resumes delivery", 
   });
   class GrantedOutbox extends OwnerYDocOutbox {
     override readHead = vi.fn(async () => head());
-    override acknowledge = vi.fn(
-      async (_outboxId: string, receipts: readonly LiveUpdateReceipt[]) => {
-        if (receipts.length !== 1 || !granted(receipts[0]!.deliveryId))
-          throw new Error("owner-outbox-frozen");
-        Object.assign(outbox, { state: "active", retryDeliveryId: null });
-        return { acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null };
-      },
-    );
+    override acknowledgeTaken = vi.fn(async (_outboxId: string, receipt: LiveUpdateReceipt) => {
+      if (!granted(receipt.deliveryId)) throw new Error("owner-outbox-frozen");
+      Object.assign(outbox, { state: "active", retryDeliveryId: null });
+      return { acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null };
+    });
     override quarantine = vi.fn(async () => {});
   }
   const engine = new GrantedOutbox(
@@ -716,26 +606,20 @@ it("finishes an accepted Try again of a quarantined head and resumes delivery", 
     "outbox",
     f.delivery,
     new OwnerKnownRefusals(),
+    true,
   );
   disposals.push(() => {
     drainer.dispose();
     engine.dispose();
   });
-  const pass = drainer.drainOnce();
-  await checked.promise;
-  f.feed();
-  expect(await pass).toBe("acknowledged");
-  expect(isReceiptApplied).toHaveBeenLastCalledWith(
-    { binding, receipt: f.receipt },
-    expect.any(AbortSignal),
-  );
-  expect(engine.acknowledge).toHaveBeenCalledWith("outbox", [f.receipt]);
+  expect(await drainer.drainOnce()).toBe("acknowledged");
+  expect(engine.acknowledgeTaken).toHaveBeenCalledWith("outbox", f.receipt);
   expect(engine.quarantine).not.toHaveBeenCalled();
   expect(outbox).toEqual({ state: "active", retryDeliveryId: null });
   expect(f.submit).toHaveBeenCalledOnce();
 });
 
-// Like native: a quarantined queue proves and acknowledges only its granted head, and a refusal
+// Like native: a quarantined queue takes only its granted head's receipt, and a refusal
 // records once, only while it is its head's own attempt. A fault fails a write or loses its response.
 function nativeOutbox() {
   const native = {
@@ -778,22 +662,21 @@ function nativeOutbox() {
           : null,
       }),
     );
-    override acknowledge = vi.fn(
-      async (_outboxId: string, receipts: readonly LiveUpdateReceipt[]) => {
-        const fault = faults.acknowledge.shift();
-        if (fault === "failed") throw new Error("Engine unavailable.");
-        if (receipts.length !== 1 || !granted(receipts[0]!.deliveryId))
-          throw new Error("owner-outbox-frozen");
-        Object.assign(native, {
-          state: "active",
-          retryDeliveryId: null,
-          reason: null,
-          pending: false,
-        });
-        if (fault === "lost") throw new Error("Engine response lost.");
-        return { acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null };
-      },
-    );
+    override acknowledgeTaken = vi.fn(async (_outboxId: string, receipt: LiveUpdateReceipt) => {
+      taken();
+      await host.held;
+      const fault = faults.acknowledge.shift();
+      if (fault === "failed") throw new Error("Engine unavailable.");
+      if (!granted(receipt.deliveryId)) throw new Error("owner-outbox-frozen");
+      Object.assign(native, {
+        state: "active",
+        retryDeliveryId: null,
+        reason: null,
+        pending: false,
+      });
+      if (fault === "lost") throw new Error("Engine response lost.");
+      return { acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null };
+    });
     override quarantine = vi.fn(async (input: Parameters<OwnerYDocOutbox["quarantine"]>[0]) => {
       const fault = faults.quarantine.shift(),
         refusal = input.refusal!;
@@ -816,17 +699,12 @@ function nativeOutbox() {
     });
   }
   const refused = { result: "refused", reason: "invalid-update" } as const;
-  const proof = vi.fn<OwnerAcceptedState["isReceiptApplied"]>(async ({ receipt }) => {
-    await host.held;
-    if (!granted(receipt.deliveryId)) throw new Error("owner-outbox-frozen");
-    return true;
-  });
+  const taken = vi.fn();
   // The session host's answer, read at each submission. Undefined accepts.
   const host: {
     result?: NamedFrameSubmissionResult;
     held?: Promise<void>;
-    state: Partial<OwnerAcceptedState>;
-  } = { result: refused, state: { isReceiptApplied: proof } };
+  } = { result: refused };
   const submissions: unknown[] = [];
   const pass = async (refusals: OwnerKnownRefusals) => {
     const f = fixture(host),
@@ -838,7 +716,7 @@ function nativeOutbox() {
         },
         "handle",
       );
-    const drainer = new OwnerYDocOutboxDrainer(engine, "outbox", f.delivery, refusals);
+    const drainer = new OwnerYDocOutboxDrainer(engine, "outbox", f.delivery, refusals, true);
     try {
       return await drainer.drainOnce();
     } finally {
@@ -847,7 +725,7 @@ function nativeOutbox() {
       engine.dispose();
     }
   };
-  return { native, faults, keys, host, proof, submissions, pass };
+  return { native, faults, keys, host, taken, submissions, pass };
 }
 
 it("admits an outstanding Try again once after a crash lost its refusal, and resumes delivery", async () => {
@@ -958,7 +836,7 @@ it("keeps a Try again through a transient failure, and lets one pass at a time h
   const release = deferred<void>();
   o.host.held = release.promise;
   const first = o.pass(refusals);
-  await vi.waitFor(() => expect(o.proof).toHaveBeenCalled());
+  await vi.waitFor(() => expect(o.taken).toHaveBeenCalled());
   expect(await o.pass(refusals)).toBe("retry");
   release.resolve();
   expect(await first).toBe("acknowledged");

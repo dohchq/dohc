@@ -213,7 +213,7 @@ describe("ChatsView work and run links", () => {
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
     const chip = await screen.findByTestId("chats-attachment-chip");
-    expect(chip.textContent).toBe("attachment");
+    expect(chip.textContent).toBe("Attachment");
     expect(chip.tagName).toBe("SPAN");
     expect(chip.getAttribute("title")).toBeNull();
     expect(onOpenPath).not.toHaveBeenCalled();
@@ -322,10 +322,10 @@ describe("ChatsView dispatch state", () => {
     await user.click(await screen.findByTestId("chats-thread"));
 
     expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
-      "agent working · 2 queued",
+      "Agent working · 2 queued",
     );
     expect((await screen.findByTestId("chats-waiting")).textContent).toBe(
-      "Nova will reply when it's free.",
+      "Waiting for Nova to finish its current run.",
     );
     const announcement = screen.getByTestId("chats-dispatch-announcement");
     expect(announcement.getAttribute("role")).toBe("status");
@@ -376,7 +376,7 @@ describe("ChatsView runs that didn't reply", () => {
       runId: "run-1",
     });
     await waitFor(() => expect(screen.queryByTestId("chats-run-failed")).toBeNull());
-    expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe("agent working");
+    expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe("Agent working");
   });
 
   it("keeps the words without Try again once the request has had its second attempt", async () => {

@@ -8,54 +8,36 @@ description: >-
 
 Write in plain and simple language.
 
-dohc's voice is tastefully formal.
-It takes the calm, exact tone of good 1960s product writing and puts it in today's plain language.
-
-## The voice
-
-- **Plain.** Use everyday words and short sentences. Every sentence states a fact, an instruction, or a reason.
+- **Plain.** Everyday words and short sentences. Every sentence states a fact, an instruction, or a reason.
 - **Exact.** Name the thing, the number, and the unit. Use only numbers you measured or can cite.
 - **Understated.** Say what dohc does and let that fact make the claim. Back a superlative with evidence, or cut it.
-- **Tastefully formal.** Write complete sentences. Outside instructions, use contractions where they read naturally. Each document may use one of these, if it fits: slang, an exclamation mark, or an emoji. Keep them out of instructions, warnings, and commit messages.
 
-## Instructions follow ASD-STE100
+Follow Orwell's six rules from "Politics and the English Language".
 
-ASD-STE100 is the controlled English of aircraft maintenance manuals.
-Use it for procedures, runbooks, skills, AGENTS.md, product invariants, and any step inside another document.
+## Procedures
 
-- Write one instruction per sentence, in 20 words or fewer.
-- Put the condition first: "If you changed a crate, rebuild the engine."
-- Name who acts: "The engine rejects the write."
-- Write commands, and keep them literal.
-- Give the reason for a rule that is not obvious.
-- End a procedure with how the reader knows it worked.
-
-## Everything else follows Orwell
-
-For docs, specs, plans, PR bodies, and code comments, follow the six rules from "Politics and the English Language":
-
-1. Never use a metaphor, simile, or other figure of speech you are used to seeing in print.
-2. Never use a long word where a short one will do.
-3. If it is possible to cut a word out, always cut it out.
-4. Never use the passive where you can use the active.
-5. Never use a foreign phrase, a scientific word, or a jargon word if you can think of an everyday English equivalent.
-6. Break any of these rules sooner than say anything outright barbarous.
+Write steps as one instruction per sentence, with the condition first: "If you changed a crate, rebuild the engine." End with how the reader knows it worked. Explanations and reasons keep their natural voice.
 
 ## Code comments
 
-Comment what the code cannot show: a reason, a constraint, or a warning.
-Let a name, a type, or the next line say the rest.
-Write the current constraint and what breaks without it.
-Leave the reviewer, the review round, the PR or issue number, and the plan label to git and the pull request.
-Keep a link to another project's issue when it explains a workaround.
-If a test holds the measurements, name the test.
+Write no comments. If code needs a comment to make sense, change the code: rename it, extract it, or give it a type.
+
+Keep only these:
+
+- Legal and license headers.
+- Behavior forced by something we can't change, such as a dependency, platform, vendor, or protocol. A surprise in our own code is not one of these. Fix the code.
+- Doc comments that define a public API contract.
+- A link to an issue or RFC that explains a constraint the code can't express.
+- Lint suppressions for a rule that is wrong for that line or only about style. If the rule protects correctness or safety, fix the code instead.
+
+A long comment that defends a workaround means the code is wrong. `IMPORTANT` or "do not remove" doesn't save a comment. If a rule matters, enforce it with a type, a test, or a lint rule.
 
 ## House style
 
 - Write "dohc" in lowercase, even at the start of a sentence.
 - Use the terms in [`CONTEXT.md`](../../../CONTEXT.md). Repeat a term instead of switching to a synonym.
-- Use sentence case for headings, straight quotation marks, and the serial comma.
-- Write measurements as numerals with units, such as "120 ms".
+- Sentence case for headings, straight quotation marks, and the serial comma.
+- Measurements as numerals with units, such as "120 ms".
 - Use a period or a comma where you want an em dash.
 
 ## Examples
@@ -74,18 +56,6 @@ If a test holds the measurements, name the test.
 
 ## Last pass
 
-Cut what marks the text as machine-written:
+Cut hype words, "not just X, but Y", "-ing" clauses tacked on to claim a result, lists of three made for rhythm, and filler such as "Here's the thing." Leave code, commands, and quotes as they are.
 
-- hype words;
-- "not just X, but Y";
-- trailing "-ing" clauses that claim a result;
-- lists of three made for rhythm;
-- filler sentences with no fact in them, such as "That's it." or "Here's the thing."
-
-When you revise, leave code, identifiers, commands, and attributed quotations unchanged.
-
-You are done when:
-
-- every fact, warning, command, and link from the source is still there;
-- every factual claim matches the code or a cited source, and proposed behavior reads as proposed;
-- a reader would call it plain and simple language.
+You are done when the prose is very easy to understand and 100% clear.

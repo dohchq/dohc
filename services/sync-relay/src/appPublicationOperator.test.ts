@@ -44,6 +44,23 @@ function exchange(path: string, value: unknown) {
   });
 }
 
+it.skipIf(process.platform === "win32")(
+  "fits the operator socket in macOS's own temp folder",
+  () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    vi.stubEnv("TMPDIR", "/var/folders/9d/l02zfgrs7c16twd3wbpdmhkc0000gn/T/");
+    try {
+      const path = operatorSocketPath({});
+      expect(path.startsWith("/var/folders/")).toBe(true);
+      expect(Buffer.byteLength("/private" + path)).toBeLessThan(104);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
 it("accepts only one disable request shape and keeps a not-found failure local to that request", async () => {
   const disableAppPublication = vi.fn(() => {
     throw notFound();

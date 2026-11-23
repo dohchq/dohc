@@ -89,6 +89,7 @@ export function createPushDeviceRoutes(options: {
         token,
         environment,
         topic: apns.topic,
+        ...(session.displayName === undefined ? {} : { accountName: session.displayName }),
         nowMs,
       });
     } else if (request.method === "DELETE") {

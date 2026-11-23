@@ -104,7 +104,7 @@ describe("folders a launch could not open", () => {
     [
       "a damaged manifest",
       "WorkspaceManifestError [unreadable]: this folder has an invalid .dohc/manifest.json: manifest kind is invalid",
-      "dohc could not open Trips. dohc can't read its .dohc/manifest.json. Fix the file, then try again.",
+      "dohc could not open Trips. dohc cannot read its .dohc/manifest.json. Fix the file, then try again.",
       true,
     ],
     [
@@ -194,7 +194,9 @@ describe("folders a launch could not open", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     await user.click(screen.getByTestId("notice-center-toggle"));
     const row = within(screen.getByTestId("notice-center"))
-      .getByText("dohc could not open Trips. Another program is using this file or folder.")
+      .getByText(
+        "dohc could not open Trips. Another program is using this file or folder. Close it there, then try again.",
+      )
       .closest("li")!;
     expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();

@@ -173,7 +173,7 @@ describe("ChatsView channels", () => {
       undefined,
       undefined,
       {
-        title: "dohc couldn't create #Launch_team",
+        title: "dohc could not create #Launch_team",
         identity: "group-name-taken:launch-team",
         action: expect.objectContaining({ label: "Open", run: expect.any(Function), ends: true }),
       },

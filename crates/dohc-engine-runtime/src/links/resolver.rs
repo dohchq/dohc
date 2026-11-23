@@ -214,7 +214,7 @@ impl Resolver {
             .and_then(|value| value.as_deref())
     }
 
-    pub(super) fn resolve_markdown(&self, source: &str, raw: &str) -> Option<&str> {
+    pub(crate) fn resolve_markdown(&self, source: &str, raw: &str) -> Option<&str> {
         let target = target(raw)?;
         let directory = source.rsplit_once('/').map_or("", |(dir, _)| dir);
         let candidate = if target.starts_with('/') || directory.is_empty() {
@@ -229,7 +229,7 @@ impl Resolver {
         self.family(&normalized)
     }
 
-    pub(super) fn resolve(&self, source: &str, raw: &str) -> Option<&str> {
+    pub(crate) fn resolve(&self, source: &str, raw: &str) -> Option<&str> {
         let target = target(raw)?;
         let directory = source.rsplit_once('/').map_or("", |(dir, _)| dir);
         let relative = if directory.is_empty() {

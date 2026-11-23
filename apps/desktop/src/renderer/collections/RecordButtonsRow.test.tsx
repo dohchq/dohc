@@ -178,7 +178,7 @@ describe("RecordButtonsRow", () => {
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     fireEvent.click(button);
     const question = screen.getByRole("dialog", { name: "Run Mark paid for Invoice 12" });
-    expect(question.textContent).toContain("Settle and Send receipt can't be undone.");
+    expect(question.textContent).toContain("The actions Settle and Send receipt cannot be undone.");
     expect(button.getAttribute("aria-expanded")).toBe("true");
     expect(document.activeElement?.textContent).toBe("Run");
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
@@ -189,7 +189,7 @@ describe("RecordButtonsRow", () => {
     expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
     fireEvent.click(button);
     expect(screen.getByRole("dialog").getAttribute("aria-describedby")).toBe(
-      screen.getByText("Settle and Send receipt can't be undone.").id,
+      screen.getByText("The actions Settle and Send receipt cannot be undone.").id,
     );
     const run = screen.getByRole("button", { name: "Run" });
     fireEvent.keyDown(run, { key: "Tab" });
@@ -730,7 +730,7 @@ describe("RecordButtonsRow in an Edit share view", () => {
     fireEvent.click(button);
     expect(
       screen.getByRole("dialog", { name: "Run Mark paid for Invoice 12" }).textContent,
-    ).toContain("Send invoice can't be undone.");
+    ).toContain("The action Send invoice cannot be undone.");
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     await waitFor(() =>
       expect(bridge.pressAutomationButton).toHaveBeenCalledWith(
@@ -750,7 +750,7 @@ describe("RecordButtonsRow in an Edit share view", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
     expect(onError).toHaveBeenCalledWith(
-      "Mark paid did not start.",
+      "dohc could not start Mark paid.",
       new Error(UNCHECKED),
       expect.any(Function),
     );
@@ -1107,7 +1107,7 @@ describe("RecordButtonsRow History in the shell", () => {
     open.focus();
     fireEvent.click(open);
     const dialog = await screen.findByRole("dialog", { name: "History of Invoice 12" });
-    await within(dialog).findByText("No field of this record has changed yet.");
+    await within(dialog).findByText("No field changes recorded yet.");
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(open));

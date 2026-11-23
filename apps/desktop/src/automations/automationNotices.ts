@@ -71,9 +71,9 @@ export async function sendFailureNotices(
     report,
   );
 }
-export const RETRY_NO_RUN = "This notice has no run to try again.";
+export const RETRY_NO_RUN = "This Notice has no run to try again.";
 export const RETRY_ELSEWHERE =
-  "Only the computer this run failed on can try it again. The notice names that computer.";
+  "Only the computer this run failed on can try it again. The Notice names that computer.";
 
 /**
  * Try again on a failed run's notice. Only the computer that ran it holds

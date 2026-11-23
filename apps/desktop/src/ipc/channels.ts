@@ -235,6 +235,7 @@ export const CHANNELS = {
   // Main wrote or removed a draft it set aside for a workspace; the renderer
   // lists them again.
   liveDraftRecoveryChanged: "desktop:live-draft-recovery-changed",
+  setAsideDraftChanged: "desktop:set-aside-draft-changed",
   // Which of the owner's computers runs a workspace's schedules changed.
   scheduleHostChanged: "desktop:schedule-host-changed",
   chatDispatchNotices: "desktop:chat-dispatch-notices",

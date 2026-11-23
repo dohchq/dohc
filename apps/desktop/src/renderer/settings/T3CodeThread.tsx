@@ -18,7 +18,7 @@ import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 export const T3_CODE = "T3 Code";
 export const T3_CODE_CANNOT_KEEP =
-  "This computer cannot encrypt dohc's sign-in to T3 Code, so dohc cannot connect to T3 Code.";
+  "This computer cannot encrypt the sign-in, so dohc cannot connect to T3 Code.";
 const ALLOW = "Allow dohc in T3 Code";
 // How long typing rests before dohc asks T3 Code for the threads it names.
 const SEARCH_REST_MS = 250;
@@ -203,7 +203,7 @@ function WaitingForT3Code(props: { onCancel: () => void; spread?: boolean }) {
         className={`${props.spread ? "mr-auto " : ""}inline-flex items-center gap-1.5`}
       >
         <LoaderCircle size={12} aria-hidden className="animate-spin" />
-        Waiting for T3 Code
+        Waiting for T3 Code…
       </span>
       <SecondaryButton
         size="row"
@@ -316,13 +316,13 @@ function T3CodeAllowHere(props: {
       {props.onClose ? (
         // T3 Code gives dohc no way to end a sign-in, so allowing again leaves the old one there.
         <p data-testid="t3-code-allow-earlier" className="m-0">
-          The sign-in dohc has now stays in T3 Code's Authorized clients until it runs out. You can
-          revoke it there.
+          The current sign-in stays in T3 Code's Authorized clients until it expires. You can revoke
+          it there.
         </p>
       ) : null}
       <div className="flex flex-col gap-2">
         <p id={`${id}-label`} className="m-0">
-          Pick the mode of the thread you want to connect, or more.
+          Choose a mode at or above the thread you want to connect.
         </p>
         <div
           role="radiogroup"
@@ -381,7 +381,9 @@ function T3CodeAllowHere(props: {
       </div>
       {usedPage ? (
         <div className="flex flex-col gap-2">
-          <p className="m-0">T3 Code asks in your browser what dohc may do there.</p>
+          <p className="m-0">
+            T3 Code opens in your browser so you can choose what dohc can access.
+          </p>
           <SignInCodeSteps />
         </div>
       ) : null}
@@ -443,9 +445,9 @@ export function T3CodeAllow(props: { access: T3CodeAccess; size?: "row" }) {
         <div className="flex flex-col gap-2">
           <p className="m-0 text-[13px] text-ink">dohc creates its own sign-in in T3 Code.</p>
           <p className="m-0">
-            With it, dohc can read and message any of your threads there that run with the mode you
-            pick, or less. dohc lists your threads so you can pick one. It reads and messages only
-            the threads you connect to agents.
+            With it, dohc can read and message threads that run with the mode you choose or lower.
+            dohc lists your threads so you can pick one, and only reads or messages threads you
+            connect to agents.
           </p>
         </div>
         <T3CodeAllowHere access={access} size={props.size} />
@@ -454,12 +456,12 @@ export function T3CodeAllow(props: { access: T3CodeAccess; size?: "row" }) {
   return (
     <div data-testid="t3-code-allow" className="flex flex-col gap-2 text-[12px] text-muted">
       <p className="m-0 text-[13px] text-ink">
-        T3 Code asks in your browser what dohc may do there.
+        T3 Code opens in your browser so you can choose what dohc can access.
       </p>
       <p className="m-0">
-        dohc can then read and message any of your threads in T3 Code that run with the mode you
-        pick, or less. A thread with full access needs Full access. dohc lists your threads so you
-        can pick one. It reads and messages only the threads you connect to agents.
+        dohc can then read and message threads in T3 Code that run with the mode you choose or
+        lower. A thread with Full access needs Full access. dohc lists your threads so you can pick
+        one, and only reads or messages threads you connect to agents.
       </p>
       <SignInCodeSteps />
       {access.allowError ? (
@@ -529,7 +531,9 @@ export function T3CodeAllowAgain(props: { access: T3CodeAccess }) {
           <WaitingForT3Code spread onCancel={access.cancel} />
         ) : (
           <>
-            <span className="mr-auto">To change what dohc may do in T3 Code, allow it again.</span>
+            <span className="mr-auto">
+              To change what dohc can access in T3 Code, allow it again.
+            </span>
             <SecondaryButton
               ref={opener}
               size="row"
@@ -589,7 +593,7 @@ function ThreadPage(props: {
     return (
       <SkeletonRows
         testId="t3-code-threads-loading"
-        label={props.first ? "Loading threads" : "Loading more threads"}
+        label={props.first ? "Loading threads…" : "Loading more threads…"}
         rows={props.first ? 3 : 1}
         className="px-2 py-2"
       />
@@ -702,7 +706,7 @@ export function T3CodeThreadPicker(props: {
     return (
       <SkeletonRows
         testId="t3-code-projects-loading"
-        label="Loading your T3 Code projects"
+        label="Loading your T3 Code projects…"
         rows={3}
       />
     );
@@ -847,7 +851,7 @@ export function T3CodeChoice(props: {
       </RetryRow>
     );
   if (state === undefined)
-    return <SkeletonRows testId="t3-code-access-loading" label="Checking T3 Code" rows={2} />;
+    return <SkeletonRows testId="t3-code-access-loading" label="Checking T3 Code…" rows={2} />;
   if (!state.canKeep)
     return (
       <p data-testid="t3-code-cannot-keep" className="m-0 text-[13px] text-danger">

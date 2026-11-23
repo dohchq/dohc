@@ -101,16 +101,16 @@ it.each([false, true])(
   },
 );
 it("does not read a host refusal's shared prefix as edits-pending", () => {
-  expect(readLiveStopRefusal(new Error("Live editing didn't stop."))).toBeNull();
+  expect(readLiveStopRefusal(new Error("Live editing did not stop."))).toBeNull();
   expect(
     readLiveStopRefusal(
       new Error(
-        "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.",
+        "Live editing did not stop. Recent edits have not reached the server yet. Resume live editing to send them, then stop it.",
       ),
     ),
   ).toBeNull();
   const error = liveStopRelayError({ code: "host-not-loaded", sessionHost: "starting" })!;
-  expect(error.message.startsWith("Live editing didn't stop.")).toBe(true);
+  expect(error.message.startsWith("Live editing did not stop.")).toBe(true);
   expect(readLiveStopRefusal(error)?.code).toBe("host-not-loaded");
   expect(readLiveStopRefusal(new Error(HOST_STOP_CASES[5][2]))).toBeNull();
 });

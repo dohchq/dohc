@@ -27,8 +27,8 @@ import {
   OpenExternallyButton,
   ViewActions,
 } from "./fileInspectorUi";
-import { TriangleAlert } from "lucide-react";
-import { EmptyState } from "./ui/controls";
+import { TriangleAlert, X } from "lucide-react";
+import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { StateMark } from "./ui/StateMark";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
@@ -137,7 +137,7 @@ export function DrawingView({
     if (truncated) {
       return {
         value: null,
-        error: "dohc cannot open a partial Excalidraw file.",
+        error: "dohc cannot open a partial drawing file.",
       };
     }
     try {
@@ -148,7 +148,7 @@ export function DrawingView({
     } catch (cause) {
       return {
         value: null,
-        error: cause instanceof Error ? cause.message : "The drawing is invalid.",
+        error: cause instanceof Error ? cause.message : "The drawing file is not valid.",
       };
     }
     // valueRevision advances only when the hook accepts a new disk snapshot.
@@ -297,6 +297,7 @@ export function DrawingView({
         <EngineMayHoldDocumentNotice
           onRetry={onRetryEngineOpen}
           contentShown={document.value !== null}
+          details={engine.openRefusalDetail}
         />
       ) : null}
       {engine.artifactAssetsInvalid ? (
@@ -308,10 +309,20 @@ export function DrawingView({
       ) : null}
       {assetRefused ? (
         <div
-          className="border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
+          className="flex items-center justify-between gap-3 border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
           data-testid="drawing-assets-refused"
         >
-          This image was not added. Collaborative drawings cannot add images yet.
+          <span className="flex min-w-0 items-center gap-2">
+            <TriangleAlert size={13} aria-hidden className="shrink-0" />
+            <span>dohc did not add this image. Shared drawings cannot include images yet.</span>
+          </span>
+          <IconButton
+            aria-label="Dismiss notice"
+            title="Dismiss"
+            onClick={() => setAssetRefused(false)}
+          >
+            <X size={13} aria-hidden />
+          </IconButton>
         </div>
       ) : null}
       {assetHydrationFailures > 0 ? (
@@ -319,17 +330,20 @@ export function DrawingView({
           className="flex items-center justify-between gap-3 border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
           data-testid="drawing-asset-hydration-error"
         >
-          <span>
-            dohc could not load {assetHydrationFailures}{" "}
-            {assetHydrationFailures === 1 ? "image" : "images"}.
+          <span className="flex min-w-0 items-center gap-2">
+            <TriangleAlert size={13} aria-hidden className="shrink-0" />
+            <span>
+              dohc could not load {assetHydrationFailures}{" "}
+              {assetHydrationFailures === 1 ? "image" : "images"}.
+            </span>
           </span>
-          <button
-            type="button"
-            className="shrink-0 text-text underline underline-offset-2"
+          <SecondaryButton
+            size="row"
+            className="shrink-0"
             onClick={() => setAssetHydrationAttempt((attempt) => attempt + 1)}
           >
             Try again
-          </button>
+          </SecondaryButton>
         </div>
       ) : null}
       {engine.opening ? (
@@ -362,7 +376,7 @@ export function DrawingView({
           data-testid="view-drawing-error"
           icon={TriangleAlert}
           tone="danger"
-          title={`dohc could not open this drawing. ${document.error ?? "The drawing is invalid."}`}
+          title={`dohc could not open this drawing. ${document.error ?? "The drawing file is not valid."}`}
         >
           <OpenExternallyButton workspaceId={workspaceId} path={path} onError={onButtonError} />
         </EmptyState>

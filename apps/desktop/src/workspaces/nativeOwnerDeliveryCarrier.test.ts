@@ -14,7 +14,7 @@ import { parseDesktopOwnerDeliveryConfig } from "./desktopOwnerDelivery";
 const relay = vi.hoisted(() => ({
   submit: vi.fn(),
   connect: vi.fn(),
-  acknowledge: vi.fn(),
+  acknowledgeTaken: vi.fn(),
   head: undefined as unknown,
   closers: [] as (() => void)[],
 }));
@@ -28,7 +28,7 @@ vi.mock("@dohc/workspace-engine-client", async (original) => {
     OwnerYDocOutbox: class extends actual.OwnerYDocOutbox {
       override readHead = async () =>
         relay.head as Awaited<ReturnType<OwnerYDocOutbox["readHead"]>>;
-      override acknowledge = relay.acknowledge;
+      override acknowledgeTaken = relay.acknowledgeTaken;
     },
   };
 });
@@ -97,7 +97,11 @@ function fixture() {
       agentDeclaration,
     },
   };
-  relay.acknowledge.mockResolvedValue({ acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null });
+  relay.acknowledgeTaken.mockResolvedValue({
+    acknowledged: 1,
+    pendingBytes: 0,
+    oldestEntryAtMs: null,
+  });
   relay.submit.mockResolvedValue({
     result: "success",
     ack: { ...receipt, localYDocSequence: 1, applicationReplayed: false },
@@ -147,7 +151,7 @@ function fixture() {
       acceptedCursor: 1,
       nativeHeadSequence: 1,
     })),
-    ownerYDocIsReceiptApplied: vi.fn(async () => true),
+    ownerYDocRestartCommittedRows: vi.fn(async () => undefined),
   };
   return client as typeof client & EngineClient;
 }
@@ -181,7 +185,7 @@ it("submits the queued agent declaration under the owner account from the same c
     },
     expect.any(AbortSignal),
   );
-  expect(relay.acknowledge).toHaveBeenCalledWith("outbox", [receipt]);
+  expect(relay.acknowledgeTaken).toHaveBeenCalledWith("outbox", receipt);
 });
 
 it("sends neither the bearer nor the account once the credential retires", async () => {

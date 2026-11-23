@@ -70,7 +70,7 @@ export function CollectionHistoryRevisionDetails(
   return (
     <section aria-label="Fields and rules history" className="mt-3 space-y-3 text-[12px]">
       <p className="m-0 text-muted">
-        Compare saved fields and rules. Restoring them creates a reviewed change against the current
+        Compare saved fields and rules. Restoring them opens a change to review against current
         records.
       </p>
       <div className="flex flex-wrap gap-2">
@@ -96,8 +96,8 @@ export function CollectionHistoryRevisionDetails(
       {versions && (
         <>
           <p className="m-0 text-muted">
-            Current records and access stay intact. Conflicting changes need a source migration.
-            Restoring a source file does not activate rules.
+            Current records and access stay unchanged. Conflicting changes must be edited in source.
+            Restoring a source file does not apply its rules.
           </p>
           <div className="grid gap-3 sm:grid-cols-2">
             {versions.map((version, index) => (
@@ -108,7 +108,7 @@ export function CollectionHistoryRevisionDetails(
               >
                 <h3 className="m-0 flex items-center justify-between gap-2 text-[12px] font-semibold">
                   {index ? "After" : "Before"}
-                  <span className="font-mono text-[11px] font-normal text-muted">
+                  <span className="tabular-nums text-[12px] font-normal text-muted">
                     Revision {version.revision.revision}
                   </span>
                 </h3>
@@ -121,7 +121,7 @@ export function CollectionHistoryRevisionDetails(
                           <li key={field.fieldId} className="flex items-center gap-2">
                             <FieldTypeIcon type={field.type} className="shrink-0 text-muted" />
                             <span className="min-w-0 break-words">{field.name}</span>
-                            <span className="ml-auto text-[11px] text-muted">{field.type}</span>
+                            <span className="ml-auto text-[12px] text-muted">{field.type}</span>
                             {field.type !== "button" && field.required ? (
                               <span title="Required" className="text-muted">
                                 <span aria-hidden="true">*</span>
@@ -156,7 +156,7 @@ export function CollectionHistoryRevisionDetails(
                 ].map((source) => (
                   <details key={source.label}>
                     <summary className="cursor-pointer">{source.label}</summary>
-                    <p className="break-all font-mono">{source.path}</p>
+                    <p className="break-all">{source.path}</p>
                     <p className="break-all text-muted">Saved SHA-256: {source.hash}</p>
                     <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all">
                       {source.content}

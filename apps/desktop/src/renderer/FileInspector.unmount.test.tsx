@@ -51,6 +51,7 @@ import {
   settlePendingEditorDrafts,
 } from "./pendingEditorDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
+import { draftFilesForTests } from "./orphanedDraftFiles.testHarness";
 
 setupFileInspectorTests();
 
@@ -97,8 +98,10 @@ async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
 // flushing, which would silently drop the draft. The unmount cleanup must
 // fire the pending draft through writeWorkspaceText.
 describe("markdown editor unmount flush", () => {
+  const disk = draftFilesForTests();
   const bridgeMock = {
     platform: "linux" as const,
+    ...disk.calls,
     onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
       text: "# Hello\n",
@@ -124,6 +127,7 @@ describe("markdown editor unmount flush", () => {
   beforeEach(() => {
     stubEditorGlobals();
     resetOrphanedDrafts();
+    disk.clear();
     bridgeMock.readWorkspaceText.mockReset().mockResolvedValue({
       text: "# Hello\n",
       truncated: false,

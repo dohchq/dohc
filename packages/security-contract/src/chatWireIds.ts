@@ -37,3 +37,14 @@ export function isWorkspaceGroup(
     kind === "channel"
   );
 }
+
+export const GENERAL_CHANNEL_ID = "channel-general";
+
+/** Whether a channel id is one only General or an agent's chat may hold. The engine reads it the same way. */
+export function isFixedChatChannelId(channelId: string): boolean {
+  return (
+    channelId === GENERAL_CHANNEL_ID ||
+    channelId.startsWith("channel-agent-") ||
+    channelId.startsWith("personal-dm:")
+  );
+}

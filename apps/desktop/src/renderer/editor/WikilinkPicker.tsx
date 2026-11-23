@@ -4,6 +4,7 @@ import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import type { WikilinkFile } from "./wikilinkPlugin";
 import { resolveFloatingMenuPosition } from "./floatingMenuPosition";
+import { dismissTrigger } from "./triggerPlugin";
 import {
   MENU_ACTIVE_OPTION,
   MENU_EMPTY,
@@ -128,12 +129,13 @@ export function WikilinkPicker({ state, files, view, insertMode = "text", onDism
     const scored = files.map((f) => {
       const path = f.path.replace(/\.md$/i, "").toLowerCase();
       const title = (f.title ?? "").toLowerCase();
-      if (q === "") return { f, score: 4 };
+      if (q === "") return { f, score: 5 };
       const leaf = path.split("/").pop() ?? path;
-      if (leaf.startsWith(q)) return { f, score: 0 };
-      if (leaf.includes(q)) return { f, score: 1 };
-      if (path.includes(q)) return { f, score: 2 };
-      if (title.includes(q)) return { f, score: 3 };
+      if (title && title.startsWith(q)) return { f, score: 0 };
+      if (leaf.startsWith(q)) return { f, score: 1 };
+      if (title && title.includes(q)) return { f, score: 2 };
+      if (leaf.includes(q)) return { f, score: 3 };
+      if (path.includes(q)) return { f, score: 4 };
       return { f, score: -1 };
     });
     return scored
@@ -158,6 +160,7 @@ export function WikilinkPicker({ state, files, view, insertMode = "text", onDism
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
+        if (view && state.open) dismissTrigger(view, state.from);
         onDismiss();
         return;
       }
@@ -173,7 +176,7 @@ export function WikilinkPicker({ state, files, view, insertMode = "text", onDism
           matches.map((file) => file.path),
         );
         if (next !== null) setActiveIdx(next);
-      } else if (e.key === "Enter") {
+      } else if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
         e.stopPropagation();
         const selected = matches[activeIdx];
@@ -211,18 +214,20 @@ export function WikilinkPicker({ state, files, view, insertMode = "text", onDism
       style={{
         position: "fixed",
         left: position.x,
-        top: position.y,
+        ...(position.placement === "above" && position.bottom !== undefined
+          ? { bottom: position.bottom }
+          : { top: position.y }),
         maxHeight: position.maxHeight,
         zIndex: 60,
         ...menuEnterFrom(position.placement),
       }}
       role="listbox"
-      aria-label="page links"
+      aria-label="Page links"
       aria-activedescendant={matches.length > 0 ? optionId(activeIdx) : undefined}
       onMouseDown={(e) => e.preventDefault()}
     >
       {matches.length === 0 ? (
-        <div className={MENU_EMPTY}>No files match "{state.query}"</div>
+        <div className={MENU_EMPTY}>No files match "{state.query}".</div>
       ) : (
         <div>
           {matches.map((f, i) => (

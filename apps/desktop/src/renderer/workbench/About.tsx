@@ -368,7 +368,7 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
       <time
         dateTime={when.iso}
         title={when.label}
-        className="shrink-0 text-[11px] tabular-nums text-subtle"
+        className="shrink-0 text-[12px] tabular-nums text-subtle"
       >
         {formatShortTime(props.thread.updatedAtMs)}
       </time>
@@ -918,7 +918,7 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
       <time
         dateTime={when.iso}
         title={when.label}
-        className="shrink-0 text-[11px] tabular-nums text-subtle"
+        className="shrink-0 text-[12px] tabular-nums text-subtle"
       >
         {formatShortTime(mention.message.createdAtMs)}
       </time>
@@ -1172,7 +1172,7 @@ export function AboutHistory(props: {
       } catch (error) {
         request.fail(
           failed,
-          ipcErrorMessage(error, "Could not load History for this file."),
+          ipcErrorMessage(error, "dohc could not load History for this file."),
           error,
           failed.retry,
         );
@@ -1364,9 +1364,12 @@ const EMPTY_WITHIN: Record<
   granted: () => ({ only: true }),
   "received-own-grant": (noun) => ({
     only: false,
-    words: `No share to you includes this ${noun}.`,
+    words: `No share with you includes this ${noun}.`,
   }),
-  "received-account": (noun) => ({ only: false, words: `No share to you includes this ${noun}.` }),
+  "received-account": (noun) => ({
+    only: false,
+    words: `No share with you includes this ${noun}.`,
+  }),
   collection: () => ({ only: true }),
 };
 
@@ -1460,14 +1463,14 @@ function AccessRowView(props: { row: AccessRow; ownName?: string }) {
         {who}
       </span>
       {row.status !== "active" ? (
-        <span className="shrink-0 text-[11px] text-muted">
+        <span className="shrink-0 text-[12px] text-muted">
           {row.selector?.kind === "workspace" && row.selector.role
             ? `${ROLE_WORDS[row.selector.role]} · `
             : ""}
           {row.status === "damaged" ? "Damaged" : "Ended"}
         </span>
       ) : level ? (
-        <span className="shrink-0 text-[11px] text-muted">Can {level.label.toLowerCase()}</span>
+        <span className="shrink-0 text-[12px] text-muted">Can {level.label.toLowerCase()}</span>
       ) : null}
     </div>
   );
@@ -1750,7 +1753,7 @@ export function AboutAccess(props: {
       } catch (error) {
         request.fail(
           { status: "failed" },
-          ipcErrorMessage(error, `Could not check who has access to this ${noun}.`),
+          ipcErrorMessage(error, `dohc could not check who has access to this ${noun}.`),
           error,
           retry,
         );
@@ -1856,7 +1859,7 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
         <time
           dateTime={formatChatTime(answer.checkedAtMs).iso}
           title={formatChatTime(answer.checkedAtMs).label}
-          className="shrink-0 text-[11px] tabular-nums text-subtle"
+          className="shrink-0 text-[12px] tabular-nums text-subtle"
         >
           {/* Beside "Checked" the time reads on its own. Beside any other state it says what it is. */}
           {answer.freshness === "fresh" ? "" : "Last checked "}
@@ -1866,7 +1869,7 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
       {props.scope ? (
         <span
           data-testid={`${props.testId}-scope`}
-          className="whitespace-nowrap text-[11px] text-subtle"
+          className="whitespace-nowrap text-[12px] text-subtle"
         >
           {props.scope}
         </span>
@@ -1876,7 +1879,7 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
 }
 
 const unexplainedFor = (noun: AccessNoun) =>
-  `Access information is unavailable for this ${noun}. This does not mean that no one has access.`;
+  `dohc could not check access for this ${noun}. Someone may still have access.`;
 export const SIGNED_OUT_ACCESS = "Connect your server to check who has access.";
 const MISSING: Record<AccessNoun, string> = {
   file: "This file is no longer available at this path.",
@@ -1922,7 +1925,7 @@ export function AccessUnknown(props: {
           icon={CloudOff}
           action={{ label: "Sync and sharing", run: setup.openSyncSettings }}
         >
-          Shares need sync, and this workspace does not sync.
+          Sharing needs sync, and this workspace is not synced.
         </AboutNote>
       );
     case "signed-out":

@@ -9,21 +9,21 @@ const AND = new Intl.ListFormat("en", { type: "conjunction" });
 export function collectionCopiesLeftMessage(left: CollectionCopiesLeft): string | null {
   const names = AND.format(left.workspaces.map((rootPath) => workspaceName({ rootPath })));
   const removed = left.workspaces.length
-    ? `dohc could not remove offline copies of Collections from a previous account. They are still in ${names}.`
+    ? `dohc could not remove offline Collection copies from a previous account. They are still in ${names}.`
     : null;
   // What dohc could not find out, as the end of a sentence that starts "dohc could not".
   const unknown =
     left.recordUnreadable && left.sweepPending
-      ? "read its list of offline copies of Collections to remove, or check every workspace for them"
+      ? "read its list of offline Collection copies to remove, or check every workspace for them"
       : left.recordUnreadable
-        ? "read its list of offline copies of Collections to remove"
+        ? "read its list of offline Collection copies to remove"
         : left.sweepPending
-          ? "check every workspace for offline copies of Collections from a previous account"
+          ? "check every workspace for offline Collection copies from a previous account"
           : null;
   if (unknown === null) return removed;
   return removed
     ? `${removed} dohc also could not ${unknown}.`
-    : `dohc could not ${unknown}. Some may still be on this computer.`;
+    : `dohc could not ${unknown}. Some copies could still be on this computer.`;
 }
 
 // What this window filed last. Module state, because the shell remounts on

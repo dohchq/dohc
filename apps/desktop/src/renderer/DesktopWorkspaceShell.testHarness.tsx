@@ -111,6 +111,7 @@ import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { forgetSyncFailureNoticesForTests } from "./shell/useSyncFailureNotice";
 import { RecoveryList } from "./RecoveryList";
 import { useAccountDeletion } from "./shell/useAccountDeletion";
+import { draftFilesForTests } from "./orphanedDraftFiles.testHarness";
 
 // The shell under the session's reaction owner and account deletion, as
 // DesktopRoot mounts it. A key on this element remounts both owners too.
@@ -348,6 +349,7 @@ function makeBaseBridge(
   const activatedCallbacks = new Set<(workspace: Workspace, file?: string) => void>();
   return {
     platform,
+    ...draftFilesForTests().calls,
     typingRecovery: vi.fn(async () => ({ failures: [] })),
     emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
       for (const callback of [...activityCallbacks]) callback(event);
@@ -431,6 +433,13 @@ function makeBaseBridge(
         notInNote: 0,
         storedOn: "this-computer",
         keptEdits: "kept",
+      }),
+    ),
+    listOwnerLiveRecoveryPackages: vi.fn(
+      async (_payload: {
+        workspaceId: string;
+      }): Promise<import("../ipc/bridgeContract").ListOwnerLiveRecoveryPackagesResult> => ({
+        packages: [],
       }),
     ),
     resumeOwnerLiveDocument: vi.fn(
@@ -854,6 +863,23 @@ function makeBaseBridge(
       path: ".env",
       status: "discarded" as const,
     })),
+    planUndoAgentRun: vi.fn(async (payload: { workspaceId: string; agentRunId: string }) => ({
+      agentRunId: payload.agentRunId,
+      agentName: null,
+      planToken: "plan-token",
+      truncated: false,
+      scannedChanges: 0,
+      restorable: [],
+      skipped: [],
+    })),
+    undoAgentRun: vi.fn(async (payload: { workspaceId: string; agentRunId: string }) => ({
+      agentRunId: payload.agentRunId,
+      correlationId: null,
+      truncated: false,
+      restored: [],
+      skipped: [],
+      failed: [],
+    })),
     // Typed to the contract: the capture recovery tests swap the answer.
     getCaptureRecoveryStatus: vi.fn(
       async (_payload: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({
@@ -1216,8 +1242,8 @@ export async function enterMarkdownSource(
     expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
   });
 
-  // The label names the next surface: Edit (read) -> Source (WYSIWYG) ->
-  // WYSIWYG (source).
+  // The label names the next surface: Edit (read) -> Source (editor) ->
+  // Editor (source).
   if (toggle.textContent === "Edit") {
     await user.click(toggle);
     await waitFor(() => expect(toggle.textContent).toBe("Source"));
@@ -1225,7 +1251,7 @@ export async function enterMarkdownSource(
   if (toggle.textContent === "Source") {
     await user.click(toggle);
   } else {
-    expect(toggle.textContent).toBe("WYSIWYG");
+    expect(toggle.textContent).toBe("Editor");
   }
   return await waitFor(() => {
     const content = queries

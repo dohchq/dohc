@@ -34,6 +34,7 @@ import {
 } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { SyncRelayStorage } from "./storage.js";
+import { createLiveOpenRefusalLog, liveOpenFailureWords } from "./liveOpenRefusalLog";
 import type { createLiveTickets } from "./liveTickets.js";
 import {
   liveBrowserActor,
@@ -427,6 +428,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   // once it resolves here. Anyone else gets the same 404 in every state.
   const busy = (vouched: boolean) =>
     kind === "link" && vouched ? linkRefusal("link_live_unavailable") : refusal();
+  const toldToTryAgain = createLiveOpenRefusalLog();
 
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -443,8 +445,17 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     )
       return refusal();
     let vouched = (request.headers.get("authorization") ?? "").startsWith("LinkCapability ");
-    if (closed || storage.unavailable.aborted || pendingRequests >= limits.maxPendingRequests)
+    if (closed || storage.unavailable.aborted || pendingRequests >= limits.maxPendingRequests) {
+      if (kind === "link" && vouched)
+        toldToTryAgain(
+          closed
+            ? "the relay is stopping"
+            : storage.unavailable.aborted
+              ? "the relay's storage is unavailable"
+              : "too many opens are waiting",
+        );
       return busy(vouched);
+    }
     pendingRequests++;
     const controller = new AbortController(),
       signal = AbortSignal.any([
@@ -456,7 +467,11 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     const timer = setTimeout(() => controller.abort(), limits.upgradeTimeoutMs);
     let cancel!: () => void;
     const cancelled = new Promise<Response>((done) => {
-      cancel = () => done(busy(vouched && !request.signal.aborted));
+      cancel = () => {
+        if (kind === "link" && vouched && !request.signal.aborted)
+          toldToTryAgain("the open ran out of time or the relay is stopping");
+        done(busy(vouched && !request.signal.aborted));
+      };
       signal.addEventListener("abort", cancel, { once: true });
     });
     // Once the request is well formed, a throw is the relay's own failure, not a refusal.
@@ -544,12 +559,16 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             return linkRefusal("link_comment_access");
           const binding = storage.resolveLiveObjectHostBinding(context, objectId as string);
           // A note paused after its file moved has no binding, and only its owner can start it again.
-          if (binding.kind === "refused")
-            return binding.reason === "host-unavailable" || binding.reason === "stale-document"
-              ? sessionHostRefusal(blocked() ?? "stopped")
-              : refusal();
+          if (binding.kind === "refused") {
+            if (binding.reason !== "host-unavailable" && binding.reason !== "stale-document")
+              return refusal();
+            const block = blocked() ?? "stopped";
+            toldToTryAgain(`the note has no binding (${binding.reason}), host says ${block}`);
+            return sessionHostRefusal(block);
+          }
         }
         const block = blocked();
+        if (block && context.kind === "link") toldToTryAgain(`the host says ${block}`);
         // A link holder's reach was checked above. An invited editor learns why only for a document they reach.
         if (block)
           return context.kind === "link"
@@ -573,9 +592,11 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
             (error.statusCode === 503 || error.statusCode === 429)
             ? errorResponse(error)
             : refusal();
-        return busy(
-          vouched && wellFormed && !(error instanceof RelayError && error.statusCode < 500),
-        );
+        const failed =
+          vouched && wellFormed && !(error instanceof RelayError && error.statusCode < 500);
+        if (kind === "link" && failed && !signal.aborted)
+          toldToTryAgain(`the open failed: ${liveOpenFailureWords(error)}`);
+        return busy(failed);
       } finally {
         pendingRequests--;
         clearTimeout(timer);

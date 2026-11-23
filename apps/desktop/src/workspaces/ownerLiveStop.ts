@@ -33,8 +33,8 @@ export async function reconcileOwnerLiveStops(options: {
   workspaceId: string;
   signal: AbortSignal;
   retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
-  /** Releases a retired Stop's queue; the engine's own release when absent. */
-  release?(
+  /** Releases a retired Stop's queue. */
+  release(
     binding: NonNullable<OwnerLiveStop["binding"]>,
     acceptedCursor: number,
     signal: AbortSignal,
@@ -68,15 +68,7 @@ export async function reconcileOwnerLiveStops(options: {
         if (acceptedCursor === null) return;
         options.assertCurrent();
         try {
-          if (stop.binding)
-            await (options.release
-              ? options.release(stop.binding, acceptedCursor, options.signal)
-              : options.client.ownerYDocRelease(
-                  request(),
-                  stop.binding,
-                  { acceptedCursor },
-                  options.signal,
-                ));
+          if (stop.binding) await options.release(stop.binding, acceptedCursor, options.signal);
           else await options.client.ownerYDocStopRetired(request(), stop.document, options.signal);
         } catch (error) {
           // Still waiting: a held save applies, discovery installs a restore

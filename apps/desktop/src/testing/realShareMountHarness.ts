@@ -167,13 +167,16 @@ export function createRealShareMountHarness(input: {
     keepOutsideChange: unexpected,
     withoutEditors: unexpected,
     listOwnerLiveStops: unexpected,
+    noteBytes: unexpected,
     ownerLiveQuarantines: unexpected,
     unwrittenOwnerLiveReleases: unexpected,
     retryOwnerLiveQuarantine: unexpected,
     retryOwnerLiveRelease: unexpected,
     saveOwnerLiveRecoveryCopy: unexpected,
+    listOwnerLiveRecoveryPackages: unexpected,
     sendRendererActivity: () => {},
     sharesChanged: unexpected,
+    receivedSharesChanged: unexpected,
     reconcileReceivedShares: unexpected,
   });
   registerOperations(

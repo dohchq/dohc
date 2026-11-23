@@ -238,9 +238,7 @@ export function LinkAgentsList(props: {
                     <span className="sr-only">, agent</span>
                   </span>
                   <span className="text-[12px] text-subtle">
-                    {agent.reportedName === null
-                      ? "The agent reported no name"
-                      : "Name reported by the agent"}
+                    {agent.reportedName === null ? "No name reported" : "Name reported by agent"}
                     {" · "}
                     <span className="whitespace-nowrap">
                       {agent.lastActionAtMs === null

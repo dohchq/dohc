@@ -93,6 +93,9 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
             ...(raw.role === "admin" || raw.role === "member" ? { role: raw.role } : {}),
           }
         : {}),
+      ...(!damaged && level !== "edit" && raw.editingNotReady === true
+        ? { editingNotReady: true as const }
+        : {}),
       ...(raw.ended === true ? { ended: true } : {}),
       ...(raw.unsavedPaths !== undefined
         ? {

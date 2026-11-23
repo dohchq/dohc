@@ -11,14 +11,14 @@ import { SHELL_ERROR_MAX_CHARS } from "./useShellError";
 describe("importStopSentence", () => {
   it("says why an import stopped in plain words, never the error code", () => {
     expect(importStopSentence({ file: "two.md", code: "EACCES" })).toBe(
-      "dohc isn't allowed to read two.md or write to this folder.",
+      "dohc does not have permission to read two.md or write to this folder.",
     );
     expect(importStopSentence({ file: "two.md", code: "EPERM" })).toBe(
-      "dohc isn't allowed to read two.md or write to this folder.",
+      "dohc does not have permission to read two.md or write to this folder.",
     );
     expect(importStopSentence({ file: "two.md", code: "ENOSPC" })).toBe("The disk is full.");
     expect(importStopSentence({ file: "two.md", code: "ENOENT" })).toBe(
-      "dohc could not find two.md or this folder anymore.",
+      "dohc could not find two.md or the destination folder.",
     );
     expect(importStopSentence({ file: "two.md", code: "EIO", detail: "EIO: i/o error" })).toBe(
       "dohc could not copy two.md.",
@@ -28,10 +28,10 @@ describe("importStopSentence", () => {
 
   it("words a dangling link with the steps in order, and shortens a long link name", () => {
     expect(importStopSentence({ file: "link.md", refusal: "dangling-link" })).toBe(
-      "dohc did not import link.md, a symbolic link to a missing file. Restore that file, then import it instead.",
+      "dohc did not import link.md because its link target is missing. Restore the target file, then import it.",
     );
     expect(importStopSentence({ file: `${"l".repeat(200)}.md`, refusal: "dangling-link" })).toBe(
-      `dohc did not import ${"l".repeat(59)}…, a symbolic link to a missing file. Restore that file, then import it instead.`,
+      `dohc did not import ${"l".repeat(59)}… because its link target is missing. Restore the target file, then import it.`,
     );
     expect(
       importStopSentence({
@@ -39,7 +39,7 @@ describe("importStopSentence", () => {
         refusal: "dangling-link",
       }),
     ).toBe(
-      `dohc did not import ${"l".repeat(58)}…, a symbolic link to a missing file. Restore that file, then import it instead.`,
+      `dohc did not import ${"l".repeat(58)}… because its link target is missing. Restore the target file, then import it.`,
     );
   });
 });

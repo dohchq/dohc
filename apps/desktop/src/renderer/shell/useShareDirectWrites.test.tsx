@@ -117,7 +117,7 @@ it("pushes when the view opens and shows what that push answered", async () => {
   });
   expect(pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: "share-view" });
   expect(notices.map((notice) => notice.message)).toEqual([
-    "The sync relay did not accept your change to packing/automations.yaml. Send it as a proposal.",
+    "The server did not accept your change to packing/automations.yaml. Send it as a proposal.",
   ]);
 });
 
@@ -269,14 +269,14 @@ it("refreshes after a stale write and offers each unsent write as a proposal, wi
     {
       kind: "direct-write-stale",
       message:
-        "packing/collection.yaml and 1 more changed before your change reached ana@example.com. Check the new version, or send yours as a proposal.",
+        "The files packing/collection.yaml and 1 more changed before your update reached ana@example.com. Check the new version, or send yours as a proposal.",
       retry: expect.any(Function),
       label: "Send as proposal",
     },
     {
       kind: "direct-write-refused",
       message:
-        "The sync relay did not accept your change: trip/packing/automations.yaml changes an automation with a personal step. Send it as a proposal.",
+        "The server did not accept your change: trip/packing/automations.yaml changes an automation with a personal step. Send it as a proposal.",
       retry: expect.any(Function),
       label: "Send as proposal",
     },
@@ -294,7 +294,7 @@ it("names a new Collection by its folder", async () => {
     ],
   });
   expect(notices[0]!.message).toBe(
-    "The sync relay did not accept your change to ideas. Send it as a proposal.",
+    "The server did not accept your change to ideas. Send it as a proposal.",
   );
 });
 
@@ -317,7 +317,7 @@ it("reports a record name race once and tells where the losing draft is kept", a
     kind: "direct-write-stale",
     retry: null,
     message:
-      "packing/One.md is taken. Your text draft is kept in trip/packing/Record draft abc-2.txt on this computer. Use New record to create another record.",
+      "The name packing/One.md is already taken. Your draft is saved in trip/packing/Record draft abc-2.txt on this computer. Use New record to create another record.",
   });
   expect(refreshShareView).toHaveBeenCalledOnce();
 });
@@ -336,7 +336,7 @@ it("tells a member who lost a page name race to use New page", async () => {
     ],
   });
   expect(notices[0]?.message).toBe(
-    "ideas/Plan.md is taken. Your text draft is kept in ideas/Page draft abc-2.txt on this computer. Use New page to create another page.",
+    "The name ideas/Plan.md is already taken. Your draft is saved in ideas/Page draft abc-2.txt on this computer. Use New page to create another page.",
   );
 });
 
@@ -418,7 +418,7 @@ it("sends a member's unsent pages without a click once they can edit again", asy
     ],
   });
   expect(notices[1]?.message).toBe(
-    "ideas/Plan.md is taken. Your text draft is kept in ideas/Page draft abc-2.txt on this computer. Use New page to create another page.",
+    "The name ideas/Plan.md is already taken. Your draft is saved in ideas/Page draft abc-2.txt on this computer. Use New page to create another page.",
   );
 });
 
@@ -490,7 +490,7 @@ it("counts several refused writes and gives the first reason", async () => {
     ],
   });
   expect(notices[0]!.message).toBe(
-    "The sync relay did not accept 2 of your changes: trip/a/collection.yaml is not a valid collection.yaml. Send them as a proposal.",
+    "The server did not accept 2 of your changes: trip/a/collection.yaml is not a valid collection.yaml. Send them as a proposal.",
   );
   await vi.waitFor(() => expect(delivery.acknowledge).toHaveBeenCalledOnce());
   expect(delivery.claim).toHaveBeenCalledOnce();
@@ -574,14 +574,14 @@ it("offers Send as proposal for a lasting refusal, keeping an earlier refusal's 
     expect.objectContaining({
       kind: "direct-write-refused",
       message:
-        "ana@example.com's share doesn't take your Collection changes directly. Send them as a proposal.",
+        "This share from ana@example.com does not accept Collection changes directly. Send them as a proposal.",
       retry: expect.any(Function),
       send: expect.objectContaining({ label: "Send as proposal" }),
     }),
     expect.objectContaining({
       kind: "direct-write-refused",
       message:
-        "The sync relay did not accept your change: trip/a/collection.yaml is not a valid collection.yaml. ana@example.com's share doesn't take your Collection changes directly. Send them as a proposal.",
+        "The server did not accept your change: trip/a/collection.yaml is not a valid collection.yaml. This share from ana@example.com does not accept Collection changes directly. Send them as a proposal.",
     }),
   ]);
 });

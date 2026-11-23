@@ -44,15 +44,14 @@ function Archive(props: Props) {
     try {
       const result = await bridge().dataset({ ...scope, action: "lifecycle", after, limit: 50 });
       if (!alive.current || request.current !== token) return;
-      if (result.kind !== "lifecycle")
-        throw Error("dohc could not read the affected apps. Try again.");
+      if (result.kind !== "lifecycle") throw Error("dohc could not read the affected apps.");
       setPage(result);
       setFailed(null);
     } catch (error) {
       if (alive.current && request.current === token) {
         setPage(null);
         setFailed({ after });
-        props.onError("Could not read the affected apps.", error, () => {
+        props.onError("dohc could not read the affected apps.", error, () => {
           void load(after);
         });
       }
@@ -82,7 +81,7 @@ function Archive(props: Props) {
       props.onClose();
     } catch (error) {
       if (alive.current && request.current === token)
-        props.onError("Could not archive this Collection.", error, () => {
+        props.onError("dohc could not archive this Collection.", error, () => {
           void archive();
         });
     } finally {
@@ -105,8 +104,8 @@ function Archive(props: Props) {
             title={`Archive ${props.name}?`}
           >
             <p>
-              Apps will stop reading and changing this Collection. Records and files stay saved.
-              Restore it from archived Collections to use it again.
+              Apps can no longer read or change this Collection. Records and files stay saved, and
+              you can restore it from archived Collections.
             </p>
           </ConfirmationHead>
           <CollectionAffectedApps

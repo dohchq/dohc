@@ -210,9 +210,9 @@ export function CollectionRecordFieldWrite({
       }
       onFailed(
         result.status === "conflict"
-          ? "This collection changed while you were editing. Try again."
+          ? "This Collection changed while you were editing."
           : result.detail
-            ? `dohc could not update this collection. ${result.detail}`
+            ? `dohc could not update this Collection. ${result.detail}`
             : null,
       );
     });
@@ -315,7 +315,7 @@ export function CollectionRecordFieldWrite({
         // Arm once so intermediate "saving" events cannot restart the window.
         {
           const file = change.recordPath.split("/").at(-1) ?? change.recordPath;
-          const message = `Another program has ${file} open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.`;
+          const message = `Another program has ${file} open, so dohc cannot update it on disk. This change is saved and dohc retries until the file is free.`;
           onDurabilityConfirmed?.(message);
           if (lockedReport.current === null) {
             lockedReport.current = setTimeout(() => {
@@ -448,9 +448,9 @@ const SUPERSEDED_MESSAGE =
 const SAVE_UNCONFIRMED_MESSAGE =
   "dohc has not confirmed this save yet. Keep dohc open until saving finishes.";
 const UNREAD_RECORD_MESSAGE =
-  "dohc did not save this change because it could not read this record to check it. Try again.";
+  "dohc did not save this change because it could not read this record to check it.";
 const LOSSY_RECORD_MESSAGE =
-  "dohc did not save this change because it would rewrite parts of this record dohc can't show. Open the record to edit it externally.";
+  "dohc did not save this change because it would rewrite parts of this record dohc cannot show. Open the record to edit it externally.";
 const COPY_UNSAVED_RECORD = "Copy what you typed before discarding it.";
 const CHANGED_SELECTION_MESSAGE =
   "This selection changed since your edit. Copy your unsaved value before discarding it.";
@@ -1114,7 +1114,7 @@ function CollectionWriteFailureRow({ failure }: { failure: CollectionWriteFailur
       data-testid="collection-write-failure"
       className="flex flex-col gap-1.5 border-t border-line pt-2 first:border-t-0 first:pt-0"
     >
-      <span className="truncate font-mono text-[11px] text-subtle">
+      <span className="truncate text-[12px] text-subtle">
         {failure.change.field} in {file}
       </span>
       <span className="text-[12px] text-ink">
@@ -1140,7 +1140,7 @@ function CollectionWriteFailureRow({ failure }: { failure: CollectionWriteFailur
         </span>
       ) : null}
       <textarea
-        aria-label="Unsaved collection value"
+        aria-label="Unsaved Collection value"
         readOnly
         value={recoveryText}
         className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink"
@@ -1155,7 +1155,7 @@ function CollectionWriteFailureRow({ failure }: { failure: CollectionWriteFailur
           disabled={accessRefusal !== null || paused || recoverOnly}
           onClick={() => retryCollectionFieldWrite(failure.id)}
         >
-          Retry
+          Try again
         </SecondaryButton>
         <span className="contents" onClickCapture={() => setCopyRefused(false)}>
           <ShellErrorReporter.Provider value={() => setCopyRefused(true)}>
@@ -1176,7 +1176,7 @@ function CollectionWriteFailureRow({ failure }: { failure: CollectionWriteFailur
       </div>
       {copyRefused ? (
         <span data-testid="collection-write-copy-refused" className="text-[12px] text-muted">
-          Could not copy. Select the value above to copy it.
+          dohc could not copy the value. Select it above to copy it.
         </span>
       ) : null}
     </div>
@@ -1196,8 +1196,8 @@ export function CollectionFieldWriteHost() {
       <span role="status" aria-live="polite" className="sr-only">
         {retained.length > 0
           ? retained.length === 1
-            ? "1 unsaved collection change needs attention."
-            : `${retained.length} unsaved collection changes need attention.`
+            ? "1 unsaved Collection change needs attention."
+            : `${retained.length} unsaved Collection changes need attention.`
           : saveUnconfirmed
             ? SAVE_UNCONFIRMED_MESSAGE
             : ""}
@@ -1249,7 +1249,7 @@ export function CollectionFieldWriteHost() {
           className="dohc-popover fixed bottom-3 right-3 z-50 flex max-h-80 w-80 flex-col gap-2 overflow-auto rounded-xl border border-line bg-panel p-3"
         >
           <span className="text-sm font-semibold text-ink">
-            {retained.length > 0 ? "Unsaved collection changes" : "Saving collection changes"}
+            {retained.length > 0 ? "Unsaved Collection changes" : "Saving Collection changes"}
           </span>
           {saveUnconfirmed ? (
             <span data-testid="collection-save-unconfirmed" className="text-[12px] text-ink">
