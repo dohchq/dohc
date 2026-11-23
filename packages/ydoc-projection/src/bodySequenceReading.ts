@@ -131,28 +131,32 @@ export function whatFollowsStartOf(reading: BodyReading, pos: number): number {
 }
 
 /**
- * The document position a place held by `whatFollowsStartOf` has now: just before the item. For a
- * boundary that is inside the paragraph the reader added in front of its block. When someone has
- * typed in that paragraph since, so that it has a boundary of its own, it is that paragraph's
- * end. With no paragraph in front in the same containers it is the block's own start. -1 when no
- * item is shown at that sequence position.
+ * The document position a place held by `whatFollowsStartOf` has now: just before the item. A
+ * boundary holds the place in the paragraph the reader added to its list item, which is the
+ * item's first block: the place is that paragraph's end, also once someone has typed in it and
+ * whatever was put between it and the boundary since. When the boundary's block has become the
+ * item's first, the place is that block's start. -1 when no item is shown at that sequence
+ * position.
  */
 export function startBefore(reading: BodyReading, index: number): number {
   const shown = positionOf(reading, index);
   const block = shown < 0 ? -1 : blockStartingAt(reading, shown);
   if (block < 0) return shown;
-  const above = block - 1;
-  if (above < 0) return shown + 1;
-  if (reading.lines[above] === reading.lines[block] && isAddedParagraph(reading, above))
-    return reading.starts[above]! + 1;
-  const node = reading.blocks[above]!.node;
   const path = reading.paths[block]!;
-  const beside =
-    node.type.name === "paragraph" &&
-    reading.paths[above]!.length === path.length &&
-    path.length > 0 &&
-    reading.paths[above]!.every((id, depth) => id === path[depth]);
-  return beside ? reading.starts[above]! + 1 + node.content.size : shown + 1;
+  const frames = reading.lines[block]?.read?.leaf.path ?? [];
+  let item = path.length - 1;
+  while (item >= 0 && frames[item]?.type !== "listItem" && frames[item]?.type !== "taskItem")
+    item--;
+  if (item < 0) return shown + 1;
+  const inItem = (other: number) =>
+    reading.paths[other]!.length > item &&
+    reading.paths[other]!.every((id, depth) => depth > item || id === path[depth]);
+  let first = block;
+  while (first > 0 && inItem(first - 1)) first--;
+  const node = reading.blocks[first]!.node;
+  return first < block && node.type.name === "paragraph"
+    ? reading.starts[first]! + 1 + node.content.size
+    : shown + 1;
 }
 
 /** The index of the block that starts at a document position, or -1. */

@@ -22,6 +22,7 @@ import {
   isBodySequenceChange,
   keepBodySequenceFormatting,
 } from "./bodySequenceEditor.js";
+import { boundaryAt, createBodyReader } from "./bodySequenceReading.js";
 import { keepsContainers } from "./bodySequenceWriting.js";
 import { readBodySequence } from "./bodySequenceYjs.js";
 import {
@@ -43,6 +44,7 @@ import {
   stopEveryone,
   tokensOf,
   withEditor,
+  type HostShape,
   type Page,
   type Person,
 } from "./bodySequenceTestSupport.js";
@@ -490,7 +492,8 @@ describe("a note with no boundary for some of its blocks", () => {
     a.expectMirror();
     expect(a.undo()).toBe(true);
     expect(a.lines()).toEqual([""]);
-    expect(a.boundaryIds()).toEqual([]);
+    expect(a.boundaryIds()).toHaveLength(1);
+    a.expectMirror();
   });
 
   it("gives the text before the first boundary a boundary when its kind changes or it is emptied", () => {
@@ -1896,6 +1899,8 @@ const ORACLE_NOTES: [string, StoredLine[]][] = [
   ],
 ];
 
+const ADDED_BLOCK_NOTES = [...ORACLE_NOTES];
+
 const SWEPT_ABOVE: [string, StoredLine | null][] = [
   ["nothing", null],
   ["text before the first boundary", stored(null, "hh")],
@@ -2241,6 +2246,319 @@ describe("an anchor", () => {
     expect(resolved(6, 1)).toBe(6);
   });
 });
+
+const LIST_NOTE: StoredLine[] = [
+  stored({}, "top"),
+  stored({ type: "heading", level: 2, ...IN_ITEM }, "Title"),
+  stored(IN_ITEM, "tail"),
+  stored({}, "end"),
+];
+const CODE_NOTE: StoredLine[] = [stored(CODE, "ab", HARD_BREAK, "cdxy"), stored({}, "end")];
+const loneSurrogate = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/u;
+
+describe.each(["bare", "hosted"] as const)(
+  "on a %s page, undo and a boundary made for a line that had none",
+  (shape) => {
+    it.each([
+      [
+        "a list item's added first paragraph",
+        LIST_NOTE,
+        'doc(paragraph("top"), bulletList(listItem(paragraph("B"), heading("Title"), paragraph("tail"))), paragraph("end"))',
+      ],
+      [
+        "the paragraph after a code block",
+        CODE_NOTE,
+        'doc(codeBlock("ab"), paragraph("B", hardBreak, "cdxy"), paragraph("end"))',
+      ],
+    ])(
+      "keeps a peer's letter in %s when the letter typed before it is undone",
+      (_name, lines, left) => {
+        const a = person(noteOfLines(lines), 10, shape);
+        const b = person(noteOfLines(lines), 20, shape);
+        a.typeAt(1, 0, "A");
+        exchange(a, b);
+        b.typeAt(1, 1, "B");
+        exchange(b, a);
+        expect(a.lines()[1]!.startsWith("AB")).toBe(true);
+        expect(a.undo()).toBe(true);
+        exchange(a, b);
+        for (const each of [a, b]) {
+          each.expectMirror();
+          expect(each.view.state.doc.toString()).toBe(left);
+        }
+      },
+    );
+
+    it.each([
+      ["a list item's added first paragraph", LIST_NOTE],
+      ["the paragraph after a code block", CODE_NOTE],
+    ])(
+      "reads as before after undo of a letter typed in %s, and has it back after redo",
+      (_name, lines) => {
+        const a = person(noteOfLines(lines), 10, shape);
+        const before = a.view.state.doc.toJSON();
+        const boundaries = a.boundaryIds().length;
+        a.typeAt(1, 0, "A");
+        expect(a.boundaryIds()).toHaveLength(boundaries + 1);
+        expect(a.undo()).toBe(true);
+        expect(a.view.state.doc.toJSON()).toEqual(before);
+        expect(a.boundaryIds()).toHaveLength(boundaries + 1);
+        a.expectMirror();
+        expect(a.redo()).toBe(true);
+        expect(a.lines()[1]!.startsWith("A")).toBe(true);
+        a.expectMirror();
+        expect(a.undo()).toBe(true);
+        expect(a.undo()).toBe(false);
+        expect(a.view.state.doc.toJSON()).toEqual(before);
+      },
+    );
+
+    it("takes back a kind change of such a line with the boundary that carried the kind", () => {
+      const a = person(noteOfLines(CODE_NOTE), 10, shape);
+      const before = a.view.state.doc.toJSON();
+      const boundaries = a.boundaryIds().length;
+      a.select([1, 1]);
+      a.retype("heading", { level: 2 });
+      expect(a.blocks()).toEqual(["codeBlock", "h2", "paragraph"]);
+      expect(a.boundaryIds()).toHaveLength(boundaries + 1);
+      expect(a.undo()).toBe(true);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      expect(a.boundaryIds()).toHaveLength(boundaries);
+      a.expectMirror();
+    });
+
+    it("takes back the split and keeps the line's own boundary for Enter at the start of the paragraph after a code block", () => {
+      const a = person(noteOfLines([stored(CODE, "ab", HARD_BREAK, "cd")]), 10, shape);
+      const before = a.view.state.doc.toJSON();
+      a.select([1, 0]);
+      expect(a.press("Enter")).toBe(true);
+      expect(a.blocks()).toEqual(["codeBlock", "paragraph", "paragraph"]);
+      expect(a.boundaryIds()).toHaveLength(3);
+      expect(a.undo()).toBe(true);
+      expect(a.view.state.doc.toJSON()).toEqual(before);
+      expect(a.boundaryIds()).toHaveLength(2);
+      a.expectMirror();
+    });
+  },
+);
+
+describe.each(["bare", "hosted"] as const)(
+  "on a %s page, a dispatch while Yjs tells of a transaction",
+  (shape) => {
+    it("is refused, so a change taken from a peer in the update callback cannot bisect a letter", () => {
+      const start = `a${String.fromCodePoint(0x1f600)}bc`;
+      const a = person(note(start), 10, shape);
+      const b = person(note(start), 20, shape);
+      b.typeAt(0, 0, "!");
+      const fromPeer = b.sent.splice(0);
+      let delivered = false;
+      a.doc.on("update", () => {
+        if (delivered) return;
+        delivered = true;
+        for (const update of fromPeer) a.receive(update);
+        a.view.dispatch(a.view.state.tr.insertText("Y", 5));
+      });
+      a.view.dispatch(a.view.state.tr.insertText("X", 2));
+      exchange(a, b);
+      for (const each of [a, b]) {
+        each.expectMirror();
+        expect(each.lines()).toEqual([`!aX${String.fromCodePoint(0x1f600)}bc`]);
+        expect(loneSurrogate.test(each.sequence.toString())).toBe(false);
+      }
+      a.typeAt(0, 3, "Y");
+      expect(a.lines()).toEqual([`!aXY${String.fromCodePoint(0x1f600)}bc`]);
+      a.expectMirror();
+    });
+
+    it("is refused from afterTransaction, so no peer reads a state the writer never showed", () => {
+      const a = person(note("abc"), 10, shape);
+      const peer = page(note("abc"), 20);
+      let replaced = false;
+      a.doc.on("afterTransaction", () => {
+        if (replaced) return;
+        replaced = true;
+        a.view.dispatch(a.view.state.tr.insertText("Z", 2, 3));
+      });
+      a.view.dispatch(a.view.state.tr.insertText("X", 2));
+      const seen = a.sent.map((update) => {
+        peer.receive(update);
+        return readBodySequence(schema, peer.doc).textContent;
+      });
+      expect(replaced).toBe(true);
+      expect(seen).toEqual(["aXbc"]);
+      expect(a.lines()).toEqual(["aXbc"]);
+      a.expectMirror();
+    });
+
+    it("writes what a plugin dispatches from its own view update with the edit that caused it", () => {
+      let added = false;
+      const addsYAtEnd = new Plugin({
+        view: () => ({
+          update(view) {
+            if (added || !view.state.doc.textContent.includes("X")) return;
+            added = true;
+            view.dispatch(
+              view.state.tr
+                .insertText("Y", view.state.doc.content.size - 1)
+                .setMeta("addToHistory", false),
+            );
+          },
+        }),
+      });
+      const a = person(note("abc"), 10, shape, [], [addsYAtEnd]);
+      a.view.dispatch(a.view.state.tr.insertText("X", 2));
+      expect(a.lines()).toEqual(["aXbcY"]);
+      expect(a.sent).toHaveLength(1);
+      expect(a.history.undoStack).toHaveLength(1);
+      a.expectMirror();
+      expect(a.undo()).toBe(true);
+      expect(a.lines()).toEqual(["abc"]);
+      expect(a.undo()).toBe(false);
+    });
+  },
+);
+
+describe("an anchor in a paragraph that has been typed in", () => {
+  it("holds to what stands before it, so a block put after it does not take it", () => {
+    const a = person(noteOfLines(LIST_NOTE), 10);
+    const b = person(noteOfLines(LIST_NOTE), 20);
+    expect(a.lines()).toEqual(["top", "", "Title", "tail", "end"]);
+    const anchor = bodySequenceAnchor(a.view.state, 8)!;
+    expect(bodySequenceAnchorPosition(a.view.state, anchor)).toBe(8);
+    a.typeAt(1, 0, "A");
+    exchange(a, b);
+    expect(bodySequenceAnchorPosition(a.view.state, anchor)).toBe(9);
+    expect(bodySequenceAnchorPosition(b.view.state, anchor)).toBe(9);
+    b.select([2, 0]);
+    expect(b.press("Enter")).toBe(true);
+    exchange(b, a);
+    expect(a.lines()).toEqual(["top", "A", "", "Title", "tail", "end"]);
+    expect(bodySequenceAnchorPosition(a.view.state, anchor)).toBe(9);
+    expect(bodySequenceAnchorPosition(b.view.state, anchor)).toBe(9);
+  });
+});
+
+type PeerSweep = { tried: number; nothingWritten: number; compared: number; enterUndone: number };
+const PEER_SWEEP_COUNTS: Record<HostShape, PeerSweep> = {
+  bare: { tried: 220, nothingWritten: 31, compared: 189, enterUndone: 62 },
+  hosted: { tried: 220, nothingWritten: 31, compared: 189, enterUndone: 62 },
+};
+
+describe.each(["bare", "hosted"] as const)(
+  "on a %s page, a peer's letters through an undo next to a block with no boundary of its own",
+  (shape) => {
+    const counted: PeerSweep & { notes: number } = {
+      notes: 0,
+      tried: 0,
+      nothingWritten: 0,
+      compared: 0,
+      enterUndone: 0,
+    };
+    const leaves = (doc: ProseMirrorNode) => {
+      const found: { node: ProseMirrorNode; pos: number }[] = [];
+      doc.descendants((node, pos) => {
+        if (!node.isBlock) return false;
+        if (!node.isTextblock && !node.isLeaf) return true;
+        found.push({ node, pos });
+        return false;
+      });
+      return found;
+    };
+    const placeOf = (doc: ProseMirrorNode, letter: string) => {
+      const all = leaves(doc);
+      const index = all.findIndex(({ node }) => node.textContent.includes(letter));
+      return index < 0 ? null : { index, kind: all[index]!.node.type.name };
+    };
+
+    it.each(ADDED_BLOCK_NOTES)("in %s", (_name, lines) => {
+      const baseline = noteOfLines(lines);
+      const start = declared(90);
+      Y.applyUpdate(start.doc, baseline);
+      const reading = createBodyReader(schema, start.sequence, start.containers).reading();
+      const text = reading.doc.textContent;
+      for (let block = 0; block < reading.blocks.length; block++) {
+        const node = reading.blocks[block]!.node;
+        if (boundaryAt(reading, block) >= 0 || !node.isTextblock) continue;
+        const from = reading.starts[block]! + 1;
+        for (const offset of new Set([0, Math.floor(node.content.size / 2), node.content.size]))
+          for (const action of ["a letter", "Enter", "bold", "an inline item"] as const) {
+            counted.tried += 1;
+            const label = `${action} at ${String(offset)} of block ${String(block)} in ${reading.doc.toString()}`;
+            const alice = person(baseline, 10, shape);
+            const bob = person(baseline, 20, shape);
+            const caretAt = (each: Person, pos: number, anchor = pos) =>
+              each.view.dispatch(
+                each.view.state.tr.setSelection(
+                  TextSelection.create(each.view.state.doc, anchor, pos),
+                ),
+              );
+            caretAt(alice, from + offset, action === "bold" ? from : from + offset);
+            if (action === "a letter") alice.type("A");
+            else if (action === "Enter") alice.press("Enter");
+            else if (action === "bold") alice.toggle("bold");
+            else alice.put("wikilink", { target: "Other", label: null });
+            if (alice.sent.length === 0) {
+              counted.nothingWritten += 1;
+              stopEveryone();
+              continue;
+            }
+            counted.compared += 1;
+            exchange(alice, bob);
+            const caret = alice.view.state.selection.to;
+            const own = leaves(bob.view.state.doc).findIndex(
+              ({ node: each, pos }) => caret > pos && caret <= pos + each.nodeSize - 1,
+            );
+            bob.view.dispatch(bob.view.state.tr.insertText("1", caret));
+            const above = leaves(bob.view.state.doc)[own - 1];
+            if (above?.node.isTextblock)
+              bob.view.dispatch(
+                bob.view.state.tr.insertText("2", above.pos + 1 + above.node.content.size),
+              );
+            const below = leaves(bob.view.state.doc)[own + 1];
+            if (below?.node.isTextblock)
+              bob.view.dispatch(bob.view.state.tr.insertText("3", below.pos + 1));
+            exchange(bob, alice);
+            const typed = ["1", "2", "3"].filter((letter) => placeOf(alice.view.state.doc, letter));
+            const before = typed.map((letter) => placeOf(alice.view.state.doc, letter)!);
+            const kinds = leaves(alice.view.state.doc).map(({ node: each }) => each.type.name);
+            alice.undo();
+            exchange(alice, bob);
+            for (const each of [alice, bob]) each.expectMirror();
+            expect(bob.view.state.doc.toJSON(), label).toEqual(alice.view.state.doc.toJSON());
+            const now = alice.view.state.doc.textContent;
+            for (const letter of typed) expect(now.split(letter), label).toHaveLength(2);
+            expect(now.replaceAll(/[123]/gu, ""), label).toBe(text);
+            typed.forEach((letter, at) => {
+              const after = placeOf(alice.view.state.doc, letter)!;
+              const was = before[at]!;
+              if (after.index === was.index && after.kind === was.kind) return;
+              const joined =
+                action === "Enter" &&
+                after.index === was.index - 1 &&
+                (after.kind === was.kind || after.kind === kinds[was.index - 1]);
+              if (!joined)
+                throw new Error(
+                  `${label}: Bob's ${letter} read in block ${String(was.index)} (${was.kind}) and reads in block ${String(after.index)} (${after.kind}) after the undo, in ${alice.view.state.doc.toString()}`,
+                );
+              counted.enterUndone += 1;
+            });
+            stopEveryone();
+          }
+      }
+      start.doc.destroy();
+      counted.notes += 1;
+    });
+
+    it("tries, compares and excepts as many cases as counted", () => {
+      const { notes, ...counts } = counted;
+      console.log(
+        `the peer sweep, ${shape}: ${String(notes)} notes; tried ${String(counts.tried)}, nothing written ${String(counts.nothingWritten)}, compared ${String(counts.compared)}; a letter one block up after an undone Enter: ${String(counts.enterUndone)}`,
+      );
+      if (notes !== ADDED_BLOCK_NOTES.length) return;
+      expect(counts).toEqual(PEER_SWEEP_COUNTS[shape]);
+    });
+  },
+);
 
 describe("two plain editors racing", () => {
   raceTests((baseline, at) => person(baseline, 10 * (at + 1)));

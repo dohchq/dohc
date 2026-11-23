@@ -33,7 +33,12 @@ import {
   type BodyReading,
   type Followed,
 } from "./bodySequenceReading.js";
-import { keepsContainers, keepsPairs, writeTransaction } from "./bodySequenceWriting.js";
+import {
+  boundariesGivenToLines,
+  keepsContainers,
+  keepsPairs,
+  writeTransaction,
+} from "./bodySequenceWriting.js";
 
 export type BodySequenceOptions = {
   /** The note's `sequence`, declared before any update was applied to its document. */
@@ -45,6 +50,15 @@ export type BodySequenceOptions = {
    * change inside a Yjs transaction of its own that has no origin. Such a transaction holds one
    * dispatch of the editor and nothing else: no second change, and no undo. Give the history the
    * same origin. Defaults to `bodySequenceKey`.
+   *
+   * While Yjs tells of a transaction on the note's document, from the end of the transaction
+   * until `afterAllTransactions`, and while a change from elsewhere is not yet shown in the
+   * editor, a dispatch that changes the document is refused: the editor stays as it is and
+   * nothing is written. A key press never arrives then. A host or a plugin that wants to change
+   * the document from a Yjs callback does it afterwards.
+   *
+   * A plugin that dispatches from its own view update before the adapter has written the edit
+   * that caused it has its edit written with that edit: one update and one undo step.
    */
   origin?: unknown;
   /**
@@ -77,6 +91,9 @@ export function isBodySequenceChange(transaction: Transaction): boolean {
  * An undo puts an earlier value back over someone else's later one. It never deletes a container
  * record, and never an attribute of a boundary that still stands. An inline item's attribute is
  * not kept that way: it may have had no value before a person first set it, and undo removes it.
+ * It never deletes a boundary the adapter made for a line that had none of its own, so text
+ * someone else typed in that line since stays in it. The boundary an Enter makes is not one of
+ * those.
  */
 export function createBodySequenceHistory(
   doc: Y.Doc,
@@ -84,6 +101,7 @@ export function createBodySequenceHistory(
 ): Y.UndoManager {
   const origin = options.origin ?? bodySequenceKey;
   const containers = doc.getMap(BODY_CONTAINERS_FIELD);
+  const givenToLines = boundariesGivenToLines(doc);
   const history: Y.UndoManager = new Y.UndoManager([doc.getText(BODY_SEQUENCE_FIELD), containers], {
     trackedOrigins: new Set([origin, null]),
     captureTransaction: (transaction) =>
@@ -95,6 +113,11 @@ export function createBodySequenceHistory(
         item.parent instanceof Y.XmlElement &&
         item.parent.nodeName === BLOCK_ELEMENT &&
         item.parentSub !== null
+      ) &&
+      !(
+        item.content instanceof Y.ContentType &&
+        item.content.type instanceof Y.XmlElement &&
+        givenToLines.has(item.content.type)
       ),
     ...(options.captureTimeout === undefined ? {} : { captureTimeout: options.captureTimeout }),
   });
@@ -268,13 +291,16 @@ function holdSelection(
  *
  * A transaction that would start, change or cut a list, quote, callout or table is refused, also
  * one that would remove the last line between two of them that share an id. So is one that would
- * write between the two units of a surrogate pair.
+ * write between the two units of a surrogate pair, and one dispatched while Yjs tells of a
+ * transaction or before a change from elsewhere is shown, whose offsets are of a document the
+ * sequence no longer reads as.
  */
 export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonly Transaction[]> {
   const { sequence, containers } = options;
   const origin = options.origin ?? bodySequenceKey;
   let flushed = NONE;
   let bound: Bound | null = null;
+  let offsetsAreStale: (() => boolean) | null = null;
   return new Plugin<readonly Transaction[]>({
     key: bodySequenceKey,
     bound: () => bound,
@@ -287,6 +313,7 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
     },
     filterTransaction(transaction, state) {
       if (!transaction.docChanged || isBodySequenceChange(transaction)) return true;
+      if (offsetsAreStale?.()) return false;
       let reading: BodyReading | null | undefined;
       const shareAnId = (at: number) => (endOfUpper: number, startOfLower: number) => {
         if (reading === undefined) {
@@ -334,6 +361,14 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
       const written = new WeakSet<Y.Transaction>();
       let shown: ProseMirrorNode | null = null;
       let destroyed = false;
+      let showing = false;
+      offsetsAreStale = () => {
+        if (showing) return false;
+        const open = doc._transaction;
+        const told = doc._transactionCleanups;
+        if (told.length > 0 && told[0] !== open) return true;
+        return open !== null && !written.has(open) && open.changed.size > 0;
+      };
 
       const show = (select?: (transaction: Transaction, end: number) => void) => {
         if (destroyed) return;
@@ -355,7 +390,14 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
             transaction = view.state.tr.replaceWith(0, current.content.size, reading.doc.content);
           select?.(transaction, b);
           if (view.state.storedMarks) transaction.setStoredMarks(view.state.storedMarks);
-          view.dispatch(transaction.setMeta(bodySequenceKey, true).setMeta(ADD_TO_HISTORY, false));
+          showing = true;
+          try {
+            view.dispatch(
+              transaction.setMeta(bodySequenceKey, true).setMeta(ADD_TO_HISTORY, false),
+            );
+          } finally {
+            showing = false;
+          }
         }
         shown = view.state.doc;
       };
@@ -414,7 +456,10 @@ export function bodySequencePlugin(options: BodySequenceOptions): Plugin<readonl
           doc.off("afterTransaction", onTransaction);
           releaseFormatting();
           if (!options.history) here.history.destroy();
-          if (bound === here) bound = null;
+          if (bound === here) {
+            bound = null;
+            offsetsAreStale = null;
+          }
         },
       };
     },

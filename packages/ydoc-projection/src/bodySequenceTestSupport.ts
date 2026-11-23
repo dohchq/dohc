@@ -213,6 +213,7 @@ export function person(
   clientID: number,
   shape: HostShape = "bare",
   plugins: Plugin[] = [],
+  pluginsBefore: Plugin[] = [],
 ) {
   const base = page(baseline, clientID, shape);
   const mount = window.document.createElement("div");
@@ -223,6 +224,7 @@ export function person(
     state: EditorState.create({
       schema,
       plugins: [
+        ...pluginsBefore,
         bodySequencePlugin({ sequence: base.sequence, containers: base.containers, history }),
         keymap(baseKeymap),
         ...plugins,

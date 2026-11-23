@@ -271,19 +271,36 @@ function inserts(tokens: readonly Token[], path: readonly string[], inForce: Att
 
 const retain = (count: number): Change[] => (count > 0 ? [{ retain: count }] : []);
 
+const givenToLines = new WeakMap<Y.Doc, WeakSet<object>>();
+
+/**
+ * The boundaries made in this program for lines of a note that had none of their own: text before
+ * the first boundary, a paragraph the reader added to a list item, and the paragraph for what a
+ * block cannot hold. Undo leaves them, because text someone else typed in such a line since would
+ * leave the line with its boundary.
+ */
+export function boundariesGivenToLines(doc: Y.Doc): WeakSet<object> {
+  const known = givenToLines.get(doc);
+  if (known) return known;
+  const made = new WeakSet<object>();
+  givenToLines.set(doc, made);
+  return made;
+}
+
 function insertBoundary(
   writing: BodyWriting,
   index: number,
   block: ProseMirrorNode,
   path: readonly string[],
+  forLineThatHadNone: boolean,
 ): void {
+  const boundary = boundaryFor(block, path);
+  const doc = writing.sequence.doc;
+  if (forLineThatHadNone && doc) boundariesGivenToLines(doc).add(boundary);
   writing.reader.touch(index - 1, index);
   apply(writing.sequence, [
     ...retain(index),
-    {
-      insert: boundaryFor(block, path),
-      attributes: formattingInForceAfter(writing.sequence, index),
-    },
+    { insert: boundary, attributes: formattingInForceAfter(writing.sequence, index) },
   ]);
 }
 
@@ -320,9 +337,7 @@ function needsOwnBoundaryFirst(
   if (!atStart) return false;
   if (tokens.some((token) => "block" in token)) return true;
   const own = reading.lines[holder]?.read?.own.node;
-  return (
-    isParagraphAfterItsLeaf(reading, holder) && own?.isTextblock === true && "letters" in tokens[0]!
-  );
+  return isParagraphAfterItsLeaf(reading, holder) && own?.isTextblock === true;
 }
 
 function writeRange(
@@ -343,7 +358,8 @@ function writeRange(
   const hasText = holder >= 0 && reading.blocks[holder]!.node.content.size > 0;
 
   if (needsOwnBoundaryFirst(reading, holder, atStart, tokens)) {
-    insertBoundary(writing, placeForBoundaryOf(reading, holder), paragraph, reading.paths[holder]!);
+    const place = placeForBoundaryOf(reading, holder);
+    insertBoundary(writing, place, paragraph, reading.paths[holder]!, true);
     reading = reader.reading();
   }
 
@@ -436,7 +452,13 @@ function writeRange(
   if (isParagraphAfterItsLeaf(reading, kept) && count > 0) {
     const held = reading.bases[kept]!;
     if (held >= index && held < index + count)
-      insertBoundary(writing, placeForBoundaryOf(reading, kept), paragraph, reading.paths[kept]!);
+      insertBoundary(
+        writing,
+        placeForBoundaryOf(reading, kept),
+        paragraph,
+        reading.paths[kept]!,
+        true,
+      );
   }
   const needsInForce = rest.some((token) => !("letters" in token));
   apply(sequence, [
@@ -549,7 +571,14 @@ function writeBlockStartsThatDiffer(writing: BodyWriting, after: ProseMirrorNode
       const path = pathOfSameContainer(reading, after, depth > 0 ? $block.before(depth) : 0, depth);
       if (path === null) return false;
       const place = stored[edit.before]?.pos ?? a;
-      insertBoundary(writing, indexAt(reading, place), $block.nodeAfter!, path);
+      const block = $block.nodeAfter!;
+      insertBoundary(
+        writing,
+        indexAt(reading, place),
+        block,
+        path,
+        block.type.name === "paragraph",
+      );
       wrote = true;
     }
     if (!wrote) return false;
@@ -672,7 +701,7 @@ function writeFormatting(writing: BodyWriting, was: ProseMirrorNode, now: ProseM
     apply(sequence, changes);
   }
   for (const start of starts.reverse())
-    insertBoundary(writing, start.index, start.block, start.path);
+    insertBoundary(writing, start.index, start.block, start.path, false);
 }
 
 /**
