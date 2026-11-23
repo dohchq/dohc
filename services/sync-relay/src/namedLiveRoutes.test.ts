@@ -2460,7 +2460,8 @@ describe("a desktop's opens while a host is away", () => {
         .then(
           (response) => (answers[index] = response.status),
           (error: unknown) => {
-            if (!ended.signal.aborted) throw error;
+            if (!ended.signal.aborted || (error as Error).cause !== ended.signal.reason)
+              throw error;
           },
         );
       return index;
