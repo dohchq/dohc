@@ -45,6 +45,7 @@ interface EngineHistoryGroup {
   summary: string;
   recordedAtMs: number;
   correlationId?: string;
+  agentRunId?: string;
   moments: EngineMomentRecord[];
 }
 
@@ -113,8 +114,15 @@ export function HistoryPaused(props: { testId: string; className?: string }) {
 // The list label for one moment: its real engine summary when it has one,
 // else calm product copy derived from the operation.
 export function engineMomentSummary(
-  moment: Pick<EngineMomentRecord, "summary" | "operation" | "path" | "contentKind" | "byteLength">,
+  moment: Pick<
+    EngineMomentRecord,
+    "summary" | "operation" | "path" | "contentKind" | "byteLength"
+  > &
+    Partial<Pick<EngineMomentRecord, "origin" | "correlationId">>,
 ): string {
+  if (moment.origin === "restore" && moment.correlationId?.startsWith("restore-agent-run-")) {
+    return "Undid agent run";
+  }
   if (moment.summary) return moment.summary;
   if (moment.operation === "rename") return `Renamed to ${basenameOf(moment.path)}`;
   if (moment.operation === "delete") return `Deleted ${basenameOf(moment.path)}`;
@@ -278,6 +286,13 @@ function soleAuthorKey(moment: EngineMomentRecord): string | undefined {
   return author.kind === "human" ? `human:${author.humanId}` : undefined;
 }
 
+function soleAgentRunId(moment: EngineMomentRecord): string | undefined {
+  if (moment.origin === "restore" || isCaptureRecoveryOrigin(moment.origin)) return undefined;
+  const [author, ...others] = moment.authors ?? [];
+  if (author?.kind !== "agent" || others.length > 0) return undefined;
+  return author.agentRunId;
+}
+
 // An edit a run can hold. A restore and kept typing each keep a row of
 // their own, so they are never folded out of sight.
 function runEdit(moment: EngineMomentRecord): boolean {
@@ -295,9 +310,22 @@ function continuesRun(newer: EngineMomentRecord, older: EngineMomentRecord): boo
   return (
     author !== undefined &&
     author === soleAuthorKey(older) &&
+    soleAgentRunId(newer) === soleAgentRunId(older) &&
     newer.path === older.path &&
     runEdit(newer) &&
     runEdit(older) &&
+    dayKey(newer.recordedAtMs) === dayKey(older.recordedAtMs)
+  );
+}
+
+function continuesAgentRun(newer: EngineMomentRecord, older: EngineMomentRecord): boolean {
+  const runId = soleAgentRunId(newer);
+  const author = soleAuthorKey(newer);
+  return (
+    runId !== undefined &&
+    author !== undefined &&
+    runId === soleAgentRunId(older) &&
+    author === soleAuthorKey(older) &&
     dayKey(newer.recordedAtMs) === dayKey(older.recordedAtMs)
   );
 }
@@ -349,19 +377,27 @@ export function groupTimeline(loaded: readonly TimelineEntry[]): TimelineItem[] 
     }
     const { moment } = entry;
     const previous = items[items.length - 1];
+    const runId = soleAgentRunId(moment);
     if (
       previous?.kind === "files" &&
       moment.correlationId !== undefined &&
-      previous.group.correlationId === moment.correlationId
+      previous.group.correlationId === moment.correlationId &&
+      previous.group.agentRunId === runId
     ) {
       previous.group.moments.push(moment);
+      if (moment.origin === "restore" && moment.correlationId.startsWith("restore-agent-run-")) {
+        previous.group.summary = "Undid agent run";
+      } else if (previous.group.agentRunId !== undefined) {
+        previous.group.summary = "Agent run";
+      }
       continue;
     }
     const next = entries[index + 1];
     const startsPass =
       moment.correlationId !== undefined &&
       next?.kind === "file" &&
-      next.moment.correlationId === moment.correlationId;
+      next.moment.correlationId === moment.correlationId &&
+      soleAgentRunId(next.moment) === runId;
     if (
       previous?.kind === "files" &&
       (previous.group.run || previous.group.moments.length === 1) &&
@@ -370,18 +406,39 @@ export function groupTimeline(loaded: readonly TimelineEntry[]): TimelineItem[] 
     ) {
       previous.group.moments.push(moment);
       previous.group.run = true;
+      if (previous.group.agentRunId !== undefined && runId !== previous.group.agentRunId) {
+        delete previous.group.agentRunId;
+      }
       previous.key = previous.group.key = moment.id;
       continue;
     }
+    if (
+      previous?.kind === "files" &&
+      previous.group.agentRunId !== undefined &&
+      previous.group.agentRunId === runId &&
+      continuesAgentRun(previous.group.moments[previous.group.moments.length - 1]!, moment)
+    ) {
+      previous.group.moments.push(moment);
+      previous.group.run = false;
+      previous.group.summary = "Agent run";
+      delete previous.group.correlationId;
+      previous.key = previous.group.key = moment.id;
+      continue;
+    }
+    const initialSummary =
+      moment.origin === "restore" && moment.correlationId?.startsWith("restore-agent-run-")
+        ? "Undid agent run"
+        : engineMomentSummary(moment);
     items.push({
       kind: "files",
       key: moment.id,
       group: {
         key: moment.id,
         run: false,
-        summary: engineMomentSummary(moment),
+        summary: initialSummary,
         recordedAtMs: moment.recordedAtMs,
         ...(moment.correlationId !== undefined ? { correlationId: moment.correlationId } : {}),
+        ...(runId !== undefined ? { agentRunId: runId } : {}),
         moments: [moment],
       },
     });
@@ -1044,9 +1101,19 @@ function RunRow(props: {
   onToggle: () => void;
   openMomentId: string | null;
   onOpenMoment: (momentId: string, filePath: string) => void;
+  onUndoAgentRun?: (agentRunId: string, agentName: string | null) => void;
 }) {
   const [newest, ...earlier] = props.group.moments;
   const holdsOpen = !props.expanded && earlier.some((moment) => moment.id === props.openMomentId);
+  const agentAuthorName = groupAgentAuthorName(props.group.moments);
+  const resolvedAgentName =
+    agentAuthorName !== undefined
+      ? chatAuthorLabel({
+          authorKind: "agent",
+          authorDisplayName: agentAuthorName,
+          authorAgentId: personalAuthorId(props.group.moments[0] ?? {}),
+        })
+      : null;
   return (
     <div data-testid="engine-moment-run">
       <HistoryRow
@@ -1064,6 +1131,18 @@ function RunRow(props: {
       />
       {props.expanded ? (
         <div data-testid="engine-moment-run-earlier" className="ml-4 border-l border-line pl-1">
+          {props.group.agentRunId !== undefined && props.onUndoAgentRun ? (
+            <div className="flex items-center px-2 py-1">
+              <SecondaryButton
+                size="row"
+                data-testid="engine-moment-undo-run"
+                onClick={() => props.onUndoAgentRun!(props.group.agentRunId!, resolvedAgentName)}
+              >
+                <RotateCcw size={12} strokeWidth={1.9} aria-hidden />
+                Undo run…
+              </SecondaryButton>
+            </div>
+          ) : null}
           {earlier.map((moment) => (
             <HistoryRow
               key={moment.id}
@@ -1089,6 +1168,7 @@ function GroupRow(props: {
   onToggle: () => void;
   openMomentId: string | null;
   onOpenMoment: (momentId: string, filePath: string) => void;
+  onUndoAgentRun?: (agentRunId: string, agentName: string | null) => void;
 }) {
   const { group } = props;
   const { expanded } = props;
@@ -1096,8 +1176,21 @@ function GroupRow(props: {
   // Uniform agent authorship surfaces on the group row itself; mixed or
   // neutral groups show no author (never a guess).
   const agentAuthorName = groupAgentAuthorName(group.moments);
+  const resolvedAgentName =
+    agentAuthorName !== undefined
+      ? chatAuthorLabel({
+          authorKind: "agent",
+          authorDisplayName: agentAuthorName,
+          authorAgentId: personalAuthorId(group.moments[0] ?? {}),
+        })
+      : null;
   const groupConnected =
     agentAuthorName !== undefined && group.moments.every((moment) => connectedAuthor(moment, 0));
+  const fileCount =
+    group.agentRunId !== undefined
+      ? new Set(group.moments.map((moment) => moment.path)).size
+      : group.moments.length;
+  const fileNoun = group.agentRunId !== undefined && fileCount === 1 ? "file" : "files";
   const Chevron = expanded ? ChevronDown : ChevronRight;
   // A collapsed pass holding the open change says so, as a run does.
   const holdsOpen = !expanded && group.moments.some((moment) => moment.id === props.openMomentId);
@@ -1119,7 +1212,7 @@ function GroupRow(props: {
           <Chevron size={14} aria-hidden />
         </span>
         <span className={LINE_TWO}>
-          {agentAuthorName !== undefined ? (
+          {resolvedAgentName !== null ? (
             <span
               data-testid="engine-moment-group-source"
               className="inline-flex min-w-0 max-w-[45%] shrink-0 items-center gap-1"
@@ -1130,24 +1223,30 @@ function GroupRow(props: {
                   <span className="sr-only">Connected agent </span>
                 </span>
               ) : null}
-              <span className="min-w-0 truncate">
-                {chatAuthorLabel({
-                  authorKind: "agent",
-                  authorDisplayName: agentAuthorName,
-                  authorAgentId: personalAuthorId(group.moments[0] ?? {}),
-                })}
-              </span>
+              <span className="min-w-0 truncate">{resolvedAgentName}</span>
             </span>
           ) : null}
           <span className="min-w-0 truncate">{group.summary}</span>
           <span className="shrink-0 text-subtle">
-            <LoadedCount count={group.moments.length} more={props.more} noun="files" />
+            <LoadedCount count={fileCount} more={props.more} noun={fileNoun} />
           </span>
         </span>
       </button>
       {holdsOpen ? <HiddenWords id={holdsOpenId}>{HOLDS_OPEN}</HiddenWords> : null}
       {expanded ? (
         <div data-testid="engine-moment-group-files" className="ml-4 border-l border-line pl-1">
+          {group.agentRunId !== undefined && props.onUndoAgentRun ? (
+            <div className="flex items-center px-2 py-1">
+              <SecondaryButton
+                size="row"
+                data-testid="engine-moment-undo-run"
+                onClick={() => props.onUndoAgentRun!(group.agentRunId!, resolvedAgentName)}
+              >
+                <RotateCcw size={12} strokeWidth={1.9} aria-hidden />
+                Undo run…
+              </SecondaryButton>
+            </div>
+          ) : null}
           {group.moments.map((moment) => (
             <HistoryRow
               key={moment.id}
@@ -1371,6 +1470,7 @@ export function EngineHistoryView(props: {
   omittedSources?: number;
   collections?: HistoryCollections;
   onRetry?: () => void;
+  onUndoAgentRun?: (agentRunId: string, agentName: string | null) => void;
   // History stopped recording, so this page may be missing changes.
   paused?: boolean;
 }) {
@@ -1446,6 +1546,7 @@ export function EngineHistoryView(props: {
       headerItemCount,
       listItemCount,
       onOpenMoment: props.onOpenMoment,
+      onUndoAgentRun: props.onUndoAgentRun,
       collections,
       openMomentId,
       moreKey,
@@ -1456,6 +1557,7 @@ export function EngineHistoryView(props: {
       headerItemCount,
       listItemCount,
       props.onOpenMoment,
+      props.onUndoAgentRun,
       collections,
       openMomentId,
       moreKey,
@@ -1657,6 +1759,7 @@ export function EngineHistoryView(props: {
                       onToggle={() => toggleGroup(item.key)}
                       openMomentId={openMomentId}
                       onOpenMoment={props.onOpenMoment}
+                      onUndoAgentRun={props.onUndoAgentRun}
                     />
                   ) : (
                     <GroupRow
@@ -1666,6 +1769,7 @@ export function EngineHistoryView(props: {
                       onToggle={() => toggleGroup(item.key)}
                       openMomentId={openMomentId}
                       onOpenMoment={props.onOpenMoment}
+                      onUndoAgentRun={props.onUndoAgentRun}
                     />
                   )
                 ) : (

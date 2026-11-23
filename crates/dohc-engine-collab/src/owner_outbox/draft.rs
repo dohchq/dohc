@@ -28,8 +28,8 @@ pub struct OwnerDraft {
 /// Edits the note's room took and has not saved yet, keyed by room position
 /// and held in memory for the owner's screen. The room sends its unsaved edits
 /// again after a reconnect or a restart; only the owner's own are also on disk
-/// (`taken.rs`). A save names the last room position it holds, which can be
-/// below its own journal cursor, so rows go only through that position.
+/// (`taken.rs`). A save names the position through which every room row is
+/// saved, below its own journal cursor, so rows go only through that position.
 #[derive(Default)]
 pub(crate) struct OwnerLayer {
     binding: Option<(String, i64)>,

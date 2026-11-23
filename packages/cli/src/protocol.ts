@@ -1244,10 +1244,15 @@ export type CliRequest = z.infer<typeof cliRequestSchema>;
 export type CliVerb = CliRequest["verb"];
 
 export const APP_PUBLICATION_CAPABILITIES = {
+  verifyFrontend: "app.frontend.verify",
   createLink: "app.link.create",
   listLocal: "app.local.list",
   checkLocal: "app.local.check",
   prepareLocal: "app.local.prepare",
+  stage: "app.local.stage",
+  listStaged: "app.local.staged.list",
+  approveStaged: "app.local.staged.approve",
+  discardStaged: "app.local.staged.discard",
   launchLocal: "app.local.launch",
   list: "app.publication.list",
   prepare: "app.publication.prepare",

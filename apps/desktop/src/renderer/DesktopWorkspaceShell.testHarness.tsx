@@ -861,6 +861,23 @@ function makeBaseBridge(
       path: ".env",
       status: "discarded" as const,
     })),
+    planUndoAgentRun: vi.fn(async (payload: { workspaceId: string; agentRunId: string }) => ({
+      agentRunId: payload.agentRunId,
+      agentName: null,
+      planToken: "plan-token",
+      truncated: false,
+      scannedChanges: 0,
+      restorable: [],
+      skipped: [],
+    })),
+    undoAgentRun: vi.fn(async (payload: { workspaceId: string; agentRunId: string }) => ({
+      agentRunId: payload.agentRunId,
+      correlationId: null,
+      truncated: false,
+      restored: [],
+      skipped: [],
+      failed: [],
+    })),
     // Typed to the contract: the capture recovery tests swap the answer.
     getCaptureRecoveryStatus: vi.fn(
       async (_payload: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({

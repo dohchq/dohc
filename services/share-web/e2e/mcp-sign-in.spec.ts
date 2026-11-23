@@ -134,6 +134,7 @@ test("a person allows an agent from the consent page, and the agent reaches the 
       200,
     );
     expect(server.issuer).toBe(front);
+    expect(server.authorization_response_iss_parameter_supported).toBe(true);
     const registered = await jsonBody(
       await request.post(requiredText(server.registration_endpoint, "registration_endpoint"), {
         data: { redirect_uris: [callback.redirectUri], client_name: CLIENT_NAME },
@@ -160,7 +161,12 @@ test("a person allows an agent from the consent page, and the agent reaches the 
     const allowState = randomBytes(16).toString("base64url");
     await page.goto(authorizeUrl(allowState, allowed.challenge));
     await expect(page.getByRole("heading", { name: CONSENT_HEADING })).toBeVisible();
-    await expect(page.getByText(CLIENT_NAME, { exact: true })).toBeVisible();
+    await expect(page.getByText(`"${CLIENT_NAME}" is the name the agent gave.`)).toBeVisible();
+    await expect(
+      page.getByText(
+        `${CLIENT_NAME} runs outside dohc. dohc limits what it reaches here, not what it does elsewhere.`,
+      ),
+    ).toBeVisible();
     expect(await consentCookieNames(context, front)).toHaveLength(1);
     const decision = page.waitForRequest(
       (sent) => sent.method() === "POST" && sent.url() === `${front}/oauth/authorize/decision`,
@@ -172,6 +178,7 @@ test("a person allows an agent from the consent page, and the agent reaches the 
     expect(callback.received).toHaveLength(1);
     const allowAnswer = callback.received[0]!;
     expect(allowAnswer.query.get("state")).toBe(allowState);
+    expect(allowAnswer.query.get("iss")).toBe(front);
     expect(allowAnswer.query.get("error")).toBeNull();
     const code = requiredText(allowAnswer.query.get("code"), "code");
     // The consent page's same-origin referrer policy keeps its address off the redirect.
@@ -220,6 +227,7 @@ test("a person allows an agent from the consent page, and the agent reaches the 
     const cancelAnswer = callback.received[1]!;
     expect(cancelAnswer.query.get("error")).toBe("access_denied");
     expect(cancelAnswer.query.get("state")).toBe(cancelState);
+    expect(cancelAnswer.query.get("iss")).toBe(front);
     expect(cancelAnswer.query.get("code")).toBeNull();
     expect(await consentCookieNames(context, front)).toEqual([]);
   } finally {

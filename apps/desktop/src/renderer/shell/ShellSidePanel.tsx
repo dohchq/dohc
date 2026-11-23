@@ -53,6 +53,7 @@ export interface ShellSidePanelProps {
   reportShellError: SitePreviewPageProps["reportError"];
   appNotices: SitePreviewPageProps["notices"];
   appAccess: SitePreviewPageProps["access"];
+  onCollectionsChange?: SitePreviewPageProps["onCollectionsChange"];
   setShareTarget: (target: RelayShareTarget) => void;
 }
 
@@ -71,6 +72,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
     reportShellError,
     appNotices,
     appAccess,
+    onCollectionsChange,
     setAppPinned,
     setShareTarget,
     showAppsInExplorer,
@@ -127,6 +129,7 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
               onShareSite={(target) =>
                 setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
               }
+              onCollectionsChange={onCollectionsChange}
               access={appAccess}
             />
           </Suspense>

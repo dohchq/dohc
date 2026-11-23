@@ -574,3 +574,128 @@ test("@dataset-collection Apply on a chat's change card gives the Collection the
     await cleanupDesktopWorkspace(desktop, workspace);
   }
 });
+
+test("@dataset-collection bound app drift appears in migration review and unpinned forms re-approve cleanly", async () => {
+  test.setTimeout(180_000);
+  const workspace = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    desktop = await launchDesktopApp({ workspace });
+    const { page } = desktop;
+    const { workspaceId } = await openWorkspaceFromFirstRun(page, workspace);
+    await desktop.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"),
+    );
+    const create = page.getByTestId("new-collection-dialog");
+    await create.getByLabel("Collection name").fill("Fundraiser");
+    await create.getByTestId("new-collection-create").click();
+    await expect(create).toBeHidden();
+    const collection = page.getByRole("region", { name: "Fundraiser", exact: true });
+    await expect(collection).toBeVisible();
+
+    const listed = await page.evaluate(
+      async (id) => window.dohcDesktop!.dataset({ workspaceId: id, action: "list" }),
+      workspaceId,
+    );
+    if (listed.kind !== "list" || !listed.datasets[0]?.datasetPath)
+      throw Error("Expected the new Collection.");
+    const datasetPath = listed.datasets[0].datasetPath;
+    const described = await page.evaluate(async (req) => window.dohcDesktop!.dataset(req), {
+      workspaceId,
+      action: "describe" as const,
+      datasetPath,
+    });
+    if (described.kind !== "description") throw Error("Expected Collection description.");
+    const table = described.dataset.tables[0]!;
+    const createOp = described.dataset.operations.find((op) => op.kind === "create")!;
+
+    const formCreated = await page.evaluate(async (req) => window.dohcDesktop!.dataset(req), {
+      workspaceId,
+      action: "createForm" as const,
+      datasetPath,
+      revision: described.dataset.revision,
+      revisionSha256: described.dataset.revisionSha256,
+      tableId: table.tableId,
+      createOperationId: createOp.operationId,
+      appRoot: "apps/signup",
+      fieldIds: createOp.fieldIds,
+    });
+    expect(formCreated.kind).toBe("form-created");
+    const manifestJson = JSON.parse(
+      await readFile(join(workspace.rootPath, "apps", "signup", "app.publish.json"), "utf8"),
+    );
+    expect(manifestJson.dataset.revision).toBeUndefined();
+    expect(manifestJson.dataset.revisionSha256).toBeUndefined();
+
+    const cliApp = async (verb: string, request: Record<string, unknown>) => {
+      const out = await runDohcCli(workspace, ["app", verb, JSON.stringify(request), "--json"]);
+      expect(out.stderr).toBe("");
+      return JSON.parse(out.stdout);
+    };
+    const prep1 = await cliApp("prepareLocal", { workspaceId, appRoot: "apps/signup" });
+    expect(prep1.kind).toBe("prepared");
+    const pub1 = await cliApp("approve", {
+      workspaceId,
+      approvalId: prep1.approvalId,
+      candidateDigest: prep1.candidateDigest,
+    });
+    expect(pub1.kind).toBe("published");
+
+    await (await collectionCommand(collection, "Fields and names")).click();
+    const fields = page.getByRole("dialog", { name: "Fields and names" });
+    await fields.getByLabel("Name", { exact: true }).fill("Notes");
+    await fields.getByRole("button", { name: "Review change", exact: true }).click();
+    const review = page.getByRole("dialog", { name: "Review Collection change" });
+    const connected = review.getByRole("region", { name: "Connected apps" });
+    await expect(connected).toBeVisible();
+    await expect(connected).toContainText("Connected apps (1)");
+    await expect(connected).toContainText("apps/signup");
+    await expect(connected).toContainText("Local");
+    await expect(connected).toContainText("Needs approval again");
+    await page.screenshot({ path: test.info().outputPath("bound-app-migration-review.png") });
+    await review
+      .getByRole("checkbox", { name: "I reviewed this change and its effect on existing data" })
+      .check();
+    await review.getByRole("button", { name: "Approve change" }).click();
+    await expect(review).toBeHidden();
+
+    const cliPerms = async () => {
+      const out = await runDohcCli(workspace, [
+        "dataset",
+        "permissions",
+        JSON.stringify({ workspaceId, datasetPath }),
+        "--json",
+      ]);
+      expect(out.stderr).toBe("");
+      return JSON.parse(out.stdout);
+    };
+    const stalePerms = await cliPerms();
+    expect(stalePerms.boundApps).toMatchObject([
+      { scope: "local", appRoot: "apps/signup", status: "needs-refresh" },
+    ]);
+
+    const prep2 = await cliApp("prepareLocal", { workspaceId, appRoot: "apps/signup" });
+    expect(prep2.kind).toBe("prepared");
+    const pub2 = await cliApp("approve", {
+      workspaceId,
+      approvalId: prep2.approvalId,
+      candidateDigest: prep2.candidateDigest,
+    });
+    expect(pub2.kind).toBe("published");
+
+    const refreshedPerms = await cliPerms();
+    expect(refreshedPerms.boundApps).toMatchObject([
+      {
+        scope: "local",
+        publicationId: pub2.publicationId,
+        appRoot: "apps/signup",
+        pinnedRevision: 2,
+        status: "compatible",
+      },
+    ]);
+    expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    assertDesktopEngineHealthy(desktop.logs);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, workspace);
+  }
+});

@@ -14,8 +14,8 @@ node apps/desktop/scripts/stage-trip-poll.mjs C:/path/to/workspace
 ```
 
 The script creates `trip-poll` and refuses to overwrite an existing folder.
-It copies the app source, installed React dependencies and their licenses,
-the response collection schema, and an `app.publish.json` declaration.
+It copies the app source, the response collection schema, and an `app.publish.json`
+declaration. React and ReactDOM come from dohc's pinned built-in kit.
 Share the `trip-poll` folder and prepare it for publication in dohc.
 Collection responses require the owner's approval and an enabled collection service.
 

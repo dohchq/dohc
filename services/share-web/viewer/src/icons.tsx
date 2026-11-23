@@ -248,6 +248,13 @@ const SHAPES = {
       <path d="M8 16H3v5" />
     </>
   ),
+  plus: (
+    <>
+      <path d="M5 12h14" />
+      <path d="M12 5v14" />
+    </>
+  ),
+  minus: <path d="M5 12h14" />,
   "panel-left": (
     <>
       <rect width="18" height="18" x="3" y="3" rx="2" />

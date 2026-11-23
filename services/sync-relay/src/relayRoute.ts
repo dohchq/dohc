@@ -356,6 +356,9 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   }
   if (parts.length === 4 && parts[2] === "ops") return parseAccountOperationRoute(parts);
   const workspaceId = parseWorkspaceId(parts[1]);
+  if (parts.length === 3 && parts[2] === "local-apps") {
+    return { route: "dataset", workspaceId, action: "local-app" };
+  }
   if (parts[2] === "datasets") {
     if (parts.length === 3) return { route: "dataset", workspaceId, action: "list" };
     const datasetId = parts[3];

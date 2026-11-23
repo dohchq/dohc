@@ -145,6 +145,8 @@ jobs:
               - '.github/workflows/desktop-release.yml'
               # packages/mcp's reference test compares this page with its generator.
               - 'docs/reference/cli-mcp-sdk.md'
+              # packages/mcp's eval case test validates YAML examples in the public skill.
+              - 'skills/dohc/references/automations.md'
               # Source-backed example apps are compiled and staged by the desktop scripts.
               - 'examples/trip-poll/**'
               - 'examples/fundraiser/**'

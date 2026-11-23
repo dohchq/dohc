@@ -61,7 +61,9 @@ const whole = (value: unknown): unknown =>
   value >= BigInt(Number.MIN_SAFE_INTEGER) &&
   value <= BigInt(Number.MAX_SAFE_INTEGER)
     ? Number(value)
-    : value;
+    : Object.is(value, -0)
+      ? 0
+      : value;
 
 const MAX_SPAN = 1000;
 const MAX_LIST_START = 999_999_999;
@@ -138,9 +140,9 @@ function attrsFor(type: NodeType | MarkType, raw: unknown): SequenceAttrs {
   const attrs: SequenceAttrs = {};
   for (const key of Object.keys(type.spec.attrs ?? {})) {
     const held = whole(own(given, key));
-    const value = filled(held)?.map(whole) ?? held;
-    if (value !== undefined && (VALUE_RULES[`${type.name}.${key}`] ?? plain)(value))
-      attrs[key] = value;
+    const rule = VALUE_RULES[`${type.name}.${key}`] ?? plain;
+    const value = rule === widths ? (filled(held)?.map(whole) ?? held) : held;
+    if (value !== undefined && rule(value)) attrs[key] = value;
   }
   return attrs;
 }
@@ -191,7 +193,12 @@ export function allowedChildren(schema: Schema): Record<string, string[]> {
   return Object.fromEntries(Object.entries(table).sort(([a], [b]) => a.localeCompare(b)));
 }
 
-function pathOf(schema: Schema, value: unknown, containers: ContainerRecords): SequenceFrame[] {
+function pathOf(
+  schema: Schema,
+  value: unknown,
+  containers: ContainerRecords,
+  held: Map<string, SequenceAttrs>,
+): SequenceFrame[] {
   const shape = shapeOf(schema);
   const path: SequenceFrame[] = [];
   const ids = filled(value);
@@ -206,10 +213,14 @@ function pathOf(schema: Schema, value: unknown, containers: ContainerRecords): S
     const type = allowed.size === 1 ? [...allowed][0] : schema.nodes[recorded];
     if (!shape.container(type) || !allowed.has(type)) break;
     seen.add(id);
-    const attrs: SequenceAttrs = {};
-    for (const key of Object.keys(type.spec.attrs ?? {})) {
-      const held = containers.get(`${id}.${key}`);
-      if (held !== undefined) attrs[key] = held;
+    let attrs = held.get(`${type.name} ${id}`);
+    if (!attrs) {
+      attrs = {};
+      for (const key of Object.keys(type.spec.attrs ?? {})) {
+        const stored = containers.get(`${id}.${key}`);
+        if (stored !== undefined) attrs[key] = stored;
+      }
+      held.set(`${type.name} ${id}`, attrs);
     }
     path.push({ type: type.name, id, attrs });
     parent = type;
@@ -232,6 +243,7 @@ export function leavesOfSequence<Inline extends SequenceInline = SequenceInline>
 ): SequenceLeaf<Inline>[] {
   const shape = shapeOf(schema);
   const leaves: SequenceLeaf<Inline>[] = [];
+  const held = new Map<string, SequenceAttrs>();
   for (const piece of pieces) {
     if (startsLeaf(piece))
       leaves.push({
@@ -240,7 +252,7 @@ export function leavesOfSequence<Inline extends SequenceInline = SequenceInline>
             ? String(piece.boundary.type)
             : "paragraph",
         attrs: piece.boundary,
-        path: pathOf(schema, own(piece.boundary, "path"), containers),
+        path: pathOf(schema, own(piece.boundary, "path"), containers, held),
         inline: [],
       });
     else if (leaves.length > 0) leaves.at(-1)!.inline.push(piece);
@@ -435,6 +447,14 @@ export function placeLeaves<Inline extends SequenceInline>(
     into().push(block.node);
     pos += block.node.nodeSize;
   };
+  const fitted = new WeakMap<SequenceAttrs, { type: NodeType; attrs: SequenceAttrs }>();
+  const frameAttrs = (type: NodeType, stored: SequenceAttrs) => {
+    const known = fitted.get(stored);
+    if (known?.type === type) return known.attrs;
+    const attrs = attrsFor(type, stored);
+    fitted.set(stored, { type, attrs });
+    return attrs;
+  };
   const closeTo = (depth: number) => {
     if (stack.length <= depth) return;
     while (stack.length > depth) {
@@ -461,7 +481,7 @@ export function placeLeaves<Inline extends SequenceInline>(
       }
       into().push(
         open.type.create(
-          attrsFor(open.type, open.frame.attrs),
+          frameAttrs(open.type, open.frame.attrs),
           missing ? missing.append(content) : content,
         ),
       );

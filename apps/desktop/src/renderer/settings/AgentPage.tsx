@@ -1016,6 +1016,12 @@ export function AgentPage(props: {
               </p>
             ) : null}
           </div>
+          {props.mcpConfig !== null ? (
+            <p data-testid="agent-mcp-note" className="m-0 mt-2 text-[12px] text-muted">
+              For local apps on this computer such as Claude Desktop or Cursor. Save the app's MCP
+              config file, then restart the app.
+            </p>
+          ) : null}
           {props.run ? (
             <>
               <h4 className={SECTION}>History</h4>
@@ -1049,7 +1055,7 @@ export function AgentPage(props: {
                 </PageRow>
               </div>
               <p className="m-0 mt-2 text-[12px] text-muted">
-                {`While a run is on, History shows changes in this workspace as ${agent.name}'s.`}
+                {`MCP edits (and CLI commands with --agent-id) already show as ${agent.name}'s. Start a run to also mark direct file edits in this workspace.`}
               </p>
             </>
           ) : null}
@@ -1115,7 +1121,7 @@ export function AgentPage(props: {
           </PageRow>
         ) : forwarded ? null : (
           <PageRow label="Reaches">
-            <span className={VALUE}>Every workspace dohc opens on this computer</span>
+            <span className={VALUE}>This workspace (copy the config in each workspace)</span>
           </PageRow>
         )}
       </div>

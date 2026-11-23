@@ -617,6 +617,9 @@ export interface VersionedTextStore {
     path: string;
     requestId?: string;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: WorkspaceObjectId;
+    expectedPathClearHeadMomentId?: VersionedTextMomentId;
     text: string;
     /** Publish after committing. Omit when recording bytes already on disk. */
     publish?: boolean;
@@ -625,6 +628,7 @@ export interface VersionedTextStore {
     metadata: ActorNeutralWriteMetadata;
     author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
+    beforeSend?: () => void;
   }): Promise<VersionedTextWriteResult>;
   writeBinaryFile(input: {
     workspaceId: WorkspaceId;
@@ -632,11 +636,15 @@ export interface VersionedTextStore {
     path: string;
     requestId?: string;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: WorkspaceObjectId;
+    expectedPathClearHeadMomentId?: VersionedTextMomentId;
     bytes: Uint8Array;
     createOnly?: boolean;
     metadata: ActorNeutralWriteMetadata;
     author?: MomentWriteAuthor;
     momentId?: VersionedTextMomentId;
+    beforeSend?: () => void;
   }): Promise<VersionedTextWriteResult>;
   readBinaryFile(input: {
     workspaceId: WorkspaceId;
@@ -708,6 +716,9 @@ export interface VersionedTextStore {
     path: string;
     expectedObjectId?: WorkspaceObjectId;
     expectedSha256?: string;
+    expectedPathClearSinceOrder?: number;
+    expectedPathClearObjectId?: WorkspaceObjectId;
+    expectedPathClearHeadMomentId?: VersionedTextMomentId;
     // Delete only if the path is still missing on disk when the engine applies
     // the delete. A caller that saw the file missing sets it: a replace can
     // empty the name for a moment.
@@ -718,6 +729,7 @@ export interface VersionedTextStore {
     momentId?: VersionedTextMomentId;
     // Refused once this `capture.hold` ended.
     captureHoldId?: string;
+    beforeSend?: () => void;
   }): Promise<VersionedTextDeleteResult>;
   // Fails closed (invalid-input) on sync record-only moments: divergent peer
   // history never rewrites the local materialized snapshot.

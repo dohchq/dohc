@@ -1,3 +1,4 @@
+import type { UndoAgentRunResult } from "@dohc/workspace-contracts/agent-run-undo";
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { ChatMessageWaiters } from "./chatMessageWaiters";
 import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
@@ -590,6 +591,11 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent in a shared view, which keeps no copies or versions of its own.
   versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
+  agentRunUndo?: (
+    agentRunId: string,
+    planToken: string,
+    origin: LiveDocumentEditOrigin,
+  ) => Promise<UndoAgentRunResult>;
   heldNoteChange?: (input: HeldNoteChangeInput) => Promise<HeldNoteChangeResult>;
   retainedCopies?: CliRetainedCopiesPort;
   keptEdits?: CliKeptEditsPort;
@@ -2449,6 +2455,7 @@ const HAND_WRITTEN_SHARE_RULES: {
   chatLinks: "anywhere",
   chatFileMentions: "anywhere",
   outsideChanges: "owner",
+  planUndoAgentRun: "owner",
   workspaceSearch: "owner",
   linksEdges: "anywhere",
   linksIn: "anywhere",
@@ -2492,7 +2499,15 @@ const HAND_WRITTEN_SHARE_RULES: {
   automationButtons: "anywhere",
   dataset: (request) =>
     DATASET_PATH_FIELDS.some((field) => field in request.args.request) ? "anywhere" : "owner",
-  appPublication: (request) => ("appRoot" in request.args.request ? "anywhere" : "owner"),
+  appPublication: (request) =>
+    request.args.request.action === "stage" ||
+    request.args.request.action === "listStaged" ||
+    request.args.request.action === "approveStaged" ||
+    request.args.request.action === "discardStaged"
+      ? "owner"
+      : "appRoot" in request.args.request && typeof request.args.request.appRoot === "string"
+        ? "anywhere"
+        : "owner",
   stopSync: "owner",
   shareCopy: "owner",
   shareAgents: "owner",
@@ -2696,12 +2711,24 @@ async function dispatch(
           args: {
             ...request.args,
             request:
-              "appRoot" in input
+              "appRoot" in input && typeof input.appRoot === "string"
                 ? {
                     ...input,
                     appRoot: paths.rebase(input.appRoot, "read"),
                     ...(input.action === "createLink" && input.paths
                       ? { paths: input.paths.map((path) => paths.rebase(path, "read")) }
+                      : {}),
+                    ...(input.action === "stage" && input.migrations
+                      ? {
+                          migrations: Object.fromEntries(
+                            Object.entries(input.migrations).map(([key, filePath]) => [
+                              key.includes("/") || key.endsWith(".json")
+                                ? paths.rebase(key, "read")
+                                : key,
+                              paths.rebase(filePath, "read"),
+                            ]),
+                          ),
+                        }
                       : {}),
                   }
                 : input,
@@ -2886,7 +2913,11 @@ async function dispatch(
           translated.datasetPath = paths.rebase(translated.datasetPath, "read");
         if ("descriptorPath" in translated)
           translated.descriptorPath = paths.rebase(translated.descriptorPath, "read");
-        if ("migrationPath" in translated)
+        if (
+          "migrationPath" in translated &&
+          translated.migrationPath !== null &&
+          translated.migrationPath !== undefined
+        )
           translated.migrationPath = paths.rebase(translated.migrationPath, "read");
         if ("sourcePath" in translated && translated.sourcePath !== undefined)
           translated.sourcePath = paths.recoveryPath(translated.sourcePath, "read");
@@ -3059,6 +3090,51 @@ const DECLARED_WRITERS: {
       return pathFreeFailure(error, "dohc could not restore the kept change.");
     }
   },
+  undoAgentRun: async (request, context, options) => {
+    if (request.args.actor !== "agent") {
+      return {
+        ok: false as const,
+        reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".`,
+      };
+    }
+    if (context.connected !== undefined) {
+      return {
+        ok: false as const,
+        reason:
+          "Connected agents cannot undo an agent run. Undo from desktop History or the owner's local CLI.",
+      };
+    }
+    if (
+      context.run !== undefined ||
+      options.agentWriteRunId(context.workspaceId) !== null ||
+      options.agentRunDepth(context.workspaceId) > 0
+    ) {
+      return {
+        ok: false as const,
+        reason: "Finish the active agent run before undoing an agent run.",
+      };
+    }
+    if (context.readOnly) {
+      return {
+        ok: false as const,
+        reason: "This workspace is read-only. Write in the owning workspace.",
+      };
+    }
+    if (!context.agentRunUndo) {
+      return { ok: false as const, reason: "Agent run undo is unavailable." };
+    }
+    try {
+      const result = await context.agentRunUndo(
+        request.args.agentRunId,
+        request.args.planToken,
+        documentEditOrigin(context, options, undefined),
+      );
+      if (result.restored.length > 0) await notifyWrite(options, context);
+      return { ok: true as const, ...result };
+    } catch (error) {
+      return pathFreeFailure(error, "dohc could not undo this agent run.");
+    }
+  },
 };
 
 async function dispatchWorkspace(
@@ -3144,12 +3220,12 @@ async function dispatchWorkspace(
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.sharing(request.args);
     case "appPublication": {
-      if (
-        request.args.request.workspaceId !== context.workspaceId ||
-        context.readOnly ||
-        !context.appPublication
-      )
+      if (context.readOnly || !context.appPublication)
         throw new CliCommandError("App publication requires the owning workspace.");
+      if (request.args.request.workspaceId !== context.workspaceId)
+        throw new CliCommandError(
+          "workspaceId does not match this workspace. Read workspaceId from .dohc/manifest.json or dohc_list_workspaces.",
+        );
       if (options.agentRunDepth(context.workspaceId) > 0)
         throw new CliCommandError("Automations cannot use app publication.");
       const agent =
@@ -3168,12 +3244,12 @@ async function dispatchWorkspace(
     case "dataset": {
       if (request.args.request.action === "export" && !request.args.request.savePath)
         throw new CliCommandError("Collection export requires an explicit savePath.");
-      if (
-        request.args.request.workspaceId !== context.workspaceId ||
-        context.readOnly ||
-        !context.dataset
-      )
+      if (context.readOnly || !context.dataset)
         throw new CliCommandError("Collections require the owning workspace.");
+      if (request.args.request.workspaceId !== context.workspaceId)
+        throw new CliCommandError(
+          "workspaceId does not match this workspace. Read workspaceId from .dohc/manifest.json or dohc_list_workspaces.",
+        );
       if (
         request.args.request.action === "approve" ||
         request.args.request.action === "approveMigration"
@@ -3199,12 +3275,12 @@ async function dispatchWorkspace(
       );
     }
     case "ownerAppResponses": {
-      if (
-        request.args.request.workspaceId !== context.workspaceId ||
-        context.readOnly ||
-        !context.ownerAppResponses
-      )
+      if (context.readOnly || !context.ownerAppResponses)
         throw new CliCommandError("App responses require the owning workspace.");
+      if (request.args.request.workspaceId !== context.workspaceId)
+        throw new CliCommandError(
+          "workspaceId does not match this workspace. Read workspaceId from .dohc/manifest.json or dohc_list_workspaces.",
+        );
       return context.ownerAppResponses(request.args.request);
     }
     case "moments": {

@@ -4,7 +4,13 @@ import { expect, it } from "vitest";
 import { VIEWER_PAGES } from "./pages";
 
 const ROUTES = ["App.tsx", "NamedRecipientApp.tsx", "NamedChatApp.tsx", "NamedApp.tsx"];
-const EDITOR = ["NamedDocumentEditor.tsx", "DiscardDraft.tsx"];
+const EDITOR = [
+  "NamedDocumentEditor.tsx",
+  "DiscardDraft.tsx",
+  "LinkDocumentEditor.tsx",
+  "CollectionFileEditor.tsx",
+  "linkLive.ts",
+];
 
 it("loads only each route's own code before it renders", async () => {
   const result = await build({
@@ -48,6 +54,7 @@ it("loads only each route's own code before it renders", async () => {
     "chat.html": ["NamedChatApp.tsx"],
     "apps.html": ["NamedApp.tsx"],
   });
+  expect(loads(pages["index.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["chat.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["apps.html"]!, EDITOR)).toEqual([]);
 });

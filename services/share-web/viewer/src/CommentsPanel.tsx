@@ -734,71 +734,75 @@ export function CommentsPanel(props: {
                   : "";
   return (
     <aside className="comments-panel" aria-labelledby="comments-title">
-      <h2 id="comments-title">Comments</h2>
-      <p className="comments-helper">
-        {props.access !== "view"
-          ? "Anyone with the link can also comment. Names they give are not verified."
-          : "Anyone with the link can read what you selected."}
-      </p>
-      {currentLoadState === "ready" && earlierCursor !== null ? (
-        <div>
-          {earlierError ? (
-            <p className="comments-empty" role="status">
-              {earlierError}
-            </p>
-          ) : null}
-          <div className="comment-submit-row">
-            <button
-              type="button"
-              disabled={earlierPending || followerPhase !== "live"}
-              onClick={() => void loadEarlierComments()}
-            >
-              Load earlier comments
-            </button>
-          </div>
-        </div>
-      ) : null}
-      {currentLoadState === "loading" ? (
-        <p className="comments-empty">Loading comments…</p>
-      ) : currentLoadState === "failed" ? (
-        <div>
-          <p className="comments-empty">{loadError}</p>
-          <div className="comment-submit-row">
-            <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
-              Try again
-            </button>
-          </div>
-        </div>
-      ) : messages?.length === 0 ? (
-        <p className="comments-empty">No comments yet.</p>
-      ) : (
-        <ol className="comment-list">
-          {messages?.map((message) => (
-            <CommentRow key={message.messageId} message={message} nowMs={Date.now()} />
-          ))}
-        </ol>
-      )}
-      {currentLoadState === "ready" && followerPhase === "live" && followerError ? (
-        <p className="comment-submit-status" role="status">
-          {followerError}
+      <div className="comments-header">
+        <h2 id="comments-title">Comments</h2>
+        <p className="comments-helper">
+          {props.access !== "view"
+            ? "Anyone with the link can also comment. Names they give are not verified."
+            : "Anyone with the link can read what you selected."}
         </p>
-      ) : null}
-      {currentLoadState === "ready" && followerPhase !== "live" ? (
-        <div>
-          <p className="comment-submit-status" role="status">
-            {followerError ?? "Comments stopped updating."}
-          </p>
-          <div className="comment-submit-row">
-            <button
-              type="button"
-              disabled={followerPhase === "recovering"}
-              onClick={recoverDiscussion}
-            >
-              Try again
-            </button>
+      </div>
+      <div className="comments-scroll">
+        {currentLoadState === "ready" && earlierCursor !== null ? (
+          <div>
+            {earlierError ? (
+              <p className="comments-empty" role="status">
+                {earlierError}
+              </p>
+            ) : null}
+            <div className="comment-submit-row">
+              <button
+                type="button"
+                disabled={earlierPending || followerPhase !== "live"}
+                onClick={() => void loadEarlierComments()}
+              >
+                Load earlier comments
+              </button>
+            </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+        {currentLoadState === "loading" ? (
+          <p className="comments-empty">Loading comments…</p>
+        ) : currentLoadState === "failed" ? (
+          <div>
+            <p className="comments-empty">{loadError}</p>
+            <div className="comment-submit-row">
+              <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
+                Try again
+              </button>
+            </div>
+          </div>
+        ) : messages?.length === 0 ? (
+          <p className="comments-empty">No comments yet.</p>
+        ) : (
+          <ol className="comment-list">
+            {messages?.map((message) => (
+              <CommentRow key={message.messageId} message={message} nowMs={Date.now()} />
+            ))}
+          </ol>
+        )}
+        {currentLoadState === "ready" && followerPhase === "live" && followerError ? (
+          <p className="comment-submit-status" role="status">
+            {followerError}
+          </p>
+        ) : null}
+        {currentLoadState === "ready" && followerPhase !== "live" ? (
+          <div>
+            <p className="comment-submit-status" role="status">
+              {followerError ?? "Comments stopped updating."}
+            </p>
+            <div className="comment-submit-row">
+              <button
+                type="button"
+                disabled={followerPhase === "recovering"}
+                onClick={recoverDiscussion}
+              >
+                Try again
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
       {currentLoadState === "ready" && props.access !== "view" ? (
         <form
           className="comment-composer"
@@ -821,6 +825,7 @@ export function CommentsPanel(props: {
           <textarea
             id="comment-body"
             name="body"
+            placeholder="Add a comment"
             value={body}
             disabled={disabled}
             aria-describedby={SUBMIT_STATUS_ID}

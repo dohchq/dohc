@@ -2,7 +2,7 @@ import { fetchShareWeb } from "./apiVersion";
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import { buildShareHandoffUrl } from "@dohc/workspace-contracts/deep-links";
 import { OpenSharedApp } from "./OpenSharedApp";
-import { PublishedApps, type AppsState } from "./PublishedApps";
+import { PublishedApps, type AppsState, type PublishedAppItem } from "./PublishedApps";
 import {
   Component,
   lazy,
@@ -20,9 +20,6 @@ import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
 import { CommentsPanel } from "./CommentsPanel";
 import { LinkChannelPanel } from "./LinkChannelPanel";
-import { LinkDocumentEditor } from "./LinkDocumentEditor";
-import { CollectionFileEditor, isCollectionOwnFile } from "./CollectionFileEditor";
-import { showLinkDocument } from "./linkLive";
 import { LinkAbout, LinkAgent } from "./LinkEntry";
 import { DohcMark, Icon, fileIcon } from "./icons";
 import { RETRY_BUDGET_MS, RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
@@ -30,6 +27,7 @@ import {
   accumulatorFromCurrentFiles,
   filesFromAccumulator,
   foldLogOps,
+  isCollectionOwnFile,
   isExcalidraw,
   isMarkdown,
   isRasterImage,
@@ -44,6 +42,12 @@ import {
 } from "./model";
 
 const ExcalidrawView = lazy(() => import("./ExcalidrawView"));
+const LinkDocumentEditor = lazy(() =>
+  import("./LinkDocumentEditor").then((module) => ({ default: module.LinkDocumentEditor })),
+);
+const CollectionFileEditor = lazy(() =>
+  import("./CollectionFileEditor").then((module) => ({ default: module.CollectionFileEditor })),
+);
 
 class ExcalidrawRenderBoundary extends Component<
   { children: ReactNode; fallback: ReactNode },
@@ -60,9 +64,29 @@ class ExcalidrawRenderBoundary extends Component<
   }
 }
 
+class EditorLoadBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode; onError: () => void },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: true } {
+    return { failed: true };
+  }
+
+  componentDidCatch(): void {
+    this.props.onError();
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
 const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
 const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
+const PUBLICATION_ID = /^[a-f0-9]{64}$/u;
 const VIEW_LOG_HOLD_MS = 30_000;
 const TERMINAL_HEARTBEAT_STATUSES = new Set([401, 403, 404]);
 export const MAX_LOG_PAGES = 200;
@@ -1042,13 +1066,13 @@ const EMPTY_PICTURE = (
   </svg>
 );
 
-// Narrow windows show the file list and the panels over the page, not beside it.
+const NARROW_MEDIA = "(max-width: 720px), (pointer: coarse) and (max-height: 500px)";
+
+// Narrow windows and landscape phones show the file list and panels over the page, not beside it.
 function useNarrow(): boolean {
-  const [narrow, setNarrow] = useState(
-    () => window.matchMedia?.("(max-width: 720px)").matches ?? false,
-  );
+  const [narrow, setNarrow] = useState(() => window.matchMedia?.(NARROW_MEDIA).matches ?? false);
   useEffect(() => {
-    const query = window.matchMedia?.("(max-width: 720px)");
+    const query = window.matchMedia?.(NARROW_MEDIA);
     if (!query) return;
     const update = () => setNarrow(query.matches);
     query.addEventListener("change", update);
@@ -1239,12 +1263,18 @@ export function App() {
   // The bar's place for an editor's Done, Save and saved state, and whether the live editor has the file.
   const [barSlot, setBarSlot] = useState<HTMLElement | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [editorLoadFailed, setEditorLoadFailed] = useState(false);
   // What is open beside or over the page. Nothing is, until the person opens it.
   const [surface, setSurface] = useState<Surface | null>(null);
   const trigger = useRef<HTMLElement | null>(null);
   const [filesToggled, setFilesToggled] = useState(false);
+  const [browsingFiles, setBrowsingFiles] = useState(false);
   const [comments, setComments] = useState({ count: 0, more: false });
   const [apps, setApps] = useState<AppsState>("none");
+  const [publishedApps, setPublishedApps] = useState<{
+    session: string;
+    items: readonly PublishedAppItem[];
+  }>({ session: "", items: [] });
   const scrollerRef = useRef<HTMLDivElement>(null);
   const narrow = useNarrow();
   useEffect(() => {
@@ -1534,21 +1564,43 @@ export function App() {
   const meta = ready?.meta ?? null;
   const files = ready?.files ?? [];
   const fileMap = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
+  const rawApp = new URLSearchParams(location.search).get("app");
+  const appToOpen = rawApp && PUBLICATION_ID.test(rawApp) ? rawApp : null;
+  const appLanding = appToOpen !== null && !browsingFiles && !editing;
+  const sessionApps = ready && publishedApps.session === ready.session ? publishedApps.items : [];
+  const appTitle =
+    appToOpen !== null
+      ? (sessionApps.find((item) => item.publicationId === appToOpen)?.name ??
+        meta?.subjectName ??
+        "Shared app")
+      : null;
+  const reportPublications = useCallback(
+    (items: readonly PublishedAppItem[]) => {
+      setPublishedApps({ session: readySession ?? "", items });
+    },
+    [readySession],
+  );
+  useEffect(() => {
+    setBrowsingFiles(false);
+  }, [readySession, appToOpen]);
   const selected = editing
     ? files.find((file) => file.path === editing.path)
     : (files.find((file) => file.path === selectedPath) ?? files[0]);
   useEffect(() => {
-    if (selected) {
+    if (appLanding && appTitle) {
+      document.title = `${appTitle} · dohc`;
+    } else if (selected) {
       document.title = `${fileTitle(selected.path)} · dohc`;
     } else if (meta?.subjectName) {
       document.title = `${meta.subjectName} · dohc`;
     } else {
       document.title = "Shared with dohc";
     }
-  }, [selected, meta?.subjectName]);
+  }, [appLanding, appTitle, selected, meta?.subjectName]);
   // A note an Edit link can change: the page fetches its state while it shows it, so a press soon after can type at
   // once. Pressing Edit keeps the same note, so the press can take that state.
   const shownNote =
+    !appLanding &&
     meta?.access === "edit" &&
     meta.effectiveSelector.versionId === null &&
     selected?.contentKind === "text" &&
@@ -1557,10 +1609,20 @@ export function App() {
       ? selected.path
       : null;
   const shownSession = ready?.session;
-  useEffect(
-    () => (shownSession && shownNote ? showLinkDocument(shownSession, shownNote) : undefined),
-    [shownSession, shownNote],
-  );
+  useEffect(() => {
+    if (!shownSession || !shownNote) return;
+    let cancelled = false;
+    let release: (() => void) | undefined;
+    void import("./linkLive")
+      .then(({ showLinkDocument }) => {
+        if (!cancelled) release = showLinkDocument(shownSession, shownNote);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      release?.();
+    };
+  }, [shownSession, shownNote]);
   // An open editor stays through every state, so its draft remains recoverable.
   if (!editing) {
     if (state.status === "refused") return <Unavailable />;
@@ -1600,7 +1662,7 @@ export function App() {
   }
   const tree = fileTree(files);
   const several = files.length > 1;
-  const filesShown = several && !editing && (narrow ? filesToggled : !filesToggled);
+  const filesShown = several && !editing && !appLanding && (narrow ? filesToggled : !filesToggled);
   const selectFile = (path: string) => {
     setSelectedPath(path);
     if (narrow) setFilesToggled(false);
@@ -1608,6 +1670,7 @@ export function App() {
   // Markdown edits live; a Collection's own files save through the direct lane.
   const canEditFile =
     !editing &&
+    !appLanding &&
     meta?.access === "edit" &&
     meta.effectiveSelector.versionId === null &&
     selected?.contentKind === "text" &&
@@ -1619,11 +1682,13 @@ export function App() {
   const namesLink = subject !== null && subject !== segments.at(-1) && subject !== segments[0];
   const toggle = (name: Surface) => (event: MouseEvent<HTMLButtonElement>) => {
     trigger.current = event.currentTarget;
+    if (narrow) setFilesToggled(false);
     setSurface((current) => (current === name ? null : name));
   };
   const stopEditing = () => {
     setEditing(null);
     setEditorOpen(false);
+    setEditorLoadFailed(false);
   };
   const editingCollectionFile = editing !== null && isCollectionOwnFile(editing.path);
   const available =
@@ -1665,14 +1730,16 @@ export function App() {
   // The read-only text stays while live editing opens or cannot start, until the editor has the server's text: its
   // early state or a live sync. A Collection's file shows only its editor.
   const reads =
-    selected !== undefined && ready !== null && !(editing && (editingCollectionFile || editorOpen));
-  const appToOpen = new URLSearchParams(location.search).get("app");
-  // A link that holds only apps leads with them, where its files would be.
-  const appsLead = files.length === 0 && apps === "some" && !editing;
+    !appLanding &&
+    selected !== undefined &&
+    ready !== null &&
+    !(editing && !editorLoadFailed && (editingCollectionFile || editorOpen));
+  // A link that holds only apps leads with them, unless a direct ?app= link already leads with its launch card.
+  const appsLead = appToOpen === null && files.length === 0 && apps === "some" && !editing;
   const discussion = meta?.channel ? "Channel" : "Comments";
   return (
     <div className={editing ? "viewer link-page editing" : "viewer link-page"}>
-      {several && !editing ? (
+      {several && !editing && !appLanding ? (
         <nav id="shared-files" aria-label="Shared files" hidden={!filesShown}>
           <ul className="tree">
             {tree.folders.map((folder) => (
@@ -1704,7 +1771,7 @@ export function App() {
       <div className="page">
         <header>
           <div className="bar-left">
-            {several && !editing ? (
+            {several && !editing && !appLanding ? (
               <button
                 className={filesShown ? "icon-button on" : "icon-button"}
                 type="button"
@@ -1712,7 +1779,10 @@ export function App() {
                 title="Files"
                 aria-expanded={filesShown}
                 aria-controls="shared-files"
-                onClick={() => setFilesToggled((value) => !value)}
+                onClick={() => {
+                  if (narrow) setSurface(null);
+                  setFilesToggled((value) => !value);
+                }}
               >
                 <Icon name="panel-left" />
               </button>
@@ -1720,7 +1790,11 @@ export function App() {
             <span className="bar-mark">
               <DohcMark />
             </span>
-            {namesLink || selected ? (
+            {appLanding ? (
+              <div className="crumbs">
+                <b>{appTitle}</b>
+              </div>
+            ) : namesLink || selected ? (
               <div className="crumbs">
                 {namesLink ? <span>{subject}</span> : null}
                 {segments.slice(0, -1).map((folder, index) => (
@@ -1820,7 +1894,9 @@ export function App() {
               </button>
               <button
                 className={
-                  surface === "more" || surface === "about" ? "icon-button on" : "icon-button"
+                  surface === "more" || surface === "about" || (narrow && surface === "agent")
+                    ? "icon-button on"
+                    : "icon-button"
                 }
                 type="button"
                 aria-label="More"
@@ -1842,6 +1918,7 @@ export function App() {
                   type="button"
                   onClick={() => {
                     setSurface(null);
+                    setEditorLoadFailed(false);
                     setEditing({
                       discriminator: ready.session,
                       path: selected.path,
@@ -1859,36 +1936,84 @@ export function App() {
         </header>
         <div className="layout">
           <div className="scroller" ref={scrollerRef}>
-            <div className="column">
-              {appToOpen !== null && ready && !editing ? (
+            {appLanding && appToOpen !== null && ready && !editing ? (
+              <main className="column app-landing-column">
                 <OpenSharedApp
                   key={ready.session}
                   session={ready.session}
                   publicationId={appToOpen}
+                  leading
+                  title={appTitle ?? undefined}
+                  onBrowseFiles={files.length > 0 ? () => setBrowsingFiles(true) : undefined}
                 />
-              ) : null}
-              {selected ? <h1 className="page-title">{fileTitle(selected.path)}</h1> : null}
-              <main className="content">
-                {editor}
-                {reads && ready && selected ? (
-                  <FileView
-                    // A new file starts with empty preview state, so one file's text
-                    // never renders under another file's kind.
-                    key={`${ready.session}\n${selected.path}\n${selected.blobSha256}`}
-                    session={ready.session}
-                    file={selected}
-                    files={files}
-                    onSelect={setSelectedPath}
-                    onStaleBlob={refreshStaleBlob}
-                  />
-                ) : !editing && apps === "none" ? (
-                  <div className="empty-state">
-                    {EMPTY_PICTURE}
-                    <p>No files on this link yet. This page shows them as soon as they arrive.</p>
-                  </div>
-                ) : null}
               </main>
-            </div>
+            ) : (
+              <div className="column">
+                {appToOpen !== null && ready && !editing ? (
+                  <OpenSharedApp
+                    key={ready.session}
+                    session={ready.session}
+                    publicationId={appToOpen}
+                    title={appTitle ?? undefined}
+                  />
+                ) : null}
+                {selected ? <h1 className="page-title">{fileTitle(selected.path)}</h1> : null}
+                <main className="content">
+                  {editing ? (
+                    <EditorLoadBoundary
+                      key={`${editing.discriminator}:${editing.path}`}
+                      onError={() => setEditorLoadFailed(true)}
+                      fallback={
+                        <div className="edit-notice" role="alert">
+                          <span className="tile bad">
+                            <Icon name="alert" />
+                          </span>
+                          <div>
+                            <p className="edit-notice-title">dohc could not open the editor.</p>
+                            <p>Reload the page to get the latest version.</p>
+                            <div className="edit-notice-actions">
+                              <button
+                                className="handoff-button primary"
+                                type="button"
+                                onClick={() => location.reload()}
+                              >
+                                Reload
+                              </button>
+                              <button
+                                className="handoff-button secondary"
+                                type="button"
+                                onClick={stopEditing}
+                              >
+                                Done
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      }
+                    >
+                      <Suspense fallback={null}>{editor}</Suspense>
+                    </EditorLoadBoundary>
+                  ) : null}
+                  {reads && ready && selected ? (
+                    <FileView
+                      // A new file starts with empty preview state, so one file's text
+                      // never renders under another file's kind.
+                      key={`${ready.session}\n${selected.path}\n${selected.blobSha256}`}
+                      session={ready.session}
+                      file={selected}
+                      files={files}
+                      onSelect={setSelectedPath}
+                      onStaleBlob={refreshStaleBlob}
+                    />
+                  ) : !editing && apps === "none" ? (
+                    <div className="empty-state">
+                      {EMPTY_PICTURE}
+                      <p>No files on this link yet. This page shows them as soon as they arrive.</p>
+                    </div>
+                  ) : null}
+                </main>
+              </div>
+            )}
           </div>
           {ready && (!editing || surface === "comments") ? (
             <div
@@ -1946,7 +2071,11 @@ export function App() {
               tabIndex={-1}
               hidden={surface !== "apps" && !appsLead}
             >
-              <PublishedApps session={ready.session} onState={setApps} />
+              <PublishedApps
+                session={ready.session}
+                onState={setApps}
+                onPublications={reportPublications}
+              />
             </div>
             <div
               className="popover link-more"
@@ -1954,6 +2083,12 @@ export function App() {
               tabIndex={-1}
               hidden={surface !== "more"}
             >
+              {narrow ? (
+                <button className="menu-item" type="button" onClick={() => setSurface("agent")}>
+                  <Icon name="sparkles" />
+                  Use with an agent
+                </button>
+              ) : null}
               <button className="menu-item" type="button" onClick={() => setSurface("about")}>
                 <Icon name="info" />
                 About this link

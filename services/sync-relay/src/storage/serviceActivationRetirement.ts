@@ -331,7 +331,7 @@ export interface RetiredJournalPage {
   readonly acceptedCursor: number;
   readonly rows: readonly {
     readonly journalCursor: number;
-    /** On a room save's row, the last room position the save holds. */
+    /** On a room save's row, the position through which every room row is saved. */
     readonly rowsThrough?: number;
     readonly updateBytes: Uint8Array;
   }[];

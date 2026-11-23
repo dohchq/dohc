@@ -1,3 +1,4 @@
+import { AGENT_RUN_HISTORY_DECLARATIONS } from "./agentRunHistoryDeclarations";
 import { CAPTURE_DECLARATIONS } from "./captureDeclarations";
 import { CHAT_DECLARATIONS } from "./chatDeclarations";
 import { LINKS_DECLARATIONS } from "./linksDeclarations";
@@ -11,6 +12,7 @@ export const DECLARATION_FAMILIES = {
   chat: CHAT_DECLARATIONS,
   links: LINKS_DECLARATIONS,
   retrieval: RETRIEVAL_DECLARATIONS,
+  agentRunHistory: AGENT_RUN_HISTORY_DECLARATIONS,
 } as const;
 
 // The type refuses these, but a cast can hide one from it.

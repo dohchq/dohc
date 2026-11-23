@@ -1,4 +1,4 @@
-import { ArrowLeftRight, CircleAlert, Info, Layers, Lock, PenLine } from "lucide-react";
+import { ArrowLeftRight, CircleAlert, Info, Layers, Link, Lock, PenLine } from "lucide-react";
 import { type ReactNode, type Ref, useId, useRef } from "react";
 import type { WorkspaceVersionRecord } from "../../ipc/bridgeContract";
 import {
@@ -100,6 +100,7 @@ export function NewVersionCard(
             id={`${id}-name`}
             data-testid="version-new-input"
             value={props.name}
+            placeholder="e.g. Try new layout"
             maxLength={80}
             readOnly={props.busy}
             aria-invalid={invalid || undefined}
@@ -160,6 +161,9 @@ export function NewVersionCard(
               It cannot merge into Main because it starts from {startName}.
             </Fact>
           )}
+          <Fact icon={Link} testId="version-new-agents">
+            Agents connected through an Agent link still read files from Main.
+          </Fact>
           <Fact icon={Info} testId="version-new-same">
             {SAME_IN_EVERY_VERSION}
           </Fact>

@@ -16,7 +16,11 @@ import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import type { LocalAppPrepared, LocalAppRow, LocalAppStore } from "./localAppStore";
 import type { LocalAppAction } from "./localAppLaunch";
 import type { LocalDatasetAgent } from "./localDatasetHost";
-import type { createLocalDatasetApps } from "./localDatasetApps";
+import {
+  createLocalDatasetApps,
+  datasetCapabilitiesOf,
+  selectDatasetCapability,
+} from "./localDatasetApps";
 
 /** The owner's server, which holds a syncing workspace's Collections. */
 export interface ServerCollectionsTransport {
@@ -66,10 +70,17 @@ export function createServerCollectionsTransport(
       return approved;
     },
     async approve(candidate, signal) {
-      const capability = candidate.capabilities[0];
-      if (capability?.kind !== "dataset")
+      if (
+        candidate.capabilities.length === 0 ||
+        candidate.capabilities.some((capability) => capability.kind !== "dataset")
+      )
         throw new Error("Choose an app connected to a Collection.");
-      const value = await post(binding(capability.datasetId), { localApp: candidate }, signal);
+      const capabilities = datasetCapabilitiesOf(candidate);
+      const path =
+        capabilities.length === 1
+          ? binding(capabilities[0]!.datasetId)
+          : `${workspacePath}/local-apps`;
+      const value = await post(path, { localApp: candidate }, signal);
       const { publicationId, authorityRevision } = (value ?? {}) as Record<string, unknown>;
       if (
         typeof publicationId !== "string" ||
@@ -82,7 +93,11 @@ export function createServerCollectionsTransport(
       return { publicationId, authorityRevision };
     },
     async withdraw(datasetId, publicationId, signal) {
-      await post(binding(datasetId), { publicationId, enabled: false }, signal);
+      await post(
+        datasetId ? binding(datasetId) : `${workspacePath}/local-apps`,
+        { publicationId, enabled: false },
+        signal,
+      );
     },
     request: (publicationId, action, body, signal) =>
       post(
@@ -125,11 +140,7 @@ export function createServerDatasetApps(options: {
 }): ReturnType<typeof createLocalDatasetApps> & { close(): Promise<void> } {
   // The server's approval revision for each app this computer approved, once the server has it.
   const approvals = new Map<string, Promise<number>>();
-  const declared = (row: LocalAppRow) => {
-    const capability = row.candidate.capabilities[0];
-    if (capability?.kind !== "dataset") throw new Error("Invalid app approval.");
-    return capability;
-  };
+  const declared = (row: LocalAppRow) => datasetCapabilitiesOf(row.candidate);
   // Each app's approvals and withdrawal on their way to the server. The server keeps whichever reaches it last, so
   // an approval and a withdrawal of the same app never go at once:
   // - `approving` holds each approval until the server has answered it and this computer has committed it or given
@@ -187,7 +198,7 @@ export function createServerDatasetApps(options: {
   };
   function current(id: string, expected?: number) {
     const row = options.store.row(id, expected);
-    return { row, capability: declared(row) };
+    return { row, capabilities: declared(row) };
   }
   // The server learns of an approval when the app first reaches it, as after a restart.
   const serverRevision = (row: LocalAppRow, signal?: AbortSignal) => {
@@ -284,8 +295,8 @@ export function createServerDatasetApps(options: {
     current(publicationId, expected);
     return result;
   }
-  const operation = (publicationId: string, expected: number, name: string) =>
-    current(publicationId, expected).capability.operations.find(
+  const operation = (publicationId: string, expected: number, name: string, dataset?: string) =>
+    selectDatasetCapability(current(publicationId, expected).capabilities, dataset).operations.find(
       (candidate) => candidate.name === name,
     );
   return {
@@ -297,9 +308,13 @@ export function createServerDatasetApps(options: {
       options.assertCurrent();
       signal.throwIfAborted();
       const candidate = parseAppPublicationCandidate(prepared.candidate, APP_PUBLICATION_LIMITS);
-      const capability = candidate.capabilities[0];
-      if (capability?.kind !== "dataset")
+      if (
+        candidate.capabilities.length === 0 ||
+        candidate.capabilities.some((capability) => capability.kind !== "dataset")
+      )
         throw new Error("Choose an app connected to a Collection.");
+      const capabilities = datasetCapabilitiesOf(candidate);
+      const resourceId = capabilities.length === 1 ? capabilities[0]!.datasetId : "";
       const publicationId = hash(
         JSON.stringify(["dohc-local-dataset-app-v1", options.workspaceId, candidate]),
       );
@@ -310,7 +325,7 @@ export function createServerDatasetApps(options: {
         return options.store.activate(
           {
             kind: "dataset",
-            resourceId: capability.datasetId,
+            resourceId,
             publicationId,
             prepared,
             agent,
@@ -337,12 +352,15 @@ export function createServerDatasetApps(options: {
         current(value.publicationId, value.authorityRevision);
         active = true;
       } catch {}
+      const capabilities = declared(value);
       return {
         publicationId: value.publicationId,
         authorityRevision: value.authorityRevision,
         appRoot: value.appRoot,
         sourceRevision: value.candidate.sourceRevision,
-        datasetCapability: declared(value),
+        ...(capabilities.length === 1
+          ? { datasetCapability: capabilities[0]! }
+          : { datasetCapabilities: capabilities }),
         approved: options.store.held(value),
         active,
       };
@@ -359,36 +377,52 @@ export function createServerDatasetApps(options: {
       if (action === "attempt") {
         if (!raw || typeof raw !== "object" || Array.isArray(raw))
           throw new Error("Invalid pending submission request.");
-        const { authorityRevision, operation: name, ...request } = raw as Record<string, unknown>;
+        const {
+          authorityRevision,
+          operation: name,
+          dataset,
+          ...request
+        } = raw as Record<string, unknown>;
         const parsed = parseDatasetAttemptRequest(request);
         const identity = parseAppBackendInvokeRequest({
           authorityRevision,
           operation: name,
           input: {},
           idempotencyKey: "attempt",
+          ...(Object.hasOwn(raw, "dataset") ? { dataset } : {}),
         });
-        const found = operation(publicationId, identity.authorityRevision, identity.operation);
+        const found = operation(
+          publicationId,
+          identity.authorityRevision,
+          identity.operation,
+          identity.dataset,
+        );
         if (!found || found.readOnly) throw new Error("This action is not approved for the app.");
         return send(
           publicationId,
           identity.authorityRevision,
           "attempt",
-          { operation: identity.operation, ...parsed },
+          {
+            operation: identity.operation,
+            ...(identity.dataset === undefined ? {} : { dataset: identity.dataset }),
+            ...parsed,
+          },
           signal,
         );
       }
       if (action === "upload") {
         const { authorityRevision, ...upload } = parseAppBackendUploadRequest(raw);
         if (
-          !current(publicationId, authorityRevision).capability.operations.some(
-            (candidate) => !candidate.readOnly,
-          )
+          !selectDatasetCapability(
+            current(publicationId, authorityRevision).capabilities,
+            upload.dataset,
+          ).operations.some((candidate) => !candidate.readOnly)
         )
           throw new Error("This app cannot upload files.");
         return send(publicationId, authorityRevision, "upload", upload, signal);
       }
       const { authorityRevision, ...input } = parseAppBackendInvokeRequest(raw);
-      if (!operation(publicationId, authorityRevision, input.operation))
+      if (!operation(publicationId, authorityRevision, input.operation, input.dataset))
         throw new Error("This action is not approved for the app.");
       // While an agent run is active, a change is the run's, unless a person's
       // click or key press in the app started it, as dohc's bootstrap reports.
@@ -413,7 +447,13 @@ export function createServerDatasetApps(options: {
     },
     readBrowserFile(
       publicationId: string,
-      raw: { authorityRevision: number; fileId: string; operation: string; input: unknown },
+      raw: {
+        authorityRevision: number;
+        fileId: string;
+        operation: string;
+        input: unknown;
+        dataset?: string;
+      },
       signal?: AbortSignal,
     ): Promise<unknown> {
       const input = parseAppBackendInvokeRequest({
@@ -421,8 +461,14 @@ export function createServerDatasetApps(options: {
         operation: raw.operation,
         input: raw.input,
         idempotencyKey: "file-read",
+        ...(raw.dataset === undefined ? {} : { dataset: raw.dataset }),
       });
-      const found = operation(publicationId, input.authorityRevision, input.operation);
+      const found = operation(
+        publicationId,
+        input.authorityRevision,
+        input.operation,
+        input.dataset,
+      );
       if (
         !found?.readOnly ||
         typeof raw.fileId !== "string" ||
@@ -433,7 +479,12 @@ export function createServerDatasetApps(options: {
         publicationId,
         input.authorityRevision,
         "file",
-        { fileId: raw.fileId, operation: input.operation, input: input.input },
+        {
+          fileId: raw.fileId,
+          operation: input.operation,
+          input: input.input,
+          ...(input.dataset === undefined ? {} : { dataset: input.dataset }),
+        },
         signal,
       );
     },

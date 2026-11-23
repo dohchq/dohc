@@ -403,7 +403,9 @@
     "desktop:write-workspace-asset",
     "desktop:write-workspace-text",
     "desktop:outside-changes",
-    "desktop:retrieve-workspace"
+    "desktop:retrieve-workspace",
+    "desktop:plan-undo-agent-run",
+    "desktop:undo-agent-run"
   ],
   "guards": {
     "desktop:held-note-change": "active-workspace",
@@ -462,6 +464,8 @@
     "desktop:resolve-work-link": "active-workspace",
     "desktop:describe-work-references": "active-workspace",
     "desktop:outside-changes": "active-workspace",
-    "desktop:retrieve-workspace": "active-workspace"
+    "desktop:retrieve-workspace": "active-workspace",
+    "desktop:plan-undo-agent-run": "active-workspace",
+    "desktop:undo-agent-run": "active-workspace"
   }
 }

@@ -144,7 +144,9 @@ it("manages the authoritative relay Collection through the desktop owner adapter
     });
     expect((await data.list({})).datasets.map((row) => row.name)).toEqual(["Registrations"]);
     expect((await data.describe(id(1))).datasetId).toBe(id(1));
-    expect((await data.approvedArtifacts(id(1))).revision).toEqual(revision);
+    const remoteArtifacts = await data.approvedArtifacts(id(1));
+    expect(remoteArtifacts.revision).toEqual(revision);
+    expect(remoteArtifacts.checkpointSha256).toMatch(/^[a-f0-9]{64}$/);
     f.storage.tx(() =>
       f.storage.db
         .prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)

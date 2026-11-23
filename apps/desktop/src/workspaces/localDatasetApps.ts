@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   parseAppPublicationCandidate,
   type AppDatasetCapability,
+  type AppPublicationCandidate,
 } from "@dohc/security-contract/app-publication";
 import {
   displayAppDatasetCapability,
@@ -45,6 +46,35 @@ export interface LocalDatasetAppContext {
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 
+export function datasetCapabilitiesOf(candidate: AppPublicationCandidate): AppDatasetCapability[] {
+  if (
+    candidate.capabilities.length === 0 ||
+    candidate.capabilities.some((capability) => capability.kind !== "dataset")
+  ) {
+    throw new Error("Invalid app approval.");
+  }
+  return candidate.capabilities as AppDatasetCapability[];
+}
+
+export function selectDatasetCapability(
+  capabilities: readonly AppDatasetCapability[],
+  dataset?: string,
+): AppDatasetCapability {
+  if (capabilities.length === 1) {
+    const only = capabilities[0]!;
+    if (dataset !== undefined && only.alias !== dataset) {
+      throw new Error("This Collection is not approved for the app.");
+    }
+    return only;
+  }
+  if (dataset === undefined) {
+    throw new Error("Choose which Collection this app action targets.");
+  }
+  const matched = capabilities.find((capability) => capability.alias === dataset);
+  if (!matched) throw new Error("This Collection is not approved for the app.");
+  return matched;
+}
+
 /** Uses the dataset authority database. No app gets the owner data API or source artifacts. */
 export function createLocalDatasetApps(options: {
   db: JournalDb;
@@ -58,9 +88,11 @@ export function createLocalDatasetApps(options: {
   localPersonId(): string;
   approved(datasetId: string): { revision: DatasetRevision; schemaSql: string; active: boolean };
   bind(
-    datasetId: string,
-    appId: string,
-    binding: AppDatasetBinding | null,
+    operations: ReadonlyArray<{
+      datasetId: string;
+      appId: string;
+      binding: AppDatasetBinding | null;
+    }>,
     commit: () => void,
   ): void;
   invoke(
@@ -84,31 +116,31 @@ export function createLocalDatasetApps(options: {
 }) {
   const { db } = options;
   const contexts = new WeakSet<LocalDatasetAppContext>();
-  function capability(value: LocalAppRow): AppDatasetCapability {
-    const candidate = value.candidate;
-    const current = options.approved(value.resourceId);
-    if (!current.active) throw new Error("This Collection is unavailable on this device.");
-    const requested = candidate.capabilities[0];
-    if (requested?.kind !== "dataset") throw new Error("Invalid app approval.");
-    return verifyAppDatasetCapability(
-      requested,
-      resolveCompatibleDatasetRevision(
-        db,
-        { workspaceId: options.workspaceId, datasetId: value.resourceId },
+  function verifyCapabilities(value: LocalAppRow): AppDatasetCapability[] {
+    const declared = datasetCapabilitiesOf(value.candidate);
+    return declared.map((requested) => {
+      const approved = options.approved(requested.datasetId);
+      if (!approved.active) throw new Error("This Collection is unavailable on this device.");
+      return verifyAppDatasetCapability(
         requested,
-        current.revision,
-      ),
-    );
+        resolveCompatibleDatasetRevision(
+          db,
+          { workspaceId: options.workspaceId, datasetId: requested.datasetId },
+          requested,
+          approved.revision,
+        ),
+      );
+    });
   }
   function current(id: string, expected?: number) {
     const value = options.store.row(id, expected);
-    return { row: value, capability: capability(value) };
+    return { row: value, capabilities: verifyCapabilities(value) };
   }
   /** The approval as Review app shows it: what each operation does in the revision it names, when this device still has that revision. */
-  function shown(value: LocalAppRow, declared: AppDatasetCapability): AppDatasetCapability {
+  function shown(declared: AppDatasetCapability): AppDatasetCapability {
     try {
-      const key = { workspaceId: options.workspaceId, datasetId: value.resourceId },
-        approved = options.approved(value.resourceId);
+      const key = { workspaceId: options.workspaceId, datasetId: declared.datasetId },
+        approved = options.approved(declared.datasetId);
       // A compatible earlier revision names the same schema and operation code as the approved one.
       const revision = resolveCompatibleDatasetRevision(db, key, declared, approved.revision);
       return displayAppDatasetCapability(
@@ -132,7 +164,10 @@ export function createLocalDatasetApps(options: {
     )
       throw new Error("App access is not permitted.");
     const checked = current(context.publicationId, context.authorityRevision);
-    if (request.datasetId !== checked.row.resourceId)
+    if (
+      !request.datasetId ||
+      !checked.capabilities.some((capability) => capability.datasetId === request.datasetId)
+    )
       throw new Error("App access is not permitted.");
     return {
       caller: { kind: "owner", userId: options.ownerId },
@@ -174,44 +209,82 @@ export function createLocalDatasetApps(options: {
       options.assertCurrent();
       signal.throwIfAborted();
       const candidate = parseAppPublicationCandidate(prepared.candidate, APP_PUBLICATION_LIMITS);
-      const declared = candidate.capabilities[0];
-      if (declared?.kind !== "dataset") throw new Error("Choose an app connected to a Collection.");
-      const approved = options.approved(declared.datasetId);
-      if (!approved.active) throw new Error("This Collection is unavailable on this device.");
-      const verified = verifyAppDatasetCapability(declared, approved.revision);
+      if (
+        candidate.capabilities.length === 0 ||
+        candidate.capabilities.some((capability) => capability.kind !== "dataset")
+      )
+        throw new Error("Choose an app connected to a Collection.");
+      const declaredList = candidate.capabilities as AppDatasetCapability[];
+      const verified = declaredList.map((declared) => {
+        let approved;
+        try {
+          approved = options.approved(declared.datasetId);
+        } catch (error) {
+          if (declaredList.length > 1) {
+            throw new Error("All Collections used by this app must be active on the same host.");
+          }
+          throw error;
+        }
+        if (!approved.active) {
+          throw new Error(
+            declaredList.length > 1
+              ? "All Collections used by this app must be active on the same host."
+              : "This Collection is unavailable on this device.",
+          );
+        }
+        return verifyAppDatasetCapability(declared, approved.revision);
+      });
       const publicationId = hash(
         JSON.stringify(["dohc-local-dataset-app-v1", options.workspaceId, candidate]),
       );
-      const { operations: _, name: _name, ...binding } = verified;
+      const resourceId = verified.length === 1 ? verified[0]!.datasetId : "";
+      const newBindings = verified.map((cap) => {
+        const { operations: _, name: _name, alias: _alias, ...binding } = cap;
+        return { datasetId: cap.datasetId, appId: publicationId, binding };
+      });
       return options.store.activate(
-        { kind: "dataset", resourceId: verified.datasetId, publicationId, prepared, agent },
+        { kind: "dataset", resourceId, publicationId, prepared, agent },
         signal,
-        (existing, _displaced, commit) =>
-          options.bind(verified.datasetId, publicationId, binding, () => {
-            if (existing && existing.publicationId !== publicationId)
-              options.bind(existing.resourceId, existing.publicationId, null, () => {});
-            commit();
-          }),
+        (existing, _displaced, commit) => {
+          const retireBindings =
+            existing && existing.publicationId !== publicationId
+              ? datasetCapabilitiesOf(existing.candidate).map((cap) => ({
+                  datasetId: cap.datasetId,
+                  appId: existing.publicationId,
+                  binding: null,
+                }))
+              : [];
+          options.bind([...newBindings, ...retireBindings], commit);
+        },
       );
     },
     /** The store has checked the root's authority. The Dataset itself may no longer be approved. */
     withdrawBinding(value: LocalAppRow, commit: () => void) {
-      options.bind(value.resourceId, value.publicationId, null, commit);
+      options.bind(
+        datasetCapabilitiesOf(value.candidate).map((cap) => ({
+          datasetId: cap.datasetId,
+          appId: value.publicationId,
+          binding: null,
+        })),
+        commit,
+      );
     },
     describe(value: LocalAppRow) {
-      const declared = value.candidate.capabilities[0];
-      if (declared?.kind !== "dataset") throw new Error("Invalid app approval.");
+      const declared = datasetCapabilitiesOf(value.candidate);
       let active = false;
       try {
         current(value.publicationId, value.authorityRevision);
         active = true;
       } catch {}
+      const formatted = declared.map((capability) => shown(capability));
       return {
         publicationId: value.publicationId,
         authorityRevision: value.authorityRevision,
         appRoot: value.appRoot,
         sourceRevision: value.candidate.sourceRevision,
-        datasetCapability: shown(value, declared),
+        ...(formatted.length === 1
+          ? { datasetCapability: formatted[0]! }
+          : { datasetCapabilities: formatted }),
         approved: options.store.held(value),
         active,
       };
@@ -231,6 +304,7 @@ export function createLocalDatasetApps(options: {
         const {
           authorityRevision,
           operation: operationName,
+          dataset,
           ...request
         } = raw as Record<string, unknown>;
         const parsed = parseDatasetAttemptRequest(request);
@@ -239,6 +313,7 @@ export function createLocalDatasetApps(options: {
           operation: operationName,
           input: {},
           idempotencyKey: "attempt",
+          ...(Object.hasOwn(raw, "dataset") ? { dataset } : {}),
         });
         return inContext(
           publicationId,
@@ -246,7 +321,8 @@ export function createLocalDatasetApps(options: {
           signal,
           activated,
           async (context) => {
-            const { capability: cap } = current(publicationId, identity.authorityRevision);
+            const { capabilities } = current(publicationId, identity.authorityRevision);
+            const cap = selectDatasetCapability(capabilities, identity.dataset);
             const operation = cap.operations.find(
               (operation) => operation.name === identity.operation && !operation.readOnly,
             );
@@ -274,14 +350,18 @@ export function createLocalDatasetApps(options: {
           signal,
           activated,
           async (context) => {
-            const { capability: cap } = current(publicationId, input.authorityRevision);
+            const { capabilities } = current(publicationId, input.authorityRevision);
+            const cap = selectDatasetCapability(capabilities, input.dataset);
             if (!cap.operations.some((operation) => !operation.readOnly))
               throw new Error("This app cannot upload files.");
             return options.upload(context, {
               datasetId: cap.datasetId,
               revision: cap.revision,
               revisionSha256: cap.revisionSha256,
-              ...input,
+              idempotencyKey: input.idempotencyKey,
+              name: input.name,
+              contentType: input.contentType,
+              bytesBase64: input.bytesBase64,
               signal,
             });
           },
@@ -294,7 +374,8 @@ export function createLocalDatasetApps(options: {
         signal,
         activated,
         async (context) => {
-          const { capability: cap } = current(publicationId, input.authorityRevision);
+          const { capabilities } = current(publicationId, input.authorityRevision);
+          const cap = selectDatasetCapability(capabilities, input.dataset);
           const operation = cap.operations.find((operation) => operation.name === input.operation);
           if (!operation) throw new Error("This action is not approved for the app.");
           return options.invoke(context, {
@@ -313,7 +394,13 @@ export function createLocalDatasetApps(options: {
     },
     readBrowserFile(
       publicationId: string,
-      raw: { authorityRevision: number; fileId: string; operation: string; input: unknown },
+      raw: {
+        authorityRevision: number;
+        fileId: string;
+        operation: string;
+        input: unknown;
+        dataset?: string;
+      },
       signal?: AbortSignal,
     ): Promise<unknown> {
       const input = parseAppBackendInvokeRequest({
@@ -321,9 +408,11 @@ export function createLocalDatasetApps(options: {
         operation: raw.operation,
         input: raw.input,
         idempotencyKey: "file-read",
+        ...(raw.dataset === undefined ? {} : { dataset: raw.dataset }),
       });
       return inContext(publicationId, input.authorityRevision, signal, false, async (context) => {
-        const { capability: cap } = current(publicationId, input.authorityRevision);
+        const { capabilities } = current(publicationId, input.authorityRevision);
+        const cap = selectDatasetCapability(capabilities, input.dataset);
         const operation = cap.operations.find(
           (operation) => operation.name === input.operation && operation.readOnly,
         );

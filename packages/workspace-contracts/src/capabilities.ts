@@ -838,6 +838,19 @@ const LISTED_CAPABILITIES = {
     mcpReason:
       "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
   }),
+  "history.agent.run.plan": capability(
+    "List which files saved during an agent run can be safely undone.",
+    {
+      ipc: [],
+      mcp: {},
+      mcpReason:
+        "Only the original workspace plans an agent run undo. Shared profiles omit this read; main admits the workspace.",
+    },
+  ),
+  "history.agent.run.undo": capability("Undo safe file changes saved during an agent run.", {
+    ipc: [],
+    mcp: {},
+  }),
   "history.read": capability("Print a file's text as one change left it.", {
     ipcReason: "Hand-registered IPC channel readEngineMoment has no operation-table row.",
     mcp: {
@@ -1266,6 +1279,14 @@ const LISTED_CAPABILITIES = {
     mcpReason:
       "Cancel a running Collection request in the workspace, identified by its invocationId. Shared profiles omit the multiplexed tool.",
   }),
+  "app.frontend.verify": capability(
+    "Verify a candidate or approved local app frontend in dohc's sandbox against an empty ephemeral Collection.",
+    {
+      ipcReason:
+        "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
+      mcp: { owner: ["dohc_publish_app"] },
+    },
+  ),
   "app.link.create": capability("Create a share link for an app.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
@@ -1286,6 +1307,38 @@ const LISTED_CAPABILITIES = {
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
     mcp: { owner: ["dohc_publish_app"] },
   }),
+  "app.local.stage": capability(
+    "Stage an app and its new or updated Collections locally for one owner approval.",
+    {
+      ipcReason:
+        "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
+      mcp: { owner: ["dohc_publish_app"] },
+    },
+  ),
+  "app.local.staged.list": capability(
+    "List staged app and Collection approvals waiting on this computer.",
+    {
+      ipcReason:
+        "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
+      mcp: { owner: ["dohc_publish_app"] },
+    },
+  ),
+  "app.local.staged.approve": capability(
+    "Apply a reviewed staged proposal, creating or updating its Collections and approving the app.",
+    {
+      ipcReason:
+        "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
+      mcp: { owner: ["dohc_publish_app"] },
+    },
+  ),
+  "app.local.staged.discard": capability(
+    "Discard a staged app proposal on this computer without changing workspace files.",
+    {
+      ipcReason:
+        "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",
+      mcp: { owner: ["dohc_publish_app"] },
+    },
+  ),
   "app.local.launch": capability("Get a local URL for an approved app.", {
     ipcReason:
       "Hand-registered IPC channel publishOwnerApp dispatches this action without an operation-table row.",

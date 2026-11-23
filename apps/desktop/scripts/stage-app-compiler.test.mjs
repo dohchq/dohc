@@ -218,6 +218,32 @@ test(
         ["bundle.css", "bundle.js"],
       );
       assert.match(Buffer.from(result.files[1].bytes).toString(), /installed/);
+      const kitResult = await compile(
+        {
+          entryPath: "dashboard.tsx",
+          inputs: [
+            file(
+              "dashboard.tsx",
+              Buffer.from(
+                `import { createRoot } from "react-dom/client";
+import { AppShell, StatCard } from "dohc/ui";
+import { Sparkline } from "dohc/charts";
+createRoot(document.getElementById("root")!).render(<AppShell><StatCard label="Spend" value="$120" footer={<Sparkline values={[10, 20, 15]} />} /></AppShell>);`,
+              ),
+            ),
+          ],
+          bounds: { maxInputFiles: 8, maxInputBytes: 64 * 1024, maxOutputBytes: 4 * 1024 * 1024 },
+        },
+        { ...bounds, maxInputBytes: 128 * 1024, maxOutputBytes: 4 * 1024 * 1024 },
+      );
+      assert.equal(kitResult.compiler.recipe, "dohc-closed-app-v4");
+      assert.match(kitResult.compiler.version, /^0\.28\.1\+kit-[0-9a-f]{64}$/);
+      assert.deepEqual(
+        kitResult.files.map((item) => item.path),
+        ["bundle.css", "bundle.js"],
+      );
+      assert.match(Buffer.from(kitResult.files[0].bytes).toString(), /--kit-bg/);
+      assert.match(Buffer.from(kitResult.files[1].bytes).toString(), /Spend/);
       await assert.rejects(compile(request, bounds, AbortSignal.abort()), { reason: "cancelled" });
       const pageBounds = { ...bounds, maxOutputBytes: 16384 };
       const page = await compile(
@@ -254,9 +280,28 @@ test(
         ),
         {
           message:
-            "index.html links missing.js, which is not in the app. Add the file or fix the link.",
+            "index.html links missing.js, which is not in the app. Add the file, list it in app.publish.json, or fix the link.",
         },
       );
+      const uiBuiltinPath = join(destination, "builtins/dohc-ui.mjs");
+      const originalUiBuiltin = await readFile(uiBuiltinPath);
+      await writeFile(uiBuiltinPath, "export const tampered = true;");
+      try {
+        await assert.rejects(
+          compile(
+            {
+              ...request,
+              inputs: [file("main.ts", Buffer.from("document.body.textContent = 'tampered';"))],
+            },
+            pageBounds,
+          ),
+          /Built-in app kit integrity check failed/,
+        );
+        await assert.rejects(requireAppCompiler(destination), /asset changed/);
+      } finally {
+        await writeFile(uiBuiltinPath, originalUiBuiltin);
+      }
+      await requireAppCompiler(destination);
       await rm(
         join(destination, process.platform === "win32" ? "compiler-owner.exe" : "compiler-owner"),
       );

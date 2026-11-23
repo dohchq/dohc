@@ -8,6 +8,7 @@ import {
   readLocalAppSource,
 } from "./ownerAppPublication";
 import { type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 
 const backend = {
@@ -222,6 +223,31 @@ describe("app.publish.json paths", () => {
       parseAppPublicationDeclaration(new TextEncoder().encode('{"version":2}'), "app"),
     ).toThrow("app/app.publish.json uses a newer version. Update dohc to read this file.");
   });
+
+  it("names the manifest path when app.publish.json is not valid JSON", () => {
+    expect(() =>
+      parseAppPublicationDeclaration(new TextEncoder().encode("{bad json"), "apps/shop"),
+    ).toThrow(/apps\/shop\/app\.publish\.json is not valid JSON \(at .+\)\. Check its syntax\./);
+  });
+
+  it.each(["react", "react/jsx-runtime", "react-dom/client", "scheduler", "dohc/ui"])(
+    "refuses packageMap override for built-in package %s",
+    (specifier) => {
+      expect(() =>
+        parseAppPublicationDeclaration(
+          new TextEncoder().encode(
+            JSON.stringify({
+              version: 1,
+              entryPath: "main.tsx",
+              inputs: ["main.tsx", "fake.js"],
+              packageMap: { [specifier]: "fake.js" },
+            }),
+          ),
+          "app",
+        ),
+      ).toThrow(/maps built-in package/);
+    },
+  );
   const manifest = {
     entryPath: "main.ts",
     inputs: ["main.ts", "deps/greeting.js", "../shared/theme.css"],
@@ -614,6 +640,254 @@ describe("owner dataset publication", () => {
     await expect(h.prepare()).rejects.toMatchObject({ name: "AbortError" });
     expect(h.compile).not.toHaveBeenCalled();
   });
+
+  it("auto-discovers inputs, excludes co-located Collection files, and auto-pins named operations", async () => {
+    const resolve = vi.fn(async () => approved);
+    const h = harness(resolve);
+    h.sources.clear();
+    h.sources.set("app/main.tsx", 'import { helper } from "./helper"; console.log(helper);');
+    h.sources.set("app/helper.ts", "export const helper = 1;");
+    h.sources.set("app/src/changes/view.tsx", "export const View = () => null;");
+    h.sources.set("app/style.css", "body { margin: 0; }");
+    // Co-located Collection files and nested Collection subfolder must stay out of browser app inputs.
+    h.sources.set(
+      "app/dataset.json",
+      JSON.stringify({
+        formatVersion: 2,
+        datasetId: approved.datasetId,
+        name: "Events",
+        schemaPath: "schema.sql",
+        operationsPath: "backend.ts",
+        tables: [
+          { sqlName: "events", primaryKey: "id", fields: [{ sqlColumn: "id", type: "text" }] },
+        ],
+        operations: [{ name: "submit", table: "events", kind: "create", fields: ["id"] }],
+      }),
+    );
+    h.sources.set("app/schema.sql", "CREATE TABLE events (id TEXT PRIMARY KEY);");
+    h.sources.set("app/backend.ts", "export const operations = {};");
+    h.sources.set("app/changes/c1.json", "{}");
+    h.sources.set("app/revisions/1/schema.sql", "SELECT 1;");
+    h.sources.set("app/nested-col/dataset.json", "{}");
+    h.sources.set("app/nested-col/operations.js", "export const operations = {};");
+    h.sources.set("app/automations.yaml", "automations: []");
+
+    h.setDeclaration({
+      version: 1,
+      entryPath: "main.tsx",
+      dataset: {
+        kind: "dataset",
+        datasetPath: "app/dataset.json",
+        operations: ["submit"],
+      },
+    });
+
+    const localSource = await readLocalAppSource(
+      { workspaceId: "w", appRoot: "app" },
+      {
+        adapter: h.adapter,
+        signal: h.controller.signal,
+        assertCurrent() {},
+        deferredWrites: [],
+      },
+    );
+    const { candidate } = await prepareLocalAppPublication(
+      { workspaceId: "w", appRoot: "app" },
+      {
+        adapter: h.adapter,
+        signal: h.controller.signal,
+        assertCurrent() {},
+        compile: h.compile,
+        deferredWrites: [],
+        resolveDatasetRevision: resolve,
+      },
+    );
+
+    expect(localSource.sourcePaths.sort()).toEqual([
+      "app/app.publish.json",
+      "app/helper.ts",
+      "app/main.tsx",
+      "app/src/changes/view.tsx",
+      "app/style.css",
+    ]);
+    expect(candidate.sourceRevision).toBe(localSource.sourceRevision);
+    expect(resolve).toHaveBeenCalledWith({ datasetId: approved.datasetId });
+    expect(candidate.capabilities).toEqual([
+      {
+        ...binding,
+        name: approved.definition.name,
+        operations: [{ operationId: id(4), name: "submit", access: "link", readOnly: false }],
+      },
+    ]);
+  });
+
+  it("refuses unknown operation names before compiling", async () => {
+    const h = harness(async () => approved);
+    h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
+    h.setDeclaration({
+      version: 1,
+      entryPath: "main.ts",
+      dataset: {
+        kind: "dataset",
+        datasetPath: "private/dataset.json",
+        operations: ["nonexistentOp"],
+      },
+    });
+    await expect(h.prepare()).rejects.toThrow(/has no operation named "nonexistentOp"/);
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a co-located dataset.json is malformed or changes mid-capture", async () => {
+    const h = harness(async () => approved);
+    h.sources.clear();
+    h.sources.set("app/main.tsx", "console.log(1);");
+    h.sources.set("app/operations.js", "export const operations = {};");
+    h.sources.set("app/dataset.json", "{ broken json");
+    h.setDeclaration({ version: 1, entryPath: "main.tsx" });
+    await expect(h.prepare()).rejects.toThrow(/could not read app\/dataset\.json/);
+    expect(h.compile).not.toHaveBeenCalled();
+
+    // Direct parse without discovery refuses omitted inputs instead of silently dropping sibling files.
+    expect(() =>
+      parseAppPublicationDeclaration(
+        new TextEncoder().encode(JSON.stringify({ version: 1, entryPath: "main.tsx" })),
+        "app",
+      ),
+    ).toThrow(/folder discovery is required/);
+
+    // Mid-capture change to co-located dataset.json fails closed instead of using stale exclusions.
+    const h2 = harness(async () => approved);
+    h2.sources.clear();
+    h2.sources.set("app/main.tsx", "console.log(1);");
+    h2.sources.set("app/backend.ts", "export const operations = {};");
+    h2.sources.set(
+      "app/dataset.json",
+      JSON.stringify({
+        formatVersion: 2,
+        datasetId: approved.datasetId,
+        name: "Events",
+        operationsPath: "backend.ts",
+        tables: [
+          { sqlName: "events", primaryKey: "id", fields: [{ sqlColumn: "id", type: "text" }] },
+        ],
+        operations: [{ name: "submit", table: "events", kind: "create", fields: ["id"] }],
+      }),
+    );
+    h2.setDeclaration({ version: 1, entryPath: "main.tsx" });
+    h2.hooks.onCapture = () => {
+      h2.sources.set("app/dataset.json", `${h2.sources.get("app/dataset.json")!} `);
+    };
+    await expect(h2.prepare()).rejects.toThrow(/app\/dataset\.json changed while dohc prepared/);
+    expect(h2.compile).not.toHaveBeenCalled();
+  });
+
+  it("prepares multi-Collection manifests for local apps and refuses >1 Collection on shared links", async () => {
+    const secondFields = approved.definition.tables[0]!.fields.map((field, index) => ({
+      ...field,
+      fieldId: id(12 + index),
+    }));
+    const secondDef = {
+      ...approved.definition,
+      datasetId: id(10),
+      name: "Workouts",
+      schemaPath: "workouts/schema.sql",
+      operationsPath: "workouts/operations.js",
+      tables: [
+        {
+          ...approved.definition.tables[0]!,
+          tableId: id(11),
+          fields: secondFields,
+        },
+      ],
+      operations: [
+        {
+          ...approved.definition.operations[0]!,
+          operationId: id(15),
+          tableId: id(11),
+          fieldIds: [secondFields[0]!.fieldId],
+        },
+      ],
+    };
+    const secondApproved = describeDatasetRevision({
+      definition: secondDef,
+      revision: 1,
+      schemaSql: "CREATE TABLE responses(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL);",
+      operationSource: "globalThis.operations={submit(){return {ok:true};}};",
+    });
+    const byId = new Map([
+      [approved.datasetId, approved],
+      [secondApproved.datasetId, secondApproved],
+    ]);
+    const h = harness(async (lookup) => {
+      const found = byId.get(lookup.datasetId);
+      if (!found) throw new Error("missing");
+      return found;
+    });
+    h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
+    h.sources.set("workouts/dataset.json", JSON.stringify(secondDef));
+    h.setDeclaration({
+      version: 1,
+      entryPath: "main.ts",
+      datasets: {
+        workouts: {
+          kind: "dataset",
+          datasetPath: "workouts/dataset.json",
+          operations: ["submit"],
+        },
+        expenses: {
+          kind: "dataset",
+          datasetPath: "private/dataset.json",
+          operations: ["submit"],
+        },
+      },
+    });
+    // Shared link preparation refuses >1 Collection (Decision 1A).
+    await expect(h.prepare()).rejects.toThrow(/Shared links support at most one Collection/);
+
+    // Local preparation succeeds and sorts capabilities deterministically with aliases preserved.
+    const localPrepared = await prepareLocalAppPublication(
+      { workspaceId: "w", appRoot: "app" },
+      {
+        deferredWrites: [],
+        adapter: h.adapter,
+        compile: h.compile,
+        signal: new AbortController().signal,
+        assertCurrent() {},
+        resolveDatasetRevision: async (lookup) => byId.get(lookup.datasetId)!,
+      },
+    );
+    expect(
+      localPrepared.candidate.capabilities.map((cap) =>
+        cap.kind === "dataset" ? [cap.alias, cap.datasetId, cap.name] : [],
+      ),
+    ).toEqual([
+      ["expenses", approved.datasetId, "Registrations"],
+      ["workouts", secondApproved.datasetId, "Workouts"],
+    ]);
+
+    // Duplicate datasetId across two aliases is refused.
+    h.setDeclaration({
+      version: 1,
+      entryPath: "main.ts",
+      datasets: {
+        a: { kind: "dataset", datasetPath: "private/dataset.json", operations: ["submit"] },
+        b: { kind: "dataset", datasetPath: "private/dataset.json", operations: ["submit"] },
+      },
+    });
+    await expect(
+      prepareLocalAppPublication(
+        { workspaceId: "w", appRoot: "app" },
+        {
+          deferredWrites: [],
+          adapter: h.adapter,
+          compile: h.compile,
+          signal: new AbortController().signal,
+          assertCurrent() {},
+          resolveDatasetRevision: async (lookup) => byId.get(lookup.datasetId)!,
+        },
+      ),
+    ).rejects.toThrow(/more than once/);
+  });
 });
 
 it.each(["会议", "Cafe\u0301"])(
@@ -631,3 +905,28 @@ it.each(["会议", "Cafe\u0301"])(
     });
   },
 );
+
+it("reports malformed app.publish.json on one line without disclosing input contents or spoofed offsets", () => {
+  const secret = "SECRET_MANIFEST_TOKEN_999";
+  const malformed = new TextEncoder().encode(`{\n  "token": "${secret}",\n  broken\n}`);
+  let message = "";
+  try {
+    parseAppPublicationDeclaration(malformed, "app");
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+  expect(message).toMatch(
+    /^app\/app\.publish\.json is not valid JSON \(at .+\)\. Check its syntax\.$/,
+  );
+  expect(message).not.toContain(secret);
+  expect(message).not.toContain("\n");
+
+  let spoofed = "";
+  try {
+    parseAppPublicationDeclaration(new TextEncoder().encode("position 8675309"), "app");
+  } catch (error) {
+    spoofed = error instanceof Error ? error.message : String(error);
+  }
+  expect(spoofed).toBe("app/app.publish.json is not valid JSON. Check its syntax.");
+  expect(spoofed).not.toContain("8675309");
+});

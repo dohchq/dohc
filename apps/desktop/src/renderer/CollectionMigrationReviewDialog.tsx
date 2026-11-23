@@ -1,21 +1,33 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Minus, Pencil, Plus } from "lucide-react";
+import { ArrowRight, Minus, Pencil, Plus, TriangleAlert } from "lucide-react";
 import {
   datasetRevisionsPreserveAccess,
   type DatasetRevision,
   type DatasetField,
 } from "@dohc/security-contract/dataset";
+import { datasetRevisionHistoryReversible } from "../workspaces/datasetHistoryReversibility";
 import { DatasetMigrationCandidate, type DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { Overlay } from "./Overlay";
-import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { DangerButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { inputClass } from "./collections/FieldForm";
 import {
   CollectionMigrationDataPreview,
+  joinList,
+  migrationTableLabel,
+  recordCount,
+  summarizeMigrationPreview,
   type MigrationDataPreviewProps,
 } from "./CollectionMigrationDataPreview";
 
 export type { DatasetMigrationPreparation } from "@dohc/cli/dataset";
+export function boundAppStatusLabel(status: "compatible" | "needs-refresh" | "incompatible") {
+  return status === "incompatible"
+    ? "Needs update"
+    : status === "needs-refresh"
+      ? "Needs approval again"
+      : "";
+}
 export interface CollectionMigrationReviewDialogProps {
   workspaceId: string;
   datasetId: string;
@@ -52,6 +64,7 @@ type Change = {
   detail: string;
   before?: string;
   after?: string;
+  button?: boolean;
 };
 function fieldSummary(field: DatasetField): string {
   if (field.type === "button") return [field.name, field.type].join(" · ");
@@ -219,6 +232,7 @@ function changes(before: DatasetRevision, after: DatasetRevision): Change[] {
         field: field.name,
         detail: "Field removed",
         before: fieldSummary(field),
+        ...(field.type === "button" ? { button: true } : {}),
       });
   }
   for (const table of before.definition.tables)
@@ -260,13 +274,95 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
   const preservesAccess =
     !!preparation &&
     datasetRevisionsPreserveAccess(preparation.previousRevision, preparation.revision);
-  const namesOnly =
-    !!props.generatedChange &&
+  const noRecordChanges =
     candidateMatches &&
-    preservesAccess &&
     preparation!.candidate.preview.tables.every(
       (table) => table.beforeRows === table.afterRows && table.changedRows === 0,
     );
+  const historyCanReverse =
+    !!preparation &&
+    datasetRevisionHistoryReversible(preparation.previousRevision, preparation.revision);
+  const affectedBoundApps = useMemo(
+    () => (preparation?.boundApps ?? []).filter((app) => app.status !== "compatible"),
+    [preparation],
+  );
+  const hasAffectedBoundApps = affectedBoundApps.length > 0;
+  const namesOnly = !!props.generatedChange && preservesAccess && noRecordChanges;
+  const previewTotals = useMemo(
+    () =>
+      preparation && candidateMatches
+        ? summarizeMigrationPreview(
+            preparation.candidate.preview.tables,
+            preparation.previousRevision,
+            preparation.revision,
+          )
+        : null,
+    [preparation, candidateMatches],
+  );
+  const removedStructure = useMemo(
+    () => diff.filter((change) => change.kind === "removed" && !change.button),
+    [diff],
+  );
+  const { warningHeadline, hasConfirmedLoss, hasDangerConfirm } = useMemo(() => {
+    const lossParts: string[] = [];
+    const unmatchedParts: string[] = [];
+    if (previewTotals && previewTotals.deletedRows > 0) {
+      lossParts.push(`removes ${recordCount(previewTotals.deletedRows)}`);
+    }
+    if (previewTotals && previewTotals.clearedValues > 0) {
+      const prefix = previewTotals.clearedValuesAtLeast ? "at least " : "";
+      lossParts.push(
+        `clears ${prefix}${previewTotals.clearedValues} existing ${previewTotals.clearedValues === 1 ? "value" : "values"}`,
+      );
+    }
+    if (previewTotals && previewTotals.replacedValues > 0) {
+      lossParts.push(
+        `replaces ${previewTotals.replacedValues} existing ${previewTotals.replacedValues === 1 ? "value" : "values"}`,
+      );
+    }
+    const removedTables = removedStructure.filter((change) => change.field === "").length;
+    const removedFields = removedStructure.filter((change) => change.field !== "").length;
+    if (removedTables > 0) {
+      lossParts.push(`removes ${removedTables} ${removedTables === 1 ? "table" : "tables"}`);
+    }
+    if (removedFields > 0) {
+      lossParts.push(`removes ${removedFields} ${removedFields === 1 ? "field" : "fields"}`);
+    }
+    let unmatchedNetLoss = false;
+    if (preparation && previewTotals) {
+      for (const unmatched of previewTotals.unmatchedTables) {
+        if (unmatched.afterRows < unmatched.beforeRows) unmatchedNetLoss = true;
+        const why =
+          unmatched.reason === "table-renamed"
+            ? "table renamed; records were not matched by key"
+            : "not matched by key";
+        const name = migrationTableLabel(
+          preparation.previousRevision,
+          preparation.revision,
+          unmatched.table,
+        );
+        unmatchedParts.push(
+          `replaces ${recordCount(unmatched.beforeRows)} in ${name} with ${recordCount(unmatched.afterRows)} (${why})`,
+        );
+      }
+      const renamedColumnCount = previewTotals.clearedColumns.filter(
+        (item) => item.renamedTo !== null,
+      ).length;
+      if (previewTotals.renamedColumnValues > 0) {
+        unmatchedParts.push(
+          `renames ${renamedColumnCount === 1 ? "a column" : `${renamedColumnCount} columns`} holding ${previewTotals.renamedColumnValues} unverified ${previewTotals.renamedColumnValues === 1 ? "value" : "values"}`,
+        );
+      }
+    }
+    const parts = [...lossParts, ...unmatchedParts];
+    const confirmedLoss = lossParts.length > 0 || unmatchedNetLoss;
+    return {
+      warningHeadline: parts.length > 0 ? `This change ${joinList(parts)}.` : null,
+      hasConfirmedLoss: confirmedLoss,
+      hasDangerConfirm: confirmedLoss || (previewTotals?.renamedColumnValues ?? 0) > 0,
+    };
+  }, [preparation, previewTotals, removedStructure]);
+  const ApproveButton = hasDangerConfirm ? DangerButton : PrimaryButton;
   async function run(kind: "prepare" | "approve"): Promise<void> {
     if (!alive.current || locked.current) return;
     if (kind === "prepare" && !props.generatedChange) {
@@ -586,21 +682,105 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
                 </details>
               </>
             )}
+            {warningHeadline ? (
+              <div
+                data-testid="migration-destructive-warning"
+                className="flex items-start gap-2 rounded-lg border border-warning/50 bg-panel-2 p-3 text-[12px] text-ink"
+              >
+                <TriangleAlert size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+                <div className="min-w-0 space-y-1">
+                  <p className="m-0 font-medium text-ink">{warningHeadline}</p>
+                  <p className="m-0 text-muted">
+                    {hasConfirmedLoss
+                      ? "Collection History cannot restore removed records, dropped fields, or cleared or overwritten values after approval. To keep a copy, choose Export recovery before you approve."
+                      : "Check the records above to confirm your values moved. Collection History cannot restore removed or overwritten values after approval. To keep a copy, choose Export recovery before you approve."}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+            {hasAffectedBoundApps || preparation.boundAppsIncomplete ? (
+              <section
+                aria-label="Connected apps"
+                className="flex flex-col gap-2 rounded-lg border border-line bg-panel-2 p-3 text-[12px]"
+              >
+                <p className="m-0 font-medium text-ink">
+                  {hasAffectedBoundApps
+                    ? `Connected apps (${affectedBoundApps.length})`
+                    : "Connected apps"}
+                </p>
+                {hasAffectedBoundApps ? (
+                  <ul className="m-0 flex list-none flex-col gap-2 p-0">
+                    {affectedBoundApps.map((app) => (
+                      <li
+                        key={`${app.scope}:${app.publicationId}`}
+                        className="flex flex-col gap-1 border-t border-line/60 pt-2 first:border-t-0 first:pt-0"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-mono text-[11px] text-ink">{app.appRoot}</span>
+                            {app.alias ? (
+                              <span className="text-[11px] text-muted">({app.alias})</span>
+                            ) : null}
+                            <span className="rounded bg-panel px-1.5 py-0.5 text-[11px] text-muted">
+                              {app.scope === "link" ? "Share link" : "Local"}
+                            </span>
+                          </span>
+                          <span
+                            className={`text-[11px] font-medium ${app.status === "incompatible" ? "text-danger" : "text-warning"}`}
+                          >
+                            {boundAppStatusLabel(app.status)}
+                          </span>
+                        </div>
+                        {app.reasons?.length ? (
+                          <ul className="m-0 list-disc pl-4 text-[11px] text-muted">
+                            {app.reasons.map((reason) => (
+                              <li key={reason}>{reason}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {preparation.boundAppsIncomplete ? (
+                  <p className="m-0 text-[11px] text-muted">
+                    Some connected apps could not be checked right now. Check Collection access
+                    after applying this change.
+                  </p>
+                ) : null}
+              </section>
+            ) : null}
             <p className="m-0 text-[12px] text-muted">
               This preview used a saved copy. Approval applies this exact result if the Collection
               has not changed.
             </p>
             <p
               className={
-                namesOnly
+                namesOnly && !hasAffectedBoundApps && !preparation.boundAppsIncomplete
                   ? "m-0 text-[12px] text-muted"
-                  : "m-0 rounded-lg border border-warning/50 bg-panel-2 p-3 text-[12px] text-warning"
+                  : "m-0 rounded-lg border border-warning/50 bg-panel-2 p-3 text-[12px] text-ink"
               }
             >
               {preservesAccess
-                ? "Only names or file locations changed. Shared apps and access stay unchanged."
-                : "Review changed values before approving. Changed rules require renewed app and collaborator approval."}{" "}
-              You can reverse changes from History, though later edits can create conflicts.
+                ? hasAffectedBoundApps
+                  ? `This change keeps current access rules, though the connected apps listed above still need review.${!noRecordChanges && candidateMatches ? " Review the record changes above before approving." : ""}`
+                  : preparation.boundAppsIncomplete
+                    ? `This change keeps current access rules, though some connected apps could not be checked right now.${!noRecordChanges && candidateMatches ? " Review the record changes above before approving." : ""}`
+                    : !noRecordChanges && candidateMatches
+                      ? "Existing shared apps keep working and access stays unchanged. Review the record changes above before approving."
+                      : "Existing shared apps keep working. Access stays unchanged."
+                : candidateMatches
+                  ? "Review changed values before approval. Changed rules require renewed app and collaborator approval."
+                  : "Changed rules require renewed app and collaborator approval."}
+              {!warningHeadline
+                ? namesOnly && historyCanReverse
+                  ? " Collection History can reverse name and button changes."
+                  : historyCanReverse
+                    ? noRecordChanges
+                      ? " Collection History can reverse name, button, and action changes."
+                      : " Collection History can reverse name, button, and action changes. It cannot reverse record changes."
+                    : " Collection History cannot reverse field, constraint, action, or record changes."
+                : ""}
             </p>
             {!namesOnly && (
               <label className="flex items-center gap-2 text-[12px] text-ink">
@@ -625,12 +805,12 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
               <SecondaryButton disabled={busy} onClick={() => void discard()}>
                 Discard review
               </SecondaryButton>
-              <PrimaryButton
+              <ApproveButton
                 disabled={busy || (!confirmed && !namesOnly) || !candidateMatches}
                 onClick={() => void run("approve")}
               >
                 {busy ? "Applying…" : "Approve change"}
-              </PrimaryButton>
+              </ApproveButton>
             </div>
           </>
         )}

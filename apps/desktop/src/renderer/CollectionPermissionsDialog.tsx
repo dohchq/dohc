@@ -1,6 +1,6 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
-import type { DatasetPermissionsPage, DatasetPlace } from "@dohc/cli/dataset";
+import type { DatasetBoundApp, DatasetPermissionsPage, DatasetPlace } from "@dohc/cli/dataset";
 import type { RelayShareGrantedRow } from "../ipc/bridgeContract";
 import {
   namingCollectionMove,
@@ -9,6 +9,7 @@ import {
   withErrorWords,
 } from "../ipc/errorWords";
 import { bridge } from "./bridge";
+import { boundAppStatusLabel } from "./CollectionMigrationReviewDialog";
 import { Overlay } from "./Overlay";
 import { inputClass } from "./collections/FieldForm";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
@@ -114,6 +115,8 @@ function Permissions({
 }) {
   const [page, setPage] = useState<DatasetPermissionsPage | null>(null);
   const [place, setPlace] = useState<DatasetPlace | null>(null);
+  const [boundApps, setBoundApps] = useState<DatasetBoundApp[]>([]);
+  const [boundAppsIncomplete, setBoundAppsIncomplete] = useState(false);
   const [recipients, setRecipients] = useState<RelayShareGrantedRow[]>([]);
   const [grantId, setGrantId] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
@@ -142,6 +145,10 @@ function Permissions({
       if (permissions.kind !== "permissions") throw Error("dohc could not read Collection access.");
       setPage({ permissions: permissions.permissions, nextCursor: permissions.nextCursor });
       setPlace(permissions.place ?? null);
+      if (!after) {
+        setBoundApps(permissions.boundApps ?? []);
+        setBoundAppsIncomplete(Boolean(permissions.boundAppsIncomplete));
+      }
       setRecipients(
         shares.granted.filter(
           (row) =>
@@ -305,6 +312,11 @@ function Permissions({
         </form>
         <div className="flex flex-col gap-2">
           <h3 className="m-0 text-sm font-semibold text-ink">People and apps with access</h3>
+          {boundAppsIncomplete ? (
+            <p className="m-0 text-[12px] text-muted">
+              Some connected apps could not be checked right now.
+            </p>
+          ) : null}
           {!page ? (
             busy ? (
               <SkeletonRows rows={2} label="Loading access…" />
@@ -314,48 +326,75 @@ function Permissions({
           ) : !page.permissions.length ? (
             <p className="m-0 text-[12px] text-muted">Only you have access.</p>
           ) : (
-            page.permissions.map((permission) => (
-              <div
-                key={`${permission.kind}:${permission.principal}`}
-                className="border-b border-line py-2"
-              >
-                {permission.kind === "data" ? (
-                  <p
-                    role="status"
-                    aria-live="polite"
-                    className="m-0 mb-1 text-[12px] text-danger empty:mb-0"
-                  >
-                    {failure?.principalKey === permission.principal ? failure.words : null}
-                  </p>
-                ) : null}
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0 text-[12px] text-ink">
-                    <span>
-                      {permission.kind === "app" ? "App" : "Person"}
-                      {permission.current ? "" : " · Rules changed"}
-                    </span>
-                    <div className="truncate font-mono text-muted" title={permission.principal}>
-                      {permission.principal}
-                    </div>
-                    <div className="text-muted">
-                      {permission.metadata.operationIds.length} allowed{" "}
-                      {permission.metadata.operationIds.length === 1 ? "action" : "actions"}
-                    </div>
-                  </div>
+            page.permissions.map((permission) => {
+              const app =
+                permission.kind === "app"
+                  ? boundApps.find((entry) => entry.publicationId === permission.principal)
+                  : undefined;
+              const label = app
+                ? boundAppStatusLabel(app.status)
+                : permission.current
+                  ? ""
+                  : "Rules changed";
+              const statusText = label ? ` · ${label}` : "";
+              return (
+                <div
+                  key={`${permission.kind}:${permission.principal}`}
+                  className="border-b border-line py-2"
+                >
                   {permission.kind === "data" ? (
-                    <SecondaryButton
-                      aria-disabled={busy || undefined}
-                      className="aria-disabled:cursor-wait aria-disabled:opacity-50"
-                      onClick={() => {
-                        if (!busy) void change(permission.principal);
-                      }}
+                    <p
+                      role="status"
+                      aria-live="polite"
+                      className="m-0 mb-1 text-[12px] text-danger empty:mb-0"
                     >
-                      Remove access
-                    </SecondaryButton>
+                      {failure?.principalKey === permission.principal ? failure.words : null}
+                    </p>
                   ) : null}
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0 text-[12px] text-ink">
+                      <span>
+                        {permission.kind === "app"
+                          ? app
+                            ? `App · ${app.scope === "link" ? "Share link" : "Local"}`
+                            : "App"
+                          : "Person"}
+                        {statusText}
+                      </span>
+                      <div className="truncate font-mono text-muted" title={permission.principal}>
+                        {app
+                          ? app.alias
+                            ? `${app.appRoot} (${app.alias})`
+                            : app.appRoot
+                          : permission.principal}
+                      </div>
+                      <div className="text-muted">
+                        {permission.metadata.operationIds.length} allowed{" "}
+                        {permission.metadata.operationIds.length === 1 ? "action" : "actions"}
+                      </div>
+                      {app?.reasons?.length ? (
+                        <ul className="m-0 mt-1 list-disc pl-4 text-[11px] text-muted">
+                          {app.reasons.map((reason) => (
+                            <li key={reason}>{reason}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                    {permission.kind === "data" ? (
+                      <SecondaryButton
+                        aria-disabled={busy || undefined}
+                        className="aria-disabled:cursor-wait aria-disabled:opacity-50"
+                        onClick={() => {
+                          if (!busy) void change(permission.principal);
+                        }}
+                      >
+                        Remove access
+                      </SecondaryButton>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
           <div className="flex gap-2">
             <SecondaryButton disabled={busy} onClick={() => void load()}>

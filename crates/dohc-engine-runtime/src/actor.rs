@@ -77,7 +77,7 @@ pub use relay::{
 };
 pub use secrets::SecretWriteDisk;
 pub use versioned::{
-    BinaryWriteExecutionResult, MergeExecutionResult, RollbackExecutionResult,
+    BinaryWriteExecutionResult, MergeExecutionResult, PathClearSince, RollbackExecutionResult,
     TextWriteExecutionResult, WriteConditions,
 };
 pub use versions::{ActiveVersionSwitch, HistoryPageRead};

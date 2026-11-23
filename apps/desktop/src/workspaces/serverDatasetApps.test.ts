@@ -9,7 +9,7 @@ import { unguardedCollections } from "../testing/collectionsHolder";
 import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { datasetResponseAction, readDatasetResponse } from "../ipc/readDatasetResponse";
-import { markDatasetServerNotFound } from "../ipc/errorWords";
+import { isDatasetServerNotFound, markDatasetServerNotFound } from "../ipc/errorWords";
 import { compileClosedApp } from "./closedAppCompiler";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import { generateDatasetFormSources } from "./datasetFormGenerator";
@@ -667,3 +667,39 @@ it("replays, on the server, an app's change this computer made before the Collec
     ),
   ).toEqual(["Alex"]);
 }, 60_000);
+
+it("tags 404 not_found responses on workspace local-apps withdrawals so retries stop cleanly", async () => {
+  const relay = await startTestRelay();
+  cleanups.push(() => relay.close());
+  await relay.activate();
+  const server = createServerCollectionsTransport("w", async (path, body, signal) => {
+    const action = datasetResponseAction(path);
+    const response = await fetch(`${relay.origin}${path}`, {
+      method: "POST",
+      headers: { authorization: "Bearer owner", "content-type": "application/json" },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    });
+    if (action) {
+      const value = (await readDatasetResponse(response, action, new AbortController().signal)) as {
+        code?: string;
+      } | null;
+      if (!response.ok)
+        throw markDatasetServerNotFound(
+          new Error(`${response.status} ${value?.code ?? ""}`),
+          response.status,
+          value,
+        );
+      return value;
+    }
+    if (!response.ok) throw new Error(`${response.status}`);
+    return response.json();
+  });
+  let caught: unknown;
+  try {
+    await server.withdraw("", "0".repeat(64), new AbortController().signal);
+  } catch (error) {
+    caught = error;
+  }
+  expect(isDatasetServerNotFound(caught)).toBe(true);
+});

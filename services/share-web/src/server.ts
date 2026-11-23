@@ -1239,6 +1239,7 @@ export function createShareWebApplication({
     ...(accountAuth && accountHandler
       ? { account: { publicOrigin: accountAuth.publicOrigin, handle: accountHandler } }
       : {}),
+    liveDocuments: Boolean(linkLiveConfig),
   });
   if (
     linkLiveConfig &&

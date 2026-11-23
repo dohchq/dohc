@@ -2137,6 +2137,192 @@ describe("CLI socket server", () => {
     ).toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
   });
 
+  it("runs undoAgentRun on an owner workspace as an agent undo and refuses human actor, active runs, runId, and read-only workspaces", async () => {
+    const agentRunUndo = vi.fn(
+      async (agentRunId: string, _planToken: string, _origin: unknown) => ({
+        agentRunId,
+        correlationId: "restore-agent-run-1",
+        truncated: false,
+        restored: [{ path: "notes/plan.md", restored: "text" as const, restoredMomentId: "m-9" }],
+        skipped: [],
+        failed: [],
+      }),
+    );
+    Object.assign(context, { agentRunUndo });
+
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toEqual({
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      ok: true,
+      result: {
+        ok: true,
+        agentRunId: "run-1",
+        correlationId: "restore-agent-run-1",
+        truncated: false,
+        restored: [{ path: "notes/plan.md", restored: "text", restoredMomentId: "m-9" }],
+        skipped: [],
+        failed: [],
+      },
+    });
+    expect(agentRunUndo).toHaveBeenCalledWith(
+      "run-1",
+      "tok-1",
+      expect.objectContaining({
+        actorOriginId: "dohc-mcp",
+        attribution: expect.objectContaining({ onBehalfOf: "person-local" }),
+      }),
+    );
+
+    agentRunUndo.mockClear();
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "human", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: {
+        ok: false,
+        reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".`,
+      },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+
+    holdRun("active-run", "default");
+    expect(
+      await rawRequest({
+        token,
+        runSecret: RUN_SECRET,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { ok: false, reason: "Finish the active agent run before undoing an agent run." },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+    dispatchedRun = null;
+    dispatchedRunId = null;
+
+    agentRunDepth = 1;
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { ok: false, reason: "Finish the active agent run before undoing an agent run." },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+    agentRunDepth = 0;
+
+    agentWriteRunId = "run-settings-active";
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { ok: false, reason: "Finish the active agent run before undoing an agent run." },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+    agentWriteRunId = null;
+
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: {
+          cwd: workspaceRoot,
+          actor: "agent",
+          agentId: "terminal",
+          agentRunId: "run-1",
+          planToken: "tok-1",
+        },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: {
+        ok: false,
+        reason:
+          "Connected agents cannot undo an agent run. Undo from desktop History or the owner's local CLI.",
+      },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: {
+          cwd: workspaceRoot,
+          actor: "agent",
+          agentRunId: "run-1",
+          planToken: "tok-1",
+          runId: "run-1",
+        },
+      }),
+    ).toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
+
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "undoAgentRun",
+        args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1" },
+      }),
+    ).toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
+
+    agentRunUndo.mockClear();
+    context.readOnly = true;
+    const readOnlyReply = await rawRequest({
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "undoAgentRun",
+      args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+    });
+    expect(readOnlyReply).toMatchObject({
+      ok: true,
+      result: { ok: false, reason: expect.any(String) },
+    });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    const shareUndoReply = await rawRequest({
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "undoAgentRun",
+      args: { cwd: workspaceRoot, actor: "agent", agentRunId: "run-1", planToken: "tok-1" },
+    });
+    expect(shareUndoReply).toMatchObject({ ok: false });
+    expect(agentRunUndo).not.toHaveBeenCalled();
+
+    const sharePlanReply = await rawRequest({
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "planUndoAgentRun",
+      args: { cwd: workspaceRoot, actor: "human", agentRunId: "run-1" },
+    });
+    expect(sharePlanReply).toMatchObject({ ok: false });
+  });
+
   it("refuses owner and chat commands in a received share opened as its own workspace", async () => {
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;
@@ -2300,7 +2486,7 @@ describe("CLI socket server", () => {
         actor: "agent",
         request: { ...request, workspaceId: "other" },
       }),
-    ).rejects.toThrow("owning workspace");
+    ).rejects.toThrow("workspaceId does not match this workspace");
     context.readOnly = true;
     await expect(
       invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request }),
@@ -2318,8 +2504,63 @@ describe("CLI socket server", () => {
           request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: request.operationId },
         }),
       ).rejects.toThrow("Automations cannot use app publication");
+      await expect(
+        invoke("appPublication", {
+          cwd: workspaceRoot,
+          actor,
+          request: { action: "stage", workspaceId: WORKSPACE_ID, appRoot: "app" },
+        }),
+      ).rejects.toThrow("Automations cannot use app publication");
+      await expect(
+        invoke("appPublication", {
+          cwd: workspaceRoot,
+          actor,
+          request: {
+            action: "approveStaged",
+            workspaceId: WORKSPACE_ID,
+            stageId: request.operationId,
+            reviewDigest: "a".repeat(64),
+          },
+        }),
+      ).rejects.toThrow("Automations cannot use app publication");
     }
+    agentRunDepth = 0;
     expect(context.appPublication).toHaveBeenCalledTimes(2);
+
+    // stage rebases appRoot and migration paths relative to cwd.
+    const subDir = join(workspaceRoot, "apps");
+    await mkdir(subDir, { recursive: true });
+    context.appPublication = vi.fn(async () => ({
+      kind: "stagedListed" as const,
+      stages: [],
+    }));
+    await invoke("appPublication", {
+      cwd: subDir,
+      actor: "agent",
+      request: {
+        action: "stage",
+        workspaceId: WORKSPACE_ID,
+        appRoot: "control-tower",
+        migrations: {
+          expenses: "control-tower/expenses/migrate.sql",
+          "control-tower/workouts/dataset.json": "control-tower/workouts/migrate.sql",
+        },
+        agentLabel: "Builder",
+      },
+    });
+    expect(context.appPublication).toHaveBeenLastCalledWith(
+      {
+        action: "stage",
+        workspaceId: WORKSPACE_ID,
+        appRoot: "apps/control-tower",
+        migrations: {
+          expenses: "apps/control-tower/expenses/migrate.sql",
+          "apps/control-tower/workouts/dataset.json": "apps/control-tower/workouts/migrate.sql",
+        },
+        agentLabel: "Builder",
+      },
+      { kind: "agent", label: "Builder", labelSource: "agent-declared" },
+    );
   });
 
   it("writes a random capability endpoint descriptor for a Windows named pipe", async (ctx) => {
@@ -4785,6 +5026,43 @@ describe("CLI socket server", () => {
     expect((await stat(server!.socketPath)).mode & 0o777).toBe(0o600);
     expect(calls.openWorkspace).toBe(0);
     expect(errors).toEqual([]);
+  });
+
+  it("explains how to find workspaceId when a dataset, appPublication, or ownerAppResponses request names another workspace", async () => {
+    const reached = vi.fn(async () => {
+      throw new Error("should not reach handler");
+    });
+    Object.assign(context, {
+      dataset: reached,
+      appPublication: reached,
+      ownerAppResponses: reached,
+    });
+    await expect(
+      invoke("dataset", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        request: { action: "list", workspaceId: "local" },
+      }),
+    ).rejects.toThrow("workspaceId does not match this workspace");
+    await expect(
+      invoke("appPublication", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        request: {
+          action: "cancel",
+          workspaceId: "local",
+          approvalId: "00000000-0000-4000-8000-000000000101",
+        },
+      }),
+    ).rejects.toThrow("workspaceId does not match this workspace");
+    await expect(
+      invoke("ownerAppResponses", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        request: { action: "list", workspaceId: "local", grantId: "g", limit: 10 },
+      }),
+    ).rejects.toThrow("workspaceId does not match this workspace");
+    expect(reached).not.toHaveBeenCalled();
   });
 });
 

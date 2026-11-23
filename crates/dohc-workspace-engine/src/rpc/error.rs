@@ -725,7 +725,9 @@ fn map_domain(error: &DomainError) -> WireError {
                 | "held-change-missing"
                 | "held-change-conflict"
                 | "held-change-undo-stale"
-                | "held-change-shared-owner"),
+                | "held-change-shared-owner"
+                | "restore-path-collision"
+                | "restore-head-changed"),
         } => (InvalidParams, *reason),
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
         DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),

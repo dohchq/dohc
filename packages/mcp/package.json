@@ -26,6 +26,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@dohc/app-backend-runtime": "workspace:*",
     "@dohc/app-browser": "workspace:*",
     "@types/node": "^24.13.3",
     "tsx": "^4.23.11",
