@@ -1444,7 +1444,7 @@ if (namedLiveConfig) {
       tickets,
       captureNative,
       admission,
-      sessionHostBlocked,
+      sessionHostBlocked: editorsBlocked,
       linkAuthority: relayApplication.linkAuthority,
       personalAgents: relayApplication.personalAgents,
       limiter: relayApplication.personalLimiter,
@@ -1469,8 +1469,10 @@ if (namedLiveConfig) {
       tickets,
       changes: frameChanges!,
       readinessLimits: selfHostLiveProfile().desktopReadiness,
+      blocked: editorsBlocked,
     });
     desktopLive = createNamedLiveRoutes({
+      rooms,
       kind: "named",
       desktopBearer: true,
       storage,

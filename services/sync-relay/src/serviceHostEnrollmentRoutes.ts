@@ -10,6 +10,7 @@ import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-document
 import type { SyncRelayStorage } from "./storage";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type {
+  LiveNoteStartFailure,
   ServiceHostEnrollment,
   ServiceHostHeldActivation,
   ServiceHostRetirementPreparation,
@@ -401,6 +402,11 @@ export type ServiceHostDocumentState =
  * Each enrolled document's readiness, from its row, the host, and the metadata
  * of its current activation and live document. It reads no state or baseline bytes.
  */
+const START_FAILED: Readonly<Record<LiveNoteStartFailure, string>> = {
+  refused: "session-host-refused",
+  "no-lineage": "live-document-without-lineage",
+  failing: "session-host-refused",
+};
 export function serviceHostReadiness(options: {
   storage: SyncRelayStorage;
   history: LiveJournalHistoryAuthority;
@@ -418,7 +424,7 @@ export function serviceHostReadiness(options: {
   function state(row: ServiceHostEnrollment): ServiceHostDocumentState {
     const base = { path: row.path, objectId: row.objectId };
     // Not live yet. A host that is down says only that, and a held document reads as Preparing. A document whose
-    // activation keeps failing says why, while the host keeps trying it.
+    // activation keeps failing says why, while its start clock runs.
     const starting = (): ServiceHostDocumentState => {
       if (host.unavailable) return { ...base, status: "unavailable" };
       const failing = host.holdReason(row) === undefined ? host.failing(row) : undefined;
@@ -433,7 +439,10 @@ export function serviceHostReadiness(options: {
     };
     if (diverged(row)) return { ...base, status: "unavailable", reason: "session-host-diverged" };
     // A Pause still waiting for its document to unload reads as paused.
-    if (!row.enabled || row.ownerStop) return { ...base, status: "paused" };
+    if (row.note.state === "off")
+      return row.note.reason === "start-failed"
+        ? { ...base, status: "unavailable", reason: START_FAILED[row.note.cause!] }
+        : { ...base, status: "paused" };
     if (changed(row)) return { ...base, status: "unavailable", reason: "workspace-changed" };
     if (
       storage.objectIdAtPathInVersion({
@@ -471,7 +480,7 @@ export function serviceHostReadiness(options: {
       if (!(error instanceof ServiceActivationDamaged)) throw error;
       return { ...base, status: "unavailable", reason: "session-host-diverged" };
     }
-    if (!saved?.completed) return starting();
+    if (row.note.state !== "live" || !saved?.completed) return starting();
     const document = {
       workspaceId: row.workspaceId,
       mainVersionId: "main",
@@ -648,9 +657,11 @@ export function createServiceHostEnrollmentRoutes(options: {
             ),
             ...(diverged(row)
               ? { reason: "session-host-diverged" }
-              : !changed(row) && storage.hasServiceHostConflictEffect(row)
-                ? { reason: "conflict-parent-withheld" }
-                : {}),
+              : row.note.reason === "start-failed"
+                ? { reason: START_FAILED[row.note.cause!] }
+                : !changed(row) && storage.hasServiceHostConflictEffect(row)
+                  ? { reason: "conflict-parent-withheld" }
+                  : {}),
           })),
           nextCursor: page.nextCursor,
         });

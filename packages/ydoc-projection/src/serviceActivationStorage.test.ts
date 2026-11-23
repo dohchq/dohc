@@ -883,6 +883,7 @@ it("requires exact seed application ACK and supports lost completion responses",
         host,
         access,
         nativeState: { adoptionId: f.capture.activationId, pendingBytes: 0 },
+        nowMs: 7,
         guard() {},
       });
     expect(complete).toThrow("application acknowledgement is missing");
@@ -1060,6 +1061,7 @@ async function completeActivation(f: ReturnType<typeof fixture>) {
     host,
     access,
     nativeState: { adoptionId: f.capture.activationId, pendingBytes: 0 },
+    nowMs: 7,
     guard() {},
   });
 }
@@ -2857,6 +2859,7 @@ async function adoptSuccessor(
       host,
       access,
       nativeState: { adoptionId: SUCCESSOR, pendingBytes },
+      nowMs: 7,
       guard() {},
     });
   return { access, apply, complete };
@@ -3126,6 +3129,7 @@ it("adopts a successor on another host than its predecessor's, funded only there
       host: other,
       access,
       nativeState: { adoptionId: SUCCESSOR, pendingBytes: 0 },
+      nowMs: 7,
       guard() {},
     });
     stopDocument(f, 60);

@@ -158,7 +158,7 @@ function personalEditor(f: Fixture) {
   });
   f.write((db) => {
     db.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
-      created_at_ms,updated_at_ms,demand_at_ms,accounted_bytes) VALUES ('workspace',?,?,'owner',NULL,'epoch','stream',1,1,1,1,64)`).run(
+      created_at_ms,updated_at_ms,demand_at_ms,accounted_bytes,generation,state,since_ms,changed_by) VALUES ('workspace',?,?,'owner',NULL,'epoch','stream',1,1,1,1,64,1,'live',1,'server')`).run(
       f.input.evidence.document.objectId,
       f.input.evidence.currentPath,
     );

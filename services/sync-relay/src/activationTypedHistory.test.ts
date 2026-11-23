@@ -80,7 +80,8 @@ function rowsAfterCheckpoint(note: TypedRelayNote, validate: Validate) {
 function foldOnePage(note: TypedRelayNote, validate: Validate) {
   const foldPage: OrdinaryFoldValidator = async (work, signal) => {
     const result = await validate(work, signal);
-    if (result.kind === "accepted") throw new Error("A fold page was answered as an activation.");
+    if (result.kind === "accepted" || result.kind === "baseline-refused")
+      throw new Error("A fold page was answered as an activation.");
     return result;
   };
   return foldOrdinaryCheckpointPages(note.deployment.storage as unknown as StorageContext, {

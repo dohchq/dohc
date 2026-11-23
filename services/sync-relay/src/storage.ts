@@ -471,6 +471,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   renewPersonalSessionDemand(input: { workspaceId: string; objectId: string; nowMs: number }) {
     return serviceHostEnrollmentStorage.renewPersonalSessionDemand(this, input);
   }
+  moveLiveNote(input: serviceHostEnrollmentStorage.MoveLiveNoteInput) {
+    const result = serviceHostEnrollmentStorage.moveLiveNote(this, input),
+      moved = result.moved
+        ? this.readServiceHostEnrollmentByObjectId(input.workspaceId, input.objectId)
+        : null;
+    if (moved) notifyDesktopReadiness(this, { workspaceId: moved.workspaceId, path: moved.path });
+    return result;
+  }
+  failLapsedLiveNoteStarts(
+    nowMs: number,
+    cause: (
+      enrollment: serviceHostEnrollmentStorage.ServiceHostEnrollment,
+    ) => serviceHostEnrollmentStorage.LiveNoteStartFailure,
+  ) {
+    return serviceHostEnrollmentStorage.failLapsedLiveNoteStarts(this, nowMs, cause);
+  }
   reclaimIdleLiveDocuments(nowMs: number) {
     const result = serviceHostEnrollmentStorage.reclaimIdleLiveDocuments(this, nowMs);
     for (const enrollment of result)

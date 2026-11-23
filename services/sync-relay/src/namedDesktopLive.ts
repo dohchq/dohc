@@ -17,6 +17,7 @@ import type { createLiveTickets } from "./liveTickets";
 import type { SyncRelayStorage } from "./storage";
 import { type LiveHostChanges } from "./relayWriteChanges";
 import { observeDesktopReadiness } from "./desktopReadinessChanges";
+import type { SessionHostBlock } from "./linkRefusal";
 
 /** Desktop bearer admission shares named grant, ticket, and frame-host authority. */
 export function createNamedDesktopLive(options: {
@@ -29,6 +30,8 @@ export function createNamedDesktopLive(options: {
   tickets: ReturnType<typeof createLiveTickets>;
   changes: LiveHostChanges;
   readinessLimits: { maxPendingRequests: number; maxPendingPerUser: number; timeoutMs: number };
+  /** Whether the note takes no editors until its owner acts, as when it is paused or held. */
+  blocked?: (document: { workspaceId: string; objectId: string }) => SessionHostBlock | undefined;
 }) {
   const { storage } = options,
     limits = parseNamedLiveBrowserHttpLimits(options.limits);
@@ -166,7 +169,8 @@ export function createNamedDesktopLive(options: {
               versionId: "main",
               path: path.normalized,
             });
-            if (!objectId) return refuse();
+            if (!objectId || options.blocked?.({ workspaceId: share.workspaceId, objectId }))
+              return refuse();
             let authorized = false,
               counted = false;
             for (const grant of storage.listActiveShareGrantsForRecipient(shareId, actor.userId)) {
