@@ -4,7 +4,7 @@ import { Stack, useIsFocused } from "expo-router";
 import { useHeaderHeight } from "expo-router/react-navigation";
 import { Check } from "lucide-react-native";
 import { useEffect, useRef, useState } from "react";
-import { AccessibilityInfo, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, Platform, StyleSheet, Text, View } from "react-native";
 import { File, Paths } from "expo-file-system";
 import { BarBand, nativeBarBand } from "../../modules/bar-band";
 import { demoMode, demoScroll } from "../demo";
@@ -14,6 +14,7 @@ import { useNotices } from "./NoticesState";
 import type { PhoneNotice } from "./phoneNotice";
 import { freeAnswer, useAnswerReveal } from "./useAnswerReveal";
 import { useSyncBandHost, type BandRecord } from "./useSyncBandHost";
+import { HeaderButton } from "../AndroidHeader";
 import { useTheme } from "../theme";
 
 export function SampleNotices() {
@@ -102,11 +103,19 @@ export function SampleNotices() {
 
   const header = (
     <>
-      <Stack.Screen options={{ title: noticesWords.heading }} />
+      <Stack.Screen
+        options={{
+          title: noticesWords.heading,
+          headerRight:
+            Platform.OS === "android" && unread > 0
+              ? () => <HeaderButton label={noticesWords.markAllRead} onPress={markAllRead} />
+              : undefined,
+        }}
+      />
       {demoMode === "notices-frames" ? <NoticesFrameProbe /> : null}
       {/* A system bar button: the platform draws its padding, glass, label colour and pressed state. A tint of
           our own made its label read as disabled on dark glass. */}
-      {unread > 0 ? (
+      {Platform.OS === "ios" && unread > 0 ? (
         <Stack.Toolbar placement="right">
           <Stack.Toolbar.Button onPress={markAllRead}>
             {noticesWords.markAllRead}

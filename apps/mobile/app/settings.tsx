@@ -41,6 +41,7 @@ import {
 import { serverName } from "../src/server/origin";
 import { useTheme } from "../src/theme";
 import { signedInOnly } from "../src/sampleOnly";
+import { symbolFallback } from "../src/symbolFallback";
 
 type Load<T> =
   | { readonly status: "loading" }
@@ -365,7 +366,7 @@ function SettingsScreen() {
               size={13}
               weight="semibold"
               tintColor={theme.subtle}
-              fallback={null}
+              fallback={symbolFallback("chevron.right", 13, theme.subtle)}
             />
           </Pressable>
         </Section>

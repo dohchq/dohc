@@ -1615,7 +1615,7 @@ describe("a damaged kept.db", () => {
 });
 
 describe("a Sign out that failed", () => {
-  it("deletes on Try again the rows of the account it was for, even after another account signed in", async () => {
+  it("deletes on Try again the rows of the account it was for, and of the account that signed in since", async () => {
     const disk = keptDisk();
     const server = testServer();
     server.on("POST", path("post"), held);
@@ -1637,8 +1637,7 @@ describe("a Sign out that failed", () => {
     disk.failWrites = null;
 
     await account.signOut();
-    expect(records(disk)).toEqual([1]);
-    expect(onDisk(disk, 1)).toMatchObject({ operationId: "op-b", accountId: "u-2" });
+    expect(records(disk)).toEqual([]);
     expect(outbox.state().deletion).toBe("none");
     expect(requests(server, "post")).not.toContainEqual(
       expect.objectContaining({ operationId: "op-b" }),
