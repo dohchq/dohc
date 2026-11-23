@@ -301,6 +301,18 @@ impl Branch {
         !self.map.is_empty()
     }
 
+    /// The plain value stored under `key`: the last value of the newest item
+    /// there, when that item is live and holds plain values
+    /// ([ItemContent::Any]). An item of any other content holds no value here,
+    /// because Yjs and yrs read such an item differently.
+    pub fn stored_value(&self, key: &str) -> Option<crate::Any> {
+        let item = self.map.get(key)?;
+        match &item.content {
+            ItemContent::Any(values) if !item.is_deleted() => values.last().cloned(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn repair_type_ref(&mut self, type_ref: TypeRef) {
         if self.type_ref == TypeRef::Undefined {
             self.type_ref = type_ref;

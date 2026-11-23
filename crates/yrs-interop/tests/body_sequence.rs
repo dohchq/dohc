@@ -465,6 +465,34 @@ fn tells_which_kinds_of_item_a_root_holds_also_once_they_are_deleted() {
 }
 
 #[test]
+fn takes_a_stored_value_only_from_the_newest_item_when_it_holds_plain_values() {
+    let doc = engine_doc();
+    let records = doc.get_or_insert_map("containers");
+    let body = doc.get_or_insert_text(ROOT);
+    let stored_value = |key: &str| AsRef::<Branch>::as_ref(&records).stored_value(key);
+    assert_eq!(stored_value("kind"), None);
+
+    records.insert(&mut doc.transact_mut(), "kind", "blockquote");
+    assert_eq!(stored_value("kind"), Some(Any::from("blockquote")));
+
+    records.insert(&mut doc.transact_mut(), "kind", "callout");
+    assert_eq!(stored_value("kind"), Some(Any::from("callout")));
+
+    records.insert(&mut doc.transact_mut(), "kind", XmlElementPrelim::empty("block"));
+    assert!(records.get(&doc.transact(), "kind").is_some());
+    assert_eq!(stored_value("kind"), None);
+
+    records.insert(&mut doc.transact_mut(), "kind", "callout");
+    records.remove(&mut doc.transact_mut(), "kind");
+    assert_eq!(stored_value("kind"), None);
+
+    let stored = body.insert_embed(&mut doc.transact_mut(), 0, XmlElementPrelim::empty("block"));
+    stored.insert_attribute(&mut doc.transact_mut(), "level", 2);
+    let level = AsRef::<Branch>::as_ref(&stored).stored_value("level");
+    assert_eq!(level, Some(Any::from(2)));
+}
+
+#[test]
 fn reencodes_yjs_body() {
     let doc = engine_doc();
     apply_yjs(&doc, "seed");

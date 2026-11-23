@@ -25,10 +25,23 @@ formatting items on both sides of it, and a letter someone else typed plain
 after that element at the same moment came out marked. The scan now stops at
 any live countable item. It still stops at a deleted string or embed, where
 Yjs scans on, which leaves a redundant formatting item and changes no text.
-The change applies to every text, also the paragraph text of a note stored
-under `body`: a local delete before an element embedded in it now keeps the
-formatting items around that element, as Yjs does.
-Tests live in `crates/yrs-interop/tests/body_sequence.rs`.
+The change applies to every text. For a note stored under `body` it reaches
+one shape only, a local delete before a shared type embedded in a paragraph's
+text, and no writer of that format puts one there. y-prosemirror 1.3.7 and
+@tiptap/y-tiptap 3.0.8 write a paragraph's text in three places
+(`createTypeFromTextNodes`, `updateYText`, and the move of a neighbouring
+text), each with strings and formatting only, and write every inline node as
+an element beside the text. The engine's own writer and import insert strings
+(`XmlTextPrelim::new`, `apply_delta` of `Delta<String>`). The per-edit check
+(`placedItemsFit` in `packages/ydoc-projection/src/liveDocumentValidation.ts`)
+admits only letters and formatting under a mark name in a text. So for that
+format the patch changes only how the engine tidies around an item no honest
+note holds, toward what Yjs does.
+Tests: `crates/yrs-interop/tests/body_sequence.rs` for the patch,
+`packages/ydoc-projection/src/paragraphTextHoldsOnlyLetters.test.ts` for
+y-prosemirror and the per-edit check, and
+`the_engines_own_writer_embeds_nothing_in_a_paragraphs_text` in
+`crates/dohc-engine-collab/src/ydoc/body_sequence.rs` for the engine's writer.
 
 `src/types/text.rs` adds `Text::try_visit_items` and `TextItem`. It visits
 every live item of a text in stored order and delivers a formatting item as
@@ -39,8 +52,14 @@ keeps no state. `src/branch.rs` adds `Branch::holds_unkeyed_item` and
 `Branch::holds_keyed_item`, which say whether a shared type holds an item of
 that kind, live or deleted. An update does not carry a root's kind, so the
 engine checks with them that a format-2 note keeps nothing under `body`, no
-keyed item under `sequence` and no unkeyed item under `containers`. Tests for
-both live in `crates/yrs-interop/tests/body_sequence.rs`.
+keyed item under `sequence` and no unkeyed item under `containers`.
+`Branch::stored_value` gives the value under a key only when the newest item
+there is live and holds plain values (`ItemContent::Any`), and then its last
+value. `Map::get` and `Xml::get_attribute` also show an item of another kind,
+and show it differently from Yjs: a keyed run of letters reads as the whole
+word here and as its last letter there. The engine reads a format-2 note's
+attributes, container records and `meta.schemaVersion` through it. Tests for
+all three live in `crates/yrs-interop/tests/body_sequence.rs`.
 
 Visitor regression tests live in `crates/yrs-interop/tests/text_diff_visitor.rs`;
 projection budget tests live in `crates/dohc-engine-collab/src/ydoc.rs`.
