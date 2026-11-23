@@ -28,8 +28,6 @@ final class ServerRoundTests: XCTestCase {
     app.descendants(matching: .any).matching(identifier: "record-field")
   }
 
-  // A record's field reads "<field>, <value>", as a sibling of its record-field container; only a record's own screen
-  // labels its values so.
   private func fieldShowing(_ app: XCUIApplication, _ text: String) -> XCUIElement {
     app.descendants(matching: .any).matching(NSPredicate(format: "label ENDSWITH %@ OR value == %@", ", " + text, text)).firstMatch
   }
@@ -256,8 +254,7 @@ final class ServerRoundTests: XCTestCase {
     let page = app.webViews.firstMatch
     let text = containing(page, try need("DOHC_SERVER_SENTENCE"))
     XCTAssertTrue(text.waitForExistence(timeout: 10), "Plan should show its sentence")
-    // On the right of the page's last line, below the seed's sentence, so the next round still finds it whole. The
-    // simulator's software keyboard ignores Command-Down.
+    // The simulator's software keyboard ignores Command-Down.
     let last = page.staticTexts.allElementsBoundByIndex.last ?? text
     last.coordinate(withNormalizedOffset: CGVector(dx: 0.99, dy: 0.5)).tap()
     typeSlowly(app, sentence)
@@ -387,16 +384,14 @@ final class ServerRoundTests: XCTestCase {
   @MainActor
   private func settled(_ app: XCUIApplication, _ field: XCUIElement, _ what: String) {
     XCTAssertTrue(app.activityIndicators["Saving"].waitForNonExistence(timeout: 60), "\(what) should save within 60 s")
-    // A field that takes a change is a button; while it saves, it isn't.
     let editable = NSPredicate(format: "exists == true AND elementType == %d", XCUIElement.ElementType.button.rawValue)
     XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: editable, evaluatedWith: field)], timeout: 10), .completed,
                    "\(what): the field should take a change again")
     XCTAssertFalse(app.buttons["Discard"].exists, "\(what) should save, not fail or be refused")
   }
 
-  /// Reads the record from the server again. The phone keeps Collections in memory only, so a relaunch reads them afresh.
   @MainActor
-  private func reread(_ app: XCUIApplication, _ name: String, _ value: String) -> XCUIElement {
+  private func readAfterRelaunch(_ app: XCUIApplication, _ name: String, _ value: String) -> XCUIElement {
     app.terminate()
     app.launch()
     return openRecord(app, name, value)
@@ -433,17 +428,17 @@ final class ServerRoundTests: XCTestCase {
     undo.tap()
     settled(app, showing(value), "Undo")
     only(value, "Undo should put \(value) back")
-    _ = reread(app, name, value)
+    _ = readAfterRelaunch(app, name, value)
     only(value, "The server should have \(value) back")
 
     edit(app, showing(value), typing: added)
     settled(app, showing(changed), "The change made again")
-    let field = reread(app, name, changed)
+    let field = readAfterRelaunch(app, name, changed)
     only(changed, "The server should have \(changed)")
     // Back as the seed had it, for the next round.
     edit(app, field, deleting: added.count)
     settled(app, showing(value), "The seed's value")
-    _ = reread(app, name, value)
+    _ = readAfterRelaunch(app, name, value)
     only(value, "The server should have \(value) again")
   }
 
@@ -475,7 +470,7 @@ final class ServerRoundTests: XCTestCase {
     let named = fieldShowing(app, added)
     XCTAssertTrue(named.waitForExistence(timeout: 10), "The field should show \(added) as it saves")
     settled(app, named, "Naming the new record")
-    _ = reread(app, name, added)
+    _ = readAfterRelaunch(app, name, added)
 
     let delete = app.navigationBars.buttons["Delete record"]
     XCTAssertTrue(delete.waitForExistence(timeout: 10), "The record should offer Delete")

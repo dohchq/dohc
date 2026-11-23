@@ -48,7 +48,6 @@ test.skip(
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
 const HOLD_MS = 2 * 60 * 60 * 1000;
-/** How long a person has to approve the desktop's sign-in. */
 const APPROVAL_MS = 10 * 60 * 1000;
 
 interface SeedAccount {
@@ -84,7 +83,6 @@ async function readAccount(path: string): Promise<SeedAccount> {
   return { email, password, bearer };
 }
 
-/** A name the workspace's folder can take as it is. */
 function folderName(name: string): string {
   if (
     name !== name.trim() ||
@@ -129,7 +127,6 @@ async function listedWorkspace(response: Response, workspaceId: string) {
   return { canOpen, showOnPhone };
 }
 
-/** The names the phone's `collections` account operation lists, or null for any other answer. */
 async function listedCollections(response: Response): Promise<string[] | null> {
   if (!response.ok) return null;
   const body: unknown = await response.json();
@@ -182,9 +179,6 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
   let temp: TempWorkspace | undefined;
   let desktop: LaunchedDesktopApp | undefined;
   try {
-    // Electron's profile stays in this run's scratch folder. The dohc home and the workspace are the fixture's; the
-    // round removes the desktop's sign-in from that home once it has ended its session. The desktop names a synced
-    // workspace after its folder.
     const scratch = await createTempWorkspace();
     const homeDir = join(fixture, "home");
     const rootPath = join(fixture, workspaceName);
@@ -199,8 +193,6 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
     });
     const { page } = desktop;
     const { workspaceId } = await openWorkspaceFromFirstRun(page, temp);
-    // The round turns Show on phone off for this ID alone at its end, so the ID is on disk before sync can register
-    // the workspace on the server.
     if (recordedId === undefined)
       await writeFile(idPath, `${workspaceId}\n`, { flag: "wx", mode: 0o600 });
     else if (recordedId !== workspaceId)
@@ -246,15 +238,12 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
       timeout: codePath ? APPROVAL_MS : 60_000,
     });
 
-    // A reopened workspace may already sync.
     const syncSwitch = page.getByRole("switch", { name: "Sync this workspace" });
     if ((await syncSwitch.getAttribute("aria-checked")) !== "true") await syncSwitch.click();
     await expect(syncSwitch).toHaveAttribute("aria-checked", "true");
     await expect(page.getByTestId("cloud-sync-code")).toBeVisible();
     await page.keyboard.press("Escape");
 
-    // Plan is written in the editor, so the server has its live history and a phone can edit it. A kept Plan holds
-    // the sentence and what earlier rounds added.
     const plan = await readFile(join(rootPath, "Plan.md"), "utf8").catch(() => null);
     if (plan === null) {
       await page.keyboard.press("ControlOrMeta+n");
@@ -270,14 +259,12 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
         .toContain(sentence);
       await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
     } else {
-      // The editor shows the live copy the server holds, which can differ from the file a round left.
       await page.getByTestId("titlebar-quick-open").click();
       const quickOpen = page.getByTestId("quick-open");
       await quickOpen.getByLabel("File").fill("Plan.md");
       await quickOpen.getByRole("option", { name: "Plan.md", exact: true }).click();
       const editor = page.getByTestId("markdown-editor");
       await expect(editor).toBeVisible();
-      // A file changed outside dohc opens with an error state until the next edit, which the repair makes.
       const saveState = page.getByTestId("markdown-save-state");
       await expect(saveState).toHaveAttribute("data-state", /^(saved|saved-to-host|error)$/, {
         timeout: 60_000,
@@ -299,7 +286,6 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
       await page.keyboard.press("Escape");
     }
 
-    // A transactional Collection with the generator's operations: Name, its primary text field, and a date.
     const collection = page.getByRole("region", { name: collectionName, exact: true });
     if (!existsSync(join(rootPath, collectionName, "dataset.json"))) {
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
@@ -314,8 +300,6 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
       await create.getByRole("button", { name: "Add field", exact: true }).click();
       await create.getByLabel("Field name", { exact: true }).nth(1).fill("Date");
       await create.getByLabel("Field type", { exact: true }).nth(1).selectOption("date");
-      // The phone offers New record only for a table with no field required without a default, and has no create
-      // form.
       await expect(create.getByLabel("Require Name", { exact: true })).not.toBeChecked();
       await expect(create.getByLabel("Require Date", { exact: true })).not.toBeChecked();
       await create.getByTestId("new-collection-create").click();
@@ -327,20 +311,18 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
         .getByRole("button", { name: collectionName, exact: true })
         .click();
     }
-    // The table has read its records once it is no longer busy.
     await expect(collection).toHaveAttribute("aria-busy", "false");
     const names = await fieldCells(collection, "Name");
     const seeded = names.getByText(recordName, { exact: true });
-    // A phone edit a stopped round left undone keeps the name as a prefix; the seed puts it back.
-    const changed = names.filter({ hasText: new RegExp(`^${recordName}.+`) }).first();
+    const changed = names
+      .filter({ hasText: new RegExp(`^${recordName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.+`) })
+      .first();
     if ((await seeded.count()) === 0 && (await changed.count()) > 0) {
       await editCell(collection, changed, recordName);
     }
     if ((await seeded.count()) === 0) await createRecord(collection, recordName);
     await expect(seeded).toHaveCount(1);
 
-    // The phone opens only a workspace its list marks canOpen, and lists only those that show on the phone. The
-    // round turned Show on phone off for a kept workspace, so it is turned on again.
     const bearer = { authorization: `Bearer ${account.bearer}` };
     const listed = async () =>
       listedWorkspace(
@@ -373,7 +355,6 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
         intervals: [1_000],
       })
       .toEqual({ canOpen: true, showOnPhone: true });
-    // The phone reads the Collection through the server's copy of the workspace.
     await expect
       .poll(
         async () =>
