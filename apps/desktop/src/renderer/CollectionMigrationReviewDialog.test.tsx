@@ -110,8 +110,8 @@ function prep(): DatasetMigrationPreparation {
               table: "registrations",
               kind: "update",
               key: { id: "one" },
-              before: { name: "Before" },
-              after: { name: "After" },
+              before: { name: "Old name" },
+              after: { name: "New name" },
             },
           ],
           nextCursor: "next",
@@ -335,23 +335,265 @@ describe("CollectionMigrationReviewDialog", () => {
         changes: [
           {
             table: "registrations",
-            kind: "delete",
+            kind: "update",
             key: { id: "two" },
-            before: { name: "Last record" },
-            after: null,
+            before: { name: "Second old" },
+            after: { name: "Second new" },
           },
         ],
         nextCursor: null,
       }),
     );
     setup({ initialPreparation: prep(), onLoadPreview });
-    expect(screen.getByText('"Before"')).toBeTruthy();
-    expect(screen.getByText('"After"')).toBeTruthy();
+    expect(screen.getByText("Old name")).toBeTruthy();
+    expect(screen.getByText("New name")).toBeTruthy();
+    expect(screen.queryByTestId("migration-destructive-warning")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "More changes" }));
-    await screen.findByText('"Last record"');
+    await screen.findByText("Second new");
     expect(onLoadPreview).toHaveBeenCalledWith(
       { workspaceId: "workspace-a", preparationId: id(10), after: "next", limit: 50 },
       expect.any(AbortSignal),
+    );
+  });
+  it("warns clearly, uses DangerButton, and names Export recovery on confirmed data loss even when another column is added", () => {
+    const destructive = prep();
+    destructive.previousRevision.definition.tables[0]!.fields.push({
+      fieldId: id(9),
+      name: "Notes",
+      sqlColumn: "notes",
+      type: "text",
+      required: false,
+      unique: false,
+    });
+    destructive.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 3,
+      afterRows: 2,
+      changedRows: 3,
+      deletedRows: 1,
+      beforeValues: { name: 3, notes: 2 },
+      afterValues: { name: 2, receipt: 2 },
+      clearedValues: { name: 0, notes: 2 },
+    };
+    setup({ initialPreparation: destructive });
+    const warning = screen.getByTestId("migration-destructive-warning");
+    expect(warning.textContent).toContain(
+      "This change removes 1 record, clears 2 existing values, and removes 1 field.",
+    );
+    expect(warning.textContent).toContain("Export recovery");
+    expect(screen.getByRole("button", { name: "Approve change" }).className).toContain(
+      "bg-danger-fill",
+    );
+    expect(screen.queryByText(/reverse rule changes/i)).toBeNull();
+    expect(screen.getAllByText(/Collection History cannot restore/).length).toBe(1);
+  });
+  it("reports unmatched primary-key changes honestly without claiming confirmed removal", () => {
+    const rekeyed = prep();
+    rekeyed.revision.definition.tables[0] = {
+      ...rekeyed.previousRevision.definition.tables[0]!,
+      primaryKey: "email",
+      fields: [
+        {
+          fieldId: id(3),
+          name: "Email",
+          sqlColumn: "email",
+          type: "text",
+          required: true,
+          unique: true,
+        },
+      ],
+    };
+    rekeyed.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 5,
+      afterRows: 5,
+      changedRows: 10,
+      deletedRows: 5,
+      beforeValues: { name: 5 },
+      afterValues: { email: 5 },
+      clearedValues: {},
+    };
+    setup({ initialPreparation: rekeyed });
+    const warning = screen.getByTestId("migration-destructive-warning");
+    expect(warning.textContent).toContain(
+      "This change replaces 5 records in Registrations with 5 records (not matched by key).",
+    );
+    expect(warning.textContent).not.toContain("removes 5 records");
+    expect(warning.textContent).toContain("Export recovery");
+    expect(screen.getByRole("button", { name: "Approve change" }).className).not.toContain(
+      "bg-danger-fill",
+    );
+  });
+  it("keeps non-destructive History copy honest and does not mislabel data-only migrations or button removals", () => {
+    const dataOnly = prep();
+    dataOnly.revision.definition = structuredClone(dataOnly.previousRevision.definition);
+    dataOnly.revision.schemaSha256 = dataOnly.previousRevision.schemaSha256;
+    dataOnly.revision.operationsSha256 = dataOnly.previousRevision.operationsSha256;
+    setup({ initialPreparation: dataOnly });
+    expect(screen.queryByText(/Only names or source locations changed/)).toBeNull();
+    expect(
+      screen.getByText(/Existing shared apps keep working and access stays unchanged/),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        /Collection History can reverse name, button, and action changes\. It cannot reverse record changes\./,
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve change" }).className).not.toContain(
+      "bg-danger-fill",
+    );
+    cleanup();
+
+    const schemaChanged = prep();
+    schemaChanged.previousRevision.definition.tables[0]!.fields[0]!.name = "Guest";
+    schemaChanged.revision.definition.tables[0]!.fields[0]!.name = "Guest Name";
+    schemaChanged.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 2,
+      afterRows: 2,
+      changedRows: 2,
+      deletedRows: 0,
+      beforeValues: { name: 2 },
+      afterValues: { name: 2, receipt: 0 },
+      clearedValues: { name: 0 },
+      replacedValues: { name: 0 },
+    };
+    setup({ initialPreparation: schemaChanged });
+    expect(screen.queryByTestId("migration-destructive-warning")).toBeNull();
+    expect(
+      screen.getByText(
+        /Collection History cannot reverse field, constraint, action, or record changes\./,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Collection History can rename/i)).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve change" }).className).not.toContain(
+      "bg-danger-fill",
+    );
+    cleanup();
+
+    const actionAdded = prep();
+    actionAdded.revision.definition = structuredClone(actionAdded.previousRevision.definition);
+    actionAdded.revision.schemaSha256 = actionAdded.previousRevision.schemaSha256;
+    actionAdded.revision.definition.operations.push({
+      operationId: id(13),
+      name: "list_all",
+      label: "List all",
+      tableId: actionAdded.revision.definition.tables[0]!.tableId,
+      kind: "read",
+      access: "helper",
+      readOnly: true,
+      fieldIds: [actionAdded.revision.definition.tables[0]!.fields[0]!.fieldId],
+    });
+    actionAdded.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 2,
+      afterRows: 2,
+      changedRows: 0,
+      deletedRows: 0,
+      beforeValues: { name: 2 },
+      afterValues: { name: 2 },
+      clearedValues: { name: 0 },
+      replacedValues: { name: 0 },
+    };
+    actionAdded.candidate.preview.firstPage = { changes: [], nextCursor: null };
+    setup({ initialPreparation: actionAdded });
+    expect(screen.queryByTestId("migration-destructive-warning")).toBeNull();
+    expect(
+      screen.getByText(
+        /Collection History cannot reverse field, constraint, action, or record changes\./,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Collection History can reverse/i)).toBeNull();
+    cleanup();
+
+    const buttonRemoved = prep();
+    buttonRemoved.revision.definition = structuredClone(buttonRemoved.previousRevision.definition);
+    buttonRemoved.revision.schemaSha256 = buttonRemoved.previousRevision.schemaSha256;
+    buttonRemoved.previousRevision.definition.tables[0]!.fields.push({
+      fieldId: id(5),
+      name: "Send receipt",
+      type: "button",
+    });
+    buttonRemoved.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 2,
+      afterRows: 2,
+      changedRows: 0,
+      deletedRows: 0,
+      beforeValues: { name: 2 },
+      afterValues: { name: 2 },
+      clearedValues: { name: 0 },
+    };
+    buttonRemoved.candidate.preview.firstPage = { changes: [], nextCursor: null };
+    setup({ initialPreparation: buttonRemoved, generatedChange: true });
+    expect(screen.queryByTestId("migration-destructive-warning")).toBeNull();
+    expect(screen.queryByText(/Only names or source locations changed/)).toBeNull();
+    expect(screen.getByText(/Collection History can reverse name and button changes/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve change" }).className).not.toContain(
+      "bg-danger-fill",
+    );
+  });
+  it("treats renamed columns with existing values as unverified and uses DangerButton", () => {
+    const renamed = prep();
+    renamed.previousRevision.definition.tables[0]!.fields.push({
+      fieldId: id(9),
+      name: "Notes",
+      sqlColumn: "notes",
+      type: "text",
+      required: false,
+      unique: false,
+    });
+    renamed.revision.definition.tables[0]!.fields = [
+      ...renamed.previousRevision.definition.tables[0]!.fields.slice(0, 1),
+      {
+        fieldId: id(9),
+        name: "Notes",
+        sqlColumn: "summary",
+        type: "text",
+        required: false,
+        unique: false,
+      },
+    ];
+    renamed.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 2,
+      afterRows: 4,
+      changedRows: 4,
+      deletedRows: 0,
+      beforeValues: { name: 2, notes: 2 },
+      afterValues: { name: 4, summary: 2 },
+      clearedValues: { name: 0, notes: 2 },
+    };
+    setup({ initialPreparation: renamed });
+    const warning = screen.getByTestId("migration-destructive-warning");
+    expect(warning.textContent).toContain("renames a column holding 2 unverified values");
+    expect(warning.textContent).not.toContain("moves 2");
+    expect(screen.getByRole("button", { name: "Approve change" }).className).toContain(
+      "bg-danger-fill",
+    );
+  });
+  it("warns, names Export recovery, and uses DangerButton when populated values are overwritten", () => {
+    const overwritten = prep();
+    overwritten.revision.definition = structuredClone(overwritten.previousRevision.definition);
+    overwritten.revision.schemaSha256 = overwritten.previousRevision.schemaSha256;
+    overwritten.revision.operationsSha256 = overwritten.previousRevision.operationsSha256;
+    overwritten.candidate.preview.tables[0] = {
+      table: "registrations",
+      beforeRows: 2,
+      afterRows: 2,
+      changedRows: 2,
+      deletedRows: 0,
+      beforeValues: { name: 2 },
+      afterValues: { name: 2 },
+      clearedValues: { name: 0 },
+      replacedValues: { name: 2 },
+    };
+    setup({ initialPreparation: overwritten });
+    const warning = screen.getByTestId("migration-destructive-warning");
+    expect(warning.textContent).toContain("This change replaces 2 existing values.");
+    expect(warning.textContent).toContain("Export recovery");
+    expect(screen.getByRole("button", { name: "Approve change" }).className).toContain(
+      "bg-danger-fill",
     );
   });
   it("refuses approval when the preview belongs to another checkpoint", () => {

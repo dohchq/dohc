@@ -284,6 +284,7 @@ const migrationPreview = z
             beforeValues: valueCounts,
             afterValues: valueCounts,
             clearedValues: valueCounts,
+            replacedValues: valueCounts.optional(),
           })
           .strict(),
       )
