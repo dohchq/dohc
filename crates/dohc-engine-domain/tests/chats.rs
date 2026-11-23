@@ -1848,7 +1848,7 @@ fn store_with_deleted_messages(account: bool) -> (ScratchDir, EngineStore) {
     {
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .ensure_general_channel(WS, 1, &NO_FAULTS)
             .expect("gen");
         agent_thread(&mut chats, "only", &[("o0", 10)]);
         agent_thread(&mut chats, "first", &[("f0", 20), ("f1", 30)]);
@@ -1919,7 +1919,7 @@ fn a_deleted_message_is_never_unread() {
         let (_scratch, mut store) = store_with_deleted_messages(account);
         let chats = LinkedChatStore::new(&mut store);
         let mut threads: Vec<_> = chats
-            .list_channel_threads(WS, "gen-1", None, 10)
+            .list_channel_threads(WS, "channel-general", None, 10)
             .expect("summaries")
             .into_iter()
             .map(|summary| {
@@ -1950,7 +1950,7 @@ fn a_deleted_message_is_never_unread() {
             .list_channels(WS)
             .expect("channels")
             .into_iter()
-            .find(|summary| summary.channel.channel_id == "gen-1")
+            .find(|summary| summary.channel.channel_id == "channel-general")
             .map(|summary| summary.unread_count);
         assert_eq!(group, Some(4), "account: {account}");
         let files: Vec<_> = chats
@@ -1982,14 +1982,21 @@ fn a_deleted_poll_keeps_no_choices_or_answer() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .ensure_general_channel(WS, 1, &NO_FAULTS)
         .expect("gen");
     chats
         .start_channel_thread(
             &StartChannelThread {
                 needs_decision: true,
                 options: vec!["Quasar".to_owned(), "Pulsar".to_owned()],
-                ..start_thread("gen-1", "t1", "poll", "Which?", ChatActorKind::Human, 10)
+                ..start_thread(
+                    "channel-general",
+                    "t1",
+                    "poll",
+                    "Which?",
+                    ChatActorKind::Human,
+                    10,
+                )
             },
             &NO_FAULTS,
         )
@@ -2125,11 +2132,18 @@ fn deleting_a_message_redraws_a_live_bookmark_and_leaves_a_snapshot() {
         let mut store = open(&db, 1);
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .ensure_general_channel(WS, 1, &NO_FAULTS)
             .expect("gen");
         chats
             .start_channel_thread(
-                &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 10),
+                &start_thread(
+                    "channel-general",
+                    "t1",
+                    "m0",
+                    "opening",
+                    ChatActorKind::Human,
+                    10,
+                ),
                 &NO_FAULTS,
             )
             .expect("start");
