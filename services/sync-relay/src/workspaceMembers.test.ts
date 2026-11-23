@@ -2538,6 +2538,15 @@ describe("folder rules", () => {
     await ownerWrite(h, "Team/plan.md", "plan");
     const rule = await created(h, "team", null);
     expect(rule.folders).toMatchObject([{ path: "Team", state: "covered" }]);
+    // A fullwidth slash folds to "/", but "Team\uff0fPrivate" is one folder name.
+    await ownerWrite(h, "Team\uff0fPrivate/plan.md", "plan");
+    await created(h, "team/private", null);
+    await ownerWrite(h, "Crew\uff0fPrivate/plan.md", "plan");
+    await created(h, "crew\uff0fprivate", null);
+    const ruled = (await membersView(h, OWNER)).folderRules!.flatMap((entry) =>
+      entry.folders.map((folder) => folder.path),
+    );
+    expect(ruled.sort()).toEqual(["Crew\uff0fPrivate", "Team", "team/private"].sort());
   });
 
   it("keeps rules and their spans when the workspace's sync identity rotates", async () => {
