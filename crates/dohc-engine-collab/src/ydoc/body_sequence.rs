@@ -1464,6 +1464,7 @@ mod tests {
 
     #[test]
     fn reads_a_note_two_people_edited_at_length_within_the_nodes_counted_for_it() {
+        const NODES_SPENT: usize = 1_116;
         let edited: EditedNote = serde_json::from_str(EDITED_NOTE).expect("the note parses");
         let doc = opened(&edited.update);
         let read = document(&doc).expect("the note reads");
@@ -1471,10 +1472,11 @@ mod tests {
         let blocks = differing(&recorded, &here, same_document);
         assert!(same_document(&edited.document, &read), "{blocks}");
 
-        let (live, nodes) = (live_items(&doc), nodes_spent(&doc));
+        let live = live_items(&doc);
         let (counted, at_most) = (edited.stored.live, edited.stored.nodes_at_most);
         assert!((1_000..=counted).contains(&live), "{live} live items");
-        assert!(nodes <= at_most, "{nodes} for {live}");
+        assert!(NODES_SPENT < live && NODES_SPENT <= at_most);
+        stops_one_node_short_of(&doc, NODES_SPENT);
     }
 
     #[test]
