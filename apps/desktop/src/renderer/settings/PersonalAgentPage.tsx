@@ -208,22 +208,15 @@ export function PersonalReachSheet(props: {
   const { agent, roster } = props;
   const id = useId();
   const listed = reachable(roster);
-  const [choices, setChoices] = useState<ReadonlyMap<string, Reach>>(
-    () =>
-      new Map(
-        listed.map(
-          (workspace) =>
-            [
-              workspace.workspaceId,
-              shownLevel(
-                workspace,
-                agent.reach.find((entry) => entry.workspaceId === workspace.workspaceId)?.level ??
-                  "none",
-              ),
-            ] as const,
-        ),
-      ),
-  );
+  // The levels chosen in this sheet. A row not chosen shows what the agent holds,
+  // so a workspace listed while the sheet is open shows and saves its reach.
+  const [choices, setChoices] = useState<ReadonlyMap<string, Reach>>(() => new Map());
+  const levelOf = (workspace: RosterWorkspace): Reach =>
+    choices.get(workspace.workspaceId) ??
+    shownLevel(
+      workspace,
+      agent.reach.find((entry) => entry.workspaceId === workspace.workspaceId)?.level ?? "none",
+    );
   const [failure, setFailure] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const open = useRef(true);
@@ -235,12 +228,15 @@ export function PersonalReachSheet(props: {
   );
   const save = async () => {
     if (saving) return;
-    // A workspace whose membership ended stays as it was until its own Remove.
+    // The sheet saves what each row shows. A workspace whose membership ended
+    // stays as it was until its own Remove.
+    const shown = new Set(listed.map((workspace) => workspace.workspaceId));
     const reach = [
-      ...[...choices].flatMap(([workspaceId, level]) =>
-        level === "none" ? [] : [{ workspaceId, level }],
-      ),
-      ...agent.reach.filter((entry) => !choices.has(entry.workspaceId)),
+      ...listed.flatMap((workspace) => {
+        const level = levelOf(workspace);
+        return level === "none" ? [] : [{ workspaceId: workspace.workspaceId, level }];
+      }),
+      ...agent.reach.filter((entry) => !shown.has(entry.workspaceId)),
     ];
     if (reach.length > PERSONAL_AGENT_REACH_LIMIT) {
       setFailure(`Choose up to ${PERSONAL_AGENT_REACH_LIMIT} workspaces.`);
@@ -301,7 +297,7 @@ export function PersonalReachSheet(props: {
                       <SegmentedControl
                         label={`What ${agent.name} can do in ${name}`}
                         testId={`personal-agent-reach-${workspace.workspaceId}`}
-                        value={choices.get(workspace.workspaceId) ?? "none"}
+                        value={levelOf(workspace)}
                         options={workspace.role === "owner" ? REACH_OPTIONS : JOINED_REACH_OPTIONS}
                         disabled={saving}
                         onChange={(level) =>

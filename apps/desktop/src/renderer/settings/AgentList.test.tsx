@@ -849,6 +849,53 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
   expect(page().queryByTestId("personal-agent-joined-note")).toBeNull();
 });
 
+it("shows a workspace listed while the reach sheet is open at the reach the agent holds there, and saves that", async () => {
+  await renderServer();
+  await openAgent("Grok Bot");
+  await userEvent.click(page().getByRole("button", { name: "Change what Grok Bot can reach" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
+  const base = account();
+  act(() =>
+    personalListener!({
+      accounts: [
+        {
+          ...base,
+          roster: {
+            ...base.roster!,
+            agents: [
+              { ...GROK, reach: [...GROK.reach, { workspaceId: "ws-3", level: "comment" }] },
+              NOVA,
+            ],
+            workspaces: [
+              ...base.roster!.workspaces,
+              { workspaceId: "ws-3", name: "Community", role: "member" },
+            ],
+          },
+        },
+      ],
+    }),
+  );
+  expect(
+    dialog
+      .getByRole("radiogroup", { name: "What Grok Bot can do in Community" })
+      .querySelector("[aria-checked='true']")!.textContent,
+  ).toBe("Comment");
+  await userEvent.click(dialog.getByRole("button", { name: "Save reach" }));
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY,
+    agentId: GROK_ID,
+    change: {
+      kind: "reach",
+      reach: [
+        { workspaceId: "ws-1", level: "comment" },
+        { workspaceId: "ws-2", level: "view" },
+        { workspaceId: "ws-3", level: "comment" },
+      ],
+    },
+    what: "change what Grok Bot can reach",
+  });
+});
+
 it("says above the sheet's buttons why a reach save failed, and keeps the choices", async () => {
   const { onError } = await renderServer();
   bridgeMock.changePersonalAgent.mockResolvedValueOnce({
