@@ -1257,15 +1257,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
       approvedArtifacts(datasetId: string) {
         assertCurrent();
-        const approved = host.approvedArtifacts(owner, { workspaceId, datasetId });
-        const row = db
-          .prepare(
-            "SELECT checkpoint_sha256 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?",
-          )
-          .get(workspaceId, datasetId) as { checkpoint_sha256?: unknown } | undefined;
-        return typeof row?.checkpoint_sha256 === "string"
-          ? { ...approved, checkpointSha256: row.checkpoint_sha256 }
-          : approved;
+        return host.approvedArtifacts(owner, { workspaceId, datasetId });
       },
       prepareRecovery(input: Parameters<typeof recovery.prepare>[0]) {
         return tracked(async () => {

@@ -122,6 +122,7 @@ export interface OwnerDatasetData {
     operationSource: string;
     active: boolean;
     cursor: DatasetCursor;
+    checkpointSha256: string;
   }>;
   /** With `after`, the owner's server returns the journal from there, when it fits. */
   invoke(
@@ -196,6 +197,7 @@ const artifacts = z
         digest: sha256,
       })
       .strict(),
+    checkpointSha256: sha256,
   })
   .strict();
 

@@ -2016,6 +2016,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         ...artifacts(key),
         active: current.active && !lifecycle(key).archived,
         cursor: current.cursor,
+        checkpointSha256: current.checkpointSha256,
       };
     },
     history(

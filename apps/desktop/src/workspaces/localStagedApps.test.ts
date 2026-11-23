@@ -7,7 +7,7 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { compileClosedApp } from "./closedAppCompiler";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createLocalStagedApps } from "./localStagedApps";
-import { createDatasetAuthorityRouter } from "./remoteDataset";
+import { createDatasetAuthorityRouter, createRemoteDatasetData } from "./remoteDataset";
 import { createLocalOwnerAppPublicationHandler } from "../ipc/localOwnerAppPublication";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
@@ -1213,6 +1213,151 @@ describe("localStagedApps", () => {
         input: {},
       },
     )) as { result: Array<{ notes: string }> };
+    expect(resumedRows.result.map((r) => r.notes)).toEqual(["backfilled"]);
+  }, 60_000);
+
+  it("carries checkpointSha256 through the remote artifacts contract so server-backed staged migrations resume after commit", async () => {
+    const serverFixture = await openFixture();
+    const desktopFixture = await openFixture();
+    const files = await loadControlTowerFiles();
+    const signal = new AbortController().signal;
+
+    const initialStage = await serverFixture.staged.stage({
+      appRoot: "personal-control-tower",
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      signal,
+    });
+    const initialApproved = await serverFixture.staged.approve({
+      stageId: initialStage.stageId,
+      reviewDigest: initialStage.reviewDigest,
+      signal,
+    });
+    await serverFixture.host.apps.request(initialApproved.publicationId, "invoke", {
+      authorityRevision: initialApproved.authorityRevision,
+      dataset: "workouts",
+      operation: "logWorkout",
+      idempotencyKey: "wrk-server-resume-seed",
+      input: {
+        date: "2026-11-23",
+        activity: "Row",
+        minutes: 25,
+        effort: "Moderate",
+        notes: "before",
+      },
+    });
+    const workoutsCol = initialStage.collections.find((c) => c.alias === "workouts")!;
+
+    const remote = createRemoteDatasetData({
+      workspaceId: "w",
+      credentials: {
+        serverUrl: "https://account.example",
+        relayUrl: "https://relay.example",
+        userId: "owner",
+        token: "test-only",
+        email: "owner@example.test",
+      },
+      credentialGeneration: 1,
+      signal,
+      currentCredentialGeneration: () => 1,
+      assertCurrent() {},
+      relayJson: async (_credentials, path) => {
+        const match = /^\/sync\/w\/datasets\/([^/]+)\/artifacts$/.exec(path);
+        if (!match) throw new Error(`Unexpected relay path ${path}`);
+        return JSON.parse(JSON.stringify(serverFixture.host.approvedArtifacts(match[1]!)));
+      },
+    });
+
+    const updatedFiles = new Map(files);
+    const updatedOps = `${files.get("personal-control-tower/workouts/operations.js")!}\n// server backfill v2\n`;
+    updatedFiles.set("personal-control-tower/workouts/operations.js", updatedOps);
+    updatedFiles.set(
+      "personal-control-tower/workouts/backfill.sql",
+      "UPDATE workouts SET notes = 'backfilled';",
+    );
+
+    let crashAfterServerCommit = false;
+    const serverLocalHost = {
+      ...desktopFixture.host,
+      appHostKind: () => "server" as const,
+      keptDatasetIds: () => [],
+      apps: serverFixture.host.apps,
+    };
+    const handler = createLocalOwnerAppPublicationHandler({
+      datasetForWorkspace: async () => serverLocalHost,
+      approvedArtifacts: async (_ws, datasetId) => remote.approvedArtifacts(datasetId),
+      migrationAuthority: async () => ({
+        approvedArtifacts: (datasetId) => remote.approvedArtifacts(datasetId),
+        prepareMigrationCandidate: (input) => serverFixture.host.prepareMigrationCandidate(input),
+        approveMigrationCandidate: async (input) => {
+          const migrated = await serverFixture.host.approveMigrationCandidate(input);
+          if (crashAfterServerCommit) {
+            crashAfterServerCommit = false;
+            throw new Error("simulated crash after server migration commit");
+          }
+          return migrated;
+        },
+        discardMigrationCandidate: (input) => serverFixture.host.discardMigrationCandidate(input),
+      }),
+      flushCapture: async () => ({ deferredWrites: [] }),
+      withAdapter: async (_ws, work) => work(sourceCaptureAdapter(updatedFiles) as never),
+      compile: compileClosedApp,
+    });
+    const op = {
+      workspace: { workspaceId: "w", rootPath: desktopFixture.workspaceRoot },
+      signal,
+      assertCurrent() {},
+    };
+
+    const stagedUpdate = await handler(
+      {
+        action: "stage",
+        workspaceId: "w",
+        appRoot: "personal-control-tower",
+        migrations: { workouts: "personal-control-tower/workouts/backfill.sql" },
+      },
+      "caller",
+      op,
+    );
+    if (!stagedUpdate || stagedUpdate.kind !== "staged") throw new Error("Expected staged update.");
+
+    crashAfterServerCommit = true;
+    await expect(
+      handler(
+        {
+          action: "approveStaged",
+          workspaceId: "w",
+          stageId: stagedUpdate.stage.stageId,
+          reviewDigest: stagedUpdate.stage.reviewDigest,
+        },
+        "caller",
+        op,
+      ),
+    ).rejects.toThrow(/simulated crash after server migration commit/i);
+
+    const resumed = await handler(
+      {
+        action: "approveStaged",
+        workspaceId: "w",
+        stageId: stagedUpdate.stage.stageId,
+        reviewDigest: stagedUpdate.stage.reviewDigest,
+      },
+      "caller",
+      op,
+    );
+    if (!resumed || resumed.kind !== "stagedApproved")
+      throw new Error("Expected stagedApproved resume result.");
+    expect(resumed.collectionsApplied).toHaveLength(1);
+    expect(resumed.collectionsApplied[0]?.revision).toBe(2);
+    const liveWorkouts = await remote.approvedArtifacts(workoutsCol.datasetId);
+    expect(liveWorkouts.checkpointSha256).toMatch(/^[0-9a-f]{64}$/);
+    const resumedRows = (await serverFixture.host.apps.request(resumed.publicationId, "invoke", {
+      authorityRevision: resumed.authorityRevision,
+      dataset: "workouts",
+      operation: "listWorkouts",
+      idempotencyKey: "wrk-server-after-resume",
+      input: {},
+    })) as { result: Array<{ notes: string }> };
     expect(resumedRows.result.map((r) => r.notes)).toEqual(["backfilled"]);
   }, 60_000);
 });
