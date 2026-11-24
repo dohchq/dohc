@@ -119,7 +119,12 @@ function hasActiveNonOwnerEditGrantForPaths(
   for (const grant of storage.listActiveWorkspaceShareGrants(workspaceId)) {
     if (grant.principalKind === "user" && grant.principalUserId === ownerUserId) continue;
     const storedSelector = parseStoredAnyShareSelectorJson(grant.selectorJson);
-    if (storedSelector === null) return true;
+    // A workspace member reaches every Collection, so the workspace isn't private.
+    if (
+      storedSelector === null ||
+      ("kind" in storedSelector && storedSelector.kind === "workspace")
+    )
+      return true;
     const effective = effectiveShareSelector(storedSelector, grant.access);
     if (effective === null) return true;
     const fileSide = fileSideOf(effective);
