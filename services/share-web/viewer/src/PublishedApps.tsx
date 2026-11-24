@@ -44,7 +44,7 @@ export function PublishedApps({
 }: {
   session: string;
   onState?: (state: AppsState) => void;
-  onPublications?: (publications: readonly PublishedAppItem[]) => void;
+  onPublications?: (publications: readonly PublishedAppItem[], hasMore: boolean) => void;
 }) {
   return (
     <PublicationList
@@ -62,7 +62,7 @@ function PublicationList({
 }: {
   session: string;
   onState?: (state: AppsState) => void;
-  onPublications?: (publications: readonly PublishedAppItem[]) => void;
+  onPublications?: (publications: readonly PublishedAppItem[], hasMore: boolean) => void;
 }) {
   const [publications, setPublications] = useState<PublishedAppItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -121,8 +121,8 @@ function PublicationList({
     onState?.(state);
   }, [onState, state]);
   useEffect(() => {
-    onPublications?.(publications);
-  }, [onPublications, publications]);
+    onPublications?.(publications, cursor !== null);
+  }, [onPublications, publications, cursor]);
   return (
     <section aria-label="Shared apps">
       <h2>Apps</h2>
