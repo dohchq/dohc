@@ -80,13 +80,7 @@ async function signedInStore(
 ) {
   const server = testServer();
   serveSessionEnd(server);
-  const stored = {
-    origin: server.origin,
-    token: "tok",
-    userId: "u-1",
-    email: "a@example.com",
-    name: "Ice",
-  };
+  const stored = { origin: server.origin, token: "tok", userId: "u-1", email: "a@example.com" };
   const stores = createScopedEnds();
   const teardown = appTeardown(stores);
   let collections: WorkspaceCollections | undefined;

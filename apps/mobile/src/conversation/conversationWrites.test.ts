@@ -167,8 +167,8 @@ function fakeAccount() {
         origin: server.origin,
         userId: "u-1",
         email: "u-1@example.com",
-        name: "Ice",
         isCurrent: () => true,
+        accountName: async () => "Ice",
         client: createServerClient({
           origin: server.origin,
           token: "tok-1",

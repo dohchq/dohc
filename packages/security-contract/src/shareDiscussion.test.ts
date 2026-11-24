@@ -5,6 +5,7 @@ import {
   SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
   SHARE_DISCUSSION_NAME_BYTE_LIMIT,
   SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT,
+  accountDisplayNameOf,
   normalizeShareDiscussionBody,
   normalizeShareDiscussionDisplayName,
 } from "./shareDiscussion";
@@ -119,5 +120,14 @@ describe("share discussion display names", () => {
   it("pins the exact UTF-8 byte boundary", () => {
     expect(Buffer.byteLength("😀".repeat(40), "utf8")).toBe(160);
     expect(Buffer.byteLength("😀".repeat(41), "utf8")).toBe(164);
+  });
+});
+
+describe("accountDisplayNameOf", () => {
+  it("gives the normalized name, or null when there is none to show", () => {
+    expect(accountDisplayNameOf("  Ice   de  Vera ")).toBe("Ice de Vera");
+    expect(accountDisplayNameOf("   ")).toBeNull();
+    expect(accountDisplayNameOf(null)).toBeNull();
+    expect(accountDisplayNameOf("a".repeat(SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT + 1))).toBeNull();
   });
 });

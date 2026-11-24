@@ -147,8 +147,8 @@ function fakeAccount(onSignOut: (leave: () => Promise<void>) => Promise<void>) {
         origin: server.origin,
         userId,
         email: `${userId}@example.com`,
-        name: "Ice",
         isCurrent: () => id === generation,
+        accountName: async () => "Ice",
         client: createServerClient({
           origin: server.origin,
           token: `tok-${id}`,
@@ -229,7 +229,6 @@ const SIGNED_IN: StoredSignIn = {
   token: "tok-1",
   userId: "u-1",
   email: "ice@example.com",
-  name: "Ice",
 };
 
 /** One run of the app as production wires it over `store`: the real account, the outbox, and the registration rows. */
@@ -255,7 +254,7 @@ function serveSignIn(server: Server) {
   server.on("POST", "/api/auth/device/token", { status: 200, body: { access_token: "tok-2" } });
   server.on("GET", "/api/auth/get-session", {
     status: 200,
-    body: { session: {}, user: { id: "u-1", email: "ice@example.com", name: "Ice" } },
+    body: { session: {}, user: { id: "u-1", email: "ice@example.com" } },
   });
 }
 
@@ -2009,7 +2008,6 @@ describe("signing out", () => {
         token: "tok-1",
         userId: "u-1",
         email: "ice@example.com",
-        name: "Ice",
       }).store,
       fetch: server.fetch,
       onSignOut: (leave) => outbox.signOut(leave),

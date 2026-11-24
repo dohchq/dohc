@@ -544,7 +544,6 @@ describe("emptying the cache", () => {
     token: "tok-1",
     userId: "u-1",
     email: "ice@example.com",
-    name: "Ice",
   };
 
   async function signedIn(server: ReturnType<typeof testServer>, disk: KeptDisk) {

@@ -1,5 +1,7 @@
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import { chatMentions } from "@dohc/workspace-contracts/chat-mentions";
+import { chatWords } from "@dohc/interface-words/notices";
+import { accountDisplayNameOf } from "@dohc/security-contract/share-discussion";
 import { accountAuthorName } from "@dohc/workspace-contracts/names";
 import type { ChatMessage } from "../server/workspaceReads";
 import { decisionOf } from "./decisionAnswers";
@@ -46,9 +48,21 @@ export function personAuthor(id: string, name: string, fills: readonly string[])
   return { id, name, kind: "person", initials, hue: fills[hash % fills.length] };
 }
 
-/** The author of a message only this phone has: the account, by the name the server will give the message. */
-export const localAuthor = (accountName: string, fills: readonly string[]): Author =>
-  personAuthor("local:you", accountAuthorName(accountName), fills);
+/**
+ * The author of a message only this phone has: the account, by the name the server will give the message, from its
+ * name as the server has it (`SignIn.accountName`). Until that name is read, `accountName` is undefined and it's You.
+ */
+export const localAuthor = (
+  accountName: string | null | undefined,
+  fills: readonly string[],
+): Author =>
+  personAuthor(
+    "local:you",
+    accountName === undefined
+      ? chatWords.you
+      : accountAuthorName(accountDisplayNameOf(accountName)),
+    fills,
+  );
 
 /** A message from the server, with its question or poll as the server has it. */
 export function serverMessage(

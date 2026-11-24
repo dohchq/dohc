@@ -20,6 +20,7 @@ import {
 } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
+import { useAccountName } from "../account/useAccountName";
 import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
 import type { ChatKind } from "../chats/types";
@@ -78,7 +79,7 @@ import {
   withMentions,
 } from "./serverMessages";
 import { phoneMentions } from "./mentionDraft";
-import type { Author, Message } from "./types";
+import type { Message } from "./types";
 import { useChatWakes } from "./useChatWakes";
 import { useVisible } from "./useVisible";
 import {
@@ -237,7 +238,8 @@ function useScreenWrites(target: string) {
     [signIn, workspaceId],
   );
   const react = useReact(writes, rowScope);
-  const you = useMemo<Author>(() => localAuthor(signIn.name, workspaceMarkFills), [signIn]);
+  const accountName = useAccountName(signIn);
+  const you = useMemo(() => localAuthor(accountName, workspaceMarkFills), [accountName]);
   const reactionsByMessage = useMemo(
     () => (state && rowScope ? reactionRecords(state, rowScope) : null),
     [state, rowScope],

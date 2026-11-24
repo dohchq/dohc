@@ -16,15 +16,12 @@ function parse(value: string): StoredSignIn | null {
     return null;
   }
   if (typeof record !== "object" || record === null) return null;
-  const { origin, token, userId, email, name } = record as Partial<
-    Record<keyof StoredSignIn, unknown>
-  >;
+  const { origin, token, userId, email } = record as Partial<Record<keyof StoredSignIn, unknown>>;
   return typeof origin === "string" &&
     typeof token === "string" &&
     typeof userId === "string" &&
-    typeof email === "string" &&
-    typeof name === "string"
-    ? { origin, token, userId, email, name }
+    typeof email === "string"
+    ? { origin, token, userId, email }
     : null;
 }
 

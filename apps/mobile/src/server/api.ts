@@ -82,21 +82,20 @@ export function accountOperations(client: ServerClient, workspaceId: string, sig
 export interface SignedInAccount {
   readonly userId: string;
   readonly email: string;
-  readonly name: string;
+  /** The account's name, or null when the server sends none. */
+  readonly name: string | null;
 }
 
 /** Better Auth's session read, which answers null when the token is no longer a session. */
 export function readAccount(client: ServerClient): Promise<SignedInAccount> {
   return client.send("GET", "/api/auth/get-session", (body) => {
     const user = isFields(body) ? body.user : null;
-    if (
-      !isFields(user) ||
-      !text(user.id, 256) ||
-      !text(user.email, 320) ||
-      typeof user.name !== "string"
-    )
-      return null;
-    return { userId: user.id, email: user.email, name: user.name };
+    if (!isFields(user) || !text(user.id, 256) || !text(user.email, 320)) return null;
+    return {
+      userId: user.id,
+      email: user.email,
+      name: typeof user.name === "string" ? user.name : null,
+    };
   });
 }
 

@@ -91,13 +91,7 @@ describe("teardown", () => {
   it("replaces the page's web view with a read-only one at Sign out, a 401, another workspace and Show on phone off", async () => {
     for (const trigger of ["sign-out", "failed sign-out", "401", "another workspace", "hidden"]) {
       const server = testServer();
-      const stored = {
-        origin: server.origin,
-        token: "tok",
-        userId: "u-1",
-        email: "a@example.com",
-        name: "Ice",
-      };
+      const stored = { origin: server.origin, token: "tok", userId: "u-1", email: "a@example.com" };
       const pages = createScopedEnds();
       const teardown = appTeardown(createAppRunner(), pages);
       let atDelete: object | null = null;

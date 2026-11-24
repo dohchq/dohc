@@ -733,7 +733,6 @@ describe("the read cache and the sign-in", () => {
     token: "tok-1",
     userId: "u-1",
     email: "ice@example.com",
-    name: "Ice",
   };
 
   async function signedIn() {

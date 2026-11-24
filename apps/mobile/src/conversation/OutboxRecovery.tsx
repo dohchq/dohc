@@ -3,6 +3,7 @@ import { useRouter } from "expo-router";
 import { useCallback, useMemo } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
+import { useAccountName } from "../account/useAccountName";
 import { workspaceName } from "../chats/workspaceName";
 import { NotYet } from "../NotYet";
 import { ActionPill } from "../notices/ActionPill";
@@ -32,7 +33,8 @@ export function OutboxRecovery() {
   const writes = useConversationWrites(outbox, phoneWrites, isCurrent);
   const blocked = state ? blockedBy(state, phoneWrites) : "loading";
   const actions = useLocalActions(writes, blocked !== null);
-  const you = useMemo(() => localAuthor(signIn.name, workspaceMarkFills), [signIn]);
+  const accountName = useAccountName(signIn);
+  const you = useMemo(() => localAuthor(accountName, workspaceMarkFills), [accountName]);
   if (!phoneWrites) return <NotYet symbol="hammer" />;
 
   const { rows, unreadable } = state

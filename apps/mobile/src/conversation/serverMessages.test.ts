@@ -126,4 +126,11 @@ describe("localAuthor", () => {
     const saved = serverMessage(entry("m", "human", "Ice", 0), null, fills).author;
     expect({ ...local, id: saved.id }).toEqual(saved);
   });
+
+  it("names it as the server normalizes the account's name, and You until the name is read", () => {
+    const fills = ["#111111"];
+    expect(localAuthor("  Ice   de  Vera ", fills).name).toBe("Ice de Vera");
+    expect(localAuthor(null, fills).name).toBe("Unnamed");
+    expect(localAuthor(undefined, fills).name).toBe("You");
+  });
 });
